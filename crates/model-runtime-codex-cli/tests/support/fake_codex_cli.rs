@@ -4,10 +4,14 @@
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 mod fixtures;
+
+static OUTPUT_LAST_MESSAGE_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     record_spawn()?;
@@ -101,6 +105,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             envelope(&format!(
                 r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
                 fixtures::BUFFERED_ANSWER
+            ));
+            completed();
+        }
+        "output_last_message_recovery" => {
+            retain_last_message(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::BUFFERED_ANSWER
+            ));
+            completed();
+        }
+        "output_last_message_split_credential" => {
+            reasoning(
+                "reason-output-file-split",
+                &fixtures::SENSITIVE_SPLIT_STREAM_TOKEN[..3],
+            );
+            retain_last_message(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                &fixtures::SENSITIVE_SPLIT_STREAM_TOKEN[3..]
             ));
             completed();
         }
@@ -481,8 +503,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         "tool_call_bad_arguments" => {
             envelope(&format!(
-                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-offline-bad","name":"{}","arguments":"not an argument object"}}]}}"#,
-                fixtures::TOOL_NAME
+                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-offline-bad","name":"{}","arguments":"{}"}}]}}"#,
+                fixtures::TOOL_NAME,
+                fixtures::MALFORMED_TOOL_ARGUMENTS
+            ));
+            completed();
+        }
+        "tool_call_non_object_arguments" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-offline-non-object","name":"{}","arguments":"{}"}}]}}"#,
+                fixtures::TOOL_NAME,
+                fixtures::NON_OBJECT_TOOL_ARGUMENTS
             ));
             completed();
         }
@@ -978,6 +1009,16 @@ fn validate_argv() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let schema_path = arguments
         .get(schema_index + 1)
         .ok_or("missing output schema path")?;
+    let output_index = arguments
+        .iter()
+        .position(|argument| argument == "--output-last-message")
+        .ok_or("missing --output-last-message")?;
+    let output_path = arguments
+        .get(output_index + 1)
+        .ok_or("missing output-last-message path")?;
+    OUTPUT_LAST_MESSAGE_PATH
+        .set(PathBuf::from(output_path))
+        .map_err(|_| "output-last-message path was already set")?;
     let schema: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(schema_path)?)?;
     if schema["properties"]["outcome"].is_null() {
         return Err("unexpected output schema".into());
@@ -1002,10 +1043,22 @@ fn envelope(value: &str) {
 }
 
 fn agent_message(id: &str, value: &str) {
+    retain_last_message(value);
     let escaped = json_escape(value);
     emit(&format!(
         r#"{{"type":"item.completed","item":{{"id":"{id}","type":"agent_message","text":"{escaped}"}}}}"#
     ));
+}
+
+fn retain_last_message(value: &str) {
+    let Some(path) = OUTPUT_LAST_MESSAGE_PATH.get() else {
+        eprintln!("output-last-message path was not validated");
+        std::process::exit(2);
+    };
+    if let Err(error) = std::fs::write(path, value) {
+        eprintln!("last message fixture could not be retained: {error}");
+        std::process::exit(2);
+    }
 }
 
 fn error_item(id: &str, message: &str) {

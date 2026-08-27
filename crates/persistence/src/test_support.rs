@@ -302,14 +302,15 @@ impl OperatorStatusFixtureRepository {
                           WHERE existing.repository = $1),
                         0
                     ) + 1,
-                    2, $2, pg_current_xact_id()
+                    4, $2, pg_current_xact_id()
              RETURNING generation",
         )
         .bind(repository)
         .bind(sqlx::types::Json(json!({
-            "storage_version": 2,
+            "storage_version": 4,
             "signal_reviewers": [],
             "event_identity_frontier": [],
+            "merged_pull_request_baselines": [],
             "state": {
                 "pull_requests": pull_requests,
                 "workflow_runs": [],

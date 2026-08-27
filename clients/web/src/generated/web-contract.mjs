@@ -65,8 +65,7 @@ const schemas = {
         "enum": [
           "provide_goal_need",
           "decide_approval",
-          "reconcile_turn",
-          "restore_runner"
+          "reconcile_turn"
         ],
         "type": "string"
       },
@@ -76,12 +75,13 @@ const schemas = {
           "kind": {
             "$ref": "#/$defs/WebAttentionActivityKind"
           },
-          "unix_microseconds": {
-            "$ref": "#/$defs/WebU64"
+          "unix_milliseconds": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
           }
         },
         "required": [
-          "unix_microseconds",
+          "unix_milliseconds",
           "kind"
         ],
         "type": "object"
@@ -109,13 +109,12 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "generation": {
-            "$ref": "#/$defs/WebPositiveU64",
-            "description": "Goal generations are strictly positive in the domain and its storage\nconstraint, so zero is not a valid wire spelling."
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
           },
           "need_summary": {
-            "description": "At least 1 and at most 128 Unicode scalar values; exact text is in\nsession detail. The stored goal need is never empty, so an empty\nsummary is contract-invalid.",
+            "description": "At most 128 Unicode scalar values; exact text is in session detail.",
             "maxLength": 128,
-            "minLength": 1,
             "type": "string"
           },
           "reason": {
@@ -133,16 +132,20 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "actionable": {
-            "$ref": "#/$defs/WebU64"
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
           },
           "completed": {
-            "$ref": "#/$defs/WebU64"
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
           },
           "escalated": {
-            "$ref": "#/$defs/WebU64"
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
           },
           "failed": {
-            "$ref": "#/$defs/WebU64"
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
           }
         },
         "required": [
@@ -153,12 +156,226 @@ const schemas = {
         ],
         "type": "object"
       },
-      "WebAttentionSort": {
+      "WebAttentionState": {
         "enum": [
-          "last_activity_descending",
-          "session_identity_ascending"
+          "active",
+          "queued",
+          "blocked",
+          "awaiting_approval",
+          "ambiguous",
+          "awaiting_tool_recovery",
+          "awaiting_reconciliation",
+          "runner_lost",
+          "idle"
         ],
         "type": "string"
+      },
+      "WebAttentionSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionAction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_turn_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "goal_block": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionGoalBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "judge": {
+            "$ref": "#/$defs/WebAttentionJudgeFacts"
+          },
+          "last_activity": {
+            "$ref": "#/$defs/WebAttentionActivity"
+          },
+          "session_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/WebAttentionState"
+          }
+        },
+        "required": [
+          "session_id",
+          "state",
+          "judge",
+          "last_activity"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "continuation_after_session_id": {
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "cursor": {
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
+      },
+      "summaries": {
+        "items": {
+          "$ref": "#/$defs/WebAttentionSummary"
+        },
+        "maxItems": 32,
+        "type": "array"
+      }
+    },
+    "required": [
+      "cursor",
+      "summaries"
+    ],
+    "title": "WebAttentionSnapshot",
+    "type": "object"
+  },
+  "WebAttentionStreamEvent": {
+    "$defs": {
+      "WebAttentionAction": {
+        "enum": [
+          "provide_goal_need",
+          "decide_approval",
+          "reconcile_turn"
+        ],
+        "type": "string"
+      },
+      "WebAttentionActivity": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/WebAttentionActivityKind"
+          },
+          "unix_milliseconds": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "unix_milliseconds",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "WebAttentionActivityKind": {
+        "enum": [
+          "session",
+          "turn",
+          "goal",
+          "approval_judge",
+          "runner"
+        ],
+        "type": "string"
+      },
+      "WebAttentionBlockedReason": {
+        "enum": [
+          "user_input_required",
+          "external_change_required",
+          "authorization_required",
+          "execution_failure"
+        ],
+        "type": "string"
+      },
+      "WebAttentionGoalBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "need_summary": {
+            "description": "At most 128 Unicode scalar values; exact text is in session detail.",
+            "maxLength": 128,
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/WebAttentionBlockedReason"
+          }
+        },
+        "required": [
+          "generation",
+          "reason",
+          "need_summary"
+        ],
+        "type": "object"
+      },
+      "WebAttentionJudgeFacts": {
+        "additionalProperties": false,
+        "properties": {
+          "actionable": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "completed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "escalated": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "failed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "actionable",
+          "completed",
+          "escalated",
+          "failed"
+        ],
+        "type": "object"
+      },
+      "WebAttentionSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "continuation_after_session_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cursor": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "summaries": {
+            "items": {
+              "$ref": "#/$defs/WebAttentionSummary"
+            },
+            "maxItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "cursor",
+          "summaries"
+        ],
+        "type": "object"
       },
       "WebAttentionState": {
         "enum": [
@@ -167,6 +384,7 @@ const schemas = {
           "blocked",
           "awaiting_approval",
           "ambiguous",
+          "awaiting_tool_recovery",
           "awaiting_reconciliation",
           "runner_lost",
           "idle"
@@ -174,6 +392,3490 @@ const schemas = {
         "type": "string"
       },
       "WebAttentionSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionAction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_turn_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "goal_block": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionGoalBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "judge": {
+            "$ref": "#/$defs/WebAttentionJudgeFacts"
+          },
+          "last_activity": {
+            "$ref": "#/$defs/WebAttentionActivity"
+          },
+          "session_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/WebAttentionState"
+          }
+        },
+        "required": [
+          "session_id",
+          "state",
+          "judge",
+          "last_activity"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "snapshot",
+            "type": "string"
+          },
+          "snapshot": {
+            "$ref": "#/$defs/WebAttentionSnapshot"
+          }
+        },
+        "required": [
+          "kind",
+          "snapshot"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "kind": {
+            "const": "update",
+            "type": "string"
+          },
+          "summaries": {
+            "items": {
+              "$ref": "#/$defs/WebAttentionSummary"
+            },
+            "maxItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "cursor",
+          "summaries"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "kind": {
+            "const": "resync_required",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "cursor"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WebAttentionStreamEvent"
+  },
+  "WebBlobDescriptor": {
+    "$defs": {
+      "WebBlobAvailableView": {
+        "additionalProperties": false,
+        "description": "One server-admitted representation; clients select by `kind`, never MIME inference.",
+        "properties": {
+          "byte_length": {
+            "type": "string"
+          },
+          "content_url": {
+            "type": "string"
+          },
+          "derivations": {
+            "items": {
+              "$ref": "#/$defs/WebBlobDerivation"
+            },
+            "maxItems": 1,
+            "type": "array"
+          },
+          "kind": {
+            "$ref": "#/$defs/WebBlobViewKind"
+          },
+          "media_type": {
+            "maxLength": 255,
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "media_type",
+          "byte_length",
+          "content_url",
+          "derivations"
+        ],
+        "type": "object"
+      },
+      "WebBlobDerivation": {
+        "additionalProperties": false,
+        "description": "Immutable blob-to-blob relation attached to an available derivative view.",
+        "properties": {
+          "derivation_id": {
+            "type": "string"
+          },
+          "input_digests": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 16,
+            "minItems": 1,
+            "type": "array"
+          },
+          "output_digests": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 16,
+            "minItems": 1,
+            "type": "array"
+          },
+          "parameters_json": {
+            "type": "string"
+          },
+          "producer": {
+            "$ref": "#/$defs/WebBlobDerivationProducer"
+          },
+          "transformation_name": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+            "type": "string"
+          },
+          "transformation_version": {
+            "format": "uint32",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "derivation_id",
+          "input_digests",
+          "transformation_name",
+          "transformation_version",
+          "parameters_json",
+          "producer",
+          "output_digests"
+        ],
+        "type": "object"
+      },
+      "WebBlobDerivationProducer": {
+        "description": "Exact producer provenance projected without persistence representation.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "cache_key": {
+                "type": "string"
+              },
+              "class": {
+                "const": "deterministic",
+                "type": "string"
+              },
+              "implementation_digest": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "class",
+              "implementation_digest",
+              "cache_key"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "class": {
+                "const": "executed",
+                "type": "string"
+              },
+              "execution_id": {
+                "type": "string"
+              },
+              "implementation_digest": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "class",
+              "execution_id",
+              "implementation_digest"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "class": {
+                "const": "model_derived",
+                "type": "string"
+              },
+              "model_call_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "class",
+              "model_call_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebBlobViewKind": {
+        "description": "Closed browser renderer capability advertised by the daemon.",
+        "enum": [
+          "download",
+          "browser_native",
+          "thumbnail",
+          "preview"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Browser read projection for one semantic use of immutable bytes.",
+    "properties": {
+      "available_views": {
+        "items": {
+          "$ref": "#/$defs/WebBlobAvailableView"
+        },
+        "maxItems": 4,
+        "type": "array"
+      },
+      "byte_length": {
+        "type": "string"
+      },
+      "declared_media_type": {
+        "maxLength": 255,
+        "type": "string"
+      },
+      "digest": {
+        "type": "string"
+      },
+      "display_filename": {
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 1,
+        "type": "array"
+      }
+    },
+    "required": [
+      "digest",
+      "byte_length",
+      "declared_media_type",
+      "display_filename",
+      "available_views"
+    ],
+    "title": "WebBlobDescriptor",
+    "type": "object"
+  },
+  "WebContractBootstrap": {
+    "$defs": {
+      "WebContractCapabilities": {
+        "additionalProperties": false,
+        "description": "Transport capabilities present in the exact contract version.",
+        "properties": {
+          "blob_derivations": {
+            "description": "Blob-to-blob provenance reads are present on derivative views.",
+            "type": "boolean"
+          },
+          "bounded_json": {
+            "description": "Ordinary bounded JSON responses are available under `/api/`.",
+            "type": "boolean"
+          },
+          "bounded_lexical_search": {
+            "description": "Bounded lexical search with stable history reveal addresses is available.",
+            "type": "boolean"
+          },
+          "bounded_session_timeline": {
+            "description": "Stable bounded session descriptors and historical windows are available.",
+            "type": "boolean"
+          },
+          "bounded_session_timeline_detail": {
+            "description": "Typed item, turn, and contiguous-region detail reads are available.",
+            "type": "boolean"
+          },
+          "bounded_usage_cost": {
+            "description": "Dedicated bounded aggregate and per-call usage/cost reads are available.",
+            "type": "boolean"
+          },
+          "image_derivatives": {
+            "description": "The daemon can lazily produce isolated deterministic image derivatives.",
+            "type": "boolean"
+          },
+          "immutable_blob_content": {
+            "description": "Immutable same-origin blob descriptors and byte delivery are available.",
+            "type": "boolean"
+          },
+          "import_discovery": {
+            "description": "Bounded imported-conversation discovery and entry windows are available.",
+            "type": "boolean"
+          },
+          "imported_continuations": {
+            "description": "Imported frontiers can seed a native session through an idempotent command.",
+            "type": "boolean"
+          },
+          "ndjson_streaming": {
+            "description": "Incremental response items use newline-delimited JSON.",
+            "type": "boolean"
+          },
+          "same_origin_json_mutations": {
+            "description": "JSON mutations validate a supplied browser origin against authority.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "bounded_json",
+          "same_origin_json_mutations",
+          "ndjson_streaming",
+          "immutable_blob_content",
+          "blob_derivations",
+          "image_derivatives",
+          "import_discovery",
+          "imported_continuations",
+          "bounded_session_timeline",
+          "bounded_session_timeline_detail",
+          "bounded_lexical_search",
+          "bounded_usage_cost"
+        ],
+        "type": "object"
+      },
+      "WebContractIdentity": {
+        "additionalProperties": false,
+        "description": "Identity of the one exact browser contract this daemon serves.",
+        "properties": {
+          "name": {
+            "description": "Stable contract family.",
+            "type": "string"
+          },
+          "version": {
+            "description": "Exact version; clients do not negotiate ranges.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version"
+        ],
+        "type": "object"
+      },
+      "WebContractLimits": {
+        "additionalProperties": false,
+        "description": "Effective hard limits clients must honor for this contract version.",
+        "properties": {
+          "max_json_body_bytes": {
+            "description": "Maximum bytes accepted for one JSON request body.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_ndjson_item_bytes": {
+            "description": "Maximum encoded bytes for one NDJSON item, excluding its newline.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_search_page_items": {
+            "description": "Maximum results in one search page.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_search_query_bytes": {
+            "description": "Maximum UTF-8 bytes in one product search expression.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_search_snippet_bytes": {
+            "description": "Maximum UTF-8 bytes in one search result snippet.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_timeline_detail_bytes": {
+            "description": "Maximum projected typed-body bytes in one detail response.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_timeline_detail_items": {
+            "description": "Maximum detailed timeline records in one response.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_timeline_window_bytes": {
+            "description": "Maximum projected structured item bytes in one timeline window.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_timeline_window_items": {
+            "description": "Maximum durable event headers returned in one timeline window.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_usage_aggregate_groups": {
+            "description": "Maximum compatibility-preserving groups in one usage summary.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_usage_call_page_items": {
+            "description": "Maximum individual calls in one usage detail page.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "max_json_body_bytes",
+          "max_ndjson_item_bytes",
+          "max_timeline_window_items",
+          "max_timeline_window_bytes",
+          "max_timeline_detail_items",
+          "max_timeline_detail_bytes",
+          "max_search_query_bytes",
+          "max_search_page_items",
+          "max_search_snippet_bytes",
+          "max_usage_aggregate_groups",
+          "max_usage_call_page_items"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Response from the contract bootstrap endpoint.",
+    "properties": {
+      "capabilities": {
+        "$ref": "#/$defs/WebContractCapabilities",
+        "description": "Supported transport capabilities."
+      },
+      "contract": {
+        "$ref": "#/$defs/WebContractIdentity",
+        "description": "Exact contract identity."
+      },
+      "limits": {
+        "$ref": "#/$defs/WebContractLimits",
+        "description": "Bounds shared by server and generated client contract."
+      }
+    },
+    "required": [
+      "contract",
+      "capabilities",
+      "limits"
+    ],
+    "title": "WebContractBootstrap",
+    "type": "object"
+  },
+  "WebContractExample": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Small generated-contract fixture proving Rust/TypeScript round trips.",
+    "properties": {
+      "message": {
+        "description": "Bounded example payload.",
+        "type": "string"
+      },
+      "request_id": {
+        "description": "Opaque request correlation chosen by the caller.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "request_id",
+      "message"
+    ],
+    "title": "WebContractExample",
+    "type": "object"
+  },
+  "WebImportContinuationRequest": {
+    "$defs": {
+      "WebImportContinuationReference": {
+        "additionalProperties": false,
+        "description": "One immutable imported frontier suitable for precise continuation.",
+        "properties": {
+          "imported_conversation_id": {
+            "description": "Owning imported-conversation UUID.",
+            "type": "string"
+          },
+          "imported_entry_id": {
+            "description": "Exact imported-entry UUID at the inclusive frontier.",
+            "type": "string"
+          },
+          "position": {
+            "description": "One-based immutable imported position.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "imported_conversation_id",
+          "imported_entry_id",
+          "position"
+        ],
+        "type": "object"
+      },
+      "WebImportedSessionRelationship": {
+        "description": "Resume or fork relationship chosen for a new native session.",
+        "oneOf": [
+          {
+            "const": "resume",
+            "description": "Resume the selected imported history.",
+            "type": "string"
+          },
+          {
+            "const": "fork",
+            "description": "Fork from the selected imported history.",
+            "type": "string"
+          }
+        ]
+      },
+      "WebModelSelection": {
+        "description": "Initial model-selection request for a continued native session.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Exact direct model-selection UUID.",
+            "properties": {
+              "kind": {
+                "const": "direct",
+                "type": "string"
+              },
+              "selection_id": {
+                "description": "Direct model-selection UUID.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "selection_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Alias UUID resolved by the daemon at command admission.",
+            "properties": {
+              "alias_id": {
+                "description": "Model alias UUID.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "alias",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "alias_id"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Idempotent continuation command for one selected immutable frontier.",
+    "properties": {
+      "command_id": {
+        "description": "Durable command UUID minted before network I/O and retained for retry.",
+        "type": "string"
+      },
+      "frontier": {
+        "$ref": "#/$defs/WebImportContinuationReference",
+        "description": "Exact selected immutable imported frontier."
+      },
+      "initial_model_selection": {
+        "$ref": "#/$defs/WebModelSelection",
+        "description": "Initial model selection; other settings use provider defaults."
+      },
+      "relationship": {
+        "$ref": "#/$defs/WebImportedSessionRelationship",
+        "description": "Resume or fork relationship."
+      }
+    },
+    "required": [
+      "command_id",
+      "frontier",
+      "relationship",
+      "initial_model_selection"
+    ],
+    "title": "WebImportContinuationRequest",
+    "type": "object"
+  },
+  "WebImportContinuationResponse": {
+    "$defs": {
+      "WebImportContinuationReference": {
+        "additionalProperties": false,
+        "description": "One immutable imported frontier suitable for precise continuation.",
+        "properties": {
+          "imported_conversation_id": {
+            "description": "Owning imported-conversation UUID.",
+            "type": "string"
+          },
+          "imported_entry_id": {
+            "description": "Exact imported-entry UUID at the inclusive frontier.",
+            "type": "string"
+          },
+          "position": {
+            "description": "One-based immutable imported position.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "imported_conversation_id",
+          "imported_entry_id",
+          "position"
+        ],
+        "type": "object"
+      },
+      "WebImportedSessionRelationship": {
+        "description": "Resume or fork relationship chosen for a new native session.",
+        "oneOf": [
+          {
+            "const": "resume",
+            "description": "Resume the selected imported history.",
+            "type": "string"
+          },
+          {
+            "const": "fork",
+            "description": "Fork from the selected imported history.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Durable applied result of an imported continuation command.",
+    "properties": {
+      "command_id": {
+        "description": "Replayed durable command UUID.",
+        "type": "string"
+      },
+      "frontier": {
+        "$ref": "#/$defs/WebImportContinuationReference",
+        "description": "Exact selected immutable imported frontier."
+      },
+      "relationship": {
+        "$ref": "#/$defs/WebImportedSessionRelationship",
+        "description": "Recorded resume or fork relationship."
+      },
+      "session_id": {
+        "description": "Newly created or replayed native session UUID.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "command_id",
+      "session_id",
+      "frontier",
+      "relationship"
+    ],
+    "title": "WebImportContinuationResponse",
+    "type": "object"
+  },
+  "WebImportDescriptor": {
+    "$defs": {
+      "WebImportContinuationReference": {
+        "additionalProperties": false,
+        "description": "One immutable imported frontier suitable for precise continuation.",
+        "properties": {
+          "imported_conversation_id": {
+            "description": "Owning imported-conversation UUID.",
+            "type": "string"
+          },
+          "imported_entry_id": {
+            "description": "Exact imported-entry UUID at the inclusive frontier.",
+            "type": "string"
+          },
+          "position": {
+            "description": "One-based immutable imported position.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "imported_conversation_id",
+          "imported_entry_id",
+          "position"
+        ],
+        "type": "object"
+      },
+      "WebImportFormat": {
+        "description": "Exact source format and converter interpretation for one import.",
+        "oneOf": [
+          {
+            "const": "claude_code_session_jsonl_v1",
+            "description": "Claude Code JSONL interpreted by Signalbox converter version 1.",
+            "type": "string"
+          },
+          {
+            "const": "claude_code_session_jsonl_v2",
+            "description": "Claude Code JSONL interpreted by Signalbox converter version 2.",
+            "type": "string"
+          },
+          {
+            "const": "codex_rollout_jsonl_v1",
+            "description": "Codex rollout JSONL interpreted by Signalbox converter version 1.",
+            "type": "string"
+          }
+        ]
+      },
+      "WebImportSizeFacts": {
+        "additionalProperties": false,
+        "description": "Byte facts projected from immutable stored import members.",
+        "properties": {
+          "normalized_entry_bytes": {
+            "description": "Sum of normalized entry and source-metadata encoding bytes.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "normalized_source_record_bytes": {
+            "description": "Sum of normalized source-record encoding bytes.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "raw_source_bytes": {
+            "description": "Sum of exact raw source-record occurrence bytes.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "raw_source_bytes",
+          "normalized_source_record_bytes",
+          "normalized_entry_bytes"
+        ],
+        "type": "object"
+      },
+      "WebImportSourceEvidence": {
+        "additionalProperties": false,
+        "description": "Source and converter evidence retained by one immutable import.",
+        "properties": {
+          "format": {
+            "$ref": "#/$defs/WebImportFormat",
+            "description": "Exact source format and converter interpretation."
+          },
+          "source_digest_sha256": {
+            "description": "SHA-256 digest of the exact ordered source records.",
+            "type": "string"
+          },
+          "source_session_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebImportSourceSessionEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Bounded converter-attested source-session evidence, when consistent."
+          }
+        },
+        "required": [
+          "format",
+          "source_digest_sha256"
+        ],
+        "type": "object"
+      },
+      "WebImportSourceSessionEvidence": {
+        "additionalProperties": false,
+        "description": "Bounded projection of exact converter-attested source-session evidence.",
+        "properties": {
+          "completeness": {
+            "$ref": "#/$defs/WebImportTextCompleteness",
+            "description": "Whether the projection contains the complete identifier."
+          },
+          "leading_text": {
+            "description": "Exact leading UTF-8 text within the response ceiling.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "leading_text",
+          "completeness"
+        ],
+        "type": "object"
+      },
+      "WebImportTextCompleteness": {
+        "description": "Completeness of a bounded attested-text preview.",
+        "oneOf": [
+          {
+            "const": "complete",
+            "description": "The exact attested text fits the preview bound.",
+            "type": "string"
+          },
+          {
+            "const": "truncated",
+            "description": "Only the leading UTF-8 prefix fits the preview bound.",
+            "type": "string"
+          }
+        ]
+      },
+      "WebImportTimelineBounds": {
+        "additionalProperties": false,
+        "description": "First and latest immutable positions in an imported timeline.",
+        "properties": {
+          "first": {
+            "$ref": "#/$defs/WebImportContinuationReference",
+            "description": "First selectable frontier."
+          },
+          "latest": {
+            "$ref": "#/$defs/WebImportContinuationReference",
+            "description": "Latest selectable frontier."
+          }
+        },
+        "required": [
+          "first",
+          "latest"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Complete bounded descriptor for one immutable import.",
+    "properties": {
+      "display_title": {
+        "description": "Evidence-derived display title, when available.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "entry_count": {
+        "description": "Number of normalized imported entries.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "imported_conversation_id": {
+        "description": "Immutable imported-conversation UUID.",
+        "type": "string"
+      },
+      "raw_record_count": {
+        "description": "Number of exact raw source records.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "sizes": {
+        "$ref": "#/$defs/WebImportSizeFacts",
+        "description": "Projected byte facts; no raw blob bytes are included."
+      },
+      "source": {
+        "$ref": "#/$defs/WebImportSourceEvidence",
+        "description": "Source and converter evidence, distinct from native execution evidence."
+      },
+      "timeline": {
+        "$ref": "#/$defs/WebImportTimelineBounds",
+        "description": "Addressable first and latest imported frontiers."
+      }
+    },
+    "required": [
+      "imported_conversation_id",
+      "raw_record_count",
+      "entry_count",
+      "source",
+      "sizes",
+      "timeline"
+    ],
+    "title": "WebImportDescriptor",
+    "type": "object"
+  },
+  "WebImportEntryWindow": {
+    "$defs": {
+      "WebImportContinuationReference": {
+        "additionalProperties": false,
+        "description": "One immutable imported frontier suitable for precise continuation.",
+        "properties": {
+          "imported_conversation_id": {
+            "description": "Owning imported-conversation UUID.",
+            "type": "string"
+          },
+          "imported_entry_id": {
+            "description": "Exact imported-entry UUID at the inclusive frontier.",
+            "type": "string"
+          },
+          "position": {
+            "description": "One-based immutable imported position.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "imported_conversation_id",
+          "imported_entry_id",
+          "position"
+        ],
+        "type": "object"
+      },
+      "WebImportTextCompleteness": {
+        "description": "Completeness of a bounded attested-text preview.",
+        "oneOf": [
+          {
+            "const": "complete",
+            "description": "The exact attested text fits the preview bound.",
+            "type": "string"
+          },
+          {
+            "const": "truncated",
+            "description": "Only the leading UTF-8 prefix fits the preview bound.",
+            "type": "string"
+          }
+        ]
+      },
+      "WebImportTextEvidence": {
+        "description": "Bounded text evidence for an imported entry.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The text member was omitted by the source.",
+            "properties": {
+              "kind": {
+                "const": "not_attested",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The source explicitly supplied no text.",
+            "properties": {
+              "kind": {
+                "const": "attested_absent",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The source supplied exact text, possibly represented by a bounded prefix.",
+            "properties": {
+              "completeness": {
+                "$ref": "#/$defs/WebImportTextCompleteness",
+                "description": "Whether the prefix is the complete text."
+              },
+              "kind": {
+                "const": "attested",
+                "type": "string"
+              },
+              "leading_text": {
+                "description": "Exact leading text within the byte ceiling.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "leading_text",
+              "completeness"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebImportedContentKind": {
+        "description": "Closed normalized imported content kind.",
+        "oneOf": [
+          {
+            "const": "source_event",
+            "description": "Non-message source record.",
+            "type": "string"
+          },
+          {
+            "const": "source_message_block",
+            "description": "Source-defined message block.",
+            "type": "string"
+          },
+          {
+            "const": "text",
+            "description": "Source text or explicit text absence.",
+            "type": "string"
+          },
+          {
+            "const": "tool_call",
+            "description": "Source tool call.",
+            "type": "string"
+          },
+          {
+            "const": "tool_result",
+            "description": "Source tool result.",
+            "type": "string"
+          },
+          {
+            "const": "thinking",
+            "description": "Source-visible thinking.",
+            "type": "string"
+          },
+          {
+            "const": "redacted_thinking",
+            "description": "Source redacted-thinking data.",
+            "type": "string"
+          },
+          {
+            "const": "document",
+            "description": "Source document descriptor.",
+            "type": "string"
+          },
+          {
+            "const": "message_content_absent",
+            "description": "Precisely classified absent message content.",
+            "type": "string"
+          }
+        ]
+      },
+      "WebImportedEntry": {
+        "additionalProperties": false,
+        "description": "One normalized imported entry in a bounded window.",
+        "properties": {
+          "content_kind": {
+            "$ref": "#/$defs/WebImportedContentKind",
+            "description": "Source-neutral normalized content kind."
+          },
+          "frontier": {
+            "$ref": "#/$defs/WebImportContinuationReference",
+            "description": "Exact immutable continuation frontier."
+          },
+          "raw_record_position": {
+            "description": "One-based physical source-record occurrence.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "record_entry_position": {
+            "description": "One-based normalized entry position within that source record.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source_speaker": {
+            "$ref": "#/$defs/WebImportedSpeakerEvidence",
+            "description": "Source speaker attestation, never native author evidence."
+          },
+          "text": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebImportTextEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Bounded text evidence only for normalized text content."
+          }
+        },
+        "required": [
+          "frontier",
+          "raw_record_position",
+          "record_entry_position",
+          "source_speaker",
+          "content_kind"
+        ],
+        "type": "object"
+      },
+      "WebImportedSpeakerEvidence": {
+        "description": "Source-attested speaker evidence for one imported entry.",
+        "oneOf": [
+          {
+            "const": "not_attested",
+            "description": "The source omitted speaker evidence.",
+            "type": "string"
+          },
+          {
+            "const": "attested_absent",
+            "description": "The source explicitly attested no speaker.",
+            "type": "string"
+          },
+          {
+            "const": "user",
+            "description": "The source attested a user-role speaker.",
+            "type": "string"
+          },
+          {
+            "const": "assistant",
+            "description": "The source attested an assistant-role speaker.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "One bounded imported-entry window.",
+    "properties": {
+      "anchor_position": {
+        "description": "Resolved immutable anchor position.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "first_position": {
+        "description": "First position returned.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "has_after": {
+        "description": "Whether later entries exist.",
+        "type": "boolean"
+      },
+      "has_before": {
+        "description": "Whether earlier entries exist.",
+        "type": "boolean"
+      },
+      "items": {
+        "description": "Entries in ascending immutable position order.",
+        "items": {
+          "$ref": "#/$defs/WebImportedEntry"
+        },
+        "type": "array"
+      },
+      "last_position": {
+        "description": "Last position returned.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "anchor_position",
+      "first_position",
+      "last_position",
+      "has_before",
+      "has_after",
+      "items"
+    ],
+    "title": "WebImportEntryWindow",
+    "type": "object"
+  },
+  "WebImportEntryWindowRequest": {
+    "$defs": {
+      "WebImportWindowAnchor": {
+        "description": "Logical anchor for an imported-entry window.",
+        "oneOf": [
+          {
+            "const": "first",
+            "description": "Anchor at imported position one.",
+            "type": "string"
+          },
+          {
+            "const": "latest",
+            "description": "Anchor at the immutable latest position.",
+            "type": "string"
+          },
+          {
+            "const": "position",
+            "description": "Anchor at the supplied exact position.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Bounded imported-entry window request carried as query parameters.",
+    "properties": {
+      "after": {
+        "description": "Number of entries requested after the anchor.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "anchor": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebImportWindowAnchor"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Logical anchor; defaults to `first` when omitted."
+      },
+      "before": {
+        "description": "Number of entries requested before the anchor.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "position": {
+        "description": "Required only for the `position` anchor.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      }
+    },
+    "title": "WebImportEntryWindowRequest",
+    "type": "object"
+  },
+  "WebImportListPage": {
+    "$defs": {
+      "WebImportFormat": {
+        "description": "Exact source format and converter interpretation for one import.",
+        "oneOf": [
+          {
+            "const": "claude_code_session_jsonl_v1",
+            "description": "Claude Code JSONL interpreted by Signalbox converter version 1.",
+            "type": "string"
+          },
+          {
+            "const": "claude_code_session_jsonl_v2",
+            "description": "Claude Code JSONL interpreted by Signalbox converter version 2.",
+            "type": "string"
+          },
+          {
+            "const": "codex_rollout_jsonl_v1",
+            "description": "Codex rollout JSONL interpreted by Signalbox converter version 1.",
+            "type": "string"
+          }
+        ]
+      },
+      "WebImportSourceSessionEvidence": {
+        "additionalProperties": false,
+        "description": "Bounded projection of exact converter-attested source-session evidence.",
+        "properties": {
+          "completeness": {
+            "$ref": "#/$defs/WebImportTextCompleteness",
+            "description": "Whether the projection contains the complete identifier."
+          },
+          "leading_text": {
+            "description": "Exact leading UTF-8 text within the response ceiling.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "leading_text",
+          "completeness"
+        ],
+        "type": "object"
+      },
+      "WebImportSummary": {
+        "additionalProperties": false,
+        "description": "One bounded imports catalog row.",
+        "properties": {
+          "display_title": {
+            "description": "Evidence-derived display title, when the source supplied one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "entry_count": {
+            "description": "Number of normalized imported entries.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "format": {
+            "$ref": "#/$defs/WebImportFormat",
+            "description": "Exact source format and converter interpretation."
+          },
+          "imported_conversation_id": {
+            "description": "Immutable imported-conversation UUID.",
+            "type": "string"
+          },
+          "source_session_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebImportSourceSessionEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Bounded converter-attested source-session evidence, when consistent."
+          },
+          "source_session_id_sha256": {
+            "description": "SHA-256 of the complete source-session identifier, when present.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "imported_conversation_id",
+          "format",
+          "entry_count"
+        ],
+        "type": "object"
+      },
+      "WebImportTextCompleteness": {
+        "description": "Completeness of a bounded attested-text preview.",
+        "oneOf": [
+          {
+            "const": "complete",
+            "description": "The exact attested text fits the preview bound.",
+            "type": "string"
+          },
+          {
+            "const": "truncated",
+            "description": "Only the leading UTF-8 prefix fits the preview bound.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "One keyset page of imports.",
+    "properties": {
+      "exact_source_session_id_sha256": {
+        "description": "SHA-256 of the complete exact-search value, absent for ordinary catalog reads.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "items": {
+        "description": "Rows in stable UUID order.",
+        "items": {
+          "$ref": "#/$defs/WebImportSummary"
+        },
+        "type": "array"
+      },
+      "next_cursor": {
+        "description": "Exclusive cursor for the next page, absent at the end.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "search_correlation": {
+        "description": "Client-selected exact-search correlation UUID, absent for ordinary catalog reads.",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "items"
+    ],
+    "title": "WebImportListPage",
+    "type": "object"
+  },
+  "WebImportListRequest": {
+    "$defs": {
+      "WebImportFormat": {
+        "description": "Exact source format and converter interpretation for one import.",
+        "oneOf": [
+          {
+            "const": "claude_code_session_jsonl_v1",
+            "description": "Claude Code JSONL interpreted by Signalbox converter version 1.",
+            "type": "string"
+          },
+          {
+            "const": "claude_code_session_jsonl_v2",
+            "description": "Claude Code JSONL interpreted by Signalbox converter version 2.",
+            "type": "string"
+          },
+          {
+            "const": "codex_rollout_jsonl_v1",
+            "description": "Codex rollout JSONL interpreted by Signalbox converter version 1.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Bounded imports catalog request carried as query parameters. An exact\nsource-session filter is carried separately as the bounded raw UTF-8 body of\n`POST /api/imports/searches`; empty text and edge whitespace are preserved.",
+    "properties": {
+      "after": {
+        "description": "Exclusive imported-conversation UUID cursor.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "format": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebImportFormat"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Optional exact source/converter filter."
+      },
+      "limit": {
+        "description": "Requested page size; the server rejects values above its hard ceiling.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "search_correlation": {
+        "description": "Client-selected UUID echoed by an exact-search response.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "source_session_id": {
+        "description": "Optional exact converter-attested source-session identifier.",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "title": "WebImportListRequest",
+    "type": "object"
+  },
+  "WebRepoWatchActivityPage": {
+    "$defs": {
+      "WebRepoWatchEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor_generation": {
+            "type": "string"
+          },
+          "event_ordinal": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WebRepoWatchEventKind"
+          },
+          "observed_at_unix_milliseconds": {
+            "type": "string"
+          },
+          "pull_request": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "cursor_generation",
+          "event_ordinal",
+          "kind",
+          "observed_at_unix_milliseconds"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchEventCursor": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor_generation": {
+            "type": "string"
+          },
+          "event_ordinal": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cursor_generation",
+          "event_ordinal"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchEventKind": {
+        "enum": [
+          "pull_request_opened",
+          "pull_request_closed",
+          "pull_request_merged",
+          "head_changed",
+          "mergeable_state_changed",
+          "checks_completed",
+          "check_run_completed",
+          "branch_workflow_run_completed",
+          "review_submitted",
+          "thread_opened",
+          "thread_resolved",
+          "labeled",
+          "unlabeled",
+          "base_advanced",
+          "reaction_changed"
+        ],
+        "type": "string"
+      },
+      "WebRepoWatchWebhookActivity": {
+        "additionalProperties": false,
+        "properties": {
+          "action_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "disposition": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepoWatchWebhookDisposition"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "event_name": {
+            "type": "string"
+          },
+          "latest_projected_at_unix_milliseconds": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "projection_count": {
+            "type": "string"
+          },
+          "receipt_sequence": {
+            "type": "string"
+          },
+          "received_at_unix_milliseconds": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_sequence",
+          "event_name",
+          "received_at_unix_milliseconds",
+          "projection_count"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchWebhookDisposition": {
+        "enum": [
+          "projected",
+          "committed",
+          "duplicate_state",
+          "superseded",
+          "ignored",
+          "quarantined"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "event_continuation_before": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebRepoWatchEventCursor"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "events": {
+        "items": {
+          "$ref": "#/$defs/WebRepoWatchEvent"
+        },
+        "maxItems": 100,
+        "type": "array"
+      },
+      "webhook_continuation_before_receipt_sequence": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "webhooks": {
+        "items": {
+          "$ref": "#/$defs/WebRepoWatchWebhookActivity"
+        },
+        "maxItems": 100,
+        "type": "array"
+      }
+    },
+    "required": [
+      "events",
+      "webhooks"
+    ],
+    "title": "WebRepoWatchActivityPage",
+    "type": "object"
+  },
+  "WebRepoWatchPullRequestPage": {
+    "$defs": {
+      "WebRepoWatchAutomationStatus": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "unattempted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "dispatch_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "held",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dispatch_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "queued",
+                "type": "string"
+              },
+              "latest_event_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "latest_event_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "dispatch_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "non_converged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dispatch_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "dispatch_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "stale_seal",
+                "type": "string"
+              },
+              "sealed_event_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dispatch_id",
+              "sealed_event_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "dispatch_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "current_head_sealed",
+                "type": "string"
+              },
+              "sealed_event_id": {
+                "type": "string"
+              },
+              "settled_at_unix_milliseconds": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dispatch_id",
+              "sealed_event_id",
+              "settled_at_unix_milliseconds"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebRepoWatchChecksStatus": {
+        "enum": [
+          "no_completed_suites",
+          "passing",
+          "failing"
+        ],
+        "type": "string"
+      },
+      "WebRepoWatchDispatch": {
+        "additionalProperties": false,
+        "properties": {
+          "attempted_at_unix_milliseconds": {
+            "type": "string"
+          },
+          "event_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "rule": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "event_id",
+          "rule",
+          "attempted_at_unix_milliseconds"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchDraftStatus": {
+        "enum": [
+          "draft",
+          "ready_for_review"
+        ],
+        "type": "string"
+      },
+      "WebRepoWatchEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor_generation": {
+            "type": "string"
+          },
+          "event_ordinal": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WebRepoWatchEventKind"
+          },
+          "observed_at_unix_milliseconds": {
+            "type": "string"
+          },
+          "pull_request": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "cursor_generation",
+          "event_ordinal",
+          "kind",
+          "observed_at_unix_milliseconds"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchEventKind": {
+        "enum": [
+          "pull_request_opened",
+          "pull_request_closed",
+          "pull_request_merged",
+          "head_changed",
+          "mergeable_state_changed",
+          "checks_completed",
+          "check_run_completed",
+          "branch_workflow_run_completed",
+          "review_submitted",
+          "thread_opened",
+          "thread_resolved",
+          "labeled",
+          "unlabeled",
+          "base_advanced",
+          "reaction_changed"
+        ],
+        "type": "string"
+      },
+      "WebRepoWatchLifecycle": {
+        "enum": [
+          "open",
+          "closed",
+          "merged"
+        ],
+        "type": "string"
+      },
+      "WebRepoWatchMergeable": {
+        "enum": [
+          "mergeable",
+          "conflicting",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "WebRepoWatchPullRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "automation": {
+            "$ref": "#/$defs/WebRepoWatchAutomationStatus"
+          },
+          "base_branch": {
+            "type": "string"
+          },
+          "checks": {
+            "$ref": "#/$defs/WebRepoWatchChecksStatus"
+          },
+          "commissioned_session_count": {
+            "type": "string"
+          },
+          "draft": {
+            "$ref": "#/$defs/WebRepoWatchDraftStatus"
+          },
+          "head": {
+            "type": "string"
+          },
+          "head_branch": {
+            "type": "string"
+          },
+          "head_repository": {
+            "type": "string"
+          },
+          "held_slot_count": {
+            "type": "string"
+          },
+          "last_actionable_event": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepoWatchEvent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_automation_settlement": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepoWatchSettlement"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_dispatch_attempt": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepoWatchDispatch"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_observed_event": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepoWatchEvent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lifecycle": {
+            "$ref": "#/$defs/WebRepoWatchLifecycle"
+          },
+          "mergeable": {
+            "$ref": "#/$defs/WebRepoWatchMergeable"
+          },
+          "number": {
+            "type": "string"
+          },
+          "open_child_count": {
+            "type": "string"
+          },
+          "open_parent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "queued_obligation_count": {
+            "type": "string"
+          },
+          "review_decision": {
+            "$ref": "#/$defs/WebRepoWatchReviewDecision"
+          },
+          "stale_review_count": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "unresolved_thread_count": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "number",
+          "title",
+          "head",
+          "head_repository",
+          "head_branch",
+          "base_branch",
+          "lifecycle",
+          "mergeable",
+          "draft",
+          "checks",
+          "review_decision",
+          "stale_review_count",
+          "unresolved_thread_count",
+          "open_child_count",
+          "automation",
+          "held_slot_count",
+          "queued_obligation_count",
+          "commissioned_session_count"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchReviewDecision": {
+        "enum": [
+          "none",
+          "commented",
+          "approved",
+          "changes_requested"
+        ],
+        "type": "string"
+      },
+      "WebRepoWatchSettlement": {
+        "additionalProperties": false,
+        "properties": {
+          "dispatch_id": {
+            "type": "string"
+          },
+          "event_id": {
+            "type": "string"
+          },
+          "settled_at_unix_milliseconds": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "dispatch_id",
+          "event_id",
+          "settled_at_unix_milliseconds"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "continuation_after_pull_request": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "pull_requests": {
+        "items": {
+          "$ref": "#/$defs/WebRepoWatchPullRequest"
+        },
+        "maxItems": 64,
+        "type": "array"
+      },
+      "repository": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "repository",
+      "pull_requests"
+    ],
+    "title": "WebRepoWatchPullRequestPage",
+    "type": "object"
+  },
+  "WebRepoWatchPullRequestSessionPage": {
+    "$defs": {
+      "WebAttentionAction": {
+        "enum": [
+          "provide_goal_need",
+          "decide_approval",
+          "reconcile_turn"
+        ],
+        "type": "string"
+      },
+      "WebAttentionActivity": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/WebAttentionActivityKind"
+          },
+          "unix_milliseconds": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "unix_milliseconds",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "WebAttentionActivityKind": {
+        "enum": [
+          "session",
+          "turn",
+          "goal",
+          "approval_judge",
+          "runner"
+        ],
+        "type": "string"
+      },
+      "WebAttentionBlockedReason": {
+        "enum": [
+          "user_input_required",
+          "external_change_required",
+          "authorization_required",
+          "execution_failure"
+        ],
+        "type": "string"
+      },
+      "WebAttentionGoalBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "need_summary": {
+            "description": "At most 128 Unicode scalar values; exact text is in session detail.",
+            "maxLength": 128,
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/WebAttentionBlockedReason"
+          }
+        },
+        "required": [
+          "generation",
+          "reason",
+          "need_summary"
+        ],
+        "type": "object"
+      },
+      "WebAttentionJudgeFacts": {
+        "additionalProperties": false,
+        "properties": {
+          "actionable": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "completed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "escalated": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "failed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "actionable",
+          "completed",
+          "escalated",
+          "failed"
+        ],
+        "type": "object"
+      },
+      "WebAttentionState": {
+        "enum": [
+          "active",
+          "queued",
+          "blocked",
+          "awaiting_approval",
+          "ambiguous",
+          "awaiting_tool_recovery",
+          "awaiting_reconciliation",
+          "runner_lost",
+          "idle"
+        ],
+        "type": "string"
+      },
+      "WebAttentionSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionAction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_turn_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "goal_block": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionGoalBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "judge": {
+            "$ref": "#/$defs/WebAttentionJudgeFacts"
+          },
+          "last_activity": {
+            "$ref": "#/$defs/WebAttentionActivity"
+          },
+          "session_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/WebAttentionState"
+          }
+        },
+        "required": [
+          "session_id",
+          "state",
+          "judge",
+          "last_activity"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchPullRequestSession": {
+        "additionalProperties": false,
+        "properties": {
+          "attention": {
+            "$ref": "#/$defs/WebAttentionSummary"
+          },
+          "commissioned_at_unix_microseconds": {
+            "type": "string"
+          },
+          "purpose": {
+            "$ref": "#/$defs/WebRepoWatchSessionPurpose"
+          }
+        },
+        "required": [
+          "commissioned_at_unix_microseconds",
+          "purpose",
+          "attention"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchSessionCursor": {
+        "additionalProperties": false,
+        "properties": {
+          "commissioned_at_unix_microseconds": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "commissioned_at_unix_microseconds",
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchSessionPurpose": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "dispatch_id": {
+                "type": "string"
+              },
+              "event_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "rule_dispatch",
+                "type": "string"
+              },
+              "rule": {
+                "type": "string"
+              },
+              "template": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dispatch_id",
+              "event_id",
+              "rule",
+              "template"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "dispatch_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "operator_commission",
+                "type": "string"
+              },
+              "template": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dispatch_id",
+              "template"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "continuation_before": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebRepoWatchSessionCursor"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "sessions": {
+        "items": {
+          "$ref": "#/$defs/WebRepoWatchPullRequestSession"
+        },
+        "maxItems": 64,
+        "type": "array"
+      }
+    },
+    "required": [
+      "sessions"
+    ],
+    "title": "WebRepoWatchPullRequestSessionPage",
+    "type": "object"
+  },
+  "WebRepoWatchRepositoryStatusPage": {
+    "$defs": {
+      "WebRepoWatchDispatch": {
+        "additionalProperties": false,
+        "properties": {
+          "attempted_at_unix_milliseconds": {
+            "type": "string"
+          },
+          "event_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "rule": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "event_id",
+          "rule",
+          "attempted_at_unix_milliseconds"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor_generation": {
+            "type": "string"
+          },
+          "event_ordinal": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WebRepoWatchEventKind"
+          },
+          "observed_at_unix_milliseconds": {
+            "type": "string"
+          },
+          "pull_request": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "cursor_generation",
+          "event_ordinal",
+          "kind",
+          "observed_at_unix_milliseconds"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchEventKind": {
+        "enum": [
+          "pull_request_opened",
+          "pull_request_closed",
+          "pull_request_merged",
+          "head_changed",
+          "mergeable_state_changed",
+          "checks_completed",
+          "check_run_completed",
+          "branch_workflow_run_completed",
+          "review_submitted",
+          "thread_opened",
+          "thread_resolved",
+          "labeled",
+          "unlabeled",
+          "base_advanced",
+          "reaction_changed"
+        ],
+        "type": "string"
+      },
+      "WebRepoWatchEventKindCount": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WebRepoWatchEventKind"
+          }
+        },
+        "required": [
+          "kind",
+          "count"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchLatestWebhook": {
+        "additionalProperties": false,
+        "properties": {
+          "action_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "event_name": {
+            "type": "string"
+          },
+          "receipt_sequence": {
+            "type": "string"
+          },
+          "received_at_unix_milliseconds": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_sequence",
+          "event_name",
+          "received_at_unix_milliseconds"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchRepositoryStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor_generation": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "event_kind_counts_previous_hour": {
+            "items": {
+              "$ref": "#/$defs/WebRepoWatchEventKindCount"
+            },
+            "type": "array"
+          },
+          "held_slot_count": {
+            "type": "string"
+          },
+          "last_actionable_event": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepoWatchEvent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_automation_settlement": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepoWatchSettlement"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_dispatch_attempt": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepoWatchDispatch"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_observed_event": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepoWatchEvent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "latest_projection_latency_milliseconds": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "latest_webhook": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepoWatchLatestWebhook"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "maximum_projection_latency_milliseconds_previous_hour": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "observed_at_unix_milliseconds": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "previous_five_minutes": {
+            "$ref": "#/$defs/WebRepoWatchWebhookWindow"
+          },
+          "previous_hour": {
+            "$ref": "#/$defs/WebRepoWatchWebhookWindow"
+          },
+          "queued_obligation_count": {
+            "type": "string"
+          },
+          "repository": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "previous_five_minutes",
+          "previous_hour",
+          "event_kind_counts_previous_hour",
+          "held_slot_count",
+          "queued_obligation_count"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchSettlement": {
+        "additionalProperties": false,
+        "properties": {
+          "dispatch_id": {
+            "type": "string"
+          },
+          "event_id": {
+            "type": "string"
+          },
+          "settled_at_unix_milliseconds": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "dispatch_id",
+          "event_id",
+          "settled_at_unix_milliseconds"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchWebhookWindow": {
+        "additionalProperties": false,
+        "properties": {
+          "projected": {
+            "type": "string"
+          },
+          "quarantined": {
+            "type": "string"
+          },
+          "received": {
+            "type": "string"
+          },
+          "seconds": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "terminal": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "seconds",
+          "received",
+          "projected",
+          "terminal",
+          "quarantined"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "continuation_after_repository": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "repositories": {
+        "items": {
+          "$ref": "#/$defs/WebRepoWatchRepositoryStatus"
+        },
+        "maxItems": 64,
+        "type": "array"
+      }
+    },
+    "required": [
+      "repositories"
+    ],
+    "title": "WebRepoWatchRepositoryStatusPage",
+    "type": "object"
+  },
+  "WebRepoWatchWorkPage": {
+    "$defs": {
+      "WebRepoWatchHeldCursor": {
+        "additionalProperties": false,
+        "properties": {
+          "dispatch_id": {
+            "type": "string"
+          },
+          "held_since_unix_microseconds": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "held_since_unix_microseconds",
+          "dispatch_id"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchHeldSlot": {
+        "additionalProperties": false,
+        "properties": {
+          "blockers": {
+            "items": {
+              "$ref": "#/$defs/WebRepoWatchHeldSlotBlocker"
+            },
+            "type": "array"
+          },
+          "dispatch_id": {
+            "type": "string"
+          },
+          "held_since_unix_microseconds": {
+            "type": "string"
+          },
+          "rule": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/$defs/WebRepoWatchSingletonScope"
+          },
+          "session_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "dispatch_id",
+          "scope",
+          "rule",
+          "held_since_unix_microseconds",
+          "session_ids",
+          "blockers"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchHeldSlotBlocker": {
+        "enum": [
+          "undelivered_action",
+          "delivery_turn_runtime_relevant",
+          "live_runtime_turn",
+          "pursuing_goal"
+        ],
+        "type": "string"
+      },
+      "WebRepoWatchObligationCursor": {
+        "additionalProperties": false,
+        "properties": {
+          "obligation_id": {
+            "type": "string"
+          },
+          "owed_since_unix_microseconds": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "owed_since_unix_microseconds",
+          "obligation_id"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchObligationReadiness": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "ready",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "dispatch_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "occupied",
+                "type": "string"
+              },
+              "session_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "dispatch_id",
+              "session_ids"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Held by a live independently commissioned session, which owns no\nrepository-watch dispatch identity to report alongside it.",
+            "properties": {
+              "kind": {
+                "const": "externally_blocked",
+                "type": "string"
+              },
+              "session_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "session_ids"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "eligible_at_unix_milliseconds": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "cooldown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "parked",
+                "type": "string"
+              },
+              "parked_at_unix_milliseconds": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "parked_at_unix_milliseconds"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebRepoWatchQueuedObligation": {
+        "additionalProperties": false,
+        "properties": {
+          "failed_attempts": {
+            "type": "string"
+          },
+          "first_event_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "latest_event_id": {
+            "type": "string"
+          },
+          "latest_match_at_unix_milliseconds": {
+            "type": "string"
+          },
+          "matched_event_count": {
+            "type": "string"
+          },
+          "owed_since_unix_microseconds": {
+            "type": "string"
+          },
+          "readiness": {
+            "$ref": "#/$defs/WebRepoWatchObligationReadiness"
+          },
+          "rule": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/$defs/WebRepoWatchSingletonScope"
+          }
+        },
+        "required": [
+          "id",
+          "scope",
+          "rule",
+          "first_event_id",
+          "latest_event_id",
+          "matched_event_count",
+          "owed_since_unix_microseconds",
+          "latest_match_at_unix_milliseconds",
+          "failed_attempts",
+          "readiness"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchSingletonScope": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "pull_request",
+                "type": "string"
+              },
+              "number": {
+                "type": "string"
+              },
+              "repository": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "repository",
+              "number"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "stack",
+                "type": "string"
+              },
+              "repository": {
+                "type": "string"
+              },
+              "root_pull_request": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "repository",
+              "root_pull_request"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "rule",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "repository",
+                "type": "string"
+              },
+              "repository": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "repository"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "held_continuation_after": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebRepoWatchHeldCursor"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "held_slots": {
+        "items": {
+          "$ref": "#/$defs/WebRepoWatchHeldSlot"
+        },
+        "maxItems": 64,
+        "type": "array"
+      },
+      "obligation_continuation_after": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebRepoWatchObligationCursor"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "queued_obligations": {
+        "items": {
+          "$ref": "#/$defs/WebRepoWatchQueuedObligation"
+        },
+        "maxItems": 64,
+        "type": "array"
+      }
+    },
+    "required": [
+      "held_slots",
+      "queued_obligations"
+    ],
+    "title": "WebRepoWatchWorkPage",
+    "type": "object"
+  },
+  "WebSearchPage": {
+    "$defs": {
+      "WebSearchContentClass": {
+        "description": "Closed browser-visible class of matched indexed content.",
+        "enum": [
+          "user_transcript",
+          "assistant_transcript",
+          "tool_arguments",
+          "tool_result",
+          "session_metadata",
+          "attachment_filename",
+          "attachment_media_metadata",
+          "derived_text_artifact"
+        ],
+        "type": "string"
+      },
+      "WebSearchHighlight": {
+        "additionalProperties": false,
+        "description": "One half-open UTF-8 byte range within a bounded snippet.",
+        "properties": {
+          "end_byte": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start_byte": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start_byte",
+          "end_byte"
+        ],
+        "type": "object"
+      },
+      "WebSearchProjectionId": {
+        "description": "Checked positive PostgreSQL projection identity encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]{0,18}$",
+        "type": "string"
+      },
+      "WebSearchResult": {
+        "additionalProperties": false,
+        "description": "One bounded lexical match with enough identity to reveal unloaded history.",
+        "properties": {
+          "address": {
+            "$ref": "#/$defs/WebTimelineAddress"
+          },
+          "content_class": {
+            "$ref": "#/$defs/WebSearchContentClass"
+          },
+          "highlights": {
+            "items": {
+              "$ref": "#/$defs/WebSearchHighlight"
+            },
+            "maxItems": 512,
+            "type": "array"
+          },
+          "projection_id": {
+            "$ref": "#/$defs/WebSearchProjectionId"
+          },
+          "session_id": {
+            "$ref": "#/$defs/WebSessionId"
+          },
+          "snippet": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/$defs/WebSearchResultSource"
+          }
+        },
+        "required": [
+          "session_id",
+          "address",
+          "projection_id",
+          "source",
+          "content_class",
+          "snippet",
+          "highlights"
+        ],
+        "type": "object"
+      },
+      "WebSearchResultSource": {
+        "description": "Typed durable source of one browser search result.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/WebSessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "accepted_input_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "kind": {
+                "const": "accepted_input",
+                "type": "string"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebUuid"
+              }
+            },
+            "required": [
+              "kind",
+              "accepted_input_id",
+              "turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "accepted_input_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "kind": {
+                "const": "steering_input",
+                "type": "string"
+              },
+              "source_turn_id": {
+                "$ref": "#/$defs/WebUuid"
+              }
+            },
+            "required": [
+              "kind",
+              "accepted_input_id",
+              "source_turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "turn_transcript_entry",
+                "type": "string"
+              },
+              "semantic_entry_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebUuid"
+              }
+            },
+            "required": [
+              "kind",
+              "semantic_entry_id",
+              "turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "session_transcript_entry",
+                "type": "string"
+              },
+              "semantic_entry_id": {
+                "$ref": "#/$defs/WebUuid"
+              }
+            },
+            "required": [
+              "kind",
+              "semantic_entry_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "tool_request",
+                "type": "string"
+              },
+              "tool_request_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebUuid"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_request_id",
+              "turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "tool_attempt",
+                "type": "string"
+              },
+              "tool_attempt_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebUuid"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_attempt_id",
+              "turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "attachment_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "kind": {
+                "const": "attachment",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "attachment_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "artifact_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "kind": {
+                "const": "derived_artifact",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "artifact_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebTimelineAddress": {
+        "additionalProperties": false,
+        "description": "Stable browser-visible location of one durable session event.",
+        "properties": {
+          "event_sequence": {
+            "$ref": "#/$defs/WebTimelineEventSequence",
+            "description": "Positive global durable event sequence encoded losslessly for JavaScript."
+          }
+        },
+        "required": [
+          "event_sequence"
+        ],
+        "type": "object"
+      },
+      "WebTimelineEventSequence": {
+        "description": "Checked positive durable-event sequence encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebUuid": {
+        "description": "Checked canonical UUID used for browser-visible non-session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "One bounded, stable page of lexical matches.",
+    "properties": {
+      "continuation": {
+        "anyOf": [
+          {
+            "additionalProperties": false,
+            "description": "Stable opaque descending search keyset boundary.",
+            "properties": {
+              "address": {
+                "$ref": "#/$defs/WebTimelineAddress"
+              },
+              "projection_id": {
+                "$ref": "#/$defs/WebSearchProjectionId"
+              }
+            },
+            "required": [
+              "address",
+              "projection_id"
+            ],
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "results": {
+        "items": {
+          "$ref": "#/$defs/WebSearchResult"
+        },
+        "maxItems": 100,
+        "type": "array"
+      }
+    },
+    "required": [
+      "results",
+      "continuation"
+    ],
+    "title": "WebSearchPage",
+    "type": "object"
+  },
+  "WebSessionCatalogSnapshot": {
+    "$defs": {
+      "WebAttentionAction": {
+        "enum": [
+          "provide_goal_need",
+          "decide_approval",
+          "reconcile_turn"
+        ],
+        "type": "string"
+      },
+      "WebAttentionActivityKind": {
+        "enum": [
+          "session",
+          "turn",
+          "goal",
+          "approval_judge",
+          "runner"
+        ],
+        "type": "string"
+      },
+      "WebAttentionBlockedReason": {
+        "enum": [
+          "user_input_required",
+          "external_change_required",
+          "authorization_required",
+          "execution_failure"
+        ],
+        "type": "string"
+      },
+      "WebAttentionGoalBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "need_summary": {
+            "description": "At most 128 Unicode scalar values; exact text is in session detail.",
+            "maxLength": 128,
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/WebAttentionBlockedReason"
+          }
+        },
+        "required": [
+          "generation",
+          "reason",
+          "need_summary"
+        ],
+        "type": "object"
+      },
+      "WebAttentionJudgeFacts": {
+        "additionalProperties": false,
+        "properties": {
+          "actionable": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "completed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "escalated": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "failed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "actionable",
+          "completed",
+          "escalated",
+          "failed"
+        ],
+        "type": "object"
+      },
+      "WebAttentionState": {
+        "enum": [
+          "active",
+          "queued",
+          "blocked",
+          "awaiting_approval",
+          "ambiguous",
+          "awaiting_tool_recovery",
+          "awaiting_reconciliation",
+          "runner_lost",
+          "idle"
+        ],
+        "type": "string"
+      },
+      "WebSessionCatalogActivity": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/WebAttentionActivityKind"
+          },
+          "unix_microseconds": {
+            "$ref": "#/$defs/WebU64"
+          }
+        },
+        "required": [
+          "unix_microseconds",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "WebSessionCatalogSort": {
+        "enum": [
+          "last_activity_descending",
+          "session_identity_ascending"
+        ],
+        "type": "string"
+      },
+      "WebSessionCatalogSummary": {
         "additionalProperties": false,
         "properties": {
           "action": {
@@ -195,7 +3897,7 @@ const schemas = {
           "current_turn_id": {
             "anyOf": [
               {
-                "description": "Checked canonical UUID used for browser-visible turn identities.",
+                "description": "Checked canonical UUID used for browser-visible non-session identities.",
                 "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
                 "type": "string"
               },
@@ -218,7 +3920,7 @@ const schemas = {
             "$ref": "#/$defs/WebAttentionJudgeFacts"
           },
           "last_activity": {
-            "$ref": "#/$defs/WebAttentionActivity"
+            "$ref": "#/$defs/WebSessionCatalogActivity"
           },
           "queued_turn_count": {
             "$ref": "#/$defs/WebU64"
@@ -254,11 +3956,6 @@ const schemas = {
           "last_activity"
         ],
         "type": "object"
-      },
-      "WebPositiveU64": {
-        "description": "Checked positive unsigned 64-bit value encoded losslessly for JavaScript.",
-        "pattern": "^[1-9][0-9]*$",
-        "type": "string"
       },
       "WebSessionId": {
         "description": "Checked canonical UUID used for browser-visible session identities.",
@@ -327,13 +4024,13 @@ const schemas = {
         "$ref": "#/$defs/WebU64"
       },
       "sort": {
-        "$ref": "#/$defs/WebAttentionSort"
+        "$ref": "#/$defs/WebSessionCatalogSort"
       },
       "summaries": {
         "items": {
-          "$ref": "#/$defs/WebAttentionSummary"
+          "$ref": "#/$defs/WebSessionCatalogSummary"
         },
-        "maxItems": 16,
+        "maxItems": 32,
         "type": "array"
       },
       "total": {
@@ -347,515 +4044,7 @@ const schemas = {
       "summaries",
       "continuation"
     ],
-    "title": "WebAttentionSnapshot",
-    "type": "object"
-  },
-  "WebAttentionStreamEvent": {
-    "$defs": {
-      "WebAttentionAction": {
-        "enum": [
-          "provide_goal_need",
-          "decide_approval",
-          "reconcile_turn",
-          "restore_runner"
-        ],
-        "type": "string"
-      },
-      "WebAttentionActivity": {
-        "additionalProperties": false,
-        "properties": {
-          "kind": {
-            "$ref": "#/$defs/WebAttentionActivityKind"
-          },
-          "unix_microseconds": {
-            "$ref": "#/$defs/WebU64"
-          }
-        },
-        "required": [
-          "unix_microseconds",
-          "kind"
-        ],
-        "type": "object"
-      },
-      "WebAttentionActivityKind": {
-        "enum": [
-          "session",
-          "turn",
-          "goal",
-          "approval_judge",
-          "runner"
-        ],
-        "type": "string"
-      },
-      "WebAttentionBlockedReason": {
-        "enum": [
-          "user_input_required",
-          "external_change_required",
-          "authorization_required",
-          "execution_failure"
-        ],
-        "type": "string"
-      },
-      "WebAttentionGoalBlock": {
-        "additionalProperties": false,
-        "properties": {
-          "generation": {
-            "$ref": "#/$defs/WebPositiveU64",
-            "description": "Goal generations are strictly positive in the domain and its storage\nconstraint, so zero is not a valid wire spelling."
-          },
-          "need_summary": {
-            "description": "At least 1 and at most 128 Unicode scalar values; exact text is in\nsession detail. The stored goal need is never empty, so an empty\nsummary is contract-invalid.",
-            "maxLength": 128,
-            "minLength": 1,
-            "type": "string"
-          },
-          "reason": {
-            "$ref": "#/$defs/WebAttentionBlockedReason"
-          }
-        },
-        "required": [
-          "generation",
-          "reason",
-          "need_summary"
-        ],
-        "type": "object"
-      },
-      "WebAttentionJudgeFacts": {
-        "additionalProperties": false,
-        "properties": {
-          "actionable": {
-            "$ref": "#/$defs/WebU64"
-          },
-          "completed": {
-            "$ref": "#/$defs/WebU64"
-          },
-          "escalated": {
-            "$ref": "#/$defs/WebU64"
-          },
-          "failed": {
-            "$ref": "#/$defs/WebU64"
-          }
-        },
-        "required": [
-          "actionable",
-          "completed",
-          "escalated",
-          "failed"
-        ],
-        "type": "object"
-      },
-      "WebAttentionSnapshot": {
-        "additionalProperties": false,
-        "properties": {
-          "continuation": {
-            "anyOf": [
-              {
-                "oneOf": [
-                  {
-                    "additionalProperties": false,
-                    "properties": {
-                      "kind": {
-                        "const": "last_activity",
-                        "type": "string"
-                      },
-                      "session_id": {
-                        "$ref": "#/$defs/WebSessionId"
-                      },
-                      "unix_microseconds": {
-                        "$ref": "#/$defs/WebU64"
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "unix_microseconds",
-                      "session_id"
-                    ],
-                    "type": "object"
-                  },
-                  {
-                    "additionalProperties": false,
-                    "properties": {
-                      "kind": {
-                        "const": "session_identity",
-                        "type": "string"
-                      },
-                      "session_id": {
-                        "$ref": "#/$defs/WebSessionId"
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "session_id"
-                    ],
-                    "type": "object"
-                  }
-                ]
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "cursor": {
-            "$ref": "#/$defs/WebU64"
-          },
-          "sort": {
-            "$ref": "#/$defs/WebAttentionSort"
-          },
-          "summaries": {
-            "items": {
-              "$ref": "#/$defs/WebAttentionSummary"
-            },
-            "maxItems": 16,
-            "type": "array"
-          },
-          "total": {
-            "$ref": "#/$defs/WebU64"
-          }
-        },
-        "required": [
-          "cursor",
-          "total",
-          "sort",
-          "summaries",
-          "continuation"
-        ],
-        "type": "object"
-      },
-      "WebAttentionSort": {
-        "enum": [
-          "last_activity_descending",
-          "session_identity_ascending"
-        ],
-        "type": "string"
-      },
-      "WebAttentionState": {
-        "enum": [
-          "active",
-          "queued",
-          "blocked",
-          "awaiting_approval",
-          "ambiguous",
-          "awaiting_reconciliation",
-          "runner_lost",
-          "idle"
-        ],
-        "type": "string"
-      },
-      "WebAttentionSummary": {
-        "additionalProperties": false,
-        "properties": {
-          "action": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WebAttentionAction"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "active_turn_count": {
-            "$ref": "#/$defs/WebU64"
-          },
-          "archived": {
-            "type": "boolean"
-          },
-          "current_turn_id": {
-            "anyOf": [
-              {
-                "description": "Checked canonical UUID used for browser-visible turn identities.",
-                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "goal_block": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WebAttentionGoalBlock"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "judge": {
-            "$ref": "#/$defs/WebAttentionJudgeFacts"
-          },
-          "last_activity": {
-            "$ref": "#/$defs/WebAttentionActivity"
-          },
-          "queued_turn_count": {
-            "$ref": "#/$defs/WebU64"
-          },
-          "session_id": {
-            "$ref": "#/$defs/WebSessionId"
-          },
-          "state": {
-            "$ref": "#/$defs/WebAttentionState"
-          },
-          "title_summary": {
-            "maxLength": 128,
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "title_truncated": {
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "session_id",
-          "title_summary",
-          "title_truncated",
-          "archived",
-          "current_turn_id",
-          "active_turn_count",
-          "queued_turn_count",
-          "state",
-          "action",
-          "judge",
-          "last_activity"
-        ],
-        "type": "object"
-      },
-      "WebPositiveU64": {
-        "description": "Checked positive unsigned 64-bit value encoded losslessly for JavaScript.",
-        "pattern": "^[1-9][0-9]*$",
-        "type": "string"
-      },
-      "WebSessionId": {
-        "description": "Checked canonical UUID used for browser-visible session identities.",
-        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-        "type": "string"
-      },
-      "WebU64": {
-        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
-        "pattern": "^(0|[1-9][0-9]*)$",
-        "type": "string"
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "oneOf": [
-      {
-        "additionalProperties": false,
-        "properties": {
-          "kind": {
-            "const": "snapshot",
-            "type": "string"
-          },
-          "snapshot": {
-            "$ref": "#/$defs/WebAttentionSnapshot"
-          }
-        },
-        "required": [
-          "kind",
-          "snapshot"
-        ],
-        "type": "object"
-      },
-      {
-        "additionalProperties": false,
-        "properties": {
-          "cursor": {
-            "$ref": "#/$defs/WebU64"
-          },
-          "kind": {
-            "const": "update",
-            "type": "string"
-          },
-          "summaries": {
-            "items": {
-              "$ref": "#/$defs/WebAttentionSummary"
-            },
-            "maxItems": 16,
-            "minItems": 1,
-            "type": "array"
-          }
-        },
-        "required": [
-          "kind",
-          "cursor",
-          "summaries"
-        ],
-        "type": "object"
-      },
-      {
-        "additionalProperties": false,
-        "properties": {
-          "cursor": {
-            "$ref": "#/$defs/WebU64"
-          },
-          "kind": {
-            "const": "resync_required",
-            "type": "string"
-          }
-        },
-        "required": [
-          "kind",
-          "cursor"
-        ],
-        "type": "object"
-      }
-    ],
-    "title": "WebAttentionStreamEvent"
-  },
-  "WebContractBootstrap": {
-    "$defs": {
-      "WebContractCapabilities": {
-        "additionalProperties": false,
-        "description": "Transport capabilities present in the exact contract version.",
-        "properties": {
-          "bounded_json": {
-            "description": "Ordinary bounded JSON responses are available under `/api/`.",
-            "type": "boolean"
-          },
-          "bounded_session_timeline": {
-            "description": "Stable bounded session descriptors and historical windows are available.",
-            "type": "boolean"
-          },
-          "bounded_session_timeline_detail": {
-            "description": "Typed item, turn, and contiguous-region detail reads are available.",
-            "type": "boolean"
-          },
-          "ndjson_streaming": {
-            "description": "Incremental response items use newline-delimited JSON.",
-            "type": "boolean"
-          },
-          "same_origin_json_mutations": {
-            "description": "JSON mutations validate a supplied browser origin against authority.",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "bounded_json",
-          "same_origin_json_mutations",
-          "ndjson_streaming",
-          "bounded_session_timeline",
-          "bounded_session_timeline_detail"
-        ],
-        "type": "object"
-      },
-      "WebContractIdentity": {
-        "additionalProperties": false,
-        "description": "Identity of the one exact browser contract this daemon serves.",
-        "properties": {
-          "name": {
-            "description": "Stable contract family.",
-            "type": "string"
-          },
-          "version": {
-            "description": "Exact version; clients do not negotiate ranges.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "name",
-          "version"
-        ],
-        "type": "object"
-      },
-      "WebContractLimits": {
-        "additionalProperties": false,
-        "description": "Effective hard limits clients must honor for this contract version.",
-        "properties": {
-          "max_json_body_bytes": {
-            "description": "Maximum bytes accepted for one JSON request body.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "max_ndjson_item_bytes": {
-            "description": "Maximum encoded bytes for one NDJSON item, excluding its newline.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "max_timeline_detail_bytes": {
-            "description": "Maximum projected typed-body bytes in one detail response.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "max_timeline_detail_items": {
-            "description": "Maximum detailed timeline records in one response.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "max_timeline_window_bytes": {
-            "description": "Maximum projected structured item bytes in one timeline window.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "max_timeline_window_items": {
-            "description": "Maximum durable event headers returned in one timeline window.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "max_json_body_bytes",
-          "max_ndjson_item_bytes",
-          "max_timeline_window_items",
-          "max_timeline_window_bytes",
-          "max_timeline_detail_items",
-          "max_timeline_detail_bytes"
-        ],
-        "type": "object"
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "additionalProperties": false,
-    "description": "Response from the contract bootstrap endpoint.",
-    "properties": {
-      "capabilities": {
-        "$ref": "#/$defs/WebContractCapabilities",
-        "description": "Supported transport capabilities."
-      },
-      "contract": {
-        "$ref": "#/$defs/WebContractIdentity",
-        "description": "Exact contract identity."
-      },
-      "limits": {
-        "$ref": "#/$defs/WebContractLimits",
-        "description": "Bounds shared by server and generated client contract."
-      }
-    },
-    "required": [
-      "contract",
-      "capabilities",
-      "limits"
-    ],
-    "title": "WebContractBootstrap",
-    "type": "object"
-  },
-  "WebContractExample": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "additionalProperties": false,
-    "description": "Small generated-contract fixture proving Rust/TypeScript round trips.",
-    "properties": {
-      "message": {
-        "description": "Bounded example payload.",
-        "type": "string"
-      },
-      "request_id": {
-        "description": "Opaque request correlation chosen by the caller.",
-        "type": "string"
-      }
-    },
-    "required": [
-      "request_id",
-      "message"
-    ],
-    "title": "WebContractExample",
+    "title": "WebSessionCatalogSnapshot",
     "type": "object"
   },
   "WebSessionTimelineDescriptor": {
@@ -1649,6 +4838,534 @@ const schemas = {
     ],
     "title": "WebSessionTimelineWindow",
     "type": "object"
+  },
+  "WebUsageCallPage": {
+    "$defs": {
+      "WebDollarAmount": {
+        "description": "Canonical nonnegative fixed-point USD amount derived by the daemon.",
+        "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,27}[1-9])?$",
+        "type": "string"
+      },
+      "WebNullableU64": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebU64"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Independently nullable token axes; null is never interpreted as zero."
+      },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebU64": {
+        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
+      },
+      "WebUsageCall": {
+        "additionalProperties": false,
+        "description": "One terminal call with exact token, provenance, rate, and billing evidence.",
+        "properties": {
+          "call_id": {
+            "$ref": "#/$defs/WebUuid"
+          },
+          "call_kind": {
+            "$ref": "#/$defs/WebUsageCallKind"
+          },
+          "cost": {
+            "$ref": "#/$defs/WebUsageCost"
+          },
+          "input_semantics": {
+            "$ref": "#/$defs/WebUsageInputSemantics"
+          },
+          "model_id": {
+            "$ref": "#/$defs/WebUuid"
+          },
+          "profile_id": {
+            "$ref": "#/$defs/WebUsageProfileId"
+          },
+          "provenance": {
+            "$ref": "#/$defs/WebUsageProvenance"
+          },
+          "recorded_at_micros": {
+            "$ref": "#/$defs/WebUsageTimestampMicros"
+          },
+          "session_id": {
+            "$ref": "#/$defs/WebSessionId"
+          },
+          "tokens": {
+            "$ref": "#/$defs/WebUsageTokenAxes"
+          },
+          "turn_id": {
+            "anyOf": [
+              {
+                "description": "Owning turn, present-but-null exactly for context compaction.",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "call_kind",
+          "call_id",
+          "session_id",
+          "turn_id",
+          "model_id",
+          "profile_id",
+          "provenance",
+          "input_semantics",
+          "tokens",
+          "recorded_at_micros",
+          "cost"
+        ],
+        "type": "object"
+      },
+      "WebUsageCallKind": {
+        "description": "Closed physical class of one terminal usage record.",
+        "enum": [
+          "model_call",
+          "approval_judge",
+          "context_compaction"
+        ],
+        "type": "string"
+      },
+      "WebUsageCost": {
+        "description": "Labeled configured cost, or an explicit reason it cannot be derived.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "amount_usd": {
+                "$ref": "#/$defs/WebDollarAmount"
+              },
+              "label": {
+                "$ref": "#/$defs/WebUsageCostLabel"
+              },
+              "rate_version": {
+                "$ref": "#/$defs/WebUsageRateVersion"
+              },
+              "status": {
+                "const": "derived",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "amount_usd",
+              "rate_version",
+              "label"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/WebUsageCostUnavailableReason"
+              },
+              "status": {
+                "const": "unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebUsageCostLabel": {
+        "description": "Browser-visible billing label derived from the serving credential profile.",
+        "enum": [
+          "real",
+          "metered_equivalent"
+        ],
+        "type": "string"
+      },
+      "WebUsageCostUnavailableReason": {
+        "description": "Why no configured dollar derivation is available for exact token evidence.",
+        "enum": [
+          "no_token_evidence",
+          "unknown_input_semantics",
+          "incomplete_cache_axes",
+          "invalid_cache_breakdown",
+          "configuration_unavailable"
+        ],
+        "type": "string"
+      },
+      "WebUsageInputSemantics": {
+        "description": "Meaning of one provider target's input-token axis.",
+        "enum": [
+          "unknown",
+          "cache_exclusive",
+          "cache_inclusive"
+        ],
+        "type": "string"
+      },
+      "WebUsageProfileId": {
+        "description": "Non-secret bounded profile identity retained by usage summaries.",
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "WebUsageProvenance": {
+        "description": "Closed provenance of one token-evidence projection.",
+        "enum": [
+          "reported",
+          "estimated"
+        ],
+        "type": "string"
+      },
+      "WebUsageRateVersion": {
+        "description": "Checked nonempty configured rate version exposed to browser clients.",
+        "maxLength": 128,
+        "minLength": 1,
+        "type": "string"
+      },
+      "WebUsageTimestampMicros": {
+        "description": "Checked application-range usage timestamp encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]{0,17})$",
+        "type": "string"
+      },
+      "WebUsageTokenAxes": {
+        "additionalProperties": false,
+        "description": "Independently nullable token axes; null is never interpreted as zero.",
+        "properties": {
+          "cache_creation_input": {
+            "$ref": "#/$defs/WebNullableU64"
+          },
+          "cache_read_input": {
+            "$ref": "#/$defs/WebNullableU64"
+          },
+          "input": {
+            "$ref": "#/$defs/WebNullableU64"
+          },
+          "output": {
+            "$ref": "#/$defs/WebNullableU64"
+          }
+        },
+        "required": [
+          "input",
+          "output",
+          "cache_creation_input",
+          "cache_read_input"
+        ],
+        "type": "object"
+      },
+      "WebUuid": {
+        "description": "Checked canonical UUID used for browser-visible non-session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "One bounded page of exact call evidence.",
+    "properties": {
+      "calls": {
+        "items": {
+          "$ref": "#/$defs/WebUsageCall"
+        },
+        "maxItems": 100,
+        "type": "array"
+      },
+      "continuation": {
+        "anyOf": [
+          {
+            "additionalProperties": false,
+            "description": "Present-but-null when the page exhausts the matching evidence, so an\nomitted member is an incompatibility rather than a silent exhaustion.",
+            "properties": {
+              "call_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "recorded_at_micros": {
+                "$ref": "#/$defs/WebUsageTimestampMicros"
+              }
+            },
+            "required": [
+              "recorded_at_micros",
+              "call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "calls",
+      "continuation"
+    ],
+    "title": "WebUsageCallPage",
+    "type": "object"
+  },
+  "WebUsageSummary": {
+    "$defs": {
+      "WebDollarAmount": {
+        "description": "Canonical nonnegative fixed-point USD amount derived by the daemon.",
+        "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,27}[1-9])?$",
+        "type": "string"
+      },
+      "WebNullableU128": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebU128"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Independently nullable aggregate token axis widened beyond one call."
+      },
+      "WebU128": {
+        "description": "Checked unsigned 128-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]{0,38})$",
+        "type": "string"
+      },
+      "WebUsageAggregateGroup": {
+        "additionalProperties": false,
+        "description": "One compatibility-preserving usage and configured-cost summary row.",
+        "properties": {
+          "call_count": {
+            "$ref": "#/$defs/WebUsageCallCount"
+          },
+          "call_kind": {
+            "$ref": "#/$defs/WebUsageCallKind"
+          },
+          "cost": {
+            "$ref": "#/$defs/WebUsageCost"
+          },
+          "coverage": {
+            "$ref": "#/$defs/WebUsageTokenCoverage"
+          },
+          "input_semantics": {
+            "$ref": "#/$defs/WebUsageInputSemantics"
+          },
+          "model_id": {
+            "$ref": "#/$defs/WebUuid"
+          },
+          "profile_id": {
+            "$ref": "#/$defs/WebUsageProfileId"
+          },
+          "provenance": {
+            "$ref": "#/$defs/WebUsageProvenance"
+          },
+          "tokens": {
+            "$ref": "#/$defs/WebUsageAggregateTokenAxes"
+          }
+        },
+        "required": [
+          "call_kind",
+          "model_id",
+          "profile_id",
+          "provenance",
+          "input_semantics",
+          "coverage",
+          "call_count",
+          "tokens",
+          "cost"
+        ],
+        "type": "object"
+      },
+      "WebUsageAggregateTokenAxes": {
+        "additionalProperties": false,
+        "description": "Aggregate token axes widened beyond one physical call.",
+        "properties": {
+          "cache_creation_input": {
+            "$ref": "#/$defs/WebNullableU128"
+          },
+          "cache_read_input": {
+            "$ref": "#/$defs/WebNullableU128"
+          },
+          "input": {
+            "$ref": "#/$defs/WebNullableU128"
+          },
+          "output": {
+            "$ref": "#/$defs/WebNullableU128"
+          }
+        },
+        "required": [
+          "input",
+          "output",
+          "cache_creation_input",
+          "cache_read_input"
+        ],
+        "type": "object"
+      },
+      "WebUsageCallCount": {
+        "description": "Checked positive summary call count encoded losslessly for JavaScript.",
+        "pattern": "^([1-9][0-9]{0,3}|10000)$",
+        "type": "string"
+      },
+      "WebUsageCallKind": {
+        "description": "Closed physical class of one terminal usage record.",
+        "enum": [
+          "model_call",
+          "approval_judge",
+          "context_compaction"
+        ],
+        "type": "string"
+      },
+      "WebUsageCost": {
+        "description": "Labeled configured cost, or an explicit reason it cannot be derived.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "amount_usd": {
+                "$ref": "#/$defs/WebDollarAmount"
+              },
+              "label": {
+                "$ref": "#/$defs/WebUsageCostLabel"
+              },
+              "rate_version": {
+                "$ref": "#/$defs/WebUsageRateVersion"
+              },
+              "status": {
+                "const": "derived",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "amount_usd",
+              "rate_version",
+              "label"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/WebUsageCostUnavailableReason"
+              },
+              "status": {
+                "const": "unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebUsageCostLabel": {
+        "description": "Browser-visible billing label derived from the serving credential profile.",
+        "enum": [
+          "real",
+          "metered_equivalent"
+        ],
+        "type": "string"
+      },
+      "WebUsageCostUnavailableReason": {
+        "description": "Why no configured dollar derivation is available for exact token evidence.",
+        "enum": [
+          "no_token_evidence",
+          "unknown_input_semantics",
+          "incomplete_cache_axes",
+          "invalid_cache_breakdown",
+          "configuration_unavailable"
+        ],
+        "type": "string"
+      },
+      "WebUsageInputSemantics": {
+        "description": "Meaning of one provider target's input-token axis.",
+        "enum": [
+          "unknown",
+          "cache_exclusive",
+          "cache_inclusive"
+        ],
+        "type": "string"
+      },
+      "WebUsageProfileId": {
+        "description": "Non-secret bounded profile identity retained by usage summaries.",
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "WebUsageProvenance": {
+        "description": "Closed provenance of one token-evidence projection.",
+        "enum": [
+          "reported",
+          "estimated"
+        ],
+        "type": "string"
+      },
+      "WebUsageRateVersion": {
+        "description": "Checked nonempty configured rate version exposed to browser clients.",
+        "maxLength": 128,
+        "minLength": 1,
+        "type": "string"
+      },
+      "WebUsageTokenCoverage": {
+        "additionalProperties": false,
+        "description": "Explicit presence shape retained by compatibility-preserving aggregates.",
+        "properties": {
+          "cache_creation_input": {
+            "type": "boolean"
+          },
+          "cache_read_input": {
+            "type": "boolean"
+          },
+          "input": {
+            "type": "boolean"
+          },
+          "output": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "input",
+          "output",
+          "cache_creation_input",
+          "cache_read_input"
+        ],
+        "type": "object"
+      },
+      "WebUuid": {
+        "description": "Checked canonical UUID used for browser-visible non-session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Bounded aggregate response; truncation is never implicit.",
+    "properties": {
+      "groups": {
+        "items": {
+          "$ref": "#/$defs/WebUsageAggregateGroup"
+        },
+        "maxItems": 256,
+        "type": "array"
+      },
+      "truncated": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "groups",
+      "truncated"
+    ],
+    "title": "WebUsageSummary",
+    "type": "object"
   }
 };
 
@@ -1670,39 +5387,6 @@ function isWellFormedUnicode(value) {
     }
   }
   return true;
-}
-
-function exceedsScalarLength(value, maxLength) {
-  let count = 0;
-  const scalars = value[Symbol.iterator]();
-  while (!scalars.next().done) {
-    count += 1;
-    if (count > maxLength) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function scalarLengthAtLeast(value, minLength) {
-  let count = 0;
-  const scalars = value[Symbol.iterator]();
-  while (!scalars.next().done) {
-    count += 1;
-    if (count >= minLength) {
-      return true;
-    }
-  }
-  return count >= minLength;
-}
-
-function scalarLength(value) {
-  let count = 0;
-  const scalars = value[Symbol.iterator]();
-  while (!scalars.next().done) {
-    count += 1;
-  }
-  return count;
 }
 
 function resolveReference(root, reference) {
@@ -1734,22 +5418,9 @@ function assertSchema(root, schema, value, path) {
     }
     return;
   }
-  if (schema.oneOf !== undefined) {
-    const accepted = schema.oneOf.some((candidate) => {
-      try {
-        assertSchema(root, candidate, value, path);
-        return true;
-      } catch {
-        return false;
-      }
-    });
-    if (!accepted) {
-      fail(path, "one recognized variant");
-    }
-    return;
-  }
-  if (schema.anyOf !== undefined) {
-    const accepted = schema.anyOf.some((candidate) => {
+  const alternatives = schema.oneOf ?? schema.anyOf;
+  if (alternatives !== undefined) {
+    const accepted = alternatives.some((candidate) => {
       try {
         assertSchema(root, candidate, value, path);
         return true;
@@ -1767,11 +5438,17 @@ function assertSchema(root, schema, value, path) {
       return;
     }
     const concrete = schema.type.filter((candidate) => candidate !== "null");
-    const actual = Array.isArray(value) ? "array" : typeof value;
-    if (!concrete.includes(actual)) {
+    const accepted = concrete.some((candidate) => {
+      try {
+        assertSchema(root, { ...schema, type: candidate }, value, path);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    if (!accepted) {
       fail(path, concrete.join(" or "));
     }
-    assertSchema(root, { ...schema, type: actual }, value, path);
     return;
   }
   if (schema.type === "object") {
@@ -1832,49 +5509,62 @@ function assertSchema(root, schema, value, path) {
     }
     return;
   }
+  if (schema.type === "string") {
+    if (typeof value !== "string") {
+      fail(path, "string");
+    }
+    if (!isWellFormedUnicode(value)) {
+      fail(path, "well-formed Unicode scalar values");
+    }
+    if (
+      (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+      value.length > 20
+    ) {
+      fail(path, "an unsigned 64-bit integer");
+    }
+    if (schema.minLength !== undefined && Array.from(value).length < schema.minLength) {
+      fail(path, `at least ${schema.minLength} Unicode scalar values`);
+    }
+    if (schema.pattern !== undefined && !new RegExp(schema.pattern, "u").test(value)) {
+      fail(path, `matching ${schema.pattern}`);
+    }
+    if (
+      (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+      BigInt(value) > 18446744073709551615n
+    ) {
+      fail(path, "an unsigned 64-bit integer");
+    }
+    if (
+      schema.pattern === "^[1-9][0-9]{0,18}$" &&
+      BigInt(value) > 9223372036854775807n
+    ) {
+      fail(path, "a positive signed 64-bit integer");
+    }
+    if (
+      schema.pattern === "^(0|[1-9][0-9]*)(\\.[0-9]{0,27}[1-9])?$" &&
+      BigInt(value.replace(".", "")) > 79228162514264337593543950335n
+    ) {
+      fail(path, "a rust_decimal coefficient");
+    }
+    if (
+      schema.pattern === "^(0|[1-9][0-9]{0,17})$" &&
+      BigInt(value) > 253402300799999999n
+    ) {
+      fail(path, "an application-range usage timestamp");
+    }
+    if (
+      schema.pattern === "^(0|[1-9][0-9]{0,38})$" &&
+      BigInt(value) > 340282366920938463463374607431768211455n
+    ) {
+      fail(path, "an unsigned 128-bit integer");
+    }
+    if (schema.maxLength !== undefined && Array.from(value).length > schema.maxLength) {
+      fail(path, `at most ${schema.maxLength} Unicode scalar values`);
+    }
+    return;
+  }
   if (typeof value !== schema.type) {
     fail(path, schema.type);
-  }
-  if (schema.type === "string" && !isWellFormedUnicode(value)) {
-    fail(path, "well-formed Unicode text");
-  }
-  if (
-    schema.type === "string" &&
-    schema.maxLength !== undefined &&
-    exceedsScalarLength(value, schema.maxLength)
-  ) {
-    fail(path, `at most ${schema.maxLength} Unicode scalar values`);
-  }
-  if (
-    schema.type === "string" &&
-    schema.minLength !== undefined &&
-    !scalarLengthAtLeast(value, schema.minLength)
-  ) {
-    fail(path, `at least ${schema.minLength} Unicode scalar values`);
-  }
-  if (
-    schema.type === "string" &&
-    schema.maxLength !== undefined &&
-    value.length > schema.maxLength
-  ) {
-    fail(path, `at most ${schema.maxLength} characters`);
-  }
-  if (
-    schema.type === "string" &&
-    (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
-    value.length > 20
-  ) {
-    fail(path, "an unsigned 64-bit integer");
-  }
-  if (schema.type === "string" && schema.pattern !== undefined && !(new RegExp(schema.pattern)).test(value)) {
-    fail(path, `a string matching ${schema.pattern}`);
-  }
-  if (
-    schema.type === "string" &&
-    (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
-    BigInt(value) > 18446744073709551615n
-  ) {
-    fail(path, "an unsigned 64-bit integer");
   }
 }
 
@@ -2095,81 +5785,108 @@ function assertTimelineDetailPage(value) {
   }
 }
 
-export function decodeWebContractBootstrap(value) {
-  assertSchema(schemas.WebContractBootstrap, schemas.WebContractBootstrap, value, "bootstrap");
-  if (value.contract.name !== "signalbox.web-http" || value.contract.version !== "1") {
-    throw new TypeError("bootstrap carries an incompatible web contract");
-  }
-  return value;
-}
-
-export function decodeWebContractExample(value) {
-  assertSchema(schemas.WebContractExample, schemas.WebContractExample, value, "example");
-  return value;
-}
-
-export function decodeWebApiErrorResponse(value) {
-  assertSchema(schemas.WebApiErrorResponse, schemas.WebApiErrorResponse, value, "error_response");
-  return value;
-}
-
-export function decodeWebSessionTimelineDescriptor(value) {
-  assertSchema(schemas.WebSessionTimelineDescriptor, schemas.WebSessionTimelineDescriptor, value, "session_descriptor");
-  return value;
-}
-
-export function decodeWebSessionTimelineWindow(value) {
-  assertSchema(schemas.WebSessionTimelineWindow, schemas.WebSessionTimelineWindow, value, "timeline_window");
-  return value;
-}
-
 export function decodeWebSessionTimelineDetailPage(value) {
   assertSchema(schemas.WebSessionTimelineDetailPage, schemas.WebSessionTimelineDetailPage, value, "timeline_detail_page");
   assertTimelineDetailPage(value);
   return value;
 }
 
-export function decodeWebAttentionSnapshot(value) {
-  assertSchema(schemas.WebAttentionSnapshot, schemas.WebAttentionSnapshot, value, "attention_snapshot");
-  assertAttentionSnapshot(value, "attention_snapshot");
-  return value;
-}
-
-export function decodeWebAttentionStreamEvent(value) {
-  assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
-  if (value.kind === "snapshot") {
-    assertAttentionSnapshot(value.snapshot, "attention_event.snapshot");
-    if (value.snapshot.sort !== "last_activity_descending") {
-      fail("attention_event.snapshot.sort", "the fixed hot-page activity sort");
-    }
-    assertUnarchivedSummaries(value.snapshot.summaries, "attention_event.snapshot.summaries");
-  } else {
-    value.summaries?.forEach((summary, index) =>
-      assertAttentionSummary(summary, `attention_event.summaries[${index}]`),
-    );
-    assertUnarchivedSummaries(value.summaries ?? [], "attention_event.summaries");
-    const identities = new Set();
-    for (const summary of value.summaries ?? []) {
-      if (identities.has(summary.session_id)) {
-        fail("attention_event.summaries", "at most one replacement per session");
-      }
-      identities.add(summary.session_id);
-    }
+function assertAttentionSummary(summary, path) {
+  const action = summary.action ?? null;
+  const goalBlock = summary.goal_block ?? null;
+  const valid =
+    (summary.state === "blocked" &&
+      (action === "provide_goal_need" ||
+        (action === null && goalBlock?.reason === "execution_failure"))) ||
+    (summary.state === "awaiting_approval" &&
+      (action === null || action === "decide_approval")) ||
+    (summary.state === "ambiguous" && action === "reconcile_turn") ||
+    ([
+      "active",
+      "queued",
+      "awaiting_tool_recovery",
+      "awaiting_reconciliation",
+      "runner_lost",
+      "idle",
+    ].includes(summary.state) && action === null);
+  if (!valid) {
+    fail(`${path}.action`, `consistent with attention state ${JSON.stringify(summary.state)}`);
   }
-  return value;
+  const validGoalBlock =
+    (summary.state === "blocked" && goalBlock !== null) ||
+    summary.state === "runner_lost" ||
+    (summary.state !== "blocked" && goalBlock === null);
+  if (!validGoalBlock) {
+    fail(
+      `${path}.goal_block`,
+      `consistent with attention state ${JSON.stringify(summary.state)}`,
+    );
+  }
 }
 
-function assertUnarchivedSummaries(summaries, path) {
-  summaries.forEach((summary, index) => {
-    if (summary.archived) {
-      fail(`${path}[${index}].archived`, "false on the hot attention stream");
-    }
-  });
+function assertSessionCatalogSummary(summary, path) {
+  assertAttentionSummary(summary, path);
+  const turnBacked = [
+    "active",
+    "queued",
+    "awaiting_approval",
+    "ambiguous",
+    "awaiting_tool_recovery",
+    "awaiting_reconciliation",
+  ].includes(summary.state);
+  if (turnBacked && summary.current_turn_id === null) {
+    fail(`${path}.current_turn_id`, `a turn identity for state ${summary.state}`);
+  }
+  const activeBacked = [
+    "active",
+    "awaiting_approval",
+    "ambiguous",
+    "awaiting_tool_recovery",
+  ].includes(summary.state);
+  if (activeBacked && BigInt(summary.active_turn_count) === 0n) {
+    fail(`${path}.active_turn_count`, `at least one active turn for state ${summary.state}`);
+  }
+  if (summary.state === "queued" && BigInt(summary.queued_turn_count) === 0n) {
+    fail(`${path}.queued_turn_count`, "at least one queued turn for queued state");
+  }
+  if (summary.title_summary === null && summary.title_truncated) {
+    fail(`${path}.title_truncated`, "false when title_summary is null");
+  }
+  if (
+    summary.title_truncated &&
+    summary.title_summary !== null &&
+    Array.from(summary.title_summary).length !== 128
+  ) {
+    fail(
+      `${path}.title_summary`,
+      "exactly 128 Unicode scalar values when title_truncated is true",
+    );
+  }
+}
+
+function assertAttentionSummaries(summaries, path) {
+  summaries.forEach((summary, index) =>
+    assertAttentionSummary(summary, `${path}[${index}]`),
+  );
 }
 
 function assertAttentionSnapshot(snapshot, path) {
+  assertAttentionSummaries(snapshot.summaries, `${path}.summaries`);
+  const continuation = snapshot.continuation_after_session_id ?? null;
+  if (continuation !== null) {
+    const last = snapshot.summaries.at(-1);
+    if (last === undefined || continuation !== last.session_id) {
+      fail(
+        `${path}.continuation_after_session_id`,
+        "the last returned session identity",
+      );
+    }
+  }
+}
+
+function assertSessionCatalogSnapshot(snapshot, path) {
   snapshot.summaries.forEach((summary, index) =>
-    assertAttentionSummary(summary, `${path}.summaries[${index}]`),
+    assertSessionCatalogSummary(summary, `${path}.summaries[${index}]`),
   );
   for (let index = 1; index < snapshot.summaries.length; index += 1) {
     const previous = snapshot.summaries[index - 1];
@@ -2200,12 +5917,15 @@ function assertAttentionSnapshot(snapshot, path) {
     fail(`${path}.continuation`, `the continuation required by sort ${snapshot.sort}`);
   }
   if (snapshot.continuation !== null) {
-    const boundary = snapshot.summaries[snapshot.summaries.length - 1];
+    const boundary = snapshot.summaries.at(-1);
     if (boundary === undefined) {
       fail(`${path}.continuation`, "absent when no summaries are returned");
     }
     if (snapshot.continuation.session_id !== boundary.session_id) {
-      fail(`${path}.continuation.session_id`, "the session of the last returned summary");
+      fail(
+        `${path}.continuation.session_id`,
+        "the session of the last returned summary",
+      );
     }
     if (
       snapshot.continuation.kind === "last_activity" &&
@@ -2219,52 +5939,744 @@ function assertAttentionSnapshot(snapshot, path) {
   }
 }
 
-function assertAttentionSummary(summary, path) {
-  const expectedAction = {
-    active: null,
-    queued: null,
-    blocked: "provide_goal_need",
-    awaiting_approval: "decide_approval",
-    ambiguous: "reconcile_turn",
-    awaiting_reconciliation: "reconcile_turn",
-    runner_lost: "restore_runner",
-    idle: null,
-  }[summary.state];
-  if (summary.action !== expectedAction) {
-    fail(`${path}.action`, `the action required by state ${summary.state}`);
+function assertCanonicalU64(value, path) {
+  if (!/^[1-9][0-9]{0,19}$/.test(value) || BigInt(value) > 18446744073709551615n) {
+    fail(path, "a positive canonical decimal u64 string");
   }
-  const turnBacked = [
-    "active",
-    "queued",
-    "awaiting_approval",
-    "ambiguous",
-    "awaiting_reconciliation",
-  ].includes(summary.state);
-  if (turnBacked && summary.current_turn_id === null) {
-    fail(`${path}.current_turn_id`, `a turn identity for state ${summary.state}`);
+}
+
+const utf8 = new TextEncoder();
+
+function compareUtf8(left, right) {
+  const leftBytes = utf8.encode(left);
+  const rightBytes = utf8.encode(right);
+  const shared = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < shared; index += 1) {
+    if (leftBytes[index] !== rightBytes[index]) return leftBytes[index] - rightBytes[index];
   }
-  const activeBacked = ["active", "awaiting_approval", "ambiguous"].includes(summary.state);
-  if (activeBacked && BigInt(summary.active_turn_count) === 0n) {
-    fail(`${path}.active_turn_count`, `at least one active turn for state ${summary.state}`);
+  return leftBytes.length - rightBytes.length;
+}
+
+function parseCanonicalJson(source) {
+  let cursor = 0;
+  const parseString = () => {
+    const start = cursor;
+    cursor += 1;
+    while (cursor < source.length) {
+      if (source[cursor] === "\\") cursor += source[cursor + 1] === "u" ? 6 : 2;
+      else if (source[cursor] === '"') {
+        cursor += 1;
+        const spelling = source.slice(start, cursor);
+        const decoded = JSON.parse(spelling);
+        if (JSON.stringify(decoded) !== spelling) throw new TypeError();
+        for (let index = 0; index < decoded.length; index += 1) {
+          const unit = decoded.charCodeAt(index);
+          if (unit >= 0xd800 && unit <= 0xdbff) {
+            const next = decoded.charCodeAt(index + 1);
+            if (!(next >= 0xdc00 && next <= 0xdfff)) throw new TypeError();
+            index += 1;
+          } else if (unit >= 0xdc00 && unit <= 0xdfff) throw new TypeError();
+        }
+        return decoded;
+      } else cursor += 1;
+    }
+    throw new TypeError();
+  };
+  const parseValue = () => {
+    const byte = source[cursor];
+    if (byte === '"') { parseString(); return; }
+    if (byte === "[") {
+      cursor += 1;
+      if (source[cursor] === "]") { cursor += 1; return; }
+      while (true) {
+        parseValue();
+        if (source[cursor] === "]") { cursor += 1; return; }
+        if (source[cursor] !== ",") throw new TypeError();
+        cursor += 1;
+      }
+    }
+    if (byte === "{") {
+      cursor += 1;
+      if (source[cursor] === "}") { cursor += 1; return; }
+      let previous;
+      while (true) {
+        if (source[cursor] !== '"') throw new TypeError();
+        const key = parseString();
+        if (previous !== undefined && compareUtf8(previous, key) >= 0) throw new TypeError();
+        previous = key;
+        if (source[cursor] !== ":") throw new TypeError();
+        cursor += 1;
+        parseValue();
+        if (source[cursor] === "}") { cursor += 1; return; }
+        if (source[cursor] !== ",") throw new TypeError();
+        cursor += 1;
+      }
+    }
+    for (const literal of ["true", "false", "null"]) {
+      if (source.startsWith(literal, cursor)) { cursor += literal.length; return; }
+    }
+    const number = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/u.exec(source.slice(cursor))?.[0];
+    if (number === undefined) throw new TypeError();
+    cursor += number.length;
+  };
+  parseValue();
+  if (cursor !== source.length) throw new TypeError();
+}
+
+function assertCanonicalParametersJson(value, path) {
+  if (utf8.encode(value).length > 4096) {
+    fail(path, "canonical JSON of at most 4096 UTF-8 bytes");
   }
-  if (summary.state === "queued" && BigInt(summary.queued_turn_count) === 0n) {
-    fail(`${path}.queued_turn_count`, "at least one queued turn for queued state");
+  try {
+    parseCanonicalJson(value);
+  } catch {
+    fail(path, "canonical JSON");
   }
-  const hasGoalBlock = Object.hasOwn(summary, "goal_block") && summary.goal_block !== null;
-  if ((summary.state === "blocked") !== hasGoalBlock) {
-    fail(`${path}.goal_block`, "present exactly for blocked state");
+}
+
+function assertDisplayFilename(value, path) {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    new TextEncoder().encode(value).length > 1024 ||
+    /\p{Cc}/u.test(value)
+  ) {
+    fail(path, "a nonempty, control-free filename of at most 1024 UTF-8 bytes");
   }
-  if (summary.title_summary === null && summary.title_truncated) {
-    fail(`${path}.title_truncated`, "false when title_summary is null");
+}
+
+function isMimeTokenCharacter(value) {
+  return /^[!#$%&'*+.^_`|~0-9A-Za-z-]$/u.test(value);
+}
+
+function consumeMimeToken(value, cursor) {
+  const start = cursor;
+  while (cursor < value.length && isMimeTokenCharacter(value[cursor])) cursor += 1;
+  return cursor === start ? -1 : cursor;
+}
+
+function isMimeValue(value) {
+  let cursor = 0;
+  cursor = consumeMimeToken(value, cursor);
+  if (cursor < 0 || value[cursor] !== "/") return false;
+  cursor += 1;
+  cursor = consumeMimeToken(value, cursor);
+  if (cursor < 0) return false;
+  if (cursor === value.length) return true;
+  if (value[cursor] !== ";") return false;
+  cursor += 1;
+  while (cursor < value.length) {
+    while (value[cursor] === " ") cursor += 1;
+    if (cursor === value.length) return true;
+    cursor = consumeMimeToken(value, cursor);
+    if (cursor < 0 || value[cursor] !== "=") return false;
+    cursor += 1;
+    if (value[cursor] === '"') {
+      cursor += 1;
+      const start = cursor;
+      while (cursor < value.length && value[cursor] !== '"') {
+        const unit = value.charCodeAt(cursor);
+        if (unit <= 31 || unit === 127) return false;
+        cursor += 1;
+      }
+      if (cursor === start || value[cursor] !== '"') return false;
+      cursor += 1;
+      while (value[cursor] === " ") cursor += 1;
+    } else {
+      cursor = consumeMimeToken(value, cursor);
+      if (cursor < 0) return false;
+    }
+    if (cursor === value.length) return true;
+    if (value[cursor] !== ";") return false;
+    cursor += 1;
+  }
+  return true;
+}
+
+function assertMediaType(value, path) {
+  if (
+    typeof value !== "string" ||
+    utf8.encode(value).length > 255 ||
+    !isMimeValue(value)
+  ) {
+    fail(path, "a MIME value of at most 255 UTF-8 bytes");
+  }
+}
+
+function assertBlobDigest(value, path) {
+  if (!/^sha256:[0-9a-f]{64}$/.test(value)) {
+    fail(path, "a tagged lowercase SHA-256 digest");
+  }
+}
+
+function assertUuid(value, path) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)) {
+    fail(path, "a canonical lowercase UUID");
+  }
+}
+
+function assertSameOriginBlobUrl(value, path) {
+  const base = "http://signalbox.invalid";
+  if (typeof value !== "string" || !value.startsWith("/") || value.startsWith("//")) {
+    fail(path, "a root-relative blob API path");
+  }
+  const parsed = new URL(value, base);
+  if (parsed.origin !== base || !parsed.pathname.startsWith("/api/blobs/") || parsed.hash !== "") {
+    fail(path, "a same-origin blob API path");
+  }
+  const route = /^\/api\/blobs\/(sha256:[0-9a-f]{64})\/(download|content\/(?:image-png|image-jpeg|image-gif|image-webp))$/u.exec(parsed.pathname);
+  if (route === null) {
+    fail(path, "a canonical blob API route");
+  }
+  let mediaType;
+  if (route[2] === "download") {
+    const mediaTypes = parsed.searchParams.getAll("media_type");
+    const filenames = parsed.searchParams.getAll("display_filename");
+    const known = [...parsed.searchParams.keys()].every((key) => key === "media_type" || key === "display_filename");
+    if (mediaTypes.length !== 1 || mediaTypes[0] === "" || filenames.length > 1 || !known) {
+      fail(path, "a download route with required media type metadata");
+    }
+    assertMediaType(mediaTypes[0], `${path} media_type`);
+    mediaType = mediaTypes[0];
+    if (filenames.length === 1) {
+      assertDisplayFilename(filenames[0], `${path} display_filename`);
+    }
+  } else if (parsed.search !== "") {
+    fail(path, "a content route without query metadata");
+  } else {
+    mediaType = {
+      "content/image-png": "image/png",
+      "content/image-jpeg": "image/jpeg",
+      "content/image-gif": "image/gif",
+      "content/image-webp": "image/webp",
+    }[route[2]];
+  }
+  return {
+    digest: route[1],
+    kind: route[2],
+    mediaType,
+    displayFilename: route[2] === "download"
+      ? parsed.searchParams.get("display_filename") ?? undefined
+      : undefined,
+  };
+}
+
+function u64Bytes(value) {
+  const output = new Uint8Array(8);
+  let remaining = BigInt(value);
+  for (let index = 7; index >= 0; index -= 1) { output[index] = Number(remaining & 255n); remaining >>= 8n; }
+  return output;
+}
+
+function digestBytes(value) {
+  return Uint8Array.from(value.slice(7).match(/../gu), (pair) => Number.parseInt(pair, 16));
+}
+
+function sha256(bytes) {
+  const constants = new Uint32Array([0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]);
+  const paddedLength = Math.ceil((bytes.length + 9) / 64) * 64;
+  const padded = new Uint8Array(paddedLength); padded.set(bytes); padded[bytes.length] = 0x80;
+  let bits = BigInt(bytes.length) * 8n;
+  for (let index = paddedLength - 1; index >= paddedLength - 8; index -= 1) { padded[index] = Number(bits & 255n); bits >>= 8n; }
+  const state = new Uint32Array([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
+  const words = new Uint32Array(64);
+  const rotate = (value, count) => (value >>> count) | (value << (32 - count));
+  for (let block = 0; block < paddedLength; block += 64) {
+    for (let index = 0; index < 16; index += 1) { const offset = block + index * 4; words[index] = (padded[offset] << 24) | (padded[offset + 1] << 16) | (padded[offset + 2] << 8) | padded[offset + 3]; }
+    for (let index = 16; index < 64; index += 1) { const x=words[index-15], y=words[index-2]; words[index]=(words[index-16]+(rotate(x,7)^rotate(x,18)^(x>>>3))+words[index-7]+(rotate(y,17)^rotate(y,19)^(y>>>10)))>>>0; }
+    let [a,b,c,d,e,f,g,h]=state;
+    for (let index=0; index<64; index+=1) { const sum1=(h+(rotate(e,6)^rotate(e,11)^rotate(e,25))+((e&f)^(~e&g))+constants[index]+words[index])>>>0; const sum0=(rotate(a,2)^rotate(a,13)^rotate(a,22))>>>0; const majority=((a&b)^(a&c)^(b&c))>>>0; h=g;g=f;f=e;e=(d+sum1)>>>0;d=c;c=b;b=a;a=(sum1+sum0+majority)>>>0; }
+    for (const [index,value] of [a,b,c,d,e,f,g,h].entries()) state[index]=(state[index]+value)>>>0;
+  }
+  return [...state].map((word) => word.toString(16).padStart(8, "0")).join("");
+}
+
+function deterministicCacheKey(derivation) {
+  const name=utf8.encode(derivation.transformation_name), parameters=utf8.encode(derivation.parameters_json);
+  const version=new Uint8Array(4); new DataView(version.buffer).setUint32(0, derivation.transformation_version);
+  const pieces=[utf8.encode("signalbox.blob-derivation.v1\0"),u64Bytes(derivation.input_digests.length)];
+  derivation.input_digests.forEach((digest)=>pieces.push(digestBytes(digest)));
+  pieces.push(u64Bytes(name.length),name,version,u64Bytes(parameters.length),parameters,digestBytes(derivation.producer.implementation_digest));
+  const framed=new Uint8Array(pieces.reduce((total,piece)=>total+piece.length,0)); let offset=0;
+  pieces.forEach((piece)=>{ framed.set(piece,offset); offset+=piece.length; });
+  return `sha256:${sha256(framed)}`;
+}
+
+export function decodeWebBlobDescriptor(value) {
+  assertSchema(schemas.WebBlobDescriptor, schemas.WebBlobDescriptor, value, "blob_descriptor");
+  assertBlobDigest(value.digest, "blob_descriptor.digest");
+  assertCanonicalU64(value.byte_length, "blob_descriptor.byte_length");
+  assertMediaType(value.declared_media_type, "blob_descriptor.declared_media_type");
+  value.display_filename.forEach((filename, index) =>
+    assertDisplayFilename(filename, `blob_descriptor.display_filename[${index}]`));
+  value.available_views.forEach((view, index) => {
+    assertMediaType(view.media_type, `blob_descriptor.available_views[${index}].media_type`);
+    assertCanonicalU64(view.byte_length, `blob_descriptor.available_views[${index}].byte_length`);
+    const contentPath = `blob_descriptor.available_views[${index}].content_url`;
+    const contentRoute = assertSameOriginBlobUrl(view.content_url, contentPath);
+    const contentDigest = contentRoute.digest;
+    if (view.media_type !== contentRoute.mediaType) {
+      fail(`blob_descriptor.available_views[${index}].media_type`, "the content route media type");
+    }
+    if (view.kind === "download" || view.kind === "browser_native") {
+      if (view.derivations.length !== 0) {
+        fail(`blob_descriptor.available_views[${index}].derivations`, "empty for an original representation");
+      }
+      if (contentDigest !== value.digest) {
+        fail(contentPath, "a route for the descriptor digest");
+      }
+      if ((view.kind === "download") !== (contentRoute.kind === "download")) {
+        fail(contentPath, "a route matching the advertised view kind");
+      }
+      if (view.byte_length !== value.byte_length) {
+        fail(`blob_descriptor.available_views[${index}].byte_length`, "the descriptor byte length for an original representation");
+      }
+      if (view.kind === "download" && view.media_type !== value.declared_media_type) {
+        fail(`blob_descriptor.available_views[${index}].media_type`, "the descriptor declared media type for the download representation");
+      }
+      if (
+        view.kind === "download" &&
+        contentRoute.displayFilename !== value.display_filename[0]
+      ) {
+        fail(contentPath, "download filename metadata matching the descriptor");
+      }
+      if (
+        view.kind === "browser_native" &&
+        value.declared_media_type.split(";", 1)[0].trim().toLowerCase() !== contentRoute.mediaType
+      ) {
+        fail(contentPath, "an original-image route matching the descriptor declared media type");
+      }
+    } else {
+      if (contentRoute.kind !== "content/image-png") {
+        fail(contentPath, "an image-content route for a derivative view");
+      }
+      if (!view.derivations.some((derivation) =>
+        derivation.input_digests.includes(value.digest) &&
+        derivation.output_digests.includes(contentDigest))) {
+        fail(contentPath, "a route for a derivation output bound to the descriptor input");
+      }
+    }
+    view.derivations.forEach((derivation, derivationIndex) => {
+      const path = `blob_descriptor.available_views[${index}].derivations[${derivationIndex}]`;
+      assertCanonicalParametersJson(derivation.parameters_json, `${path}.parameters_json`);
+      assertUuid(derivation.derivation_id, `${path}.derivation_id`);
+      derivation.input_digests.forEach((digest, digestIndex) =>
+        assertBlobDigest(digest, `${path}.input_digests[${digestIndex}]`));
+      derivation.output_digests.forEach((digest, digestIndex) =>
+        assertBlobDigest(digest, `${path}.output_digests[${digestIndex}]`));
+      if (derivation.producer.class === "deterministic") {
+        assertBlobDigest(derivation.producer.implementation_digest, `${path}.producer.implementation_digest`);
+        assertBlobDigest(derivation.producer.cache_key, `${path}.producer.cache_key`);
+        if (deterministicCacheKey(derivation) !== derivation.producer.cache_key) {
+          fail(`${path}.producer.cache_key`, "the deterministic key for the advertised provenance");
+        }
+      } else if (derivation.producer.class === "executed") {
+        assertUuid(derivation.producer.execution_id, `${path}.producer.execution_id`);
+        assertBlobDigest(derivation.producer.implementation_digest, `${path}.producer.implementation_digest`);
+      } else {
+        assertUuid(derivation.producer.model_call_id, `${path}.producer.model_call_id`);
+      }
+    });
+    if (view.kind === "thumbnail" || view.kind === "preview") {
+      const derivation = view.derivations[0];
+      const expectedName = view.kind === "thumbnail" ? "image.thumbnail" : "image.preview";
+      const expectedParameters = view.kind === "thumbnail"
+        ? '{"edge_px":256,"format":"image/png"}'
+        : '{"edge_px":1600,"format":"image/png"}';
+      if (
+        derivation === undefined ||
+        derivation.transformation_name !== expectedName ||
+        derivation.transformation_version !== 1 ||
+        derivation.parameters_json !== expectedParameters ||
+        derivation.producer.class !== "deterministic"
+      ) {
+        fail(
+          `blob_descriptor.available_views[${index}].derivations`,
+          "the exact deterministic image transformation for the advertised view kind",
+        );
+      }
+    }
+  });
+  const downloadViews = value.available_views.filter((view) => view.kind === "download");
+  if (downloadViews.length !== 1) {
+    fail("blob_descriptor.available_views", "exactly one download view");
+  }
+  const representationKinds = value.available_views.map((view) => view.kind);
+  if (new Set(representationKinds).size !== representationKinds.length) {
+    fail("blob_descriptor.available_views", "at most one view of each representation kind");
+  }
+  return value;
+}
+
+export function decodeWebAttentionSnapshot(value) {
+  assertSchema(schemas.WebAttentionSnapshot, schemas.WebAttentionSnapshot, value, "attention_snapshot");
+  assertAttentionSnapshot(value, "attention_snapshot");
+  return value;
+}
+
+export function decodeWebAttentionStreamEvent(value) {
+  assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
+  if (value.kind === "snapshot") {
+    assertAttentionSnapshot(value.snapshot, "attention_event.snapshot");
+  } else if (value.kind === "update") {
+    assertAttentionSummaries(value.summaries, "attention_event.summaries");
+  }
+  return value;
+}
+
+export function decodeWebSessionCatalogSnapshot(value) {
+  assertSchema(
+    schemas.WebSessionCatalogSnapshot,
+    schemas.WebSessionCatalogSnapshot,
+    value,
+    "session_catalog_snapshot",
+  );
+  assertSessionCatalogSnapshot(value, "session_catalog_snapshot");
+  return value;
+}
+
+function validSearchSourceCorrelation(result) {
+  switch (result.source.kind) {
+    case "session":
+      return result.source.session_id === result.session_id && result.content_class === "session_metadata";
+    case "accepted_input":
+    case "steering_input":
+      return result.content_class === "user_transcript";
+    case "turn_transcript_entry":
+      return result.content_class === "assistant_transcript";
+    case "session_transcript_entry":
+      return result.content_class === "derived_text_artifact";
+    case "tool_request":
+      return result.content_class === "tool_arguments";
+    case "tool_attempt":
+      return result.content_class === "tool_result";
+    case "attachment":
+      return result.content_class === "attachment_filename" ||
+        result.content_class === "attachment_media_metadata";
+    case "derived_artifact":
+      return result.content_class === "derived_text_artifact";
+    default:
+      return false;
+  }
+}
+
+export function decodeWebSearchPage(value) {
+  assertSchema(schemas.WebSearchPage, schemas.WebSearchPage, value, "search_page");
+  if (value.continuation !== null) {
+    const lastResult = value.results.at(-1);
+    if (
+      lastResult === undefined ||
+      value.continuation.address.event_sequence !== lastResult.address.event_sequence ||
+      value.continuation.projection_id !== lastResult.projection_id
+    ) {
+      fail(
+        "search_page.continuation",
+        "a cursor anchored to the final search result",
+      );
+    }
+  }
+  const encoder = new TextEncoder();
+  let previousKey = null;
+  value.results.forEach((result, resultIndex) => {
+    const address = BigInt(result.address.event_sequence);
+    const projection = BigInt(result.projection_id);
+    if (
+      previousKey !== null &&
+      (address > previousKey.address ||
+        (address === previousKey.address && projection >= previousKey.projection))
+    ) {
+      fail(
+        `search_page.results[${resultIndex}]`,
+        "a strictly descending search result key",
+      );
+    }
+    previousKey = { address, projection };
+    if (!validSearchSourceCorrelation(result)) {
+      fail(
+        `search_page.results[${resultIndex}].source`,
+        "a source consistent with the result session and content class",
+      );
+    }
+    const bytes = encoder.encode(result.snippet);
+    if (bytes.length > 512) {
+      fail(
+        `search_page.results[${resultIndex}].snippet`,
+        `at most 512 UTF-8 bytes`,
+      );
+    }
+    let previousEnd = 0;
+    result.highlights.forEach((highlight, highlightIndex) => {
+      const rangePath = `search_page.results[${resultIndex}].highlights[${highlightIndex}]`;
+      if (
+        highlight.start_byte < previousEnd ||
+        highlight.start_byte >= highlight.end_byte ||
+        highlight.end_byte > bytes.length
+      ) {
+        fail(rangePath, "an ordered non-overlapping in-bounds UTF-8 byte range");
+      }
+      if (
+        (highlight.start_byte > 0 && (bytes[highlight.start_byte] & 0xc0) === 0x80) ||
+        (highlight.end_byte < bytes.length && (bytes[highlight.end_byte] & 0xc0) === 0x80)
+      ) {
+        fail(rangePath, "a range on UTF-8 boundaries");
+      }
+      previousEnd = highlight.end_byte;
+    });
+  });
+  return value;
+}
+
+export function decodeWebUsageSummary(value) {
+  assertSchema(schemas.WebUsageSummary, schemas.WebUsageSummary, value, "usage_summary");
+  const encoder = new TextEncoder();
+  const compatibilityKeys = new Set();
+  let totalCallCount = 0n;
+  value.groups.forEach((group, index) => {
+    const callCount = BigInt(group.call_count);
+    totalCallCount += callCount;
+    if (totalCallCount > 10000n) {
+      fail("usage_summary.groups", "at most 10000 represented calls");
+    }
+    assertUsageEvidence(
+      group.input_semantics,
+      group.tokens,
+      group.cost,
+      `usage_summary.groups[${index}]`,
+      group.input_semantics === "cache_inclusive" &&
+        callCount > 1n &&
+        group.tokens.input !== null &&
+        group.tokens.cache_creation_input !== null &&
+        group.tokens.cache_read_input !== null,
+    );
+    const compatibilityKey = JSON.stringify([
+      group.call_kind,
+      group.model_id,
+      group.profile_id,
+      group.provenance,
+      group.input_semantics,
+      group.coverage.input,
+      group.coverage.output,
+      group.coverage.cache_creation_input,
+      group.coverage.cache_read_input,
+    ]);
+    if (compatibilityKeys.has(compatibilityKey)) {
+      fail(`usage_summary.groups[${index}]`, "a unique compatibility key");
+    }
+    compatibilityKeys.add(compatibilityKey);
+    const profileBytes = encoder.encode(group.profile_id).length;
+    if (profileBytes === 0 || profileBytes > 256) {
+      fail(`usage_summary.groups[${index}].profile_id`, "1 through 256 UTF-8 bytes");
+    }
+    for (const axis of ["input", "output", "cache_creation_input", "cache_read_input"]) {
+      if (group.coverage[axis] !== (group.tokens[axis] !== null)) {
+        fail(`usage_summary.groups[${index}].coverage.${axis}`, "consistent with token evidence");
+      }
+      if (
+        group.tokens[axis] !== null &&
+        BigInt(group.tokens[axis]) > callCount * 18446744073709551615n
+      ) {
+        fail(`usage_summary.groups[${index}].tokens.${axis}`, "bounded by call_count times u64::MAX");
+      }
+    }
+  });
+  return value;
+}
+
+export function decodeWebUsageCallPage(value, order) {
+  assertSchema(schemas.WebUsageCallPage, schemas.WebUsageCallPage, value, "usage_call_page");
+  if (order !== "newest") {
+    fail("usage_call_page.order", "newest");
+  }
+  const encoder = new TextEncoder();
+  let previousKey = null;
+  const callIds = new Set();
+  value.calls.forEach((call, index) => {
+    assertUsageEvidence(
+      call.input_semantics,
+      call.tokens,
+      call.cost,
+      `usage_call_page.calls[${index}]`,
+      false,
+    );
+    const profileBytes = encoder.encode(call.profile_id).length;
+    if (profileBytes === 0 || profileBytes > 256) {
+      fail(`usage_call_page.calls[${index}].profile_id`, "1 through 256 UTF-8 bytes");
+    }
+    const isCompaction = call.call_kind === "context_compaction";
+    if (!Object.hasOwn(call, "turn_id") || isCompaction !== (call.turn_id === null)) {
+      fail(
+        `usage_call_page.calls[${index}].turn_id`,
+        "null exactly for context compaction calls",
+      );
+    }
+    const key = { recordedAt: BigInt(call.recorded_at_micros), callId: call.call_id };
+    if (callIds.has(call.call_id)) {
+      fail(`usage_call_page.calls[${index}].call_id`, "unique within the page");
+    }
+    callIds.add(call.call_id);
+    if (previousKey !== null) {
+      const comparison = key.recordedAt === previousKey.recordedAt
+        ? key.callId < previousKey.callId ? -1 : key.callId > previousKey.callId ? 1 : 0
+        : key.recordedAt < previousKey.recordedAt ? -1 : 1;
+      if (comparison >= 0) {
+        fail(
+          `usage_call_page.calls[${index}]`,
+          "strictly descending by call key",
+        );
+      }
+    }
+    previousKey = key;
+  });
+  if (value.continuation != null) {
+    const lastCall = value.calls.at(-1);
+    if (
+      lastCall === undefined ||
+      value.continuation.recorded_at_micros !== lastCall.recorded_at_micros ||
+      value.continuation.call_id !== lastCall.call_id
+    ) {
+      fail("usage_call_page.continuation", "a cursor anchored to the final usage call");
+    }
+  }
+  return value;
+}
+
+function assertUsageEvidence(inputSemantics, tokens, cost, path, allowHiddenInvalidBreakdown) {
+  if (cost.status === "derived") {
+    const rateVersionBytes = new TextEncoder().encode(cost.rate_version).length;
+    if (rateVersionBytes === 0 || rateVersionBytes > 128) {
+      fail(`${path}.cost.rate_version`, "1 through 128 UTF-8 bytes");
+    }
+  }
+  const hasTokenEvidence = Object.values(tokens).some((value) => value !== null);
+  const incompleteCacheAxes =
+    inputSemantics === "cache_inclusive" &&
+    tokens.input !== null &&
+    tokens.output === null &&
+    tokens.cache_creation_input === null &&
+    tokens.cache_read_input === null;
+  const invalidCacheBreakdown =
+    inputSemantics === "cache_inclusive" &&
+    tokens.input !== null &&
+    tokens.cache_creation_input !== null &&
+    tokens.cache_read_input !== null &&
+    BigInt(tokens.input) <
+      BigInt(tokens.cache_creation_input) + BigInt(tokens.cache_read_input);
+  const requiredReason = !hasTokenEvidence
+    ? "no_token_evidence"
+    : inputSemantics === "unknown"
+      ? "unknown_input_semantics"
+      : incompleteCacheAxes
+        ? "incomplete_cache_axes"
+        : invalidCacheBreakdown
+          ? "invalid_cache_breakdown"
+          : null;
+  if (requiredReason !== null) {
+    if (cost.status !== "unavailable" || cost.reason !== requiredReason) {
+      fail(`${path}.cost`, `unavailable with reason ${requiredReason}`);
+    }
+    return;
   }
   if (
-    summary.title_truncated &&
-    summary.title_summary !== null &&
-    scalarLength(summary.title_summary) !== 128
+    cost.status === "unavailable" &&
+    (cost.reason === "no_token_evidence" ||
+      cost.reason === "unknown_input_semantics" ||
+      cost.reason === "incomplete_cache_axes" ||
+      (cost.reason === "invalid_cache_breakdown" && !allowHiddenInvalidBreakdown))
   ) {
-    fail(
-      `${path}.title_summary`,
-      "exactly 128 Unicode scalar values when title_truncated is true",
-    );
+    fail(`${path}.cost.reason`, "consistent with token evidence and input semantics");
   }
+}
+export function decodeWebContractBootstrap(value) {
+  assertSchema(schemas.WebContractBootstrap, schemas.WebContractBootstrap, value, "webcontractbootstrap");
+  if (value.contract.name !== "signalbox.web-http" || value.contract.version !== "2" ||
+      value.capabilities.bounded_json !== true ||
+      value.capabilities.same_origin_json_mutations !== true ||
+      value.capabilities.ndjson_streaming !== true ||
+      value.capabilities.import_discovery !== true ||
+      value.capabilities.imported_continuations !== true ||
+      value.limits.max_json_body_bytes !== 65536 ||
+      value.limits.max_ndjson_item_bytes !== 65536) {
+    throw new TypeError("bootstrap carries an incompatible web contract");
+  }
+  return value;
+}
+
+export function decodeWebContractExample(value) {
+  assertSchema(schemas.WebContractExample, schemas.WebContractExample, value, "webcontractexample");
+  return value;
+}
+
+export function decodeWebApiErrorResponse(value) {
+  assertSchema(schemas.WebApiErrorResponse, schemas.WebApiErrorResponse, value, "webapierrorresponse");
+  return value;
+}
+
+export function decodeWebSessionTimelineDescriptor(value) {
+  assertSchema(schemas.WebSessionTimelineDescriptor, schemas.WebSessionTimelineDescriptor, value, "websessiontimelinedescriptor");
+  return value;
+}
+
+export function decodeWebSessionTimelineWindow(value) {
+  assertSchema(schemas.WebSessionTimelineWindow, schemas.WebSessionTimelineWindow, value, "websessiontimelinewindow");
+  return value;
+}
+
+export function decodeWebImportListRequest(value) {
+  assertSchema(schemas.WebImportListRequest, schemas.WebImportListRequest, value, "webimportlistrequest");
+  return value;
+}
+
+export function decodeWebImportListPage(value) {
+  assertSchema(schemas.WebImportListPage, schemas.WebImportListPage, value, "webimportlistpage");
+  return value;
+}
+
+export function decodeWebImportDescriptor(value) {
+  assertSchema(schemas.WebImportDescriptor, schemas.WebImportDescriptor, value, "webimportdescriptor");
+  return value;
+}
+
+export function decodeWebImportEntryWindowRequest(value) {
+  assertSchema(schemas.WebImportEntryWindowRequest, schemas.WebImportEntryWindowRequest, value, "webimportentrywindowrequest");
+  return value;
+}
+
+export function decodeWebImportEntryWindow(value) {
+  assertSchema(schemas.WebImportEntryWindow, schemas.WebImportEntryWindow, value, "webimportentrywindow");
+  return value;
+}
+
+export function decodeWebImportContinuationRequest(value) {
+  assertSchema(schemas.WebImportContinuationRequest, schemas.WebImportContinuationRequest, value, "webimportcontinuationrequest");
+  return value;
+}
+
+export function decodeWebImportContinuationResponse(value) {
+  assertSchema(schemas.WebImportContinuationResponse, schemas.WebImportContinuationResponse, value, "webimportcontinuationresponse");
+  return value;
+}
+
+export function decodeWebRepoWatchRepositoryStatusPage(value) {
+  assertSchema(schemas.WebRepoWatchRepositoryStatusPage, schemas.WebRepoWatchRepositoryStatusPage, value, "webrepowatchrepositorystatuspage");
+  return value;
+}
+
+export function decodeWebRepoWatchPullRequestPage(value) {
+  assertSchema(schemas.WebRepoWatchPullRequestPage, schemas.WebRepoWatchPullRequestPage, value, "webrepowatchpullrequestpage");
+  return value;
+}
+
+export function decodeWebRepoWatchWorkPage(value) {
+  assertSchema(schemas.WebRepoWatchWorkPage, schemas.WebRepoWatchWorkPage, value, "webrepowatchworkpage");
+  return value;
+}
+
+export function decodeWebRepoWatchPullRequestSessionPage(value) {
+  assertSchema(schemas.WebRepoWatchPullRequestSessionPage, schemas.WebRepoWatchPullRequestSessionPage, value, "webrepowatchpullrequestsessionpage");
+  return value;
+}
+
+export function decodeWebRepoWatchActivityPage(value) {
+  assertSchema(schemas.WebRepoWatchActivityPage, schemas.WebRepoWatchActivityPage, value, "webrepowatchactivitypage");
+  return value;
 }

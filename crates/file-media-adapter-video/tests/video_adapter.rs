@@ -1,0 +1,1290 @@
+mod fixtures;
+
+use std::error::Error;
+
+use fixtures::{MemorySource, VideoFixture};
+use signalbox_file_media_adapter_video::{VideoProvider, declaration};
+use signalbox_file_media_runtime::{
+    CancellationSignal, FileInspection, FileInspectionStatus, FileMediaCeilings, FileMediaFailure,
+    FileMediaProcessor, FileMediaProcessorFuture, FileMediaProvider, FileMediaProviderReadRequest,
+    FileMediaProviderValidationRequest, FileMediaRegistry, FileReadInput, FileReadRequest,
+    FileReadResult, InspectionRequest, NeverCancelled, ProcessorBoundaryFailure, ProcessorFailure,
+    ProcessorIsolation, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
+    ReadContinuation, ReadViewName, ReaderIdentity, VerifiedBlobSource,
+};
+
+struct DirectProcessor {
+    provider: VideoProvider,
+}
+
+impl DirectProcessor {
+    const fn new() -> Self {
+        Self {
+            provider: VideoProvider::new(),
+        }
+    }
+}
+
+impl FileMediaProcessor for DirectProcessor {
+    fn probe<'a>(
+        &'a self,
+        reader: &'a ReaderIdentity,
+        source: &'a dyn VerifiedBlobSource,
+        cancellation: &'a dyn CancellationSignal,
+    ) -> FileMediaProcessorFuture<'a, ProcessorProbeOutput> {
+        Box::pin(async move {
+            self.provider
+                .probe(reader, source, cancellation)
+                .await
+                .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
+        })
+    }
+
+    fn validate<'a>(
+        &'a self,
+        reader: &'a ReaderIdentity,
+        request: FileMediaProviderValidationRequest,
+        source: &'a dyn VerifiedBlobSource,
+        cancellation: &'a dyn CancellationSignal,
+    ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
+        Box::pin(async move {
+            self.provider
+                .inspect(reader, request, source, cancellation)
+                .await
+                .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
+        })
+    }
+
+    fn read<'a>(
+        &'a self,
+        reader: &'a ReaderIdentity,
+        request: FileMediaProviderReadRequest,
+        source: &'a dyn VerifiedBlobSource,
+        cancellation: &'a dyn CancellationSignal,
+    ) -> FileMediaProcessorFuture<'a, ProcessorReadOutput> {
+        Box::pin(async move {
+            self.provider
+                .read(reader, request, source, cancellation)
+                .await
+                .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
+        })
+    }
+}
+
+struct AdversarialOutputProcessor {
+    direct: DirectProcessor,
+}
+
+impl AdversarialOutputProcessor {
+    const fn new() -> Self {
+        Self {
+            direct: DirectProcessor::new(),
+        }
+    }
+}
+
+impl FileMediaProcessor for AdversarialOutputProcessor {
+    fn probe<'a>(
+        &'a self,
+        reader: &'a ReaderIdentity,
+        source: &'a dyn VerifiedBlobSource,
+        cancellation: &'a dyn CancellationSignal,
+    ) -> FileMediaProcessorFuture<'a, ProcessorProbeOutput> {
+        self.direct.probe(reader, source, cancellation)
+    }
+
+    fn validate<'a>(
+        &'a self,
+        reader: &'a ReaderIdentity,
+        request: FileMediaProviderValidationRequest,
+        source: &'a dyn VerifiedBlobSource,
+        cancellation: &'a dyn CancellationSignal,
+    ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
+        self.direct.validate(reader, request, source, cancellation)
+    }
+
+    fn read<'a>(
+        &'a self,
+        _reader: &'a ReaderIdentity,
+        _request: FileMediaProviderReadRequest,
+        _source: &'a dyn VerifiedBlobSource,
+        _cancellation: &'a dyn CancellationSignal,
+    ) -> FileMediaProcessorFuture<'a, ProcessorReadOutput> {
+        Box::pin(async {
+            Ok(ProcessorReadOutput::Text {
+                body: String::from("decoder\0injection"),
+                truncated: false,
+                cursor: None,
+            })
+        })
+    }
+}
+
+#[test]
+fn declaration_registers_mp4_and_webm_under_available_isolation() -> Result<(), Box<dyn Error>> {
+    let registry = registry()?;
+
+    assert_eq!(registry.providers(), &[declaration()?]);
+    let mp4_probe = registry.providers()[0].readers()[0].probe();
+    assert_eq!(mp4_probe.prefix_bytes(), 4 * 1024);
+    assert_eq!(mp4_probe.suffix_bytes(), 0);
+    assert_eq!(mp4_probe.range_count(), 4);
+    assert_eq!(mp4_probe.cumulative_bytes(), 256 * 1024);
+    let webm_probe = registry.providers()[0].readers()[1].probe();
+    assert_eq!(webm_probe.prefix_bytes(), 4 * 1024);
+    assert_eq!(webm_probe.suffix_bytes(), 0);
+    assert_eq!(webm_probe.range_count(), 4);
+    assert_eq!(webm_probe.cumulative_bytes(), 256 * 1024);
+    Ok(())
+}
+
+#[tokio::test]
+async fn generated_mp4_validates_and_reports_metadata() -> Result<(), Box<dyn Error>> {
+    let fixture = VideoFixture::ordinary_mp4();
+    let expected_duration = fixture.expected_duration_milliseconds();
+    let expected_tracks = fixture.expected_video_tracks();
+    let expected_container = fixture.expected_container();
+    let expected_container_brand = fixture.expected_container_brand();
+    let (inspection, body) = inspect_and_read_metadata(fixture).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    assert_eq!(body["duration_milliseconds"], expected_duration);
+    assert_eq!(body["video_tracks"], expected_tracks);
+    assert_eq!(body["container"], expected_container);
+    assert_eq!(body["container_brand"], expected_container_brand);
+    Ok(())
+}
+
+#[tokio::test]
+async fn generated_webm_validates_and_reports_metadata() -> Result<(), Box<dyn Error>> {
+    let fixture = VideoFixture::ordinary_webm();
+    let expected_duration = fixture.expected_duration_milliseconds();
+    let expected_tracks = fixture.expected_video_tracks();
+    let expected_container = fixture.expected_container();
+    let expected_container_brand = fixture.expected_container_brand();
+    let (inspection, body) = inspect_and_read_metadata(fixture).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    assert_eq!(body["duration_milliseconds"], expected_duration);
+    assert_eq!(body["video_tracks"], expected_tracks);
+    assert_eq!(body["container"], expected_container);
+    assert_eq!(body["container_brand"], expected_container_brand);
+    Ok(())
+}
+
+#[tokio::test]
+async fn truncated_mp4_is_a_typed_malformed_inspection() -> Result<(), Box<dyn Error>> {
+    assert_malformed(VideoFixture::truncated_mp4(), "malformed_video").await
+}
+
+#[tokio::test]
+async fn truncated_webm_is_a_typed_malformed_inspection() -> Result<(), Box<dyn Error>> {
+    assert_malformed(VideoFixture::truncated_webm(), "malformed_video").await
+}
+
+#[tokio::test]
+async fn encrypted_mp4_is_terminal_without_a_key_channel() -> Result<(), Box<dyn Error>> {
+    assert_locked(VideoFixture::encrypted_mp4()).await
+}
+
+#[tokio::test]
+async fn invalid_encrypted_mp4_sample_entry_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_invalid_encrypted_sample_entry(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn empty_mp4_protection_information_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_empty_protection_information(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn malformed_mp4_scheme_information_is_not_encryption_evidence() -> Result<(), Box<dyn Error>>
+{
+    assert_malformed(
+        VideoFixture::mp4_with_malformed_scheme_information(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn encrypted_webm_is_terminal_without_a_key_channel() -> Result<(), Box<dyn Error>> {
+    assert_locked(VideoFixture::encrypted_webm()).await
+}
+
+#[tokio::test]
+async fn encrypted_webm_missing_track_fields_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::encrypted_webm_missing_track_fields(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn nested_mp4_movie_is_rejected_as_a_recursive_container() -> Result<(), Box<dyn Error>> {
+    assert_malformed(VideoFixture::recursive_mp4(), "recursive_container").await
+}
+
+#[tokio::test]
+async fn nested_webm_segment_is_rejected_as_a_recursive_container() -> Result<(), Box<dyn Error>> {
+    assert_malformed(VideoFixture::recursive_webm(), "recursive_container").await
+}
+
+#[tokio::test]
+async fn truncated_nested_webm_segment_tail_is_recursive() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::partially_buffered_webm_with_nested_segment_tail(),
+        "recursive_container",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn excessive_mp4_box_count_is_a_typed_bounded_failure() -> Result<(), Box<dyn Error>> {
+    assert_malformed(VideoFixture::excessive_mp4_boxes(), "structure_limit").await
+}
+
+#[tokio::test]
+async fn excessive_webm_element_count_is_a_typed_bounded_failure() -> Result<(), Box<dyn Error>> {
+    assert_malformed(VideoFixture::excessive_webm_elements(), "structure_limit").await
+}
+
+#[tokio::test]
+async fn zero_mp4_timescale_is_rejected_before_duration_output() -> Result<(), Box<dyn Error>> {
+    assert_malformed(VideoFixture::zero_timescale_mp4(), "malformed_video").await
+}
+
+#[tokio::test]
+async fn nonfinite_webm_duration_is_rejected_before_output() -> Result<(), Box<dyn Error>> {
+    assert_malformed(VideoFixture::nonfinite_duration_webm(), "malformed_video").await
+}
+
+#[tokio::test]
+async fn unknown_bytes_remain_a_typed_unknown_inspection() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::unknown(b"not video".to_vec())?;
+    let inspection =
+        inspect_as(&DirectProcessor::new(), &source, "application/octet-stream").await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn declared_video_type_with_unrecognized_bytes_remains_unknown() -> Result<(), Box<dyn Error>>
+{
+    let source = MemorySource::unknown(b"not video".to_vec())?;
+    let inspection = inspect_as(&DirectProcessor::new(), &source, "video/mp4").await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn ordinary_large_mp4_validates_from_the_bounded_metadata_prefix()
+-> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::ordinary_large_mp4().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn partially_buffered_mp4_movie_validates_complete_prefix_metadata()
+-> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::large_mp4_with_partially_buffered_movie().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn partially_buffered_nested_mp4_movie_is_recursive() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::partially_buffered_movie_with_nested_movie_tail(),
+        "recursive_container",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn partial_mp4_header_at_metadata_cutoff_is_an_accepted_truncated_tail()
+-> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::large_mp4_with_partial_header_at_metadata_cutoff().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn partial_mp4_extended_header_at_metadata_cutoff_is_an_accepted_truncated_tail()
+-> Result<(), Box<dyn Error>> {
+    let source =
+        VideoFixture::large_mp4_with_partial_extended_header_at_metadata_cutoff().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn incomplete_mp4_header_at_actual_eof_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_incomplete_header_at_actual_eof(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn mp4_box_declared_past_actual_source_end_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::large_mp4_with_box_past_source_end(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn header_only_avc1_sample_entry_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(VideoFixture::header_only_avc1_mp4(), "malformed_video").await
+}
+
+#[tokio::test]
+async fn zero_width_mp4_visual_sample_entry_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_zero_width_sample_entry(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn unsupported_iso_bmff_brand_is_not_claimed_as_mp4() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::unsupported_brand_mp4().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn matroska_doctype_is_not_claimed_as_webm() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::matroska_ebml().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn encryption_like_bytes_inside_clear_mp4_payload_are_not_locked()
+-> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::clear_mp4_with_encryption_like_payload_bytes().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn truncated_mandatory_mp4_movie_header_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(VideoFixture::truncated_mvhd_mp4(), "malformed_video").await
+}
+
+#[tokio::test]
+async fn duplicate_webm_timestamp_scale_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::duplicate_timestamp_scale_webm(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn iso6_mp4_brand_validates() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::mp4_with_iso6_brand().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn space_padded_mp4_brand_validates() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::mp4_with_space_padded_brand().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn hevc_mp4_video_sample_entry_validates() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::hevc_mp4().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn hevc_reserved_configuration_fields_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::hevc_mp4_with_invalid_reserved_fields(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn excessive_hevc_nal_entries_are_a_typed_bounded_failure() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::hevc_mp4_with_excessive_nal_entries(),
+        "structure_limit",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn recognized_mp4_box_in_invalid_scope_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_misplaced_track_box(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn mp4v_missing_mandatory_esds_descriptors_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4v_with_missing_esds_descriptors(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn nonzero_stsd_full_box_flags_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_nonzero_stsd_flags(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn mp4_metadata_after_the_former_probe_prefix_is_nominated() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::mp4_with_metadata_after_probe_prefix().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn webm_metadata_after_the_former_probe_prefix_is_nominated() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::webm_with_metadata_after_probe_prefix().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn missing_webm_track_uid_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_missing_track_uid(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn duplicate_webm_track_uids_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_duplicate_track_uids(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn recognized_webm_element_in_invalid_scope_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_misplaced_track_entry(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn mp4_visual_sample_entry_validates() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::mp4_visual_sample_entry().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn av1_reserved_configuration_bits_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::av1_mp4_with_reserved_configuration_bits(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn avc_reserved_configuration_bits_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::avc_mp4_with_invalid_reserved_bits(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn truncated_hevc_configuration_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::hevc_mp4_with_truncated_configuration(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn truncated_avc_parameter_set_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::avc_mp4_with_truncated_parameter_set(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn high_profile_avc_extension_validates() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::high_profile_avc_mp4().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unknown_mp4_movie_duration_reports_unavailable_duration() -> Result<(), Box<dyn Error>> {
+    let fixture = VideoFixture::mp4_with_unknown_movie_duration();
+    let (inspection, body) = inspect_and_read_metadata(fixture).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    assert_eq!(body["duration_milliseconds"], serde_json::Value::Null);
+    Ok(())
+}
+
+#[tokio::test]
+async fn fragmented_unknown_movie_duration_uses_movie_extends_duration()
+-> Result<(), Box<dyn Error>> {
+    let fixture = VideoFixture::fragmented_mp4_with_unknown_movie_duration();
+    let expected_duration = fixture.expected_duration_milliseconds();
+    let (inspection, body) = inspect_and_read_metadata(fixture).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    assert_eq!(body["duration_milliseconds"], expected_duration);
+    Ok(())
+}
+
+#[tokio::test]
+async fn zero_mp4_media_timescale_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_zero_media_timescale(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn zero_sized_nested_mp4_box_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_zero_sized_nested_configuration(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn duplicate_mp4_handlers_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_media_with_duplicate_handlers(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn duplicate_mp4_track_ids_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_duplicate_track_ids(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn duplicate_mp4_sample_descriptions_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_duplicate_sample_descriptions(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn duplicate_mp4_sample_tables_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_duplicate_sample_tables(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn duplicate_mp4_media_information_boxes_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_duplicate_media_information(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn supported_brand_is_probed_from_a_partially_buffered_file_type_box()
+-> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::mp4_with_large_file_type_box().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unsupported_ebml_read_version_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_unsupported_ebml_read_version(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn unsupported_webm_doctype_read_version_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_unsupported_doctype_read_version(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn webm_video_track_with_audio_codec_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_video_track_with_audio_codec(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn webm_other_track_with_video_codec_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_other_track_with_video_codec(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn audio_only_mp4_is_not_claimed_as_video() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::audio_only_mp4().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn audio_only_webm_is_not_claimed_as_video() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::audio_only_webm().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn large_audio_only_mp4_is_not_claimed_as_video() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::large_audio_only_mp4().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn large_audio_only_webm_is_not_claimed_as_video() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::large_audio_only_webm().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn webm_with_large_header_is_probed_and_validated() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::webm_with_large_ebml_header().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn mp4_supported_brand_after_probe_prefix_is_probed_and_validated()
+-> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::mp4_with_supported_brand_after_probe_prefix().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn webm_doc_type_after_probe_prefix_is_probed_and_validated() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::webm_with_doc_type_after_probe_prefix().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn webm_without_tracks_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(VideoFixture::webm_without_tracks(), "malformed_video").await
+}
+
+#[tokio::test]
+async fn webm_track_without_mandatory_fields_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_track_missing_number_and_codec(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn webm_video_track_without_video_settings_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_video_track_without_video_settings(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn webm_webvtt_track_is_accepted_as_non_video() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::webm_with_webvtt_track().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn duplicate_webm_track_numbers_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_duplicate_track_numbers(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn durationless_webm_validates_with_unavailable_duration() -> Result<(), Box<dyn Error>> {
+    let fixture = VideoFixture::durationless_webm();
+    let (inspection, body) = inspect_and_read_metadata(fixture).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    assert_eq!(body["duration_milliseconds"], serde_json::Value::Null);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unknown_sized_final_webm_cluster_is_permitted() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::webm_with_unknown_sized_final_cluster().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn fragmented_mp4_uses_movie_extends_duration() -> Result<(), Box<dyn Error>> {
+    let fixture = VideoFixture::fragmented_mp4_with_movie_extends_duration();
+    let expected_duration = fixture.expected_duration_milliseconds();
+    let (inspection, body) = inspect_and_read_metadata(fixture).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    assert_eq!(body["duration_milliseconds"], expected_duration);
+    Ok(())
+}
+
+#[tokio::test]
+async fn fragmented_mp4_without_movie_extends_duration_reports_unavailable_duration()
+-> Result<(), Box<dyn Error>> {
+    let fixture = VideoFixture::fragmented_mp4_without_movie_extends_duration();
+    let (inspection, body) = inspect_and_read_metadata(fixture).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    assert_eq!(body["duration_milliseconds"], serde_json::Value::Null);
+    Ok(())
+}
+
+#[tokio::test]
+async fn fragmented_mp4_without_track_extends_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::fragmented_mp4_without_track_extends(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn zero_trex_sample_description_index_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::fragmented_mp4_with_zero_sample_description_index(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn out_of_range_trex_sample_description_index_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::fragmented_mp4_with_out_of_range_sample_description_index(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn nonzero_mvhd_full_box_flags_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_nonzero_movie_header_flags(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn nonzero_mehd_full_box_flags_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::fragmented_mp4_with_nonzero_movie_extends_header_flags(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn zero_sample_entry_data_reference_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_zero_sample_entry_data_reference(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn mp4_video_track_without_sample_description_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_video_track_without_sample_description(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn mp4_video_track_without_mandatory_headers_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_video_track_without_mandatory_headers(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn mp4_track_with_split_media_evidence_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_track_with_split_media_evidence(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn incomplete_additional_mp4_track_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_incomplete_additional_track(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn duplicate_webm_content_encodings_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_duplicate_content_encodings(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn mp4_handler_and_sample_entry_mismatch_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_handler_sample_entry_mismatch(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn partial_webm_header_at_metadata_cutoff_is_an_accepted_truncated_tail()
+-> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::large_webm_with_partial_header_at_metadata_cutoff().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn partial_webm_vint_at_actual_eof_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_partial_vint_at_actual_eof(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn partial_webm_child_cannot_extend_past_known_segment() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_child_extending_past_known_segment(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn declared_ebml_identifier_limit_is_enforced() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_declared_one_byte_id_limit(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn validation_read_honors_the_effective_source_byte_ceiling() -> Result<(), Box<dyn Error>> {
+    let maximum_source_bytes = 4096_u64;
+    let source = VideoFixture::ordinary_large_mp4()
+        .into_source()?
+        .with_maximum_read_length(maximum_source_bytes);
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.validation_source_bytes = maximum_source_bytes;
+    let request = InspectionRequest {
+        source: source.file_use()?,
+        visible_part: None,
+    };
+    let inspection = FileMediaRegistry::try_new(
+        vec![declaration()?],
+        ceilings,
+        ProcessorIsolation::Available,
+    )?
+    .inspect(&DirectProcessor::new(), request, &source, &NeverCancelled)
+    .await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn metadata_read_uses_the_same_source_window_as_validation() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::mp4_with_malformed_tail_after_validation_window().into_source()?;
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.validation_source_bytes = 4096;
+    let registry = FileMediaRegistry::try_new(
+        vec![declaration()?],
+        ceilings,
+        ProcessorIsolation::Available,
+    )?;
+    let request = FileReadRequest {
+        inspection: InspectionRequest {
+            source: source.file_use()?,
+            visible_part: None,
+        },
+        view: ReadViewName::try_new("metadata")?,
+        input: FileReadInput::Initial {
+            options: serde_json::json!({}),
+        },
+    };
+    let result = registry
+        .read(&DirectProcessor::new(), request, &source, &NeverCancelled)
+        .await?;
+
+    let body = complete_structure(result)?;
+    assert_eq!(body["container"], "mp4");
+    assert_eq!(body["video_tracks"], 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn probe_evidence_does_not_exceed_the_effective_validation_ceiling()
+-> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::mp4_with_metadata_after_probe_prefix().into_source()?;
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.validation_source_bytes = 4096;
+    let request = InspectionRequest {
+        source: source.file_use()?,
+        visible_part: None,
+    };
+    let inspection = FileMediaRegistry::try_new(
+        vec![declaration()?],
+        ceilings,
+        ProcessorIsolation::Available,
+    )?
+    .inspect(&DirectProcessor::new(), request, &source, &NeverCancelled)
+    .await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn declared_mp4_metadata_beyond_the_supported_window_remains_unknown()
+-> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::mp4_with_metadata_beyond_supported_window().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn duplicate_webm_tracks_elements_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_duplicate_tracks_elements(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn undefined_webm_track_type_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_undefined_track_type(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn reserved_ebml_element_identifier_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_reserved_element_id(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn all_zero_ebml_element_identifier_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_all_zero_element_id(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn invalid_webm_crc32_length_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_invalid_crc32_length(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn webm_duration_at_u64_boundary_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_duration_at_u64_boundary(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn hostile_view_arguments_are_typed_and_content_silent() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::ordinary_mp4().into_source()?;
+    let result = read(
+        &DirectProcessor::new(),
+        &source,
+        "metadata",
+        serde_json::json!({"frame": "../../host"}),
+    )
+    .await;
+
+    assert_eq!(result, Err(FileMediaFailure::InvalidViewArguments));
+    Ok(())
+}
+
+#[tokio::test]
+async fn adversarial_decoder_output_kind_is_rejected_by_registry_sanitization()
+-> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::ordinary_webm().into_source()?;
+    let result = read(
+        &AdversarialOutputProcessor::new(),
+        &source,
+        "metadata",
+        serde_json::json!({}),
+    )
+    .await;
+
+    assert_eq!(result, Err(FileMediaFailure::ProcessorFailed));
+    Ok(())
+}
+
+async fn inspect_and_read_metadata(
+    fixture: VideoFixture,
+) -> Result<(FileInspection, serde_json::Value), Box<dyn Error>> {
+    let source = fixture.into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+    let result = read(
+        &DirectProcessor::new(),
+        &source,
+        "metadata",
+        serde_json::json!({}),
+    )
+    .await?;
+    let body = complete_structure(result)?;
+    Ok((inspection, body))
+}
+
+async fn assert_locked(fixture: VideoFixture) -> Result<(), Box<dyn Error>> {
+    let source = fixture.into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::EncryptedOrLocked);
+    Ok(())
+}
+
+async fn assert_malformed(fixture: VideoFixture, reason: &str) -> Result<(), Box<dyn Error>> {
+    let source = fixture.into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Malformed);
+    assert_eq!(malformed_reason(&inspection)?, reason);
+    Ok(())
+}
+
+fn registry() -> Result<FileMediaRegistry, Box<dyn Error>> {
+    Ok(FileMediaRegistry::try_new(
+        vec![declaration()?],
+        FileMediaCeilings::version_one(),
+        ProcessorIsolation::Available,
+    )?)
+}
+
+async fn inspect(
+    processor: &dyn FileMediaProcessor,
+    source: &MemorySource,
+) -> Result<FileInspection, FileMediaFailure> {
+    let request = InspectionRequest {
+        source: source
+            .file_use()
+            .map_err(|_| FileMediaFailure::ProcessorFailed)?,
+        visible_part: None,
+    };
+    registry()
+        .map_err(|_| FileMediaFailure::ProcessorFailed)?
+        .inspect(processor, request, source, &NeverCancelled)
+        .await
+}
+
+async fn inspect_as(
+    processor: &dyn FileMediaProcessor,
+    source: &MemorySource,
+    declared_media_type: &str,
+) -> Result<FileInspection, FileMediaFailure> {
+    let request = InspectionRequest {
+        source: source
+            .file_use_as(declared_media_type)
+            .map_err(|_| FileMediaFailure::ProcessorFailed)?,
+        visible_part: None,
+    };
+    registry()
+        .map_err(|_| FileMediaFailure::ProcessorFailed)?
+        .inspect(processor, request, source, &NeverCancelled)
+        .await
+}
+
+async fn read(
+    processor: &dyn FileMediaProcessor,
+    source: &MemorySource,
+    view: &str,
+    options: serde_json::Value,
+) -> Result<FileReadResult, FileMediaFailure> {
+    let request = FileReadRequest {
+        inspection: InspectionRequest {
+            source: source
+                .file_use()
+                .map_err(|_| FileMediaFailure::ProcessorFailed)?,
+            visible_part: None,
+        },
+        view: ReadViewName::try_new(view).map_err(|_| FileMediaFailure::ProcessorFailed)?,
+        input: FileReadInput::Initial { options },
+    };
+    registry()
+        .map_err(|_| FileMediaFailure::ProcessorFailed)?
+        .read(processor, request, source, &NeverCancelled)
+        .await
+}
+
+fn malformed_reason(inspection: &FileInspection) -> Result<&str, Box<dyn Error>> {
+    match inspection {
+        FileInspection::Malformed { reason_code, .. } => Ok(reason_code.as_str()),
+        _ => Err("expected malformed video".into()),
+    }
+}
+
+fn complete_structure(result: FileReadResult) -> Result<serde_json::Value, Box<dyn Error>> {
+    match result {
+        FileReadResult::Structured {
+            body,
+            continuation: ReadContinuation::Complete,
+        } => Ok(body),
+        _ => Err("expected complete structured result".into()),
+    }
+}

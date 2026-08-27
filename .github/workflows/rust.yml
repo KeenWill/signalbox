@@ -191,6 +191,8 @@ jobs:
         run: python3 scripts/test_check_docs_consistency.py
       - name: Test the PostgreSQL suite manifest reader
         run: python3 scripts/test_postgres_integration_suites.py
+      - name: Test the convergence reconciler
+        run: python3 tooling/convergence-reconciler/test_reconcile.py
       - name: Test the built-executable resolver
         run: python3 tooling/test_resolve_cargo_bin.py
       - name: Test the lifecycle watchdog
@@ -229,7 +231,7 @@ jobs:
           inventory_hash="$(sha256sum \
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
-            7821f7cbfbb4dbfaee27a593c74d9ddec33606e232e0a15dfd731bdbd4b03b2a
+            f59b2179c097b9a2544f0d6d678e45945bc0659c4bdc00ee18520b95e7ebf391
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
               next if $ARGV =~ m{/lock_inventory[.]rs$};
@@ -381,6 +383,7 @@ jobs:
           sudo sh -c 'echo +pids +memory > /sys/fs/cgroup/signalbox-file-media-ci/cgroup.subtree_control'
           sudo chown -R "$USER" /sys/fs/cgroup/signalbox-file-media-ci
       - name: Cache Rust dependencies
+        id: rust-cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
@@ -391,6 +394,13 @@ jobs:
           cache-targets: false
           shared-key: rust
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # A prefix restore can retain a native build-script fingerprint after its
+      # static archive was omitted from the cache, making Cargo skip the script
+      # and then fail at link time. Keep registry downloads but rebuild target
+      # artifacts whenever the dependency key is not an exact match.
+      - name: Discard target artifacts from a prefix cache restore
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        run: cargo clean
       - name: Run tests
         env:
           SIGNALBOX_RUN_BWRAP_INTEGRATION: "1"
@@ -623,7 +633,7 @@ jobs:
           shared-key: rust
           save-if: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2.86.7
+        uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
         with:
           tool: cargo-nextest@0.9.143
       # One archive per suite, each built with exactly the package selection
@@ -710,7 +720,7 @@ jobs:
   # Persistence is sharded according to its measured test-execution cost; every
   # other suite runs whole because it fits well inside the job timeout.
   #
-  # The run matrix currently expands to eight shards after the one shared
+  # The run matrix currently expands to eleven shards after the one shared
   # build.
   # The shards compile nothing and run for minutes; the build's single cache
   # key replaces the old per-suite keys that evicted one another.
@@ -760,7 +770,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2.86.7
+        uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
         with:
           tool: cargo-nextest@0.9.143
       - name: Download the ${{ matrix.suite }} archive

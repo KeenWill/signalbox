@@ -16,19 +16,20 @@ use std::{
 
 use rust_decimal::Decimal;
 use signalbox_application::{
-    AuthorizeModelCallOutcome, AuthorizeModelCallTransaction, AvailabilitySuccessorOutcome,
-    ClassifyOperatorFailure, CommitModelCallObservationTransaction, CredentialPoolExhaustedOutcome,
-    FailPreparedModelCallTransaction, ModelCallAuthorizationReread, ModelCallCredentialReference,
-    ModelCallObservationCommitOutcome, ModelCallTerminalIdentityCandidates, OperatorFailureClass,
-    PrepareModelCallOutcome, PrepareModelCallTransaction, PrepareToolContinuationOutcome,
-    ResolvedToolConversationEntry, RetainedModelCallObservationStatus,
-    RetainedPreparedFailureStatus,
+    AttachmentPreparationFailure, AuthorizeModelCallOutcome, AuthorizeModelCallTransaction,
+    AvailabilitySuccessorOutcome, ClassifyOperatorFailure, CommitModelCallObservationTransaction,
+    CredentialPoolExhaustedOutcome, FailPreparedModelCallTransaction, ModelCallAuthorizationReread,
+    ModelCallCredentialReference, ModelCallObservationCommitOutcome,
+    ModelCallTerminalIdentityCandidates, OperatorFailureClass, PrepareModelCallOutcome,
+    PrepareModelCallTransaction, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
+    RetainedModelCallObservationStatus, RetainedPreparedFailureStatus,
 };
 use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, ActiveTurnPhase,
     ActiveTurnSchedulingReconstitutionInput, AmbiguousModelCallTurn, AssistantResponsePart,
-    AssistantText, AuthorizedModelCall, AvailabilitySuccessorModelCallTurn, CancelledModelCallTurn,
-    CancelledToolRoundModelCallTurn, CompletedModelCallTurn, ConsumedSteeringReconstitutionInput,
+    AssistantText, AttachmentBlobFact, AuthorizedModelCall, AvailabilitySuccessorModelCallTurn,
+    BlobDigest, CancelledModelCallTurn, CancelledToolRoundModelCallTurn, CompletedModelCallTurn,
+    ConsumedSteeringReconstitutionInput, ContextFrontierId, ContextHeadroomExhaustedModelCallTurn,
     CorrelatedModelCallTerminalObservation, CredentialPoolExhaustedModelCallTurn,
     DelegatedModelCallRecoveryReconstitutionInput, DelegatedTurnActivationInput,
     DelegatedWakeTurnActivationInput, DelegationContent, DelegationOutcome, DelegationOutcomeKind,
@@ -76,31 +77,161 @@ use crate::{
     },
 };
 
+/// Immutable usage boundary for one resolved continuation mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ToolContinuationUsageLimit {
+    target: ResolvedProviderTarget,
+    fast_mode: FastMode,
+    max_output_tokens: u64,
+    context_window_tokens: u64,
+}
+
+impl ToolContinuationUsageLimit {
+    /// Defines one deployment-owned continuation boundary.
+    pub const fn new(
+        target: ResolvedProviderTarget,
+        fast_mode: FastMode,
+        max_output_tokens: u64,
+        context_window_tokens: u64,
+    ) -> Self {
+        Self {
+            target,
+            fast_mode,
+            max_output_tokens,
+            context_window_tokens,
+        }
+    }
+
+    pub(crate) const fn max_output_tokens(self) -> u64 {
+        self.max_output_tokens
+    }
+
+    pub(crate) const fn context_window_tokens(self) -> u64 {
+        self.context_window_tokens
+    }
+}
+
+/// Exact continuation limits derived from immutable model configuration.
+pub type ToolContinuationUsageLimitCatalog =
+    HashMap<(ResolvedProviderTarget, FastMode), ToolContinuationUsageLimit>;
+
 /// Exact prospective first-call material derived from one activation preview.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProspectiveModelCall {
+    prepared: signalbox_domain::PreparedInitialModelCall,
     request: PreparedModelCallRequest,
     credential_reference: ModelCallCredentialReference,
     system_prompt: Option<signalbox_domain::SessionSystemPrompt>,
     tool_entries: Box<[ResolvedToolConversationEntry]>,
+    projected_members: Box<[SemanticTranscriptEntryRef]>,
+    uncommitted_content_bytes: u64,
+}
+
+/// The model-visible input whose unreported content one usage read scores.
+///
+/// Membership is the canonical projection the renderer sends, not physical
+/// frontier order: entries a compaction summarized away are no longer model
+/// visible and are not part of the next request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProspectiveModelInput<'a> {
+    /// One committed frontier, projected from its durable membership.
+    Committed(ContextFrontierId),
+    /// One uncommitted activation preview.
+    ///
+    /// A preview's starting frontier and the entries it mints exist only in
+    /// memory — its transaction is discarded before any caller can read them —
+    /// so the preview carries its own projected membership and the exact
+    /// content bytes of the entries no durable row can score.
+    Preview {
+        /// Model-visible members in projected order.
+        projected_members: &'a [SemanticTranscriptEntryRef],
+        /// UTF-8 content bytes of the members the preview minted.
+        uncommitted_content_bytes: u64,
+    },
+}
+
+impl From<ContextFrontierId> for ProspectiveModelInput<'_> {
+    fn from(frontier: ContextFrontierId) -> Self {
+        Self::Committed(frontier)
+    }
+}
+
+/// Latest terminal-call usage usable as a conservative next-call lower bound.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReportedModelCallUsage {
+    usage: ProviderReportedTokenUsage,
+    input_includes_cache_tokens: bool,
+    input_is_retained: bool,
+    output_is_retained: bool,
+    projected_unreported_content_bytes: u64,
+}
+
+impl ReportedModelCallUsage {
+    /// Returns the exact provider-reported fields retained for the call.
+    pub const fn usage(self) -> ProviderReportedTokenUsage {
+        self.usage
+    }
+
+    /// Whether the stored input field already includes the cache axes.
+    pub const fn input_includes_cache_tokens(self) -> bool {
+        self.input_includes_cache_tokens
+    }
+
+    /// Whether the reported input is still model-visible for the next call.
+    ///
+    /// An ordinary call's input is the transcript prefix its successor resends.
+    /// A dedicated compaction call's input is the source text its summary
+    /// replaced, so none of it survives into the next request; that call's
+    /// retained material is its summary output plus the content the compaction
+    /// did not summarize, which the projected-content allowance counts.
+    pub const fn input_is_retained(self) -> bool {
+        self.input_is_retained
+    }
+
+    /// Whether reported output became assistant transcript for the next call.
+    pub const fn output_is_retained(self) -> bool {
+        self.output_is_retained
+    }
+
+    /// Returns a conservative byte allowance for model-visible transcript
+    /// material appended after the reported call's input.
+    pub const fn projected_unreported_content_bytes(self) -> u64 {
+        self.projected_unreported_content_bytes
+    }
 }
 
 impl ProspectiveModelCall {
     /// Applies the canonical application frontier renderer with the supplied tool catalog.
     pub fn render(
-        self,
+        &self,
         tools: Box<[signalbox_application::ToolDefinition]>,
     ) -> Result<
         signalbox_application::PreparedModelOperation,
         signalbox_application::ModelFrontierRenderingError,
     > {
         signalbox_application::PreparedModelOperation::render(
-            self.request,
-            self.credential_reference,
-            self.system_prompt,
+            self.request.clone(),
+            self.credential_reference.clone(),
+            self.system_prompt.clone(),
             tools,
             &self.tool_entries,
         )
+    }
+
+    /// Names the model-visible input this preview would send.
+    ///
+    /// The preview's own starting frontier is never committed, so a usage read
+    /// scores this membership and content instead of a frontier identity that
+    /// resolves to no durable rows.
+    pub fn prospective_input(&self) -> ProspectiveModelInput<'_> {
+        ProspectiveModelInput::Preview {
+            projected_members: &self.projected_members,
+            uncommitted_content_bytes: self.uncommitted_content_bytes,
+        }
+    }
+
+    const fn prepared(&self) -> &signalbox_domain::PreparedInitialModelCall {
+        &self.prepared
     }
 }
 
@@ -458,7 +589,15 @@ pub struct PostgresModelCallRepository {
     credential_families: Option<crate::ModelCredentialFamilyCatalog>,
     credential_pools: CredentialPoolRuntimeCatalog,
     cache_inclusive_input_targets: HashSet<ResolvedProviderTarget>,
+    continuation_usage_limits: ToolContinuationUsageLimitCatalog,
 }
+
+/// Proof that one model-call transaction serialized before either shared lock class.
+pub(crate) struct ModelCallOutboxOrderGuard {
+    _private: (),
+}
+
+const MODEL_CALL_OUTBOX_ORDER_GUARD: &str = "model_call_outbox_order_guard:v1";
 
 impl PostgresModelCallRepository {
     /// Uses the shared pool, immutable target catalog, and current non-secret
@@ -475,6 +614,7 @@ impl PostgresModelCallRepository {
             credential_families: None,
             credential_pools: HashMap::new(),
             cache_inclusive_input_targets: HashSet::new(),
+            continuation_usage_limits: HashMap::new(),
         }
     }
 
@@ -502,9 +642,444 @@ impl PostgresModelCallRepository {
         self
     }
 
+    /// Pins configured usage headroom for same-turn tool continuations.
+    pub fn with_continuation_usage_limits(
+        mut self,
+        limits: impl IntoIterator<Item = ToolContinuationUsageLimit>,
+    ) -> Self {
+        self.continuation_usage_limits = limits
+            .into_iter()
+            .map(|limit| ((limit.target, limit.fast_mode), limit))
+            .collect();
+        self
+    }
+
     /// Borrows the shared pool for composition-owned adjacent transactions.
     pub const fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Reads the newest ordinary or dedicated-compaction call with reported input
+    /// usage for one exact target.
+    ///
+    /// A later failed call with no usage does not erase the last provider-confirmed
+    /// context size. Callers may use this only as a lower bound: later transcript
+    /// entries can make the next request larger, never smaller absent compaction.
+    ///
+    /// The prospective input names the model-visible entries the next request
+    /// would carry. Membership is compared against the reported call's own
+    /// frontier, so the allowance covers exactly the content appended after the
+    /// provider counted its input.
+    pub async fn latest_reported_usage<'a>(
+        &self,
+        session: SessionId,
+        target: ResolvedProviderTarget,
+        prospective: impl Into<ProspectiveModelInput<'a>>,
+    ) -> Result<Option<ReportedModelCallUsage>, ModelCallRepositoryError> {
+        let (projected_members, uncommitted_content_bytes) = match prospective.into() {
+            ProspectiveModelInput::Committed(frontier) => {
+                let mut connection = self.pool.acquire().await?;
+                let members = crate::context_compaction::projected_frontier_membership(
+                    &mut connection,
+                    session,
+                    frontier,
+                )
+                .await
+                .map_err(map_projected_membership_error)?;
+                (members, 0)
+            }
+            ProspectiveModelInput::Preview {
+                projected_members,
+                uncommitted_content_bytes,
+            } => (projected_members.to_vec(), uncommitted_content_bytes),
+        };
+        let member_sessions = projected_members
+            .iter()
+            .map(|member| session_id_to_uuid(member.source_session()))
+            .collect::<Vec<_>>();
+        let member_entries = projected_members
+            .iter()
+            .map(|member| member.entry().into_uuid())
+            .collect::<Vec<_>>();
+        // Calls no newer than the latest compaction cannot win the final call-ID
+        // ordering, so discard them before the exact summary-membership probe.
+        let row = sqlx::query(
+            "WITH latest_compaction AS MATERIALIZED (
+                SELECT compaction.source_frontier_id,
+                       compaction.summary_entry_id,
+                       call.model_call_id,
+                       call.resolved_provider_model_identity_id,
+                       call.state_kind,
+                       call.terminal_disposition_kind,
+                       COALESCE(call.usage_input_includes_cache_tokens, false) AS
+                           usage_input_includes_cache_tokens,
+                       call.input_tokens AS usage_input_tokens,
+                       call.output_tokens AS usage_output_tokens,
+                       call.cache_creation_input_tokens AS
+                           usage_cache_creation_input_tokens,
+                       call.cache_read_input_tokens AS usage_cache_read_input_tokens
+                  FROM context_compaction AS compaction
+                  JOIN context_compaction_model_call AS call
+                    ON call.session_id = compaction.session_id
+                   AND call.model_call_id = compaction.producing_call_id
+                 WHERE compaction.session_id = $1
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM context_compaction AS successor
+                        WHERE successor.session_id = compaction.session_id
+                          AND successor.predecessor_compaction_id =
+                              compaction.context_compaction_id
+                   )
+             ), ordinary_candidate AS (
+                SELECT 'ordinary'::text AS call_kind,
+                       model_call.model_call_id,
+                       model_call.context_frontier_id,
+                       model_call.usage_input_includes_cache_tokens,
+                       true AS input_is_retained,
+                       model_call.terminal_disposition_kind = 'completed' AS output_is_retained,
+                       model_call.usage_input_tokens,
+                       model_call.usage_output_tokens,
+                       model_call.usage_cache_creation_input_tokens,
+                       model_call.usage_cache_read_input_tokens,
+                       NULL::uuid AS reported_summary_entry_id,
+                       headroom.projected_result_content_bytes AS
+                           proven_unreported_content_bytes
+                  FROM model_call
+                  LEFT JOIN tool_continuation_context_headroom AS headroom
+                    ON headroom.session_id = model_call.session_id
+                   AND headroom.producing_model_call_id = model_call.model_call_id
+                 WHERE model_call.session_id = $1
+                   AND model_call.resolved_provider_model_identity_id = $2
+                   AND model_call.state_kind = 'terminal'
+                   AND model_call.usage_input_tokens IS NOT NULL
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM latest_compaction AS latest
+                        WHERE model_call.model_call_id <= latest.model_call_id
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM latest_compaction AS latest
+                        WHERE NOT EXISTS (
+                            SELECT 1
+                              FROM context_frontier_member AS member
+                             WHERE member.owning_session_id = model_call.session_id
+                               AND member.context_frontier_id =
+                                   model_call.context_frontier_id
+                               AND member.source_session_id = model_call.session_id
+                               AND member.semantic_entry_id = latest.summary_entry_id
+                        )
+                   )
+             ), compaction_candidate AS (
+                -- A dedicated compaction call's reported input is the source
+                -- text its summary replaced: the summary removed exactly that
+                -- material from model visibility, so none of it bounds the next
+                -- request. Its reported output is the retained summary, and the
+                -- content the compaction did not summarize stays in the
+                -- projected membership below.
+                SELECT 'context_compaction'::text AS call_kind,
+                       latest.model_call_id,
+                       latest.source_frontier_id AS context_frontier_id,
+                       latest.usage_input_includes_cache_tokens,
+                       false AS input_is_retained,
+                       true AS output_is_retained,
+                       latest.usage_input_tokens,
+                       latest.usage_output_tokens,
+                       latest.usage_cache_creation_input_tokens,
+                       latest.usage_cache_read_input_tokens,
+                       latest.summary_entry_id AS reported_summary_entry_id,
+                       NULL::numeric AS proven_unreported_content_bytes
+                  FROM latest_compaction AS latest
+                 WHERE latest.resolved_provider_model_identity_id = $2
+                   AND latest.state_kind = 'terminal'
+                   AND latest.terminal_disposition_kind = 'completed'
+                   AND latest.usage_input_tokens IS NOT NULL
+             ), latest_call AS (
+                SELECT *
+                  FROM (
+                      SELECT * FROM ordinary_candidate
+                      UNION ALL
+                      SELECT * FROM compaction_candidate
+                  ) AS candidate
+                 ORDER BY model_call_id DESC
+                 LIMIT 1
+             ), unreported_member AS MATERIALIZED (
+                -- An ordinary call's reported input is its own frontier, so
+                -- only projected members outside that membership are new. A
+                -- compaction call reports no retained input at all: every
+                -- projected member except its summary is content the next
+                -- request adds to that summary.
+                SELECT prospective.source_session_id, prospective.semantic_entry_id
+                  FROM UNNEST($3::uuid[], $4::uuid[])
+                       AS prospective(source_session_id, semantic_entry_id)
+                EXCEPT
+                SELECT reported.source_session_id, reported.semantic_entry_id
+                  FROM latest_call
+                  JOIN context_frontier_member AS reported
+                    ON reported.owning_session_id = $1
+                   AND reported.context_frontier_id =
+                       latest_call.context_frontier_id
+                 WHERE latest_call.call_kind = 'ordinary'
+             )
+             SELECT usage_input_includes_cache_tokens, input_is_retained,
+                    output_is_retained,
+                    usage_input_tokens, usage_output_tokens,
+                    usage_cache_creation_input_tokens,
+                    usage_cache_read_input_tokens,
+                    COALESCE(latest_call.proven_unreported_content_bytes, 0)
+                    -- Entries an uncommitted preview minted have no durable row
+                    -- to score; the preview measured their content itself.
+                    + $5::numeric
+                    + (
+                        SELECT COALESCE(SUM(
+                            CASE
+                                -- The durable proof already measured every
+                                -- result the producing call's round projected,
+                                -- including a returning foreground delegation's
+                                -- child result. Each correlates to that call
+                                -- through the request that produced it.
+                                WHEN latest_call.proven_unreported_content_bytes IS NOT NULL
+                                     AND (
+                                         (
+                                             entry.payload_kind IN (
+                                                 'tool_execution_result',
+                                                 'tool_denied'
+                                             )
+                                             AND result_request.producing_model_call_id =
+                                                 latest_call.model_call_id
+                                         )
+                                         OR (
+                                             entry.payload_kind = 'delegation_result'
+                                             AND awaiting_request.producing_model_call_id =
+                                                 latest_call.model_call_id
+                                         )
+                                     )
+                                THEN 0
+                                ELSE CASE entry.payload_kind
+                                    WHEN 'imported_entry' THEN
+                                        COALESCE(octet_length(imported.content_encoding), 0)
+                                    -- Accepted-input content is an ordered part
+                                    -- array, so its context cost is the sum of
+                                    -- the text parts; attachment parts carry
+                                    -- their own rendered-stub accounting.
+                                    WHEN 'origin_accepted_input' THEN
+                                        COALESCE((
+                                            SELECT SUM(COALESCE(
+                                                octet_length(part.text_value), 0
+                                            ))
+                                              FROM accepted_input_content_part AS part
+                                             WHERE part.accepted_input_id =
+                                                   input.accepted_input_id
+                                        ), 0)
+                                    WHEN 'steering_accepted_input' THEN
+                                        COALESCE((
+                                            SELECT SUM(COALESCE(
+                                                octet_length(part.text_value), 0
+                                            ))
+                                              FROM accepted_input_content_part AS part
+                                             WHERE part.accepted_input_id =
+                                                   input.accepted_input_id
+                                        ), 0)
+                                    WHEN 'context_summary' THEN
+                                        COALESCE(octet_length(entry.context_summary_value), 0)
+                                    WHEN 'assistant_text' THEN
+                                        COALESCE(octet_length(entry.assistant_text_value), 0)
+                                    WHEN 'assistant_tool_use' THEN
+                                        COALESCE(octet_length(request.tool_name), 0)
+                                        + COALESCE(octet_length(request.arguments_text), 0)
+                                    WHEN 'tool_execution_result' THEN
+                                        COALESCE(octet_length(attempt.result_text), 0)
+                                        + COALESCE(octet_length(attempt.error_detail), 0)
+                                    WHEN 'tool_denied' THEN
+                                        COALESCE(octet_length(decision.denial_reason), 0)
+                                    WHEN 'delegated_task' THEN
+                                        COALESCE(octet_length(task.task_content), 0)
+                                    WHEN 'delegation_message' THEN
+                                        COALESCE(octet_length(message.content_text), 0)
+                                    WHEN 'delegation_result' THEN
+                                        COALESCE(octet_length(child_result.content_text), 0)
+                                    ELSE 0
+                                END
+                            END
+                        ), 0)::numeric
+                          FROM unreported_member AS prospective
+                          JOIN semantic_transcript_entry AS entry
+                            ON entry.source_session_id = prospective.source_session_id
+                           AND entry.semantic_entry_id = prospective.semantic_entry_id
+                          LEFT JOIN accepted_input AS input
+                            ON input.accepted_input_id = entry.origin_accepted_input_id
+                           AND input.session_id = entry.source_session_id
+                          LEFT JOIN imported_transcript_entry AS imported
+                            ON imported.imported_conversation_id = entry.imported_conversation_id
+                           AND imported.imported_transcript_entry_id =
+                               entry.imported_transcript_entry_id
+                          LEFT JOIN tool_request AS request
+                            ON request.request_id = entry.assistant_tool_request_id
+                           AND request.session_id = entry.source_session_id
+                          LEFT JOIN tool_attempt AS attempt
+                            ON attempt.attempt_id = entry.tool_result_attempt_id
+                           AND attempt.session_id = entry.source_session_id
+                          LEFT JOIN tool_request AS result_request
+                            ON result_request.request_id = COALESCE(
+                                   attempt.request_id,
+                                   entry.tool_result_request_id
+                               )
+                           AND result_request.session_id = entry.source_session_id
+                          LEFT JOIN tool_request AS awaiting_request
+                            ON awaiting_request.request_id =
+                               entry.delegation_result_awaiting_tool_request_id
+                           AND awaiting_request.session_id = entry.source_session_id
+                          LEFT JOIN tool_approval_decision AS decision
+                            ON decision.request_id = entry.tool_result_request_id
+                          LEFT JOIN session_delegation_initial_task AS task
+                            ON task.child_session_id = entry.source_session_id
+                           AND task.semantic_entry_id = entry.semantic_entry_id
+                          LEFT JOIN session_message AS message
+                            ON message.message_id = entry.delegation_message_id
+                          LEFT JOIN session_child_result AS child_result
+                            ON child_result.spawning_tool_request_id =
+                               entry.delegation_result_spawning_tool_request_id
+                         WHERE NOT (
+                                   latest_call.usage_output_tokens IS NOT NULL
+                               AND (
+                                      (
+                                          latest_call.call_kind = 'ordinary'
+                                          AND entry.payload_kind IN (
+                                              'assistant_text',
+                                              'assistant_tool_use'
+                                          )
+                                          AND entry.producing_model_call_id =
+                                              latest_call.model_call_id
+                                      )
+                                      OR (
+                                          latest_call.call_kind = 'context_compaction'
+                                          AND entry.source_session_id = $1
+                                          AND entry.semantic_entry_id =
+                                              latest_call.reported_summary_entry_id
+                                      )
+                               )
+                           )
+                    ) AS projected_unreported_content_bytes
+               FROM latest_call",
+        )
+        .bind(session_id_to_uuid(session))
+        .bind(target.identity().into_uuid())
+        .bind(&member_sessions)
+        .bind(&member_entries)
+        .bind(Decimal::from(uncommitted_content_bytes))
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let decode = |field: &'static str| -> Result<Option<u64>, ModelCallRepositoryError> {
+            row.try_get::<Option<Decimal>, _>(field)?
+                .map(|value| {
+                    if !value.fract().is_zero() || value.is_sign_negative() {
+                        return Err(ModelCallCorruption::Inconsistent(
+                            "completed model-call token usage",
+                        )
+                        .into());
+                    }
+                    u64::try_from(value).map_err(|_| {
+                        ModelCallCorruption::Inconsistent("completed model-call token usage").into()
+                    })
+                })
+                .transpose()
+        };
+        Ok(Some(ReportedModelCallUsage {
+            usage: ProviderReportedTokenUsage::unreported()
+                .with_input_tokens(decode("usage_input_tokens")?)
+                .with_output_tokens(decode("usage_output_tokens")?)
+                .with_cache_creation_input_tokens(decode("usage_cache_creation_input_tokens")?)
+                .with_cache_read_input_tokens(decode("usage_cache_read_input_tokens")?),
+            input_includes_cache_tokens: row.try_get("usage_input_includes_cache_tokens")?,
+            input_is_retained: row.try_get("input_is_retained")?,
+            output_is_retained: row.try_get("output_is_retained")?,
+            projected_unreported_content_bytes: decode("projected_unreported_content_bytes")?
+                .ok_or(ModelCallCorruption::Missing(
+                    "projected unreported transcript content byte count",
+                ))?,
+        }))
+    }
+
+    /// Whether a preserved request-size failure still lacks later evidence that
+    /// the same target accepted a call after it or that compaction replaced it.
+    ///
+    /// The provider may reject an oversized call without reporting token usage.
+    /// A successor can use that typed terminal evidence to compact once, but a
+    /// later provider-accepted ordinary call or completed compaction on the
+    /// prospective lineage supersedes the failure so it cannot trigger forever.
+    /// The supplied frontier is the durable immediate prefix of an uncommitted
+    /// activation preview, so lineage checks never depend on a speculative ID.
+    pub async fn request_too_large_requires_compaction(
+        &self,
+        session: SessionId,
+        target: ResolvedProviderTarget,
+        persisted_prospective_prefix: ContextFrontierId,
+    ) -> Result<bool, ModelCallRepositoryError> {
+        let requires_compaction = sqlx::query_scalar(
+            "WITH latest_failure AS MATERIALIZED (
+                SELECT failed.model_call_id
+                  FROM model_call AS failed
+                 WHERE failed.session_id = $1
+                   AND failed.resolved_provider_model_identity_id = $2
+                   AND failed.state_kind = 'terminal'
+                   AND failed.terminal_provider_failure_cause =
+                       'request_too_large'
+                   AND context_frontier_preserves_prefix(
+                           $1,
+                           failed.context_frontier_id,
+                           $3
+                       )
+                 ORDER BY failed.model_call_id DESC
+                 LIMIT 1
+             )
+             SELECT EXISTS (
+                 SELECT 1
+                   FROM latest_failure AS failed
+                  WHERE NOT EXISTS (
+                      SELECT 1
+                        FROM model_call AS accepted
+                       WHERE accepted.session_id = $1
+                         AND accepted.resolved_provider_model_identity_id = $2
+                         AND accepted.model_call_id > failed.model_call_id
+                         AND accepted.state_kind = 'terminal'
+                         AND (
+                                accepted.terminal_disposition_kind = 'completed'
+                             OR accepted.usage_input_tokens IS NOT NULL
+                         )
+                         AND context_frontier_preserves_prefix(
+                                 $1,
+                                 accepted.context_frontier_id,
+                                 $3
+                             )
+                      UNION ALL
+                      SELECT 1
+                        FROM context_compaction AS compaction
+                        JOIN context_compaction_model_call AS accepted
+                          ON accepted.session_id = compaction.session_id
+                         AND accepted.model_call_id =
+                             compaction.producing_call_id
+                       WHERE compaction.session_id = $1
+                         AND accepted.resolved_provider_model_identity_id = $2
+                         AND accepted.model_call_id > failed.model_call_id
+                         AND accepted.state_kind = 'terminal'
+                         AND accepted.terminal_disposition_kind = 'completed'
+                         AND context_frontier_preserves_prefix(
+                                 $1,
+                                 compaction.result_frontier_id,
+                                 $3
+                             )
+                  )
+             )",
+        )
+        .bind(session_id_to_uuid(session))
+        .bind(target.identity().into_uuid())
+        .bind(persisted_prospective_prefix.into_uuid())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(requires_compaction)
     }
 
     /// Resolves the credential currently pinned for one session and exact
@@ -535,6 +1110,7 @@ impl PostgresModelCallRepository {
             self.credential_reference.clone(),
         )
         .with_cache_inclusive_input_targets(self.cache_inclusive_input_targets.clone())
+        .with_continuation_usage_limits(self.continuation_usage_limits.clone())
         .with_session_credentials(self.credential_families.clone())
         .with_credential_pools(self.credential_pools.clone())
     }
@@ -593,10 +1169,31 @@ impl PostgresModelCallRepository {
             .collect::<Result<Vec<_>, ModelCallRepositoryError>>()?;
         let origin_contents =
             load_origin_contents(&mut transaction, &frontier_entries, &[], &[]).await?;
+        let attachment_blob_facts =
+            load_attachment_blob_facts(&mut transaction, &origin_contents).await?;
         let tool_result_correlations =
             load_tool_result_correlations(&mut transaction, &frontier_entries).await?;
         let tool_denial_correlations =
             load_tool_denial_correlations(&mut transaction, &frontier_entries).await?;
+        // The canonical projection the renderer sends. A preview never commits
+        // its starting frontier, so a later usage read cannot resolve that
+        // identity to membership and takes this instead.
+        let projected_members =
+            signalbox_domain::ContextFrontierProjection::from_complete_entries(&frontier_entries)
+                .map_err(|_| ModelCallCorruption::Inconsistent("preview frontier projection"))?
+                .ordered_entries()
+                .collect::<Box<[SemanticTranscriptEntryRef]>>();
+        // The entries this preview minted are equally uncommitted, so the
+        // durable payload-kind accounting a usage read applies to committed
+        // members cannot see them. Every other projected member resolved
+        // through the scheduling projection and is scored durably there.
+        let uncommitted_content_bytes = projected_members
+            .iter()
+            .filter(|reference| scheduling.semantic_entry(**reference).is_none())
+            .filter_map(|reference| starting_entries.get(reference))
+            .fold(0_u64, |total, entry| {
+                total.saturating_add(preview_entry_content_bytes(entry, &origin_contents))
+            });
         let execution = ModelCallExecutionReconstitutionInput::new(
             preview.turn(),
             self.targets.clone(),
@@ -606,6 +1203,7 @@ impl PostgresModelCallRepository {
             None,
             Vec::new(),
         )
+        .with_attachment_blob_facts(attachment_blob_facts)
         .with_tool_result_correlations(tool_result_correlations)
         .with_tool_denial_correlations(tool_denial_correlations)
         .reconstitute()
@@ -613,6 +1211,10 @@ impl PostgresModelCallRepository {
             let (_, failure) = error.into_parts();
             ModelCallCorruption::Execution(failure)
         })?;
+        let prepared = execution
+            .clone()
+            .prepare_initial_call(call)
+            .map_err(|_| ModelCallRepositoryError::InvalidTransition("preview initial call"))?;
         let request = execution
             .preview_initial_call(call)
             .map_err(|_| ModelCallRepositoryError::InvalidTransition("preview initial call"))?;
@@ -668,10 +1270,13 @@ impl PostgresModelCallRepository {
         };
         transaction.rollback().await?;
         Ok(Some(ProspectiveModelCall {
+            prepared,
             request,
             credential_reference,
             system_prompt,
             tool_entries,
+            projected_members,
+            uncommitted_content_bytes,
         }))
     }
 
@@ -680,40 +1285,37 @@ impl PostgresModelCallRepository {
     pub(crate) async fn checkpoint_counted_activation_in_transaction(
         &self,
         connection: &mut PgConnection,
-        session: SessionId,
-        call: ModelCallId,
+        activated: &signalbox_domain::ActivatedTurn,
+        prospective: &ProspectiveModelCall,
+        _outbox_order_guard: ModelCallOutboxOrderGuard,
     ) -> Result<(), ModelCallRepositoryError> {
-        let execution = require_live_execution_with_targets(
-            connection,
-            session,
-            Some(&self.targets),
-            None,
-            None,
-        )
-        .await?;
-        if execution.current_call().is_some()
-            || !execution.active_turn().pending_steering().is_empty()
+        let prepared = prospective.prepared();
+        let signalbox_domain::ActiveTurnPhase::Running { current_attempt } = activated.phase()
+        else {
+            return Err(ModelCallRepositoryError::InvalidTransition(
+                "counted activation is not running",
+            ));
+        };
+        if prepared.session() != activated.session()
+            || prepared.turn() != activated.turn()
+            || prepared.attempt() != current_attempt.id()
+            || current_attempt.state() != &signalbox_domain::CurrentTurnAttemptState::Prepared
+            || !prepared.consumed_steering().is_empty()
+            || prepared.steering_snapshot().is_some()
         {
             return Err(ModelCallRepositoryError::InvalidTransition(
-                "counted activation gained uncounted call input",
+                "counted preparation does not match activated turn",
             ));
         }
-        let fast_mode = execution
+        let fast_mode = activated
             .configuration()
             .effective()
             .model_settings()
             .effective()
             .fast_mode();
-        let prepared = execution
-            .prepare_initial_call_consuming_steering(call, Vec::new(), None)
-            .map_err(|_| {
-                ModelCallRepositoryError::InvalidTransition(
-                    "counted activation initial call cannot be prepared",
-                )
-            })?;
         let credential_reference = resolve_session_credential(
             connection,
-            session,
+            activated.session(),
             prepared.call().target(),
             fast_mode,
             &self.credential_reference,
@@ -734,6 +1336,7 @@ impl PostgresModelCallRepository {
             &self.credential_pools,
         )
         .await?;
+        outbox::lock_sequence_allocator(connection).await?;
         let Some(credential_reference) = selected.reference.as_ref() else {
             // The activated turn remains call-free; the ordinary preparation
             // pass owns the typed pool-exhaustion closure and its identities.
@@ -741,7 +1344,7 @@ impl PostgresModelCallRepository {
         };
         insert_prepared_call(
             connection,
-            &prepared,
+            prepared,
             credential_reference,
             selected.policy.as_ref(),
             self.cache_inclusive_input_targets
@@ -773,6 +1376,14 @@ impl PostgresModelCallRepository {
         let result = async {
             lock_delegated_child_endpoint_sessions(&mut transaction, session).await?;
             lock_session(&mut transaction, session).await?;
+            let dispatch_start_lease_expired: bool =
+                sqlx::query_scalar(crate::lock_inventory::EXPIRED_DISPATCH_START_LEASE)
+                    .bind(session_id_to_uuid(session))
+                    .fetch_one(&mut *transaction)
+                    .await?;
+            if dispatch_start_lease_expired {
+                return Ok((false, PrepareInitialModelCallOutcome::NoWork));
+            }
             let execution =
                 require_live_execution(&mut transaction, session, &self.targets).await?;
             if execution.current_call().is_none()
@@ -887,7 +1498,8 @@ impl PostgresModelCallRepository {
                     self.credential_families.as_ref(),
                 )
                 .await?;
-                Some(
+                acquire_model_call_outbox_order_guard(&mut transaction).await?;
+                let selected = Some(
                     select_runtime_pool_credential(
                         &mut transaction,
                         session,
@@ -902,7 +1514,9 @@ impl PostgresModelCallRepository {
                         &self.credential_pools,
                     )
                     .await?,
-                )
+                );
+                outbox::lock_sequence_allocator(&mut transaction).await?;
+                selected
             } else {
                 None
             };
@@ -985,6 +1599,7 @@ impl PostgresModelCallRepository {
                         &mut transaction,
                         &failed,
                         ProviderReportedTokenUsage::unreported(),
+                        None,
                         None,
                     )
                     .await?;
@@ -1160,9 +1775,10 @@ impl PostgresModelCallRepository {
                     provider_failure_cause.ok_or(ModelCallRepositoryError::InvalidTransition(
                         "availability candidates require a classified provider failure",
                     ))?;
-                let Some(policy) =
-                    load_call_pool_policy(&mut transaction, observation.call().into_uuid()).await?
-                else {
+                let policy =
+                    load_call_pool_policy(&mut transaction, observation.call().into_uuid()).await?;
+                let Some(policy) = policy else {
+                    outbox::lock_sequence_allocator(&mut transaction).await?;
                     // The call carried no credential pool, so no configured
                     // action governs this availability cause. Close the turn on
                     // the ordinary terminal path rather than failing the commit.
@@ -1187,6 +1803,9 @@ impl PostgresModelCallRepository {
                         outcome,
                     ))));
                 };
+                acquire_model_call_outbox_order_guard(&mut transaction).await?;
+                lock_credential_pool_action_heads(&mut transaction, &policy).await?;
+                outbox::lock_sequence_allocator(&mut transaction).await?;
                 let action = policy.action(cause);
                 let mut pool_exhausted_name = None;
                 let current_reference = if action == CredentialPoolRuntimeAction::Stay {
@@ -1366,6 +1985,7 @@ impl PostgresModelCallRepository {
         &self,
         session: SessionId,
         call: ModelCallId,
+        attachment_failure: Option<AttachmentPreparationFailure>,
         identities: FailedModelCallTurnIdentities,
         mut next_reclassified_turn: NextTurn,
     ) -> Result<FailedModelCallTurn, ModelCallRepositoryError>
@@ -1395,6 +2015,7 @@ impl PostgresModelCallRepository {
                 &failed,
                 ProviderReportedTokenUsage::unreported(),
                 None,
+                attachment_failure,
             )
             .await?;
             Ok(failed)
@@ -1403,18 +2024,71 @@ impl PostgresModelCallRepository {
         finish_commit(transaction, result).await
     }
 
+    /// Closes a freshly activated call-free turn after required automatic
+    /// context compaction failed in the same transaction.
+    pub(crate) async fn fail_automatic_compaction_in_transaction(
+        &self,
+        connection: &mut PgConnection,
+        session: SessionId,
+        turn: TurnId,
+        identities: FailedModelCallTurnIdentities,
+        recovery_cause: Option<crate::goal::GoalExecutionFailureRecoveryCause>,
+    ) -> Result<FailedModelCallTurn, ModelCallRepositoryError> {
+        let execution = require_live_execution(connection, session, &self.targets).await?;
+        if execution.turn() != turn || execution.current_call().is_some() {
+            return Err(ModelCallRepositoryError::InvalidTransition(
+                "automatic compaction failure does not match fresh call-free execution",
+            ));
+        }
+        let failed = execution
+            .fail_automatic_context_compaction(identities)
+            .map_err(|_| {
+                ModelCallRepositoryError::InvalidTransition(
+                    "automatic compaction failure could not close fresh execution",
+                )
+            })?;
+        persist_failed_with_delegated_child_result(
+            connection,
+            &failed,
+            ProviderReportedTokenUsage::unreported(),
+            None,
+            None,
+        )
+        .await?;
+        if let Some(cause) = recovery_cause {
+            crate::goal::record_execution_failure_recovery_cause(connection, session, turn, cause)
+                .await?;
+        }
+        Ok(failed)
+    }
+
     /// Rereads whether an unchanged pre-send prepared failure committed.
     pub async fn reread_prepared_failure(
         &self,
         session: SessionId,
         call: ModelCallId,
+        attachment_failure: Option<AttachmentPreparationFailure>,
     ) -> Result<RetainedPreparedFailureStatus, ModelCallRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_session(&mut transaction, session).await?;
-            let stored = sqlx::query_as::<_, (Uuid, Uuid, Uuid, String, Option<String>)>(
+            let stored = sqlx::query_as::<
+                _,
+                (
+                    Uuid,
+                    Uuid,
+                    Uuid,
+                    String,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<Decimal>,
+                ),
+            >(
                 "SELECT turn_id, turn_attempt_id, context_frontier_id, state_kind,
-                        terminal_disposition_kind
+                        terminal_disposition_kind, terminal_provider_failure_cause,
+                        terminal_attachment_preparation_failure_cause,
+                        terminal_attachment_preparation_failure_maximum_bytes
                    FROM model_call
                   WHERE session_id = $1
                     AND model_call_id = $2",
@@ -1426,7 +2100,16 @@ impl PostgresModelCallRepository {
             .ok_or(ModelCallCorruption::Missing(
                 "retained prepared-failure model call",
             ))?;
-            let (turn, attempt, source_frontier, state, disposition) = stored;
+            let (
+                turn,
+                attempt,
+                source_frontier,
+                state,
+                disposition,
+                provider_failure_cause,
+                stored_attachment_failure,
+                stored_attachment_maximum,
+            ) = stored;
             match (state.as_str(), disposition.as_deref()) {
                 ("prepared", None) => {
                     let execution = require_exact_call(
@@ -1441,6 +2124,29 @@ impl PostgresModelCallRepository {
                     Ok(RetainedPreparedFailureStatus::Pending)
                 }
                 ("terminal", Some("known_failed")) => {
+                    let (expected_attachment_failure, expected_attachment_maximum) =
+                        match attachment_failure {
+                            Some(AttachmentPreparationFailure::TooLarge { maximum_bytes }) => (
+                                Some("too_large"),
+                                Some(Decimal::from(maximum_bytes)),
+                            ),
+                            Some(AttachmentPreparationFailure::Missing) => (Some("missing"), None),
+                            Some(AttachmentPreparationFailure::Corrupt) => (Some("corrupt"), None),
+                            Some(AttachmentPreparationFailure::Unavailable) => {
+                                return Err(ModelCallRepositoryError::InvalidTransition(
+                                    "retryable attachment unavailability cannot have a terminal closure",
+                                ));
+                            }
+                            None => (None, None),
+                        };
+                    if provider_failure_cause.is_some()
+                        || stored_attachment_failure.as_deref() != expected_attachment_failure
+                        || stored_attachment_maximum != expected_attachment_maximum
+                    {
+                        return Err(ModelCallRepositoryError::InvalidTransition(
+                            "retained capability failure durable cause changed",
+                        ));
+                    }
                     let transition_history_matches = sqlx::query_scalar::<_, bool>(
                         "SELECT
                             EXISTS (
@@ -2190,12 +2896,39 @@ async fn delegated_nonterminal_result_absent(
     .await?)
 }
 
+/// Reconstitutes one continuation against caller-owned, transaction-local tool
+/// results before the shared model-call/outbox ordering guard is acquired.
+pub(crate) async fn load_tool_continuation_execution(
+    connection: &mut PgConnection,
+    session: SessionId,
+    targets: &ModelTargetCatalog,
+    projection: &PreparedToolResultProjection,
+) -> Result<ModelCallExecution, ModelCallRepositoryError> {
+    let continuation_snapshot = projection.snapshot();
+    let continuation = ResolvedContextFrontierReconstitutionInput::new(
+        session,
+        continuation_snapshot.frontier().snapshot(),
+        continuation_snapshot.ordered_entries().collect(),
+    );
+    require_live_execution_with_targets(
+        connection,
+        session,
+        Some(targets),
+        Some(continuation),
+        Some(projection.clone()),
+    )
+    .await
+}
+
 /// Prepares one continuation call inside a caller-owned tool-result
-/// transaction. The caller must hold the session scheduler lock and commits or
-/// rolls back this function's writes together with the result projection.
+/// transaction. The caller must hold the session scheduler lock and the shared
+/// model-call/outbox ordering guard before projecting any result outbox event,
+/// and commits or rolls back this function's writes together with that result.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn prepare_tool_continuation_call<NextSteeringIdentities>(
     connection: &mut PgConnection,
+    _outbox_order_guard: ModelCallOutboxOrderGuard,
+    execution: ModelCallExecution,
     session: SessionId,
     turn: TurnId,
     targets: &ModelTargetCatalog,
@@ -2203,7 +2936,9 @@ pub(crate) async fn prepare_tool_continuation_call<NextSteeringIdentities>(
     credential_families: Option<&crate::ModelCredentialFamilyCatalog>,
     credential_pools: &CredentialPoolRuntimeCatalog,
     cache_inclusive_input_targets: &HashSet<ResolvedProviderTarget>,
+    continuation_usage_limits: &ToolContinuationUsageLimitCatalog,
     projection: &PreparedToolResultProjection,
+    producing_call: ModelCallId,
     call: ModelCallId,
     failure_identities: FailedModelCallTurnIdentities,
     steering_frontier: signalbox_domain::ContextFrontierId,
@@ -2214,19 +2949,6 @@ where
         FnMut(AcceptedInputId) -> (signalbox_domain::SemanticTranscriptEntryId, TurnId),
 {
     let continuation_snapshot = projection.snapshot();
-    let continuation = ResolvedContextFrontierReconstitutionInput::new(
-        session,
-        continuation_snapshot.frontier().snapshot(),
-        continuation_snapshot.ordered_entries().collect(),
-    );
-    let execution = require_live_execution_with_targets(
-        connection,
-        session,
-        Some(targets),
-        Some(continuation),
-        Some(projection.clone()),
-    )
-    .await?;
     if execution.turn() != turn || execution.current_call().is_some() {
         return Ok(PrepareToolContinuationOutcome::NoWork);
     }
@@ -2267,32 +2989,83 @@ where
         .model_settings()
         .effective()
         .fast_mode();
-    let selected =
-        if let Ok(resolved) = targets.resolve(*execution.configuration().effective().model()) {
-            let default_reference = resolve_session_credential(
+    let resolved_target = targets.resolve(*execution.configuration().effective().model());
+    if let Ok(resolved) = resolved_target
+        && let Some(limit) = continuation_usage_limits.get(&(resolved.target(), fast_mode))
+        && let Some(evidence) = load_tool_continuation_headroom_evidence(
+            connection,
+            session,
+            turn,
+            producing_call,
+            *limit,
+        )
+        .await?
+    {
+        let source_turn = execution.turn();
+        let reclassifications = steering_identities
+            .iter()
+            .map(|(_, reclassification)| *reclassification)
+            .collect::<Vec<_>>();
+        let mut proposed_turns = BTreeSet::new();
+        for reclassification in &reclassifications {
+            record_reclassified_turn_candidate(
+                source_turn,
+                reclassification.turn(),
+                &mut proposed_turns,
+            )?;
+        }
+        let required = execution
+            .require_context_compaction_after_tool_results(
+                producing_call,
+                failure_identities
+                    .clone()
+                    .with_pending_steering_reclassifications(reclassifications),
+            )
+            .map_err(|_| {
+                ModelCallRepositoryError::InvalidTransition(
+                    "context headroom exhaustion could not close tool continuation",
+                )
+            })?;
+        persist_failed_with_delegated_child_result(
+            connection,
+            required.failed(),
+            ProviderReportedTokenUsage::unreported(),
+            None,
+            None,
+        )
+        .await?;
+        persist_tool_continuation_headroom_exhaustion(connection, &required, evidence).await?;
+        return Ok(PrepareToolContinuationOutcome::ContextCompactionRequired(
+            Box::new(required),
+        ));
+    }
+    let selected = if let Ok(resolved) = resolved_target {
+        let default_reference = resolve_session_credential(
+            connection,
+            session,
+            resolved.target(),
+            fast_mode,
+            credential_reference,
+            credential_families,
+        )
+        .await?;
+        let selected = Some(
+            select_runtime_pool_credential(
                 connection,
                 session,
-                resolved.target(),
-                fast_mode,
-                credential_reference,
-                credential_families,
+                turn,
+                execution.current_attempt().id(),
+                serving_pool_target(credential_families, resolved.target(), fast_mode),
+                default_reference,
+                credential_pools,
             )
-            .await?;
-            Some(
-                select_runtime_pool_credential(
-                    connection,
-                    session,
-                    turn,
-                    execution.current_attempt().id(),
-                    serving_pool_target(credential_families, resolved.target(), fast_mode),
-                    default_reference,
-                    credential_pools,
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
+            .await?,
+        );
+        outbox::lock_sequence_allocator(connection).await?;
+        selected
+    } else {
+        None
+    };
     if let Some(SelectedRuntimePoolCredential {
         reference: None,
         policy: Some(policy),
@@ -2371,6 +3144,7 @@ where
                 &failed,
                 ProviderReportedTokenUsage::unreported(),
                 None,
+                None,
             )
             .await?;
             return Ok(PrepareToolContinuationOutcome::TargetUnavailable(Box::new(
@@ -2407,6 +3181,147 @@ where
     )
     .await?;
     Ok(PrepareToolContinuationOutcome::Checkpointed(call))
+}
+
+#[derive(Clone, Copy)]
+struct ToolContinuationHeadroomEvidence {
+    usage: ProviderReportedTokenUsage,
+    input_includes_cache_tokens: bool,
+    projected_result_content_bytes: u64,
+    limit: ToolContinuationUsageLimit,
+}
+
+async fn load_tool_continuation_headroom_evidence(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    producing_call: ModelCallId,
+    limit: ToolContinuationUsageLimit,
+) -> Result<Option<ToolContinuationHeadroomEvidence>, ModelCallRepositoryError> {
+    let row = sqlx::query(
+        "SELECT usage_input_includes_cache_tokens,
+                usage_input_tokens, usage_output_tokens,
+                usage_cache_creation_input_tokens,
+                usage_cache_read_input_tokens,
+                (
+                    SELECT COALESCE(SUM(projected.content_bytes), 0)::numeric
+                      FROM (
+                            SELECT COALESCE(octet_length(attempt.result_text), 0)
+                                   + COALESCE(octet_length(attempt.error_detail), 0)
+                                       AS content_bytes
+                              FROM semantic_transcript_entry AS entry
+                              JOIN tool_attempt AS attempt
+                                ON attempt.attempt_id = entry.tool_result_attempt_id
+                               AND attempt.session_id = entry.source_session_id
+                              JOIN tool_request AS request
+                                ON request.request_id = attempt.request_id
+                               AND request.session_id = attempt.session_id
+                               AND request.turn_id = attempt.turn_id
+                             WHERE request.producing_model_call_id = model_call.model_call_id
+                               AND request.session_id = model_call.session_id
+                               AND request.turn_id = model_call.turn_id
+
+                            UNION ALL
+
+                            SELECT COALESCE(octet_length(decision.denial_reason), 0)
+                                       AS content_bytes
+                              FROM semantic_transcript_entry AS entry
+                              JOIN tool_request AS request
+                                ON request.request_id = entry.tool_result_request_id
+                               AND request.session_id = entry.source_session_id
+                              JOIN tool_approval_decision AS decision
+                                ON decision.request_id = request.request_id
+                             WHERE entry.payload_kind = 'tool_denied'
+                               AND request.producing_model_call_id = model_call.model_call_id
+                               AND request.session_id = model_call.session_id
+                               AND request.turn_id = model_call.turn_id
+
+                            UNION ALL
+
+                            -- A returning foreground await renders the child's
+                            -- delivered result as this round's tool result, so
+                            -- its content joins the round through the awaiting
+                            -- request this call issued.
+                            SELECT COALESCE(octet_length(child_result.content_text), 0)
+                                       AS content_bytes
+                              FROM semantic_transcript_entry AS entry
+                              JOIN tool_request AS request
+                                ON request.request_id =
+                                   entry.delegation_result_awaiting_tool_request_id
+                               AND request.session_id = entry.source_session_id
+                              JOIN session_child_result AS child_result
+                                ON child_result.spawning_tool_request_id =
+                                   entry.delegation_result_spawning_tool_request_id
+                             WHERE entry.payload_kind = 'delegation_result'
+                               AND request.producing_model_call_id = model_call.model_call_id
+                               AND request.session_id = model_call.session_id
+                               AND request.turn_id = model_call.turn_id
+                      ) AS projected
+                ) AS projected_result_content_bytes
+           FROM model_call
+          WHERE model_call_id = $1
+            AND session_id = $2
+            AND turn_id = $3
+            AND state_kind = 'terminal'
+            AND terminal_disposition_kind = 'completed'",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return Err(ModelCallCorruption::Missing("completed tool-producing call").into());
+    };
+    let decode = |field: &'static str| -> Result<Option<u64>, ModelCallRepositoryError> {
+        row.try_get::<Option<Decimal>, _>(field)?
+            .map(|value| {
+                if !value.fract().is_zero() || value.is_sign_negative() {
+                    return Err(ModelCallCorruption::Inconsistent(
+                        "tool-producing model-call token usage",
+                    )
+                    .into());
+                }
+                u64::try_from(value).map_err(|_| {
+                    ModelCallCorruption::Inconsistent("tool-producing model-call token usage")
+                        .into()
+                })
+            })
+            .transpose()
+    };
+    let usage = ProviderReportedTokenUsage::unreported()
+        .with_input_tokens(decode("usage_input_tokens")?)
+        .with_output_tokens(decode("usage_output_tokens")?)
+        .with_cache_creation_input_tokens(decode("usage_cache_creation_input_tokens")?)
+        .with_cache_read_input_tokens(decode("usage_cache_read_input_tokens")?);
+    let input_includes_cache_tokens = row.try_get("usage_input_includes_cache_tokens")?;
+    let projected_result_content_bytes = decode("projected_result_content_bytes")?.ok_or(
+        ModelCallCorruption::Missing("projected tool-result content byte count"),
+    )?;
+    let Some(input_tokens) = usage.input_tokens() else {
+        return Ok(None);
+    };
+    let input_tokens = if input_includes_cache_tokens {
+        input_tokens
+    } else {
+        input_tokens
+            .saturating_add(usage.cache_creation_input_tokens().unwrap_or(0))
+            .saturating_add(usage.cache_read_input_tokens().unwrap_or(0))
+    };
+    let exhausted = input_tokens
+        .saturating_add(usage.output_tokens().unwrap_or(0))
+        // Provider-neutral CLI adapters expose no tokenizer-only operation.
+        // UTF-8 payload bytes therefore reserve a deliberately conservative
+        // allowance for result material appended after the reported input.
+        .saturating_add(projected_result_content_bytes)
+        .saturating_add(limit.max_output_tokens())
+        > limit.context_window_tokens();
+    Ok(exhausted.then_some(ToolContinuationHeadroomEvidence {
+        usage,
+        input_includes_cache_tokens,
+        projected_result_content_bytes,
+        limit,
+    }))
 }
 
 pub(crate) async fn resolve_session_credential(
@@ -2500,6 +3415,7 @@ where
         &failed,
         ProviderReportedTokenUsage::unreported(),
         None,
+        None,
     )
     .await?;
     Ok(failed)
@@ -2544,6 +3460,7 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
         session: SessionId,
         call: ModelCallId,
         _cause: signalbox_application::PreparedModelCallFailureCause,
+        attachment_failure: Option<AttachmentPreparationFailure>,
         identities: FailedModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
     ) -> Result<FailedModelCallTurn, Self::Error>
@@ -2554,6 +3471,7 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
             self,
             session,
             call,
+            attachment_failure,
             identities,
             next_reclassified_turn,
         )
@@ -2564,8 +3482,10 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
         &mut self,
         session: SessionId,
         call: ModelCallId,
+        attachment_failure: Option<AttachmentPreparationFailure>,
     ) -> Result<RetainedPreparedFailureStatus, Self::Error> {
-        self.reread_prepared_failure(session, call).await
+        self.reread_prepared_failure(session, call, attachment_failure)
+            .await
     }
 }
 
@@ -4224,6 +5144,7 @@ async fn require_live_execution_with_targets(
         active_turn.consumed_steering(),
     )
     .await?;
+    let attachment_blob_facts = load_attachment_blob_facts(connection, &origin_contents).await?;
     let tool_result_correlations =
         load_tool_result_correlations(connection, &frontier_entries).await?;
     let tool_denial_correlations =
@@ -4265,6 +5186,7 @@ async fn require_live_execution_with_targets(
         pinned_target,
         calls,
     )
+    .with_attachment_blob_facts(attachment_blob_facts)
     .with_tool_result_correlations(tool_result_correlations)
     .with_tool_denial_correlations(tool_denial_correlations);
     if availability_successor {
@@ -4564,6 +5486,7 @@ async fn decode_delegated_active_phase(
                     revision,
                     row.try_get::<Option<Uuid>, _>("runner_recovery_tool_attempt_id")?
                         .map(signalbox_domain::ToolAttemptId::from_uuid),
+                    None,
                 ),
             )
         }
@@ -5025,7 +5948,7 @@ async fn load_availability_predecessor_snapshot(
         .map(Some)
 }
 
-async fn load_call_snapshot(
+pub(crate) async fn load_call_snapshot(
     connection: &mut PgConnection,
     session: SessionId,
     frontier: signalbox_domain::ContextFrontierId,
@@ -5134,7 +6057,9 @@ async fn load_origin_contents(
         .collect::<Vec<_>>();
     let rows = sqlx::query(
         "SELECT accepted.accepted_input_id, accepted.accepting_command_id,
-                accepted.content_text, goal.turn_id AS goal_turn_id
+                accepted_input_content_parts_json(accepted.accepted_input_id)
+                    AS content_parts,
+                goal.turn_id AS goal_turn_id
            FROM accepted_input AS accepted
            LEFT JOIN goal_turn AS goal
              ON goal.accepted_input_id = accepted.accepted_input_id
@@ -5160,7 +6085,7 @@ async fn load_origin_contents(
         if pending_by_accepted.contains_key(&accepted)
             || consumed_by_accepted.contains_key(&accepted)
         {
-            let content = UserContent::try_text(required(&row, "content_text")?)
+            let content = crate::user_content::decode(required(&row, "content_parts")?)
                 .map_err(|_| ModelCallCorruption::Inconsistent("steering content"))?;
             if steering_content_by_accepted
                 .insert(accepted, content)
@@ -5184,7 +6109,7 @@ async fn load_origin_contents(
                 StoredAcceptedInputProvenance::Command(command)
             }
             (None, Some(_)) => {
-                let content = UserContent::try_text(required(&row, "content_text")?)
+                let content = crate::user_content::decode(required(&row, "content_parts")?)
                     .map_err(|_| ModelCallCorruption::Inconsistent("goal input content"))?;
                 StoredAcceptedInputProvenance::Goal(content)
             }
@@ -5251,6 +6176,59 @@ async fn load_origin_contents(
                 return Err(ModelCallCorruption::Inconsistent("accepted content identity").into());
             }
             Ok(content)
+        })
+        .collect()
+}
+
+async fn load_attachment_blob_facts(
+    connection: &mut PgConnection,
+    origin_contents: &[ModelCallOriginContent],
+) -> Result<Vec<AttachmentBlobFact>, ModelCallRepositoryError> {
+    let digests = origin_contents
+        .iter()
+        .flat_map(|origin| origin.content().parts())
+        .filter_map(|part| match part {
+            signalbox_domain::UserContentPart::Attachment { digest, .. } => Some(*digest),
+            signalbox_domain::UserContentPart::Text { .. } => None,
+        })
+        .collect::<BTreeSet<_>>();
+    if digests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let encoded = digests
+        .iter()
+        .map(|digest| digest.as_bytes().to_vec())
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        "SELECT digest, byte_length
+           FROM blob
+          WHERE digest = ANY($1::bytea[])
+          ORDER BY digest",
+    )
+    .bind(&encoded)
+    .fetch_all(&mut *connection)
+    .await?;
+    if rows.len() != digests.len() {
+        return Err(ModelCallCorruption::Missing("attachment blob catalog fact").into());
+    }
+    rows.into_iter()
+        .map(|row| {
+            let bytes: Vec<u8> = row.try_get("digest")?;
+            let digest = BlobDigest::from_bytes(bytes.try_into().map_err(|_| {
+                ModelCallCorruption::Inconsistent("attachment blob catalog digest")
+            })?);
+            if !digests.contains(&digest) {
+                return Err(
+                    ModelCallCorruption::Inconsistent("attachment blob catalog inventory").into(),
+                );
+            }
+            let length = positive_u64_from_numeric(row.try_get("byte_length")?).map_err(|_| {
+                ModelCallCorruption::Inconsistent("attachment blob catalog byte length")
+            })?;
+            let length = NonZeroU64::new(length).ok_or(ModelCallCorruption::Inconsistent(
+                "attachment blob catalog byte length",
+            ))?;
+            Ok(AttachmentBlobFact::new(digest, length))
         })
         .collect()
 }
@@ -5611,6 +6589,39 @@ async fn lock_credential_pool_action_head(
     Ok(())
 }
 
+/// Serializes model-call transactions before either credential or outbox locks.
+pub(crate) async fn acquire_model_call_outbox_order_guard(
+    connection: &mut PgConnection,
+) -> Result<ModelCallOutboxOrderGuard, ModelCallRepositoryError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(MODEL_CALL_OUTBOX_ORDER_GUARD)
+        .execute(&mut *connection)
+        .await?;
+    Ok(ModelCallOutboxOrderGuard { _private: () })
+}
+
+/// Takes every action-head lock for one pool in deterministic profile order.
+async fn lock_credential_pool_action_heads(
+    connection: &mut PgConnection,
+    policy: &CredentialPoolRuntimePolicy,
+) -> Result<(), ModelCallRepositoryError> {
+    let members = credential_pool_member_references(policy);
+    let mut locked = members.iter().copied().collect::<Vec<_>>();
+    locked.sort_unstable();
+    for reference in locked {
+        lock_credential_pool_action_head(connection, reference).await?;
+    }
+    Ok(())
+}
+
+fn credential_pool_member_references(policy: &CredentialPoolRuntimePolicy) -> HashSet<&str> {
+    policy
+        .members()
+        .iter()
+        .map(CredentialPoolRuntimeMember::credential_reference)
+        .collect()
+}
+
 /// Reads the durable exclusions governing one pool under its members' locks.
 ///
 /// Selection and the availability-successor test must apply exactly the same
@@ -5624,16 +6635,8 @@ async fn load_durable_pool_exclusions(
     turn: TurnId,
     policy: &CredentialPoolRuntimePolicy,
 ) -> Result<DurablePoolExclusions, ModelCallRepositoryError> {
-    let members = policy
-        .members()
-        .iter()
-        .map(CredentialPoolRuntimeMember::credential_reference)
-        .collect::<HashSet<_>>();
-    let mut locked = members.iter().copied().collect::<Vec<_>>();
-    locked.sort_unstable();
-    for reference in locked {
-        lock_credential_pool_action_head(connection, reference).await?;
-    }
+    let members = credential_pool_member_references(policy);
+    lock_credential_pool_action_heads(connection, policy).await?;
     let mut excluded = sqlx::query_scalar::<_, String>(
         "SELECT credential_reference
            FROM credential_pool_chain_exclusion
@@ -6680,6 +7683,7 @@ async fn persist_terminal_outcome_with_usage(
                 failed,
                 usage,
                 provider_failure_cause,
+                None,
             )
             .await
         }
@@ -6717,10 +7721,43 @@ async fn persist_failed_with_delegated_child_result(
     failed: &FailedModelCallTurn,
     usage: ProviderReportedTokenUsage,
     provider_failure_cause: Option<ProviderModelCallFailureCause>,
+    attachment_failure: Option<AttachmentPreparationFailure>,
 ) -> Result<(), ModelCallRepositoryError> {
     lock_delegated_child_result_frontier(connection, failed.session(), failed.turn()).await?;
-    persist_failed(connection, failed, usage, provider_failure_cause).await?;
+    persist_failed(
+        connection,
+        failed,
+        usage,
+        provider_failure_cause,
+        attachment_failure,
+    )
+    .await?;
     persist_delegated_child_result(connection, &DelegationOutcome::from_failed_child(failed)).await
+}
+
+/// Encodes the durable evidence a definitive attachment-preparation failure
+/// carries into the statement that terminalizes its call.
+///
+/// `model_call_changes_are_guarded` raises on every update whose OLD row is
+/// already terminal, so this evidence is only writable by the same
+/// Prepared-to-terminal `UPDATE` that closes the call; a follow-up statement
+/// would abort the whole failure transaction and leave the call open.
+/// `Unavailable` is retryable and so never terminalizes a prepared call.
+fn encode_attachment_preparation_failure(
+    failure: AttachmentPreparationFailure,
+) -> Result<(&'static str, Option<Decimal>), ModelCallRepositoryError> {
+    match failure {
+        AttachmentPreparationFailure::TooLarge { maximum_bytes } => {
+            Ok(("too_large", Some(Decimal::from(maximum_bytes))))
+        }
+        AttachmentPreparationFailure::Missing => Ok(("missing", None)),
+        AttachmentPreparationFailure::Corrupt => Ok(("corrupt", None)),
+        AttachmentPreparationFailure::Unavailable => {
+            Err(ModelCallRepositoryError::InvalidTransition(
+                "retryable attachment unavailability cannot terminalize a prepared call",
+            ))
+        }
+    }
 }
 
 pub(crate) async fn persist_automatic_reconciliation(
@@ -7378,6 +8415,7 @@ async fn persist_availability_successor(
         successor.predecessor_call(),
         usage,
         Some(cause),
+        None,
     )
     .await?;
     persist_ended_attempt(
@@ -7485,6 +8523,7 @@ async fn persist_credential_pool_exhaustion(
         exhausted.failed(),
         ProviderReportedTokenUsage::unreported(),
         None,
+        None,
     )
     .await?;
     insert_credential_pool_terminal_exhaustion(
@@ -7497,6 +8536,38 @@ async fn persist_credential_pool_exhaustion(
         None,
     )
     .await
+}
+
+async fn persist_tool_continuation_headroom_exhaustion(
+    connection: &mut PgConnection,
+    required: &ContextHeadroomExhaustedModelCallTurn,
+    evidence: ToolContinuationHeadroomEvidence,
+) -> Result<(), ModelCallRepositoryError> {
+    let usage = encode_token_usage(evidence.usage);
+    sqlx::query(
+        "INSERT INTO tool_continuation_context_headroom
+            (terminal_attempt_id, producing_model_call_id, session_id, turn_id,
+             usage_input_includes_cache_tokens, usage_input_tokens,
+             usage_output_tokens, usage_cache_creation_input_tokens,
+             usage_cache_read_input_tokens, projected_result_content_bytes,
+             max_output_tokens, context_window_tokens)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+    )
+    .bind(required.failed().attempt().id().into_uuid())
+    .bind(required.producing_call().into_uuid())
+    .bind(session_id_to_uuid(required.failed().session()))
+    .bind(turn_id_to_uuid(required.failed().turn()))
+    .bind(evidence.input_includes_cache_tokens)
+    .bind(usage.input_tokens)
+    .bind(usage.output_tokens)
+    .bind(usage.cache_creation_input_tokens)
+    .bind(usage.cache_read_input_tokens)
+    .bind(Decimal::from(evidence.projected_result_content_bytes))
+    .bind(Decimal::from(evidence.limit.max_output_tokens()))
+    .bind(Decimal::from(evidence.limit.context_window_tokens()))
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
 }
 
 const MAX_AVAILABILITY_BACKOFF: Duration = Duration::from_secs(300);
@@ -7764,6 +8835,7 @@ fn encode_tool_decision_source(
         ToolDecisionSource::UserCommand => ToolApprovalDecisionSourceStorageKind::UserCommand,
         ToolDecisionSource::PolicyAuto => ToolApprovalDecisionSourceStorageKind::PolicyAuto,
         ToolDecisionSource::SessionBlanket => ToolApprovalDecisionSourceStorageKind::SessionBlanket,
+        ToolDecisionSource::RuntimeSafety => ToolApprovalDecisionSourceStorageKind::RuntimeSafety,
         ToolDecisionSource::UserOverride => ToolApprovalDecisionSourceStorageKind::UserOverride,
         ToolDecisionSource::SessionOverride | ToolDecisionSource::Delegate => {
             return Err(ModelCallRepositoryError::InvalidTransition(
@@ -7968,6 +9040,7 @@ async fn persist_failed(
     failed: &FailedModelCallTurn,
     usage: ProviderReportedTokenUsage,
     provider_failure_cause: Option<ProviderModelCallFailureCause>,
+    attachment_failure: Option<AttachmentPreparationFailure>,
 ) -> Result<(), ModelCallRepositoryError> {
     if let Some(call) = failed.call() {
         persist_ended_call_with_provider_failure_cause(
@@ -7977,8 +9050,14 @@ async fn persist_failed(
             call,
             usage,
             provider_failure_cause,
+            attachment_failure,
         )
         .await?;
+    } else if attachment_failure.is_some() {
+        return Err(ModelCallCorruption::Inconsistent(
+            "attachment-preparation failure without a model call",
+        )
+        .into());
     }
     persist_ended_attempt(
         connection,
@@ -8441,8 +9520,10 @@ async fn persist_ended_call(
     call: &signalbox_domain::EndedModelCall,
     usage: ProviderReportedTokenUsage,
 ) -> Result<(), ModelCallRepositoryError> {
-    persist_ended_call_with_provider_failure_cause(connection, session, turn, call, usage, None)
-        .await
+    persist_ended_call_with_provider_failure_cause(
+        connection, session, turn, call, usage, None, None,
+    )
+    .await
 }
 
 async fn persist_ended_call_with_provider_failure_cause(
@@ -8452,8 +9533,12 @@ async fn persist_ended_call_with_provider_failure_cause(
     call: &signalbox_domain::EndedModelCall,
     usage: ProviderReportedTokenUsage,
     provider_failure_cause: Option<ProviderModelCallFailureCause>,
+    attachment_failure: Option<AttachmentPreparationFailure>,
 ) -> Result<(), ModelCallRepositoryError> {
     let usage = encode_token_usage(usage);
+    let attachment_failure = attachment_failure
+        .map(encode_attachment_preparation_failure)
+        .transpose()?;
     let rows = sqlx::query(
         "UPDATE model_call
             SET state_kind = 'terminal',
@@ -8462,11 +9547,13 @@ async fn persist_ended_call_with_provider_failure_cause(
                 usage_output_tokens = $3,
                 usage_cache_creation_input_tokens = $4,
                 usage_cache_read_input_tokens = $5,
-                terminal_provider_failure_cause = $6
-          WHERE model_call_id = $7
-            AND turn_id = $8
-            AND session_id = $9
-            AND turn_attempt_id = $10
+                terminal_provider_failure_cause = $6,
+                terminal_attachment_preparation_failure_cause = $7,
+                terminal_attachment_preparation_failure_maximum_bytes = $8
+          WHERE model_call_id = $9
+            AND turn_id = $10
+            AND session_id = $11
+            AND turn_attempt_id = $12
             AND state_kind <> 'terminal'
             AND terminal_disposition_kind IS NULL",
     )
@@ -8476,6 +9563,8 @@ async fn persist_ended_call_with_provider_failure_cause(
     .bind(usage.cache_creation_input_tokens)
     .bind(usage.cache_read_input_tokens)
     .bind(provider_failure_cause.map(encode_provider_failure_cause))
+    .bind(attachment_failure.map(|(cause, _)| cause))
+    .bind(attachment_failure.and_then(|(_, maximum_bytes)| maximum_bytes))
     .bind(call.id().into_uuid())
     .bind(turn_id_to_uuid(turn))
     .bind(session_id_to_uuid(session))
@@ -8891,6 +9980,78 @@ async fn finish_optional_commit<T>(
         Err(error) => {
             transaction.rollback().await?;
             Err(error)
+        }
+    }
+}
+
+/// Measures one uncommitted preview entry the way the durable read measures
+/// its committed equivalent.
+///
+/// Each arm mirrors the payload-kind term `latest_reported_usage` applies to a
+/// committed member: accepted input sums its text parts and leaves attachment
+/// stubs to their own accounting, and delegated material carries the exact
+/// delivered content. Kinds a preview never mints contribute nothing.
+fn preview_entry_content_bytes(
+    entry: &SemanticTranscriptEntry,
+    origin_contents: &[ModelCallOriginContent],
+) -> u64 {
+    match entry.payload() {
+        SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
+        | SemanticTranscriptEntryPayload::SteeringAcceptedInput { accepted_input, .. } => {
+            origin_contents
+                .iter()
+                .find(|origin| origin.accepted_input() == *accepted_input)
+                .map_or(0, |origin| accepted_input_text_bytes(origin.content()))
+        }
+        SemanticTranscriptEntryPayload::DelegatedTask { content, .. }
+        | SemanticTranscriptEntryPayload::DelegationMessage { content, .. } => {
+            utf8_byte_length(content.as_str())
+        }
+        SemanticTranscriptEntryPayload::DelegationResult { outcome, .. } => outcome
+            .content()
+            .map_or(0, |content| utf8_byte_length(content.as_str())),
+        SemanticTranscriptEntryPayload::Imported { .. }
+        | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+        | SemanticTranscriptEntryPayload::ContextSummary { .. }
+        | SemanticTranscriptEntryPayload::TurnFailed { .. }
+        | SemanticTranscriptEntryPayload::AssistantText { .. }
+        | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+        | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+        | SemanticTranscriptEntryPayload::ToolDenied { .. }
+        | SemanticTranscriptEntryPayload::ToolClosed { .. }
+        | SemanticTranscriptEntryPayload::TurnCompleted { .. }
+        | SemanticTranscriptEntryPayload::TurnCancelled { .. } => 0,
+    }
+}
+
+/// Sums the text parts of one accepted input, as `octet_length` does durably.
+fn accepted_input_text_bytes(content: &UserContent) -> u64 {
+    content
+        .parts()
+        .iter()
+        .fold(0_u64, |total, part| match part {
+            signalbox_domain::UserContentPart::Text { value } => {
+                total.saturating_add(utf8_byte_length(value.as_str()))
+            }
+            signalbox_domain::UserContentPart::Attachment { .. } => total,
+        })
+}
+
+fn utf8_byte_length(value: &str) -> u64 {
+    u64::try_from(value.len()).unwrap_or(u64::MAX)
+}
+
+fn map_projected_membership_error(
+    error: crate::context_compaction::ContextCompactionRepositoryError,
+) -> ModelCallRepositoryError {
+    use crate::context_compaction::ContextCompactionRepositoryError as ProjectionError;
+    match error {
+        ProjectionError::Database(error) => error.into(),
+        ProjectionError::CommitAmbiguous(error) => {
+            ModelCallRepositoryError::from_database(error, true)
+        }
+        ProjectionError::IdentityCollision | ProjectionError::Corruption(_) => {
+            ModelCallCorruption::Inconsistent("projected prospective frontier membership").into()
         }
     }
 }

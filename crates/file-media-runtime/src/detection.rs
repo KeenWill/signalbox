@@ -307,6 +307,8 @@ pub enum ProcessorProbeOutput {
         media_type: String,
         /// Claimed evidence strength.
         strength: ProbeStrength,
+        /// Actual cumulative source bytes examined to produce this evidence.
+        evidence_bytes: u64,
     },
     /// Reader recognized a malformed format.
     RecognizedMalformed {

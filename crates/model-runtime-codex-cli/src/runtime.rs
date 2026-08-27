@@ -1,5 +1,7 @@
 //! One operation, one Codex CLI process spawn.
 
+use std::path::Path;
+use std::process::Stdio;
 use std::time::Duration;
 use std::{collections::HashMap, path::PathBuf};
 
@@ -85,10 +87,20 @@ pub const DISABLED_CODEX_CLI_CAPABILITY_FEATURES: &[&str] = &[
     "external_agent_memory_import",
     "goals",
     "guardian_approval",
+    // The registry gate for the CLI's guardian extension — the subsystem whose
+    // two wired gates, immediately above and below, are already disabled: it
+    // installs review contributors that spawn their own model exchanges. The
+    // pinned release reads this name nowhere, so disabling it changes nothing
+    // today; classifying an unwired name in that subsystem as behavior would
+    // instead make the release that wires it a silent capability gain.
+    "guardian_ext",
     "guardianv2",
     "hooks",
     "image_generation",
     "in_app_browser",
+    "in_app_chat",
+    "in_app_dictation",
+    "in_app_local_automation",
     // The CLI's own update check and update flow: it reaches package-registry
     // hosts unrelated to the model exchange and can replace the executable
     // whose version this adapter pins. Its machinery lives in the interactive
@@ -107,6 +119,7 @@ pub const DISABLED_CODEX_CLI_CAPABILITY_FEATURES: &[&str] = &[
     "remote_plugin",
     "request_permissions_tool",
     "shell_snapshot",
+    "shell_snapshot_v2",
     "shell_tool",
     "skill_mcp_dependency_install",
     "skill_search",
@@ -130,14 +143,181 @@ pub const DISABLED_CODEX_CLI_CAPABILITY_FEATURES: &[&str] = &[
 /// to a model dispatch.
 pub const SUPPORTED_CODEX_CLI_VERSION: &str = env!("SIGNALBOX_CODEX_CLI_VERSION");
 
+const MAX_VERSION_BANNER_BYTES: usize = 4096;
+const VERSION_PROBE_SPAWN_RETRY_DELAY: Duration = Duration::from_millis(20);
+
+/// Why the configured Codex executable could not prove the adapter's pin.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CodexCliVersionProbeError {
+    /// The configured probe bound was zero.
+    InvalidBound,
+    /// The executable could not be started.
+    SpawnFailed,
+    /// The executable did not finish within the deployment-owned bound.
+    TimedOut,
+    /// The executable's bounded output could not be collected.
+    OutputFailed,
+    /// The executable rejected the version request.
+    Unsuccessful,
+    /// The version banner was not bounded UTF-8 with a version token.
+    InvalidBanner,
+    /// The invoked executable does not match the adapter's exact pin.
+    VersionMismatch,
+}
+
+impl std::fmt::Display for CodexCliVersionProbeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidBound => "Codex CLI version probe bound is invalid",
+            Self::SpawnFailed => "Codex CLI version probe could not start",
+            Self::TimedOut => "Codex CLI version probe exceeded its bound",
+            Self::OutputFailed => "Codex CLI version probe output could not be collected",
+            Self::Unsuccessful => "Codex CLI version probe exited unsuccessfully",
+            Self::InvalidBanner => "Codex CLI version banner is invalid",
+            Self::VersionMismatch => "Codex CLI executable does not match the adapter pin",
+        })
+    }
+}
+
+impl std::error::Error for CodexCliVersionProbeError {}
+
+/// Proves that the executable invoked by the composition matches this
+/// adapter's exact protocol pin before the composition admits model work.
+pub async fn verify_pinned_codex_cli_version(
+    executable: &Path,
+    bound: Duration,
+) -> Result<(), CodexCliVersionProbeError> {
+    if bound.is_zero() {
+        return Err(CodexCliVersionProbeError::InvalidBound);
+    }
+    let deadline = tokio::time::Instant::now()
+        .checked_add(bound)
+        .ok_or(CodexCliVersionProbeError::InvalidBound)?;
+    let mut command = tokio::process::Command::new(executable);
+    command
+        .arg("--version")
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
+    let mut child = spawn_version_probe(&mut command, deadline).await?;
+    let process_group = child.id();
+    let remaining = deadline
+        .checked_duration_since(tokio::time::Instant::now())
+        .ok_or(CodexCliVersionProbeError::TimedOut)?;
+    let output = match tokio::time::timeout(remaining, collect_version_output(&mut child)).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            kill_probe_process_group(process_group);
+            let _ = tokio::time::timeout(bound, child.wait()).await;
+            return Err(error);
+        }
+        Err(_) => {
+            kill_probe_process_group(process_group);
+            let _ = tokio::time::timeout(bound, child.wait()).await;
+            return Err(CodexCliVersionProbeError::TimedOut);
+        }
+    };
+    if !output.status.success() {
+        return Err(CodexCliVersionProbeError::Unsuccessful);
+    }
+    let banner = std::str::from_utf8(&output.stdout)
+        .map_err(|_| CodexCliVersionProbeError::InvalidBanner)?;
+    let version = banner
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().next_back())
+        .ok_or(CodexCliVersionProbeError::InvalidBanner)?;
+    if version != SUPPORTED_CODEX_CLI_VERSION {
+        return Err(CodexCliVersionProbeError::VersionMismatch);
+    }
+    Ok(())
+}
+
+async fn spawn_version_probe(
+    command: &mut tokio::process::Command,
+    deadline: tokio::time::Instant,
+) -> Result<tokio::process::Child, CodexCliVersionProbeError> {
+    loop {
+        match command.spawn() {
+            Ok(child) => return Ok(child),
+            Err(error) if error.raw_os_error() == Some(26) => {
+                let remaining = deadline
+                    .checked_duration_since(tokio::time::Instant::now())
+                    .ok_or(CodexCliVersionProbeError::TimedOut)?;
+                tokio::time::sleep(VERSION_PROBE_SPAWN_RETRY_DELAY.min(remaining)).await;
+            }
+            Err(_) => return Err(CodexCliVersionProbeError::SpawnFailed),
+        }
+    }
+}
+
+async fn collect_version_output(
+    child: &mut tokio::process::Child,
+) -> Result<std::process::Output, CodexCliVersionProbeError> {
+    use tokio::io::AsyncReadExt;
+
+    let mut stdout = Vec::new();
+    let Some(mut pipe) = child.stdout.take() else {
+        return Err(CodexCliVersionProbeError::OutputFailed);
+    };
+    let mut bounded = vec![0_u8; MAX_VERSION_BANNER_BYTES + 1];
+    let mut filled = 0_usize;
+    while filled < bounded.len() {
+        let read = pipe
+            .read(&mut bounded[filled..])
+            .await
+            .map_err(|_| CodexCliVersionProbeError::OutputFailed)?;
+        if read == 0 {
+            break;
+        }
+        filled += read;
+    }
+    if filled > MAX_VERSION_BANNER_BYTES {
+        kill_probe_process_group(child.id());
+        let _ = child.wait().await;
+        return Err(CodexCliVersionProbeError::InvalidBanner);
+    }
+    bounded.truncate(filled);
+    stdout.extend_from_slice(&bounded);
+    let status = child
+        .wait()
+        .await
+        .map_err(|_| CodexCliVersionProbeError::OutputFailed)?;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr: Vec::new(),
+    })
+}
+
+#[cfg(unix)]
+fn kill_probe_process_group(group: Option<u32>) {
+    if let Some(raw) = group
+        && let Some(pid) = rustix::process::Pid::from_raw(raw as i32)
+    {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_probe_process_group(_group: Option<u32>) {}
+
 /// Stateless subscription-backed Codex CLI adapter.
 pub struct CodexCliRuntime {
     executable: PathBuf,
     working_directory: PathBuf,
     credential_reference: signalbox_model_runtime::CredentialReference,
     credential_homes: HashMap<signalbox_model_runtime::CredentialReference, PathBuf>,
-    exchange_timeout: Duration,
+    exchange_timeout: Option<Duration>,
     interrupt_grace: Duration,
+    post_kill_reap_bound: Option<Duration>,
     event_limit: usize,
     stderr_limit: usize,
     model_capabilities: ModelCapabilityCatalog,
@@ -145,7 +325,7 @@ pub struct CodexCliRuntime {
 
 /// Opaque one-shot capability for one Codex CLI spawn.
 ///
-/// It owns the rendered full context and the temporary output-schema file.
+/// It owns the rendered full context and the temporary output files.
 /// It deliberately implements neither `Clone`, serialization, nor diagnostic
 /// formatting.
 #[must_use]
@@ -154,12 +334,14 @@ pub struct CodexCliPreparedRequest<C> {
     working_directory: PathBuf,
     prompt: Vec<u8>,
     output_schema: NamedTempFile,
+    output_last_message: NamedTempFile,
     correlation: C,
     resolved_target: String,
     delivery: DeliveryMode,
     translated: crate::translate::TranslatedOperation,
-    exchange_timeout: Duration,
+    exchange_timeout: Option<Duration>,
     interrupt_grace: Duration,
+    post_kill_reap_bound: Option<Duration>,
     event_limit: usize,
     stderr_limit: usize,
     controls: CodexControls,
@@ -279,11 +461,9 @@ impl CodexCliRuntime {
         if !config.working_directory.is_dir() {
             return Err(CodexCliConstructionError::InvalidWorkingDirectory);
         }
-        if config.exchange_timeout.is_zero()
-            || tokio::time::Instant::now()
-                .checked_add(config.exchange_timeout)
-                .is_none()
-        {
+        if config.exchange_timeout.is_some_and(|timeout| {
+            timeout.is_zero() || tokio::time::Instant::now().checked_add(timeout).is_none()
+        }) {
             return Err(CodexCliConstructionError::InvalidExchangeTimeout);
         }
         if config.interrupt_grace.is_zero() {
@@ -316,6 +496,7 @@ impl CodexCliRuntime {
             credential_homes: config.credential_homes,
             exchange_timeout: config.exchange_timeout,
             interrupt_grace: config.interrupt_grace,
+            post_kill_reap_bound: config.post_kill_reap_bound,
             event_limit: config.event_limit,
             stderr_limit: config.stderr_limit,
             model_capabilities: config.model_capabilities,
@@ -434,7 +615,7 @@ impl CodexCliRuntime {
         let mut output_schema = match tempfile::Builder::new()
             .prefix("signalbox-codex-output-")
             .suffix(".json")
-            .tempfile_in(temporary_directory)
+            .tempfile_in(&temporary_directory)
         {
             Ok(file) => file,
             Err(error) => {
@@ -455,18 +636,35 @@ impl CodexCliRuntime {
                 },
             };
         }
+        let output_last_message = match tempfile::Builder::new()
+            .prefix("signalbox-codex-last-message-")
+            .suffix(".json")
+            .tempfile_in(&temporary_directory)
+        {
+            Ok(file) => file,
+            Err(error) => {
+                return PreparationOutcome::Defect {
+                    correlation,
+                    defect: PreparationDefect::RequestConstructionFailed {
+                        detail: format!("could not create output-last-message file: {error}"),
+                    },
+                };
+            }
+        };
         let prompt = std::mem::take(&mut translated.prompt);
         PreparationOutcome::Prepared(CodexCliPreparedRequest {
             executable: self.executable.clone(),
             working_directory: self.working_directory.clone(),
             prompt,
             output_schema,
+            output_last_message,
             correlation,
             resolved_target: operation.resolved_target.as_str().to_string(),
             delivery: operation.delivery,
             translated,
             exchange_timeout: self.exchange_timeout,
             interrupt_grace: self.interrupt_grace,
+            post_kill_reap_bound: self.post_kill_reap_bound,
             event_limit: self.event_limit,
             stderr_limit: self.stderr_limit,
             controls,
@@ -631,12 +829,16 @@ async fn execute_process<C: Clone + Send + Sync>(
         .arg(&prepared.resolved_target)
         .arg("--output-schema")
         .arg(prepared.output_schema.path())
+        .arg("--output-last-message")
+        .arg(prepared.output_last_message.path())
         .arg("-")
         .current_dir(&prepared.working_directory);
     let decoder = EventDecoder::new(
         prepared.correlation.clone(),
         prepared.delivery,
         &prepared.translated,
+        prepared.output_last_message.path().to_path_buf(),
+        prepared.event_limit,
     );
     // The selected profile controls this child only; the adapter passes the
     // path reference and never opens the login material, as required by
@@ -656,22 +858,93 @@ async fn execute_process<C: Clone + Send + Sync>(
         decoder,
         exchange_timeout: prepared.exchange_timeout,
         interrupt_grace: prepared.interrupt_grace,
+        post_kill_reap_bound: prepared.post_kill_reap_bound,
         event_limit: prepared.event_limit,
         stderr_limit: prepared.stderr_limit,
         environment: CODEX_ENVIRONMENT,
         environment_overrides,
     };
     let _output_schema = prepared.output_schema;
+    let _output_last_message = prepared.output_last_message;
     execute_cli_process(request, sink, cancellation).await
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use std::path::PathBuf;
+    use std::time::Duration;
+
     use super::{
         CODEX_CREDENTIAL_HOME, CODEX_ENVIRONMENT, CliEnvironmentVariable, CodexCliServiceTier,
-        FORBIDDEN_DIRECT_CREDENTIAL_ENVIRONMENT, FastMode, ModelSettings, ReasoningLevel,
-        ServiceTier, codex_controls, validate_model_settings,
+        CodexCliVersionProbeError, FORBIDDEN_DIRECT_CREDENTIAL_ENVIRONMENT, FastMode,
+        ModelSettings, ReasoningLevel, SUPPORTED_CODEX_CLI_VERSION, ServiceTier, codex_controls,
+        validate_model_settings, verify_pinned_codex_cli_version,
     };
+
+    #[cfg(unix)]
+    fn version_fixture(script: &str) -> (tempfile::TempDir, PathBuf) {
+        let directory = tempfile::tempdir().expect("temporary version fixture directory");
+        let executable = directory.path().join("codex");
+        std::fs::write(&executable, script).expect("version fixture is written");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("version fixture metadata exists")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&executable, permissions).expect("version fixture is executable");
+        (directory, executable)
+    }
+
+    #[cfg(unix)]
+    fn oversized_version_fixture() -> (tempfile::TempDir, PathBuf) {
+        let banner = "x".repeat(super::MAX_VERSION_BANNER_BYTES + 1);
+        version_fixture(&format!("#!/bin/sh\nprintf '%s' '{banner}'\n"))
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pinned_version_probe_accepts_the_exact_adapter_pin() {
+        let script =
+            format!("#!/bin/sh\nprintf 'codex-cli %s\\n' '{SUPPORTED_CODEX_CLI_VERSION}'\n");
+        let (_directory, executable) = version_fixture(&script);
+
+        let result = verify_pinned_codex_cli_version(&executable, Duration::from_secs(1)).await;
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pinned_version_probe_rejects_executable_drift() {
+        let (_directory, executable) =
+            version_fixture("#!/bin/sh\nprintf 'codex-cli %s\\n' '0.0.1'\n");
+
+        let result = verify_pinned_codex_cli_version(&executable, Duration::from_secs(1)).await;
+
+        assert_eq!(result, Err(CodexCliVersionProbeError::VersionMismatch));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pinned_version_probe_bounds_a_hung_executable() {
+        let (_directory, executable) = version_fixture("#!/bin/sh\nsleep 30\n");
+
+        let result = verify_pinned_codex_cli_version(&executable, Duration::from_millis(10)).await;
+
+        assert_eq!(result, Err(CodexCliVersionProbeError::TimedOut));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pinned_version_probe_bounds_the_version_banner() {
+        let (_directory, executable) = oversized_version_fixture();
+
+        let result = verify_pinned_codex_cli_version(&executable, Duration::from_secs(1)).await;
+
+        assert_eq!(result, Err(CodexCliVersionProbeError::InvalidBanner));
+    }
 
     /// INV-035: the CLI receives only a reference to its ambient login store;
     /// direct credential-value variables are absent from the inherited set.

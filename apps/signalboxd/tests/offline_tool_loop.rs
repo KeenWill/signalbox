@@ -4,6 +4,8 @@
     reason = "the standalone integration tests use assertion panics and explicit fixture expectations"
 )]
 
+mod support;
+
 use std::{
     error::Error,
     fmt, fs,
@@ -18,10 +20,10 @@ use signalbox_application::{
     InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
     ModelCallCredentialReference, OperatorFailureClass, StartEligibleTurnOutcome,
     StartEligibleTurnService, StartupScanService, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputService, ToolDefinition, ToolExecutionInvocation, ToolExecutor,
-    ToolExecutorEvidence, ToolInputSchema, UuidV7SessionIdGenerator,
-    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator, UuidV7SubmitInputIdGenerator,
-    UuidV7ToolLoopIdGenerator,
+    SubmitInputService, ToolCatalog, ToolCatalogValidationFailure, ToolDefinition,
+    ToolExecutionInvocation, ToolExecutor, ToolExecutorEvidence, ToolInputSchema,
+    ToolPreauthorization, UuidV7SessionIdGenerator, UuidV7StartEligibleTurnIdGenerator,
+    UuidV7StartupScanIdGenerator, UuidV7SubmitInputIdGenerator, UuidV7ToolLoopIdGenerator,
 };
 use signalbox_domain::{
     ActivatedTurn, DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestResult,
@@ -48,16 +50,16 @@ use signalbox_model_runtime::{
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository, disposable_postgres_server_args,
-    disposable_postgres_state_tmpfs, disposable_test_container_labels,
+    disposable_postgres_state_tmpfs_from_example, disposable_test_container_labels,
     local_test_connection_options, migrate, model_execution::PostgresModelCallRepository,
     process_read::ProcessReadRepository, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
     submit_input::SubmitInputRepository, tool_loop::PostgresToolLoopRepository,
 };
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, InputContent,
-    InputDelivery, ModelSettingsOverlay, ProtocolVersion, RequestId, ServerMessage, ToolDecision,
-    decode_server_line, encode_client_line,
+    CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, InputDelivery,
+    ModelSettingsOverlay, ProtocolVersion, RequestId, ServerMessage, ToolDecision,
+    UserInputContent, decode_server_line, encode_client_line,
 };
 use signalbox_tools_exec::{
     BwrapAvailability, CaptureCompleteness, ProcessOutcome, ProcessOutput, ProcessRequest,
@@ -77,25 +79,25 @@ use signalboxd::{
     CHANGE_REQUEST_THREAD_INVENTORY_NAME, CHANGE_REQUEST_THREAD_REPLY_NAME,
     CHANGE_REQUEST_THREAD_RESOLVE_NAME, ChangeRequestCommentResult, ChangeRequestSummaryFields,
     ChangeRequestSummaryResult, ChangedFile, ChangedFilesResult, CheckStatus, ChecksStatusResult,
-    CiJobLogResult, CodeHostOperation, CodeHostResult, CodeHostResultCompleteness,
-    CodeHostTransport, CodeHostTransportFailure, ConvergenceStateFields, ConvergenceStateResult,
-    ConversationIntrospectionPort, ConversationListPage, ConversationListRequest,
-    ConversationTranscriptRead, ConversationTranscriptRequest, DaemonTools,
-    DaemonToolsConstructionError, FilePatchResult, GitHubEgressPolicy, GitHubOperation,
-    GitHubResult, GitHubTransport, GitHubTransportFailure, HubModelConfiguration,
-    ImportedTranscriptRequest, LocalProcessListener, LocalWorkspaceFileSystem,
-    MappedDaemonCredentialInputs, PULL_REQUEST_METADATA_NAME, PULL_REQUEST_PUBLISH_REVIEW_NAME,
-    PostgresConversationIntrospection, PostgresProviderModelExecution,
-    PostgresProviderToolLoopExecution, PostgresSessionStatusWriter, ProcessRuntime, READ_FILE_NAME,
-    REVIEW_GATE_CHECK_NAME, RerunFailedJobsResult, ReviewAuthorClass, ReviewDispositionClass,
-    ReviewGateCheckResult, ReviewGatePurpose, ReviewThread, ReviewThreadComment,
-    ReviewThreadFields, ReviewThreadInventoryFields, ReviewThreadInventoryItem,
-    ReviewThreadResolution, ReviewThreadsResult, ReviewerVerdictEvidence, ReviewerVerdictFields,
-    ReviewerVerdictStatus, SessionStatusWrite, SessionStatusWriteOutcome, SessionStatusWriter,
-    StackStateFields, StackStateResult, ThreadInventoryResult, ThreadReplyResult,
-    ThreadResolveResult, TranscriptPage, WRITE_FILE_NAME, WebFetchBodyCompleteness,
-    WebFetchEgressPolicy, WebFetchRequest, WebFetchResponse, WebFetchTransport,
-    WebFetchTransportFailure,
+    CiJobLogResult, CodeHostNumericBounds, CodeHostOperation, CodeHostResult,
+    CodeHostResultCompleteness, CodeHostTransport, CodeHostTransportFailure,
+    ConvergenceStateFields, ConvergenceStateResult, ConversationIntrospectionPort,
+    ConversationListPage, ConversationListRequest, ConversationTranscriptRead,
+    ConversationTranscriptRequest, DaemonTools, DaemonToolsConstructionError, FilePatchResult,
+    GitHubEgressPolicy, GitHubOperation, GitHubResult, GitHubTransport, GitHubTransportFailure,
+    HubModelConfiguration, ImportedTranscriptRequest, LocalProcessListener,
+    LocalWorkspaceFileSystem, MappedDaemonCredentialInputs, PULL_REQUEST_METADATA_NAME,
+    PULL_REQUEST_PUBLISH_REVIEW_NAME, PostgresConversationIntrospection,
+    PostgresProviderModelExecution, PostgresProviderToolLoopExecution, PostgresSessionStatusWriter,
+    ProcessRuntime, READ_FILE_NAME, REVIEW_GATE_CHECK_NAME, RerunFailedJobsResult,
+    ReviewAuthorClass, ReviewDispositionClass, ReviewGateCheckResult, ReviewGatePurpose,
+    ReviewThread, ReviewThreadComment, ReviewThreadFields, ReviewThreadInventoryFields,
+    ReviewThreadInventoryItem, ReviewThreadResolution, ReviewThreadsResult,
+    ReviewerVerdictEvidence, ReviewerVerdictFields, ReviewerVerdictStatus, SessionStatusWrite,
+    SessionStatusWriteOutcome, SessionStatusWriter, StackStateFields, StackStateResult,
+    ThreadInventoryResult, ThreadReplyResult, ThreadResolveResult, TranscriptPage, WRITE_FILE_NAME,
+    WebFetchBodyCompleteness, WebFetchEgressPolicy, WebFetchRequest, WebFetchResponse,
+    WebFetchTransport, WebFetchTransportFailure,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use tempfile::tempdir;
@@ -135,6 +137,10 @@ fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin 
 const FIXTURE_ID_SEED: u128 = 0x3100;
 const DECISION_COMMAND_ID: u128 = 0x3110;
 const OFFLINE_CODE_HOST_TOKEN: &[u8] = b"offline-code-host-token";
+
+const fn code_host_bounds() -> CodeHostNumericBounds {
+    CodeHostNumericBounds::new(None, None, None, None, None, None)
+}
 const FIXTURE_USER_CONTENT: &str = "offline tool-loop request";
 const PROCESS_MODEL_CONFIGURATION: &str = r#"
 version = 1
@@ -171,7 +177,7 @@ context_window_tokens = 200000
 "#;
 
 fn approval_judge_model_configuration() -> HubModelConfiguration {
-    HubModelConfiguration::parse(&format!(
+    support::parse_model_configuration(&format!(
         r#"
 version = 1
 
@@ -214,6 +220,7 @@ context_window_tokens = 200000
 #[derive(Clone, Debug)]
 struct RecordingScriptedModel {
     inner: Arc<ScriptedModel<ModelCallId>>,
+    shutdown_after_execute: Option<watch::Sender<bool>>,
 }
 
 type FixtureProvider = RuntimeModelCallProvider<RecordingScriptedModel>;
@@ -261,7 +268,11 @@ impl ModelRuntime<ModelCallId> for RecordingScriptedModel {
         sink: &mut (dyn ObservationSink<ModelCallId> + Send),
         cancellation: CancellationSignal,
     ) -> TerminalReport<ModelCallId> {
-        self.inner.execute(prepared, sink, cancellation).await
+        let report = self.inner.execute(prepared, sink, cancellation).await;
+        if let Some(shutdown) = &self.shutdown_after_execute {
+            shutdown.send_replace(true);
+        }
+        report
     }
 }
 
@@ -393,12 +404,99 @@ impl ToolLoopFixture {
         Executor: ToolExecutor + Clone + Send + 'static,
         Executor::Error: Send + 'static,
     {
+        self.execution_with_model_shutdown(scripts, catalog, executor, None)
+    }
+
+    fn execution_requesting_shutdown<Catalog, Executor>(
+        &self,
+        scripts: impl IntoIterator<Item = Script>,
+        catalog: Catalog,
+        executor: Executor,
+        shutdown: watch::Sender<bool>,
+    ) -> (
+        FixtureExecution<Catalog, Executor>,
+        Arc<ScriptedModel<ModelCallId>>,
+    )
+    where
+        Catalog: signalbox_application::ToolCatalog + Clone + Send + 'static,
+        Executor: ToolExecutor + Clone + Send + 'static,
+        Executor::Error: Send + 'static,
+    {
+        self.execution_with_model_shutdown(scripts, catalog, executor, Some(shutdown))
+    }
+
+    fn execution_with_model_shutdown<Catalog, Executor>(
+        &self,
+        scripts: impl IntoIterator<Item = Script>,
+        catalog: Catalog,
+        executor: Executor,
+        shutdown_after_execute: Option<watch::Sender<bool>>,
+    ) -> (
+        FixtureExecution<Catalog, Executor>,
+        Arc<ScriptedModel<ModelCallId>>,
+    )
+    where
+        Catalog: signalbox_application::ToolCatalog + Clone + Send + 'static,
+        Executor: ToolExecutor + Clone + Send + 'static,
+        Executor::Error: Send + 'static,
+    {
+        self.execution_with_model_shutdown_and_limit(
+            scripts,
+            catalog,
+            executor,
+            shutdown_after_execute,
+            None,
+        )
+    }
+
+    fn execution_with_tool_round_limit<Catalog, Executor>(
+        &self,
+        scripts: impl IntoIterator<Item = Script>,
+        catalog: Catalog,
+        executor: Executor,
+        automatic_tool_round_limit: Option<usize>,
+    ) -> (
+        FixtureExecution<Catalog, Executor>,
+        Arc<ScriptedModel<ModelCallId>>,
+    )
+    where
+        Catalog: signalbox_application::ToolCatalog + Clone + Send + 'static,
+        Executor: ToolExecutor + Clone + Send + 'static,
+        Executor::Error: Send + 'static,
+    {
+        self.execution_with_model_shutdown_and_limit(
+            scripts,
+            catalog,
+            executor,
+            None,
+            automatic_tool_round_limit,
+        )
+    }
+
+    fn execution_with_model_shutdown_and_limit<Catalog, Executor>(
+        &self,
+        scripts: impl IntoIterator<Item = Script>,
+        catalog: Catalog,
+        executor: Executor,
+        shutdown_after_execute: Option<watch::Sender<bool>>,
+        automatic_tool_round_limit: Option<usize>,
+    ) -> (
+        FixtureExecution<Catalog, Executor>,
+        Arc<ScriptedModel<ModelCallId>>,
+    )
+    where
+        Catalog: signalbox_application::ToolCatalog + Clone + Send + 'static,
+        Executor: ToolExecutor + Clone + Send + 'static,
+        Executor::Error: Send + 'static,
+    {
         let runtime = Arc::new(ScriptedModel::<ModelCallId>::following(scripts));
         let provider = RuntimeModelCallProvider::new(
             RecordingScriptedModel {
                 inner: Arc::clone(&runtime),
+                shutdown_after_execute,
             },
             self.runtime_models.clone(),
+            None,
         );
         (
             PostgresProviderModelExecution::new(
@@ -409,6 +507,7 @@ impl ToolLoopFixture {
                 ),
                 InProcessAttemptDispatchGate::default(),
                 provider,
+                automatic_tool_round_limit,
             )
             .with_tool_loop(self.tool_dispatch_gate.clone(), catalog, executor)
             .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
@@ -437,12 +536,15 @@ impl ToolLoopFixture {
         let provider = RuntimeModelCallProvider::new(
             RecordingScriptedModel {
                 inner: Arc::clone(&runtime),
+                shutdown_after_execute: None,
             },
             self.runtime_models.clone(),
+            None,
         );
         let judge: Arc<dyn ApprovalJudgeModel> = Arc::new(RuntimeApprovalJudgeModel::new(
             RecordingScriptedModel {
                 inner: Arc::clone(&judge_runtime),
+                shutdown_after_execute: None,
             },
             self.runtime_models.clone(),
         ));
@@ -456,6 +558,7 @@ impl ToolLoopFixture {
                 ),
                 InProcessAttemptDispatchGate::default(),
                 provider,
+                None,
             )
             .with_tool_loop(self.tool_dispatch_gate.clone(), catalog, executor)
             .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
@@ -629,7 +732,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -940,6 +1043,7 @@ struct RecordingExecutor {
     events: Arc<Mutex<Vec<String>>>,
     arguments: Arc<Mutex<Vec<String>>>,
     correlations: Arc<Mutex<Vec<ToolAttemptDispatchCorrelation>>>,
+    shutdown: Option<watch::Sender<bool>>,
 }
 
 impl RecordingExecutor {
@@ -949,6 +1053,17 @@ impl RecordingExecutor {
             events: Arc::new(Mutex::new(Vec::new())),
             arguments: Arc::new(Mutex::new(Vec::new())),
             correlations: Arc::new(Mutex::new(Vec::new())),
+            shutdown: None,
+        }
+    }
+
+    fn completing_and_requesting_shutdown(shutdown: watch::Sender<bool>) -> Self {
+        Self {
+            mode: ExecutorMode::Complete,
+            events: Arc::new(Mutex::new(Vec::new())),
+            arguments: Arc::new(Mutex::new(Vec::new())),
+            correlations: Arc::new(Mutex::new(Vec::new())),
+            shutdown: Some(shutdown),
         }
     }
 
@@ -958,6 +1073,7 @@ impl RecordingExecutor {
             events: Arc::new(Mutex::new(Vec::new())),
             arguments: Arc::new(Mutex::new(Vec::new())),
             correlations: Arc::new(Mutex::new(Vec::new())),
+            shutdown: None,
         }
     }
 
@@ -980,6 +1096,54 @@ impl RecordingExecutor {
             .lock()
             .expect("fixture correlation lock is available")
             .clone()
+    }
+}
+
+/// Requests daemon shutdown whenever the tool loop resolves one exact tool
+/// name, and otherwise answers exactly as the wrapped catalog does.
+///
+/// Only the loop's own attempt preparation and its preflight resolve a single
+/// name; everything earlier reads the advertised snapshot. So the first such
+/// lookup of a batch is the one preceding that batch's attempt checkpoint, and
+/// the request lands between two committed boundaries rather than inside an
+/// issued operation — the interleaving an asynchronous `SIGTERM` produces, and
+/// the one the drive loop's shutdown checks exist to catch.
+#[derive(Clone, Debug)]
+struct ShutdownOnToolResolutionCatalog {
+    inner: CompiledToolCatalog,
+    shutdown: watch::Sender<bool>,
+}
+
+impl ShutdownOnToolResolutionCatalog {
+    const fn new(inner: CompiledToolCatalog, shutdown: watch::Sender<bool>) -> Self {
+        Self { inner, shutdown }
+    }
+}
+
+impl ToolCatalog for ShutdownOnToolResolutionCatalog {
+    fn definitions(&self) -> Box<[ToolDefinition]> {
+        self.inner.definitions()
+    }
+
+    fn definition(&self, name: &ToolName) -> Option<ToolDefinition> {
+        self.shutdown.send_replace(true);
+        self.inner.definition(name)
+    }
+
+    fn validate_arguments(
+        &self,
+        name: &ToolName,
+        arguments: &NormalizedToolArguments,
+    ) -> Result<(), ToolCatalogValidationFailure> {
+        self.inner.validate_arguments(name, arguments)
+    }
+
+    fn preauthorization(
+        &self,
+        name: &ToolName,
+        arguments: &NormalizedToolArguments,
+    ) -> Result<ToolPreauthorization, ToolCatalogValidationFailure> {
+        self.inner.preauthorization(name, arguments)
     }
 }
 
@@ -1145,6 +1309,10 @@ impl CredentialAccess for OfflineCodeHostCredentials {
 struct UnusedCodeHostTransport;
 
 impl CodeHostTransport for UnusedCodeHostTransport {
+    fn numeric_bounds(&self) -> CodeHostNumericBounds {
+        code_host_bounds()
+    }
+
     async fn execute(
         &mut self,
         _operation: CodeHostOperation,
@@ -1418,6 +1586,10 @@ impl RecordingCodeHostTransport {
 }
 
 impl CodeHostTransport for RecordingCodeHostTransport {
+    fn numeric_bounds(&self) -> CodeHostNumericBounds {
+        code_host_bounds()
+    }
+
     async fn execute(
         &mut self,
         operation: CodeHostOperation,
@@ -1720,22 +1892,25 @@ async fn code_host_tool_completes_offline(
 
 fn summary_result() -> CodeHostResult {
     CodeHostResult::Summary(
-        ChangeRequestSummaryResult::try_new(ChangeRequestSummaryFields {
-            number: 17,
-            title: format!(
-                "summary {}",
-                std::str::from_utf8(OFFLINE_CODE_HOST_TOKEN)
-                    .expect("fixture credential is valid UTF-8")
-            ),
-            body: Some(String::from("bounded body")),
-            state: String::from("open"),
-            draft: false,
-            author: Some(String::from("reviewer")),
-            base_ref: String::from("main"),
-            head_ref: String::from("feature"),
-            head_revision: String::from("0123456789abcdef0123456789abcdef01234567"),
-            url: String::from("https://github.example/owner/repository/pull/17"),
-        })
+        ChangeRequestSummaryResult::try_new(
+            code_host_bounds(),
+            ChangeRequestSummaryFields {
+                number: 17,
+                title: format!(
+                    "summary {}",
+                    std::str::from_utf8(OFFLINE_CODE_HOST_TOKEN)
+                        .expect("fixture credential is valid UTF-8")
+                ),
+                body: Some(String::from("bounded body")),
+                state: String::from("open"),
+                draft: false,
+                author: Some(String::from("reviewer")),
+                base_ref: String::from("main"),
+                head_ref: String::from("feature"),
+                head_revision: String::from("0123456789abcdef0123456789abcdef01234567"),
+                url: String::from("https://github.example/owner/repository/pull/17"),
+            },
+        )
         .expect("fixture summary is bounded"),
     )
 }
@@ -1743,9 +1918,16 @@ fn summary_result() -> CodeHostResult {
 fn changed_files_result() -> CodeHostResult {
     CodeHostResult::ChangedFiles(
         ChangedFilesResult::try_new(
+            code_host_bounds(),
             vec![
-                ChangedFile::try_new(String::from("src/lib.rs"), String::from("modified"), 7, 2)
-                    .expect("fixture changed file is bounded"),
+                ChangedFile::try_new(
+                    code_host_bounds(),
+                    String::from("src/lib.rs"),
+                    String::from("modified"),
+                    7,
+                    2,
+                )
+                .expect("fixture changed file is bounded"),
             ],
             CodeHostResultCompleteness::Complete,
         )
@@ -1756,8 +1938,15 @@ fn changed_files_result() -> CodeHostResult {
 fn file_patch_result() -> CodeHostResult {
     CodeHostResult::FilePatch(
         FilePatchResult::try_new(
-            ChangedFile::try_new(String::from("src/lib.rs"), String::from("modified"), 7, 2)
-                .expect("fixture changed file is bounded"),
+            code_host_bounds(),
+            ChangedFile::try_new(
+                code_host_bounds(),
+                String::from("src/lib.rs"),
+                String::from("modified"),
+                7,
+                2,
+            )
+            .expect("fixture changed file is bounded"),
             Some(String::from("@@ -1 +1 @@\n-old\n+new")),
         )
         .expect("fixture patch is bounded"),
@@ -1767,9 +1956,11 @@ fn file_patch_result() -> CodeHostResult {
 fn checks_status_result() -> CodeHostResult {
     CodeHostResult::ChecksStatus(
         ChecksStatusResult::try_new(
+            code_host_bounds(),
             String::from("0123456789abcdef0123456789abcdef01234567"),
             vec![
                 CheckStatus::try_new(
+                    code_host_bounds(),
                     9001,
                     String::from("validate"),
                     String::from("completed"),
@@ -1796,25 +1987,33 @@ fn comment_result() -> CodeHostResult {
 
 fn review_threads_result() -> CodeHostResult {
     let comment = ReviewThreadComment::try_new(
+        code_host_bounds(),
         String::from("PRRC_comment"),
         Some(String::from("reviewer")),
         String::from("please adjust"),
         String::from("https://github.example/comment/7001"),
     )
     .expect("fixture review comment is bounded");
-    let thread = ReviewThread::try_new(ReviewThreadFields {
-        id: String::from("PRRT_thread"),
-        resolved: false,
-        outdated: false,
-        path: String::from("src/lib.rs"),
-        line: Some(12),
-        comments: vec![comment],
-        comments_truncated: false,
-    })
+    let thread = ReviewThread::try_new(
+        code_host_bounds(),
+        ReviewThreadFields {
+            id: String::from("PRRT_thread"),
+            resolved: false,
+            outdated: false,
+            path: String::from("src/lib.rs"),
+            line: Some(12),
+            comments: vec![comment],
+            comments_truncated: false,
+        },
+    )
     .expect("fixture review thread is bounded");
     CodeHostResult::ReviewThreads(
-        ReviewThreadsResult::try_new(vec![thread], CodeHostResultCompleteness::Complete)
-            .expect("fixture review-thread page is bounded"),
+        ReviewThreadsResult::try_new(
+            code_host_bounds(),
+            vec![thread],
+            CodeHostResultCompleteness::Complete,
+        )
+        .expect("fixture review-thread page is bounded"),
     )
 }
 
@@ -1831,6 +2030,7 @@ fn thread_reply_result() -> CodeHostResult {
 fn thread_resolve_result() -> CodeHostResult {
     CodeHostResult::ThreadResolve(
         ThreadResolveResult::try_new(
+            code_host_bounds(),
             String::from("PRRT_thread"),
             ReviewThreadResolution::Resolved,
         )
@@ -1841,6 +2041,7 @@ fn thread_resolve_result() -> CodeHostResult {
 fn ci_job_log_result() -> CodeHostResult {
     CodeHostResult::CiJobLog(
         CiJobLogResult::try_new(
+            code_host_bounds(),
             9001,
             String::from("offline job log"),
             CodeHostResultCompleteness::Complete,
@@ -1864,37 +2065,43 @@ const REVIEW_SLOG_BASE_REF: &str = "main";
 const REVIEW_SLOG_HEAD_REF: &str = "feature";
 
 fn reviewer_verdict_result() -> ReviewerVerdictEvidence {
-    ReviewerVerdictEvidence::try_new(ReviewerVerdictFields {
-        status: ReviewerVerdictStatus::CurrentHead,
-        reviewed_revision: Some(String::from(REVIEW_SLOG_HEAD_REVISION)),
-        reviewed_at: Some(String::from(REVIEW_SLOG_REVIEWED_AT)),
-        starvation_after_verdict: false,
-        latest_starvation_at: None,
-        latest_review_request_at: None,
-        review_request_in_flight: false,
-        source_truncated: false,
-        comments_previous_cursor: None,
-        reviews_previous_cursor: None,
-    })
+    ReviewerVerdictEvidence::try_new(
+        code_host_bounds(),
+        ReviewerVerdictFields {
+            status: ReviewerVerdictStatus::CurrentHead,
+            reviewed_revision: Some(String::from(REVIEW_SLOG_HEAD_REVISION)),
+            reviewed_at: Some(String::from(REVIEW_SLOG_REVIEWED_AT)),
+            starvation_after_verdict: false,
+            latest_starvation_at: None,
+            latest_review_request_at: None,
+            review_request_in_flight: false,
+            source_truncated: false,
+            comments_previous_cursor: None,
+            reviews_previous_cursor: None,
+        },
+    )
     .expect("fixture reviewer verdict is bounded")
 }
 
 fn convergence_state_evidence() -> ConvergenceStateResult {
-    ConvergenceStateResult::try_new(ConvergenceStateFields {
-        head_revision: String::from(REVIEW_SLOG_HEAD_REVISION),
-        mergeable_state: String::from("MERGEABLE"),
-        ci_rollup_state: Some(String::from("SUCCESS")),
-        checks: Vec::new(),
-        checks_truncated: false,
-        checks_next_cursor: None,
-        unresolved_threads: Vec::new(),
-        open_escalations: Vec::new(),
-        buried_escalations: Vec::new(),
-        undispositioned_threads: Vec::new(),
-        threads_truncated: false,
-        threads_next_cursor: None,
-        reviewer: reviewer_verdict_result(),
-    })
+    ConvergenceStateResult::try_new(
+        code_host_bounds(),
+        ConvergenceStateFields {
+            head_revision: String::from(REVIEW_SLOG_HEAD_REVISION),
+            mergeable_state: String::from("MERGEABLE"),
+            ci_rollup_state: Some(String::from("SUCCESS")),
+            checks: Vec::new(),
+            checks_truncated: false,
+            checks_next_cursor: None,
+            unresolved_threads: Vec::new(),
+            open_escalations: Vec::new(),
+            buried_escalations: Vec::new(),
+            undispositioned_threads: Vec::new(),
+            threads_truncated: false,
+            threads_next_cursor: None,
+            reviewer: reviewer_verdict_result(),
+        },
+    )
     .expect("fixture convergence state is bounded")
 }
 
@@ -1903,20 +2110,23 @@ fn convergence_state_result() -> CodeHostResult {
 }
 
 fn stack_state_evidence() -> StackStateResult {
-    StackStateResult::try_new(StackStateFields {
-        number: REVIEW_SLOG_NUMBER,
-        base_ref: String::from(REVIEW_SLOG_BASE_REF),
-        base_revision: String::from(REVIEW_SLOG_BASE_REVISION),
-        head_ref: String::from(REVIEW_SLOG_HEAD_REF),
-        head_revision: String::from(REVIEW_SLOG_HEAD_REVISION),
-        default_ref: String::from(REVIEW_SLOG_BASE_REF),
-        default_revision: String::from(REVIEW_SLOG_BASE_REVISION),
-        base_commits_not_in_head: 0,
-        main_commits_not_in_base: 0,
-        children: Vec::new(),
-        children_truncated: false,
-        children_next_cursor: None,
-    })
+    StackStateResult::try_new(
+        code_host_bounds(),
+        StackStateFields {
+            number: REVIEW_SLOG_NUMBER,
+            base_ref: String::from(REVIEW_SLOG_BASE_REF),
+            base_revision: String::from(REVIEW_SLOG_BASE_REVISION),
+            head_ref: String::from(REVIEW_SLOG_HEAD_REF),
+            head_revision: String::from(REVIEW_SLOG_HEAD_REVISION),
+            default_ref: String::from(REVIEW_SLOG_BASE_REF),
+            default_revision: String::from(REVIEW_SLOG_BASE_REVISION),
+            base_commits_not_in_head: 0,
+            main_commits_not_in_base: 0,
+            children: Vec::new(),
+            children_truncated: false,
+            children_next_cursor: None,
+        },
+    )
     .expect("fixture stack state is bounded")
 }
 
@@ -1925,19 +2135,23 @@ fn stack_state_result() -> CodeHostResult {
 }
 
 fn thread_inventory_evidence() -> ThreadInventoryResult {
-    let thread = ReviewThreadInventoryItem::try_new(ReviewThreadInventoryFields {
-        id: String::from("PRRT_thread"),
-        path: String::from("src/lib.rs"),
-        line: Some(12),
-        resolved: true,
-        outdated: false,
-        author: Some(String::from("review-bot")),
-        author_class: ReviewAuthorClass::Bot,
-        finding_title: String::from("Finding title"),
-        disposition: ReviewDispositionClass::FixNamed,
-    })
+    let thread = ReviewThreadInventoryItem::try_new(
+        code_host_bounds(),
+        ReviewThreadInventoryFields {
+            id: String::from("PRRT_thread"),
+            path: String::from("src/lib.rs"),
+            line: Some(12),
+            resolved: true,
+            outdated: false,
+            author: Some(String::from("review-bot")),
+            author_class: ReviewAuthorClass::Bot,
+            finding_title: String::from("Finding title"),
+            disposition: ReviewDispositionClass::FixNamed,
+        },
+    )
     .expect("fixture inventory item is bounded");
     ThreadInventoryResult::try_new(
+        code_host_bounds(),
         String::from(REVIEW_SLOG_HEAD_REVISION),
         vec![thread],
         false,
@@ -2013,6 +2227,9 @@ impl ToolExecutor for RecordingExecutor {
             .expect("fixture argument lock is available")
             .push(invocation.request().arguments().as_str().to_owned());
         let name = invocation.request().name().as_str().to_owned();
+        if let Some(shutdown) = &self.shutdown {
+            shutdown.send_replace(true);
+        }
         match self.mode {
             ExecutorMode::Complete => Ok(invocation.bind(ToolExecutorEvidence::CompletedText(
                 format!("completed:{name}"),
@@ -2067,10 +2284,11 @@ async fn delegated_park_resumes_into_fresh_judge_composition() -> Result<(), Box
     first_execution
         .execute(Box::new(fixture.activated.clone()))
         .await?;
-    let (scheduled, continuation) = PostgresEligibilitySweep::new(fixture.pool.clone())
-        .find_sessions()
-        .await?
-        .into_parts();
+    let (scheduled, _dispatch_starts, continuation) =
+        PostgresEligibilitySweep::new(fixture.pool.clone())
+            .find_sessions()
+            .await?
+            .into_parts();
     let resumable = PostgresToolLoopRepository::new(fixture.pool.clone())
         .find_resumable_turn(fixture.session)
         .await?;
@@ -2265,6 +2483,267 @@ async fn delegated_escalation_retains_park_for_user_resolution() -> Result<(), B
     assert_eq!(
         model_call_history_count(&fixture.pool, fixture.session).await?,
         3
+    );
+    Ok(())
+}
+
+/// A shutdown requested during an issued tool operation waits for its durable
+/// result, checkpoints there, and lets a successor finish without repeating
+/// the tool or beginning an extra model call before restart.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn shutdown_checkpoints_after_the_issued_tool_before_the_next_model_call()
+-> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let tool_catalog = catalog([tool(
+        "checkpointed",
+        ToolPermissionDefault::Auto,
+        ToolEffectClass::EffectFree,
+    )]);
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    let executor = RecordingExecutor::completing_and_requesting_shutdown(shutdown_sender);
+    let (execution, first_runtime) = fixture.execution(
+        [
+            tool_use_script(&[("checkpointed", "{}")]),
+            completion_script("must remain unused before restart"),
+        ],
+        tool_catalog.clone(),
+        executor.clone(),
+    );
+
+    execution
+        .with_shutdown_checkpoint(shutdown_receiver)
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let active: (String, String) = sqlx::query_as(
+        "SELECT state_kind, active_phase_kind
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(executor.events(), vec![String::from("checkpointed")]);
+    assert_eq!(first_runtime.received_operations().len(), 1);
+    assert_eq!(
+        model_call_history_count(&fixture.pool, fixture.session).await?,
+        1
+    );
+    assert_eq!(active, (String::from("active"), String::from("running")));
+
+    let resumed_executor = RecordingExecutor::completing();
+    let (resumed, second_runtime) = fixture.execution(
+        [completion_script("resumed after the shutdown checkpoint")],
+        tool_catalog,
+        resumed_executor.clone(),
+    );
+    resumed.resume_active(fixture.session).await?;
+
+    assert!(resumed_executor.events().is_empty());
+    assert_eq!(second_runtime.received_operations().len(), 1);
+    assert_eq!(
+        model_call_history_count(&fixture.pool, fixture.session).await?,
+        2
+    );
+    assert_eq!(
+        fixture.transcript_kinds().await?,
+        vec![
+            "origin_accepted_input",
+            "assistant_tool_use",
+            "tool_execution_result",
+            "assistant_text",
+            "turn_completed",
+        ]
+    );
+    Ok(())
+}
+
+/// A shutdown requested during an issued model operation waits for its durable
+/// result, checkpoints there, and lets a successor execute the requested tool
+/// without beginning that tool operation before restart.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn shutdown_checkpoints_after_the_issued_model_before_the_next_tool()
+-> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let tool_catalog = catalog([tool(
+        "checkpointed",
+        ToolPermissionDefault::Auto,
+        ToolEffectClass::EffectFree,
+    )]);
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    let executor = RecordingExecutor::completing();
+    let (execution, first_runtime) = fixture.execution_requesting_shutdown(
+        [tool_use_script(&[("checkpointed", "{}")])],
+        tool_catalog.clone(),
+        executor.clone(),
+        shutdown_sender,
+    );
+
+    execution
+        .with_shutdown_checkpoint(shutdown_receiver)
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let active: (String, String) = sqlx::query_as(
+        "SELECT state_kind, active_phase_kind
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert!(executor.events().is_empty());
+    assert_eq!(first_runtime.received_operations().len(), 1);
+    assert_eq!(
+        model_call_history_count(&fixture.pool, fixture.session).await?,
+        1
+    );
+    assert_eq!(active, (String::from("active"), String::from("running")));
+
+    let (resumed, second_runtime) = fixture.execution(
+        [completion_script("resumed after the shutdown checkpoint")],
+        tool_catalog,
+        executor.clone(),
+    );
+    resumed.resume_active(fixture.session).await?;
+
+    assert_eq!(executor.events(), vec![String::from("checkpointed")]);
+    assert_eq!(second_runtime.received_operations().len(), 1);
+    assert_eq!(
+        model_call_history_count(&fixture.pool, fixture.session).await?,
+        2
+    );
+    assert_eq!(
+        fixture.transcript_kinds().await?,
+        vec![
+            "origin_accepted_input",
+            "assistant_tool_use",
+            "tool_execution_result",
+            "assistant_text",
+            "turn_completed",
+        ]
+    );
+    Ok(())
+}
+
+/// A shutdown requested between two operations checkpoints at the committed
+/// attempt boundary the loop has just reached, issuing neither the tool
+/// operation that boundary prepared nor the continuation provider round beyond
+/// it, and lets a successor finish both.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn shutdown_checkpoints_at_a_committed_boundary_before_the_next_operation()
+-> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    let tool_catalog = ShutdownOnToolResolutionCatalog::new(
+        catalog([tool(
+            "checkpointed",
+            ToolPermissionDefault::Auto,
+            ToolEffectClass::EffectFree,
+        )]),
+        shutdown_sender,
+    );
+    let executor = RecordingExecutor::completing();
+    let (execution, first_runtime) = fixture.execution(
+        [
+            tool_use_script(&[("checkpointed", "{}")]),
+            completion_script("must remain unused before restart"),
+        ],
+        tool_catalog.clone(),
+        executor.clone(),
+    );
+
+    execution
+        .with_shutdown_checkpoint(shutdown_receiver)
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let active: (String, String) = sqlx::query_as(
+        "SELECT state_kind, active_phase_kind
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert!(executor.events().is_empty());
+    assert_eq!(first_runtime.received_operations().len(), 1);
+    assert_eq!(
+        model_call_history_count(&fixture.pool, fixture.session).await?,
+        1
+    );
+    assert_eq!(active, (String::from("active"), String::from("running")));
+
+    let (resumed, second_runtime) = fixture.execution(
+        [completion_script("resumed after the shutdown checkpoint")],
+        tool_catalog,
+        executor.clone(),
+    );
+    resumed.resume_active(fixture.session).await?;
+
+    assert_eq!(executor.events(), vec![String::from("checkpointed")]);
+    assert_eq!(second_runtime.received_operations().len(), 1);
+    assert_eq!(
+        model_call_history_count(&fixture.pool, fixture.session).await?,
+        2
+    );
+    assert_eq!(
+        fixture.transcript_kinds().await?,
+        vec![
+            "origin_accepted_input",
+            "assistant_tool_use",
+            "tool_execution_result",
+            "assistant_text",
+            "turn_completed",
+        ]
+    );
+    Ok(())
+}
+
+/// The daemon's required automatic tool-round policy reaches the production
+/// PostgreSQL tool loop and terminalizes before a disallowed provider call.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn configured_automatic_tool_round_limit_stops_before_the_next_provider_call()
+-> Result<(), Box<dyn Error>> {
+    const TOOL_NAME: &str = "effect_free";
+    const AUTOMATIC_TOOL_ROUND_LIMIT: usize = 1;
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let executor = RecordingExecutor::completing();
+    let (execution, runtime) = fixture.execution_with_tool_round_limit(
+        [
+            tool_use_script(&[(TOOL_NAME, "{}")]),
+            completion_script("must not be observed"),
+        ],
+        catalog([tool(
+            TOOL_NAME,
+            ToolPermissionDefault::Auto,
+            ToolEffectClass::EffectFree,
+        )]),
+        executor.clone(),
+        Some(AUTOMATIC_TOOL_ROUND_LIMIT),
+    );
+
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+
+    assert_eq!(executor.events(), vec![String::from(TOOL_NAME)]);
+    assert_eq!(runtime.received_operations().len(), 1);
+    assert_eq!(
+        fixture.transcript_kinds().await?,
+        vec![
+            "origin_accepted_input",
+            "assistant_tool_use",
+            "tool_execution_result",
+            "turn_failed",
+        ]
     );
     Ok(())
 }
@@ -2732,7 +3211,9 @@ async fn s10_composed_workspace_read_executes_offline() -> Result<(), Box<dyn Er
         serde_json::json!({
             "path": relative_path,
             "content": fixture_content,
+            "offset": 0,
             "bytes_read": fixture_content.len(),
+            "next_offset": fixture_content.len(),
             "total_bytes": fixture_content.len(),
             "truncated": false
         })
@@ -2845,6 +3326,7 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
         "max_bytes": 131072
     })
     .to_string();
+    let expected_user_content = format!(r#"[{{"type":"text","text":"{FIXTURE_USER_CONTENT}"}}]"#);
     let expected_tool_use_content = format!(
         "{}\n{arguments}",
         signalbox_tools_conversations::READ_OWN_CONVERSATION_NAME
@@ -2871,7 +3353,7 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
             "entries": [{
                 "position": 1,
                 "kind": "user",
-                "content": FIXTURE_USER_CONTENT,
+                "content": expected_user_content,
                 "content_truncated": false
             }, {
                 "position": 2,
@@ -3758,10 +4240,11 @@ async fn s02_s10_inv005_inv006_restart_leaves_approval_turn_parked() -> Result<(
     fixture
         .decide(request, ToolApprovalDecision::Approve)
         .await?;
-    let (resumable, continuation) = PostgresEligibilitySweep::new(fixture.pool.clone())
-        .find_sessions()
-        .await?
-        .into_parts();
+    let (resumable, _dispatch_starts, continuation) =
+        PostgresEligibilitySweep::new(fixture.pool.clone())
+            .find_sessions()
+            .await?
+            .into_parts();
     assert!(!continuation);
     assert_eq!(resumable, vec![fixture.session]);
     let (restarted_execution, restarted_runtime) = fixture.execution(
@@ -4191,7 +4674,7 @@ async fn submit_frame_through_process(
         fixture.pool.clone(),
         eligibility_nudge,
         fixture.tool_dispatch_gate.clone(),
-        HubModelConfiguration::parse(PROCESS_MODEL_CONFIGURATION)?,
+        support::parse_model_configuration(PROCESS_MODEL_CONFIGURATION)?,
     );
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let runtime_task = tokio::spawn(runtime.run(shutdown_receiver));
@@ -4364,7 +4847,7 @@ async fn s02_s08_s10_inv016_inv036_steering_consumed_at_continuation_completes()
         .await?;
     let request = fixture.wait_for_requests(1).await?[0];
 
-    let steering_content = InputContent::new(String::from("steer the parked tool round"));
+    let steering_content = UserInputContent::text(String::from("steer the parked tool round"));
     let steering_frame = ClientFrame::try_new_for_version(
         ProtocolVersion::One,
         RequestId::try_new(1)?,

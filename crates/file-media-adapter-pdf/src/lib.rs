@@ -217,6 +217,8 @@ impl FileMediaProvider for PdfProvider {
                 Ok(ProcessorProbeOutput::Candidate {
                     media_type: String::from(MEDIA_TYPE),
                     strength: ProbeStrength::Strong,
+                    evidence_bytes: u64::try_from(prefix.len())
+                        .map_err(|_| FileMediaProviderFailure::Failed)?,
                 })
             } else {
                 Ok(malformed_probe())
@@ -355,6 +357,10 @@ pub fn declaration() -> Result<FileMediaProviderDeclaration, Box<dyn Error>> {
             range_count: signalbox_file_media_runtime::MAX_PROBE_RANGES,
             cumulative_bytes: VALIDATION_SOURCE_BYTES,
         }),
+        validation: signalbox_file_media_runtime::ValidationDeclaration::new(
+            VALIDATION_SOURCE_BYTES,
+            signalbox_file_media_runtime::MAX_VALIDATION_RANGES,
+        ),
         views: vec![text_view, metadata_view],
         reason_codes: vec![
             ReasonCode::try_new(MALFORMED_REASON)?,

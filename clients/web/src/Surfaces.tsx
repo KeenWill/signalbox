@@ -84,14 +84,29 @@ function DialogFrame({
 export function OverlaySurfaces({
   context,
   activeId,
+  importsSurface = false,
+  navigationDisabled = false,
+  navigationContent,
 }: {
   context: CommandContext
   activeId: string
+  importsSurface?: boolean
+  navigationDisabled?: boolean
+  navigationContent?: React.ReactNode
 }) {
   const overlay = useAppSelector((state) => state.app.overlay)
   const close = () => invokeCommand('surface.escape', context)
+  // A surface only registers the hotkey collections its own shell mounts, so both overlays list
+  // the same surface-scoped set. Keyboard help additionally names the escape binding the palette
+  // deliberately hides, because Escape is registered wherever this overlay is mounted.
+  const surfaceScoped = (command: (typeof commandRegistry)[number]) =>
+    command.available(context) &&
+    (!importsSurface || command.category === 'Surface' || command.category === 'Imports')
   const availableCommands = commandRegistry.filter(
-    (command) => command.id !== 'surface.escape' && command.available(context),
+    (command) => command.id !== 'surface.escape' && surfaceScoped(command),
+  )
+  const boundCommands = commandRegistry.filter(
+    (command) => command.bindings.length > 0 && surfaceScoped(command),
   )
 
   return (
@@ -128,27 +143,31 @@ export function OverlaySurfaces({
         onClose={close}
       >
         <dl className="shortcut-list">
-          {availableCommands
-            .filter((command) => command.bindings.length > 0)
-            .map((command) => (
-              <div key={command.id}>
-                <dt>{command.title}</dt>
-                <dd>
-                  {command.bindings.map((binding) => (
-                    <kbd key={binding.label}>{binding.label}</kbd>
-                  ))}
-                </dd>
-              </div>
-            ))}
+          {boundCommands.map((command) => (
+            <div key={command.id}>
+              <dt>{command.title}</dt>
+              <dd>
+                {command.bindings.map((binding) => (
+                  <kbd key={binding.label}>{binding.label}</kbd>
+                ))}
+              </dd>
+            </div>
+          ))}
         </dl>
       </DialogFrame>
       <DialogFrame
         open={overlay === 'navigation'}
-        title="Development scenarios"
-        description="Deterministic projections exercise the real client shell."
+        title={navigationContent ? 'Product navigation' : 'Development scenarios'}
+        description={
+          navigationContent
+            ? 'Choose a Signalbox product surface.'
+            : 'Deterministic projections exercise the real client shell.'
+        }
         onClose={close}
       >
-        <ScenarioNavigation activeId={activeId} onSelect={close} />
+        {navigationContent ?? (
+          <ScenarioNavigation activeId={activeId} onSelect={close} disabled={navigationDisabled} />
+        )}
       </DialogFrame>
     </>
   )
@@ -218,6 +237,11 @@ export interface DiagnosticSnapshot {
   queryStates: string[]
   queryCacheSize: number
   recentActions: readonly string[]
+  loadedImports?: number
+  logicalImports?: number
+  loadedImportEntries?: number
+  selectedImport?: string | null
+  selectedImportPosition?: number | null
 }
 
 // Tunable effective ceiling: the inspector shows a concise recent action tail.

@@ -15,17 +15,12 @@ use std::{
     time::Duration,
 };
 
-// With the runtime's ten-minute exchange deadline, 256 rounds can already hold
-// one progressing turn in provider work for 42 hours 40 minutes and repeat a
-// full-context spend 256 times. Further work is a latency and spend runaway.
-// numeric-bound: ceiling - protects against multi-day latency and repeated provider spend
-const MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN: usize = 256;
-
-// The round ceiling alone does not bound memory: it multiplies against the
-// 32-request batch bound and the 1 MiB argument and result bounds, so 256
-// rounds would admit 16 GiB of retained argument and result text where 32
-// rounds admitted 2 GiB. Retained content is therefore bounded on its own
-// terms, independently of the round ceiling. One maximal round retains 32
+// The configured automatic tool-round ceiling alone does not bound memory: it
+// multiplies against the 32-request batch bound and the 1 MiB argument and
+// result bounds, so a 256-round deployment would admit 16 GiB of retained
+// argument and result text where 32 rounds admitted 2 GiB. Retained content is
+// therefore bounded on its own terms, independently of the round ceiling — and
+// of whether a deployment configured one at all. One maximal round retains 32
 // requests times 1 MiB of arguments plus 1 MiB of results, so this admits four
 // maximal rounds while leaving the round ceiling operative for the
 // kilobyte-scale results real executors return. It bounds every kind of content
@@ -34,27 +29,31 @@ const MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN: usize = 256;
 // blind to it would be multiplied by the same round count it is meant to
 // contain. It also sits far above any provider context window, so it cannot
 // refuse a turn a provider would accept.
-// numeric-bound: ceiling - protects daemon memory against multiplicative retained frontier content
+// numeric-bound: guard - prevents retained frontier content from exhausting daemon memory as rounds multiply
 const MAX_RETAINED_FRONTIER_CONTENT_BYTES: usize = 256 * 1024 * 1024;
+
+// Worst-case compact JSON for maximum checked metadata, u64 length, and digest.
+// numeric-bound: guard - prevents a stub the retained-content sum excludes from growing unbounded
+const MAX_RENDERED_ATTACHMENT_STUB_BYTES: usize = 2_304;
 
 use signalbox_domain::{
     AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText,
-    AuthorizedModelCall, AvailabilitySuccessorModelCallTurn, CompletedModelCallIdentities,
-    ContextCompactionRange, ContextFrontierId, ContextFrontierProjection,
-    ContextFrontierProjectionFailure, CorrelatedModelCallTerminalObservation,
-    CredentialPoolExhaustedModelCallTurn, DangerousToolAutoApproval, DelegationContent,
-    DelegationMessageId, DelegationOutcome, DelegationWaitMode, DirectModelSelection,
-    FailedModelCallTurn, FailedModelCallTurnIdentities, ImportedSourceAttestation, ImportedSpeaker,
-    ImportedText, ImportedTranscriptContent, ImportedTranscriptEntryId, InitialToolApproval,
-    ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
-    ModelCallTerminalOutcome, PhysicalCancellationModelCallTurnIdentities,
-    PreparedModelCallRequest, RecordedUserOverride, RefusedModelCallTurnIdentities,
-    SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SemanticTranscriptEntryRef,
-    SessionConfigurationDefaultsVersion, SessionId, SessionSystemPrompt,
-    StopRequestedModelCallTurn, StoppedToolResponsePartIdentity,
+    AttachmentKind, AuthorizedModelCall, AvailabilitySuccessorModelCallTurn, BlobDigest,
+    CompletedModelCallIdentities, ContextCompactionRange, ContextFrontierId,
+    ContextFrontierProjection, ContextFrontierProjectionFailure,
+    CorrelatedModelCallTerminalObservation, CredentialPoolExhaustedModelCallTurn,
+    DangerousToolAutoApproval, DelegationContent, DelegationMessageId, DelegationOutcome,
+    DelegationWaitMode, DirectModelSelection, FailedModelCallTurn, FailedModelCallTurnIdentities,
+    ImportedSourceAttestation, ImportedSpeaker, ImportedText, ImportedTranscriptContent,
+    ImportedTranscriptEntryId, InitialToolApproval, ModelCallId, ModelCallTerminalIdentities,
+    ModelCallTerminalObservation, ModelCallTerminalOutcome,
+    PhysicalCancellationModelCallTurnIdentities, PreparedModelCallRequest, RecordedUserOverride,
+    RefusedModelCallTurnIdentities, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
+    SemanticTranscriptEntryRef, SessionConfigurationDefaultsVersion, SessionId,
+    SessionSystemPrompt, StopRequestedModelCallTurn, StoppedToolResponsePartIdentity,
     StoppedToolRoundModelCallIdentities, ToolApprovalDecision, ToolAttemptEnd, ToolDenialReason,
     ToolExecutionError, ToolRequest, ToolRequestId, ToolResponsePartIdentity, ToolResultContent,
-    ToolRoundModelCallIdentities, TurnAttemptId, TurnId, UserContent,
+    ToolRoundModelCallIdentities, TurnAttemptId, TurnId, UserContent, UserContentPart,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -76,6 +75,102 @@ impl ModelCallCredentialReference {
     /// Borrows the non-secret reference text.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// One provider-neutral text part derived from ordered accepted-input content.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ModelUserContentPart {
+    /// Exact user-authored text.
+    Text(signalbox_domain::NonEmptyUnicodeText),
+    /// Canonical compact-JSON attachment stub; never attachment bytes.
+    AttachmentStub(ModelAttachmentStub),
+}
+
+impl ModelUserContentPart {
+    /// Borrows the exact provider-visible text for this part.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Text(value) => value.as_str(),
+            Self::AttachmentStub(stub) => stub.as_str(),
+        }
+    }
+
+    fn corresponds_to(&self, source: &UserContentPart) -> bool {
+        match (self, source) {
+            (Self::Text(rendered), UserContentPart::Text { value }) => rendered == value,
+            (
+                Self::AttachmentStub(rendered),
+                UserContentPart::Attachment {
+                    digest,
+                    kind,
+                    media_type,
+                    display_filename,
+                },
+            ) => {
+                rendered.digest == *digest
+                    && rendered.kind == *kind
+                    && &rendered.media_type == media_type
+                    && &rendered.display_filename == display_filename
+            }
+            (Self::Text(_), UserContentPart::Attachment { .. })
+            | (Self::AttachmentStub(_), UserContentPart::Text { .. }) => false,
+        }
+    }
+}
+
+/// Provider-neutral ordered text projection of one accepted input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelUserContent {
+    parts: Box<[ModelUserContentPart]>,
+}
+
+impl ModelUserContent {
+    /// Borrows the ordered provider-visible text and attachment-stub parts.
+    pub fn parts(&self) -> &[ModelUserContentPart] {
+        &self.parts
+    }
+
+    /// Borrows text when the source content is exactly one text part.
+    pub fn single_text(&self) -> Option<&signalbox_domain::NonEmptyUnicodeText> {
+        match self.parts.as_ref() {
+            [ModelUserContentPart::Text(value)] => Some(value),
+            _ => None,
+        }
+    }
+}
+
+impl PartialEq<UserContent> for ModelUserContent {
+    fn eq(&self, other: &UserContent) -> bool {
+        self.parts.len() == other.parts().len()
+            && self
+                .parts
+                .iter()
+                .zip(other.parts())
+                .all(|(rendered, source)| rendered.corresponds_to(source))
+    }
+}
+
+/// Canonical bounded model-visible metadata for one attachment.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ModelAttachmentStub {
+    rendered: String,
+    digest: BlobDigest,
+    kind: AttachmentKind,
+    media_type: signalbox_domain::DeclaredMediaType,
+    display_filename: Option<signalbox_domain::AttachmentDisplayFilename>,
+}
+
+impl ModelAttachmentStub {
+    /// Borrows the exact compact JSON spelling.
+    pub fn as_str(&self) -> &str {
+        &self.rendered
+    }
+}
+
+impl fmt::Debug for ModelAttachmentStub {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ModelAttachmentStub(<redacted>)")
     }
 }
 
@@ -111,8 +206,8 @@ pub enum ModelConversationMessage {
         source: SemanticTranscriptEntryRef,
         /// The immutable accepted input carrying this content.
         accepted_input: AcceptedInputId,
-        /// Exact user-owned content.
-        content: UserContent,
+        /// Ordered provider-neutral text and attachment-stub parts.
+        content: ModelUserContent,
     },
     /// Model-authored task injected into one delegated child's first turn.
     DelegatedTask {
@@ -206,6 +301,73 @@ pub enum ModelToolResultContent {
     Delegation(DelegationOutcome),
 }
 
+#[derive(serde::Serialize)]
+struct SerializedAttachmentEnvelope<'a> {
+    signalbox_attachment: SerializedAttachmentStub<'a>,
+}
+
+#[derive(serde::Serialize)]
+struct SerializedAttachmentStub<'a> {
+    kind: &'static str,
+    media_type: &'a str,
+    display_filename: Option<&'a str>,
+    byte_length: String,
+    digest: String,
+}
+
+/// Renders ordered user content into canonical provider-visible text and
+/// bounded attachment stubs.
+pub fn render_model_user_content(
+    content: UserContent,
+    mut attachment_byte_length: impl FnMut(BlobDigest) -> Option<NonZeroU64>,
+) -> Result<ModelUserContent, ModelFrontierRenderingError> {
+    let parts = content
+        .into_parts()
+        .into_iter()
+        .map(|part| match part {
+            UserContentPart::Text { value } => Ok(ModelUserContentPart::Text(value)),
+            UserContentPart::Attachment {
+                digest,
+                kind,
+                media_type,
+                display_filename,
+            } => {
+                let byte_length = attachment_byte_length(digest)
+                    .ok_or(ModelFrontierRenderingError::MissingAttachmentBlobFact { digest })?;
+                let kind_name = match kind {
+                    AttachmentKind::Image => "image",
+                    AttachmentKind::Document => "document",
+                    AttachmentKind::File => "file",
+                };
+                let serialized = serde_json::to_string(&SerializedAttachmentEnvelope {
+                    signalbox_attachment: SerializedAttachmentStub {
+                        kind: kind_name,
+                        media_type: media_type.as_str(),
+                        display_filename: display_filename
+                            .as_ref()
+                            .map(signalbox_domain::AttachmentDisplayFilename::as_str),
+                        byte_length: byte_length.get().to_string(),
+                        digest: digest.to_string(),
+                    },
+                })
+                .map_err(|_| ModelFrontierRenderingError::AttachmentStubSerialization)?;
+                if serialized.len() > MAX_RENDERED_ATTACHMENT_STUB_BYTES {
+                    return Err(ModelFrontierRenderingError::AttachmentStubBoundExceeded);
+                }
+                Ok(ModelUserContentPart::AttachmentStub(ModelAttachmentStub {
+                    rendered: serialized,
+                    digest,
+                    kind,
+                    media_type,
+                    display_filename,
+                }))
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Vec::into_boxed_slice)?;
+    Ok(ModelUserContent { parts })
+}
+
 fn render_frontier_messages<'a>(
     entries: impl IntoIterator<
         Item = (
@@ -214,6 +376,7 @@ fn render_frontier_messages<'a>(
         ),
     >,
     mut origin_content: impl FnMut(AcceptedInputId) -> Option<UserContent>,
+    mut attachment_byte_length: impl FnMut(BlobDigest) -> Option<NonZeroU64>,
     tool_entries: impl IntoIterator<Item = &'a ResolvedToolConversationEntry>,
 ) -> Result<Box<[ModelConversationMessage]>, ModelFrontierRenderingError> {
     let mut resolved_tools = BTreeMap::new();
@@ -275,6 +438,7 @@ fn render_frontier_messages<'a>(
                         accepted_input: *accepted_input,
                     },
                 )?;
+                let content = render_model_user_content(content, &mut attachment_byte_length)?;
                 messages.push(ModelConversationMessage::User {
                     source,
                     accepted_input: *accepted_input,
@@ -522,6 +686,27 @@ fn render_frontier_messages<'a>(
 /// Reading the lengths of already-resident durable facts allocates nothing,
 /// which is what lets the ceiling be enforced before the clone rather than
 /// after it.
+///
+/// Sums the text a user-content part array carries.
+///
+/// Ordered user content holds text parts and attachment parts. Only the text
+/// parts carry bytes that scale with what the renderer clones; an attachment
+/// part carries a fixed-width digest, a bounded media-type declaration, and an
+/// optional bounded display filename, all of which sit outside this sum for the
+/// same reason the fixed-width identities do. Exactly one text part reduces
+/// this to the single-text length the ceiling counted before user content grew
+/// a part array, so the bound does not move for content that did not change
+/// shape.
+fn user_content_text_bytes(content: &UserContent) -> usize {
+    content
+        .parts()
+        .iter()
+        .fold(0_usize, |total, part| match part {
+            UserContentPart::Text { value } => total.saturating_add(value.as_str().len()),
+            UserContentPart::Attachment { .. } => total,
+        })
+}
+
 fn projected_frontier_content_bytes<'a>(
     entries: impl IntoIterator<
         Item = (
@@ -548,7 +733,7 @@ fn projected_frontier_content_bytes<'a>(
             SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { accepted_input, .. } => {
                 // Absent origin content refuses the render instead of cloning.
-                origin_content(*accepted_input).map_or(0, |content| content.text().as_str().len())
+                origin_content(*accepted_input).map_or(0, user_content_text_bytes)
             }
             SemanticTranscriptEntryPayload::DelegatedTask { content, .. }
             | SemanticTranscriptEntryPayload::DelegationMessage { content, .. } => {
@@ -709,6 +894,7 @@ impl PreparedModelOperation {
         let messages = render_frontier_messages(
             projected_entries,
             |accepted_input| request.origin_content(accepted_input).cloned(),
+            |digest| request.attachment_byte_length(digest),
             projected_tool_entries,
         )?;
         Ok(Self {
@@ -745,6 +931,21 @@ impl PreparedModelOperation {
     pub fn tools(&self) -> &[ToolDefinition] {
         &self.tools
     }
+
+    /// Iterates over attachment digests represented by the rendered request.
+    pub fn attachment_digests(&self) -> impl Iterator<Item = BlobDigest> + '_ {
+        self.messages
+            .iter()
+            .filter_map(|message| match message {
+                ModelConversationMessage::User { content, .. } => Some(content.parts()),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|part| match part {
+                ModelUserContentPart::AttachmentStub(stub) => Some(stub.digest),
+                ModelUserContentPart::Text(_) => None,
+            })
+    }
 }
 
 /// A checked frontier could not be projected into the current text-only input.
@@ -757,6 +958,15 @@ pub enum ModelFrontierRenderingError {
         /// The accepted input whose content was absent.
         accepted_input: AcceptedInputId,
     },
+    /// A referenced attachment lacked its immutable catalog length fact.
+    MissingAttachmentBlobFact {
+        /// Global blob identity whose catalog projection was absent.
+        digest: BlobDigest,
+    },
+    /// Canonical attachment metadata could not be serialized.
+    AttachmentStubSerialization,
+    /// Checked attachment metadata exceeded its derived rendered bound.
+    AttachmentStubBoundExceeded,
     /// Two storage evidence values claimed the same semantic entry.
     DuplicateToolEvidence {
         /// Duplicated source-qualified entry.
@@ -806,6 +1016,15 @@ impl fmt::Display for ModelFrontierRenderingError {
         match self {
             Self::MissingOriginContent { .. } => {
                 formatter.write_str("model frontier origin content is missing")
+            }
+            Self::MissingAttachmentBlobFact { .. } => {
+                formatter.write_str("model frontier attachment catalog fact is missing")
+            }
+            Self::AttachmentStubSerialization => {
+                formatter.write_str("model frontier attachment stub could not be serialized")
+            }
+            Self::AttachmentStubBoundExceeded => {
+                formatter.write_str("model frontier attachment stub exceeded its byte bound")
             }
             Self::DuplicateToolEvidence { .. } => {
                 formatter.write_str("model frontier tool evidence is duplicated")
@@ -908,6 +1127,7 @@ pub trait FailPreparedModelCallTransaction {
         session: SessionId,
         call: ModelCallId,
         cause: PreparedModelCallFailureCause,
+        attachment_failure: Option<AttachmentPreparationFailure>,
         identities: FailedModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
     ) -> impl Future<Output = Result<FailedModelCallTurn, Self::Error>> + Send
@@ -919,6 +1139,7 @@ pub trait FailPreparedModelCallTransaction {
         &mut self,
         session: SessionId,
         call: ModelCallId,
+        attachment_failure: Option<AttachmentPreparationFailure>,
     ) -> impl Future<Output = Result<RetainedPreparedFailureStatus, Self::Error>> + Send;
 }
 
@@ -1114,6 +1335,8 @@ enum RetainedModelCallExecutionStateKind {
         call: ModelCallId,
         /// Exact application reason that must survive the retained retry.
         cause: PreparedModelCallFailureCause,
+        /// Distinct attachment-preparation cause, absent for ordinary capability failure.
+        attachment_failure: Option<AttachmentPreparationFailure>,
     },
     /// Ambiguous authorization still has same-incarnation proof of no send.
     AuthorizationNonConsumption {
@@ -1133,6 +1356,22 @@ enum RetainedModelCallExecutionStateKind {
     },
 }
 
+/// Closed result of preparing rendered attachment authority before provider work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttachmentPreparationFailure {
+    /// Distinct rendered attachments exceed the deployment verification bound.
+    TooLarge {
+        /// Deployment maximum applied before store I/O.
+        maximum_bytes: u64,
+    },
+    /// No recorded replica contains the required attachment.
+    Missing,
+    /// Recorded replicas were readable but failed identity verification.
+    Corrupt,
+    /// No replica verified and at least one candidate was temporarily unavailable.
+    Unavailable,
+}
+
 /// Adapter-local result of credential lookup and capability preparation.
 pub enum ModelCallCapabilityPreparation<Capability> {
     /// A call-bound one-shot capability is ready to move into provider work.
@@ -1141,6 +1380,8 @@ pub enum ModelCallCapabilityPreparation<Capability> {
     Cancelled,
     /// A trustworthy ordinary local failure occurred before send authorization.
     KnownFailure,
+    /// Attachment preparation could not establish authority for the request.
+    AttachmentFailure(AttachmentPreparationFailure),
 }
 
 /// Outcome of one exact provider-native prospective input count.
@@ -1302,6 +1543,8 @@ pub enum ModelCallExecutionOutcome {
     TargetUnavailable(Box<FailedModelCallTurn>),
     /// A trustworthy local capability failure closed the prepared call.
     CapabilityKnownFailure(Box<FailedModelCallTurn>),
+    /// Attachment verification was unavailable; the call remains `Prepared`.
+    AttachmentUnavailable,
     /// A retained prepared failure's earlier commit was proven to have landed.
     CapabilityFailureAlreadyCommitted(ModelCallId),
     /// The automatic tool-round limit closed the prepared call and turn.
@@ -1499,6 +1742,7 @@ pub struct ModelCallExecutionService<
     gate: Gate,
     catalog: Arc<dyn ToolCatalog>,
     retained_state: Option<RetainedModelCallExecutionState>,
+    max_automatic_tool_rounds_per_turn: Option<usize>,
     retained_frontier_content_limit: usize,
 }
 
@@ -1506,6 +1750,10 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
     ModelCallExecutionService<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
 {
     /// Composes every purpose-specific effect role.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the service keeps each effect role and the required deployment policy explicit"
+    )]
     pub fn new(
         ids: Ids,
         prepare: Prepare,
@@ -1514,6 +1762,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         observation: Observation,
         provider: Provider,
         gate: Gate,
+        max_automatic_tool_rounds_per_turn: Option<usize>,
     ) -> Self {
         Self {
             ids,
@@ -1525,6 +1774,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
             gate,
             catalog: Arc::new(NoToolCatalog),
             retained_state: None,
+            max_automatic_tool_rounds_per_turn,
             retained_frontier_content_limit: MAX_RETAINED_FRONTIER_CONTENT_BYTES,
         }
     }
@@ -1557,6 +1807,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         gate: Gate,
         catalog: Arc<dyn ToolCatalog>,
         retained_state: Option<RetainedModelCallExecutionState>,
+        max_automatic_tool_rounds_per_turn: Option<usize>,
     ) -> Self {
         Self {
             ids,
@@ -1568,6 +1819,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
             gate,
             catalog,
             retained_state,
+            max_automatic_tool_rounds_per_turn,
             retained_frontier_content_limit: MAX_RETAINED_FRONTIER_CONTENT_BYTES,
         }
     }
@@ -1589,6 +1841,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         Gate,
         Arc<dyn ToolCatalog>,
         Option<RetainedModelCallExecutionState>,
+        Option<usize>,
     ) {
         (
             self.ids,
@@ -1600,6 +1853,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
             self.gate,
             self.catalog,
             self.retained_state,
+            self.max_automatic_tool_rounds_per_turn,
         )
     }
 
@@ -1660,10 +1914,15 @@ where
                     turn,
                     call,
                     cause,
-                } => match self.failure.reread_failure(session, call).await {
+                    attachment_failure,
+                } => match self
+                    .failure
+                    .reread_failure(session, call, attachment_failure)
+                    .await
+                {
                     Ok(RetainedPreparedFailureStatus::Pending) => {
                         return self
-                            .commit_prepared_failure(session, turn, call, cause)
+                            .commit_prepared_failure(session, turn, call, cause, attachment_failure)
                             .await;
                     }
                     Ok(RetainedPreparedFailureStatus::AlreadyCommitted) => {
@@ -1691,6 +1950,7 @@ where
                                 turn,
                                 call,
                                 cause,
+                                attachment_failure,
                             },
                         });
                         return Err(ModelCallExecutionError::PreparedFailureReread(error));
@@ -1908,18 +2168,25 @@ where
                         turn,
                         call,
                         PreparedModelCallFailureCause::ToolRoundLimitReached,
+                        None,
                     )
                     .await;
             }
             Err(error) => return Err(ModelCallExecutionError::Render(error)),
         };
+        // A deployment that configures no automatic tool-round ceiling leaves the
+        // loop bounded by the retained-content ceiling above and by the turn's
+        // own liveness watchdogs, so an absent limit admits the round rather than
+        // substituting one the operator did not ask for.
         let observed_tool_rounds = automatic_tool_round_count(turn, operation.messages());
-        if observed_tool_rounds >= MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN {
+        if let Some(tool_round_limit) = self.max_automatic_tool_rounds_per_turn
+            && observed_tool_rounds >= tool_round_limit
+        {
             tracing::warn!(
                 session_id = %session.as_uuid(),
                 turn_id = %turn.as_uuid(),
                 model_call_id = %call.into_uuid(),
-                tool_round_limit = MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN,
+                tool_round_limit,
                 observed_tool_rounds,
                 "automatic tool-round limit reached"
             );
@@ -1929,6 +2196,7 @@ where
                     turn,
                     call,
                     PreparedModelCallFailureCause::ToolRoundLimitReached,
+                    None,
                 )
                 .await;
         }
@@ -1949,6 +2217,27 @@ where
                         turn,
                         call,
                         PreparedModelCallFailureCause::CapabilityKnownFailure,
+                        None,
+                    )
+                    .await;
+            }
+            Ok(ModelCallCapabilityPreparation::AttachmentFailure(
+                AttachmentPreparationFailure::Unavailable,
+            )) => {
+                return Ok(ModelCallExecutionOutcome::AttachmentUnavailable);
+            }
+            Ok(ModelCallCapabilityPreparation::AttachmentFailure(
+                failure @ (AttachmentPreparationFailure::TooLarge { .. }
+                | AttachmentPreparationFailure::Missing
+                | AttachmentPreparationFailure::Corrupt),
+            )) => {
+                return self
+                    .commit_prepared_failure(
+                        session,
+                        turn,
+                        call,
+                        PreparedModelCallFailureCause::CapabilityKnownFailure,
+                        Some(failure),
                     )
                     .await;
             }
@@ -2056,6 +2345,7 @@ where
         turn: TurnId,
         call: ModelCallId,
         cause: PreparedModelCallFailureCause,
+        attachment_failure: Option<AttachmentPreparationFailure>,
     ) -> Result<
         ModelCallExecutionOutcome,
         ModelCallExecutionError<
@@ -2072,7 +2362,14 @@ where
             let next_turn = move |_| ids.next_turn_id();
             match self
                 .failure
-                .fail_prepared(session, call, cause, identities, next_turn)
+                .fail_prepared(
+                    session,
+                    call,
+                    cause,
+                    attachment_failure,
+                    identities,
+                    next_turn,
+                )
                 .await
             {
                 Ok(failed) => {
@@ -2100,6 +2397,7 @@ where
                             turn,
                             call,
                             cause,
+                            attachment_failure,
                         },
                     });
                     return Err(ModelCallExecutionError::PreparedFailureCommit(error));
@@ -2337,6 +2635,9 @@ where
             .filter_map(|part| match part {
                 AssistantResponsePart::Text(_) => None,
                 AssistantResponsePart::ToolCall(proposal) => {
+                    if proposal.is_suppressed() {
+                        return Some(InitialToolApproval::RuntimeSafetyDeny);
+                    }
                     let definition = advertised_tools
                         .iter()
                         .find(|definition| definition.name() == proposal.name());
@@ -2518,6 +2819,11 @@ fn report_turn_terminalization(
         "turn terminalized"
     );
 }
+/// Counts one turn's distinct automatic tool rounds in a rendered frontier.
+///
+/// The count is the quantity a deployment's configured ceiling is compared
+/// against; the comparison itself stays at the checkpoint that owns the
+/// configured limit.
 fn automatic_tool_round_count(turn: TurnId, messages: &[ModelConversationMessage]) -> usize {
     messages
         .iter()
@@ -2839,6 +3145,72 @@ mod tests {
         ModelCallCredentialReference::new("fixture-provider-primary")
     }
 
+    fn rendered_text(content: UserContent) -> ModelUserContent {
+        render_model_user_content(content, |_| None)
+            .expect("text-only fixture needs no attachment catalog facts")
+    }
+
+    /// S02 / INV-015 / INV-062: ordered attachment content becomes bounded
+    /// canonical text stubs with metadata visible and blob bytes absent.
+    #[test]
+    fn s02_inv015_inv062_attachment_frontier_renders_ordered_stubs_without_bytes() {
+        let digest = BlobDigest::digest(b"secret blob bytes");
+        let filename =
+            signalbox_domain::AttachmentDisplayFilename::try_new(String::from("scan\".png"))
+                .expect("the fixture display filename is valid");
+        let content = UserContent::try_parts(vec![
+            UserContentPart::try_text(String::from("before"))
+                .expect("the fixture leading text is valid"),
+            UserContentPart::Attachment {
+                digest,
+                kind: AttachmentKind::Image,
+                media_type: signalbox_domain::DeclaredMediaType::try_new(String::from("image/png"))
+                    .expect("the fixture media type is valid"),
+                display_filename: Some(filename),
+            },
+            UserContentPart::try_text(String::from("after"))
+                .expect("the fixture trailing text is valid"),
+        ])
+        .expect("the interleaved fixture content is valid");
+        let expected_stub = format!(
+            r#"{{"signalbox_attachment":{{"kind":"image","media_type":"image/png","display_filename":"scan\".png","byte_length":"17","digest":"{digest}"}}}}"#
+        );
+
+        let rendered = render_model_user_content(content, |candidate| {
+            (candidate == digest)
+                .then_some(NonZeroU64::new(17).expect("the fixture attachment length is positive"))
+        })
+        .expect("the catalog fact covers the exact attachment");
+
+        assert_eq!(rendered.parts()[0].as_str(), "before");
+        assert_eq!(rendered.parts()[1].as_str(), expected_stub);
+        assert_eq!(rendered.parts()[2].as_str(), "after");
+        assert!(!rendered.parts()[1].as_str().contains("secret blob bytes"));
+    }
+
+    #[test]
+    fn maximum_checked_attachment_metadata_fits_the_named_stub_bound() {
+        let digest = BlobDigest::digest(b"maximum metadata fixture");
+        let filename = signalbox_domain::AttachmentDisplayFilename::try_new("\u{1}".repeat(255))
+            .expect("the maximum-byte control filename is valid metadata");
+        let media_type = signalbox_domain::DeclaredMediaType::try_new("\"".repeat(255))
+            .expect("the maximum-byte visible-ASCII media type is valid");
+        let content = UserContent::try_parts(vec![UserContentPart::Attachment {
+            digest,
+            kind: AttachmentKind::Document,
+            media_type,
+            display_filename: Some(filename),
+        }])
+        .expect("the maximum metadata fixture is valid");
+
+        let rendered = render_model_user_content(content, |_| Some(NonZeroU64::MAX))
+            .expect("the derived bound covers maximum checked metadata");
+        let stub = rendered.parts()[0].as_str();
+
+        assert!(stub.len() <= MAX_RENDERED_ATTACHMENT_STUB_BYTES);
+        assert_eq!(stub.len(), 2_242);
+    }
+
     #[test]
     fn delegation_task_message_and_background_result_render_as_typed_inputs() {
         let child = identity(40, SessionId::from_uuid);
@@ -2906,6 +3278,7 @@ mod tests {
                 (result_source, &result),
             ],
             |_| None,
+            |_| None,
             [],
         )
         .expect("typed delegation entries render without accepted-input evidence");
@@ -2970,7 +3343,7 @@ mod tests {
             outcome: Box::new(outcome.clone()),
         };
 
-        let rendered = render_frontier_messages([(source, &result)], |_| None, [])
+        let rendered = render_frontier_messages([(source, &result)], |_| None, |_| None, [])
             .expect("foreground delivery is one correlated tool result");
 
         assert_eq!(
@@ -3832,6 +4205,7 @@ mod tests {
             _session: SessionId,
             _call: ModelCallId,
             _cause: PreparedModelCallFailureCause,
+            _attachment_failure: Option<AttachmentPreparationFailure>,
             _identities: FailedModelCallTurnIdentities,
             _next_reclassified_turn: NextTurn,
         ) -> Result<FailedModelCallTurn, Self::Error>
@@ -3845,6 +4219,7 @@ mod tests {
             &mut self,
             _session: SessionId,
             _call: ModelCallId,
+            _attachment_failure: Option<AttachmentPreparationFailure>,
         ) -> Result<RetainedPreparedFailureStatus, Self::Error> {
             panic!("unused prepared-failure reread")
         }
@@ -3866,6 +4241,7 @@ mod tests {
             _session: SessionId,
             _call: ModelCallId,
             _cause: PreparedModelCallFailureCause,
+            _attachment_failure: Option<AttachmentPreparationFailure>,
             _identities: FailedModelCallTurnIdentities,
             _next_reclassified_turn: NextTurn,
         ) -> Result<FailedModelCallTurn, Self::Error>
@@ -3883,6 +4259,7 @@ mod tests {
             &mut self,
             _session: SessionId,
             _call: ModelCallId,
+            _attachment_failure: Option<AttachmentPreparationFailure>,
         ) -> Result<RetainedPreparedFailureStatus, Self::Error> {
             self.reread_calls += 1;
             self.rereads
@@ -3902,6 +4279,7 @@ mod tests {
         session: SessionId,
         call: ModelCallId,
         cause: PreparedModelCallFailureCause,
+        attachment_failure: Option<AttachmentPreparationFailure>,
         identities: FailedModelCallTurnIdentities,
     }
 
@@ -3920,6 +4298,7 @@ mod tests {
             session: SessionId,
             call: ModelCallId,
             cause: PreparedModelCallFailureCause,
+            attachment_failure: Option<AttachmentPreparationFailure>,
             identities: FailedModelCallTurnIdentities,
             _next_reclassified_turn: NextTurn,
         ) -> Result<FailedModelCallTurn, Self::Error>
@@ -3931,6 +4310,7 @@ mod tests {
                 session,
                 call,
                 cause,
+                attachment_failure,
                 identities,
             });
             self.results
@@ -3942,6 +4322,7 @@ mod tests {
             &mut self,
             _session: SessionId,
             _call: ModelCallId,
+            _attachment_failure: Option<AttachmentPreparationFailure>,
         ) -> Result<RetainedPreparedFailureStatus, Self::Error> {
             panic!("a committed capability failure is never reread")
         }
@@ -4159,6 +4540,45 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct AttachmentFailureProvider {
+        failure: AttachmentPreparationFailure,
+        preparation_count: usize,
+    }
+
+    impl ModelCallProvider for AttachmentFailureProvider {
+        type Capability = ();
+        type Error = FakeError;
+
+        async fn prepare_capability<Cancellation>(
+            &mut self,
+            _operation: PreparedModelOperation,
+            _cancellation: Cancellation,
+        ) -> Result<ModelCallCapabilityPreparation<Self::Capability>, Self::Error>
+        where
+            Cancellation: Future<Output = ()> + Send + 'static,
+        {
+            self.preparation_count += 1;
+            Ok(ModelCallCapabilityPreparation::AttachmentFailure(
+                self.failure,
+            ))
+        }
+
+        async fn invoke<AcceptancePossible, Cancellation>(
+            &mut self,
+            _authorized: AuthorizedModelCall,
+            _capability: Self::Capability,
+            _acceptance_possible: AcceptancePossible,
+            _cancellation: Cancellation,
+        ) -> Result<CorrelatedModelCallTerminalObservation, Self::Error>
+        where
+            AcceptancePossible: FnOnce() + Send,
+            Cancellation: Future<Output = ()> + Send + 'static,
+        {
+            panic!("attachment failure must prevent provider interaction")
+        }
+    }
+
+    #[derive(Debug)]
     struct BoundaryBlockingProvider {
         crossed: Arc<tokio::sync::Notify>,
         finish: Arc<tokio::sync::Notify>,
@@ -4245,7 +4665,14 @@ mod tests {
         };
         assert_eq!(source.source_session(), identity(1, SessionId::from_uuid));
         assert_eq!(*accepted_input, identity(3, AcceptedInputId::from_uuid));
-        assert_eq!(content.text().as_str(), "exact user request");
+        assert_eq!(
+            content
+                .parts()
+                .first()
+                .expect("the fixture has one provider-visible text part")
+                .as_str(),
+            "exact user request"
+        );
     }
 
     /// S34 / INV-046: rendering binds the exact optional frozen-epoch system
@@ -4385,6 +4812,7 @@ mod tests {
             UnusedObservation,
             UnusedProvider,
             InProcessAttemptDispatchGate::default(),
+            None,
         )
         .with_tool_catalog(catalog);
         let advertised_tools = service.catalog.definitions();
@@ -4493,6 +4921,7 @@ mod tests {
             UnusedObservation,
             UnusedProvider,
             InProcessAttemptDispatchGate::default(),
+            None,
         )
         .with_tool_catalog(catalog);
         let observation = tool_response();
@@ -4576,6 +5005,47 @@ mod tests {
             "lifecycle-dependent candidates receive a disjoint identity inventory"
         );
     }
+
+    /// S10 / INV-020 / INV-035: a credential-suppressed proposal bypasses the
+    /// advertised execution policy and receives an automatic safety denial.
+    #[test]
+    fn s10_inv020_inv035_suppressed_proposal_forces_runtime_safety_denial() {
+        let service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: VecDeque::new(),
+                calls: 0,
+            },
+            UnusedFailure,
+            UnusedAuthorization,
+            UnusedObservation,
+            UnusedProvider,
+            InProcessAttemptDispatchGate::default(),
+            None,
+        );
+        let response = signalbox_domain::ToolUsingAssistantResponse::try_from_parts(vec![
+            signalbox_domain::AssistantResponsePart::ToolCall(
+                signalbox_domain::ToolCallProposal::suppressed(
+                    signalbox_domain::ToolName::try_new(String::from("sandboxed_exec"))
+                        .expect("fixture tool name is valid"),
+                ),
+            ),
+        ])
+        .expect("suppressed proposal remains one bounded logical request");
+        let observation = ModelCallTerminalObservation::CompletedWithTools { response };
+
+        assert_eq!(
+            service
+                .tool_approvals(
+                    &observation,
+                    DangerousToolAutoApproval::ApproveAll,
+                    &[],
+                    &[]
+                )
+                .as_ref(),
+            [InitialToolApproval::RuntimeSafetyDeny]
+        );
+    }
     /// S28 / INV-038 / INV-039: attested imported text keeps its exact
     /// source-attested role, semantic source, imported authority, and decoded
     /// text without acquiring a native input or call identity.
@@ -4621,6 +5091,7 @@ mod tests {
         let messages = render_frontier_messages(
             entries.iter().map(|(source, payload)| (*source, payload)),
             |_| panic!("imported text must not request native accepted-input content"),
+            |_| panic!("imported text must not request attachment facts"),
             std::iter::empty(),
         )
         .expect("attested imported text is conservatively renderable");
@@ -4715,6 +5186,7 @@ mod tests {
         let messages = render_frontier_messages(
             entries.iter().map(|(source, payload)| (*source, payload)),
             |_| panic!("imported absence must not request native accepted-input content"),
+            |_| panic!("imported absence must not request attachment facts"),
             std::iter::empty(),
         )
         .expect("typed imported absence is conservatively skipped");
@@ -4849,6 +5321,7 @@ mod tests {
         let messages = render_frontier_messages(
             entries.iter().map(|(source, payload)| (*source, payload)),
             |_| panic!("imported non-text must not request native accepted-input content"),
+            |_| panic!("imported non-text must not request attachment facts"),
             std::iter::empty(),
         )
         .expect("imported non-text is conservatively skipped");
@@ -4944,6 +5417,7 @@ mod tests {
         let messages = render_frontier_messages(
             entries.iter().map(|(source, payload)| (*source, payload)),
             |accepted_input| origin_contents.get(&accepted_input).cloned(),
+            |_| None,
             [],
         )
         .expect("the admitted mixed text frontier renders");
@@ -4962,10 +5436,12 @@ mod tests {
                     accepted_input: AcceptedInputId(
                         00000000-0000-0000-0000-00000000005b,
                     ),
-                    content: Text {
-                        value: NonEmptyUnicodeText(
-                            "inherited user request",
-                        ),
+                    content: ModelUserContent {
+                        parts: [
+                            Text(
+                                NonEmptyUnicodeText(<redacted>),
+                            ),
+                        ],
                     },
                 },
                 Assistant {
@@ -4981,9 +5457,7 @@ mod tests {
                         00000000-0000-0000-0000-00000000005d,
                     ),
                     content: AssistantText(
-                        NonEmptyUnicodeText(
-                            "inherited assistant reply",
-                        ),
+                        NonEmptyUnicodeText(<redacted>),
                     ),
                 },
                 User {
@@ -4998,10 +5472,12 @@ mod tests {
                     accepted_input: AcceptedInputId(
                         00000000-0000-0000-0000-000000000063,
                     ),
-                    content: Text {
-                        value: NonEmptyUnicodeText(
-                            "failed user request",
-                        ),
+                    content: ModelUserContent {
+                        parts: [
+                            Text(
+                                NonEmptyUnicodeText(<redacted>),
+                            ),
+                        ],
                     },
                 },
                 User {
@@ -5016,10 +5492,12 @@ mod tests {
                     accepted_input: AcceptedInputId(
                         00000000-0000-0000-0000-00000000005c,
                     ),
-                    content: Text {
-                        value: NonEmptyUnicodeText(
-                            "current user request",
-                        ),
+                    content: ModelUserContent {
+                        parts: [
+                            Text(
+                                NonEmptyUnicodeText(<redacted>),
+                            ),
+                        ],
                     },
                 },
             ]
@@ -5030,7 +5508,7 @@ mod tests {
             &ModelConversationMessage::User {
                 source: entries[0].0,
                 accepted_input: inherited_input,
-                content: inherited_content,
+                content: rendered_text(inherited_content),
             }
         );
         assert_eq!(
@@ -5046,7 +5524,7 @@ mod tests {
             &ModelConversationMessage::User {
                 source: entries[3].0,
                 accepted_input: failed_input,
-                content: failed_content,
+                content: rendered_text(failed_content),
             }
         );
         assert_eq!(
@@ -5054,7 +5532,7 @@ mod tests {
             &ModelConversationMessage::User {
                 source: entries[5].0,
                 accepted_input: current_input,
-                content: current_content,
+                content: rendered_text(current_content),
             }
         );
     }
@@ -5202,6 +5680,7 @@ mod tests {
         let messages = render_frontier_messages(
             entries.iter().map(|(source, payload)| (*source, payload)),
             |_| None,
+            |_| None,
             evidence.iter(),
         )
         .expect("exact tool evidence renders");
@@ -5285,7 +5764,7 @@ mod tests {
             attempt: cross_turn_attempt,
         };
 
-        let error = render_frontier_messages([(source, &payload)], |_| None, [&evidence])
+        let error = render_frontier_messages([(source, &payload)], |_| None, |_| None, [&evidence])
             .expect_err("cross-turn tool evidence must fail closed");
 
         assert_eq!(
@@ -5310,6 +5789,7 @@ mod tests {
             UnusedObservation,
             UnusedProvider,
             InProcessAttemptDispatchGate::default(),
+            None,
         );
         assert_eq!(
             service
@@ -5342,6 +5822,7 @@ mod tests {
             UnusedObservation,
             UnusedProvider,
             InProcessAttemptDispatchGate::default(),
+            None,
         );
         assert_eq!(
             service
@@ -5371,6 +5852,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityCancelled]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert_eq!(
@@ -5415,6 +5897,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityCancelled]),
             InProcessAttemptDispatchGate::default(),
+            None,
         )
         .with_tool_catalog(catalog);
 
@@ -5460,6 +5943,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityCancelled]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
         assert_eq!(
             service
@@ -5485,6 +5969,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityCancelled]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
         assert_eq!(
             promptless_service
@@ -5522,6 +6007,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityKnownFailure]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert!(matches!(
@@ -5538,12 +6024,23 @@ mod tests {
                     turn,
                     call,
                     cause: PreparedModelCallFailureCause::CapabilityKnownFailure,
+                    attachment_failure: None,
                 },
             })
         );
 
-        let (ids, prepare, failure, authorization, observation, provider, gate, catalog, retained) =
-            service.into_parts();
+        let (
+            ids,
+            prepare,
+            failure,
+            authorization,
+            observation,
+            provider,
+            gate,
+            catalog,
+            retained,
+            tool_round_limit,
+        ) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
         assert_eq!(failure.reread_calls, 0);
@@ -5558,6 +6055,7 @@ mod tests {
             gate,
             catalog,
             retained,
+            tool_round_limit,
         );
         assert!(matches!(
             resumed.execute(identity(99, SessionId::from_uuid)).await,
@@ -5565,7 +6063,7 @@ mod tests {
                 FakeError::Infrastructure
             ))
         ));
-        let (_, prepare, failure, _, _, provider, _, _, retained) = resumed.into_parts();
+        let (_, prepare, failure, _, _, provider, _, _, retained, _) = resumed.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 2);
         assert_eq!(failure.reread_calls, 1);
@@ -5578,6 +6076,7 @@ mod tests {
                     turn,
                     call,
                     cause: PreparedModelCallFailureCause::CapabilityKnownFailure,
+                    attachment_failure: None,
                 },
             })
         );
@@ -5613,6 +6112,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityKnownFailure]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert_eq!(
@@ -5622,7 +6122,7 @@ mod tests {
                 .expect("the capability failure commits"),
             ModelCallExecutionOutcome::CapabilityKnownFailure(Box::new(failed))
         );
-        let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
+        let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
         // The failure must belong to the prepared turn's own session *and*
@@ -5638,6 +6138,94 @@ mod tests {
             "the committed failure must terminalize the prepared call"
         );
         assert_eq!(provider.interaction_count(), 0);
+        assert!(retained.is_none());
+    }
+
+    /// INV-062: a typed attachment failure terminalizes the prepared call
+    /// before durable send authorization or provider interaction, and the
+    /// exact attachment evidence reaches the guarded failure transaction.
+    #[tokio::test]
+    async fn inv062_attachment_failure_closes_before_durable_authorization() {
+        let (request, _) = prepared_fixture();
+        let session = request.session();
+        let failed = failed_turn_fixture();
+        let attachment_failure = AttachmentPreparationFailure::Missing;
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(ready(request))].into(),
+                calls: 0,
+            },
+            ScriptedFailure {
+                results: [Ok(failed.clone())].into(),
+                calls: 0,
+                recorded: Vec::new(),
+            },
+            UnusedAuthorization,
+            UnusedObservation,
+            AttachmentFailureProvider {
+                failure: attachment_failure,
+                preparation_count: 0,
+            },
+            InProcessAttemptDispatchGate::default(),
+            None,
+        );
+
+        assert_eq!(
+            service
+                .execute(session)
+                .await
+                .expect("the typed attachment failure commits before authorization"),
+            ModelCallExecutionOutcome::CapabilityKnownFailure(Box::new(failed))
+        );
+        let (_, _, failure, _, _, provider, _, _, retained, _) = service.into_parts();
+        assert_eq!(failure.calls, 1);
+        let committed = &failure.recorded[0];
+        assert_eq!(
+            committed.cause,
+            PreparedModelCallFailureCause::CapabilityKnownFailure
+        );
+        assert_eq!(committed.attachment_failure, Some(attachment_failure));
+        assert_eq!(provider.preparation_count, 1);
+        assert!(retained.is_none());
+    }
+
+    /// INV-062: unavailable attachment verification leaves the exact call
+    /// prepared without durable failure or send authorization.
+    #[tokio::test]
+    async fn inv062_attachment_unavailable_leaves_prepared_without_authorization() {
+        let (request, _) = prepared_fixture();
+        let session = request.session();
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(ready(request))].into(),
+                calls: 0,
+            },
+            ScriptedFailure {
+                results: [].into(),
+                calls: 0,
+                recorded: Vec::new(),
+            },
+            UnusedAuthorization,
+            UnusedObservation,
+            AttachmentFailureProvider {
+                failure: AttachmentPreparationFailure::Unavailable,
+                preparation_count: 0,
+            },
+            InProcessAttemptDispatchGate::default(),
+            None,
+        );
+
+        assert_eq!(
+            service
+                .execute(session)
+                .await
+                .expect("unavailable attachment verification is a typed retryable outcome"),
+            ModelCallExecutionOutcome::AttachmentUnavailable
+        );
+        let (_, _, failure, _, _, _, _, _, retained, _) = service.into_parts();
+        assert_eq!(failure.calls, 0);
         assert!(retained.is_none());
     }
 
@@ -5668,6 +6256,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityKnownFailure]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert_eq!(
@@ -5677,7 +6266,7 @@ mod tests {
                 .expect("the retried capability failure commits"),
             ModelCallExecutionOutcome::CapabilityKnownFailure(Box::new(failed))
         );
-        let (_, _, failure, _, _, provider, _, _, retained) = service.into_parts();
+        let (_, _, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(failure.calls, 2);
         // Both attempts must address the prepared call — agreeing only with
         // each other would still pass if the service handed the same stale or
@@ -5719,8 +6308,9 @@ mod tests {
     /// capability failure.
     #[tokio::test]
     async fn s15_inv071_tool_round_limit_fires_before_provider_entry() {
+        const CONFIGURED_TOOL_ROUND_LIMIT: usize = 7;
         let (request, tool_entries, failed) =
-            tool_round_saturated_fixture(MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN);
+            tool_round_saturated_fixture(CONFIGURED_TOOL_ROUND_LIMIT);
         let session = request.session();
         // Captured before the request moves into the fake: the committed
         // terminalization has to name *this* saturated call.
@@ -5740,6 +6330,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([]),
             InProcessAttemptDispatchGate::default(),
+            Some(CONFIGURED_TOOL_ROUND_LIMIT),
         );
         let captured = CapturedTelemetry::default();
         let subscriber = tracing_subscriber::fmt()
@@ -5762,7 +6353,7 @@ mod tests {
                 .contains("terminal_outcome=\"tool_round_limit_reached\""),
             "the service terminalization must expose the INV-071 label"
         );
-        let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
+        let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
         // A count alone accepts `fail_prepared` called with an unrelated
@@ -5801,7 +6392,21 @@ mod tests {
             let bytes = match message {
                 ModelConversationMessage::ContextSummary { content, .. }
                 | ModelConversationMessage::Assistant { content, .. } => content.as_str().len(),
-                ModelConversationMessage::User { content, .. } => content.text().as_str().len(),
+                // Mirrors `user_content_text_bytes`: attachment stubs carry a
+                // fixed-width digest and bounded declarations held under
+                // `MAX_RENDERED_ATTACHMENT_STUB_BYTES`, so they sit outside the
+                // retained-content sum on both sides of this comparison.
+                ModelConversationMessage::User { content, .. } => {
+                    content
+                        .parts()
+                        .iter()
+                        .fold(0_usize, |total, part| match part {
+                            ModelUserContentPart::Text(value) => {
+                                total.saturating_add(value.as_str().len())
+                            }
+                            ModelUserContentPart::AttachmentStub(_) => total,
+                        })
+                }
                 ModelConversationMessage::DelegatedTask { content, .. }
                 | ModelConversationMessage::DelegationMessage { content, .. } => {
                     content.as_str().len()
@@ -6087,6 +6692,7 @@ mod tests {
         let messages = render_frontier_messages(
             entries.iter().map(|(source, payload)| (*source, payload)),
             |accepted_input| origin_contents.get(&accepted_input).cloned(),
+            |_| None,
             std::iter::empty(),
         )
         .expect("the payload fixture renders");
@@ -6258,8 +6864,8 @@ mod tests {
     /// spend but not retained memory, which is what this bound supplies.
     #[tokio::test]
     async fn s15_inv071_retained_frontier_content_limit_fires_before_provider_entry() {
-        // Two rounds: far below the round ceiling, so only the retained-content
-        // bound can explain the closure.
+        // Two rounds and no configured round ceiling at all, so only the
+        // retained-content bound can explain the closure.
         let (request, tool_entries, failed) = tool_round_saturated_fixture(2);
         let session = request.session();
         let over_bound_call = request.call().id();
@@ -6278,6 +6884,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([]),
             InProcessAttemptDispatchGate::default(),
+            None,
         )
         .with_retained_frontier_content_limit(0);
         let captured = CapturedTelemetry::default();
@@ -6304,7 +6911,7 @@ mod tests {
             telemetry.contains("terminal_outcome=\"tool_round_limit_reached\""),
             "the service terminalization must expose the INV-071 label"
         );
-        let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
+        let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
         assert_eq!(failure.recorded.len(), 1);
@@ -6333,8 +6940,8 @@ mod tests {
     /// already-committed outcome without entering the provider.
     #[tokio::test]
     async fn inv071_tool_round_limit_ambiguous_commit_round_trips_retained_cause() {
-        let (request, tool_entries, _) =
-            tool_round_saturated_fixture(MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN);
+        const CONFIGURED_TOOL_ROUND_LIMIT: usize = 5;
+        let (request, tool_entries, _) = tool_round_saturated_fixture(CONFIGURED_TOOL_ROUND_LIMIT);
         let session = request.session();
         let turn = request.turn();
         let call = request.call().id();
@@ -6354,6 +6961,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([]),
             InProcessAttemptDispatchGate::default(),
+            Some(CONFIGURED_TOOL_ROUND_LIMIT),
         );
 
         assert!(matches!(
@@ -6370,6 +6978,7 @@ mod tests {
                     turn,
                     call,
                     cause: PreparedModelCallFailureCause::ToolRoundLimitReached,
+                    attachment_failure: None,
                 },
             })
         );
@@ -6380,7 +6989,7 @@ mod tests {
                 .expect("the reread proves the tool-round closure landed"),
             ModelCallExecutionOutcome::ToolRoundLimitAlreadyCommitted(call)
         );
-        let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
+        let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
         assert_eq!(failure.reread_calls, 1);
@@ -6412,6 +7021,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityKnownFailure]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert!(matches!(
@@ -6427,7 +7037,7 @@ mod tests {
                 .expect("the cancellation reread is authoritative"),
             ModelCallExecutionOutcome::NoWork
         );
-        let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
+        let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
         assert_eq!(failure.reread_calls, 1);
@@ -6460,6 +7070,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityKnownFailure]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert!(matches!(
@@ -6475,7 +7086,7 @@ mod tests {
                 .expect("the authoritative reread proves the closure landed"),
             ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(call)
         );
-        let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
+        let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
         assert_eq!(failure.reread_calls, 1);
@@ -6508,6 +7119,7 @@ mod tests {
                 ModelCallTerminalObservation::KnownFailed,
             )]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert!(matches!(
@@ -6516,7 +7128,7 @@ mod tests {
                 FakeError::IdentityCollision
             ))
         ));
-        let (_, prepare, _, authorization, _, provider, _, _, retained) = service.into_parts();
+        let (_, prepare, _, authorization, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(authorization.calls, 1);
         assert_eq!(authorization.reread_calls, 0);
@@ -6545,6 +7157,7 @@ mod tests {
                 ModelCallTerminalObservation::KnownFailed,
             )]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert_eq!(
@@ -6554,7 +7167,7 @@ mod tests {
                 .expect("stale authority is a normal no-send result"),
             ModelCallExecutionOutcome::NoWork
         );
-        let (_, _, _, authorization, _, provider, _, _, retained) = service.into_parts();
+        let (_, _, _, authorization, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(authorization.calls, 1);
         assert_eq!(provider.capability_preparation_count(), 1);
         assert_eq!(provider.interaction_count(), 0);
@@ -6583,6 +7196,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::InteractionOperatorFailure]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
         let error = service
             .execute(identity(1, SessionId::from_uuid))
@@ -6592,7 +7206,7 @@ mod tests {
             error,
             ModelCallExecutionError::Provider(ScriptedModelCallError::InteractionOperatorFailure)
         ));
-        let (_, prepare, _, authorization, _, provider, _, _, _) = service.into_parts();
+        let (_, prepare, _, authorization, _, provider, _, _, _, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(authorization.calls, 1);
         assert_eq!(provider.capability_preparation_count(), 1);
@@ -6635,6 +7249,7 @@ mod tests {
                 ModelCallTerminalObservation::KnownFailed,
             )]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         let error = service
@@ -6672,7 +7287,7 @@ mod tests {
             ModelCallExecutionOutcome::ObservationAlreadyCommitted(call)
         );
         assert!(service.retained_observation().is_none());
-        let (_, _, _, authorization, observation, provider, _, _, _) = service.into_parts();
+        let (_, _, _, authorization, observation, provider, _, _, _, _) = service.into_parts();
         assert_eq!(authorization.calls, 1);
         assert_eq!(authorization.reread_calls, 0);
         assert_eq!(observation.commit_calls, 2);
@@ -6723,6 +7338,7 @@ mod tests {
                 },
             )]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         let error = service
@@ -6741,7 +7357,7 @@ mod tests {
             retained.observation(),
             &ModelCallTerminalObservation::KnownFailed
         );
-        let (_, _, _, authorization, observation, provider, _, _, _) = service.into_parts();
+        let (_, _, _, authorization, observation, provider, _, _, _, _) = service.into_parts();
         assert_eq!(authorization.calls, 1);
         assert_eq!(authorization.reread_calls, 1);
         assert_eq!(observation.commit_calls, 1);
@@ -6781,6 +7397,7 @@ mod tests {
                 ModelCallTerminalObservation::KnownFailed,
             )]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert_eq!(
@@ -6790,7 +7407,8 @@ mod tests {
                 .expect("the complete terminal cancellation is authoritative"),
             ModelCallExecutionOutcome::NoWork
         );
-        let (_, _, _, authorization, observation, provider, _, _, retained) = service.into_parts();
+        let (_, _, _, authorization, observation, provider, _, _, retained, _) =
+            service.into_parts();
         assert_eq!(authorization.calls, 1);
         assert_eq!(authorization.reread_calls, 1);
         assert_eq!(observation.commit_calls, 0);
@@ -6841,6 +7459,7 @@ mod tests {
                 },
             )]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert!(matches!(
@@ -6860,8 +7479,18 @@ mod tests {
             }) if *retained_session == session && **prepared == request
         ));
 
-        let (ids, prepare, failure, authorization, observation, provider, gate, catalog, retained) =
-            service.into_parts();
+        let (
+            ids,
+            prepare,
+            failure,
+            authorization,
+            observation,
+            provider,
+            gate,
+            catalog,
+            retained,
+            tool_round_limit,
+        ) = service.into_parts();
         let mut resumed = ModelCallExecutionService::from_parts(
             ids,
             prepare,
@@ -6872,6 +7501,7 @@ mod tests {
             gate,
             catalog,
             retained,
+            tool_round_limit,
         );
         let error = resumed
             .execute(identity(99, SessionId::from_uuid))
@@ -6889,7 +7519,7 @@ mod tests {
             retained_observation.observation(),
             &ModelCallTerminalObservation::KnownFailed
         );
-        let (_, prepare, _, authorization, observation, provider, _, _, retained) =
+        let (_, prepare, _, authorization, observation, provider, _, _, retained, _) =
             resumed.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(authorization.calls, 1);
@@ -6943,6 +7573,7 @@ mod tests {
                 ModelCallTerminalObservation::KnownFailed,
             )]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert!(matches!(
@@ -6960,7 +7591,8 @@ mod tests {
             })
         ));
 
-        let (_, prepare, _, authorization, observation, provider, _, _, _) = service.into_parts();
+        let (_, prepare, _, authorization, observation, provider, _, _, _, _) =
+            service.into_parts();
         assert_eq!(prepare.calls, 2);
         assert_eq!(authorization.calls, 2);
         assert_eq!(authorization.reread_calls, 2);
@@ -7002,6 +7634,7 @@ mod tests {
                 interaction_count: 0,
             },
             gate,
+            None,
         );
         {
             let execution = service.execute(session);
@@ -7024,7 +7657,7 @@ mod tests {
                 Err(ModelCallExecutionError::Provider(FakeError::Infrastructure))
             ));
         }
-        let (_, _, _, _, _, provider, _, _, _) = service.into_parts();
+        let (_, _, _, _, _, provider, _, _, _, _) = service.into_parts();
         assert_eq!(provider.interaction_count, 1);
     }
 

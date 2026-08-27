@@ -6,16 +6,36 @@ The model-call recovery telemetry vocabulary is re-verified against this PR
 The browser HTTP listener, same-origin static assets, and generated contract
 bootstrap are verified against this PR (`agent/web-http-transport`). The
 composed bounded session descriptor and historical-window routes are verified
-against this PR (`agent/web-session-timeline`). The fleet-attention snapshot and
-monitor stream are verified against this PR (`agent/web-attention-projections`).
-The bounded session catalog route, its hot-page follow stream, and the bounded
-replacement batching are verified against this PR
-(`agent/web-session-catalog-follow`). The typed item, turn, and
-contiguous-region detail routes and their bootstrap advertisement are verified
-against this PR (`agent/web-timeline-detail`).
+against this PR (`agent/web-session-timeline`). The version-two imports
+capabilities and production adapter are verified against this PR
+(`agent/web-discovery-reads`). Contract version two and its blob routes are
+verified against this PR (`agent/web-blob-delivery`). The fleet-attention
+snapshot and monitor stream are verified against this PR
+(`agent/web-attention-projections`). The bounded session catalog route and its
+loopback authority placement are verified against this PR
+(`agent/web-session-catalog-follow`). The bounded lexical-search route and
+generated DTOs are verified against this PR (`agent/web-search-usage`). The
+dedicated browser usage/cost routes and generated DTOs are verified against this
+PR (`agent/web-usage-http`). The repository-watch browser projection and
+Activity surface are verified against this PR
+(`agent/web-attention-activity-surfaces`).
+The typed item, turn, and contiguous-region detail routes and their bootstrap
+advertisement are verified against this PR (`agent/web-timeline-detail`).
 
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
+
+The usable context-ceiling definition and Codex CLI catalog values are
+re-verified against this PR (`agent/daemon-live-codex-effective-window`). The
+bounded Codex CLI startup pin probe is verified against this PR
+(`agent/daemon-live-codex-pin-preflight`).
+
+The required numeric-bound configuration grammar and scheduler admission policy
+are verified against this PR (`agent/bounds-required-config-protocol`). The
+fenced pool floor reconciliation policy is verified against this PR
+(`agent/daemon-live-nondisruptive-pool-reconcile`). The fenced PostgreSQL
+prewarm policy is verified against this PR
+(`agent/daemon-live-configured-pool-prewarm`).
 
 The delegated tool-approval posture, judge selection, and daemon composition are
 verified against the implementing stack through this PR
@@ -26,9 +46,6 @@ and which of them changes its resolved approval, are re-verified against this PR
 The daemon-local Git and execution-tool dependencies are verified against this
 stack through this PR (`agent/daemon-exec-tools`).
 
-The scheduler pass-admission override is verified against this PR
-(`agent/scheduler-pass-pause`).
-
 The derivation of each session's workspace root from the configured root is
 verified against this PR (`agent/per-session-workspaces`).
 
@@ -38,7 +55,12 @@ profile does and does not provide are verified against this PR
 variant is verified against this PR (`agent/kubernetes-bwrap-proc`).
 
 Direct unsandboxed Git execution from sandbox-created linked worktrees is
-verified against this PR (`agent/unsandboxed-worktree-gitdir`).
+verified against this PR (`agent/unsandboxed-worktree-gitdir`). Sandboxed Git
+execution from host-created linked worktrees is verified against this PR
+(`agent/daemon-live-sandbox-linked-worktree-git`).
+
+The explicit read-only Cargo registry cache is verified against this PR
+(`agent/daemon-live-sandbox-provisioning`).
 
 The daemon web-tool composition, Brave credential channel, and shipped human
 postures are verified against PR #433 (`agent/web-search-wiring`).
@@ -177,10 +199,11 @@ stated where each is owned.
   configuration failure. Otherwise the runner socket uses the same private-node
   discipline but has an independent lock, identity, vocabulary, and listener.
 - `SIGNALBOX_WEB_BIND` — optional browser HTTP socket address. Absence binds
-  `127.0.0.1:37231`, keeping the listener on loopback. Explicit addresses must
-  also be loopback because these routes have no application authentication; an
-  invalid, non-Unicode, or non-loopback value fails the `Configuration` phase
-  without logging the value.
+  `127.0.0.1:37231`, keeping the listener on loopback; an explicit socket must
+  also use a loopback address because this browser surface has no application
+  authentication. A non-loopback value fails configuration. A valid loopback
+  socket address is the deployment's opt-in override. An invalid or non-Unicode
+  value fails the `Configuration` phase without logging the value.
 - `SIGNALBOX_WEB_ASSET_ROOT` — optional path to a static production web build.
   An explicitly empty path fails the `Configuration` phase. When absent, non-API
   paths return `404 Not Found`; when present, the daemon serves files from that
@@ -195,41 +218,75 @@ daemon does not emit permissive CORS headers and adds no account, login,
 bearer-token, application-session, TLS, proxy, VPN, or ingress machinery. The
 listener therefore rejects non-loopback binds; any future remote deployment
 requires an explicit authentication and transport-security design first.
-Unauthenticated session descriptor and timeline reads additionally require a
-loopback `Host` authority: `localhost` or an IPv4 or IPv6 loopback address, with
-an optional port. Another authority receives a structured `403 Forbidden`
-transport error with code `non_loopback_host_rejected` before session data is
-read.
+Unauthenticated session reads — the session catalog, session descriptor, session
+timeline, bounded lexical search, bounded usage summary and usage-call detail,
+operator attention snapshot and its follow stream, and the blob descriptor and
+content routes — additionally require a loopback `Host` authority: `localhost`
+or an IPv4 or IPv6 loopback address, with an optional port. Another authority
+receives a structured `403 Forbidden` transport error with code
+`non_loopback_host_rejected` before session data, search results, usage and cost
+results, blob metadata, or blob bytes are read, and before a descriptor read may
+start image derivation work.
 
 `GET /api/bootstrap` describes the production browser contract. It returns the
-exact contract family `signalbox.web-http`, version `1`, the `bounded_json`,
-`same_origin_json_mutations`, and `ndjson_streaming` capabilities, the
-`bounded_session_timeline` and `bounded_session_timeline_detail` capabilities,
-the effective 65,536-byte JSON-body and NDJSON-item hard ceilings, the 256-item
-and 65,536-projected-byte timeline-window ceilings, and the 128-item and
-65,536-projected-body-byte timeline-detail ceilings. The generated browser
-decoder rejects an unknown field, wrong shape, different family, or different
-version rather than interpreting it as the local process protocol. No
-process-protocol frame is a browser DTO. The descriptor and historical-window
-route shapes and semantics are owned by
-[Sessions and the transcript](sessions-and-transcript.md#bounded-browser-session-timeline).
+exact contract family `signalbox.web-http`, version `2`, the `bounded_json`,
+`same_origin_json_mutations`, `ndjson_streaming`, `import_discovery`,
+`imported_continuations`, and `bounded_session_timeline` capabilities, the
+`bounded_session_timeline_detail` capability, the
+`immutable_blob_content`, `blob_derivations`, and `image_derivatives`
+capabilities, the `bounded_lexical_search` and `bounded_usage_cost`
+capabilities, the effective 65,536-byte JSON-body and NDJSON-item hard ceilings,
+the 256-item and 65,536-projected-byte timeline ceilings, the 128-item and
+65,536-projected-body-byte timeline-detail ceilings, and the 512-byte query,
+100-item page, and 512-byte snippet search ceilings. It also advertises the
+256-group usage summary and 100-call usage-detail ceilings. Version two adds the
+bounded import DTOs and routes owned by
+[conversation import](conversation-import.md#bounded-browser-discovery-and-continuation).
+The generated browser decoder rejects an unknown field, wrong shape, different
+family, or different version rather than interpreting it as the local process
+protocol. No process-protocol frame is a browser DTO. The descriptor,
+historical-window, and lexical-search route shapes and semantics are owned by
+[Sessions and the transcript](sessions-and-transcript.md#bounded-browser-session-timeline)
+and its
+[lexical-search section](sessions-and-transcript.md#bounded-browser-lexical-search).
+The descriptor, content, and download routes beneath `/api/blobs/{digest}` are
+the same-origin surface owned by
+[blob storage](blob-storage.md#browser-delivery-views-and-derivations).
 
-The bounded session catalog route and row semantics are owned by
-[Sessions and the transcript](sessions-and-transcript.md#bounded-browser-session-catalog).
-The projection uses one set query over the selected identities and never
-constructs the fleet by following individual sessions.
+`GET /api/attention` returns at most 32 session summaries from one read-only
+repeatable-read snapshot, ordered by session identity. A continuation names the
+last session identity and opens the next keyset page; it is not a count-based or
+fixed-tail feed. Each summary carries the current turn classification, exact
+operator action when one is owed, a typed blocked-goal reason and a need summary
+of at most 128 Unicode scalar values, approval-judge outcome counts, and the
+last publication-timestamped durable activity fact. Exact blocked-goal need text
+remains available from the session detail read rather than entering the hot
+fleet page.
 
-`GET /api/attention/follow` begins with the coherent hot-session catalog page
-and its durable change-journal cursor, then emits summary replacements only for
-changed session identities. One incremental read examines at most 128 journal
+Runner loss, model-call recovery ambiguity, tool recovery, reconciliation,
+approval wait, blocked goal, active, queued, and idle remain distinct states.
+Tool recovery carries no reconciliation action because no current command writes
+that wait. The projection uses one set query over the selected identities and
+never constructs the fleet by following individual sessions.
+
+`GET /api/attention/follow` begins with the first coherent attention page and
+its durable change-journal cursor, then emits summary replacements only for
+changed session identities. One incremental read examines at most 32 journal
 records. A larger cursor gap emits `resync_required` with the current cursor and
 ends that stream; it never skips records or continues from a partial gap. The
-HTTP producer retains at most one bounded 128-summary replacement batch,
-represented as no more than eight 16-summary update items, and waits between
+HTTP producer retains only the item currently being encoded and waits between
 empty polls. An initial projection failure returns a typed HTTP error before
 streaming begins. The append-only change journal timestamps commits explicitly;
 historical creation is seeded only from the durable command claim time and never
 inferred from UUID bits.
+
+Five read-only repository-watch routes expose the durable operator projection:
+`GET /api/repository-watch/repositories`, `pull-requests`, `work`, `sessions`,
+and `activity`. Their projection bounds, keyset continuation semantics, typed
+facts, and read-only behavior are owned by the
+[repository-watch operator read projection](repo-watch.md#operator-read-projection).
+The activity route exposes independently selectable event and webhook cursors
+under that contract; an excluded feed cannot carry a cursor.
 
 Rust serde DTOs and their schemars schemas under `crates/web-contract` are the
 authority. The checked-in `web-contract.mjs` runtime decoders and
@@ -257,6 +314,12 @@ when the response body polls it, carries one trailing newline, and is at most
 own bounded channel supplies backpressure; dropping the browser response drops
 that stream and closes its receiver, cancelling a blocked producer. Static files
 use ordinary HTTP bodies rather than JSON wrapping.
+
+### Bounded browser usage and cost reads
+
+The bounded `/api/usage/summary` and newest-first `/api/usage/calls` routes,
+their filters, pagination, compatibility grouping, and read-time configured-cost
+semantics are owned by [Usage evidence](usage-evidence.md).
 
 `deterministic_test_router` supplies a database-free page plus bounded read,
 mutation, and two-item stream routes. It composes the same bootstrap, mutation
@@ -429,23 +492,24 @@ The registry contains exactly six metric names:
   values are `completed`, `known_failed`, `refused`, `cancelled`, and
   `ambiguous`, counts durable terminal model calls. It separates provider-call
   health and refusal from ambiguity that requires recovery handling.
-- `signalbox_scheduler_passes_in_flight`, with no labels, reports current
-  authoritative scheduler-pass occupancy.
-- `signalbox_scheduler_oldest_in_flight_pass_age_seconds`, with no labels,
-  reports the oldest admitted pass's age at scrape time.
-- `signalbox_scheduler_oldest_in_flight_pass_info{session_id}` reports the
-  daemon-minted session UUID of that oldest pass. It has zero or one series and
-  removes the former label value when the oldest pass changes.
+- `signalbox_scheduler_passes_in_flight`, with no labels, is the current count
+  of authoritative scheduler passes holding admission slots.
+- `signalbox_scheduler_oldest_in_flight_pass_age_seconds`, with no labels, is
+  the scrape-time age of the oldest admitted pass, or zero while idle.
+- `signalbox_scheduler_oldest_in_flight_pass_info{session_id}` identifies that
+  oldest pass by its daemon-minted session UUID. It has zero or one series and
+  removes the prior series whenever the oldest pass changes or the loop becomes
+  idle.
 
-All closed-enum label children are allocated at registry construction. The only
-identity label is the scheduler oldest-pass `session_id`; the metric API accepts
-no turn id, model-call id, prompt, completion, or tool value. The terminal
-metric source is the already-committed typed outbox transition, and
-content-bearing input events are ignored. The dispatcher retains only the last
-observed durable sequence, so a retry of that sequence is not counted twice and
-deduplication has constant memory. Metric help and type lines are fixed strings;
-sample values are counters or gauges. There are no tool, queue-depth, or
-database-duration metrics in this surface.
+Counter label children are allocated from closed enums at registry construction.
+The only free-form metric label is the scheduler information gauge's
+daemon-minted `session_id`; no turn id, model-call id, prompt, completion, or
+tool value is accepted. The durable counters use already-committed typed outbox
+transitions, and content-bearing input events are ignored. The dispatcher
+retains only the last observed durable sequence, so a retry of that sequence is
+not counted twice and deduplication has constant memory. Metric help and type
+lines are fixed strings. There are no tool, queue-depth, or database-duration
+metrics in this surface.
 
 The complete OTLP record inventory is:
 
@@ -616,6 +680,14 @@ fail-closed:
   this branch installs the grammar in the parser and updates that file in the
   same change, so it declares `adapter` and `delivery` on every profile and maps
   each family through a `[[credential_pools]]` entry.
+- The `[numeric_bounds]` table is required and contains every deployment-owned
+  numeric policy listed in `config/signalboxd.example.toml`. Integer policies
+  use nonnegative TOML integers and duration policies use an unsigned integer
+  followed by `ms` or `s`. Every field also accepts the single exact string
+  `"none"` for an unbounded deployment policy. Missing fields are one typed
+  startup failure whose sanitized message lists every absent field in schema
+  order; mistyped values, alternate spellings of `"none"`, and unknown fields
+  fail startup. The loader supplies no default for any member of this table.
 - At least one `[[models]]` entry is required: an absent, mistyped, or empty
   models array is rejected (`MissingModels`), so a document containing only
   `version = 1` fails startup.
@@ -663,15 +735,33 @@ fail-closed:
 - Parse errors are typed, sanitized values; no file content appears in error
   text. (signalboxd erases the type before logging, as described above.)
 
-The optional `[scheduler]` table has exactly one `max_in_flight_passes` integer
-from 0 through 16. It replaces the scheduler's fixed 16-pass baseline for this
-daemon process. Omission keeps that baseline. A positive limit bounds concurrent
-authoritative per-session passes, not the durable queue: excess eligible
-sessions remain recorded and are admitted as passes finish. Zero pauses
+The required `numeric_bounds.scheduler_pass_admission_cap` policy bounds
+concurrent authoritative per-session passes, not the durable queue: excess
+eligible sessions remain recorded and are admitted as passes finish. Zero pauses
 authoritative session execution while the scheduler task and the daemon's
-ingestion and process services remain live; durable queued work is unchanged. A
-value above 16, a mistyped value, or an unknown field fails startup as invalid
-scheduler settings.
+ingestion and process services remain live; `"none"` admits every currently
+eligible session. The retired optional `[scheduler]` table is an unknown root
+field.
+
+The required finite, positive `numeric_bounds.codex_cli_version_probe_bound`
+policy bounds the credential-free startup probe that asks a configured Codex CLI
+executable for its version. A missing, malformed, unbounded, zero, unsuccessful,
+or mismatched probe fails configuration before the socket opens; the executable
+must report the exact version compiled into the adapter from the installation
+manifest.
+
+The required `numeric_bounds.fenced_pool_min_connections` policy controls how
+many fenced PostgreSQL sessions are established before daemon work begins;
+`"none"` preserves SQLx's zero-session floor. A finite value above the daemon's
+compiled pool ceiling is rejected during configuration rather than silently
+clamped. A positive floor also requires finite, positive
+`fenced_pool_floor_reconciliation_interval` and
+`fenced_pool_floor_reconciliation_attempt_bound` policies. The runtime
+periodically observes sessions retired after startup without consuming any idle
+service capacity. Once ordinary demand has consumed the idle inventory, one
+bounded attempt adds one missing physical session and returns it; failed,
+timed-out, or concurrently invalidated attempts retry after the configured
+interval. A zero or `"none"` floor disables that reconciliation.
 
 The optional `[model_settings]` table supplies the deployment-global settings
 overlay. Each `[[model_settings_profiles]]` entry gives an exact unique `name`
@@ -905,13 +995,14 @@ value. A missing table, unknown field, invalid value, or identity construction
 failure is a sanitized configuration failure.
 
 The complete mapped composition also requires one `[daemon_tools]` table with
-exactly `exec_supervisor_executable`. The value is an absolute path to an
-existing file naming the separately packaged `signalbox-exec-supervisor`
-program. A missing table, unknown field, relative path, or path that is not a
-file is a sanitized configuration failure. Production resolves an admitted
-symlink to its canonical regular-file path and passes that canonical path to the
-execution suite, which pins the program during construction; the daemon never
-derives it from its own executable path.
+`exec_supervisor_executable` and admits the optional `cargo_registry_cache`. The
+executable value is an absolute path to an existing file naming the separately
+packaged `signalbox-exec-supervisor` program. The cache value, when present, is
+an absolute path to an existing directory. A missing table, unknown field,
+relative path, or wrong path kind is a sanitized configuration failure.
+Production resolves admitted paths to their canonical targets; the execution
+suite pins both the program and optional cache during construction. The daemon
+never derives either from its own executable path or home directory.
 
 The configured root is opened once during tool construction and its pinned
 authority is cloned into both workspace suites. The local Git suite
@@ -1206,23 +1297,36 @@ resolved posture; family composition itself does not.
 
 On Linux, `unsandboxed_exec` pins the requested host working directory before
 launch. When the direct program is Git and that directory is a linked worktree
-whose `.git` marker names an administration directory below the sandbox-only
-`/workspace` path, execution pins the corresponding directory below the injected
-workspace root and supplies the pinned administration and worktree paths through
-Git's environment. Discovery stops at the first `.git` entry, so a nested clone
-or submodule never inherits an outer worktree's environment, and explicit Git
-repository selectors (`-C`, `--git-dir`, or `--work-tree`) suppress injection.
-The repository-creating commands `init` and `clone` also suppress injection,
-because each establishes a new repository rather than operating on the current
-one, and an inherited `GIT_WORK_TREE` makes `clone` refuse its destination.
-Before injection, execution atomically rewrites the linked-worktree
-administration directory's sandbox-only `gitdir` backlink to the corresponding
-host marker path so host-side worktree maintenance does not prune the live
-worktree. That durable metadata write exposes the host workspace path to the
-sandbox-side view and can make sandbox-side worktree maintenance unable to
-resolve the backlink; callers needing that view must recreate the linked
-worktree there. Other programs and other `.git` marker shapes receive no
-Git-specific environment or metadata mutation.
+whose `.git` marker names an administration directory below either the
+sandbox-only `/workspace` path or the injected host workspace root, execution
+pins the corresponding directory below that root and supplies the pinned
+administration and worktree paths through Git's environment. Discovery stops at
+the first `.git` entry, so a nested clone or submodule never inherits an outer
+worktree's environment, and explicit Git repository selectors (`-C`,
+`--git-dir`, or `--work-tree`) suppress injection. The repository-creating
+commands `init` and `clone` also suppress injection, because each establishes a
+new repository rather than operating on the current one, and an inherited
+`GIT_WORK_TREE` makes `clone` refuse its destination. Before injection,
+execution atomically rewrites the linked-worktree administration directory's
+sandbox-only `gitdir` backlink to the corresponding host marker path so
+host-side worktree maintenance does not prune the live worktree. That durable
+metadata write exposes the host workspace path to the sandbox-side view and can
+make sandbox-side worktree maintenance unable to resolve the backlink; callers
+needing that view must recreate the linked worktree there. Other programs and
+other `.git` marker shapes receive no Git-specific environment or metadata
+mutation.
+
+On Linux, direct Git through `sandboxed_exec` recognizes the same host- and
+sandbox-rooted linked-worktree markers, under the same selector, nested-marker,
+and ownership guards. It pins the administration directory, binds it over its
+corresponding path below `/workspace`, and supplies that path and the requested
+`/workspace` worktree through Git's environment. A marker already written in
+host form — the ordinary case for a worktree created on the host — is verified
+and left alone, so it stays valid without granting another host path or
+rewriting repository state. A marker still in sandbox-only form is rewritten to
+the host form exactly as the unsandboxed path does, with the same trade-off
+recorded above. Other sandboxed programs and marker shapes receive no
+Git-specific mount, environment, or metadata mutation.
 
 `sandboxed_exec` and `cargo_diagnostics` share one daemon-local bubblewrap
 profile. Its name claims more than it delivers, so this page recites the launch
@@ -1244,8 +1348,11 @@ session's bound workspace root read-write at `/workspace`, read-only binds the
 pinned execution supervisor — a host path that need not lie under that root — at
 `/signalbox-exec-dispatch`, and changes directory to `/workspace` or to the
 requested directory beneath it. The child environment is cleared and then set to
-`LANG`, `LC_ALL`, `PATH`, and `HOME=/workspace`. Every command is dispatched
-through the supervisor.
+`LANG`, `LC_ALL`, `PATH`, and `HOME=/workspace`. When `cargo_registry_cache` is
+configured, the profile additionally creates a private writable tmpfs at
+`/cargo-home`, read-only binds the pinned cache at `/cargo-home/registry`, and
+sets `CARGO_HOME=/cargo-home`; replacement or removal of the configured cache
+fails sandbox setup closed. Every command is dispatched through the supervisor.
 
 The profile does not provide the following, and no other daemon-local control
 supplies them:
@@ -1266,8 +1373,11 @@ supplies them:
   identifier among it — that no workspace bind governs, so the readable surface
   is wider than the bound paths alone.
 - `HOME` is the workspace root, so home-relative configuration discovery —
-  `~/.cargo`, `~/.config`, and anything else a program resolves that way — lands
-  inside the writable workspace rather than at a host location.
+  `~/.config` and anything else a program resolves that way — lands inside the
+  writable workspace rather than at a host location. Cargo alone uses the
+  private `/cargo-home` when an explicit registry cache is configured; its
+  registry is read-only while its lock and other transient state remain private
+  to the process.
 - Everything under the workspace root is writable, including the repository's
   `.git`.
 - `cargo_diagnostics` compiles and runs the workspace's own build scripts,
@@ -1311,8 +1421,9 @@ Each `[[models]]` entry defines one direct selection:
   typed startup failure, so a deployment serving one provider through two
   surfaces gives each surface its own spelling.
 - `max_output_tokens` — required positive `u32` output-token ceiling.
-- `context_window_tokens` — required positive `u32` context ceiling, not smaller
-  than `max_output_tokens`.
+- `context_window_tokens` — required positive `u32` usable context ceiling after
+  any provider or adapter reservation, not the provider's larger raw advertised
+  window, and not smaller than `max_output_tokens`.
 - the optional all-or-none rate set — `rate_version`,
   `input_usd_per_million_tokens`, `output_usd_per_million_tokens`,
   `cache_creation_input_usd_per_million_tokens`, and

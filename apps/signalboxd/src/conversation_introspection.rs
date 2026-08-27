@@ -8,10 +8,13 @@ use signalbox_application::{
     ConversationPageReader, ListConversationsService, OperatorFailureClass,
 };
 use signalbox_domain::{
-    ImportedSourceAttestation, ImportedSpeaker, ImportedTranscriptContent, ImportedTranscriptEntry,
+    ImportedSourceAttestation, ImportedSpeaker, ImportedTranscriptContent,
+    ImportedTranscriptEntryInput,
 };
 use signalbox_persistence::{
-    conversation_import::{ImportedConversationRepository, ImportedConversationRepositoryError},
+    conversation_import::{
+        ImportedConversationRepositoryError, ImportedRawBlobStorageError, load_normalized_entries,
+    },
     conversation_listing::{ConversationListingRepository, ConversationListingRepositoryError},
     process_read::{
         ProcessImportedContentKind, ProcessImportedSourceSpeaker, ProcessReadError,
@@ -52,6 +55,12 @@ impl ConversationIntrospectionError {
         }
     }
 
+    const fn corrupt_projection() -> Self {
+        Self {
+            class: OperatorFailureClass::FailClosedCorruption,
+        }
+    }
+
     fn from_listing(error: ConversationListingRepositoryError) -> Self {
         Self {
             class: match error {
@@ -88,6 +97,17 @@ impl ConversationIntrospectionError {
                 }
                 ImportedConversationRepositoryError::IdentityCollision(_) => {
                     OperatorFailureClass::IdentityCollision
+                }
+                ImportedConversationRepositoryError::BlobStorage(
+                    ImportedRawBlobStorageError::Unavailable,
+                ) => OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: false,
+                },
+                ImportedConversationRepositoryError::BlobStorage(
+                    ImportedRawBlobStorageError::Integrity,
+                ) => OperatorFailureClass::FailClosedCorruption,
+                ImportedConversationRepositoryError::BlobCatalog(_) => {
+                    OperatorFailureClass::FailClosedCorruption
                 }
                 ImportedConversationRepositoryError::Corruption(_) => {
                     OperatorFailureClass::FailClosedCorruption
@@ -192,8 +212,7 @@ impl ConversationIntrospectionPort for PostgresConversationIntrospection {
         &mut self,
         request: ImportedTranscriptRequest,
     ) -> Result<Option<TranscriptPage>, Self::Error> {
-        let Some(conversation) = ImportedConversationRepository::new(self.pool.clone())
-            .load(request.conversation())
+        let Some(entries) = load_normalized_entries(&self.pool, request.conversation())
             .await
             .map_err(ConversationIntrospectionError::from_import)?
         else {
@@ -201,7 +220,7 @@ impl ConversationIntrospectionPort for PostgresConversationIntrospection {
         };
         let after = request.after_position().map_or(0, NonZeroU64::get);
         let mut builder = TranscriptPageBuilder::new(request.max_entries(), request.max_bytes());
-        for entry in conversation.entries() {
+        for entry in &entries {
             if entry.position().as_u64() <= after {
                 continue;
             }
@@ -290,7 +309,12 @@ fn visible_process_entry(
             entry_index,
             content,
             ..
-        } => (entry_index, TranscriptEntryKind::User, content),
+        } => (
+            entry_index,
+            TranscriptEntryKind::User,
+            serde_json::to_string(&crate::process_runtime::wire_user_content(&content))
+                .map_err(|_| ConversationIntrospectionError::corrupt_projection())?,
+        ),
         ProcessTranscriptEntry::Assistant {
             entry_index,
             content,
@@ -387,7 +411,7 @@ fn process_imported_marker(kind: ProcessImportedContentKind) -> String {
 }
 
 fn visible_imported_entry(
-    entry: &ImportedTranscriptEntry,
+    entry: &ImportedTranscriptEntryInput,
 ) -> Result<VisibleEntry, ConversationIntrospectionError> {
     let position = NonZeroU64::new(entry.position().as_u64())
         .ok_or_else(ConversationIntrospectionError::caller_bug)?;

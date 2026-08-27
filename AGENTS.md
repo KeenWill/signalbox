@@ -73,6 +73,13 @@ one finished and awaiting owner merge:
 
 - CI is green on the final commit. An owner merge is terminal: a merged pull
   request is converged, and no agent waits for another verdict on landed work.
+- The pull request is open ready for review, which is how every pull request is
+  opened. Draft is only for a branch being force-iterated right now, and the
+  agent that marked it draft marks it ready again before that session ends; a
+  draft left behind is a defect, not a holding state, and pending validation is
+  never a reason to leave one (owner ruling 2026-08-25, after finding opened
+  drafts nobody ever flipped). Validation gates the review request, not the
+  draft flag.
 - Every reviewer comment receives an in-thread reply, never deferred to a later
   wave. For an accepted finding, push the commit or commits that resolve it,
   then reply naming the fixing commit or commits. For a declined finding, reply
@@ -174,8 +181,8 @@ linear and healthy:
   reviewed against that immediate base, not `main`.
 - Verify a base branch still exists before stacking on it; when a base merges,
   fetch and retarget or rebase the remainder without discarding work.
-- Open draft pull requests early so the stack is visible; mark each ready only
-  after its own validation passes.
+- Open pull requests early so the stack is visible, ready for review rather than
+  as drafts, and request each one's review only after its own validation passes.
 - Never force-push or rewrite a shared branch without first proving it necessary
   and safe; preserve owner-authored and externally added changes.
 
@@ -252,8 +259,6 @@ formatting.
 **Operational traps.** Do not adopt the review-slog toolkit as a merge gate
 until its
 [blocking condition](docs/open-questions.md#review-slog-toolkit-adoption) is
-cleared. Do not rely on automatic context compaction until its
-[blocking condition](docs/open-questions.md#automatic-context-compaction) is
 cleared.
 
 Run `git worktree list` before working with another checkout of this clone.
