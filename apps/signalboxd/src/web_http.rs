@@ -5764,10 +5764,15 @@ mod tests {
             .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
-        let waiting = tokio::spawn(
+        let mut waiting = tokio::spawn(
             router_with_snapshot_reader_shutdown(budget, shutdown_receiver).oneshot(request),
         );
-        tokio::task::yield_now().await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut waiting)
+                .await
+                .is_err(),
+            "the held reader permit keeps the snapshot request pending before shutdown"
+        );
 
         shutdown
             .send(true)
