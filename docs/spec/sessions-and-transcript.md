@@ -3,7 +3,8 @@
 The bounded browser session descriptor and historical timeline foundation are
 verified against this PR (`agent/web-session-timeline`). The bounded
 lexical-search projection and query boundary are verified against this PR
-(`agent/web-search-usage`).
+(`agent/web-search-usage`). The bounded browser session catalog is verified
+against this PR (`agent/web-session-catalog-follow`).
 
 Dedicated-compaction usage as the next queued-turn headroom baseline is verified
 against this PR (`agent/fix-headroom-accounting`).
@@ -677,6 +678,40 @@ partial session.
 
 Why (fail closed): a fabricated or partial session would mask corruption and
 launder invalid durable state into valid-looking domain values.
+
+## Bounded browser session catalog
+
+`GET /api/sessions` is the one fleet-wide session chooser and attention read
+model. It returns at most 32 rows from one read-only repeatable-read snapshot,
+the exact filtered total, and the durable attention-journal cursor. The total
+counts filtered session and metadata rows; it never scans transcript or timeline
+records. Each row carries session identity, a title summary of at most 128
+Unicode scalar values with an explicit truncation bit, archive posture, current
+turn, active and queued turn counts, the closed current attention state, exact
+operator action when one is owed, bounded blocked-goal and approval-judge facts,
+and the last explicitly timestamped durable activity. No timestamp is inferred
+from UUID identity bits.
+
+The sequence-backed attention journal is authoritative for activity kind and
+timestamp. A per-session last-activity timestamp maintained from that journal is
+only the indexed keyset substrate; missing substrate fails the catalog read
+closed rather than hiding a session. Session metadata changes publish a session
+fact through the same journal and therefore invalidate a hot follow snapshot.
+
+The default order is descending last activity with ascending session identity as
+the total tie-breaker. The alternate order is ascending session identity. Both
+use exclusive typed keyset continuations; a continuation for one order is
+invalid under the other. Search is an exact case-sensitive substring of title or
+canonical session UUID. A query may additionally require at most eight exact
+tags, whose combined UTF-8 bytes together with search text are at most 1,024,
+and may include archived sessions. Sort and filter state are client-local inputs
+to these bounded reads, not durable session state.
+
+This extends the fleet attention projection rather than maintaining a second
+session-state classifier. Runner loss, tool recovery, recovery ambiguity,
+reconciliation, approval wait, blocked goal, active, queued, and idle remain
+distinct. Page and change reads derive them from the same durable facts and fail
+closed on unknown states or inconsistent shapes.
 
 ## Bounded browser session timeline
 

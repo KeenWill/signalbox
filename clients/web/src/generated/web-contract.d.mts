@@ -470,6 +470,28 @@ export type WebSearchResultSource = {
   readonly kind: "derived_artifact";
 };
 
+export type WebSessionCatalogActivity = {
+  readonly kind: WebAttentionActivityKind;
+  readonly unix_microseconds: WebU64;
+};
+
+export type WebSessionCatalogSort = "last_activity_descending" | "session_identity_ascending";
+
+export type WebSessionCatalogSummary = {
+  readonly action: WebAttentionAction | null;
+  readonly active_turn_count: WebU64;
+  readonly archived: boolean;
+  readonly current_turn_id: string | null;
+  readonly goal_block?: WebAttentionGoalBlock | null;
+  readonly judge: WebAttentionJudgeFacts;
+  readonly last_activity: WebSessionCatalogActivity;
+  readonly queued_turn_count: WebU64;
+  readonly session_id: WebSessionId;
+  readonly state: WebAttentionState;
+  readonly title_summary: string | null;
+  readonly title_truncated: boolean;
+};
+
 export type WebSessionId = string;
 
 export type WebSessionTimelineEventKind = "session_created" | "session_model_settings_changed" | "turn_model_settings_resolved" | "input_accepted" | "goal_turn_retired" | "turn_activated" | "turn_failed" | "model_call_transition" | "tool_batch_transition" | "tool_approval_decided" | "context_compacted" | "turn_completed" | "turn_refused" | "turn_cancelled" | "turn_reconciliation_required" | "runner_state_transition" | "delegation_update" | "delegation_wake";
@@ -642,6 +664,21 @@ export type WebAttentionStreamEvent = {
   readonly kind: "resync_required";
 };
 
+export type WebSessionCatalogSnapshot = {
+  readonly continuation: {
+  readonly kind: "last_activity";
+  readonly session_id: WebSessionId;
+  readonly unix_microseconds: WebU64;
+} | {
+  readonly kind: "session_identity";
+  readonly session_id: WebSessionId;
+} | null;
+  readonly cursor: WebU64;
+  readonly sort: WebSessionCatalogSort;
+  readonly summaries: ReadonlyArray<WebSessionCatalogSummary>;
+  readonly total: WebU64;
+};
+
 export type WebImportListRequest = {
   readonly after?: string | null;
   readonly format?: WebImportFormat | null;
@@ -756,6 +793,7 @@ export function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTi
 export function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;
 export function decodeWebAttentionSnapshot(value: unknown): WebAttentionSnapshot;
 export function decodeWebAttentionStreamEvent(value: unknown): WebAttentionStreamEvent;
+export function decodeWebSessionCatalogSnapshot(value: unknown): WebSessionCatalogSnapshot;
 export function decodeWebImportListRequest(value: unknown): WebImportListRequest;
 export function decodeWebImportListPage(value: unknown): WebImportListPage;
 export function decodeWebImportDescriptor(value: unknown): WebImportDescriptor;

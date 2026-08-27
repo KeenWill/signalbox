@@ -6168,6 +6168,9 @@ impl WorkspaceRecord {
 pub const fn max_attention_snapshot_items() -> u16;
 pub const fn max_attention_goal_summary_characters() -> u16;
 pub const fn max_attention_change_items() -> u16;
+pub const fn max_attention_title_characters() -> u16;
+pub const fn max_attention_filter_tags() -> u8;
+pub const fn max_attention_filter_utf8_bytes() -> u16;
 
 pub struct AttentionCursor(/* private */);
 impl AttentionCursor {
@@ -6185,6 +6188,43 @@ pub enum AttentionState {
     AwaitingReconciliation,
     RunnerLost,
     Idle,
+}
+
+pub enum AttentionSort {
+    LastActivityDescending,
+    SessionIdentityAscending,
+}
+
+pub enum AttentionContinuation {
+    LastActivity { recorded_at: SystemTime, session: SessionId },
+    SessionIdentity(SessionId),
+}
+
+pub struct AttentionQuery { /* private */ }
+impl AttentionQuery {
+    pub fn hot_page() -> Self;
+    pub fn identity_page(after: Option<SessionId>) -> Self;
+    pub fn try_new(
+        search: Option<String>,
+        required_tags: Vec<String>,
+        include_archived: bool,
+        sort: AttentionSort,
+        continuation: Option<AttentionContinuation>,
+    ) -> Result<Self, AttentionQueryError>;
+    pub fn search(&self) -> Option<&str>;
+    pub fn required_tags(&self) -> impl ExactSizeIterator<Item = &str>;
+    pub const fn include_archived(&self) -> bool;
+    pub const fn sort(&self) -> AttentionSort;
+    pub const fn continuation(&self) -> Option<&AttentionContinuation>;
+}
+
+pub enum AttentionQueryError {
+    TooManyTags,
+    InvalidTag,
+    DuplicateTag,
+    InvalidSearch,
+    FilterTooLarge,
+    ContinuationSortMismatch,
 }
 
 pub enum AttentionAction {
@@ -6228,7 +6268,12 @@ pub enum AttentionActivityKind {
 
 pub struct AttentionSummary {
     pub session: SessionId,
+    pub title_summary: Option<String>,
+    pub title_truncated: bool,
+    pub archived: bool,
     pub current_turn: Option<TurnId>,
+    pub active_turn_count: u64,
+    pub queued_turn_count: u64,
     pub state: AttentionState,
     pub action: Option<AttentionAction>,
     pub goal_block: Option<AttentionGoalBlock>,
@@ -6238,8 +6283,10 @@ pub struct AttentionSummary {
 
 pub struct AttentionSnapshot {
     pub cursor: AttentionCursor,
+    pub total: u64,
+    pub sort: AttentionSort,
     pub summaries: Vec<AttentionSummary>,
-    pub continuation_after: Option<SessionId>,
+    pub continuation: Option<AttentionContinuation>,
 }
 
 pub enum AttentionChanges {
@@ -6254,7 +6301,7 @@ pub trait AttentionReader {
     type Error;
     fn snapshot(
         &self,
-        after: Option<SessionId>,
+        query: AttentionQuery,
     ) -> impl Future<Output = Result<AttentionSnapshot, Self::Error>> + Send;
     fn changes_after(
         &self,
@@ -12976,7 +13023,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | **signalbox-domain total**                         | **859 (+12 free fn)**            |
 | application: repo_watch_operations                 | 33 (+2 free fn) (incl. 1 trait)  |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
-| application: attention                             | 12 (+3 free fn) (incl. 1 trait)  |
+| application: attention                             | 16 (+6 free fn) (incl. 1 trait)  |
 | application: blob_derivation                       | 9 (incl. 3 traits)               |
 | application: commissioned_dispatch                 | 6 (incl. 1 trait)                |
 | application: conversation_import                   | 12 (incl. 4 traits)              |
@@ -13008,4 +13055,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop_ports                       | 10 (incl. 3 traits)              |
 | application: turn_liveness                         | 14                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **465 (+25 free fn)**            |
+| **signalbox-application total**                    | **469 (+28 free fn)**            |

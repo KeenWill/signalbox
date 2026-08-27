@@ -4,9 +4,11 @@ use std::{collections::BTreeSet, error::Error, fmt, time::SystemTime};
 
 use signalbox_application::{
     AttentionAction, AttentionActivity, AttentionActivityKind, AttentionBlockedReason,
-    AttentionChanges, AttentionCursor, AttentionGoalBlock, AttentionJudgeFacts, AttentionReader,
-    AttentionSnapshot, AttentionState, AttentionSummary, max_attention_change_items,
+    AttentionChanges, AttentionContinuation, AttentionCursor, AttentionGoalBlock,
+    AttentionJudgeFacts, AttentionQuery, AttentionReader, AttentionSnapshot, AttentionSort,
+    AttentionState, AttentionSummary, max_attention_change_items,
     max_attention_goal_summary_characters, max_attention_snapshot_items,
+    max_attention_title_characters,
 };
 use signalbox_domain::{GoalBlockedReasonKind, SessionId, TurnId};
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
@@ -70,6 +72,15 @@ impl From<AttentionCorruption> for AttentionRepositoryError {
     }
 }
 
+/// One bounded attention page without the catalog-only exact total.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttentionPage {
+    pub cursor: AttentionCursor,
+    pub sort: AttentionSort,
+    pub summaries: Vec<AttentionSummary>,
+    pub continuation: Option<AttentionContinuation>,
+}
+
 /// The automatic-resume attempt limits an operator projection reads.
 ///
 /// Both must be the numbers the daemon's resume planner applies
@@ -126,28 +137,68 @@ impl AttentionRepository {
 
     pub async fn snapshot(
         &self,
-        after: Option<SessionId>,
+        query: AttentionQuery,
     ) -> Result<AttentionSnapshot, AttentionRepositoryError> {
+        let (page, total) = self.read_page(query, true).await?;
+        Ok(AttentionSnapshot {
+            cursor: page.cursor,
+            total,
+            sort: page.sort,
+            summaries: page.summaries,
+            continuation: page.continuation,
+        })
+    }
+
+    /// Reads the bounded legacy attention projection without scanning the
+    /// fleet for the catalog's exact filtered total.
+    pub async fn page(
+        &self,
+        query: AttentionQuery,
+    ) -> Result<AttentionPage, AttentionRepositoryError> {
+        self.read_page(query, false)
+            .await
+            .map(|(page, _total)| page)
+    }
+
+    async fn read_page(
+        &self,
+        query: AttentionQuery,
+        include_total: bool,
+    ) -> Result<(AttentionPage, u64), AttentionRepositoryError> {
         let mut transaction = self.read_transaction().await?;
         let cursor = current_cursor(&mut transaction).await?;
+        let total = if include_total {
+            verify_fact_completeness(&mut transaction).await?;
+            count_catalog_matches(&mut transaction, &query).await?
+        } else {
+            0
+        };
         let mut summaries = load_summaries(
             &mut transaction,
             None,
-            after,
+            Some(&query),
             self.automatic_resume_attempts,
         )
         .await?;
         let has_more = summaries.len() > usize::from(max_attention_snapshot_items());
         summaries.truncate(usize::from(max_attention_snapshot_items()));
-        let continuation_after = has_more
-            .then(|| summaries.last().map(|row| row.session))
+        let continuation = has_more
+            .then(|| {
+                summaries
+                    .last()
+                    .map(|row| continuation_for(row, query.sort()))
+            })
             .flatten();
         transaction.commit().await?;
-        Ok(AttentionSnapshot {
-            cursor,
-            summaries,
-            continuation_after,
-        })
+        Ok((
+            AttentionPage {
+                cursor,
+                sort: query.sort(),
+                summaries,
+                continuation,
+            },
+            total,
+        ))
     }
 
     pub async fn changes_after(
@@ -160,7 +211,7 @@ impl AttentionRepository {
             return Err(AttentionCorruption::Invalid("follow cursor").into());
         }
         let rows = sqlx::query(
-            "SELECT change_sequence, session_id
+            "SELECT change_sequence, session_id, fact_kind
                FROM operator_attention_change
               WHERE change_sequence > $1
               ORDER BY change_sequence
@@ -171,6 +222,16 @@ impl AttentionRepository {
         .fetch_all(&mut *transaction)
         .await?;
         if rows.len() > usize::from(max_attention_change_items()) {
+            transaction.commit().await?;
+            return Ok(AttentionChanges::ResyncRequired { cursor: current });
+        }
+        let membership_changed = rows
+            .iter()
+            .map(|row| row.try_get::<String, _>("fact_kind"))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .any(|fact_kind| fact_kind == "session");
+        if membership_changed {
             transaction.commit().await?;
             return Ok(AttentionChanges::ResyncRequired { cursor: current });
         }
@@ -217,8 +278,8 @@ impl AttentionRepository {
 impl AttentionReader for AttentionRepository {
     type Error = AttentionRepositoryError;
 
-    async fn snapshot(&self, after: Option<SessionId>) -> Result<AttentionSnapshot, Self::Error> {
-        AttentionRepository::snapshot(self, after).await
+    async fn snapshot(&self, query: AttentionQuery) -> Result<AttentionSnapshot, Self::Error> {
+        AttentionRepository::snapshot(self, query).await
     }
 
     async fn changes_after(
@@ -246,13 +307,12 @@ fn cursor_from_i64(value: i64) -> Result<AttentionCursor, AttentionRepositoryErr
     Ok(AttentionCursor::new(value))
 }
 
-const SUMMARY_SQL: &str = r#"
-WITH RECURSIVE selected AS (
-    SELECT session_id FROM session
-     WHERE ($2::uuid[] IS NULL AND ($3::uuid IS NULL OR session_id > $3))
-        OR ($2::uuid[] IS NOT NULL AND session_id = ANY($2))
-     ORDER BY session_id LIMIT $1
-), latest_turn AS (
+macro_rules! summary_sql {
+    ($selection:literal, $ordering:literal) => {
+        concat!(
+            "WITH RECURSIVE selected AS (",
+            $selection,
+            r#"), latest_turn AS (
     SELECT DISTINCT ON (lifecycle.session_id)
            lifecycle.session_id, lifecycle.turn_id, lifecycle.state_kind,
            lifecycle.active_phase_kind, lifecycle.terminal_disposition_kind,
@@ -459,6 +519,11 @@ WITH RECURSIVE selected AS (
 )
 SELECT selected.session_id, turn.turn_id, turn.state_kind AS turn_state,
        turn.active_phase_kind, turn.terminal_disposition_kind,
+       LEFT(metadata.title, $7) AS title_summary,
+       metadata.title IS NOT NULL AND length(metadata.title) > $7 AS title_truncated,
+       COALESCE(metadata.archived, false) AS archived,
+       facts.active_turn_count::text AS active_turn_count,
+       facts.queued_turn_count::text AS queued_turn_count,
        CASE
            WHEN request.approval_posture = 'human' THEN true
            WHEN request.approval_posture = 'delegated' THEN
@@ -510,6 +575,10 @@ SELECT selected.session_id, turn.turn_id, turn.state_kind AS turn_state,
        runner.state_kind AS runner_state,
        activity.fact_kind, activity.recorded_at
   FROM selected
+  LEFT JOIN session_metadata AS metadata
+    ON metadata.session_id = selected.session_id
+  LEFT JOIN session_timeline_fact AS facts
+    ON facts.session_id = selected.session_id
   LEFT JOIN latest_turn AS turn
     ON turn.session_id = selected.session_id
   LEFT JOIN tool_request AS request
@@ -526,13 +595,86 @@ SELECT selected.session_id, turn.turn_id, turn.state_kind AS turn_state,
     ON runner.session_id = selected.session_id
   LEFT JOIN latest_activity AS activity
     ON activity.session_id = selected.session_id
- ORDER BY selected.session_id
+"#,
+            $ordering
+        )
+    };
+}
+
+const SELECT_IDENTITY: &str = summary_sql!(
+    r#"
+    SELECT session_row.session_id
+      FROM session AS session_row
+      LEFT JOIN session_metadata AS metadata USING (session_id)
+     WHERE ($2::uuid[] IS NOT NULL
+            AND session_row.session_id = ANY($2)
+            AND NOT COALESCE(metadata.archived, false))
+        OR ($2::uuid[] IS NULL
+            AND ($3::uuid IS NULL OR session_row.session_id > $3)
+            AND ($8::text IS NULL
+                 OR strpos(COALESCE(metadata.title, ''), $8) > 0
+                 OR strpos(session_row.session_id::text, $8) > 0)
+            AND ($10 OR NOT COALESCE(metadata.archived, false))
+            AND NOT EXISTS (
+                SELECT 1 FROM unnest($9::text[]) AS required(tag)
+                 WHERE NOT EXISTS (
+                    SELECT 1 FROM session_metadata_tag AS stored
+                     WHERE stored.session_id = session_row.session_id
+                       AND stored.tag = required.tag))
+            AND $11::timestamptz IS NULL)
+     ORDER BY session_row.session_id LIMIT $1
+    "#,
+    "ORDER BY selected.session_id"
+);
+
+// The indexed timestamp projection chooses one bounded keyset page. The
+// sequence-backed journal remains authoritative for the activity kind and
+// timestamp decoded into each selected summary.
+const SELECT_LAST_ACTIVITY: &str = summary_sql!(
+    r#"
+    SELECT session_row.session_id
+      FROM session_timeline_fact AS facts
+      JOIN session AS session_row USING (session_id)
+      LEFT JOIN session_metadata AS metadata USING (session_id)
+     WHERE ($8::text IS NULL
+            OR strpos(COALESCE(metadata.title, ''), $8) > 0
+            OR strpos(session_row.session_id::text, $8) > 0)
+       AND ($10 OR NOT COALESCE(metadata.archived, false))
+       AND NOT EXISTS (
+           SELECT 1 FROM unnest($9::text[]) AS required(tag)
+            WHERE NOT EXISTS (
+               SELECT 1 FROM session_metadata_tag AS stored
+                WHERE stored.session_id = session_row.session_id
+                  AND stored.tag = required.tag))
+       AND ($11::timestamptz IS NULL
+            OR facts.attention_activity_recorded_at < $11
+            OR (facts.attention_activity_recorded_at = $11
+                AND session_row.session_id > $3))
+     ORDER BY facts.attention_activity_recorded_at DESC, session_row.session_id LIMIT $1
+    "#,
+    "ORDER BY activity.recorded_at DESC, selected.session_id"
+);
+
+const COUNT_CATALOG_MATCHES_SQL: &str = r#"
+SELECT count(*)
+  FROM session AS session_row
+  LEFT JOIN session_metadata AS metadata USING (session_id)
+ WHERE ($1::text IS NULL
+        OR strpos(COALESCE(metadata.title, ''), $1) > 0
+        OR strpos(session_row.session_id::text, $1) > 0)
+   AND ($3 OR NOT COALESCE(metadata.archived, false))
+   AND NOT EXISTS (
+       SELECT 1 FROM unnest($2::text[]) AS required(tag)
+        WHERE NOT EXISTS (
+           SELECT 1 FROM session_metadata_tag AS stored
+            WHERE stored.session_id = session_row.session_id
+              AND stored.tag = required.tag))
 "#;
 
 pub(crate) async fn load_summaries(
     transaction: &mut Transaction<'_, Postgres>,
     identities: Option<&[Uuid]>,
-    after: Option<SessionId>,
+    query: Option<&AttentionQuery>,
     automatic_resume_attempts: AutomaticResumeAttemptBounds,
 ) -> Result<Vec<AttentionSummary>, AttentionRepositoryError> {
     if identities.is_some_and(<[Uuid]>::is_empty) {
@@ -542,18 +684,125 @@ pub(crate) async fn load_summaries(
         || i64::from(max_attention_snapshot_items()) + 1,
         |values| i64::try_from(values.len()).unwrap_or(i64::MAX),
     );
-    sqlx::query(SUMMARY_SQL)
+    let (sql, after_session, after_activity) = match query {
+        Some(query) => match (query.sort(), query.continuation()) {
+            (
+                AttentionSort::LastActivityDescending,
+                Some(AttentionContinuation::LastActivity {
+                    recorded_at,
+                    session,
+                }),
+            ) => (
+                SELECT_LAST_ACTIVITY,
+                Some(session.into_uuid()),
+                Some(offset_date_time_from_system_time(*recorded_at)?),
+            ),
+            (AttentionSort::LastActivityDescending, None) => (SELECT_LAST_ACTIVITY, None, None),
+            (
+                AttentionSort::SessionIdentityAscending,
+                Some(AttentionContinuation::SessionIdentity(session)),
+            ) => (SELECT_IDENTITY, Some(session.into_uuid()), None),
+            (AttentionSort::SessionIdentityAscending, None) => (SELECT_IDENTITY, None, None),
+            _ => return Err(AttentionCorruption::Invalid("catalog continuation").into()),
+        },
+        None => (SELECT_IDENTITY, None, None),
+    };
+    let search = query.and_then(AttentionQuery::search);
+    let required_tags: Vec<String> = query
+        .map(|query| query.required_tags().map(str::to_owned).collect())
+        .unwrap_or_default();
+    let include_archived = query.is_some_and(AttentionQuery::include_archived);
+    sqlx::query(sql)
         .bind(limit)
         .bind(identities.map(<[Uuid]>::to_vec))
-        .bind(after.map(SessionId::into_uuid))
+        .bind(after_session)
         .bind(i32::from(max_attention_goal_summary_characters()))
         .bind(automatic_resume_attempts.budget.map(i64::from))
         .bind(automatic_resume_attempts.ceiling.map(i64::from))
+        .bind(i32::from(max_attention_title_characters()))
+        .bind(search)
+        .bind(required_tags)
+        .bind(include_archived)
+        .bind(after_activity)
         .fetch_all(&mut **transaction)
         .await?
         .iter()
         .map(decode_summary)
         .collect()
+}
+
+fn offset_date_time_from_system_time(
+    recorded_at: SystemTime,
+) -> Result<sqlx::types::time::OffsetDateTime, AttentionRepositoryError> {
+    let nanoseconds = recorded_at
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|_| AttentionCorruption::Invalid("catalog continuation timestamp"))?
+        .as_nanos();
+    let nanoseconds = i128::try_from(nanoseconds)
+        .map_err(|_| AttentionCorruption::Invalid("catalog continuation timestamp"))?;
+    sqlx::types::time::OffsetDateTime::from_unix_timestamp_nanos(nanoseconds)
+        .map_err(|_| AttentionCorruption::Invalid("catalog continuation timestamp").into())
+}
+
+/// Fails the coherent catalog read closed when any durable session is missing
+/// its indexed timeline/activity fact or its projected key disagrees with the
+/// authoritative latest journal row. The exact count is session-driven, so an
+/// incomplete projection must not silently shrink or misorder the page.
+async fn verify_fact_completeness(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<(), AttentionRepositoryError> {
+    let incomplete = sqlx::query_scalar::<_, bool>(
+        "SELECT facts.session_id IS NULL
+                OR facts.attention_activity_recorded_at IS NULL
+                OR activity.recorded_at IS NULL AS missing
+           FROM session AS session_row
+           LEFT JOIN session_timeline_fact AS facts USING (session_id)
+           LEFT JOIN LATERAL (
+               SELECT change.recorded_at
+                 FROM operator_attention_change AS change
+                WHERE change.session_id = session_row.session_id
+                ORDER BY change.change_sequence DESC
+                LIMIT 1
+           ) AS activity ON true
+          WHERE facts.session_id IS NULL
+             OR facts.attention_activity_recorded_at IS NULL
+             OR activity.recorded_at IS NULL
+             OR facts.attention_activity_recorded_at IS DISTINCT FROM activity.recorded_at
+          LIMIT 1",
+    )
+    .fetch_optional(&mut **transaction)
+    .await?;
+    match incomplete {
+        Some(true) => Err(AttentionCorruption::Missing("session activity fact").into()),
+        Some(false) => Err(AttentionCorruption::Invalid("session activity fact").into()),
+        None => Ok(()),
+    }
+}
+
+async fn count_catalog_matches(
+    transaction: &mut Transaction<'_, Postgres>,
+    query: &AttentionQuery,
+) -> Result<u64, AttentionRepositoryError> {
+    let tags: Vec<String> = query.required_tags().map(str::to_owned).collect();
+    let count: i64 = sqlx::query_scalar(COUNT_CATALOG_MATCHES_SQL)
+        .bind(query.search())
+        .bind(tags)
+        .bind(query.include_archived())
+        .fetch_one(&mut **transaction)
+        .await?;
+    nonnegative(count, "catalog total")
+}
+
+fn continuation_for(summary: &AttentionSummary, sort: AttentionSort) -> AttentionContinuation {
+    match sort {
+        AttentionSort::LastActivityDescending => AttentionContinuation::LastActivity {
+            recorded_at: summary.last_activity.recorded_at,
+            session: summary.session,
+        },
+        AttentionSort::SessionIdentityAscending => {
+            AttentionContinuation::SessionIdentity(summary.session)
+        }
+    }
 }
 
 fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryError> {
@@ -580,15 +829,27 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
         approval_human_authority,
         automatic_resumption_pending,
     );
+    let active_turn_count = required_string(row, "active_turn_count")?
+        .parse()
+        .map_err(|_| AttentionCorruption::Invalid("active turn count"))?;
+    let queued_turn_count = required_string(row, "queued_turn_count")?
+        .parse()
+        .map_err(|_| AttentionCorruption::Invalid("queued turn count"))?;
+    validate_state_counts(state, active_turn_count, queued_turn_count)?;
     let fact_kind = required_string(row, "fact_kind")?;
     let recorded_at = row
         .try_get::<Option<sqlx::types::time::OffsetDateTime>, _>("recorded_at")?
         .ok_or(AttentionCorruption::Missing("activity timestamp"))?;
     Ok(AttentionSummary {
         session: SessionId::from_uuid(row.try_get("session_id")?),
+        title_summary: row.try_get("title_summary")?,
+        title_truncated: row.try_get("title_truncated")?,
+        archived: row.try_get("archived")?,
         current_turn: row
             .try_get::<Option<Uuid>, _>("turn_id")?
             .map(TurnId::from_uuid),
+        active_turn_count,
+        queued_turn_count,
         state,
         action,
         goal_block: decode_goal_block(row, goal_state.as_deref())?,
@@ -603,6 +864,27 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
             kind: decode_activity_kind(&fact_kind)?,
         },
     })
+}
+
+fn validate_state_counts(
+    state: AttentionState,
+    active_turn_count: u64,
+    queued_turn_count: u64,
+) -> Result<(), AttentionRepositoryError> {
+    let active_backed = matches!(
+        state,
+        AttentionState::Active
+            | AttentionState::AwaitingApproval
+            | AttentionState::Ambiguous
+            | AttentionState::AwaitingToolRecovery
+    );
+    if active_backed && active_turn_count == 0 {
+        return Err(AttentionCorruption::Invalid("active turn count").into());
+    }
+    if state == AttentionState::Queued && queued_turn_count == 0 {
+        return Err(AttentionCorruption::Invalid("queued turn count").into());
+    }
+    Ok(())
 }
 
 fn attention_action(
@@ -847,6 +1129,28 @@ mod tests {
         assert!(matches!(
             error,
             AttentionRepositoryError::Corruption(AttentionCorruption::Invalid("turn state shape"))
+        ));
+    }
+
+    #[test]
+    fn active_state_requires_a_projected_active_turn() {
+        let error = validate_state_counts(AttentionState::Active, 0, 0)
+            .expect_err("an active state with no projected active turn is corrupt");
+
+        assert!(matches!(
+            error,
+            AttentionRepositoryError::Corruption(AttentionCorruption::Invalid("active turn count"))
+        ));
+    }
+
+    #[test]
+    fn queued_state_requires_a_projected_queued_turn() {
+        let error = validate_state_counts(AttentionState::Queued, 0, 0)
+            .expect_err("a queued state with no projected queued turn is corrupt");
+
+        assert!(matches!(
+            error,
+            AttentionRepositoryError::Corruption(AttentionCorruption::Invalid("queued turn count"))
         ));
     }
 
