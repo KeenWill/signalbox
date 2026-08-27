@@ -106,11 +106,15 @@ const useRefreshingSearchFixture = async (page: Page) => {
   })
 }
 
+// Shared setup reads its expected heading from the fixture, so changing the fixture's cardinality
+// never fails other scenarios before they reach their own assertions.
+const resultsHeading = (results: readonly unknown[]) => `${results.length} results on this page`
+
 const submitSearch = async (page: Page) => {
   await page.getByRole('textbox', { name: 'Search text' }).fill('release evidence')
   await page.getByRole('textbox', { name: /Exact session/ }).fill(sessionId)
   await page.getByRole('textbox', { name: 'Search text' }).press('Enter')
-  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: resultsHeading(firstPage.results) })).toBeVisible()
 }
 
 const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
@@ -134,12 +138,25 @@ test('searches without advertising an unavailable session reveal', async ({ page
 })
 
 test('does not announce query validation before bootstrap limits load', async ({ page }) => {
+  // Hold bootstrap on an explicit signal rather than a timer: the pending notice below is a
+  // positive gate proving the contract has not been admitted yet, so the alert assertion cannot
+  // pass by observing the already-successful state.
+  let admitBootstrap: () => void = () => undefined
+  const bootstrapHeld = new Promise<void>((resolve) => {
+    admitBootstrap = resolve
+  })
   await page.route('**/api/bootstrap', async (route) => {
-    await new Promise((resolve) => setTimeout(resolve, 250))
+    await bootstrapHeld
     await route.fulfill({ json: bootstrapFixture })
   })
+  await page.route('**/api/search?**', (route) => route.fulfill({ json: firstPage }))
   await page.goto('/search?q=release')
 
+  await expect(page.getByText('Checking whether bounded search is available…')).toBeVisible()
+  await expect(page.getByRole('alert')).toHaveCount(0)
+
+  admitBootstrap()
+  await expect(page.getByRole('heading', { name: resultsHeading(firstPage.results) })).toBeVisible()
   await expect(page.getByRole('alert')).toHaveCount(0)
 })
 
