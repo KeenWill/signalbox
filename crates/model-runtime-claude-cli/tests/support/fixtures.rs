@@ -40,6 +40,7 @@ pub const CREDENTIAL_TOOL_ID_ONE: &str = "api_key=synthetic-tool-one";
 pub const CREDENTIAL_TOOL_ID_TWO: &str = "api_key=synthetic-tool-two";
 pub const TOOL_ARGUMENTS: &str = r#"{"subject":"synthetic"}"#;
 pub const NONCANONICAL_TOOL_ARGUMENTS: &str = r#"{"z":1, "a":2}"#;
+pub const SUPPRESSED_TOOL_ARGUMENTS: &str = r#"{"sk-opaque-token-key":"safe"}"#;
 pub const FINISH_TOKEN_SECRET: &str = "api_key=synthetic-finish-secret";
 pub const ERROR_TOKEN_SECRET: &str = "api_key=synthetic-error-secret";
 pub const REASONING_SECRET_PREFIX: &str = "sk-";

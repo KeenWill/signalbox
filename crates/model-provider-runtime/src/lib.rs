@@ -52,14 +52,6 @@ use signalbox_model_runtime::{
     UnsentCause,
 };
 
-/// The longest provider-reported model identity retained for operator
-/// diagnostics.
-///
-/// The provider controls the reported spelling, so the diagnostic projection
-/// is bounded before it can reach a log line.
-// numeric-bound: tunable - controls retained provider identity detail
-const DIAGNOSTIC_MODEL_IDENTITY_LIMIT: usize = 128;
-
 const MODEL_IDENTITY_CHANGE_MESSAGE: &str = "Signalbox session event: your model identity is now";
 const CONTEXT_SUMMARY_MESSAGE: &str = "Signalbox prior-conversation summary:";
 
@@ -756,15 +748,18 @@ const fn provider_error_token(kind: ProviderErrorKind) -> ModelCallCauseToken {
 /// Bounds a provider-reported identity before it reaches operator telemetry.
 ///
 /// The provider controls the reported spelling, so the diagnostic projection
-/// is truncated to [`DIAGNOSTIC_MODEL_IDENTITY_LIMIT`] bytes on a character
-/// boundary. The value is already credential-redacted by the adapter
-/// (docs/spec/runtime-substrate.md); this bound keeps a hostile length from
-/// reaching a log line.
-fn diagnostic_model_identity(reported: &str) -> String {
-    if reported.len() <= DIAGNOSTIC_MODEL_IDENTITY_LIMIT {
+/// is truncated to the configured byte limit on a character boundary. The
+/// value is already credential-redacted by the adapter
+/// (docs/spec/runtime-substrate.md); this policy keeps a hostile length from
+/// reaching a log line when bounded.
+fn diagnostic_model_identity(reported: &str, limit: Option<usize>) -> String {
+    let Some(limit) = limit else {
+        return reported.to_owned();
+    };
+    if reported.len() <= limit {
         return reported.to_owned();
     }
-    let mut boundary = DIAGNOSTIC_MODEL_IDENTITY_LIMIT;
+    let mut boundary = limit;
     while boundary > 0 && !reported.is_char_boundary(boundary) {
         boundary -= 1;
     }
@@ -908,6 +903,7 @@ pub struct RuntimeModelCallProvider<R> {
     runtime: Arc<R>,
     models: RuntimeModelCatalog,
     text_deltas: Arc<dyn ProviderTextDeltaSink>,
+    diagnostic_model_identity_limit: Option<usize>,
 }
 
 struct AcceptanceObservations<AcceptancePossible, Correlation> {
@@ -961,11 +957,16 @@ where
 
 impl<R> RuntimeModelCallProvider<R> {
     /// Supplies the runtime and immutable target mapping.
-    pub fn new(runtime: R, models: RuntimeModelCatalog) -> Self {
+    pub fn new(
+        runtime: R,
+        models: RuntimeModelCatalog,
+        diagnostic_model_identity_limit: Option<usize>,
+    ) -> Self {
         Self {
             runtime: Arc::new(runtime),
             models,
             text_deltas: Arc::new(DiscardProviderTextDeltas),
+            diagnostic_model_identity_limit,
         }
     }
 
@@ -986,6 +987,7 @@ impl<R> Clone for RuntimeModelCallProvider<R> {
             runtime: Arc::clone(&self.runtime),
             models: self.models.clone(),
             text_deltas: Arc::clone(&self.text_deltas),
+            diagnostic_model_identity_limit: self.diagnostic_model_identity_limit,
         }
     }
 }
@@ -1351,6 +1353,7 @@ where
             report.evidence,
             &observations.observations,
             &capability.resolved_target,
+            self.diagnostic_model_identity_limit,
         )
         .map_err(|failure| {
             fail_closed(telemetry, failure.error, failure.served_target.as_deref())
@@ -1520,7 +1523,14 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
                 collecting_tool_results = false;
             }
             ModelConversationMessage::User { content, .. } => {
-                rendered.push(ConversationMessage::user_text(content.text().as_str()));
+                rendered.push(ConversationMessage {
+                    role: ConversationRole::User,
+                    parts: content
+                        .parts()
+                        .iter()
+                        .map(|part| MessagePart::Text(part.as_str().to_owned()))
+                        .collect(),
+                });
                 assistant_call = None;
                 collecting_tool_results = false;
             }
@@ -1766,6 +1776,7 @@ fn render_tool_result(content: &ModelToolResultContent) -> (String, bool) {
             let kind = match error.kind() {
                 ToolExecutionErrorKind::UnknownTool => "unknown_tool",
                 ToolExecutionErrorKind::InvalidArguments => "invalid_arguments",
+                ToolExecutionErrorKind::PreauthorizationRejected => "preauthorization_rejected",
                 ToolExecutionErrorKind::ExecutionFailed => "execution_failed",
                 ToolExecutionErrorKind::ResultTooLarge => "result_too_large",
                 ToolExecutionErrorKind::CrashLost => "crash_lost",
@@ -1899,6 +1910,7 @@ fn classify_terminal(
     evidence: TerminalEvidence,
     observations: &[Observation<ModelCallId>],
     configured_target: &ResolvedTarget,
+    diagnostic_model_identity_limit: Option<usize>,
 ) -> Result<TerminalClassification, ClassificationFailure> {
     // docs/spec/model-call-execution.md: an alias resolved to its own
     // canonical dated form is the same logical target and is accepted with
@@ -1910,12 +1922,18 @@ fn classify_terminal(
         match relate_provider_target(configured_target, reported) {
             ProviderTargetRelation::Exact => {}
             ProviderTargetRelation::AliasConcretion => {
-                concrete_target = Some(diagnostic_model_identity(reported.as_str()));
+                concrete_target = Some(diagnostic_model_identity(
+                    reported.as_str(),
+                    diagnostic_model_identity_limit,
+                ));
             }
             ProviderTargetRelation::DifferentLineage => {
                 return Err(ClassificationFailure {
                     error: RuntimeModelCallProviderError::ProviderTargetSubstituted,
-                    served_target: Some(diagnostic_model_identity(reported.as_str())),
+                    served_target: Some(diagnostic_model_identity(
+                        reported.as_str(),
+                        diagnostic_model_identity_limit,
+                    )),
                 });
             }
         }
@@ -1966,6 +1984,18 @@ fn classify_terminal(
                         };
                         response_parts.push(AssistantResponsePart::ToolCall(
                             DomainToolCallProposal::new(name, arguments),
+                        ));
+                    }
+                    AssistantPart::SuppressedToolCall(name) => {
+                        tool_count += 1;
+                        let Ok(name) = DomainToolName::try_new(name.as_str().to_owned()) else {
+                            return classify(
+                                ModelCallTerminalObservation::KnownFailed,
+                                ModelCallCauseCode::UnrepresentableToolMaterial,
+                            );
+                        };
+                        response_parts.push(AssistantResponsePart::ToolCall(
+                            DomainToolCallProposal::suppressed(name),
                         ));
                     }
                     // Claude 5-family models run adaptive thinking by
@@ -2142,12 +2172,13 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AcceptanceObservations, InvalidRuntimeToolSchema, ModelCallTelemetry, ProviderTextDelta,
-        ProviderTextDeltaContext, ProviderTextDeltaSink, RuntimeInputTokenCountError,
-        RuntimeModelCallProviderError, RuntimeModelCatalog, RuntimeModelCatalogError,
-        RuntimeModelDefinition, RuntimeModelDefinitionError, classify_terminal,
-        decode_checked_raw_json, provider_reported_token_usage, render_runtime_messages,
-        runtime_delivery_definitions, runtime_model_settings,
+        AcceptanceObservations, InvalidRuntimeToolSchema, ModelCallCauseCode, ModelCallTelemetry,
+        ProviderTextDelta, ProviderTextDeltaContext, ProviderTextDeltaSink,
+        RuntimeInputTokenCountError, RuntimeModelCallProviderError, RuntimeModelCatalog,
+        RuntimeModelCatalogError, RuntimeModelDefinition, RuntimeModelDefinitionError,
+        classify_terminal as classify_terminal_with_limit, decode_checked_raw_json,
+        provider_reported_token_usage, render_runtime_messages, runtime_delivery_definitions,
+        runtime_model_settings,
     };
     use signalbox_domain::ResolvedProviderTarget;
 
@@ -2170,6 +2201,14 @@ mod tests {
     /// The exact provider-model spelling one deployment configures.
     fn configured(spelling: &str) -> signalbox_model_runtime::ResolvedTarget {
         signalbox_model_runtime::ResolvedTarget::new(spelling.to_owned())
+    }
+
+    fn classify_terminal(
+        evidence: TerminalEvidence,
+        observations: &[Observation<ModelCallId>],
+        configured_target: &signalbox_model_runtime::ResolvedTarget,
+    ) -> Result<super::TerminalClassification, super::ClassificationFailure> {
+        classify_terminal_with_limit(evidence, observations, configured_target, None)
     }
 
     /// One provider-reported identity, exactly as observed.
@@ -2981,6 +3020,40 @@ mod tests {
         );
     }
 
+    /// A CLI-redacted argument object becomes an inert domain proposal so the
+    /// application can record its runtime-safety denial and continue the turn.
+    #[test]
+    fn fully_suppressed_tool_arguments_cross_as_inert_proposal() {
+        let classified = classify_terminal(
+            completion_with_finish(
+                "model-exact",
+                CompletionFinish::ToolUse,
+                vec![AssistantPart::SuppressedToolCall(ToolName::new(
+                    "current_time",
+                ))],
+            ),
+            &[],
+            &configured("model-exact"),
+        )
+        .expect("suppressed tool material has a bounded terminal classification");
+
+        let ModelCallTerminalObservation::CompletedWithTools { response } = classified.observation
+        else {
+            panic!("suppressed tool material yields a same-turn denial round");
+        };
+        assert_eq!(classified.cause, ModelCallCauseCode::Completed);
+        let signalbox_domain::AssistantResponsePart::ToolCall(proposal) = &response.parts()[0]
+        else {
+            panic!("the response retains the inert tool proposal");
+        };
+        assert_eq!(proposal.name().as_str(), "current_time");
+        assert_eq!(
+            proposal.arguments().as_str(),
+            r#"{"redacted":"[redacted]"}"#
+        );
+        assert!(proposal.is_suppressed());
+    }
+
     #[test]
     fn checked_tool_json_decoding_is_stack_guarded_beyond_serde_default_depth() {
         let depth = 512;
@@ -3437,13 +3510,14 @@ mod tests {
         let configured = "claude-haiku-4-5";
         let reported = format!("{configured}-{}", "1".repeat(8));
         assert_eq!(
-            super::diagnostic_model_identity(&reported).len(),
+            super::diagnostic_model_identity(&reported, None).len(),
             reported.len()
         );
 
-        let hostile = "x".repeat(super::DIAGNOSTIC_MODEL_IDENTITY_LIMIT * 4);
-        let bounded = super::diagnostic_model_identity(&hostile);
-        assert!(bounded.starts_with(&"x".repeat(super::DIAGNOSTIC_MODEL_IDENTITY_LIMIT)));
+        let configured_limit = 17;
+        let hostile = "x".repeat(configured_limit * 4);
+        let bounded = super::diagnostic_model_identity(&hostile, Some(configured_limit));
+        assert!(bounded.starts_with(&"x".repeat(configured_limit)));
         assert!(bounded.ends_with("… [truncated]"));
     }
 

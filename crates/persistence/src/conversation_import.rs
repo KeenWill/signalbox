@@ -1,21 +1,33 @@
 //! Append-only PostgreSQL storage for imported conversation snapshots.
 
-use std::{collections::BTreeMap, error::Error, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+};
 
 use rust_decimal::Decimal;
 use signalbox_application::{ImportedConversationStore, ImportedConversationStoreOutcome};
+use signalbox_blob_store::{BlobObjectKey, BlobStoreName, ExpectedBlob};
 use signalbox_domain::{
-    ImportedConversation, ImportedConversationDisplayTitle, ImportedConversationFormat,
+    BlobDigest, ImportedConversation, ImportedConversationDisplayTitle, ImportedConversationFormat,
     ImportedConversationId, ImportedConversationReconstitutionFailure,
     ImportedConversationReconstitutionInput, ImportedConversationSourceDigest,
     ImportedRawRecordConversionDigest, ImportedRawRecordHash, ImportedRawRecordPosition,
     ImportedRawSourceRecordReconstitutionInput, ImportedRecordEntryPosition,
     ImportedSourceAttestation, ImportedSpeaker, ImportedTranscriptEntryId,
-    ImportedTranscriptEntryInput, ImportedTranscriptPosition,
+    ImportedTranscriptEntryInput, ImportedTranscriptFrontier, ImportedTranscriptPosition,
 };
-use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
+use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::{
+    blob::{
+        BlobCatalogRepositoryError, BlobReplicaRecord, BlobStoreBindingRecord,
+        register_verified_replica_in_transaction,
+    },
     conversation_import_codec::{
         ImportedConversationEncodingFailure as CodecFailure, decode_content,
         decode_source_metadata, decode_structured, encode_content, encode_source_metadata,
@@ -31,9 +43,228 @@ const CLAUDE_CODE_VERSION_TWO: i16 = 2;
 const CODEX_FORMAT: &str = "codex_rollout_jsonl";
 const CODEX_VERSION_ONE: i16 = 1;
 const TRANSCRIPT_ENTRY_IDENTITY_UNIQUE: &str = "imported_transcript_entry_identity_unique";
-pub(crate) const DISPLAY_TITLE_STATE_PENDING: &str = "pending";
 pub(crate) const DISPLAY_TITLE_STATE_DERIVED: &str = "derived";
 pub(crate) const DISPLAY_TITLE_STATE_UNDERIVABLE: &str = "underivable";
+
+/// One exact imported-source blob supplied to the deployment adapter.
+#[derive(Clone)]
+pub struct ImportedRawBlobInput {
+    expected: ExpectedBlob,
+    bytes: Arc<[u8]>,
+}
+
+impl ImportedRawBlobInput {
+    /// Constructs one already-hashed positive-length source record.
+    pub const fn new(expected: ExpectedBlob, bytes: Arc<[u8]>) -> Self {
+        Self { expected, bytes }
+    }
+
+    /// Returns the expected identity and length.
+    pub const fn expected(&self) -> ExpectedBlob {
+        self.expected
+    }
+
+    /// Borrows the exact source bytes.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Clones the shared exact source bytes without copying their allocation.
+    pub fn shared_bytes(&self) -> Arc<[u8]> {
+        Arc::clone(&self.bytes)
+    }
+}
+
+impl fmt::Debug for ImportedRawBlobInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ImportedRawBlobInput")
+            .field("expected", &self.expected)
+            .field("bytes", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Verified publication facts registered with the importing aggregate.
+#[derive(Clone, Debug)]
+pub struct ImportedRawBlobPublication {
+    expected: ExpectedBlob,
+    store: BlobStoreName,
+    namespace_id: Uuid,
+    object_key: BlobObjectKey,
+}
+
+impl ImportedRawBlobPublication {
+    /// Constructs one verified deployment placement.
+    pub const fn new(
+        expected: ExpectedBlob,
+        store: BlobStoreName,
+        namespace_id: Uuid,
+        object_key: BlobObjectKey,
+    ) -> Self {
+        Self {
+            expected,
+            store,
+            namespace_id,
+            object_key,
+        }
+    }
+
+    /// Returns the verified immutable identity and byte length.
+    pub const fn expected(&self) -> ExpectedBlob {
+        self.expected
+    }
+
+    /// Returns the deployment store holding the verified object.
+    pub const fn store(&self) -> &BlobStoreName {
+        &self.store
+    }
+
+    /// Returns the deployment namespace bound to the store.
+    pub const fn namespace_id(&self) -> Uuid {
+        self.namespace_id
+    }
+
+    /// Returns the verified immutable object key.
+    pub const fn object_key(&self) -> &BlobObjectKey {
+        &self.object_key
+    }
+}
+
+/// Content-silent imported-source store failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ImportedRawBlobStorageError {
+    /// No bounded store operation can currently complete.
+    Unavailable,
+    /// Durable catalog or object bytes disagreed.
+    Integrity,
+}
+
+impl fmt::Display for ImportedRawBlobStorageError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Unavailable => "imported raw blob storage is unavailable",
+            Self::Integrity => "imported raw blob storage failed integrity verification",
+        })
+    }
+}
+
+impl Error for ImportedRawBlobStorageError {}
+
+/// Bounded asynchronous publication result owned by an imported-source adapter.
+pub type ImportedRawBlobPublicationFuture<'storage> = Pin<
+    Box<
+        dyn Future<Output = Result<Box<[ImportedRawBlobPublication]>, ImportedRawBlobStorageError>>
+            + Send
+            + 'storage,
+    >,
+>;
+
+/// Bounded asynchronous checked-read result owned by an imported-source adapter.
+pub type ImportedRawBlobReadFuture<'storage> = Pin<
+    Box<dyn Future<Output = Result<Box<[Vec<u8>]>, ImportedRawBlobStorageError>> + Send + 'storage>,
+>;
+
+/// Deployment adapter for sequential publication and checked aggregate reads.
+pub trait ImportedRawBlobStorage: fmt::Debug + Send + Sync {
+    /// Publishes or verifies each distinct source record in supplied order.
+    fn publish(&self, blobs: Box<[ImportedRawBlobInput]>) -> ImportedRawBlobPublicationFuture<'_>;
+
+    /// Reads and verifies each distinct source record in supplied order after
+    /// enforcing the complete occurrence-expanded source size.
+    fn read(
+        &self,
+        blobs: Box<[ExpectedBlob]>,
+        total_source_bytes: u64,
+    ) -> ImportedRawBlobReadFuture<'_>;
+}
+
+#[cfg(feature = "postgres-integration")]
+#[derive(Debug)]
+struct IntegrationImportedRawBlobStorage;
+
+#[cfg(feature = "postgres-integration")]
+fn integration_imported_blobs() -> &'static std::sync::Mutex<BTreeMap<BlobDigest, Arc<[u8]>>> {
+    static BLOBS: std::sync::OnceLock<std::sync::Mutex<BTreeMap<BlobDigest, Arc<[u8]>>>> =
+        std::sync::OnceLock::new();
+    BLOBS.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
+}
+
+/// Replaces one integration fixture object to prove checked reads fail closed.
+#[cfg(feature = "postgres-integration")]
+pub fn corrupt_integration_imported_blob(
+    digest: BlobDigest,
+    bytes: Arc<[u8]>,
+) -> Result<(), ImportedRawBlobStorageError> {
+    let mut retained = integration_imported_blobs()
+        .lock()
+        .map_err(|_| ImportedRawBlobStorageError::Unavailable)?;
+    let stored = retained
+        .get_mut(&digest)
+        .ok_or(ImportedRawBlobStorageError::Integrity)?;
+    *stored = bytes;
+    Ok(())
+}
+
+#[cfg(feature = "postgres-integration")]
+impl ImportedRawBlobStorage for IntegrationImportedRawBlobStorage {
+    fn publish(&self, blobs: Box<[ImportedRawBlobInput]>) -> ImportedRawBlobPublicationFuture<'_> {
+        Box::pin(async move {
+            let store = BlobStoreName::try_new("integration")
+                .map_err(|_| ImportedRawBlobStorageError::Integrity)?;
+            let namespace = Uuid::from_u128(0x696d706f727465645f736f75726365);
+            let mut retained = integration_imported_blobs()
+                .lock()
+                .map_err(|_| ImportedRawBlobStorageError::Unavailable)?;
+            let mut publications = Vec::with_capacity(blobs.len());
+            for blob in blobs {
+                let expected = blob.expected();
+                if BlobDigest::digest(blob.bytes()) != expected.digest()
+                    || u64::try_from(blob.bytes().len()).ok() != Some(expected.byte_length())
+                {
+                    return Err(ImportedRawBlobStorageError::Integrity);
+                }
+                if let Some(existing) = retained.get(&expected.digest()) {
+                    if existing.as_ref() != blob.bytes() {
+                        return Err(ImportedRawBlobStorageError::Integrity);
+                    }
+                } else {
+                    retained.insert(expected.digest(), blob.shared_bytes());
+                }
+                publications.push(ImportedRawBlobPublication::new(
+                    expected,
+                    store.clone(),
+                    namespace,
+                    BlobObjectKey::for_digest(expected.digest()),
+                ));
+            }
+            Ok(publications.into_boxed_slice())
+        })
+    }
+
+    fn read(
+        &self,
+        blobs: Box<[ExpectedBlob]>,
+        _total_source_bytes: u64,
+    ) -> ImportedRawBlobReadFuture<'_> {
+        Box::pin(async move {
+            let retained = integration_imported_blobs()
+                .lock()
+                .map_err(|_| ImportedRawBlobStorageError::Unavailable)?;
+            let mut contents = Vec::with_capacity(blobs.len());
+            for expected in blobs {
+                let bytes = retained
+                    .get(&expected.digest())
+                    .ok_or(ImportedRawBlobStorageError::Integrity)?;
+                if u64::try_from(bytes.len()).ok() != Some(expected.byte_length()) {
+                    return Err(ImportedRawBlobStorageError::Integrity);
+                }
+                contents.push(bytes.to_vec());
+            }
+            Ok(contents.into_boxed_slice())
+        })
+    }
+}
 
 /// Why a versioned imported domain-algebra encoding is invalid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -185,6 +416,10 @@ pub enum ImportedConversationRepositoryError {
     Database(sqlx::Error),
     /// A candidate identity collided with a different durable record.
     IdentityCollision(ImportedConversationIdentityCollision),
+    /// Blob publication or checked reading could not complete.
+    BlobStorage(ImportedRawBlobStorageError),
+    /// Published placement facts could not join the importing transaction.
+    BlobCatalog(BlobCatalogRepositoryError),
     /// Candidate or durable data cannot satisfy the imported-record contract.
     Corruption(ImportedConversationCorruption),
 }
@@ -201,6 +436,8 @@ impl fmt::Display for ImportedConversationRepositoryError {
                     "conversation import identity collision: {collision:?}"
                 )
             }
+            Self::BlobStorage(error) => error.fmt(formatter),
+            Self::BlobCatalog(error) => error.fmt(formatter),
             Self::Corruption(error) => error.fmt(formatter),
         }
     }
@@ -211,6 +448,8 @@ impl Error for ImportedConversationRepositoryError {
         match self {
             Self::Database(error) => Some(error),
             Self::IdentityCollision(_) => None,
+            Self::BlobStorage(error) => Some(error),
+            Self::BlobCatalog(error) => Some(error),
             Self::Corruption(error) => Some(error),
         }
     }
@@ -236,16 +475,35 @@ impl From<ImportedConversationCorruption> for ImportedConversationRepositoryErro
     }
 }
 
+impl From<ImportedRawBlobStorageError> for ImportedConversationRepositoryError {
+    fn from(error: ImportedRawBlobStorageError) -> Self {
+        Self::BlobStorage(error)
+    }
+}
+
+impl From<BlobCatalogRepositoryError> for ImportedConversationRepositoryError {
+    fn from(error: BlobCatalogRepositoryError) -> Self {
+        Self::BlobCatalog(error)
+    }
+}
+
 /// PostgreSQL implementation of pure, idempotent conversation ingestion.
 #[derive(Clone, Debug)]
 pub struct ImportedConversationRepository {
     pool: PgPool,
+    blob_storage: Arc<dyn ImportedRawBlobStorage>,
 }
 
 impl ImportedConversationRepository {
     /// Uses the supplied pool for atomic insertion and checked complete loads.
+    pub fn with_blob_storage(pool: PgPool, blob_storage: Arc<dyn ImportedRawBlobStorage>) -> Self {
+        Self { pool, blob_storage }
+    }
+
+    /// Uses the deterministic integration-store fixture.
+    #[cfg(feature = "postgres-integration")]
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self::with_blob_storage(pool, Arc::new(IntegrationImportedRawBlobStorage))
     }
 
     /// Inserts one complete snapshot or resolves its exact durable duplicate.
@@ -259,20 +517,37 @@ impl ImportedConversationRepository {
         let declared_raw_record_count =
             usize_to_u64(encoded.raws.len(), "declared raw-record count")?;
         let declared_entry_count = usize_to_u64(encoded.entries.len(), "declared entry count")?;
-        let mut transaction = self.pool.begin().await?;
-        if let Some(existing) = resolve_existing_snapshot(
-            &mut transaction,
-            &conversation,
-            encoded.format,
-            encoded.converter_version,
-            source_digest,
-        )
-        .await?
+        let raw_source_bytes = encoded.raw_source_bytes()?;
+        let normalized_source_record_bytes = encoded.normalized_source_record_bytes()?;
+        let normalized_entry_bytes = encoded.normalized_entry_bytes()?;
+        // Publish before resolving a duplicate. The ingestion contract in
+        // `docs/spec/blob-storage.md` makes re-ingest rediscover the object: a
+        // missing or corrupt routed object is repaired from the supplied
+        // bytes, and an identity whose only healthy replica sits in a
+        // historical store gains one in the currently routed store. Resolving
+        // first would instead run a checked load against the damaged replica
+        // and return `Integrity`, so an exact re-import could never repair the
+        // aggregate. Publication short-circuits on a live-verified routed
+        // replica, so the healthy duplicate path still uploads nothing, and
+        // replica registration is idempotent.
+        let publications = publish_raw_blobs(self.blob_storage.as_ref(), &encoded.raws).await?;
+        let mut registration = self.pool.begin().await?;
+        register_raw_blobs(&mut registration, &publications).await?;
+        registration.commit().await?;
+        if let Some(existing) = self
+            .resolve_existing_snapshot(
+                &conversation,
+                encoded.format,
+                encoded.converter_version,
+                source_digest,
+            )
+            .await?
         {
-            transaction.rollback().await?;
             return Ok(existing);
         }
-        insert_raw_blobs(&mut transaction, &encoded.raws).await?;
+        let mut transaction = self.pool.begin().await?;
+        register_raw_blobs(&mut transaction, &publications).await?;
+        insert_raw_blob_references(&mut transaction, &encoded.raws).await?;
         let inserted = sqlx::query(
             "INSERT INTO imported_conversation
                 (imported_conversation_id, storage_version, source_format,
@@ -300,21 +575,20 @@ impl ImportedConversationRepository {
             == 1;
 
         if !inserted {
-            let existing = resolve_existing_snapshot(
-                &mut transaction,
-                &conversation,
-                encoded.format,
-                encoded.converter_version,
-                source_digest,
-            )
-            .await?;
-            let Some(existing) = existing else {
-                transaction.rollback().await?;
+            transaction.rollback().await?;
+            let Some(existing) = self
+                .resolve_existing_snapshot(
+                    &conversation,
+                    encoded.format,
+                    encoded.converter_version,
+                    source_digest,
+                )
+                .await?
+            else {
                 return Err(ImportedConversationRepositoryError::IdentityCollision(
                     ImportedConversationIdentityCollision::Conversation,
                 ));
             };
-            transaction.rollback().await?;
             return Ok(existing);
         }
 
@@ -326,6 +600,14 @@ impl ImportedConversationRepository {
         }
         insert_raw_occurrences(&mut transaction, candidate_id, &encoded.raws).await?;
         insert_entries(&mut transaction, candidate_id, &encoded.entries).await?;
+        insert_size_totals(
+            &mut transaction,
+            candidate_id,
+            raw_source_bytes,
+            normalized_source_record_bytes,
+            normalized_entry_bytes,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(ImportedConversationStoreOutcome::Inserted {
             conversation: candidate_id,
@@ -339,7 +621,51 @@ impl ImportedConversationRepository {
         conversation: ImportedConversationId,
     ) -> Result<Option<ImportedConversation>, ImportedConversationRepositoryError> {
         let mut connection = self.pool.acquire().await?;
-        load_from_connection(&mut connection, conversation).await
+        let projection = load_projection_from_connection(&mut connection, conversation).await?;
+        drop(connection);
+        match projection {
+            Some(projection) => self.finish_projection(projection).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
+    async fn resolve_existing_snapshot(
+        &self,
+        candidate: &ImportedConversation,
+        format: &str,
+        converter_version: i16,
+        source_digest: ImportedConversationSourceDigest,
+    ) -> Result<Option<ImportedConversationStoreOutcome>, ImportedConversationRepositoryError> {
+        let mut connection = self.pool.acquire().await?;
+        let existing_id = load_identity_by_source_digest(
+            &mut connection,
+            format,
+            converter_version,
+            source_digest,
+        )
+        .await?;
+        drop(connection);
+        let Some(existing_id) = existing_id else {
+            return Ok(None);
+        };
+        let existing = self
+            .load(existing_id)
+            .await?
+            .ok_or(ImportedConversationCorruption::ExistingSnapshotMismatch)?;
+        if !equivalent_snapshot(candidate, &existing) {
+            return Err(ImportedConversationCorruption::ExistingSnapshotMismatch.into());
+        }
+        Ok(Some(ImportedConversationStoreOutcome::AlreadyImported {
+            conversation: existing.id(),
+            source_digest: existing.source_digest(),
+        }))
+    }
+
+    async fn finish_projection(
+        &self,
+        projection: StoredConversationProjection,
+    ) -> Result<ImportedConversation, ImportedConversationRepositoryError> {
+        finish_projection(self.blob_storage.as_ref(), projection).await
     }
 }
 
@@ -392,7 +718,7 @@ impl EncodedConversation {
                 Ok(EncodedRawRecord {
                     content_hash: raw.content_hash(),
                     conversion_digest: raw.conversion_digest(),
-                    bytes: raw.bytes().to_vec(),
+                    bytes: Arc::from(raw.bytes()),
                     normalized: encode_structured(raw.normalized())
                         .map_err(|failure| encoding_corruption("normalized value", failure))?,
                     declared_entry_count,
@@ -425,12 +751,45 @@ impl EncodedConversation {
             entries,
         })
     }
+
+    fn raw_source_bytes(&self) -> Result<u64, ImportedConversationRepositoryError> {
+        encoded_byte_total(
+            self.raws.iter().map(|raw| raw.bytes.len()),
+            "raw source bytes",
+        )
+    }
+
+    fn normalized_source_record_bytes(&self) -> Result<u64, ImportedConversationRepositoryError> {
+        encoded_byte_total(
+            self.raws.iter().map(|raw| raw.normalized.len()),
+            "normalized source-record bytes",
+        )
+    }
+
+    fn normalized_entry_bytes(&self) -> Result<u64, ImportedConversationRepositoryError> {
+        encoded_byte_total(
+            self.entries
+                .iter()
+                .flat_map(|entry| [entry.content.len(), entry.source.len()]),
+            "normalized entry bytes",
+        )
+    }
+}
+
+fn encoded_byte_total(
+    mut lengths: impl Iterator<Item = usize>,
+    field: &'static str,
+) -> Result<u64, ImportedConversationRepositoryError> {
+    lengths.try_fold(0_u64, |total, length| {
+        total
+            .checked_add(usize_to_u64(length, field)?)
+            .ok_or_else(|| invalid_ordinal(field))
+    })
 }
 
 /// Maps a derived-or-absent display title to its closed resolved state.
 ///
-/// Insertion always resolves the title, so the transitional `'pending'` state
-/// belongs only to rows inserted before the column existed.
+/// Insertion always writes one of the final resolved title states.
 fn resolved_display_title_state(display_title: Option<&str>) -> &'static str {
     if display_title.is_some() {
         DISPLAY_TITLE_STATE_DERIVED
@@ -459,9 +818,20 @@ fn consistent_source_session_id(conversation: &ImportedConversation) -> Option<&
 struct EncodedRawRecord {
     content_hash: ImportedRawRecordHash,
     conversion_digest: ImportedRawRecordConversionDigest,
-    bytes: Vec<u8>,
+    bytes: Arc<[u8]>,
     normalized: Vec<u8>,
     declared_entry_count: u64,
+}
+
+impl EncodedRawRecord {
+    fn expected(&self) -> Result<ExpectedBlob, ImportedConversationRepositoryError> {
+        ExpectedBlob::try_new(
+            BlobDigest::from_bytes(*self.content_hash.as_bytes()),
+            u64::try_from(self.bytes.len())
+                .map_err(|_| invalid_ordinal("raw-record byte length"))?,
+        )
+        .map_err(|_| invalid_ordinal("raw-record byte length"))
+    }
 }
 
 struct EncodedEntry {
@@ -494,10 +864,10 @@ async fn any_entry_identity_exists(
     .await
 }
 
-async fn insert_raw_blobs(
-    connection: &mut PgConnection,
+async fn publish_raw_blobs(
+    storage: &dyn ImportedRawBlobStorage,
     raws: &[EncodedRawRecord],
-) -> Result<(), ImportedConversationRepositoryError> {
+) -> Result<Box<[ImportedRawBlobPublication]>, ImportedConversationRepositoryError> {
     let mut blobs = raw_blobs_in_key_order(raws);
     if blobs
         .windows(2)
@@ -506,29 +876,54 @@ async fn insert_raw_blobs(
         return Err(ImportedConversationCorruption::RawRecordHashCollision.into());
     }
     blobs.dedup_by_key(|raw| raw.content_hash);
+    let blobs = blobs
+        .into_iter()
+        .map(|raw| {
+            Ok(ImportedRawBlobInput::new(
+                raw.expected()?,
+                raw.bytes.clone(),
+            ))
+        })
+        .collect::<Result<Vec<_>, ImportedConversationRepositoryError>>()?;
+    storage
+        .publish(blobs.into_boxed_slice())
+        .await
+        .map_err(Into::into)
+}
 
-    for raw in blobs {
-        let hash = raw.content_hash.as_bytes().as_slice();
+async fn register_raw_blobs(
+    transaction: &mut Transaction<'_, Postgres>,
+    publications: &[ImportedRawBlobPublication],
+) -> Result<(), ImportedConversationRepositoryError> {
+    for publication in publications {
+        let binding =
+            BlobStoreBindingRecord::new(publication.store.clone(), publication.namespace_id);
+        let replica =
+            BlobReplicaRecord::new(publication.store.clone(), publication.object_key.clone());
+        register_verified_replica_in_transaction(
+            transaction,
+            publication.expected,
+            &binding,
+            &replica,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn insert_raw_blob_references(
+    connection: &mut PgConnection,
+    raws: &[EncodedRawRecord],
+) -> Result<(), ImportedConversationRepositoryError> {
+    for raw in raw_blobs_in_key_order(raws) {
         sqlx::query(
-            "INSERT INTO imported_raw_source_record (content_hash, raw_bytes)
-             VALUES ($1, $2)
+            "INSERT INTO imported_raw_source_record (content_hash)
+             VALUES ($1)
              ON CONFLICT DO NOTHING",
         )
-        .bind(hash)
-        .bind(&raw.bytes)
+        .bind(raw.content_hash.as_bytes().as_slice())
         .execute(&mut *connection)
         .await?;
-        let durable_bytes: Vec<u8> = sqlx::query_scalar(
-            "SELECT raw_bytes
-               FROM imported_raw_source_record
-              WHERE content_hash = $1",
-        )
-        .bind(hash)
-        .fetch_one(&mut *connection)
-        .await?;
-        if durable_bytes != raw.bytes {
-            return Err(ImportedConversationCorruption::RawRecordHashCollision.into());
-        }
     }
     Ok(())
 }
@@ -593,6 +988,28 @@ async fn insert_entries(
     Ok(())
 }
 
+async fn insert_size_totals(
+    connection: &mut PgConnection,
+    conversation: ImportedConversationId,
+    raw_source_bytes: u64,
+    normalized_source_record_bytes: u64,
+    normalized_entry_bytes: u64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO imported_conversation_size_totals
+            (imported_conversation_id, raw_source_bytes,
+             normalized_source_record_bytes, normalized_entry_bytes)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(conversation.into_uuid())
+    .bind(Decimal::from(raw_source_bytes))
+    .bind(Decimal::from(normalized_source_record_bytes))
+    .bind(Decimal::from(normalized_entry_bytes))
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
 fn entries_in_key_order(entries: &[EncodedEntry]) -> Vec<&EncodedEntry> {
     let mut entries = entries.iter().collect::<Vec<_>>();
     entries.sort_unstable_by_key(|entry| entry.identity);
@@ -620,35 +1037,10 @@ async fn load_identity_by_source_digest(
     .map(|identity| identity.map(ImportedConversationId::from_uuid))
 }
 
-async fn resolve_existing_snapshot(
-    connection: &mut PgConnection,
-    candidate: &ImportedConversation,
-    format: &str,
-    converter_version: i16,
-    source_digest: ImportedConversationSourceDigest,
-) -> Result<Option<ImportedConversationStoreOutcome>, ImportedConversationRepositoryError> {
-    let Some(existing_id) =
-        load_identity_by_source_digest(connection, format, converter_version, source_digest)
-            .await?
-    else {
-        return Ok(None);
-    };
-    let existing = load_from_connection(connection, existing_id)
-        .await?
-        .ok_or(ImportedConversationCorruption::ExistingSnapshotMismatch)?;
-    if !equivalent_snapshot(candidate, &existing) {
-        return Err(ImportedConversationCorruption::ExistingSnapshotMismatch.into());
-    }
-    Ok(Some(ImportedConversationStoreOutcome::AlreadyImported {
-        conversation: existing.id(),
-        source_digest: existing.source_digest(),
-    }))
-}
-
-pub(crate) async fn load_from_connection(
+pub(crate) async fn load_projection_from_connection(
     connection: &mut PgConnection,
     requested: ImportedConversationId,
-) -> Result<Option<ImportedConversation>, ImportedConversationRepositoryError> {
+) -> Result<Option<StoredConversationProjection>, ImportedConversationRepositoryError> {
     let header = sqlx::query(
         "SELECT imported_conversation_id, storage_version, source_format,
                 converter_version, source_digest, source_session_id,
@@ -663,16 +1055,171 @@ pub(crate) async fn load_from_connection(
     let Some(header) = header else {
         return Ok(None);
     };
-    decode_complete(connection, requested, header)
+    decode_projection(connection, requested, header)
         .await
         .map(Some)
 }
 
-async fn decode_complete(
+/// Loads the normalized runtime prefix without touching raw audit bytes.
+pub(crate) async fn load_normalized_prefix_from_connection(
+    connection: &mut PgConnection,
+    frontier: ImportedTranscriptFrontier,
+) -> Result<Option<Vec<ImportedTranscriptEntryInput>>, ImportedConversationRepositoryError> {
+    load_normalized_entries_from_connection(
+        connection,
+        frontier.conversation(),
+        Some(frontier.through_position().as_u64()),
+    )
+    .await
+}
+
+/// Loads one conversation's normalized runtime entries without audit bytes.
+pub async fn load_normalized_entries(
+    pool: &PgPool,
+    conversation: ImportedConversationId,
+) -> Result<Option<Box<[ImportedTranscriptEntryInput]>>, ImportedConversationRepositoryError> {
+    let mut connection = pool.acquire().await?;
+    load_normalized_entries_from_connection(&mut connection, conversation, None)
+        .await
+        .map(|entries| entries.map(Vec::into_boxed_slice))
+}
+
+async fn load_normalized_entries_from_connection(
+    connection: &mut PgConnection,
+    conversation: ImportedConversationId,
+    through_position: Option<u64>,
+) -> Result<Option<Vec<ImportedTranscriptEntryInput>>, ImportedConversationRepositoryError> {
+    let header = sqlx::query(
+        "SELECT conversation.storage_version,
+                conversation.declared_entry_count,
+                inventory.actual_entry_count,
+                inventory.inventory_is_complete
+           FROM imported_conversation AS conversation
+           CROSS JOIN LATERAL (
+               SELECT COUNT(*)::numeric AS actual_entry_count,
+                      COUNT(*)::numeric = conversation.declared_entry_count
+                      AND MAX(imported_entry_position) =
+                          conversation.declared_entry_count
+                          AS inventory_is_complete
+                 FROM imported_transcript_entry
+                WHERE imported_conversation_id =
+                      conversation.imported_conversation_id
+           ) AS inventory
+          WHERE conversation.imported_conversation_id = $1",
+    )
+    .bind(conversation.into_uuid())
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(header) = header else {
+        return Ok(None);
+    };
+    require_i16(&header, "storage_version", STORAGE_VERSION)?;
+    let declared_entry_count = positive_u64(header.try_get("declared_entry_count")?)
+        .map_err(|reason| invalid_ordinal_with_reason("declared entry count", reason))?;
+    let actual_entry_count: Decimal = header.try_get("actual_entry_count")?;
+    let actual_entry_count =
+        u64::try_from(actual_entry_count).map_err(|_| invalid_ordinal("actual entry count"))?;
+    if !header.try_get::<bool, _>("inventory_is_complete")? {
+        return Err(ImportedConversationCorruption::Domain(
+            ImportedConversationReconstitutionFailure::DeclaredEntryCountMismatch {
+                declared: declared_entry_count,
+                actual: usize::try_from(actual_entry_count)
+                    .map_err(|_| invalid_ordinal("actual entry count"))?,
+            },
+        )
+        .into());
+    }
+    let rows = sqlx::query(
+        "SELECT imported_entry_position, imported_transcript_entry_id,
+                raw_record_position, record_entry_position,
+                source_speaker_kind, content_encoding,
+                source_metadata_encoding
+          FROM imported_transcript_entry
+          WHERE imported_conversation_id = $1
+            AND ($2::numeric IS NULL OR imported_entry_position <= $2)
+          ORDER BY imported_entry_position",
+    )
+    .bind(conversation.into_uuid())
+    .bind(through_position.map(Decimal::from))
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut entries = Vec::with_capacity(rows.len());
+    let mut expected_position = ImportedTranscriptPosition::first();
+    let mut identities = BTreeSet::new();
+    for row in rows {
+        let position = decode_entry_position(row.try_get("imported_entry_position")?)?;
+        let identity =
+            ImportedTranscriptEntryId::from_uuid(row.try_get("imported_transcript_entry_id")?);
+        if position != expected_position {
+            return Err(ImportedConversationCorruption::Domain(
+                ImportedConversationReconstitutionFailure::EntryPositionMismatch {
+                    entry: identity,
+                    expected: expected_position,
+                    actual: position,
+                },
+            )
+            .into());
+        }
+        expected_position = expected_position
+            .checked_next()
+            .ok_or_else(|| invalid_ordinal("normalized entry position"))?;
+        if !identities.insert(identity) {
+            return Err(ImportedConversationCorruption::Domain(
+                ImportedConversationReconstitutionFailure::DuplicateEntry { entry: identity },
+            )
+            .into());
+        }
+        let raw_position = decode_raw_position(row.try_get("raw_record_position")?)?;
+        let within_position = decode_within_position(row.try_get("record_entry_position")?)?;
+        let source_speaker =
+            decode_source_speaker(row.try_get::<String, _>("source_speaker_kind")?.as_str())?;
+        let content_encoding: Vec<u8> = row.try_get("content_encoding")?;
+        let content = decode_content(&content_encoding)
+            .map_err(|failure| encoding_corruption("content", failure))?;
+        let source_encoding: Vec<u8> = row.try_get("source_metadata_encoding")?;
+        let source = decode_source_metadata(&source_encoding)
+            .map_err(|failure| encoding_corruption("source metadata", failure))?;
+        entries.push(ImportedTranscriptEntryInput::new(
+            identity,
+            conversation,
+            position,
+            raw_position,
+            within_position,
+            source_speaker,
+            content,
+            source,
+        ));
+    }
+    Ok(Some(entries))
+}
+
+pub(crate) struct StoredConversationProjection {
+    requested: ImportedConversationId,
+    stored: ImportedConversationId,
+    format: ImportedConversationFormat,
+    source_digest: ImportedConversationSourceDigest,
+    source_session_id: Option<Vec<u8>>,
+    display_title: Option<String>,
+    display_title_state: String,
+    declared_raw_record_count: u64,
+    raws: Vec<StoredRawProjection>,
+    declared_entry_count: u64,
+    entries: Vec<ImportedTranscriptEntryInput>,
+}
+
+struct StoredRawProjection {
+    position: ImportedRawRecordPosition,
+    hash: ImportedRawRecordHash,
+    conversion_digest: ImportedRawRecordConversionDigest,
+    expected: ExpectedBlob,
+    normalized: signalbox_domain::ImportedStructuredValue,
+}
+
+async fn decode_projection(
     connection: &mut PgConnection,
     requested: ImportedConversationId,
     header: PgRow,
-) -> Result<ImportedConversation, ImportedConversationRepositoryError> {
+) -> Result<StoredConversationProjection, ImportedConversationRepositoryError> {
     let stored = ImportedConversationId::from_uuid(header.try_get("imported_conversation_id")?);
     require_i16(&header, "storage_version", STORAGE_VERSION)?;
     let source_format: String = header.try_get("source_format")?;
@@ -694,10 +1241,12 @@ async fn decode_complete(
     let raw_rows = sqlx::query(
         "SELECT occurrence.raw_record_position, occurrence.content_hash,
                 occurrence.conversion_digest, occurrence.normalized_value_encoding,
-                occurrence.declared_entry_count, blob.raw_bytes
+                occurrence.declared_entry_count, blob.byte_length
            FROM imported_conversation_raw_record AS occurrence
-           LEFT JOIN imported_raw_source_record AS blob
-             ON blob.content_hash = occurrence.content_hash
+           LEFT JOIN imported_raw_source_record AS raw
+             ON raw.content_hash = occurrence.content_hash
+           LEFT JOIN blob
+             ON blob.digest = raw.content_hash
           WHERE occurrence.imported_conversation_id = $1
           ORDER BY occurrence.raw_record_position",
     )
@@ -722,18 +1271,24 @@ async fn decode_complete(
             "raw-record conversion digest",
             ImportedRawRecordConversionDigest::from_bytes,
         )?;
-        let bytes: Option<Vec<u8>> = row.try_get("raw_bytes")?;
-        let bytes = bytes.ok_or(ImportedConversationCorruption::Missing("raw bytes"))?;
+        let byte_length: Option<Decimal> = row.try_get("byte_length")?;
+        let byte_length = byte_length.ok_or(ImportedConversationCorruption::Missing(
+            "raw blob reference",
+        ))?;
+        let byte_length = positive_u64(byte_length)
+            .map_err(|reason| invalid_ordinal_with_reason("raw-record byte length", reason))?;
+        let expected = ExpectedBlob::try_new(BlobDigest::from_bytes(*hash.as_bytes()), byte_length)
+            .map_err(|_| invalid_ordinal("raw-record byte length"))?;
         let normalized_encoding: Vec<u8> = row.try_get("normalized_value_encoding")?;
         let normalized = decode_structured(&normalized_encoding)
             .map_err(|failure| encoding_corruption("normalized value", failure))?;
-        raws.push(ImportedRawSourceRecordReconstitutionInput::new(
+        raws.push(StoredRawProjection {
             position,
             hash,
             conversion_digest,
-            bytes,
+            expected,
             normalized,
-        ));
+        });
         declared_entries_by_raw.insert(position, declared_entry_count);
     }
 
@@ -794,33 +1349,114 @@ async fn decode_complete(
         }
     }
 
-    let conversation = ImportedConversationReconstitutionInput::new(
+    Ok(StoredConversationProjection {
         requested,
         stored,
         format,
         source_digest,
+        source_session_id,
+        display_title,
+        display_title_state,
         declared_raw_record_count,
         raws,
         declared_entry_count,
         entries,
+    })
+}
+
+fn total_expected_bytes(
+    blobs: impl IntoIterator<Item = ExpectedBlob>,
+) -> Result<u64, ImportedRawBlobStorageError> {
+    blobs.into_iter().try_fold(0_u64, |total, blob| {
+        total
+            .checked_add(blob.byte_length())
+            .ok_or(ImportedRawBlobStorageError::Integrity)
+    })
+}
+
+fn distinct_expected_blobs(
+    blobs: impl IntoIterator<Item = ExpectedBlob>,
+) -> Result<BTreeMap<BlobDigest, ExpectedBlob>, ImportedConversationRepositoryError> {
+    let mut expected_by_digest = BTreeMap::new();
+    for expected in blobs {
+        match expected_by_digest.entry(expected.digest()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(expected);
+            }
+            std::collections::btree_map::Entry::Occupied(entry) if *entry.get() == expected => {}
+            std::collections::btree_map::Entry::Occupied(_) => {
+                return Err(ImportedConversationCorruption::RawRecordHashCollision.into());
+            }
+        }
+    }
+    Ok(expected_by_digest)
+}
+
+pub(crate) async fn finish_projection(
+    storage: &dyn ImportedRawBlobStorage,
+    projection: StoredConversationProjection,
+) -> Result<ImportedConversation, ImportedConversationRepositoryError> {
+    let total_source_bytes = total_expected_bytes(projection.raws.iter().map(|raw| raw.expected))?;
+    let expected_by_digest =
+        distinct_expected_blobs(projection.raws.iter().map(|raw| raw.expected))?;
+    let expected = expected_by_digest.values().copied().collect::<Box<[_]>>();
+    let distinct_bytes = storage.read(expected, total_source_bytes).await?;
+    if distinct_bytes.len() != expected_by_digest.len() {
+        return Err(ImportedConversationCorruption::Missing("raw blob bytes").into());
+    }
+    let bytes_by_digest = expected_by_digest
+        .into_keys()
+        .zip(distinct_bytes)
+        .collect::<BTreeMap<_, _>>();
+    let raws = projection
+        .raws
+        .into_iter()
+        .map(|raw| {
+            let stored_bytes = bytes_by_digest
+                .get(&raw.expected.digest())
+                .ok_or(ImportedConversationCorruption::Missing("raw blob bytes"))?;
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(stored_bytes.len())
+                .map_err(|_| ImportedRawBlobStorageError::Unavailable)?;
+            bytes.extend_from_slice(stored_bytes);
+            Ok(ImportedRawSourceRecordReconstitutionInput::new(
+                raw.position,
+                raw.hash,
+                raw.conversion_digest,
+                bytes,
+                raw.normalized,
+            ))
+        })
+        .collect::<Result<Vec<_>, ImportedConversationRepositoryError>>()?;
+    let conversation = ImportedConversationReconstitutionInput::new(
+        projection.requested,
+        projection.stored,
+        projection.format,
+        projection.source_digest,
+        projection.declared_raw_record_count,
+        raws,
+        projection.declared_entry_count,
+        projection.entries,
     )
     .reconstitute()
     .map_err(|error| ImportedConversationCorruption::Domain(error.failure()))?;
-    if let Some(source_session_id) = source_session_id
+    if let Some(source_session_id) = projection.source_session_id
         && Some(source_session_id.as_slice()) != consistent_source_session_id(&conversation)
     {
         return Err(ImportedConversationCorruption::SourceSessionLineageMismatch.into());
     }
-    validate_display_title(&conversation, display_title, &display_title_state)?;
+    validate_display_title(
+        &conversation,
+        projection.display_title,
+        &projection.display_title_state,
+    )?;
     Ok(conversation)
 }
 
 /// Requires a resolved stored display title to agree exactly with pure
 /// re-derivation from the reconstituted records.
 ///
-/// The transitional `'pending'` state names a row inserted before the title
-/// column existed and not yet resolved by the startup backfill; it carries no
-/// stored derivation to check.
 fn validate_display_title(
     conversation: &ImportedConversation,
     display_title: Option<String>,
@@ -828,7 +1464,6 @@ fn validate_display_title(
 ) -> Result<(), ImportedConversationRepositoryError> {
     let derived = ImportedConversationDisplayTitle::derive(conversation);
     match display_title_state {
-        DISPLAY_TITLE_STATE_PENDING => Ok(()),
         DISPLAY_TITLE_STATE_DERIVED => {
             let stored = display_title
                 .ok_or(ImportedConversationCorruption::Missing("display title"))
@@ -855,64 +1490,6 @@ fn validate_display_title(
     }
 }
 
-/// Resolves every transitional `'pending'` display title by pure
-/// re-derivation from the preserved records, returning the resolved count.
-///
-/// The daemon runs this once at startup, after migration and before serving,
-/// so every row the serving read surfaces observe carries a resolved title
-/// state. Each row resolves in its own transaction through the one guarded
-/// update the append-only trigger admits; a lost row or unexpected update
-/// count fails closed.
-pub async fn backfill_imported_conversation_display_titles(
-    pool: &PgPool,
-) -> Result<u64, ImportedConversationRepositoryError> {
-    let mut connection = pool.acquire().await?;
-    let pending: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT imported_conversation_id
-           FROM imported_conversation
-          WHERE display_title_state = 'pending'
-          ORDER BY imported_conversation_id",
-    )
-    .fetch_all(&mut *connection)
-    .await?;
-    drop(connection);
-    let mut resolved = 0_u64;
-    for pending_id in pending {
-        let mut transaction = pool.begin().await?;
-        let requested = ImportedConversationId::from_uuid(pending_id);
-        let conversation = load_from_connection(&mut transaction, requested)
-            .await?
-            .ok_or(ImportedConversationCorruption::Missing(
-                "pending display-title header",
-            ))?;
-        let display_title = ImportedConversationDisplayTitle::derive(&conversation)
-            .map(ImportedConversationDisplayTitle::into_string);
-        let updated = sqlx::query(
-            "UPDATE imported_conversation
-                SET display_title = $2, display_title_state = $3
-              WHERE imported_conversation_id = $1
-                AND display_title_state = 'pending'",
-        )
-        .bind(pending_id)
-        .bind(display_title.as_deref())
-        .bind(resolved_display_title_state(display_title.as_deref()))
-        .execute(&mut *transaction)
-        .await?
-        .rows_affected();
-        if updated != 1 {
-            return Err(ImportedConversationCorruption::Missing(
-                "pending display-title row for its guarded backfill update",
-            )
-            .into());
-        }
-        transaction.commit().await?;
-        resolved = resolved
-            .checked_add(1)
-            .ok_or_else(|| invalid_ordinal("resolved display-title count"))?;
-    }
-    Ok(resolved)
-}
-
 fn equivalent_snapshot(candidate: &ImportedConversation, existing: &ImportedConversation) -> bool {
     candidate.format() == existing.format()
         && candidate.source_digest() == existing.source_digest()
@@ -932,7 +1509,7 @@ fn equivalent_snapshot(candidate: &ImportedConversation, existing: &ImportedConv
             })
 }
 
-fn encode_format(format: ImportedConversationFormat) -> (&'static str, i16) {
+pub(crate) fn encode_format(format: ImportedConversationFormat) -> (&'static str, i16) {
     match format {
         ImportedConversationFormat::ClaudeCodeSessionJsonlV1 => {
             (CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_ONE)
@@ -987,7 +1564,7 @@ fn encode_source_speaker(speaker: &ImportedSourceAttestation<ImportedSpeaker>) -
     }
 }
 
-fn decode_source_speaker(
+pub(crate) fn decode_source_speaker(
     value: &str,
 ) -> Result<ImportedSourceAttestation<ImportedSpeaker>, ImportedConversationRepositoryError> {
     match value {
@@ -1127,18 +1704,19 @@ mod tests {
     use sqlx::types::Uuid;
 
     use super::{
-        CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_ONE, CLAUDE_CODE_VERSION_TWO, CODEX_FORMAT,
-        CODEX_VERSION_ONE, EncodedEntry, EncodedRawRecord, ImportedConversationFormat,
-        ImportedRawRecordConversionDigest, ImportedRawRecordHash, ImportedRawRecordPosition,
-        ImportedRecordEntryPosition, ImportedTranscriptEntryId, ImportedTranscriptPosition,
-        decode_format, encode_format, entries_in_key_order, raw_blobs_in_key_order,
+        BlobDigest, CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_ONE, CLAUDE_CODE_VERSION_TWO,
+        CODEX_FORMAT, CODEX_VERSION_ONE, EncodedEntry, EncodedRawRecord, ExpectedBlob,
+        ImportedConversationFormat, ImportedRawRecordConversionDigest, ImportedRawRecordHash,
+        ImportedRawRecordPosition, ImportedRecordEntryPosition, ImportedTranscriptEntryId,
+        ImportedTranscriptPosition, decode_format, distinct_expected_blobs, encode_format,
+        entries_in_key_order, raw_blobs_in_key_order,
     };
 
     fn encoded_raw(key: u8) -> EncodedRawRecord {
         EncodedRawRecord {
             content_hash: ImportedRawRecordHash::from_bytes([key; 32]),
             conversion_digest: ImportedRawRecordConversionDigest::from_bytes([0; 32]),
-            bytes: vec![key],
+            bytes: std::sync::Arc::from([key]),
             normalized: vec![key],
             declared_entry_count: 1,
         }
@@ -1209,6 +1787,26 @@ mod tests {
             ordered[1].content_hash,
             ImportedRawRecordHash::from_bytes([2; 32])
         );
+    }
+
+    #[test]
+    fn imported_blob_read_plan_deduplicates_equal_occurrences() {
+        let expected = ExpectedBlob::try_new(BlobDigest::from_bytes([1; 32]), 1)
+            .expect("fixture length is positive");
+
+        let distinct = distinct_expected_blobs([expected, expected])
+            .expect("equal immutable identities agree");
+
+        assert_eq!(distinct.len(), 1);
+        assert_eq!(distinct.get(&expected.digest()), Some(&expected));
+    }
+
+    #[test]
+    fn imported_blob_source_size_counts_equal_occurrences() {
+        let expected = ExpectedBlob::try_new(BlobDigest::from_bytes([1; 32]), 3)
+            .expect("fixture length is positive");
+
+        assert_eq!(super::total_expected_bytes([expected, expected]), Ok(6));
     }
 
     /// S28 / INV-001 / INV-038: globally unique entry keys are emitted in one

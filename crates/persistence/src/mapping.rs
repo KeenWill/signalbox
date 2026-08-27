@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use signalbox_application::{
     InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind, RepoWatchConvergenceVerdict,
     RepoWatchPullRequestLifecycle, RepoWatchReviewDecision, RepoWatchThreadState,
+    SearchContentClass, UsageCallKind, UsageProvenance,
 };
 use signalbox_domain::{
     AcceptedInputId, AnthropicServiceTier, BoundChildAction, CheckConclusion, ChecksOutcome,
@@ -87,6 +88,110 @@ const fn outbox_event_kind_utf8_byte_bounds() -> (u64, u64) {
 
 pub(crate) const OUTBOX_EVENT_KIND_UTF8_BYTE_BOUNDS: (u64, u64) =
     outbox_event_kind_utf8_byte_bounds();
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SearchProjectionSourceKind {
+    SessionMetadata,
+    AcceptedInput,
+    SteeringInput,
+    SemanticEntry,
+    ToolRequest,
+    ToolAttempt,
+    Attachment,
+    DerivedArtifact,
+}
+
+pub(crate) const fn search_projection_source_kind_to_str(
+    value: SearchProjectionSourceKind,
+) -> &'static str {
+    match value {
+        SearchProjectionSourceKind::SessionMetadata => "session_metadata",
+        SearchProjectionSourceKind::AcceptedInput => "accepted_input",
+        SearchProjectionSourceKind::SteeringInput => "steering_input",
+        SearchProjectionSourceKind::SemanticEntry => "semantic_entry",
+        SearchProjectionSourceKind::ToolRequest => "tool_request",
+        SearchProjectionSourceKind::ToolAttempt => "tool_attempt",
+        SearchProjectionSourceKind::Attachment => "attachment",
+        SearchProjectionSourceKind::DerivedArtifact => "derived_artifact",
+    }
+}
+
+pub(crate) fn search_projection_source_kind_from_str(
+    value: &str,
+) -> Option<SearchProjectionSourceKind> {
+    Some(match value {
+        "session_metadata" => SearchProjectionSourceKind::SessionMetadata,
+        "accepted_input" => SearchProjectionSourceKind::AcceptedInput,
+        "steering_input" => SearchProjectionSourceKind::SteeringInput,
+        "semantic_entry" => SearchProjectionSourceKind::SemanticEntry,
+        "tool_request" => SearchProjectionSourceKind::ToolRequest,
+        "tool_attempt" => SearchProjectionSourceKind::ToolAttempt,
+        "attachment" => SearchProjectionSourceKind::Attachment,
+        "derived_artifact" => SearchProjectionSourceKind::DerivedArtifact,
+        _ => return None,
+    })
+}
+
+pub(crate) const fn search_projection_content_class_to_str(
+    value: SearchContentClass,
+) -> &'static str {
+    match value {
+        SearchContentClass::UserTranscript => "user_transcript",
+        SearchContentClass::AssistantTranscript => "assistant_transcript",
+        SearchContentClass::ToolArguments => "tool_arguments",
+        SearchContentClass::ToolResult => "tool_result",
+        SearchContentClass::SessionMetadata => "session_metadata",
+        SearchContentClass::AttachmentFilename => "attachment_filename",
+        SearchContentClass::AttachmentMediaMetadata => "attachment_media_metadata",
+        SearchContentClass::DerivedTextArtifact => "derived_text_artifact",
+    }
+}
+
+pub(crate) fn search_projection_content_class_from_str(value: &str) -> Option<SearchContentClass> {
+    Some(match value {
+        "user_transcript" => SearchContentClass::UserTranscript,
+        "assistant_transcript" => SearchContentClass::AssistantTranscript,
+        "tool_arguments" => SearchContentClass::ToolArguments,
+        "tool_result" => SearchContentClass::ToolResult,
+        "session_metadata" => SearchContentClass::SessionMetadata,
+        "attachment_filename" => SearchContentClass::AttachmentFilename,
+        "attachment_media_metadata" => SearchContentClass::AttachmentMediaMetadata,
+        "derived_text_artifact" => SearchContentClass::DerivedTextArtifact,
+        _ => return None,
+    })
+}
+
+pub(crate) const fn usage_call_kind_to_str(value: UsageCallKind) -> &'static str {
+    match value {
+        UsageCallKind::ModelCall => "model_call",
+        UsageCallKind::ApprovalJudge => "approval_judge",
+        UsageCallKind::ContextCompaction => "context_compaction",
+    }
+}
+
+pub(crate) fn usage_call_kind_from_str(value: &str) -> Option<UsageCallKind> {
+    match value {
+        "model_call" => Some(UsageCallKind::ModelCall),
+        "approval_judge" => Some(UsageCallKind::ApprovalJudge),
+        "context_compaction" => Some(UsageCallKind::ContextCompaction),
+        _ => None,
+    }
+}
+
+pub(crate) const fn usage_provenance_to_str(value: UsageProvenance) -> &'static str {
+    match value {
+        UsageProvenance::Reported => "reported",
+        UsageProvenance::Estimated => "estimated",
+    }
+}
+
+pub(crate) fn usage_provenance_from_str(value: &str) -> Option<UsageProvenance> {
+    match value {
+        "reported" => Some(UsageProvenance::Reported),
+        "estimated" => Some(UsageProvenance::Estimated),
+        _ => None,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OutboxEventDiscriminator {
@@ -587,6 +692,43 @@ pub fn instruction_finding_kind_from_str(value: &str) -> Option<InstructionDisco
     }
 }
 
+/// Closed active-turn phase discriminators stored by PostgreSQL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ActiveTurnPhaseStorageKind {
+    Running,
+    AwaitingToolApproval,
+    AwaitingChild,
+    AwaitingModelCallRecovery,
+    AwaitingToolRecovery,
+    AwaitingRunnerRecovery,
+}
+
+#[cfg(test)]
+pub(crate) const fn active_turn_phase_to_str(value: ActiveTurnPhaseStorageKind) -> &'static str {
+    match value {
+        ActiveTurnPhaseStorageKind::Running => "running",
+        ActiveTurnPhaseStorageKind::AwaitingToolApproval => "awaiting_tool_approval",
+        ActiveTurnPhaseStorageKind::AwaitingChild => "awaiting_child",
+        ActiveTurnPhaseStorageKind::AwaitingModelCallRecovery => "awaiting_model_call_recovery",
+        ActiveTurnPhaseStorageKind::AwaitingToolRecovery => "awaiting_tool_recovery",
+        ActiveTurnPhaseStorageKind::AwaitingRunnerRecovery => "awaiting_runner_recovery",
+    }
+}
+
+pub(crate) fn active_turn_phase_from_str(value: &str) -> Option<ActiveTurnPhaseStorageKind> {
+    match value {
+        "running" => Some(ActiveTurnPhaseStorageKind::Running),
+        "awaiting_tool_approval" => Some(ActiveTurnPhaseStorageKind::AwaitingToolApproval),
+        "awaiting_child" => Some(ActiveTurnPhaseStorageKind::AwaitingChild),
+        "awaiting_model_call_recovery" => {
+            Some(ActiveTurnPhaseStorageKind::AwaitingModelCallRecovery)
+        }
+        "awaiting_tool_recovery" => Some(ActiveTurnPhaseStorageKind::AwaitingToolRecovery),
+        "awaiting_runner_recovery" => Some(ActiveTurnPhaseStorageKind::AwaitingRunnerRecovery),
+        _ => None,
+    }
+}
+
 /// Closed stored states for one durable runner-loss propagation cursor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RunnerLossPropagationStateStorageKind {
@@ -677,6 +819,39 @@ pub(crate) fn tool_attempt_disposition_from_str(
     }
 }
 
+/// Closed `blob_read_tool_charge.rejection_reason` discriminators in PostgreSQL.
+///
+/// A visibility refusal never reaches a charge row, so it has no spelling on
+/// this axis: only a recorded turn-budget rejection is durable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BlobReadRejectionStorageKind {
+    /// The turn's admitted decoded-byte budget could not absorb this request.
+    TurnByteBudgetExceeded,
+    /// The turn's admitted distinct-request count could not absorb this request.
+    TurnReadCountExceeded,
+}
+
+pub(crate) const fn blob_read_rejection_to_str(
+    value: BlobReadRejectionStorageKind,
+) -> &'static str {
+    match value {
+        BlobReadRejectionStorageKind::TurnByteBudgetExceeded => "blob_turn_byte_budget_exceeded",
+        BlobReadRejectionStorageKind::TurnReadCountExceeded => "blob_turn_read_count_exceeded",
+    }
+}
+
+pub(crate) fn blob_read_rejection_from_str(value: &str) -> Option<BlobReadRejectionStorageKind> {
+    match value {
+        "blob_turn_byte_budget_exceeded" => {
+            Some(BlobReadRejectionStorageKind::TurnByteBudgetExceeded)
+        }
+        "blob_turn_read_count_exceeded" => {
+            Some(BlobReadRejectionStorageKind::TurnReadCountExceeded)
+        }
+        _ => None,
+    }
+}
+
 /// Closed delegated-session update discriminators in PostgreSQL.
 ///
 /// Public because the outbox decode tripwire drives these spellings with the
@@ -751,6 +926,7 @@ pub(crate) const fn repo_watch_webhook_disposition_to_str(
 ) -> &'static str {
     match value {
         RepoWatchWebhookDisposition::Projected => "projected",
+        RepoWatchWebhookDisposition::Committed => "committed",
         RepoWatchWebhookDisposition::DuplicateState => "duplicate_state",
         RepoWatchWebhookDisposition::Superseded => "superseded",
         RepoWatchWebhookDisposition::Ignored => "ignored",
@@ -760,12 +936,12 @@ pub(crate) const fn repo_watch_webhook_disposition_to_str(
 
 /// Paired with the encoder above so a renamed or added disposition cannot
 /// update the writer while leaving a reader interpreting the old spelling.
-#[cfg(feature = "test-support")]
 pub(crate) fn repo_watch_webhook_disposition_from_str(
     value: &str,
 ) -> Option<RepoWatchWebhookDisposition> {
     match value {
         "projected" => Some(RepoWatchWebhookDisposition::Projected),
+        "committed" => Some(RepoWatchWebhookDisposition::Committed),
         "duplicate_state" => Some(RepoWatchWebhookDisposition::DuplicateState),
         "superseded" => Some(RepoWatchWebhookDisposition::Superseded),
         "ignored" => Some(RepoWatchWebhookDisposition::Ignored),
@@ -1095,6 +1271,7 @@ pub(crate) enum ToolApprovalDecisionSourceStorageKind {
     PolicyAuto,
     SessionBlanket,
     Delegate,
+    RuntimeSafety,
     UserOverride,
 }
 
@@ -1106,6 +1283,7 @@ pub(crate) const fn tool_approval_decision_source_to_str(
         ToolApprovalDecisionSourceStorageKind::PolicyAuto => "policy_auto",
         ToolApprovalDecisionSourceStorageKind::SessionBlanket => "session_blanket",
         ToolApprovalDecisionSourceStorageKind::Delegate => "delegate",
+        ToolApprovalDecisionSourceStorageKind::RuntimeSafety => "runtime_safety",
         ToolApprovalDecisionSourceStorageKind::UserOverride => "user_override",
     }
 }
@@ -1118,6 +1296,7 @@ pub(crate) fn tool_approval_decision_source_from_str(
         "policy_auto" => Some(ToolApprovalDecisionSourceStorageKind::PolicyAuto),
         "session_blanket" => Some(ToolApprovalDecisionSourceStorageKind::SessionBlanket),
         "delegate" => Some(ToolApprovalDecisionSourceStorageKind::Delegate),
+        "runtime_safety" => Some(ToolApprovalDecisionSourceStorageKind::RuntimeSafety),
         "user_override" => Some(ToolApprovalDecisionSourceStorageKind::UserOverride),
         _ => None,
     }
@@ -1583,6 +1762,7 @@ pub(crate) const fn repo_watch_event_target_to_str(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RepoWatchEventProducerStorageKind {
     Poll,
+    Webhook,
 }
 
 pub(crate) const fn repo_watch_event_producer_to_str(
@@ -1590,6 +1770,7 @@ pub(crate) const fn repo_watch_event_producer_to_str(
 ) -> &'static str {
     match value {
         RepoWatchEventProducerStorageKind::Poll => "poll",
+        RepoWatchEventProducerStorageKind::Webhook => "webhook",
     }
 }
 
@@ -1598,6 +1779,7 @@ pub(crate) fn repo_watch_event_producer_from_str(
 ) -> Option<RepoWatchEventProducerStorageKind> {
     match value {
         "poll" => Some(RepoWatchEventProducerStorageKind::Poll),
+        "webhook" => Some(RepoWatchEventProducerStorageKind::Webhook),
         _ => None,
     }
 }
@@ -2793,7 +2975,8 @@ mod tests {
     };
 
     use super::{
-        ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
+        ActiveTurnPhaseStorageKind, ApprovalJudgeStateStorageKind,
+        ApprovalJudgeTerminalDispositionStorageKind, BlobReadRejectionStorageKind,
         ConvergenceSweepOutcomeStorageKind, ConvergenceSweepStateStorageKind,
         DelegationPolicyStorageKind, DelegationRejectionStorageKind, DelegationUpdateStorageKind,
         DelegationWakeStorageKind, DurableCommandIdMappingError, DurableCommandKind,
@@ -2804,10 +2987,11 @@ mod tests {
         SessionPlacementResultStorageKind, StoredModelSettingsError,
         ToolApprovalDecisionSourceStorageKind, ToolAttemptDispositionStorageKind,
         WorkspaceInstructionAuthorityStorageKind, accepted_input_id_from_uuid,
-        accepted_input_id_to_uuid, approval_judge_recommendation_from_str,
-        approval_judge_recommendation_to_str, approval_judge_state_from_str,
-        approval_judge_state_to_str, approval_judge_terminal_disposition_from_str,
-        approval_judge_terminal_disposition_to_str, bound_child_action_from_str,
+        accepted_input_id_to_uuid, active_turn_phase_from_str, active_turn_phase_to_str,
+        approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
+        approval_judge_state_from_str, approval_judge_state_to_str,
+        approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
+        blob_read_rejection_from_str, blob_read_rejection_to_str, bound_child_action_from_str,
         bound_child_action_to_str, convergence_sweep_decision_outcome,
         convergence_sweep_failure_from_str, convergence_sweep_failure_outcome,
         convergence_sweep_failure_to_str, convergence_sweep_operator_need_from_str,
@@ -2860,6 +3044,64 @@ mod tests {
         tool_permission_default_from_str, tool_permission_default_to_str, turn_id_from_uuid,
         turn_id_to_uuid, workspace_instruction_authority_from_placement_state,
     };
+
+    #[test]
+    fn blob_read_rejection_mapping_is_closed() {
+        assert_eq!(
+            blob_read_rejection_from_str(blob_read_rejection_to_str(
+                BlobReadRejectionStorageKind::TurnByteBudgetExceeded,
+            )),
+            Some(BlobReadRejectionStorageKind::TurnByteBudgetExceeded)
+        );
+        assert_eq!(
+            blob_read_rejection_from_str(blob_read_rejection_to_str(
+                BlobReadRejectionStorageKind::TurnReadCountExceeded,
+            )),
+            Some(BlobReadRejectionStorageKind::TurnReadCountExceeded)
+        );
+        assert_eq!(blob_read_rejection_from_str("blob_not_visible"), None);
+    }
+
+    #[test]
+    fn active_turn_phase_mapping_is_closed() {
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::Running,
+            )),
+            Some(ActiveTurnPhaseStorageKind::Running)
+        );
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::AwaitingToolApproval,
+            )),
+            Some(ActiveTurnPhaseStorageKind::AwaitingToolApproval)
+        );
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::AwaitingChild,
+            )),
+            Some(ActiveTurnPhaseStorageKind::AwaitingChild)
+        );
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::AwaitingModelCallRecovery,
+            )),
+            Some(ActiveTurnPhaseStorageKind::AwaitingModelCallRecovery)
+        );
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::AwaitingToolRecovery,
+            )),
+            Some(ActiveTurnPhaseStorageKind::AwaitingToolRecovery)
+        );
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::AwaitingRunnerRecovery,
+            )),
+            Some(ActiveTurnPhaseStorageKind::AwaitingRunnerRecovery)
+        );
+        assert_eq!(active_turn_phase_from_str("unknown"), None);
+    }
 
     #[test]
     fn inv061_workspace_instruction_root_and_bundle_mappings_are_closed() {
@@ -3582,6 +3824,12 @@ mod tests {
                 ToolApprovalDecisionSourceStorageKind::Delegate,
             )),
             Some(ToolApprovalDecisionSourceStorageKind::Delegate)
+        );
+        assert_eq!(
+            tool_approval_decision_source_from_str(tool_approval_decision_source_to_str(
+                ToolApprovalDecisionSourceStorageKind::RuntimeSafety,
+            )),
+            Some(ToolApprovalDecisionSourceStorageKind::RuntimeSafety)
         );
         assert_eq!(
             tool_approval_decision_source_from_str(UNKNOWN_DISCRIMINATOR),

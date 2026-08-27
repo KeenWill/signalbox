@@ -34,14 +34,40 @@ use crate::{
         goal_blocked_reason_from_str, goal_blocked_reason_to_str, goal_command_rejection_from_str,
         goal_command_rejection_to_str, goal_event_kind_from_str, goal_event_kind_to_str,
         goal_model_blocked_reason_from_str, goal_operation_from_str, goal_operation_to_str,
-        positive_u64_from_numeric, session_id_to_uuid, tool_request_id_from_uuid,
-        tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
+        positive_u64_from_numeric, session_id_from_uuid, session_id_to_uuid,
+        tool_request_id_from_uuid, tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
     outbox::{self, OutboxEvent},
     session::SessionCorruption,
 };
 
 const STORAGE_VERSION: i16 = 1;
+
+/// Closed durable cause for an execution failure that requires an operator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GoalExecutionFailureRecoveryCause {
+    /// No safe context-compaction boundary fits the configured model window.
+    ContextCompactionInputDoesNotFit,
+}
+
+impl GoalExecutionFailureRecoveryCause {
+    /// Returns the closed durable spelling used by storage and telemetry.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::ContextCompactionInputDoesNotFit => "context_compaction_input_does_not_fit",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, GoalCorruption> {
+        match value {
+            "context_compaction_input_does_not_fit" => Ok(Self::ContextCompactionInputDoesNotFit),
+            value => Err(GoalCorruption::Unsupported {
+                field: "goal_execution_failure_recovery cause_kind",
+                value: value.to_owned(),
+            }),
+        }
+    }
+}
 
 /// Result of handling a user-global goal command identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -74,6 +100,25 @@ pub enum GoalTransitionOutcome {
     Rejected(GoalTransitionError),
     /// Scheduler provenance did not name a turn in the current goal generation.
     NotCurrentGoalTurn,
+}
+
+/// One latest execution-failure block selected for daemon reconciliation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PendingGoalExecutionFailure {
+    session: SessionId,
+    blocked: GoalEventOrdinal,
+}
+
+impl PendingGoalExecutionFailure {
+    /// Returns the session whose goal remains blocked.
+    pub const fn session(self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the exact blocked event the reconciliation must answer.
+    pub const fn blocked(self) -> GoalEventOrdinal {
+        self.blocked
+    }
 }
 
 /// A durable goal shape that cannot reconstruct domain values.
@@ -209,6 +254,29 @@ impl GoalRepository {
     /// Uses the supplied pool for independent goal transactions.
     pub const fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Loads the durable operator-required cause for one failed goal turn.
+    pub async fn execution_failure_recovery_cause(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+    ) -> Result<Option<GoalExecutionFailureRecoveryCause>, GoalRepositoryError> {
+        let cause = sqlx::query_scalar::<_, String>(
+            "SELECT cause_kind
+               FROM goal_execution_failure_recovery
+              WHERE session_id = $1
+                AND turn_id = $2",
+        )
+        .bind(session_id_to_uuid(session))
+        .bind(turn_id_to_uuid(turn))
+        .fetch_optional(&self.pool)
+        .await?;
+        cause
+            .as_deref()
+            .map(GoalExecutionFailureRecoveryCause::parse)
+            .transpose()
+            .map_err(GoalRepositoryError::Corruption)
     }
 
     /// Claims and handles an unseen user command, atomically scheduling a turn
@@ -500,6 +568,110 @@ impl GoalRepository {
         load_goal_from_connection(&mut connection, session).await
     }
 
+    /// Loads the current turn in one goal generation.
+    ///
+    /// The daemon uses this only to associate a pre-block execution failure
+    /// with the automatic resume whose budget it would otherwise spend. The
+    /// guarded goal transition still revalidates the same turn under the
+    /// session lock before appending anything.
+    pub async fn load_current_goal_turn(
+        &self,
+        session: SessionId,
+        generation: GoalGeneration,
+    ) -> Result<Option<TurnId>, GoalRepositoryError> {
+        let mut connection = self.pool.acquire().await?;
+        current_goal_turn(&mut connection, session, generation).await
+    }
+
+    /// Selects failed turns whose automatic resume does not spend its budget.
+    ///
+    /// Reconciled ambiguity is infrastructure work whether it originated at
+    /// startup or from the live watchdog. A definitive provider response is
+    /// likewise external only for transient rate limiting, overload, or an
+    /// internal provider failure. A continuation closed for configured context
+    /// headroom is also daemon-owned. Session-actionable provider failures
+    /// remain chargeable.
+    pub async fn unchargeable_automatic_resume_turns(
+        &self,
+        session: SessionId,
+        turns: &[TurnId],
+    ) -> Result<Box<[TurnId]>, GoalRepositoryError> {
+        if turns.is_empty() {
+            return Ok(Box::new([]));
+        }
+        let turn_ids = turns
+            .iter()
+            .map(|turn| turn_id_to_uuid(*turn))
+            .collect::<Vec<_>>();
+        let rows = sqlx::query(
+            "SELECT lifecycle.turn_id
+               FROM turn_lifecycle AS lifecycle
+               LEFT JOIN automatic_reconciliation AS recovery
+                 ON recovery.turn_id = lifecycle.turn_id
+                AND recovery.session_id = lifecycle.session_id
+               LEFT JOIN model_call AS terminal_call
+                 ON terminal_call.model_call_id = lifecycle.terminal_model_call_id
+                AND terminal_call.turn_id = lifecycle.turn_id
+                AND terminal_call.session_id = lifecycle.session_id
+               LEFT JOIN tool_continuation_context_headroom AS headroom
+                 ON headroom.terminal_attempt_id = lifecycle.terminal_attempt_id
+                AND headroom.turn_id = lifecycle.turn_id
+                AND headroom.session_id = lifecycle.session_id
+              WHERE lifecycle.session_id = $1
+                AND lifecycle.turn_id = ANY($2::uuid[])
+                AND (recovery.state_kind = 'reconciled'
+                     OR headroom.terminal_attempt_id IS NOT NULL
+                     OR terminal_call.terminal_provider_failure_cause IN
+                        ('rate_limited', 'overloaded', 'provider_internal'))
+              ORDER BY lifecycle.turn_id",
+        )
+        .bind(session_id_to_uuid(session))
+        .bind(turn_ids)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| Ok(turn_id_from_uuid(column(row, "turn_id")?)))
+            .collect::<Result<Vec<_>, GoalRepositoryError>>()
+            .map(Vec::into_boxed_slice)
+    }
+
+    /// Lists latest execution-failure blocks carrying one exact need.
+    ///
+    /// The need distinguishes daemon-scheduled automatic resumption from
+    /// execution-failure blocks that deliberately require an operator, such as
+    /// an unattended approval escalation. A later event removes the session
+    /// from this inventory without mutating the historical block.
+    pub async fn pending_execution_failures_with_need(
+        &self,
+        need: &GoalNeed,
+    ) -> Result<Box<[PendingGoalExecutionFailure]>, GoalRepositoryError> {
+        let rows = sqlx::query(
+            "SELECT event.session_id, event.event_ordinal
+               FROM goal_event AS event
+              WHERE event.event_kind = 'blocked'
+                AND event.blocked_reason = 'execution_failure'
+                AND event.need = $1
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM goal_event AS later
+                     WHERE later.session_id = event.session_id
+                       AND later.event_ordinal > event.event_ordinal)
+              ORDER BY event.session_id",
+        )
+        .bind(need.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(PendingGoalExecutionFailure {
+                    session: session_id_from_uuid(column(row, "session_id")?),
+                    blocked: GoalEventOrdinal::new(positive(column(row, "event_ordinal")?)?),
+                })
+            })
+            .collect::<Result<Vec<_>, GoalRepositoryError>>()
+            .map(Vec::into_boxed_slice)
+    }
+
     /// Reconciles one current goal turn's durable terminal disposition.
     ///
     /// Nonterminal work is left alone, completion queues one idempotent
@@ -782,6 +954,27 @@ pub(crate) async fn block_execution_failure_locked(
         .await?;
     }
     Ok(GoalTransitionOutcome::Applied(event))
+}
+
+/// Records an operator-required recovery cause inside the transaction that
+/// terminalizes the exact failed turn.
+pub(crate) async fn record_execution_failure_recovery_cause(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    cause: GoalExecutionFailureRecoveryCause,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO goal_execution_failure_recovery
+            (turn_id, session_id, cause_kind)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(turn_id_to_uuid(turn))
+    .bind(session_id_to_uuid(session))
+    .bind(cause.code())
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
 }
 
 fn recorded_scheduler_failure(goal: &Goal, turn: TurnId) -> Option<&GoalEvent> {
@@ -1254,7 +1447,7 @@ pub(crate) async fn lock_session(
     )
 }
 
-async fn lock_scheduler(
+pub(crate) async fn lock_scheduler(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<(), GoalRepositoryError> {

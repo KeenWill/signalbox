@@ -3,8 +3,9 @@
 use serde_json::{Value, json};
 
 use crate::code_host::{
+    CodeHostNumericBounds,
     arguments::{valid_cursor, valid_revision},
-    result::{MAX_RESULT_ITEMS, valid_required_text},
+    result::valid_required_text,
 };
 
 /// One immediate child in a change-request stack.
@@ -20,21 +21,21 @@ pub struct ChildStackState {
 impl ChildStackState {
     /// Validates one child comparison projection.
     pub fn try_new(
+        bounds: CodeHostNumericBounds,
         number: u32,
         head_ref: String,
         head_revision: String,
         base_commits_not_in_head: u64,
         main_commits_not_in_base: u64,
     ) -> Option<Self> {
-        (number > 0 && valid_required_text(&head_ref) && valid_revision(&head_revision)).then_some(
-            Self {
+        (number > 0 && valid_required_text(bounds, &head_ref) && valid_revision(&head_revision))
+            .then_some(Self {
                 number,
                 head_ref,
                 head_revision,
                 base_commits_not_in_head,
                 main_commits_not_in_base,
-            },
-        )
+            })
     }
 
     pub(super) fn needs_merge_forward(&self) -> bool {
@@ -106,19 +107,19 @@ pub struct StackStateFields {
 
 impl StackStateResult {
     /// Validates one bounded stack-state result.
-    pub fn try_new(fields: StackStateFields) -> Option<Self> {
+    pub fn try_new(bounds: CodeHostNumericBounds, fields: StackStateFields) -> Option<Self> {
         let cursor_valid = fields
             .children_next_cursor
             .as_deref()
             .is_none_or(valid_cursor);
         let valid = fields.number > 0
-            && valid_required_text(&fields.base_ref)
+            && valid_required_text(bounds, &fields.base_ref)
             && valid_revision(&fields.base_revision)
-            && valid_required_text(&fields.head_ref)
+            && valid_required_text(bounds, &fields.head_ref)
             && valid_revision(&fields.head_revision)
-            && valid_required_text(&fields.default_ref)
+            && valid_required_text(bounds, &fields.default_ref)
             && valid_revision(&fields.default_revision)
-            && fields.children.len() <= MAX_RESULT_ITEMS
+            && bounds.permits_result_items(fields.children.len())
             && cursor_valid
             && fields.children_truncated == fields.children_next_cursor.is_some();
         valid.then_some(Self {
@@ -203,20 +204,23 @@ mod tests {
     fn opaque_child_cursor_is_admitted() {
         const BASE_REVISION: &str = "1111111111111111111111111111111111111111";
         const HEAD_REVISION: &str = "2222222222222222222222222222222222222222";
-        let result = StackStateResult::try_new(StackStateFields {
-            number: 17,
-            base_ref: String::from("main"),
-            base_revision: String::from(BASE_REVISION),
-            head_ref: String::from("feature"),
-            head_revision: String::from(HEAD_REVISION),
-            default_ref: String::from("main"),
-            default_revision: String::from(BASE_REVISION),
-            base_commits_not_in_head: 0,
-            main_commits_not_in_base: 0,
-            children: Vec::new(),
-            children_truncated: true,
-            children_next_cursor: Some(String::from("opaque-child-page")),
-        });
+        let result = StackStateResult::try_new(
+            crate::code_host::test_numeric_bounds(),
+            StackStateFields {
+                number: 17,
+                base_ref: String::from("main"),
+                base_revision: String::from(BASE_REVISION),
+                head_ref: String::from("feature"),
+                head_revision: String::from(HEAD_REVISION),
+                default_ref: String::from("main"),
+                default_revision: String::from(BASE_REVISION),
+                base_commits_not_in_head: 0,
+                main_commits_not_in_base: 0,
+                children: Vec::new(),
+                children_truncated: true,
+                children_next_cursor: Some(String::from("opaque-child-page")),
+            },
+        );
 
         assert!(result.is_some());
     }

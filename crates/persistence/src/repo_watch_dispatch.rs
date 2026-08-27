@@ -5,6 +5,7 @@ use std::{
     error::Error,
     fmt,
     num::NonZeroU64,
+    time::Duration,
 };
 
 use rust_decimal::Decimal;
@@ -35,6 +36,12 @@ use crate::{
 };
 
 const CONFIGURATION_LOCK: &str = "repo-watch\u{1f}configuration";
+// numeric-bound: guard - prevents a dispatch start that never calls a model from holding its slot forever
+const DISPATCH_START_LEASE_LIMIT: Duration = Duration::from_secs(5 * 60);
+// numeric-bound: guard - prevents a lowered lease from expiring the start it just admitted
+const MINIMUM_DISPATCH_START_LEASE: Duration = Duration::from_millis(1);
+// numeric-bound: ceiling - one repository-watch rule can dispatch this many actions
+const UNSTARTED_DISPATCH_NUDGE_BATCH_SIZE: i64 = 32;
 
 struct ConfiguredRuleIdentity {
     content_digest: [u8; 32],
@@ -184,11 +191,48 @@ impl From<sqlx::Error> for RepoWatchDispatchRepositoryError {
     }
 }
 
+/// Tracks the identity of the most recent expired-start-lease candidate an
+/// unlocked drain pass observed vanish under its locked recheck.
+///
+/// A vanished candidate is ordinarily a benign race with concurrent
+/// retirement (see `process_pending_expired_start_leases`), and concurrent
+/// draining can legitimately make two *different* candidates vanish back to
+/// back. Every durable disposition the drain's predicate excludes on is
+/// monotonic, so a candidate the drain has already retired for can never be
+/// reselected; only the exact same candidate vanishing twice in a row is a
+/// real predicate disagreement between the drain's unlocked selection and
+/// the locked recheck.
+#[derive(Default)]
+struct VanishedCandidateTracker {
+    last: Option<(Uuid, i32)>,
+}
+
+impl VanishedCandidateTracker {
+    /// Records that the locked recheck found no candidate for the selection
+    /// identified by `dispatch_id` and `action_ordinal`. Returns `true` when
+    /// this repeats the exact identity most recently vanished, the drain's
+    /// fail-closed signal.
+    fn observe_vanished(&mut self, dispatch_id: Uuid, action_ordinal: i32) -> bool {
+        let identity = (dispatch_id, action_ordinal);
+        let repeat = self.last == Some(identity);
+        self.last = Some(identity);
+        repeat
+    }
+
+    /// Clears the tracked identity after real progress: a retirement, or a
+    /// candidate-specific quarantine that already recorded its own durable
+    /// disposition.
+    fn observe_progress(&mut self) {
+        self.last = None;
+    }
+}
+
 /// PostgreSQL implementation of atomic repository-watch dispatch admission.
 #[derive(Clone, Debug)]
 pub struct PostgresRepoWatchDispatchStore {
     pool: PgPool,
     credential_pin: crate::SessionCredentialPin,
+    dispatch_start_lease: Duration,
 }
 
 impl PostgresRepoWatchDispatchStore {
@@ -196,11 +240,285 @@ impl PostgresRepoWatchDispatchStore {
         Self {
             pool,
             credential_pin,
+            dispatch_start_lease: DISPATCH_START_LEASE_LIMIT,
         }
+    }
+
+    /// Lowers the dispatch-start lease for a composed runtime or test.
+    ///
+    /// Requests above the production ceiling are clamped rather than creating
+    /// a path that can raise the safety bound.
+    pub fn with_dispatch_start_lease(mut self, requested: Duration) -> Self {
+        self.dispatch_start_lease = requested
+            .max(MINIMUM_DISPATCH_START_LEASE)
+            .min(DISPATCH_START_LEASE_LIMIT);
+        self
     }
 
     pub(crate) const fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Loads bounded durable dispatch starts that still need priority admission.
+    pub async fn load_unstarted_dispatch_sessions(
+        &self,
+        repository: &RepositorySlug,
+    ) -> Result<Vec<SessionId>, RepoWatchDispatchRepositoryError> {
+        let sessions = sqlx::query_scalar::<_, Uuid>(
+            "SELECT lease.session_id
+               FROM repo_watch_dispatch_start_lease AS lease
+               JOIN repo_watch_dispatch_batch AS batch
+                 ON batch.dispatch_id = lease.dispatch_id
+               JOIN repo_watch_event AS origin ON origin.event_id = batch.event_id
+              WHERE origin.repository = $1
+                AND lease.expires_at > clock_timestamp()
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM model_call AS call
+                     WHERE call.session_id = lease.session_id
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_dispatch_start_lease_expiration AS expired
+                     WHERE expired.dispatch_id = lease.dispatch_id
+                       AND expired.action_ordinal = lease.action_ordinal
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_dispatch_start_lease_quarantine AS quarantined
+                     WHERE quarantined.dispatch_id = lease.dispatch_id
+                       AND quarantined.action_ordinal = lease.action_ordinal
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_dispatch_release AS released
+                     WHERE released.dispatch_id = lease.dispatch_id
+                )
+                AND EXISTS (
+                    SELECT 1
+                      FROM goal_event AS current_goal
+                     WHERE current_goal.session_id = lease.session_id
+                       AND current_goal.event_ordinal = (
+                            SELECT max(candidate.event_ordinal)
+                              FROM goal_event AS candidate
+                             WHERE candidate.session_id = lease.session_id
+                       )
+                       AND current_goal.event_kind IN (
+                            'commissioned', 'resumed', 'superseded'
+                       )
+                )
+              ORDER BY lease.leased_at, lease.session_id
+              LIMIT $2",
+        )
+        .bind(repository.as_str())
+        .bind(UNSTARTED_DISPATCH_NUDGE_BATCH_SIZE)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(sessions
+            .into_iter()
+            .map(SessionId::from_uuid)
+            .collect::<Vec<_>>())
+    }
+
+    /// Retires one expired evidence-free dispatch through ordinary goal authority.
+    pub async fn process_next_expired_start_lease<NextCommandId>(
+        &self,
+        repository: &RepositorySlug,
+        mut next_command_id: NextCommandId,
+    ) -> Result<bool, RepoWatchDispatchRepositoryError>
+    where
+        NextCommandId: FnMut() -> DurableCommandId,
+    {
+        let mut transaction = self.pool.begin().await?;
+        lock_text(&mut transaction, repository.as_str()).await?;
+        // The repository lock serializes lease selection. The session lock
+        // below then excludes model-call preparation before its evidence
+        // recheck and the composed stop.
+        let candidate = sqlx::query(
+            "SELECT lease.dispatch_id, lease.action_ordinal, lease.session_id
+               FROM repo_watch_dispatch_start_lease AS lease
+               JOIN repo_watch_dispatch_batch AS batch
+                 ON batch.dispatch_id = lease.dispatch_id
+               JOIN repo_watch_event AS origin ON origin.event_id = batch.event_id
+              WHERE origin.repository = $1
+                AND lease.expires_at <= clock_timestamp()
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM model_call AS call
+                     WHERE call.session_id = lease.session_id
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_dispatch_start_lease_expiration AS expired
+                     WHERE expired.dispatch_id = lease.dispatch_id
+                       AND expired.action_ordinal = lease.action_ordinal
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_dispatch_start_lease_quarantine AS quarantined
+                     WHERE quarantined.dispatch_id = lease.dispatch_id
+                       AND quarantined.action_ordinal = lease.action_ordinal
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_dispatch_release AS released
+                     WHERE released.dispatch_id = lease.dispatch_id
+                )
+                AND EXISTS (
+                    SELECT 1
+                      FROM goal_event AS current_goal
+                     WHERE current_goal.session_id = lease.session_id
+                       AND current_goal.event_ordinal = (
+                            SELECT max(candidate.event_ordinal)
+                              FROM goal_event AS candidate
+                             WHERE candidate.session_id = lease.session_id
+                       )
+                       AND current_goal.event_kind IN (
+                            'commissioned', 'resumed', 'superseded'
+                       )
+                )
+              ORDER BY lease.expires_at, lease.session_id
+              LIMIT 1",
+        )
+        .bind(repository.as_str())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(candidate) = candidate else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        let dispatch_id: Uuid = candidate.try_get("dispatch_id")?;
+        let action_ordinal: i32 = candidate.try_get("action_ordinal")?;
+        let session_id: Uuid = candidate.try_get("session_id")?;
+        let session = SessionId::from_uuid(session_id);
+        if !crate::goal::lock_session(&mut transaction, session).await? {
+            sqlx::query(
+                "INSERT INTO repo_watch_dispatch_start_lease_quarantine
+                    (dispatch_id, action_ordinal, session_id, reason)
+                 VALUES ($1, $2, $3, $4)",
+            )
+            .bind(dispatch_id)
+            .bind(action_ordinal)
+            .bind(session_id)
+            .bind("missing session")
+            .execute(&mut *transaction)
+            .await?;
+            commit(transaction).await?;
+            return Err(RepoWatchDispatchRepositoryError::Corruption(
+                "expired dispatch start lease references a missing session",
+            ));
+        }
+        sqlx::query("SAVEPOINT expired_start_lease_goal")
+            .execute(&mut *transaction)
+            .await?;
+        if let Err(error) = crate::goal::lock_scheduler(&mut transaction, session).await {
+            if matches!(&error, crate::goal::GoalRepositoryError::Corruption(_)) {
+                sqlx::query("ROLLBACK TO SAVEPOINT expired_start_lease_goal")
+                    .execute(&mut *transaction)
+                    .await?;
+                sqlx::query(
+                    "INSERT INTO repo_watch_dispatch_start_lease_quarantine
+                        (dispatch_id, action_ordinal, session_id, reason)
+                     VALUES ($1, $2, $3, $4)",
+                )
+                .bind(dispatch_id)
+                .bind(action_ordinal)
+                .bind(session_id)
+                .bind("goal scheduler corruption")
+                .execute(&mut *transaction)
+                .await?;
+                commit(transaction).await?;
+            }
+            return Err(RepoWatchDispatchRepositoryError::GoalCutoff(error));
+        }
+        let model_call_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM model_call WHERE session_id = $1
+            )",
+        )
+        .bind(session_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if model_call_exists {
+            transaction.rollback().await?;
+            return Ok(true);
+        }
+        let current_goal_is_pursuing: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1
+                  FROM goal_event AS current_goal
+                 WHERE current_goal.session_id = $1
+                   AND current_goal.event_ordinal = (
+                        SELECT max(candidate.event_ordinal)
+                          FROM goal_event AS candidate
+                         WHERE candidate.session_id = $1
+                   )
+                   AND current_goal.event_kind IN (
+                        'commissioned', 'resumed', 'superseded'
+                   )
+            )",
+        )
+        .bind(session_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !current_goal_is_pursuing {
+            transaction.rollback().await?;
+            return Ok(true);
+        }
+        let command = GoalUserCommand::new(
+            next_command_id(),
+            session,
+            GoalUserAction::Stop {
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            },
+        );
+        let stopped =
+            match crate::goal::insert_repo_watch_composed_stop(&mut transaction, command.clone())
+                .await
+            {
+                Ok(stopped) => stopped,
+                Err(error) => {
+                    if matches!(&error, crate::goal::GoalRepositoryError::Corruption(_)) {
+                        sqlx::query("ROLLBACK TO SAVEPOINT expired_start_lease_goal")
+                            .execute(&mut *transaction)
+                            .await?;
+                        sqlx::query(
+                            "INSERT INTO repo_watch_dispatch_start_lease_quarantine
+                            (dispatch_id, action_ordinal, session_id, reason)
+                         VALUES ($1, $2, $3, $4)",
+                        )
+                        .bind(dispatch_id)
+                        .bind(action_ordinal)
+                        .bind(session_id)
+                        .bind("goal stop corruption")
+                        .execute(&mut *transaction)
+                        .await?;
+                        commit(transaction).await?;
+                    }
+                    return Err(RepoWatchDispatchRepositoryError::GoalCutoff(error));
+                }
+            };
+        sqlx::query("RELEASE SAVEPOINT expired_start_lease_goal")
+            .execute(&mut *transaction)
+            .await?;
+        // A successor generation legitimately makes the repository-watch
+        // generation-one stop inapplicable. The lease still needs a durable
+        // retirement record so authoritative activation is no longer barred;
+        // only a stop that actually applied has a command receipt to retain.
+        let goal_command_id = stopped.then(|| *command.command_id().as_uuid());
+        sqlx::query(
+            "INSERT INTO repo_watch_dispatch_start_lease_expiration
+                (dispatch_id, action_ordinal, session_id, goal_command_id)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(dispatch_id)
+        .bind(action_ordinal)
+        .bind(session_id)
+        .bind(goal_command_id)
+        .execute(&mut *transaction)
+        .await?;
+        commit(transaction).await?;
+        Ok(true)
     }
 
     /// Processes the oldest unhandled pull-request closure and withdraws every
@@ -550,7 +868,119 @@ impl PostgresRepoWatchDispatchStore {
         Ok(())
     }
 
-    /// Drains durable lifecycle cutoffs before repository-specific tasks start.
+    /// Exhausts expired start leases before repository-specific tasks start.
+    pub async fn process_pending_expired_start_leases<NextCommandId>(
+        &self,
+        mut next_command_id: NextCommandId,
+    ) -> Result<(), RepoWatchDispatchRepositoryError>
+    where
+        NextCommandId: FnMut() -> DurableCommandId,
+    {
+        // This selection runs unlocked, so a concurrent repository-watch task
+        // (racing its own `process_next_expired_start_lease` calls against
+        // this drain, per `repo_watch_runtime::process_cutoffs`) or this same
+        // drain's next pass can retire the candidate before
+        // `process_next_expired_start_lease` takes the repository lock and
+        // repeats the identical predicate. That race is benign — the work
+        // happened — so a vanished candidate resumes the drain. Concurrent
+        // draining can legitimately make two *different* candidates from the
+        // same repository each vanish this way in a row, so tracking by
+        // repository alone would misreport that as corruption. Every
+        // durable disposition this loop's predicate excludes on (model call
+        // recorded, expiration, quarantine, release, or the goal leaving
+        // `commissioned`/`resumed`/`superseded`) is monotonic, so a candidate
+        // this selection has already retired for can never be reselected.
+        // Only the exact same (dispatch_id, action_ordinal) vanishing twice
+        // in a row is therefore a real predicate disagreement between the two
+        // queries, which still fails closed. Progress on any candidate clears
+        // the tracked identity, and each pass either retires a lease or
+        // retires a candidate from this drain, so the loop still terminates.
+        let mut vanished = VanishedCandidateTracker::default();
+        loop {
+            let candidate = sqlx::query(
+                "SELECT origin.repository, lease.dispatch_id, lease.action_ordinal
+                   FROM repo_watch_dispatch_start_lease AS lease
+                   JOIN repo_watch_dispatch_batch AS batch
+                     ON batch.dispatch_id = lease.dispatch_id
+                   JOIN repo_watch_event AS origin ON origin.event_id = batch.event_id
+                  WHERE lease.expires_at <= clock_timestamp()
+                    AND NOT EXISTS (
+                        SELECT 1 FROM model_call AS call
+                         WHERE call.session_id = lease.session_id
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM repo_watch_dispatch_start_lease_expiration AS expired
+                         WHERE expired.dispatch_id = lease.dispatch_id
+                           AND expired.action_ordinal = lease.action_ordinal
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM repo_watch_dispatch_start_lease_quarantine AS quarantined
+                         WHERE quarantined.dispatch_id = lease.dispatch_id
+                           AND quarantined.action_ordinal = lease.action_ordinal
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1 FROM repo_watch_dispatch_release AS released
+                         WHERE released.dispatch_id = lease.dispatch_id
+                    )
+                    AND EXISTS (
+                        SELECT 1
+                          FROM goal_event AS current_goal
+                         WHERE current_goal.session_id = lease.session_id
+                           AND current_goal.event_ordinal = (
+                                SELECT max(candidate.event_ordinal)
+                                  FROM goal_event AS candidate
+                                 WHERE candidate.session_id = lease.session_id
+                           )
+                           AND current_goal.event_kind IN (
+                                'commissioned', 'resumed', 'superseded'
+                           )
+                    )
+                  ORDER BY lease.expires_at, lease.session_id
+                  LIMIT 1",
+            )
+            .fetch_optional(&self.pool)
+            .await?;
+            let Some(candidate) = candidate else {
+                return Ok(());
+            };
+            let repository: String = candidate.try_get("repository")?;
+            let dispatch_id: Uuid = candidate.try_get("dispatch_id")?;
+            let action_ordinal: i32 = candidate.try_get("action_ordinal")?;
+            let repository = RepositorySlug::try_new(repository).map_err(|_| {
+                RepoWatchDispatchRepositoryError::Corruption(
+                    "pending dispatch start lease has an invalid repository",
+                )
+            })?;
+            match self
+                .process_next_expired_start_lease(&repository, &mut next_command_id)
+                .await
+            {
+                Ok(true) => {
+                    vanished.observe_progress();
+                }
+                Ok(false) => {
+                    if vanished.observe_vanished(dispatch_id, action_ordinal) {
+                        return Err(RepoWatchDispatchRepositoryError::Corruption(
+                            "selected pending dispatch start lease disappeared",
+                        ));
+                    }
+                }
+                Err(RepoWatchDispatchRepositoryError::GoalCutoff(
+                    crate::goal::GoalRepositoryError::Corruption(_),
+                ))
+                | Err(RepoWatchDispatchRepositoryError::Corruption(
+                    "expired dispatch start lease references a missing session",
+                )) => {
+                    vanished.observe_progress();
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Exhausts lifecycle cutoffs before repository-specific tasks start.
     pub async fn process_pending_lifecycle_cutoffs<NextCommandId>(
         &self,
         mut next_command_id: NextCommandId,
@@ -1223,6 +1653,12 @@ impl PostgresRepoWatchDispatchStore {
                 let action_count = i32::try_from(actions.len()).map_err(|_| {
                     RepoWatchDispatchRepositoryError::Corruption("action count exceeds storage")
                 })?;
+                let dispatch_start_lease_millis =
+                    i64::try_from(self.dispatch_start_lease.as_millis()).map_err(|_| {
+                        RepoWatchDispatchRepositoryError::Corruption(
+                            "dispatch start lease exceeds storage",
+                        )
+                    })?;
                 let cooldown_seconds = i64::try_from(cooldown.as_secs()).map_err(|_| {
                     RepoWatchDispatchRepositoryError::Corruption("cooldown exceeds storage")
                 })?;
@@ -1296,6 +1732,30 @@ impl PostgresRepoWatchDispatchStore {
                     .bind(command_id.as_uuid())
                     .bind(template_name)
                     .bind(template_digest)
+                    .execute(&mut *transaction)
+                    .await?;
+                    // The start window opens when admission is recorded, not
+                    // when this transaction began: `transaction_timestamp()`
+                    // predates the repository and singleton lock waits and
+                    // every session prepared above, so a delayed dispatch
+                    // would commit leases that are already expiring against
+                    // the `clock_timestamp()` every expiry check reads. One
+                    // `clock_timestamp()` per row feeds both columns so a
+                    // lease always spans exactly its configured duration.
+                    sqlx::query(
+                        "INSERT INTO repo_watch_dispatch_start_lease
+                            (dispatch_id, action_ordinal, session_id,
+                             leased_at, expires_at)
+                         SELECT
+                            $1, $2, $3,
+                            admitted.at,
+                            admitted.at + $4 * INTERVAL '1 millisecond'
+                           FROM (SELECT clock_timestamp() AS at) AS admitted",
+                    )
+                    .bind(dispatch_id.as_uuid())
+                    .bind(ordinal)
+                    .bind(session_id_to_uuid(session))
+                    .bind(dispatch_start_lease_millis)
                     .execute(&mut *transaction)
                     .await?;
                     crate::submit_input::insert_fresh_initial_input(
@@ -1862,9 +2322,11 @@ async fn insert_evaluation(
     let affected = sqlx::query(
         "INSERT INTO repo_watch_rule_evaluation
             (repository, rule_id, rule_version, event_id,
-             cursor_generation, event_ordinal, outcome_kind, dispatch_id)
+             cursor_generation, event_ordinal, outcome_kind, dispatch_id,
+             pull_request_number)
          SELECT event.repository, $2, $3, event.event_id,
-                event.cursor_generation, event.event_ordinal, $4, $5
+                event.cursor_generation, event.event_ordinal, $4, $5,
+                event.pull_request_number
            FROM repo_watch_event AS event
           WHERE event.event_id = $1
             AND event.repository = $6",
@@ -2179,4 +2641,48 @@ fn stored_rule_id(rule_id: &str) -> Result<RepoWatchRuleId, RepoWatchDispatchRep
     RepoWatchRuleId::try_new(rule_id.to_owned()).map_err(|_| {
         RepoWatchDispatchRepositoryError::Corruption("stored rule identifier is invalid")
     })
+}
+
+#[cfg(test)]
+mod vanished_candidate_tracker_tests {
+    use super::VanishedCandidateTracker;
+    use sqlx::types::Uuid;
+
+    #[test]
+    fn distinct_candidates_vanishing_in_a_row_are_not_a_repeat() {
+        let mut tracker = VanishedCandidateTracker::default();
+        let first = Uuid::from_u128(1);
+        let second = Uuid::from_u128(2);
+
+        assert!(!tracker.observe_vanished(first, 0));
+        assert!(!tracker.observe_vanished(second, 0));
+    }
+
+    #[test]
+    fn the_same_candidate_vanishing_twice_in_a_row_is_a_repeat() {
+        let mut tracker = VanishedCandidateTracker::default();
+        let candidate = Uuid::from_u128(1);
+
+        assert!(!tracker.observe_vanished(candidate, 0));
+        assert!(tracker.observe_vanished(candidate, 0));
+    }
+
+    #[test]
+    fn the_same_dispatch_with_a_different_action_ordinal_is_not_a_repeat() {
+        let mut tracker = VanishedCandidateTracker::default();
+        let dispatch_id = Uuid::from_u128(1);
+
+        assert!(!tracker.observe_vanished(dispatch_id, 0));
+        assert!(!tracker.observe_vanished(dispatch_id, 1));
+    }
+
+    #[test]
+    fn progress_clears_the_tracked_identity() {
+        let mut tracker = VanishedCandidateTracker::default();
+        let candidate = Uuid::from_u128(1);
+
+        assert!(!tracker.observe_vanished(candidate, 0));
+        tracker.observe_progress();
+        assert!(!tracker.observe_vanished(candidate, 0));
+    }
 }

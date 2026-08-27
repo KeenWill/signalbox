@@ -45,9 +45,14 @@ const productNavigationCommands = [
   {
     id: 'navigate.activity',
     title: 'Go to Activity',
-    description: 'Open the system-wide event stream.',
+    description: 'Open bounded repository ingestion and automation reads.',
     category: 'Navigate',
-    bindings: [],
+    bindings: [
+      {
+        label: 'g t',
+        registration: { kind: 'sequence', sequence: ['G', 'T'] as HotkeySequence },
+      },
+    ],
     run: (context: ProductCommandContext) => context.navigate('/activity'),
   },
   {
@@ -102,6 +107,14 @@ const productNavigationCommands = [
       },
     ],
     run: (context: ProductCommandContext) => context.navigate('/settings'),
+  },
+  {
+    id: 'navigate.scenario',
+    title: 'Go to Scenario Studio',
+    description: 'Open the streaming interaction scenario.',
+    category: 'Navigate',
+    bindings: [],
+    run: (context: ProductCommandContext) => context.navigate('/scenario/streaming'),
   },
 ] as const
 

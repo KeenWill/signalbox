@@ -539,18 +539,28 @@ describe('BoundedSessionHistory', () => {
     const request = async () =>
       new Response(
         JSON.stringify({
-          contract: { name: 'signalbox.web-http', version: '1' },
+          contract: { name: 'signalbox.web-http', version: '2' },
           capabilities: {
             bounded_json: true,
+            bounded_lexical_search: true,
+            bounded_usage_cost: true,
             same_origin_json_mutations: true,
             ndjson_streaming: true,
+            immutable_blob_content: true,
+            blob_derivations: true,
+            image_derivatives: true,
+            import_discovery: true,
+            imported_continuations: true,
             bounded_session_timeline: false,
-            bounded_session_live: true,
           },
           limits: {
-            max_json_body_bytes: 1024,
-            max_ndjson_item_bytes: 1024,
-            max_session_live_queued_turns: 32,
+            max_json_body_bytes: 64 * 1024,
+            max_ndjson_item_bytes: 64 * 1024,
+            max_search_query_bytes: 1,
+            max_search_page_items: 1,
+            max_search_snippet_bytes: 1,
+            max_usage_aggregate_groups: 1,
+            max_usage_call_page_items: 1,
             max_timeline_window_items: 256,
             max_timeline_window_bytes: 64 * 1024,
           },
@@ -567,18 +577,28 @@ describe('BoundedSessionHistory', () => {
     const request = async () =>
       new Response(
         JSON.stringify({
-          contract: { name: 'signalbox.web-http', version: '1' },
+          contract: { name: 'signalbox.web-http', version: '2' },
           capabilities: {
             bounded_json: false,
+            bounded_lexical_search: true,
+            bounded_usage_cost: true,
             same_origin_json_mutations: true,
             ndjson_streaming: true,
+            immutable_blob_content: true,
+            blob_derivations: true,
+            image_derivatives: true,
+            import_discovery: true,
+            imported_continuations: true,
             bounded_session_timeline: true,
-            bounded_session_live: true,
           },
           limits: {
-            max_json_body_bytes: 1024,
-            max_ndjson_item_bytes: 1024,
-            max_session_live_queued_turns: 32,
+            max_json_body_bytes: 64 * 1024,
+            max_ndjson_item_bytes: 64 * 1024,
+            max_search_query_bytes: 1,
+            max_search_page_items: 1,
+            max_search_snippet_bytes: 1,
+            max_usage_aggregate_groups: 1,
+            max_usage_call_page_items: 1,
             max_timeline_window_items: 256,
             max_timeline_window_bytes: 64 * 1024,
           },
@@ -587,7 +607,7 @@ describe('BoundedSessionHistory', () => {
       )
 
     await expect(HttpSessionTimelineSource.connect(request)).rejects.toThrow(
-      'bounded JSON session timeline capability is unavailable',
+      'bootstrap carries an incompatible web contract',
     )
   })
 
@@ -595,18 +615,28 @@ describe('BoundedSessionHistory', () => {
     const request = async () =>
       new Response(
         JSON.stringify({
-          contract: { name: 'signalbox.web-http', version: '1' },
+          contract: { name: 'signalbox.web-http', version: '2' },
           capabilities: {
             bounded_json: true,
+            bounded_lexical_search: true,
+            bounded_usage_cost: true,
             same_origin_json_mutations: true,
             ndjson_streaming: true,
+            immutable_blob_content: true,
+            blob_derivations: true,
+            image_derivatives: true,
+            import_discovery: true,
+            imported_continuations: true,
             bounded_session_timeline: true,
-            bounded_session_live: true,
           },
           limits: {
-            max_json_body_bytes: 1024,
-            max_ndjson_item_bytes: 1024,
-            max_session_live_queued_turns: 32,
+            max_json_body_bytes: 64 * 1024,
+            max_ndjson_item_bytes: 64 * 1024,
+            max_search_query_bytes: 1,
+            max_search_page_items: 1,
+            max_search_snippet_bytes: 1,
+            max_usage_aggregate_groups: 1,
+            max_usage_call_page_items: 1,
             max_timeline_window_items: 0,
             max_timeline_window_bytes: 255,
           },
@@ -623,18 +653,28 @@ describe('BoundedSessionHistory', () => {
     const request = async () =>
       new Response(
         JSON.stringify({
-          contract: { name: 'signalbox.web-http', version: '1' },
+          contract: { name: 'signalbox.web-http', version: '2' },
           capabilities: {
             bounded_json: true,
+            bounded_lexical_search: true,
+            bounded_usage_cost: true,
             same_origin_json_mutations: true,
             ndjson_streaming: true,
+            immutable_blob_content: true,
+            blob_derivations: true,
+            image_derivatives: true,
+            import_discovery: true,
+            imported_continuations: true,
             bounded_session_timeline: true,
-            bounded_session_live: true,
           },
           limits: {
-            max_json_body_bytes: 1024,
-            max_ndjson_item_bytes: 1024,
-            max_session_live_queued_turns: 32,
+            max_json_body_bytes: 64 * 1024,
+            max_ndjson_item_bytes: 64 * 1024,
+            max_search_query_bytes: 1,
+            max_search_page_items: 1,
+            max_search_snippet_bytes: 1,
+            max_usage_aggregate_groups: 1,
+            max_usage_call_page_items: 1,
             max_timeline_window_items: 257,
             max_timeline_window_bytes: 64 * 1024 + 1,
           },
@@ -653,18 +693,28 @@ describe('BoundedSessionHistory', () => {
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
-            contract: { name: 'signalbox.web-http', version: '1' },
+            contract: { name: 'signalbox.web-http', version: '2' },
             capabilities: {
               bounded_json: true,
+              bounded_lexical_search: true,
+              bounded_usage_cost: true,
               same_origin_json_mutations: true,
               ndjson_streaming: true,
+              immutable_blob_content: true,
+              blob_derivations: true,
+              image_derivatives: true,
+              import_discovery: true,
+              imported_continuations: true,
               bounded_session_timeline: true,
-              bounded_session_live: true,
             },
             limits: {
               max_json_body_bytes: 64 * 1024,
               max_ndjson_item_bytes: 64 * 1024,
-              max_session_live_queued_turns: 32,
+              max_search_query_bytes: 1,
+              max_search_page_items: 1,
+              max_search_snippet_bytes: 1,
+              max_usage_aggregate_groups: 1,
+              max_usage_call_page_items: 1,
               max_timeline_window_items: 256,
               max_timeline_window_bytes: 64 * 1024,
             },
@@ -706,18 +756,28 @@ describe('BoundedSessionHistory', () => {
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
-            contract: { name: 'signalbox.web-http', version: '1' },
+            contract: { name: 'signalbox.web-http', version: '2' },
             capabilities: {
               bounded_json: true,
+              bounded_lexical_search: true,
+              bounded_usage_cost: true,
               same_origin_json_mutations: true,
               ndjson_streaming: true,
+              immutable_blob_content: true,
+              blob_derivations: true,
+              image_derivatives: true,
+              import_discovery: true,
+              imported_continuations: true,
               bounded_session_timeline: true,
-              bounded_session_live: true,
             },
             limits: {
               max_json_body_bytes: 64 * 1024,
               max_ndjson_item_bytes: 64 * 1024,
-              max_session_live_queued_turns: 32,
+              max_search_query_bytes: 1,
+              max_search_page_items: 1,
+              max_search_snippet_bytes: 1,
+              max_usage_aggregate_groups: 1,
+              max_usage_call_page_items: 1,
               max_timeline_window_items: 256,
               max_timeline_window_bytes: 64 * 1024,
             },
@@ -1206,18 +1266,28 @@ describe('BoundedSessionHistory', () => {
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
-            contract: { name: 'signalbox.web-http', version: '1' },
+            contract: { name: 'signalbox.web-http', version: '2' },
             capabilities: {
               bounded_json: true,
+              bounded_lexical_search: true,
+              bounded_usage_cost: true,
               same_origin_json_mutations: true,
               ndjson_streaming: true,
+              immutable_blob_content: true,
+              blob_derivations: true,
+              image_derivatives: true,
+              import_discovery: true,
+              imported_continuations: true,
               bounded_session_timeline: true,
-              bounded_session_live: true,
             },
             limits: {
-              max_json_body_bytes: 1024,
-              max_ndjson_item_bytes: 1024,
-              max_session_live_queued_turns: 32,
+              max_json_body_bytes: 64 * 1024,
+              max_ndjson_item_bytes: 64 * 1024,
+              max_search_query_bytes: 1,
+              max_search_page_items: 1,
+              max_search_snippet_bytes: 1,
+              max_usage_aggregate_groups: 1,
+              max_usage_call_page_items: 1,
               max_timeline_window_items: 256,
               max_timeline_window_bytes: 64 * 1024,
             },
@@ -1263,18 +1333,28 @@ describe('BoundedSessionHistory', () => {
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
-            contract: { name: 'signalbox.web-http', version: '1' },
+            contract: { name: 'signalbox.web-http', version: '2' },
             capabilities: {
               bounded_json: true,
+              bounded_lexical_search: true,
+              bounded_usage_cost: true,
               same_origin_json_mutations: true,
               ndjson_streaming: true,
+              immutable_blob_content: true,
+              blob_derivations: true,
+              image_derivatives: true,
+              import_discovery: true,
+              imported_continuations: true,
               bounded_session_timeline: true,
-              bounded_session_live: true,
             },
             limits: {
-              max_json_body_bytes: 1024,
-              max_ndjson_item_bytes: 1024,
-              max_session_live_queued_turns: 32,
+              max_json_body_bytes: 64 * 1024,
+              max_ndjson_item_bytes: 64 * 1024,
+              max_search_query_bytes: 1,
+              max_search_page_items: 1,
+              max_search_snippet_bytes: 1,
+              max_usage_aggregate_groups: 1,
+              max_usage_call_page_items: 1,
               max_timeline_window_items: 256,
               max_timeline_window_bytes: 64 * 1024,
             },

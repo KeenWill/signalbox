@@ -1,6 +1,23 @@
 //! Session creation, configuration defaults, submitted input, and first turn activation.
 
 use crate::*;
+use signalbox_application::SubmitInputRequestError;
+use signalbox_domain::{AttachmentKind, BlobDigest, DeclaredMediaType, UserContentPart};
+
+fn attachment_part(digest: BlobDigest) -> UserContentPart {
+    UserContentPart::Attachment {
+        digest,
+        kind: AttachmentKind::File,
+        media_type: DeclaredMediaType::try_new(String::from("application/octet-stream"))
+            .expect("the fixture media type is valid"),
+        display_filename: None,
+    }
+}
+
+fn attachment_content(digest: BlobDigest) -> UserContent {
+    UserContent::try_parts(vec![attachment_part(digest)])
+        .expect("the fixture attachment content is canonical")
+}
 
 /// S01 / INV-002 / INV-008 / INV-012: the Postgres adapters preserve
 /// application command outcomes, return the complete current session
@@ -1042,7 +1059,7 @@ async fn inv012_incomplete_or_unknown_claims_fail_closed_as_corruption()
             ('10000000-0000-4000-8000-000000000134',
              'replace_session_defaults', 99, transaction_timestamp()),
             ('10000000-0000-4000-8000-000000000135',
-             'submit_input', 1, transaction_timestamp()),
+             'submit_input', 3, transaction_timestamp()),
             ('10000000-0000-4000-8000-000000000136',
              'submit_input', 99, transaction_timestamp())",
     )
@@ -2533,7 +2550,7 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
     sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'submit_input', 1, transaction_timestamp())",
+         VALUES ($1, 'submit_input', 3, transaction_timestamp())",
     )
     .bind(Uuid::from_u128(0x3ff))
     .execute(&mut *transaction)
@@ -2562,8 +2579,8 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
         )
         .await?;
     let error = sqlx::query(
-        "UPDATE submit_input_command
-            SET content_text = 'mutated'
+        "UPDATE submit_input_command_content_part
+            SET text_value = 'mutated'
           WHERE command_id = $1",
     )
     .bind(Uuid::from_u128(0x3fe))
@@ -2593,78 +2610,86 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
         .await?;
 
     let source_command_id = Uuid::from_u128(0x3fd);
-    let malformed_rejections = [
-        (
-            Uuid::from_u128(0x3fa),
-            "no_active_turn",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        ),
-        (
-            Uuid::from_u128(0x3f9),
-            "session_defaults_version_mismatch",
-            None,
-            None,
-            Some(Decimal::ONE),
-            None,
-            None,
-            None,
-        ),
-        (
-            Uuid::from_u128(0x3f8),
-            "unknown_model_alias",
-            None,
-            None,
-            None,
-            Some(Uuid::from_u128(0x8f8)),
-            None,
-            None,
-        ),
-        (
-            Uuid::from_u128(0x3f7),
-            "acceptance_position_exhausted",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        ),
-    ];
-    for (
-        command_id,
-        rejection_kind,
-        expected_turn,
-        expected_defaults,
-        current_defaults,
-        unknown_alias,
-        selected_defaults,
-        last_position,
-    ) in malformed_rejections
-    {
-        let error = insert_malformed_submit_rejection(
-            &pool,
-            command_id,
-            source_command_id,
-            rejection_kind,
-            expected_turn,
-            expected_defaults,
-            current_defaults,
-            unknown_alias,
-            selected_defaults,
-            last_position,
-        )
-        .await
-        .expect_err(rejection_kind);
-        assert_eq!(
-            error.as_database_error().and_then(|error| error.code()),
-            Some("23514".into())
-        );
-    }
+    let malformed_no_active_turn = insert_malformed_submit_rejection(
+        &pool,
+        Uuid::from_u128(0x3fa),
+        source_command_id,
+        "no_active_turn",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("no_active_turn");
+    assert_eq!(
+        malformed_no_active_turn
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+    let malformed_defaults_mismatch = insert_malformed_submit_rejection(
+        &pool,
+        Uuid::from_u128(0x3f9),
+        source_command_id,
+        "session_defaults_version_mismatch",
+        None,
+        None,
+        Some(Decimal::ONE),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("session_defaults_version_mismatch");
+    assert_eq!(
+        malformed_defaults_mismatch
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+    let malformed_unknown_alias = insert_malformed_submit_rejection(
+        &pool,
+        Uuid::from_u128(0x3f8),
+        source_command_id,
+        "unknown_model_alias",
+        None,
+        None,
+        None,
+        Some(Uuid::from_u128(0x8f8)),
+        None,
+        None,
+    )
+    .await
+    .expect_err("unknown_model_alias");
+    assert_eq!(
+        malformed_unknown_alias
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+    let malformed_exhaustion = insert_malformed_submit_rejection(
+        &pool,
+        Uuid::from_u128(0x3f7),
+        source_command_id,
+        "acceptance_position_exhausted",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("acceptance_position_exhausted");
+    assert_eq!(
+        malformed_exhaustion
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
 
     let error = insert_malformed_submit_rejection(
         &pool,
@@ -2689,7 +2714,7 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
     sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'submit_input', 1, transaction_timestamp())",
+         VALUES ($1, 'submit_input', 3, transaction_timestamp())",
     )
     .bind(Uuid::from_u128(0x3fb))
     .execute(&mut *transaction)
@@ -2698,7 +2723,7 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
         "INSERT INTO submit_input_command
             (command_id, command_kind, storage_version, session_id,
              actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text, delivery_kind,
+             delivery_kind,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
@@ -2710,7 +2735,7 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
          SELECT
              $1, command_kind, storage_version, session_id,
              actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text, delivery_kind,
+             delivery_kind,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
@@ -2728,6 +2753,19 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
     .bind(Uuid::from_u128(0x3fd))
     .execute(&mut *transaction)
     .await?;
+    sqlx::query(
+        "INSERT INTO submit_input_command_content_part
+            (command_id, position, part_kind, text_value, blob_digest,
+             attachment_kind, declared_media_type, display_filename)
+         SELECT $1, position, part_kind, text_value, blob_digest,
+                attachment_kind, declared_media_type, display_filename
+           FROM submit_input_command_content_part
+          WHERE command_id = $2",
+    )
+    .bind(Uuid::from_u128(0x3fb))
+    .bind(Uuid::from_u128(0x3fd))
+    .execute(&mut *transaction)
+    .await?;
     let error = transaction
         .commit()
         .await
@@ -2742,32 +2780,32 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
     Ok(())
 }
 
-/// The persistence contract mirrors the one-mebibyte accepted-input
-/// content bound is one contract enforced at correlated layers — oversized
-/// text fails application admission before the typed command and never reaches SQL,
-/// exact-bound text commits through the real adapter, and a direct SQL
-/// insert of oversized content is refused by the schema checks.
+/// The deployment's configured accepted-input content bound is enforced at
+/// application admission: oversized text fails before the typed command
+/// exists, so it never reaches SQL and claims no durable identifier.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn content_size_bound_rejects_oversized_text_at_application_and_schema()
--> Result<(), Box<dyn Error>> {
+async fn content_size_bound_rejects_oversized_text_at_application() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
 
-    let oversized = UserContent::try_text("a".repeat(1_048_577))
+    const CONFIGURED_MAX_UTF8_BYTES: usize = 11;
+    let oversized = UserContent::try_text("a".repeat(CONFIGURED_MAX_UTF8_BYTES + 1))
         .expect("domain text is intentionally unbounded");
-    let error = SubmitInputRequest::try_new(
+    let error = SubmitInputRequest::try_new_with_content_limit(
         DurableCommandId::from_uuid(Uuid::from_u128(0x320)),
         SessionId::from_uuid(Uuid::from_u128(0x720)),
         oversized,
         DeliveryRequest::StartWhenNoActiveTurn {
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
+        Some(CONFIGURED_MAX_UTF8_BYTES),
     )
     .expect_err("text over the provisional bound fails application admission");
     assert_eq!(
         error,
         SubmitInputRequestError::OversizedContent {
-            utf8_byte_length: 1_048_577,
+            utf8_byte_length: CONFIGURED_MAX_UTF8_BYTES + 1,
+            max_utf8_bytes: CONFIGURED_MAX_UTF8_BYTES,
         }
     );
     let claimed: i64 = sqlx::query_scalar("SELECT count(*) FROM durable_command")
@@ -2778,6 +2816,12 @@ async fn content_size_bound_rejects_oversized_text_at_application_and_schema()
         "content rejected before typed-command construction claims no durable identifier"
     );
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+async fn persist_at_bound_content(pool: &PgPool) -> Result<usize, Box<dyn Error>> {
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x321, 0x721, direct(0x821)))
         .await?;
@@ -2795,33 +2839,58 @@ async fn content_size_bound_rejects_oversized_text_at_application_and_schema()
             Some(TurnId::from_uuid(Uuid::from_u128(0xa21))),
         )
         .await?;
+    Ok(at_bound.len())
+}
+
+/// The persistence adapter and both mirrored rows admit the domain's exact
+/// one-mebibyte text bound.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn content_size_bound_commits_at_exact_maximum() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let expected_length = i32::try_from(persist_at_bound_content(&pool).await?)?;
     let stored_lengths: Vec<i32> = sqlx::query_scalar(
-        "SELECT octet_length(content_text) FROM submit_input_command
+        "SELECT octet_length(text_value)
+           FROM submit_input_command_content_part
          UNION ALL
-         SELECT octet_length(content_text) FROM accepted_input",
+         SELECT octet_length(text_value)
+           FROM accepted_input_content_part",
     )
     .fetch_all(&pool)
     .await?;
     assert_eq!(
         stored_lengths,
-        vec![1_048_576, 1_048_576],
+        vec![expected_length, expected_length],
         "the schema must admit the domain's exact maximum"
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The submit-command satellite refuses content one byte above the domain
+/// maximum even when SQL bypasses domain construction.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn submit_command_schema_rejects_content_above_maximum() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let above_bound = "a".repeat(persist_at_bound_content(&pool).await? + 1);
 
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'submit_input', 1, transaction_timestamp())",
+         VALUES ($1, 'submit_input', 3, transaction_timestamp())",
     )
     .bind(Uuid::from_u128(0x323))
     .execute(&mut *transaction)
     .await?;
-    let command_error = sqlx::query(
+    sqlx::query(
         "INSERT INTO submit_input_command
             (command_id, command_kind, storage_version, session_id,
              actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text, delivery_kind,
+             delivery_kind,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
@@ -2833,7 +2902,7 @@ async fn content_size_bound_rejects_oversized_text_at_application_and_schema()
          SELECT
              $1, command_kind, storage_version, session_id,
              actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text || 'a', delivery_kind,
+             delivery_kind,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
@@ -2848,54 +2917,1988 @@ async fn content_size_bound_rejects_oversized_text_at_application_and_schema()
     .bind(Uuid::from_u128(0x323))
     .bind(Uuid::from_u128(0x322))
     .execute(&mut *transaction)
-    .await
-    .expect_err("the schema refuses command content one byte over the bound");
+    .await?;
+    sqlx::query(
+        "INSERT INTO submit_input_command_content_part
+            (command_id, position, part_kind, text_value)
+         VALUES ($1, 0, 'text', $2)",
+    )
+    .bind(Uuid::from_u128(0x323))
+    .bind(above_bound)
+    .execute(&mut *transaction)
+    .await?;
+    let command_error =
+        sqlx::query("SET CONSTRAINTS submit_input_command_content_parts_are_valid IMMEDIATE")
+            .execute(&mut *transaction)
+            .await
+            .expect_err("the schema refuses command content one byte over the bound");
     let database_error = command_error
         .as_database_error()
         .expect("a check violation is a database error");
     assert_eq!(database_error.code(), Some("23514".into()));
     assert_eq!(
         database_error.constraint(),
-        Some("submit_input_command_content_bounded")
+        Some("submit_input_command_content_parts_valid")
     );
     transaction.rollback().await?;
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The accepted-input satellite refuses content one byte above the domain
+/// maximum even when SQL bypasses domain construction.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn accepted_input_schema_rejects_content_above_maximum() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let above_bound = "a".repeat(persist_at_bound_content(&pool).await? + 1);
+
     let mut transaction = pool.begin().await?;
-    let accepted_error = sqlx::query(
+    sqlx::query(
         "INSERT INTO accepted_input
             (accepted_input_id, accepting_command_id, session_id,
-             content_kind, content_text, delivery_kind,
+             delivery_kind,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
              acceptance_position, disposition_kind, origin_turn_id)
          SELECT
-             $1, $2, session_id,
-             content_kind, content_text || 'a', delivery_kind,
+             $1, NULL, session_id,
+             delivery_kind,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
-             $3, disposition_kind, $4
+             $2, disposition_kind, $3
            FROM accepted_input
-          WHERE accepted_input_id = $5",
+          WHERE accepted_input_id = $4",
     )
     .bind(Uuid::from_u128(0x922))
-    .bind(Uuid::from_u128(0x323))
     .bind(Decimal::TWO)
     .bind(Uuid::from_u128(0xa22))
     .bind(Uuid::from_u128(0x921))
     .execute(&mut *transaction)
-    .await
-    .expect_err("the schema refuses accepted content one byte over the bound");
+    .await?;
+    sqlx::query(
+        "INSERT INTO accepted_input_content_part
+            (accepted_input_id, position, part_kind, text_value)
+         VALUES ($1, 0, 'text', $2)",
+    )
+    .bind(Uuid::from_u128(0x922))
+    .bind(above_bound)
+    .execute(&mut *transaction)
+    .await?;
+    let accepted_error =
+        sqlx::query("SET CONSTRAINTS accepted_input_content_parts_are_valid IMMEDIATE")
+            .execute(&mut *transaction)
+            .await
+            .expect_err("the schema refuses accepted content one byte over the bound");
     let database_error = accepted_error
         .as_database_error()
         .expect("a check violation is a database error");
     assert_eq!(database_error.code(), Some("23514".into()));
     assert_eq!(
         database_error.constraint(),
-        Some("accepted_input_content_bounded")
+        Some("accepted_input_content_parts_valid")
     );
     transaction.rollback().await?;
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+struct MultipartReplayFixture {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    repository: SubmitInputRepository,
+    command: SubmitInput,
+    first: SubmitInputHandlingOutcome,
+}
+
+const MULTIPART_SESSION_COMMAND_ID: u128 = 0x324;
+const MULTIPART_SESSION_ID: u128 = 0x724;
+const MULTIPART_MODEL_SELECTION_ID: u128 = 0x824;
+const MULTIPART_BLOB_NAMESPACE_ID: u128 = 0xb24;
+const MULTIPART_SUBMIT_COMMAND_ID: u128 = 0x325;
+const MULTIPART_ACCEPTED_INPUT_ID: u128 = 0x925;
+const MULTIPART_TURN_ID: u128 = 0xa25;
+const MULTIPART_REPLAY_ACCEPTED_INPUT_ID: u128 = 0x926;
+const MULTIPART_REPLAY_TURN_ID: u128 = 0xa26;
+const MULTIPART_REORDERED_ACCEPTED_INPUT_ID: u128 = 0x927;
+const MULTIPART_REORDERED_TURN_ID: u128 = 0xa27;
+const MULTIPART_METADATA_ACCEPTED_INPUT_ID: u128 = 0x928;
+const MULTIPART_METADATA_TURN_ID: u128 = 0xa28;
+const MULTIPART_ATTACHMENT_PAYLOAD: &[u8] = b"multipart attachment";
+const MULTIPART_ATTACHMENT_MAXIMUM_BYTES: u64 = 1_024;
+const MULTIPART_BLOB_STORE_NAME: &str = "multipart_test";
+const MULTIPART_BLOB_OBJECT_KEY: &str = "multipart/object";
+
+fn multipart_input_choices() -> PerInputConfigurationChoices {
+    PerInputConfigurationChoices::new(
+        SessionConfigurationDefaultsVersion::first(),
+        ModelSelectionOverride::UseSessionDefault,
+    )
+}
+
+#[derive(sqlx::FromRow)]
+struct MultipartProjectionFacts {
+    command_projection: Value,
+    accepted_projection: Value,
+}
+
+impl MultipartReplayFixture {
+    async fn finish(self) {
+        self.pool.close().await;
+        drop(self.container);
+    }
+}
+
+async fn multipart_replay_fixture(
+    command: SubmitInput,
+    attachment_payload: &[u8],
+) -> Result<MultipartReplayFixture, Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(
+            MULTIPART_SESSION_COMMAND_ID,
+            MULTIPART_SESSION_ID,
+            direct(MULTIPART_MODEL_SELECTION_ID),
+        ))
+        .await?;
+
+    let digest = BlobDigest::digest(attachment_payload);
+    let mut catalog = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO blob_store_binding (store_name, namespace_id)
+         VALUES ($1, $2)",
+    )
+    .bind(MULTIPART_BLOB_STORE_NAME)
+    .bind(Uuid::from_u128(MULTIPART_BLOB_NAMESPACE_ID))
+    .execute(&mut *catalog)
+    .await?;
+    sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, $2)")
+        .bind(digest.as_bytes().as_slice())
+        .bind(Decimal::from(attachment_payload.len()))
+        .execute(&mut *catalog)
+        .await?;
+    sqlx::query(
+        "INSERT INTO blob_replica (digest, store_name, object_key)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(digest.as_bytes().as_slice())
+    .bind(MULTIPART_BLOB_STORE_NAME)
+    .bind(MULTIPART_BLOB_OBJECT_KEY)
+    .execute(&mut *catalog)
+    .await?;
+    catalog.commit().await?;
+
+    let repository = SubmitInputRepository::new(pool.clone())
+        .with_attachment_maximum_bytes(MULTIPART_ATTACHMENT_MAXIMUM_BYTES);
+    let first = repository
+        .handle(
+            command.clone(),
+            AcceptedInputId::from_uuid(Uuid::from_u128(MULTIPART_ACCEPTED_INPUT_ID)),
+            Some(TurnId::from_uuid(Uuid::from_u128(MULTIPART_TURN_ID))),
+        )
+        .await?;
+    match &first {
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_),
+        )) => {}
+        SubmitInputHandlingOutcome::Recorded(
+            SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(_))
+            | SubmitInputResult::Rejected(_),
+        )
+        | SubmitInputHandlingOutcome::ConflictingReuse { .. } => panic!(
+            "the multipart fixture submission must record a turn-origin acceptance, not {first:?}"
+        ),
+    }
+
+    Ok(MultipartReplayFixture {
+        container,
+        pool,
+        repository,
+        command,
+        first,
+    })
+}
+
+/// INV-012: equal multipart replay returns the original durable acceptance.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_equal_multipart_submit_replay_returns_the_original_receipt()
+-> Result<(), Box<dyn Error>> {
+    let digest = BlobDigest::digest(MULTIPART_ATTACHMENT_PAYLOAD);
+    let before = UserContentPart::try_text(String::from("before"))
+        .expect("the fixture leading text is valid");
+    let attachment = UserContentPart::Attachment {
+        digest,
+        kind: AttachmentKind::Document,
+        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
+            .expect("the fixture media type is valid"),
+        display_filename: Some(
+            AttachmentDisplayFilename::try_new(String::from("notes.pdf"))
+                .expect("the fixture display filename is valid"),
+        ),
+    };
+    let after = UserContentPart::try_text(String::from("after"))
+        .expect("the fixture trailing text is valid");
+    let content = UserContent::try_parts(vec![before, attachment, after])
+        .expect("the fixture parts are canonical");
+    let command = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(MULTIPART_SUBMIT_COMMAND_ID)),
+        SessionId::from_uuid(Uuid::from_u128(MULTIPART_SESSION_ID)),
+        content,
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: multipart_input_choices(),
+        },
+    );
+    let fixture = multipart_replay_fixture(command, MULTIPART_ATTACHMENT_PAYLOAD).await?;
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                fixture.command.clone(),
+                AcceptedInputId::from_uuid(Uuid::from_u128(MULTIPART_REPLAY_ACCEPTED_INPUT_ID)),
+                Some(TurnId::from_uuid(Uuid::from_u128(MULTIPART_REPLAY_TURN_ID))),
+            )
+            .await?,
+        fixture.first
+    );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-012: loading a durable multipart command reconstructs its exact value.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_durable_multipart_command_reconstructs_the_original_value()
+-> Result<(), Box<dyn Error>> {
+    let digest = BlobDigest::digest(MULTIPART_ATTACHMENT_PAYLOAD);
+    let before = UserContentPart::try_text(String::from("before"))
+        .expect("the fixture leading text is valid");
+    let attachment = UserContentPart::Attachment {
+        digest,
+        kind: AttachmentKind::Document,
+        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
+            .expect("the fixture media type is valid"),
+        display_filename: Some(
+            AttachmentDisplayFilename::try_new(String::from("notes.pdf"))
+                .expect("the fixture display filename is valid"),
+        ),
+    };
+    let after = UserContentPart::try_text(String::from("after"))
+        .expect("the fixture trailing text is valid");
+    let content = UserContent::try_parts(vec![before, attachment, after])
+        .expect("the fixture parts are canonical");
+    let command = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(MULTIPART_SUBMIT_COMMAND_ID)),
+        SessionId::from_uuid(Uuid::from_u128(MULTIPART_SESSION_ID)),
+        content,
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: multipart_input_choices(),
+        },
+    );
+    let fixture = multipart_replay_fixture(command, MULTIPART_ATTACHMENT_PAYLOAD).await?;
+    assert_eq!(
+        fixture
+            .repository
+            .load(fixture.command.command_id())
+            .await?
+            .expect("the multipart command is complete")
+            .command(),
+        &fixture.command
+    );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-012: multipart part order participates in durable replay equality.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_reordered_multipart_submit_is_conflicting_reuse() -> Result<(), Box<dyn Error>> {
+    let digest = BlobDigest::digest(MULTIPART_ATTACHMENT_PAYLOAD);
+    let before = UserContentPart::try_text(String::from("before"))
+        .expect("the fixture leading text is valid");
+    let attachment = UserContentPart::Attachment {
+        digest,
+        kind: AttachmentKind::Document,
+        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
+            .expect("the fixture media type is valid"),
+        display_filename: Some(
+            AttachmentDisplayFilename::try_new(String::from("notes.pdf"))
+                .expect("the fixture display filename is valid"),
+        ),
+    };
+    let after = UserContentPart::try_text(String::from("after"))
+        .expect("the fixture trailing text is valid");
+    let content = UserContent::try_parts(vec![before.clone(), attachment.clone(), after.clone()])
+        .expect("the fixture parts are canonical");
+    let command = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(MULTIPART_SUBMIT_COMMAND_ID)),
+        SessionId::from_uuid(Uuid::from_u128(MULTIPART_SESSION_ID)),
+        content,
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: multipart_input_choices(),
+        },
+    );
+    let fixture = multipart_replay_fixture(command, MULTIPART_ATTACHMENT_PAYLOAD).await?;
+    let reordered = SubmitInput::new(
+        fixture.command.command_id(),
+        fixture.command.session(),
+        UserContent::try_parts(vec![after, attachment, before])
+            .expect("the reordered fixture parts are canonical"),
+        fixture.command.delivery(),
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                reordered,
+                AcceptedInputId::from_uuid(Uuid::from_u128(MULTIPART_REORDERED_ACCEPTED_INPUT_ID)),
+                Some(TurnId::from_uuid(Uuid::from_u128(
+                    MULTIPART_REORDERED_TURN_ID
+                ))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::ConflictingReuse {
+            command_id: fixture.command.command_id(),
+        }
+    );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-012: attachment display metadata participates in durable replay
+/// equality.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_changed_attachment_metadata_is_conflicting_reuse() -> Result<(), Box<dyn Error>> {
+    let digest = BlobDigest::digest(MULTIPART_ATTACHMENT_PAYLOAD);
+    let before = UserContentPart::try_text(String::from("before"))
+        .expect("the fixture leading text is valid");
+    let attachment = UserContentPart::Attachment {
+        digest,
+        kind: AttachmentKind::Document,
+        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
+            .expect("the fixture media type is valid"),
+        display_filename: Some(
+            AttachmentDisplayFilename::try_new(String::from("notes.pdf"))
+                .expect("the fixture display filename is valid"),
+        ),
+    };
+    let after = UserContentPart::try_text(String::from("after"))
+        .expect("the fixture trailing text is valid");
+    let content = UserContent::try_parts(vec![before.clone(), attachment, after.clone()])
+        .expect("the fixture parts are canonical");
+    let command = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(MULTIPART_SUBMIT_COMMAND_ID)),
+        SessionId::from_uuid(Uuid::from_u128(MULTIPART_SESSION_ID)),
+        content,
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: multipart_input_choices(),
+        },
+    );
+    let fixture = multipart_replay_fixture(command, MULTIPART_ATTACHMENT_PAYLOAD).await?;
+    let changed_attachment = UserContentPart::Attachment {
+        digest,
+        kind: AttachmentKind::Document,
+        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
+            .expect("the fixture media type is valid"),
+        display_filename: Some(
+            AttachmentDisplayFilename::try_new(String::from("changed.pdf"))
+                .expect("the changed fixture filename is valid"),
+        ),
+    };
+    let changed_metadata = SubmitInput::new(
+        fixture.command.command_id(),
+        fixture.command.session(),
+        UserContent::try_parts(vec![before, changed_attachment, after])
+            .expect("the changed-metadata fixture parts are canonical"),
+        fixture.command.delivery(),
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                changed_metadata,
+                AcceptedInputId::from_uuid(Uuid::from_u128(MULTIPART_METADATA_ACCEPTED_INPUT_ID)),
+                Some(TurnId::from_uuid(Uuid::from_u128(
+                    MULTIPART_METADATA_TURN_ID
+                ))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::ConflictingReuse {
+            command_id: fixture.command.command_id(),
+        }
+    );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-012: the command and accepted-input satellites mirror the exact ordered
+/// multipart projection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_multipart_command_and_accepted_satellites_are_identical()
+-> Result<(), Box<dyn Error>> {
+    let digest = BlobDigest::digest(MULTIPART_ATTACHMENT_PAYLOAD);
+    let before = UserContentPart::try_text(String::from("before"))
+        .expect("the fixture leading text is valid");
+    let attachment = UserContentPart::Attachment {
+        digest,
+        kind: AttachmentKind::Document,
+        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
+            .expect("the fixture media type is valid"),
+        display_filename: Some(
+            AttachmentDisplayFilename::try_new(String::from("notes.pdf"))
+                .expect("the fixture display filename is valid"),
+        ),
+    };
+    let after = UserContentPart::try_text(String::from("after"))
+        .expect("the fixture trailing text is valid");
+    let content = UserContent::try_parts(vec![before, attachment, after])
+        .expect("the fixture parts are canonical");
+    let command = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(MULTIPART_SUBMIT_COMMAND_ID)),
+        SessionId::from_uuid(Uuid::from_u128(MULTIPART_SESSION_ID)),
+        content,
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: multipart_input_choices(),
+        },
+    );
+    let fixture = multipart_replay_fixture(command, MULTIPART_ATTACHMENT_PAYLOAD).await?;
+    let mirrored: MultipartProjectionFacts = sqlx::query_as(
+        "SELECT
+            (SELECT jsonb_agg(
+                jsonb_build_object(
+                    'position', position,
+                    'part_kind', part_kind,
+                    'text_value', text_value,
+                    'blob_digest', encode(blob_digest, 'hex'),
+                    'attachment_kind', attachment_kind,
+                    'declared_media_type', declared_media_type,
+                    'display_filename', display_filename)
+                ORDER BY position)
+               FROM submit_input_command_content_part
+              WHERE command_id = $1) AS command_projection,
+            (SELECT jsonb_agg(
+                jsonb_build_object(
+                    'position', position,
+                    'part_kind', part_kind,
+                    'text_value', text_value,
+                    'blob_digest', encode(blob_digest, 'hex'),
+                    'attachment_kind', attachment_kind,
+                    'declared_media_type', declared_media_type,
+                    'display_filename', display_filename)
+                ORDER BY position)
+               FROM accepted_input_content_part AS part
+               JOIN accepted_input AS accepted
+                 ON accepted.accepted_input_id = part.accepted_input_id
+              WHERE accepted.accepting_command_id = $1) AS accepted_projection",
+    )
+    .bind(fixture.command.command_id().as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(mirrored.command_projection, mirrored.accepted_projection);
+
+    fixture.finish().await;
+    Ok(())
+}
+
+/// Catalogues one blob identity with a verified replica in its own store
+/// binding, which is the only committed shape an admission check can observe as
+/// available.
+async fn catalog_verified_blob(
+    pool: &PgPool,
+    digest: BlobDigest,
+    byte_length: u64,
+    store_name: &str,
+    namespace_id: Uuid,
+    object_key: &str,
+) -> Result<(), Box<dyn Error>> {
+    let mut catalog = pool.begin().await?;
+    sqlx::query("INSERT INTO blob_store_binding (store_name, namespace_id) VALUES ($1, $2)")
+        .bind(store_name)
+        .bind(namespace_id)
+        .execute(&mut *catalog)
+        .await?;
+    sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, $2)")
+        .bind(digest.as_bytes().as_slice())
+        .bind(Decimal::from(byte_length))
+        .execute(&mut *catalog)
+        .await?;
+    sqlx::query("INSERT INTO blob_replica (digest, store_name, object_key) VALUES ($1, $2, $3)")
+        .bind(digest.as_bytes().as_slice())
+        .bind(store_name)
+        .bind(object_key)
+        .execute(&mut *catalog)
+        .await?;
+    catalog.commit().await?;
+    Ok(())
+}
+
+struct UnknownAttachmentFixture {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    repository: SubmitInputRepository,
+    command: SubmitInput,
+    expected_result: SubmitInputResult,
+    digest: BlobDigest,
+    changed_digest: BlobDigest,
+}
+
+impl UnknownAttachmentFixture {
+    async fn finish(self) {
+        self.pool.close().await;
+        drop(self.container);
+    }
+}
+
+async fn unknown_attachment_fixture() -> Result<UnknownAttachmentFixture, Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let digest = BlobDigest::digest(b"unknown attachment");
+    let changed_digest = BlobDigest::digest(b"changed attachment");
+    let session = SessionId::from_uuid(Uuid::from_u128(0xb310));
+    let command_id = DurableCommandId::from_uuid(Uuid::from_u128(0xb311));
+    let command = SubmitInput::new(
+        command_id,
+        session,
+        attachment_content(digest),
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let repository = SubmitInputRepository::new(pool.clone()).with_attachment_maximum_bytes(1024);
+    let expected_result =
+        SubmitInputResult::Rejected(SubmitInputRejectedResult::AttachmentBlobNotFound { digest });
+    Ok(UnknownAttachmentFixture {
+        container,
+        pool,
+        repository,
+        command,
+        expected_result,
+        digest,
+        changed_digest,
+    })
+}
+
+/// INV-012 / INV-089: an attachment with no catalogued blob identity is
+/// rejected only after the durable command identity is claimed, and the
+/// unavailable digest is the recorded evidence. A committed catalogued
+/// identity always carries a verified replica, because the deferred
+/// `blob_requires_replica` constraint trigger rejects any commit without one
+/// and the catalog tables are append-only, so an absent `blob` row is the only
+/// unavailability an admission check can observe.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_inv089_unknown_attachment_is_a_post_claim_rejection() -> Result<(), Box<dyn Error>>
+{
+    let fixture = unknown_attachment_fixture().await?;
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                fixture.command.clone(),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb312)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb313))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(fixture.expected_result.clone())
+    );
+    let durable: (i16, String, Vec<u8>) = sqlx::query_as(
+        "SELECT storage_version, rejection_kind, result_attachment_digest
+           FROM submit_input_command WHERE command_id = $1",
+    )
+    .bind(fixture.command.command_id().as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        durable,
+        (
+            3,
+            String::from("attachment_blob_not_found"),
+            fixture.digest.as_bytes().to_vec()
+        )
+    );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-012: an unknown-attachment rejection replays exactly. The digest is
+/// catalogued with a verified replica between the two calls, so revalidation
+/// would now admit the command and only durable replay returns the rejection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_unknown_attachment_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
+    let fixture = unknown_attachment_fixture().await?;
+    let first = fixture
+        .repository
+        .handle(
+            fixture.command.clone(),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb312)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb313))),
+        )
+        .await?;
+    assert_eq!(
+        first,
+        SubmitInputHandlingOutcome::Recorded(fixture.expected_result.clone())
+    );
+    catalog_verified_blob(
+        &fixture.pool,
+        fixture.digest,
+        16,
+        "replayed_test",
+        Uuid::from_u128(0xb31a),
+        "replayed",
+    )
+    .await?;
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                fixture.command.clone(),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb314)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb315))),
+            )
+            .await?,
+        first
+    );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-012: the durable unknown-attachment rejection reconstitutes exactly.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_unknown_attachment_rejection_reconstitutes_exactly() -> Result<(), Box<dyn Error>> {
+    let fixture = unknown_attachment_fixture().await?;
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                fixture.command.clone(),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb312)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb313))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(fixture.expected_result.clone())
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .load(fixture.command.command_id())
+            .await?
+            .expect("the rejected command remains complete")
+            .result(),
+        &fixture.expected_result
+    );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-012: correcting an unknown attachment to a catalogued one under the
+/// claimed identity is conflicting reuse, not a second admission.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_changed_unknown_attachment_is_conflicting_reuse() -> Result<(), Box<dyn Error>> {
+    let fixture = unknown_attachment_fixture().await?;
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                fixture.command.clone(),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb312)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb313))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(fixture.expected_result.clone())
+    );
+    catalog_verified_blob(
+        &fixture.pool,
+        fixture.changed_digest,
+        16,
+        "changed_test",
+        Uuid::from_u128(0xb318),
+        "changed",
+    )
+    .await?;
+    let changed = SubmitInput::new(
+        fixture.command.command_id(),
+        fixture.command.session(),
+        attachment_content(fixture.changed_digest),
+        fixture.command.delivery(),
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                changed,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb316)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb317))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::ConflictingReuse {
+            command_id: fixture.command.command_id(),
+        }
+    );
+    fixture.finish().await;
+    Ok(())
+}
+
+struct AttachmentBudgetFixture {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    repository: SubmitInputRepository,
+    first_part: UserContentPart,
+    /// A second reference to `first_part`'s digest carrying different
+    /// attachment metadata, so a repeated digest cannot be mistaken for a
+    /// repeated part value.
+    repeated_first_part: UserContentPart,
+    second_part: UserContentPart,
+    /// A third catalogued digest whose length completes `first_part`'s to
+    /// exactly `maximum`, so admission at the bound is observable.
+    completing_part: UserContentPart,
+    session: SessionId,
+    delivery: DeliveryRequest,
+    first_length: u64,
+    maximum: u64,
+}
+
+impl AttachmentBudgetFixture {
+    async fn finish(self) {
+        self.pool.close().await;
+        drop(self.container);
+    }
+}
+
+async fn attachment_budget_fixture() -> Result<AttachmentBudgetFixture, Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let first_digest = BlobDigest::digest(b"first attachment");
+    let second_digest = BlobDigest::digest(b"second attachment");
+    let completing_digest = BlobDigest::digest(b"completing attachment");
+    // Each catalogued length is admissible on its own and only their sum
+    // exceeds the maximum, so admission has to aggregate rather than compare
+    // lengths one at a time. Doubling the first length also exceeds the
+    // maximum, so counting one digest twice cannot pass either. The completing
+    // length brings the first to exactly the maximum, which the spec's "must
+    // not exceed" admits, so a `>=` comparison is observable.
+    let first_length = 16_u64;
+    let second_length = 12_u64;
+    let maximum = 20_u64;
+    let completing_length = maximum - first_length;
+    let mut catalog = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO blob_store_binding (store_name, namespace_id)
+         VALUES ('attachment_test', $1)",
+    )
+    .bind(Uuid::from_u128(0xb320))
+    .execute(&mut *catalog)
+    .await?;
+    sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, $2), ($3, $4), ($5, $6)")
+        .bind(first_digest.as_bytes().as_slice())
+        .bind(Decimal::from(first_length))
+        .bind(second_digest.as_bytes().as_slice())
+        .bind(Decimal::from(second_length))
+        .bind(completing_digest.as_bytes().as_slice())
+        .bind(Decimal::from(completing_length))
+        .execute(&mut *catalog)
+        .await?;
+    sqlx::query(
+        "INSERT INTO blob_replica (digest, store_name, object_key)
+         VALUES ($1, 'attachment_test', 'first'),
+                ($2, 'attachment_test', 'second'),
+                ($3, 'attachment_test', 'completing')",
+    )
+    .bind(first_digest.as_bytes().as_slice())
+    .bind(second_digest.as_bytes().as_slice())
+    .bind(completing_digest.as_bytes().as_slice())
+    .execute(&mut *catalog)
+    .await?;
+    catalog.commit().await?;
+
+    let session = SessionId::from_uuid(Uuid::from_u128(0xb321));
+    let delivery = DeliveryRequest::StartWhenNoActiveTurn {
+        configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+    };
+    let repository =
+        SubmitInputRepository::new(pool.clone()).with_attachment_maximum_bytes(maximum);
+    Ok(AttachmentBudgetFixture {
+        container,
+        pool,
+        repository,
+        first_part: attachment_part(first_digest),
+        repeated_first_part: UserContentPart::Attachment {
+            digest: first_digest,
+            kind: AttachmentKind::Document,
+            media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
+                .expect("the fixture media type is valid"),
+            display_filename: Some(
+                AttachmentDisplayFilename::try_new(String::from("second-reference.pdf"))
+                    .expect("the fixture display filename is valid"),
+            ),
+        },
+        second_part: attachment_part(second_digest),
+        completing_part: attachment_part(completing_digest),
+        session,
+        delivery,
+        first_length,
+        maximum,
+    })
+}
+
+fn distinct_attachment_command(
+    fixture: &AttachmentBudgetFixture,
+    command_id: DurableCommandId,
+) -> SubmitInput {
+    SubmitInput::new(
+        command_id,
+        fixture.session,
+        UserContent::try_parts(vec![
+            fixture.first_part.clone(),
+            fixture.second_part.clone(),
+        ])
+        .expect("the distinct fixture content is canonical"),
+        fixture.delivery,
+    )
+}
+
+fn repeated_attachment_command(
+    fixture: &AttachmentBudgetFixture,
+    command_id: DurableCommandId,
+) -> SubmitInput {
+    SubmitInput::new(
+        command_id,
+        fixture.session,
+        UserContent::try_parts(vec![
+            fixture.first_part.clone(),
+            fixture.repeated_first_part.clone(),
+        ])
+        .expect("the repeated fixture content is canonical"),
+        fixture.delivery,
+    )
+}
+
+/// INV-089: the digest is the accounting key, so two metadata-distinct parts
+/// naming one catalogued digest consume its length only once and reach session
+/// lookup rather than the byte-budget rejection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv089_attachment_admission_counts_a_repeated_digest_once() -> Result<(), Box<dyn Error>> {
+    let fixture = attachment_budget_fixture().await?;
+    let repeated = repeated_attachment_command(
+        &fixture,
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb322)),
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                repeated,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb323)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb324))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::SessionNotFound {
+                session: fixture.session,
+            }
+        ))
+    );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-089: a repeated digest is charged once rather than not at all, so the
+/// same two metadata-distinct parts are rejected under a maximum below their
+/// one catalogued length.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv089_attachment_admission_charges_a_repeated_digest_at_least_once()
+-> Result<(), Box<dyn Error>> {
+    let fixture = attachment_budget_fixture().await?;
+    let narrow_maximum = fixture.first_length - 1;
+    let narrow = SubmitInputRepository::new(fixture.pool.clone())
+        .with_attachment_maximum_bytes(narrow_maximum);
+    let repeated = repeated_attachment_command(
+        &fixture,
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb32a)),
+    );
+    assert_eq!(
+        narrow
+            .handle(
+                repeated,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb32b)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb32c))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
+                maximum_bytes: narrow_maximum,
+            }
+        ))
+    );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-089: the bound is "must not exceed", so distinct catalogued digests
+/// summing to exactly the maximum are admitted and reach session lookup.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv089_attachment_bytes_equal_to_the_maximum_are_admitted() -> Result<(), Box<dyn Error>> {
+    let fixture = attachment_budget_fixture().await?;
+    let exact = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb32d)),
+        fixture.session,
+        UserContent::try_parts(vec![
+            fixture.first_part.clone(),
+            fixture.completing_part.clone(),
+        ])
+        .expect("the completing fixture content is canonical"),
+        fixture.delivery,
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                exact,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb32e)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb32f))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::SessionNotFound {
+                session: fixture.session,
+            }
+        ))
+    );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-089: distinct catalogued digests, each admissible alone, are rejected
+/// once their summed lengths pass the deployment maximum, and that maximum is
+/// the durable evidence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv089_distinct_attachment_bytes_above_the_maximum_are_rejected()
+-> Result<(), Box<dyn Error>> {
+    let fixture = attachment_budget_fixture().await?;
+    let distinct_command_id = DurableCommandId::from_uuid(Uuid::from_u128(0xb325));
+    let distinct = distinct_attachment_command(&fixture, distinct_command_id);
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                distinct,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb326)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb327))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
+                maximum_bytes: fixture.maximum,
+            }
+        ))
+    );
+    let durable_maximum: Decimal = sqlx::query_scalar(
+        "SELECT result_attachment_maximum_bytes
+           FROM submit_input_command WHERE command_id = $1",
+    )
+    .bind(distinct_command_id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(durable_maximum, Decimal::from(fixture.maximum));
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-012: the attachment-byte-bound rejection replays exactly. The replay
+/// runs under a maximum that now admits the same aggregate, so revalidation
+/// would return acceptance and only durable replay returns the first maximum.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_attachment_byte_bound_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
+    let fixture = attachment_budget_fixture().await?;
+    let distinct = distinct_attachment_command(
+        &fixture,
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb325)),
+    );
+    let expected = SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+        SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
+            maximum_bytes: fixture.maximum,
+        },
+    ));
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                distinct.clone(),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb326)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb327))),
+            )
+            .await?,
+        expected
+    );
+    let widened = SubmitInputRepository::new(fixture.pool.clone())
+        .with_attachment_maximum_bytes(fixture.maximum * 4);
+    assert_eq!(
+        widened
+            .handle(
+                distinct,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb328)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb329))),
+            )
+            .await?,
+        expected
+    );
+    fixture.finish().await;
+    Ok(())
+}
+
+struct QueuedFrontierFixture {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    repository: SubmitInputRepository,
+    session: SessionId,
+    first_digest: BlobDigest,
+    second_digest: BlobDigest,
+    maximum: u64,
+}
+
+impl QueuedFrontierFixture {
+    async fn finish(self) {
+        self.pool.close().await;
+        drop(self.container);
+    }
+}
+
+async fn queued_frontier_fixture() -> Result<QueuedFrontierFixture, Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let first_digest = BlobDigest::digest(b"first prospective attachment");
+    let second_digest = BlobDigest::digest(b"second prospective attachment");
+    let maximum = 10_u64;
+    let mut catalog = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO blob_store_binding (store_name, namespace_id)
+         VALUES ('prospective_queue', $1)",
+    )
+    .bind(Uuid::from_u128(0xb330))
+    .execute(&mut *catalog)
+    .await?;
+    sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, 7), ($2, 7)")
+        .bind(first_digest.as_bytes().as_slice())
+        .bind(second_digest.as_bytes().as_slice())
+        .execute(&mut *catalog)
+        .await?;
+    sqlx::query(
+        "INSERT INTO blob_replica (digest, store_name, object_key)
+         VALUES ($1, 'prospective_queue', 'first'),
+                ($2, 'prospective_queue', 'second')",
+    )
+    .bind(first_digest.as_bytes().as_slice())
+    .bind(second_digest.as_bytes().as_slice())
+    .execute(&mut *catalog)
+    .await?;
+    catalog.commit().await?;
+
+    let session = SessionId::from_uuid(Uuid::from_u128(0xb331));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(0xb332, 0xb331, direct(0xb333)))
+        .await?;
+    let repository =
+        SubmitInputRepository::new(pool.clone()).with_attachment_maximum_bytes(maximum);
+    Ok(QueuedFrontierFixture {
+        container,
+        pool,
+        repository,
+        session,
+        first_digest,
+        second_digest,
+        maximum,
+    })
+}
+
+/// INV-089: a newly queued input is rejected when the complete prospective
+/// rendered frontier, rather than either input alone, exceeds the attachment
+/// verification bound.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv089_queued_input_checks_the_complete_prospective_attachment_frontier()
+-> Result<(), Box<dyn Error>> {
+    let fixture = queued_frontier_fixture().await?;
+    let delivery = DeliveryRequest::StartWhenNoActiveTurn {
+        configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+    };
+    let first = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb334)),
+        fixture.session,
+        attachment_content(fixture.first_digest),
+        delivery,
+    );
+    assert!(
+        matches!(
+            fixture
+                .repository
+                .handle(
+                    first,
+                    AcceptedInputId::from_uuid(Uuid::from_u128(0xb335)),
+                    Some(TurnId::from_uuid(Uuid::from_u128(0xb336))),
+                )
+                .await?,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::TurnOrigin(_)
+            ))
+        ),
+        "the first seven-byte attachment must remain within the ten-byte bound"
+    );
+    let second = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb337)),
+        fixture.session,
+        attachment_content(fixture.second_digest),
+        delivery,
+    );
+
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                second,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb338)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb339))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
+                maximum_bytes: fixture.maximum,
+            },
+        ))
+    );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-012: a prospective queued-frontier rejection replays exactly.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_queued_frontier_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
+    let fixture = queued_frontier_fixture().await?;
+    let delivery = DeliveryRequest::StartWhenNoActiveTurn {
+        configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+    };
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb334)),
+                fixture.session,
+                attachment_content(fixture.first_digest),
+                delivery,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb335)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb336))),
+        )
+        .await?;
+    let rejected = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb337)),
+        fixture.session,
+        attachment_content(fixture.second_digest),
+        delivery,
+    );
+    let expected = SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+        SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
+            maximum_bytes: fixture.maximum,
+        },
+    ));
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                rejected.clone(),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb338)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb339))),
+            )
+            .await?,
+        expected
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                rejected,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb33a)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb33b))),
+            )
+            .await?,
+        expected
+    );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-089: the frontier sum is over distinct digests, so one digest referenced
+/// by both the rendered origin and a newly queued input is charged once and the
+/// queued input is admitted, even though doubling that length would exceed the
+/// bound.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv089_prospective_frontier_charges_a_shared_digest_once() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let shared_digest = BlobDigest::digest(b"shared prospective attachment");
+    let shared_length = 7_u64;
+    let maximum = 10_u64;
+    catalog_verified_blob(
+        &pool,
+        shared_digest,
+        shared_length,
+        "prospective_shared",
+        Uuid::from_u128(0xb350),
+        "shared",
+    )
+    .await?;
+
+    let session = SessionId::from_uuid(Uuid::from_u128(0xb351));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(0xb352, 0xb351, direct(0xb353)))
+        .await?;
+    let delivery = DeliveryRequest::StartWhenNoActiveTurn {
+        configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+    };
+    let repository =
+        SubmitInputRepository::new(pool.clone()).with_attachment_maximum_bytes(maximum);
+    assert!(matches!(
+        repository
+            .handle(
+                SubmitInput::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(0xb354)),
+                    session,
+                    attachment_content(shared_digest),
+                    delivery,
+                ),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb355)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb356))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+    // The same digest carried by different attachment metadata, so a shared
+    // digest cannot be mistaken for a repeated input value.
+    let restated = UserContent::try_parts(vec![UserContentPart::Attachment {
+        digest: shared_digest,
+        kind: AttachmentKind::Document,
+        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
+            .expect("the fixture media type is valid"),
+        display_filename: Some(
+            AttachmentDisplayFilename::try_new(String::from("restated.pdf"))
+                .expect("the fixture display filename is valid"),
+        ),
+    }])
+    .expect("the restated fixture content is canonical");
+    assert!(2 * shared_length > maximum);
+    assert!(matches!(
+        repository
+            .handle(
+                SubmitInput::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(0xb357)),
+                    session,
+                    restated,
+                    delivery,
+                ),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb358)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb359))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-012: retained attachment evidence never outlives the rejection that
+/// authorizes it. Dropping the rejection kind while the maximum stands leaves
+/// both named-rejection comparisons null, so the shape is asserted with
+/// `IS TRUE` and rejects the row rather than admitting an unreadable one. The
+/// append-only guard is suspended inside a transaction this test rolls back.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_retained_attachment_maximum_requires_its_rejection_kind()
+-> Result<(), Box<dyn Error>> {
+    let fixture = attachment_budget_fixture().await?;
+    let rejected_command_id = DurableCommandId::from_uuid(Uuid::from_u128(0xb325));
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                distinct_attachment_command(&fixture, rejected_command_id),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb326)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb327))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
+                maximum_bytes: fixture.maximum,
+            }
+        ))
+    );
+    let mut orphaned_maximum = fixture.pool.begin().await?;
+    sqlx::query("ALTER TABLE submit_input_command DISABLE TRIGGER USER")
+        .execute(&mut *orphaned_maximum)
+        .await?;
+    let orphaned_maximum_error = sqlx::query(
+        "UPDATE submit_input_command
+            SET rejection_kind = NULL
+          WHERE command_id = $1",
+    )
+    .bind(rejected_command_id.as_uuid())
+    .execute(&mut *orphaned_maximum)
+    .await
+    .expect_err("a retained attachment maximum cannot outlive its rejection");
+    assert_eq!(
+        orphaned_maximum_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("submit_input_command_attachment_result_evidence_shape")
+    );
+    orphaned_maximum.rollback().await?;
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-089: a rejected queued frontier rolls back every provisional accepted
+/// input and queue-origin effect.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv089_queued_frontier_rejection_rolls_back_provisional_effects()
+-> Result<(), Box<dyn Error>> {
+    let fixture = queued_frontier_fixture().await?;
+    let delivery = DeliveryRequest::StartWhenNoActiveTurn {
+        configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+    };
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb334)),
+                fixture.session,
+                attachment_content(fixture.first_digest),
+                delivery,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb335)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb336))),
+        )
+        .await?;
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb337)),
+                fixture.session,
+                attachment_content(fixture.second_digest),
+                delivery,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb338)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb339))),
+        )
+        .await?;
+    #[derive(sqlx::FromRow)]
+    struct QueuedFrontierEffectCounts {
+        accepted_inputs: i64,
+        queued_origins: i64,
+    }
+    let effects = sqlx::query_as::<_, QueuedFrontierEffectCounts>(
+        "SELECT (SELECT count(*) FROM accepted_input WHERE session_id = $1)
+                    AS accepted_inputs,
+                (SELECT count(*) FROM queued_input_origin WHERE session_id = $1)
+                    AS queued_origins",
+    )
+    .bind(fixture.session.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(effects.accepted_inputs, 1);
+    assert_eq!(effects.queued_origins, 1);
+
+    fixture.finish().await;
+    Ok(())
+}
+
+struct SteeringFrontierFixture {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    repository: SubmitInputRepository,
+    session: SessionId,
+    active_turn: TurnId,
+    queued_digest: BlobDigest,
+    later_queued_digest: BlobDigest,
+    steering_digest: BlobDigest,
+    maximum: u64,
+}
+
+impl SteeringFrontierFixture {
+    async fn finish(self) {
+        self.pool.close().await;
+        drop(self.container);
+    }
+}
+
+async fn steering_frontier_fixture() -> Result<SteeringFrontierFixture, Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let queued_digest = BlobDigest::digest(b"queued prospective attachment");
+    let later_queued_digest = BlobDigest::digest(b"later queued prospective attachment");
+    let steering_digest = BlobDigest::digest(b"steering prospective attachment");
+    // Each catalogued attachment is seven bytes. Before steering the queue
+    // totals fourteen; steering adds a third to the rendered base, so the
+    // earlier successor reaches fourteen and only the later one reaches
+    // twenty-one.
+    let maximum = 20_u64;
+    let mut catalog = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO blob_store_binding (store_name, namespace_id)
+         VALUES ('prospective_steering', $1)",
+    )
+    .bind(Uuid::from_u128(0xb340))
+    .execute(&mut *catalog)
+    .await?;
+    sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, 7), ($2, 7), ($3, 7)")
+        .bind(queued_digest.as_bytes().as_slice())
+        .bind(later_queued_digest.as_bytes().as_slice())
+        .bind(steering_digest.as_bytes().as_slice())
+        .execute(&mut *catalog)
+        .await?;
+    sqlx::query(
+        "INSERT INTO blob_replica (digest, store_name, object_key)
+         VALUES ($1, 'prospective_steering', 'queued'),
+                ($2, 'prospective_steering', 'later_queued'),
+                ($3, 'prospective_steering', 'steering')",
+    )
+    .bind(queued_digest.as_bytes().as_slice())
+    .bind(later_queued_digest.as_bytes().as_slice())
+    .bind(steering_digest.as_bytes().as_slice())
+    .execute(&mut *catalog)
+    .await?;
+    catalog.commit().await?;
+
+    let session = SessionId::from_uuid(Uuid::from_u128(0xb341));
+    let active_turn = TurnId::from_uuid(Uuid::from_u128(0xb342));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(0xb343, 0xb341, direct(0xb344)))
+        .await?;
+    let repository =
+        SubmitInputRepository::new(pool.clone()).with_attachment_maximum_bytes(maximum);
+    repository
+        .handle(
+            start_input(
+                0xb345,
+                0xb341,
+                "active text origin",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb346)),
+            Some(active_turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(0xb347),
+            starting_frontier: Uuid::from_u128(0xb348),
+            initial_attempt: Uuid::from_u128(0xb349),
+        },
+    )
+    .await?;
+    Ok(SteeringFrontierFixture {
+        container,
+        pool,
+        repository,
+        session,
+        active_turn,
+        queued_digest,
+        later_queued_digest,
+        steering_digest,
+        maximum,
+    })
+}
+
+/// INV-089: pending steering is rejected when it would make a queued
+/// successor's eventual rendered frontier exceed the attachment bound. Two
+/// successors are queued in canonical order: after the steering transition the
+/// earlier one's prospective frontier still fits and only the later one
+/// exceeds the bound, so every affected queued frontier has to be recomputed
+/// rather than just the first.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv089_pending_steering_rechecks_affected_queued_attachment_frontiers()
+-> Result<(), Box<dyn Error>> {
+    let fixture = steering_frontier_fixture().await?;
+    let queued = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb34a)),
+        fixture.session,
+        attachment_content(fixture.queued_digest),
+        DeliveryRequest::AfterCurrentTurn {
+            expected_active_turn: fixture.active_turn,
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    assert!(
+        matches!(
+            fixture
+                .repository
+                .handle(
+                    queued,
+                    AcceptedInputId::from_uuid(Uuid::from_u128(0xb34b)),
+                    Some(TurnId::from_uuid(Uuid::from_u128(0xb34c))),
+                )
+                .await?,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::TurnOrigin(_)
+            ))
+        ),
+        "the queued seven-byte attachment must remain within the twenty-byte bound"
+    );
+    let later_queued = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb370)),
+        fixture.session,
+        attachment_content(fixture.later_queued_digest),
+        DeliveryRequest::AfterCurrentTurn {
+            expected_active_turn: fixture.active_turn,
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    assert!(
+        matches!(
+            fixture
+                .repository
+                .handle(
+                    later_queued,
+                    AcceptedInputId::from_uuid(Uuid::from_u128(0xb371)),
+                    Some(TurnId::from_uuid(Uuid::from_u128(0xb372))),
+                )
+                .await?,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::TurnOrigin(_)
+            ))
+        ),
+        "the queued pair must total fourteen bytes, within the twenty-byte bound"
+    );
+    let steering = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb34d)),
+        fixture.session,
+        attachment_content(fixture.steering_digest),
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: fixture.active_turn,
+        },
+    );
+
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                steering,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb34e)),
+                None,
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
+                maximum_bytes: fixture.maximum,
+            },
+        ))
+    );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-012: a prospective steering-frontier rejection replays exactly.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_steering_frontier_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
+    let fixture = steering_frontier_fixture().await?;
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb34a)),
+                fixture.session,
+                attachment_content(fixture.queued_digest),
+                DeliveryRequest::AfterCurrentTurn {
+                    expected_active_turn: fixture.active_turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb34b)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb34c))),
+        )
+        .await?;
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb370)),
+                fixture.session,
+                attachment_content(fixture.later_queued_digest),
+                DeliveryRequest::AfterCurrentTurn {
+                    expected_active_turn: fixture.active_turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb371)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb372))),
+        )
+        .await?;
+    let steering = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb34d)),
+        fixture.session,
+        attachment_content(fixture.steering_digest),
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: fixture.active_turn,
+        },
+    );
+    let expected = SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+        SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
+            maximum_bytes: fixture.maximum,
+        },
+    ));
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                steering.clone(),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb34e)),
+                None,
+            )
+            .await?,
+        expected
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                steering,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb34f)),
+                None,
+            )
+            .await?,
+        expected
+    );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-089: a rejected steering frontier rolls back the provisional pending
+/// steering while preserving the active and queued origins.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv089_steering_frontier_rejection_rolls_back_provisional_effects()
+-> Result<(), Box<dyn Error>> {
+    let fixture = steering_frontier_fixture().await?;
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb34a)),
+                fixture.session,
+                attachment_content(fixture.queued_digest),
+                DeliveryRequest::AfterCurrentTurn {
+                    expected_active_turn: fixture.active_turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb34b)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb34c))),
+        )
+        .await?;
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb370)),
+                fixture.session,
+                attachment_content(fixture.later_queued_digest),
+                DeliveryRequest::AfterCurrentTurn {
+                    expected_active_turn: fixture.active_turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb371)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb372))),
+        )
+        .await?;
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb34d)),
+                fixture.session,
+                attachment_content(fixture.steering_digest),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: fixture.active_turn,
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb34e)),
+            None,
+        )
+        .await?;
+    #[derive(sqlx::FromRow)]
+    struct SteeringFrontierEffectCounts {
+        accepted_inputs: i64,
+        queued_successor_origins: i64,
+        pending_steering: i64,
+    }
+    let effects = sqlx::query_as::<_, SteeringFrontierEffectCounts>(
+        "SELECT (SELECT count(*) FROM accepted_input WHERE session_id = $1)
+                    AS accepted_inputs,
+                (SELECT count(*) FROM queued_input_origin WHERE session_id = $1
+                    AND turn_id <> $2) AS queued_successor_origins,
+                (SELECT count(*) FROM accepted_input WHERE session_id = $1
+                    AND disposition_kind = 'pending_steering') AS pending_steering",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.active_turn.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(effects.accepted_inputs, 3);
+    assert_eq!(effects.queued_successor_origins, 2);
+    assert_eq!(effects.pending_steering, 0);
+
+    fixture.finish().await;
+    Ok(())
+}
+
+/// Base identity for the accepted-input executing-batch scenario. Arbitrary:
+/// it only has to leave `checkpoint_tool_batch_with_approval`'s derived
+/// identities distinct from every other fixture in this file.
+const TOOL_BATCH_FIXTURE_SEED: u128 = 0xb360;
+/// Base identity for the delegated executing-batch scenario. Arbitrary, and
+/// far enough above [`TOOL_BATCH_FIXTURE_SEED`] that the two fixtures' derived
+/// identities cannot meet.
+const DELEGATED_BATCH_FIXTURE_SEED: u128 = 0xb380;
+/// Seed offsets for identities these scenarios introduce. Each is arbitrary
+/// and only has to be distinct from the fixture's own identities.
+const STORE_NAMESPACE: u128 = 0x200;
+const SECOND_STORE_NAMESPACE: u128 = 0x201;
+const QUEUED_COMMAND: u128 = 0x202;
+const QUEUED_ACCEPTED_INPUT: u128 = 0x203;
+const QUEUED_TURN_CANDIDATE: u128 = 0x204;
+const STEERING_COMMAND: u128 = 0x205;
+const STEERING_ACCEPTED_INPUT: u128 = 0x206;
+const LATER_STEERING_COMMAND: u128 = 0x207;
+const LATER_STEERING_ACCEPTED_INPUT: u128 = 0x208;
+const TOOL_REQUEST: u128 = 0x209;
+const TOOL_CALL_ENTRY: u128 = 0x20a;
+const YIELDED_FRONTIER: u128 = 0x20b;
+const CONTINUATION_ATTEMPT: u128 = 0x20c;
+/// Each catalogued attachment in these scenarios. Load-bearing: one fits under
+/// [`TOOL_BATCH_ATTACHMENT_MAXIMUM`] and two do not.
+const RETAINED_ATTACHMENT_LENGTH: u64 = 7;
+const TOOL_BATCH_ATTACHMENT_MAXIMUM: u64 = 10;
+
+/// INV-089: a turn executing a tool batch keeps the `running` phase while the
+/// call that produced the batch is already terminal, so prospective
+/// attachment accounting reads the batch's yielded frontier instead of
+/// rejecting the submission it cannot reconstitute.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv089_executing_tool_batch_admits_a_bounded_attachment_queue()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (fixture, _, _, _) = checkpoint_tool_batch_with_approval(
+        &pool,
+        TOOL_BATCH_FIXTURE_SEED,
+        &[("current_time", "{}")],
+        InitialToolApproval::PolicyAuto,
+    )
+    .await?;
+    let digest = BlobDigest::digest(b"tool batch prospective attachment");
+    catalog_verified_blob(
+        &pool,
+        digest,
+        RETAINED_ATTACHMENT_LENGTH,
+        "prospective_tool_batch",
+        Uuid::from_u128(TOOL_BATCH_FIXTURE_SEED + STORE_NAMESPACE),
+        "queued",
+    )
+    .await?;
+    let queued = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(TOOL_BATCH_FIXTURE_SEED + QUEUED_COMMAND)),
+        fixture.session,
+        attachment_content(digest),
+        DeliveryRequest::AfterCurrentTurn {
+            expected_active_turn: fixture.turn,
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+
+    assert!(
+        matches!(
+            SubmitInputRepository::new(pool.clone())
+                .with_attachment_maximum_bytes(TOOL_BATCH_ATTACHMENT_MAXIMUM)
+                .handle(
+                    queued,
+                    AcceptedInputId::from_uuid(Uuid::from_u128(
+                        TOOL_BATCH_FIXTURE_SEED + QUEUED_ACCEPTED_INPUT,
+                    )),
+                    Some(TurnId::from_uuid(Uuid::from_u128(
+                        TOOL_BATCH_FIXTURE_SEED + QUEUED_TURN_CANDIDATE,
+                    ))),
+                )
+                .await?,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::TurnOrigin(_)
+            ))
+        ),
+        "the queued seven-byte attachment must remain within the ten-byte bound"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-089: a delegated turn executing a tool batch keeps the `running` phase
+/// with no cancellation-requested call, and a delegation origin owns no
+/// accepted-input turn in the scheduling projection. The batch's yielded
+/// frontier and the steering pending against that turn are still retained
+/// context, so their attachments are charged against the bound rather than
+/// being replaced by the earliest queued base.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv089_delegated_executing_tool_batch_charges_its_retained_attachment()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture =
+        authorize_delegated_model_call_fixture(&pool, DELEGATED_BATCH_FIXTURE_SEED).await?;
+    let turn = fixture.authorized.turn();
+    let request =
+        ToolRequestId::from_uuid(Uuid::from_u128(DELEGATED_BATCH_FIXTURE_SEED + TOOL_REQUEST));
+    let response =
+        ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
+            ToolCallProposal::new(
+                ToolName::try_new(String::from("current_time")).expect("valid fixture tool name"),
+                NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                    .expect("bounded fixture arguments"),
+            ),
+        )])
+        .expect("the proposal forms a tool-using response");
+    let outcome = fixture
+        .repository
+        .apply_terminal_observation(
+            fixture.child,
+            fixture
+                .authorized
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+                    response,
+                }),
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                vec![ToolResponsePartIdentity::tool_call(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                        DELEGATED_BATCH_FIXTURE_SEED + TOOL_CALL_ENTRY,
+                    )),
+                    request,
+                    InitialToolApproval::PolicyAuto,
+                )],
+                ContextFrontierId::from_uuid(Uuid::from_u128(
+                    DELEGATED_BATCH_FIXTURE_SEED + YIELDED_FRONTIER,
+                )),
+                Some(TurnAttemptId::from_uuid(Uuid::from_u128(
+                    DELEGATED_BATCH_FIXTURE_SEED + CONTINUATION_ATTEMPT,
+                ))),
+            )),
+            |_| panic!("the delegated fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    assert!(
+        matches!(
+            &outcome,
+            ModelCallTerminalOutcome::ToolRound(round)
+                if matches!(round.next_phase(), ActiveTurnPhase::Running { .. })
+        ),
+        "the delegated fixture reaches a tool round whose automatically approved batch executes under the running phase"
+    );
+
+    let retained_digest = BlobDigest::digest(b"delegated retained attachment");
+    let later_steering_digest = BlobDigest::digest(b"delegated later steering attachment");
+    catalog_verified_blob(
+        &pool,
+        retained_digest,
+        RETAINED_ATTACHMENT_LENGTH,
+        "delegated_batch_retained",
+        Uuid::from_u128(DELEGATED_BATCH_FIXTURE_SEED + STORE_NAMESPACE),
+        "retained",
+    )
+    .await?;
+    catalog_verified_blob(
+        &pool,
+        later_steering_digest,
+        RETAINED_ATTACHMENT_LENGTH,
+        "delegated_batch_later_steering",
+        Uuid::from_u128(DELEGATED_BATCH_FIXTURE_SEED + SECOND_STORE_NAMESPACE),
+        "later_steering",
+    )
+    .await?;
+    let repository = SubmitInputRepository::new(pool.clone())
+        .with_attachment_maximum_bytes(TOOL_BATCH_ATTACHMENT_MAXIMUM);
+    assert!(
+        matches!(
+            repository
+                .handle(
+                    SubmitInput::new(
+                        DurableCommandId::from_uuid(Uuid::from_u128(
+                            DELEGATED_BATCH_FIXTURE_SEED + STEERING_COMMAND,
+                        )),
+                        fixture.child,
+                        attachment_content(retained_digest),
+                        DeliveryRequest::NextSafePoint {
+                            expected_active_turn: turn,
+                        },
+                    ),
+                    AcceptedInputId::from_uuid(Uuid::from_u128(
+                        DELEGATED_BATCH_FIXTURE_SEED + STEERING_ACCEPTED_INPUT,
+                    )),
+                    None,
+                )
+                .await?,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::PendingSteering(_)
+            ))
+        ),
+        "the retained seven-byte attachment must remain within the ten-byte bound"
+    );
+    assert_eq!(
+        repository
+            .handle(
+                SubmitInput::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(
+                        DELEGATED_BATCH_FIXTURE_SEED + LATER_STEERING_COMMAND,
+                    )),
+                    fixture.child,
+                    attachment_content(later_steering_digest),
+                    DeliveryRequest::NextSafePoint {
+                        expected_active_turn: turn,
+                    },
+                ),
+                AcceptedInputId::from_uuid(Uuid::from_u128(
+                    DELEGATED_BATCH_FIXTURE_SEED + LATER_STEERING_ACCEPTED_INPUT,
+                )),
+                None,
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
+                maximum_bytes: TOOL_BATCH_ATTACHMENT_MAXIMUM,
+            }
+        ))
+    );
 
     pool.close().await;
     drop(container);
@@ -2975,11 +4978,18 @@ async fn s01_inv005_inv008_inv010_inv012_inv028_submit_apply_replay_conflict_and
     );
 
     let stored: (String, String, String, i64, String) = sqlx::query_as(
-        "SELECT typed.content_text, accepted.content_text, queued.priority_kind,
+        "SELECT command_part.text_value, accepted_part.text_value,
+                queued.priority_kind,
                 queued.acceptance_position::bigint, turn.state_kind
            FROM submit_input_command AS typed
+           JOIN submit_input_command_content_part AS command_part
+             ON command_part.command_id = typed.command_id
+            AND command_part.position = 0
            JOIN accepted_input AS accepted
              ON accepted.accepting_command_id = typed.command_id
+           JOIN accepted_input_content_part AS accepted_part
+             ON accepted_part.accepted_input_id = accepted.accepted_input_id
+            AND accepted_part.position = 0
            JOIN queued_input_origin AS queued
              ON queued.accepted_input_id = accepted.accepted_input_id
            JOIN turn_lifecycle AS turn
