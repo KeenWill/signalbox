@@ -2823,8 +2823,9 @@ async fn attach_continuing_tool_round_projection(
         "INSERT INTO semantic_transcript_entry
             (source_session_id, semantic_entry_id, payload_kind,
              producing_model_call_id, assistant_tool_request_id,
-             assistant_response_part_ordinal)
-         VALUES ($1, $2, 'assistant_tool_use', $3, $4, 0)",
+             assistant_response_part_ordinal,
+             assistant_response_text_start_bytes)
+         VALUES ($1, $2, 'assistant_tool_use', $3, $4, 0, NULL)",
     )
     .bind(session.into_uuid())
     .bind(assistant_entry)
@@ -2946,8 +2947,9 @@ async fn append_denied_request_to_continuing_tool_round_projection(
         "INSERT INTO semantic_transcript_entry
             (source_session_id, semantic_entry_id, payload_kind,
              producing_model_call_id, assistant_tool_request_id,
-             assistant_response_part_ordinal)
-         VALUES ($1, $2, 'assistant_tool_use', $3, $4, 1)",
+             assistant_response_part_ordinal,
+             assistant_response_text_start_bytes)
+         VALUES ($1, $2, 'assistant_tool_use', $3, $4, 1, NULL)",
     )
     .bind(session.into_uuid())
     .bind(assistant_entry)

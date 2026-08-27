@@ -911,9 +911,10 @@ async fn insert_goal_declaration_request(
         "INSERT INTO semantic_transcript_entry
             (source_session_id, semantic_entry_id, payload_kind,
              assistant_text_value, producing_model_call_id,
-             assistant_response_part_ordinal, assistant_tool_request_id)
-         VALUES ($1, $2, 'assistant_text', $4, $3, 0, NULL),
-                ($1, $5, 'assistant_tool_use', NULL, $3, 1, $6)",
+             assistant_response_part_ordinal, assistant_tool_request_id,
+             assistant_response_text_start_bytes)
+         VALUES ($1, $2, 'assistant_text', $4, $3, 0, NULL, 0),
+                ($1, $5, 'assistant_tool_use', NULL, $3, 1, $6, NULL)",
     )
     .bind(session.into_uuid())
     .bind(Uuid::from_u128(request.into_uuid().as_u128() + 0x2000))

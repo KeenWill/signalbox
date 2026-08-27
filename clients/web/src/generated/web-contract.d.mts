@@ -76,6 +76,8 @@ export type WebBlobDerivationProducer = {
   readonly model_call_id: string;
 };
 
+export type WebBlobId = string;
+
 export type WebBlobViewKind = "download" | "browser_native" | "thumbnail" | "preview";
 
 export type WebContractCapabilities = {
@@ -83,6 +85,7 @@ export type WebContractCapabilities = {
   readonly bounded_json: boolean;
   readonly bounded_lexical_search: boolean;
   readonly bounded_session_timeline: boolean;
+  readonly bounded_session_timeline_detail: boolean;
   readonly bounded_usage_cost: boolean;
   readonly image_derivatives: boolean;
   readonly immutable_blob_content: boolean;
@@ -103,6 +106,8 @@ export type WebContractLimits = {
   readonly max_search_page_items: number;
   readonly max_search_query_bytes: number;
   readonly max_search_snippet_bytes: number;
+  readonly max_timeline_detail_bytes: number;
+  readonly max_timeline_detail_items: number;
   readonly max_timeline_window_bytes: number;
   readonly max_timeline_window_items: number;
   readonly max_usage_aggregate_groups: number;
@@ -190,6 +195,8 @@ export type WebModelSelection = {
 export type WebNullableU128 = WebU128 | null;
 
 export type WebNullableU64 = WebU64 | null;
+
+export type WebProviderModelCallFailureCause = "credential_rejected" | "permission_denied" | "invalid_request" | "target_not_found" | "request_too_large" | "rate_limited" | "quota_exhausted" | "overloaded" | "provider_internal" | "unrecognized";
 
 export type WebRepoWatchAutomationStatus = {
   readonly kind: "unattempted";
@@ -494,6 +501,38 @@ export type WebSessionCatalogSummary = {
 
 export type WebSessionId = string;
 
+export type WebSessionTimelineDetail = {
+  readonly address: WebTimelineAddress;
+  readonly body: WebSessionTimelineDetailBody;
+  readonly kind: WebSessionTimelineEventKind;
+  readonly projected_body_bytes: number;
+};
+
+export type WebSessionTimelineDetailBody = {
+  readonly attachments: ReadonlyArray<WebTimelineBlobReference>;
+  readonly text: WebTimelineTextExcerpt;
+  readonly turn_id: WebSessionId;
+  readonly type: "user_input";
+} | {
+  readonly model_call_id: WebSessionId;
+  readonly model_identity_id: WebSessionId;
+  readonly provider_failure_cause?: WebProviderModelCallFailureCause | null;
+  readonly request_context_items: WebU64;
+  readonly response?: WebTimelineTextExcerpt | null;
+  readonly state: WebTimelineModelCallState;
+  readonly turn_id: WebSessionId;
+  readonly type: "model_call";
+  readonly usage: WebTimelineModelUsage;
+} | {
+  readonly cause_code: string;
+  readonly lifecycle: WebTimelineTurnLifecycleKind;
+  readonly turn_id: WebSessionId;
+  readonly type: "turn_lifecycle";
+} | {
+  readonly kind: WebSessionTimelineEventKind;
+  readonly type: "event_fact";
+};
+
 export type WebSessionTimelineEventKind = "session_created" | "session_model_settings_changed" | "turn_model_settings_resolved" | "input_accepted" | "goal_turn_retired" | "turn_activated" | "turn_failed" | "model_call_transition" | "tool_batch_transition" | "tool_approval_decided" | "context_compacted" | "turn_completed" | "turn_refused" | "turn_cancelled" | "turn_reconciliation_required" | "runner_state_transition" | "delegation_update" | "delegation_wake";
 
 export type WebSessionTimelineItem = {
@@ -519,7 +558,59 @@ export type WebTimelineAddress = {
   readonly event_sequence: WebTimelineEventSequence;
 };
 
+export type WebTimelineBlobReference = {
+  readonly blob_id: WebBlobId;
+  readonly length_bytes: WebU64;
+  readonly media_type?: string | null;
+};
+
+export type WebTimelineBodyContinuation = {
+  readonly address: WebTimelineAddress;
+  readonly field: WebTimelineBodyField;
+  readonly member_index: number;
+  readonly offset_bytes: WebU64;
+};
+
+export type WebTimelineBodyField = "input_text" | "model_response";
+
+export type WebTimelineDetailContinuation = {
+  readonly address: WebTimelineAddress;
+  readonly type: "more_at";
+} | {
+  readonly body: WebTimelineBodyContinuation;
+  readonly type: "more_body";
+};
+
 export type WebTimelineEventSequence = string;
+
+export type WebTimelineModelCallDisposition = "completed" | "known_failed" | "refused" | "cancelled" | "ambiguous";
+
+export type WebTimelineModelCallState = {
+  readonly type: "prepared";
+} | {
+  readonly type: "in_flight";
+} | {
+  readonly type: "cancellation_requested";
+} | {
+  readonly disposition: WebTimelineModelCallDisposition;
+  readonly type: "terminal";
+};
+
+export type WebTimelineModelUsage = {
+  readonly cache_creation_input_tokens?: WebU64 | null;
+  readonly cache_read_input_tokens?: WebU64 | null;
+  readonly input_tokens?: WebU64 | null;
+  readonly output_tokens?: WebU64 | null;
+};
+
+export type WebTimelineTextExcerpt = {
+  readonly continuation?: WebTimelineBodyContinuation | null;
+  readonly offset_bytes: WebU64;
+  readonly text: string;
+  readonly total_bytes: WebU64;
+};
+
+export type WebTimelineTurnLifecycleKind = "activated" | "terminalized";
 
 export type WebU128 = string;
 
@@ -643,6 +734,13 @@ export type WebSessionTimelineWindow = {
 } | null;
   readonly items: ReadonlyArray<WebSessionTimelineItem>;
   readonly projected_structured_bytes: number;
+  readonly session_id: WebSessionId;
+};
+
+export type WebSessionTimelineDetailPage = {
+  readonly continuation?: WebTimelineDetailContinuation | null;
+  readonly items: ReadonlyArray<WebSessionTimelineDetail>;
+  readonly projected_body_bytes: number;
   readonly session_id: WebSessionId;
 };
 
@@ -791,6 +889,7 @@ export function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;
 export function decodeWebBlobDescriptor(value: unknown): WebBlobDescriptor;
 export function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;
 export function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;
+export function decodeWebSessionTimelineDetailPage(value: unknown): WebSessionTimelineDetailPage;
 export function decodeWebAttentionSnapshot(value: unknown): WebAttentionSnapshot;
 export function decodeWebAttentionStreamEvent(value: unknown): WebAttentionStreamEvent;
 export function decodeWebSessionCatalogSnapshot(value: unknown): WebSessionCatalogSnapshot;
