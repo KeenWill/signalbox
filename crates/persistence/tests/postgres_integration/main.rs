@@ -1942,13 +1942,18 @@ async fn postgres_before_approval_event_migration()
 
 /// The attention journal migration, whose backfill the fixture below stages.
 const OPERATOR_ATTENTION_CHANGE_MIGRATION_VERSION: i64 = 202608250800;
+/// The catalog activity substrate depends on the attention journal and is also
+/// withheld while staging the journal's historical backfill fixture.
+const SESSION_CATALOG_ACTIVITY_MIGRATION_VERSION: i64 = 202608260003;
 
 /// Stages the database an existing installation carries when the attention
-/// journal ships: every other migration applied, this one not.
+/// journal ships: every independent migration applied, the journal and its
+/// later catalog substrate not.
 ///
 /// The staged database is written through current repository code, which
 /// requires the current schema, so the fixture withholds exactly the migration
-/// under test rather than every migration recorded after it.
+/// under test and its one dependent migration rather than every migration
+/// recorded after it.
 async fn postgres_before_attention_migration()
 -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
     let (container, pool, database_url) = unmigrated_postgres().await?;
@@ -1956,10 +1961,10 @@ async fn postgres_before_attention_migration()
     connection
         .ensure_migrations_table("_sqlx_migrations")
         .await?;
-    for migration in MIGRATOR
-        .iter()
-        .filter(|migration| migration.version != OPERATOR_ATTENTION_CHANGE_MIGRATION_VERSION)
-    {
+    for migration in MIGRATOR.iter().filter(|migration| {
+        migration.version != OPERATOR_ATTENTION_CHANGE_MIGRATION_VERSION
+            && migration.version != SESSION_CATALOG_ACTIVITY_MIGRATION_VERSION
+    }) {
         connection.apply("_sqlx_migrations", migration).await?;
     }
     drop(connection);
