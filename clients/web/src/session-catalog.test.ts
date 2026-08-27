@@ -150,4 +150,42 @@ describe('session catalog transport', () => {
       }),
     ).rejects.toThrow('continued session catalog snapshot is not a full page')
   })
+
+  it('rejects an empty durable cursor on a nonempty page', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ ...singlePage, cursor: '0' }))),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('nonempty session catalog snapshot carries the empty cursor')
+  })
+
+  it('rejects a zero goal generation', async () => {
+    const blocked = {
+      ...summary,
+      action: 'provide_goal_need' as const,
+      goal_block: {
+        generation: '0',
+        need_summary: 'Choose a deployment target.',
+        reason: 'user_input_required' as const,
+      },
+      state: 'blocked' as const,
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ ...singlePage, summaries: [blocked] }))),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('session catalog goal generation must be positive')
+  })
 })

@@ -326,6 +326,11 @@ const validateCursor = (cursor: string): void => {
   }
 }
 
+const validatePositiveU64 = (value: string, label: string): void => {
+  validateCursor(value)
+  if (value === '0') throw new TypeError(`${label} must be positive`)
+}
+
 type AttentionSummary = WebAttentionSnapshot['summaries'][number]
 
 const validateAttentionSummary = (summary: AttentionSummary): void => {
@@ -449,6 +454,9 @@ const validateSessionCatalogSnapshot = (
 ): WebSessionCatalogSnapshot => {
   validateCursor(snapshot.cursor)
   validateCursor(snapshot.total)
+  if (snapshot.summaries.length > 0 && snapshot.cursor === '0') {
+    throw new TypeError('nonempty session catalog snapshot carries the empty cursor')
+  }
   if (snapshot.summaries.length > MAX_SESSION_PAGE_ITEMS) {
     throw new TypeError('session catalog snapshot exceeds the contract item ceiling')
   }
@@ -497,7 +505,7 @@ const validateSessionCatalogSnapshot = (
     validateCursor(summary.judge.failed)
     validateCursor(summary.last_activity.unix_microseconds)
     if (summary.goal_block !== null && summary.goal_block !== undefined) {
-      validateCursor(summary.goal_block.generation)
+      validatePositiveU64(summary.goal_block.generation, 'session catalog goal generation')
     }
     const titleScalars =
       summary.title_summary === null ? 0 : Array.from(summary.title_summary).length
