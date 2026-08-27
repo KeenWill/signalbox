@@ -206,13 +206,14 @@ impl WorkspaceFileSystem for ReplacingRootFileSystem {
         )
     }
 
-    fn read_file_prefix(
+    fn read_file_range(
         &self,
         root: &WorkspaceRoot,
         path: &Path,
+        offset: u64,
         max_bytes: usize,
     ) -> Result<WorkspaceFileBytes, WorkspaceResolveError> {
-        LocalWorkspaceFileSystem.read_file_prefix(root, path, max_bytes)
+        LocalWorkspaceFileSystem.read_file_range(root, path, offset, max_bytes)
     }
 }
 
@@ -246,13 +247,14 @@ impl WorkspaceFileSystem for ObservingIndexLockFileSystem {
         )
     }
 
-    fn read_file_prefix(
+    fn read_file_range(
         &self,
         root: &WorkspaceRoot,
         path: &Path,
+        offset: u64,
         max_bytes: usize,
     ) -> Result<WorkspaceFileBytes, WorkspaceResolveError> {
-        let read = LocalWorkspaceFileSystem.read_file_prefix(root, path, max_bytes)?;
+        let read = LocalWorkspaceFileSystem.read_file_range(root, path, offset, max_bytes)?;
         self.lock_observed.store(
             self.root_path.join(".git/index.lock").is_file(),
             Ordering::SeqCst,
@@ -297,13 +299,14 @@ impl WorkspaceFileSystem for ConcurrentRootOpenFileSystem {
         )
     }
 
-    fn read_file_prefix(
+    fn read_file_range(
         &self,
         root: &WorkspaceRoot,
         path: &Path,
+        offset: u64,
         max_bytes: usize,
     ) -> Result<WorkspaceFileBytes, WorkspaceResolveError> {
-        LocalWorkspaceFileSystem.read_file_prefix(root, path, max_bytes)
+        LocalWorkspaceFileSystem.read_file_range(root, path, offset, max_bytes)
     }
 }
 

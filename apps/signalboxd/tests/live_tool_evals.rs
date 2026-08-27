@@ -3325,7 +3325,9 @@ fn workspace_forced_case_passed(
         READ_FILE_NAME => &[
             "path",
             "content",
+            "offset",
             "bytes_read",
+            "next_offset",
             "total_bytes",
             "truncated",
             EVAL_RECEIPT_FIELD,
@@ -3413,7 +3415,9 @@ fn workspace_forced_case_passed(
             result["path"] == path
                 && max_bytes == WORKSPACE_FORCED_READ_MAX_BYTES
                 && result["content"] == expected
+                && result["offset"] == 0
                 && result["bytes_read"] == expected.len()
+                && result["next_offset"] == expected.len()
                 && result["total_bytes"] == WORKSPACE_SEED.len()
                 && result["truncated"] == true
                 && fs::read(root.join(path))? == WORKSPACE_SEED.as_bytes()
@@ -11027,14 +11031,18 @@ fn workspace_natural_read_result_passed(
         &[
             "path",
             "content",
+            "offset",
             "bytes_read",
+            "next_offset",
             "total_bytes",
             "truncated",
             EVAL_RECEIPT_FIELD,
         ],
     ) && result["path"] == WORKSPACE_SEED_PATH
         && result["content"] == WORKSPACE_SEED
+        && result["offset"] == 0
         && result["bytes_read"] == WORKSPACE_SEED.len()
+        && result["next_offset"] == WORKSPACE_SEED.len()
         && result["total_bytes"] == WORKSPACE_SEED.len()
         && result["truncated"] == false
 }
@@ -16917,7 +16925,9 @@ fn forced_workspace_read_verifier_rejects_an_unbounded_result() -> EvalResult {
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
         "content": WORKSPACE_SEED,
+        "offset": 0,
         "bytes_read": WORKSPACE_SEED.len(),
+        "next_offset": WORKSPACE_SEED.len(),
         "total_bytes": WORKSPACE_SEED.len(),
         "truncated": false,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
@@ -16941,7 +16951,9 @@ fn forced_workspace_read_verifier_rejects_an_unknown_result_field() -> EvalResul
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
         "content": prefix,
+        "offset": 0,
         "bytes_read": prefix.len(),
+        "next_offset": prefix.len(),
         "total_bytes": WORKSPACE_SEED.len(),
         "truncated": true,
         "error": "synthetic contradictory field",
@@ -16970,7 +16982,9 @@ fn forced_workspace_read_verifier_rejects_a_mutated_fixture() -> EvalResult {
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
         "content": prefix,
+        "offset": 0,
         "bytes_read": prefix.len(),
+        "next_offset": prefix.len(),
         "total_bytes": WORKSPACE_DRIFTED_SEED.len(),
         "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
@@ -16998,7 +17012,9 @@ fn forced_workspace_read_verifier_rejects_collateral_mutation() -> EvalResult {
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
         "content": prefix,
+        "offset": 0,
         "bytes_read": prefix.len(),
+        "next_offset": prefix.len(),
         "total_bytes": WORKSPACE_SEED.len(),
         "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
@@ -17024,7 +17040,9 @@ fn forced_workspace_read_verifier_rejects_collateral_mtime_drift() -> EvalResult
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
         "content": prefix,
+        "offset": 0,
         "bytes_read": prefix.len(),
+        "next_offset": prefix.len(),
         "total_bytes": WORKSPACE_SEED.len(),
         "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
@@ -17060,7 +17078,9 @@ fn forced_workspace_read_verifier_rejects_restored_mode_ctime_drift() -> EvalRes
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
         "content": prefix,
+        "offset": 0,
         "bytes_read": prefix.len(),
+        "next_offset": prefix.len(),
         "total_bytes": WORKSPACE_SEED.len(),
         "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
@@ -17113,7 +17133,9 @@ fn forced_workspace_read_verifier_rejects_byte_identical_file_replacement() -> E
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
         "content": prefix,
+        "offset": 0,
         "bytes_read": prefix.len(),
+        "next_offset": prefix.len(),
         "total_bytes": WORKSPACE_SEED.len(),
         "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
@@ -17178,7 +17200,9 @@ fn forced_workspace_read_verifier_rejects_byte_identical_directory_replacement()
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
         "content": prefix,
+        "offset": 0,
         "bytes_read": prefix.len(),
+        "next_offset": prefix.len(),
         "total_bytes": WORKSPACE_SEED.len(),
         "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
@@ -17235,7 +17259,9 @@ fn forced_workspace_read_verifier_rejects_directory_mode_drift() -> EvalResult {
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
         "content": prefix,
+        "offset": 0,
         "bytes_read": prefix.len(),
+        "next_offset": prefix.len(),
         "total_bytes": WORKSPACE_SEED.len(),
         "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
@@ -17263,7 +17289,9 @@ fn forced_workspace_read_verifier_rejects_root_mode_drift() -> EvalResult {
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
         "content": prefix,
+        "offset": 0,
         "bytes_read": prefix.len(),
+        "next_offset": prefix.len(),
         "total_bytes": WORKSPACE_SEED.len(),
         "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
@@ -19169,7 +19197,9 @@ fn record_workspace_read_result(tracker: &OperationTracker, content: &str, trunc
         &serde_json::json!({
             "path": WORKSPACE_SEED_PATH,
             "content": content,
+            "offset": 0,
             "bytes_read": content.len(),
+            "next_offset": content.len(),
             "total_bytes": WORKSPACE_SEED.len(),
             "truncated": truncated,
             EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
@@ -19567,7 +19597,9 @@ fn workspace_natural_execution_rejects_an_unknown_read_result_field() {
         &serde_json::json!({
             "path": WORKSPACE_SEED_PATH,
             "content": WORKSPACE_SEED,
+            "offset": 0,
             "bytes_read": WORKSPACE_SEED.len(),
+            "next_offset": WORKSPACE_SEED.len(),
             "total_bytes": WORKSPACE_SEED.len(),
             "truncated": false,
             "error": "synthetic contradictory field",

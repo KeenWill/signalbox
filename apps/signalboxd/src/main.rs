@@ -1509,12 +1509,14 @@ async fn run_hub(
         configured_usize("terminalizations_per_liveness_scan")?,
         configured_duration("turn_liveness_recovery_attempt_bound"),
         configured_usize("automatic_reconciliations_per_liveness_scan")?,
+        configured_duration("automatic_reconciliation_attempt_bound"),
         turn_liveness_persistence_bounds,
     );
     let goal_mode_numeric_bounds = GoalModeNumericBounds::new(
         configured_duration("automatic_resume_base_backoff"),
         configured_duration("automatic_resume_backoff_cap"),
         configured_u32("automatic_resume_attempt_budget")?,
+        configured_u32("automatic_resume_attempt_ceiling")?,
         configured_duration("automatic_resume_startup_retry_delay"),
     );
     let diagnostic_model_identity_limit = configured_usize("diagnostic_model_identity_limit")?;

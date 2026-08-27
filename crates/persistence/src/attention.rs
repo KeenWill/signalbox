@@ -81,27 +81,57 @@ pub struct AttentionPage {
     pub continuation: Option<AttentionContinuation>,
 }
 
+/// The automatic-resume attempt limits an operator projection reads.
+///
+/// Both must be the numbers the daemon's resume planner applies
+/// (`automatic_resume_attempt_budget` and `automatic_resume_attempt_ceiling`);
+/// reading different ones makes a projection report a session as needing its
+/// operator while the daemon still owes it resumes, or the reverse. `None` is
+/// the configured unbounded policy for that limit, under which automatic
+/// resumption never ends for that reason. The planner ends a run at whichever
+/// limit it reaches first: the budget counts only chargeable failures, so a run
+/// whose failures are all exempt ends at the ceiling and at nothing else.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AutomaticResumeAttemptBounds {
+    budget: Option<u32>,
+    ceiling: Option<u32>,
+}
+
+impl AutomaticResumeAttemptBounds {
+    /// Binds both configured limits.
+    #[must_use]
+    pub const fn new(budget: Option<u32>, ceiling: Option<u32>) -> Self {
+        Self { budget, ceiling }
+    }
+
+    /// The configured policy under which no automatic-resume run ever ends.
+    #[must_use]
+    pub const fn unbounded() -> Self {
+        Self {
+            budget: None,
+            ceiling: None,
+        }
+    }
+}
+
 /// Read-only PostgreSQL implementation of the fleet projection port.
 #[derive(Clone, Debug)]
 pub struct AttentionRepository {
     pool: PgPool,
-    automatic_resume_attempt_budget: Option<u32>,
+    automatic_resume_attempts: AutomaticResumeAttemptBounds,
 }
 
 impl AttentionRepository {
     /// Binds the projection to the deployment's automatic-resume attempt
-    /// budget.
-    ///
-    /// The budget must be the one the daemon's resume planner applies
-    /// (`automatic_resume_attempt_budget`); reading a different number makes
-    /// the projection report a session as needing its operator while the
-    /// daemon still owes it resumes, or the reverse. `None` is the configured
-    /// unbounded budget, under which automatic resumption never exhausts.
+    /// limits.
     #[must_use]
-    pub const fn new(pool: PgPool, automatic_resume_attempt_budget: Option<u32>) -> Self {
+    pub const fn new(
+        pool: PgPool,
+        automatic_resume_attempts: AutomaticResumeAttemptBounds,
+    ) -> Self {
         Self {
             pool,
-            automatic_resume_attempt_budget,
+            automatic_resume_attempts,
         }
     }
 
@@ -147,7 +177,7 @@ impl AttentionRepository {
             &mut transaction,
             None,
             Some(&query),
-            self.automatic_resume_attempt_budget,
+            self.automatic_resume_attempts,
         )
         .await?;
         let has_more = summaries.len() > usize::from(max_attention_snapshot_items());
@@ -224,7 +254,7 @@ impl AttentionRepository {
             &mut transaction,
             Some(&identities),
             None,
-            self.automatic_resume_attempt_budget,
+            self.automatic_resume_attempts,
         )
         .await?;
         transaction.commit().await?;
@@ -324,7 +354,8 @@ macro_rules! summary_sql {
      ORDER BY goal.session_id, goal.event_ordinal DESC
 ), automatic_resume_lineage AS (
     SELECT goal.session_id, goal.generation, goal.event_ordinal AS head_ordinal,
-           goal.scheduler_turn_id AS failed_turn_id, 0::integer AS spent
+           goal.scheduler_turn_id AS failed_turn_id, 0::integer AS spent,
+           0::integer AS attempted
       FROM latest_goal AS goal
      WHERE goal.event_kind = 'blocked'
        AND goal.blocked_reason = 'execution_failure'
@@ -367,9 +398,11 @@ macro_rules! summary_sql {
     -- for the next step to classify. The predicate is the exact classification
     -- `GoalRepository::unchargeable_automatic_resume_turns` applies before the
     -- resume planner spends the attempt budget: a failure the daemon itself
-    -- owns is not charged to the operator's ceiling. It probes the one named
+    -- owns is not charged to the operator's budget. It probes the one named
     -- turn rather than the session's history, so charging costs no more than
-    -- the lineage walk it rides on.
+    -- the lineage walk it rides on. `attempted` counts every step regardless,
+    -- which is the count the planner tests against the lifetime ceiling: a run
+    -- of exempt failures charges nothing and so ends at that limit alone.
     SELECT lineage.session_id, lineage.generation, blocked.event_ordinal,
            blocked.scheduler_turn_id,
            lineage.spent + CASE WHEN EXISTS (
@@ -392,7 +425,8 @@ macro_rules! summary_sql {
                        OR headroom.terminal_attempt_id IS NOT NULL
                        OR terminal_call.terminal_provider_failure_cause IN
                           ('rate_limited', 'overloaded', 'provider_internal'))
-           ) THEN 0 ELSE 1 END
+           ) THEN 0 ELSE 1 END,
+           lineage.attempted + 1
       FROM automatic_resume_lineage AS lineage
       JOIN goal_event AS resumed
         ON resumed.session_id = lineage.session_id
@@ -429,13 +463,15 @@ macro_rules! summary_sql {
            (get_byte(identity.bytes, 8) & 63) | 128
        )
 ), automatic_resumption AS (
-    -- $5 is the deployment's configured automatic-resume attempt budget, the
-    -- same number the daemon's resume planner spends; NULL is the configured
-    -- unbounded budget, under which resumption never exhausts. `spent` counts
-    -- only the chargeable attempts the planner charges, so exhaustion here and
-    -- exhaustion there name the same lineage.
+    -- $5 and $6 are the deployment's configured automatic-resume attempt budget
+    -- and lifetime ceiling, the same two numbers the daemon's resume planner
+    -- applies; NULL is the configured unbounded policy for that limit, under
+    -- which resumption never ends for that reason. `spent` counts only the
+    -- attempts the planner charges and `attempted` counts them all, so a run
+    -- ends here at whichever limit ends it there.
     SELECT lineage.session_id,
            ($5::bigint IS NULL OR max(lineage.spent) < $5::bigint)
+           AND ($6::bigint IS NULL OR max(lineage.attempted) < $6::bigint)
            AND NOT EXISTS (
                SELECT 1
                  FROM goal_command AS command
@@ -483,8 +519,8 @@ macro_rules! summary_sql {
 )
 SELECT selected.session_id, turn.turn_id, turn.state_kind AS turn_state,
        turn.active_phase_kind, turn.terminal_disposition_kind,
-       LEFT(metadata.title, $6) AS title_summary,
-       metadata.title IS NOT NULL AND length(metadata.title) > $6 AS title_truncated,
+       LEFT(metadata.title, $7) AS title_summary,
+       metadata.title IS NOT NULL AND length(metadata.title) > $7 AS title_truncated,
        COALESCE(metadata.archived, false) AS archived,
        facts.active_turn_count::text AS active_turn_count,
        facts.queued_turn_count::text AS queued_turn_count,
@@ -575,17 +611,17 @@ const SELECT_IDENTITY: &str = summary_sql!(
             AND NOT COALESCE(metadata.archived, false))
         OR ($2::uuid[] IS NULL
             AND ($3::uuid IS NULL OR session_row.session_id > $3)
-            AND ($7::text IS NULL
-                 OR strpos(COALESCE(metadata.title, ''), $7) > 0
-                 OR strpos(session_row.session_id::text, $7) > 0)
-            AND ($9 OR NOT COALESCE(metadata.archived, false))
+            AND ($8::text IS NULL
+                 OR strpos(COALESCE(metadata.title, ''), $8) > 0
+                 OR strpos(session_row.session_id::text, $8) > 0)
+            AND ($10 OR NOT COALESCE(metadata.archived, false))
             AND NOT EXISTS (
-                SELECT 1 FROM unnest($8::text[]) AS required(tag)
+                SELECT 1 FROM unnest($9::text[]) AS required(tag)
                  WHERE NOT EXISTS (
                     SELECT 1 FROM session_metadata_tag AS stored
                      WHERE stored.session_id = session_row.session_id
                        AND stored.tag = required.tag))
-            AND $10::timestamptz IS NULL)
+            AND $11::timestamptz IS NULL)
      ORDER BY session_row.session_id LIMIT $1
     "#,
     "ORDER BY selected.session_id"
@@ -600,19 +636,19 @@ const SELECT_LAST_ACTIVITY: &str = summary_sql!(
       FROM session_timeline_fact AS facts
       JOIN session AS session_row USING (session_id)
       LEFT JOIN session_metadata AS metadata USING (session_id)
-     WHERE ($7::text IS NULL
-            OR strpos(COALESCE(metadata.title, ''), $7) > 0
-            OR strpos(session_row.session_id::text, $7) > 0)
-       AND ($9 OR NOT COALESCE(metadata.archived, false))
+     WHERE ($8::text IS NULL
+            OR strpos(COALESCE(metadata.title, ''), $8) > 0
+            OR strpos(session_row.session_id::text, $8) > 0)
+       AND ($10 OR NOT COALESCE(metadata.archived, false))
        AND NOT EXISTS (
-           SELECT 1 FROM unnest($8::text[]) AS required(tag)
+           SELECT 1 FROM unnest($9::text[]) AS required(tag)
             WHERE NOT EXISTS (
                SELECT 1 FROM session_metadata_tag AS stored
                 WHERE stored.session_id = session_row.session_id
                   AND stored.tag = required.tag))
-       AND ($10::timestamptz IS NULL
-            OR facts.attention_activity_recorded_at < $10
-            OR (facts.attention_activity_recorded_at = $10
+       AND ($11::timestamptz IS NULL
+            OR facts.attention_activity_recorded_at < $11
+            OR (facts.attention_activity_recorded_at = $11
                 AND session_row.session_id > $3))
      ORDER BY facts.attention_activity_recorded_at DESC, session_row.session_id LIMIT $1
     "#,
@@ -639,7 +675,7 @@ pub(crate) async fn load_summaries(
     transaction: &mut Transaction<'_, Postgres>,
     identities: Option<&[Uuid]>,
     query: Option<&AttentionQuery>,
-    automatic_resume_attempt_budget: Option<u32>,
+    automatic_resume_attempts: AutomaticResumeAttemptBounds,
 ) -> Result<Vec<AttentionSummary>, AttentionRepositoryError> {
     if identities.is_some_and(<[Uuid]>::is_empty) {
         return Ok(Vec::new());
@@ -681,7 +717,8 @@ pub(crate) async fn load_summaries(
         .bind(identities.map(<[Uuid]>::to_vec))
         .bind(after_session)
         .bind(i32::from(max_attention_goal_summary_characters()))
-        .bind(automatic_resume_attempt_budget.map(i64::from))
+        .bind(automatic_resume_attempts.budget.map(i64::from))
+        .bind(automatic_resume_attempts.ceiling.map(i64::from))
         .bind(i32::from(max_attention_title_characters()))
         .bind(search)
         .bind(required_tags)

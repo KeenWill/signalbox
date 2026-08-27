@@ -25,8 +25,12 @@ use signalbox_persistence::{
 use crate::{
     ActivatedTurnExecution, HubModelConfiguration, TurnPassExecutionStage,
     WorkspaceInstructionRuntime, WorkspaceInstructionRuntimeError,
-    process_runtime::compact_automatically, report_ambiguous_commit,
-    usage_limits::reported_usage_requires_compaction,
+    process_runtime::compact_automatically,
+    report_ambiguous_commit,
+    usage_limits::{
+        ReportedInputCacheAxes, ReportedInputRetention, ReportedOutputRetention,
+        reported_usage_requires_compaction,
+    },
 };
 use tracing::Instrument;
 
@@ -174,6 +178,7 @@ impl ReportedUsageCompaction {
     pub async fn compact_if_needed(
         &self,
         session: SessionId,
+        observe_prepared: Option<&(dyn Fn(ModelCallId) + Send + Sync)>,
     ) -> Result<(), ReportedUsageCompactionError> {
         let Some(candidate) = self.compaction_candidate(session).await? else {
             return Ok(());
@@ -185,6 +190,7 @@ impl ReportedUsageCompaction {
             &self.compaction_model,
             session,
             turn,
+            observe_prepared,
         )
         .await
         {
@@ -325,20 +331,22 @@ impl ReportedUsageCompaction {
                 operation.request().model_settings().effective().fast_mode(),
             )
             .ok_or(ReportedUsageCompactionError::ContextWindowUnavailable(turn))?;
+        // The preview's starting frontier is never committed, so it names the
+        // model-visible input it would send rather than an identity no durable
+        // membership resolves.
         let reported = self
             .model_calls
-            .latest_reported_usage(
-                session,
-                target,
-                operation.request().call().frontier().snapshot(),
-            )
+            .latest_reported_usage(session, target, prospective.prospective_input())
             .await
             .map_err(|source| ReportedUsageCompactionError::Model { turn, source })?;
         let reported_requires_compaction = reported.is_some_and(|reported| {
             reported_usage_requires_compaction(
                 reported.usage(),
-                reported.input_includes_cache_tokens(),
-                reported.output_is_retained(),
+                ReportedInputCacheAxes::from_includes_cache_tokens(
+                    reported.input_includes_cache_tokens(),
+                ),
+                ReportedInputRetention::from_retained(reported.input_is_retained()),
+                ReportedOutputRetention::from_retained(reported.output_is_retained()),
                 reported.projected_unreported_content_bytes(),
                 u64::from(definition.max_output_tokens()),
                 u64::from(definition.context_window_tokens()),
@@ -728,6 +736,7 @@ where
                             &compaction_model,
                             session,
                             turn,
+                            None,
                         )
                         .await
                         {

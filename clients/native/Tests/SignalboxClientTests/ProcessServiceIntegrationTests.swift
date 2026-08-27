@@ -7099,7 +7099,9 @@ private enum ProcessProjectionFixture {
           "state":{
             "type":"active_awaiting_model_call_recovery",
             "ended_attempt_id":"\(ProcessDriverFixture.attempt)",
-            "recovery_model_call_id":"\(ProcessDriverFixture.modelCall)"
+            "recovery_model_call_id":"\(ProcessDriverFixture.modelCall)",
+            "automatic_reconciliation_attempts":"0",
+            "operator_action_required":false
           }
         }
         """,
@@ -8820,7 +8822,9 @@ private enum ProcessProjectionFixture {
     {
       "type":"active_awaiting_model_call_recovery",
       "ended_attempt_id":"\(ProcessDriverFixture.attempt)",
-      "recovery_model_call_id":"\(ProcessDriverFixture.modelCall)"
+      "recovery_model_call_id":"\(ProcessDriverFixture.modelCall)",
+      "automatic_reconciliation_attempts":"0",
+      "operator_action_required":false
     }
     """
 
@@ -8987,7 +8991,9 @@ private enum ProcessProjectionFixture {
         {
           "type":"active_awaiting_model_call_recovery",
           "ended_attempt_id":"\(ProcessDriverFixture.attempt)",
-          "recovery_model_call_id":"\(ProcessDriverFixture.modelCall)"
+          "recovery_model_call_id":"\(ProcessDriverFixture.modelCall)",
+          "automatic_reconciliation_attempts":"0",
+          "operator_action_required":false
         }
         """
     )

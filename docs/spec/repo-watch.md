@@ -56,14 +56,18 @@ Webhook preemption of slow complete reconciliation is verified against PR #926
 (`agent/webhook-projection-preemption-review`). The finite cutoff and dispatch
 reconciliation quanta ahead of and after a webhook drain are verified against
 this PR (`agent/daemon-live-bounded-repo-reconciliation`). Repeatable preemption
-while durable drain pages remain is verified against this PR
+of convergence-cutoff backlogs is verified against this PR
+(`agent/repo-watch-cursor-drain-baselines`). Repeatable preemption while durable
+drain pages remain is verified against this PR
 (`agent/daemon-live-repeatable-webhook-preemption`). The progressing-drain work
 budget and continuation wake are verified against this PR
 (`agent/daemon-live-webhook-progress-budget`). Merged-pull-request cursor
-compaction and payload-scaled webhook deadlines are verified against this PR
-(`agent/repo-watch-cursor-drain-bounds`). Primary webhook intake, the producer
-each event row records, the parity view's promotion bound, and the frontier
-entry's ownership member are verified against this PR
+compaction and payload-scaled webhook deadlines are verified against PR #1332
+(`agent/repo-watch-cursor-drain-bounds`); post-settlement logical cursor sizing
+and compact comparison baselines are verified against this PR
+(`agent/repo-watch-cursor-drain-baselines`). Primary webhook intake, the
+producer each event row records, the parity view's promotion bound, and the
+frontier entry's ownership member are verified against this PR
 (`agent/webhook-primary-mode`). The approval-judge dispatch fence and unattended
 escalation release described below are verified against this PR
 (`agent/headless-approval-escalation`). The operator-commissioned dispatch fence
@@ -202,11 +206,12 @@ once a page observes no remainder, it leaves no continuation wake and the
 complete poll proceeds. A drain retry in backoff suppresses admission preemption
 until its deadline, and that retry deadline can itself interrupt the provider
 sweep. The original cycle start remains the cadence anchor. Each leading or
-trailing lifecycle-cutoff phase and rule-or-obligation dispatch phase settles at
-most 16 durable records before returning to the webhook-aware scheduler.
-Reaching that ceiling re-arms the repository wake, so durable remainder is
-revisited without letting a sustained reconciliation backlog indefinitely delay
-webhook work.
+trailing lifecycle- or convergence-cutoff phase and rule-or-obligation dispatch
+phase settles at most 16 durable records before returning to the webhook-aware
+scheduler. A cutoff whose goal is corrupt counts as settled because the cutoff
+itself was durably dispositioned while that goal was quarantined. Reaching that
+ceiling re-arms the repository wake, so durable remainder is revisited without
+letting a sustained reconciliation backlog indefinitely delay webhook work.
 
 **Implemented behavior.** One attempt fetches up to eight open pull requests
 concurrently. The fetch sequence within a single pull request stays ordered, and
@@ -266,33 +271,37 @@ runtime lifecycle defect.
 repository state needed for future comparisons, exact signal-reviewer set, and
 the last positive occurrence sequence for each recurring source-independent
 event stream. A complete or targeted observation derives events against the full
-provider state first, then omits merged pull-request details from the cursor
-candidate while retaining the merge event's advanced occurrence frontier. Closed
+provider state first, then removes each merged pull request from the ordinary
+cursor observation. A separate compact baseline keeps only its number, head,
+labels, mergeability, completed-check comparison keys, review identities, thread
+states, and reactions. That is enough for the differ to recognize later
+post-merge occurrences without retaining terminal titles, bodies, branch and
+repository names, check names, reviewer names, or review commits. Closed
 unmerged pull requests remain until a later complete poll no longer fetches
 them. Thus a merge burst cannot make every later webhook refresh re-transfer
-terminal titles, bodies, checks, reviews, threads, and reactions. The frontier
-is canonical by its 32-byte stream identities, rejects duplicates and zero
-sequences, and admits at most 1,000,000 streams. That ceiling is where one
-repository's identity state, rather than its event history, becomes the dominant
-cost of watching it: each entry costs a 32-byte stream identity, an 8-byte
-sequence, and an 8-byte owning pull-request number, so the limit bounds one
-frontier's raw entry fields near 48 MB before map and encoding overhead.
-Exceeding it fails the comparison, because the alternative is reusing an
-occurrence number and minting a content identity that collides with an
-already-durable one. Sequence exhaustion fails the comparison rather than
-wrapping. Provider-keyed immutable facts use sequence one without occupying
-frontier space. A fact counts as immutable only when the differ suppresses
-re-emission on members its stream key already names, so completed check runs are
-not among them: their conclusion can change under an unchanged run identity and
-completion generation, and they advance a frontier sequence like any recurring
-stream. The cursor does not retain resource keys, ETags, accepted transport
-responses, raw provider payloads, or credentials. A per-repository atomic commit
-accepts an expected generation, one complete cursor candidate, and its ordered
-event-occurrence batch. It serializes competing commits, appends the cursor and
-every event together, rolls back the whole batch on failure, reports a stale
-generation as conflict, and recognizes only an exact candidate-and-occurrence
-replay. An unchanged candidate with no events does not advance the cursor; an
-unchanged candidate carrying events is rejected.
+full terminal detail, while post-merge label, check, review, thread, and
+reaction changes still produce events. The frontier is canonical by its 32-byte
+stream identities, rejects duplicates and zero sequences, and admits at most
+1,000,000 streams. That ceiling is where one repository's identity state, rather
+than its event history, becomes the dominant cost of watching it: each entry
+costs a 32-byte stream identity, an 8-byte sequence, and an 8-byte owning
+pull-request number, so the limit bounds one frontier's raw entry fields near 48
+MB before map and encoding overhead. Exceeding it fails the comparison, because
+the alternative is reusing an occurrence number and minting a content identity
+that collides with an already-durable one. Sequence exhaustion fails the
+comparison rather than wrapping. Provider-keyed immutable facts use sequence one
+without occupying frontier space. A fact counts as immutable only when the
+differ suppresses re-emission on members its stream key already names, so
+completed check runs are not among them: their conclusion can change under an
+unchanged run identity and completion generation, and they advance a frontier
+sequence like any recurring stream. The cursor does not retain resource keys,
+ETags, accepted transport responses, raw provider payloads, or credentials. A
+per-repository atomic commit accepts an expected generation, one complete cursor
+candidate, and its ordered event-occurrence batch. It serializes competing
+commits, appends the cursor and every event together, rolls back the whole batch
+on failure, reports a stale generation as conflict, and recognizes only an exact
+candidate-and-occurrence replay. An unchanged candidate with no events does not
+advance the cursor; an unchanged candidate carrying events is rejected.
 
 A commit coalesces an occurrence whose content identity is already durable for
 that repository under the same content, writing the cursor without a second row
@@ -409,6 +418,31 @@ reset could collide with existed. A carried entry names no owning pull request,
 since version two stored none and the one-way hash cannot recover one; the
 stream's next occurrence overwrites the member with the pull request that
 produced it, so only a stream that never recurs again keeps null.
+
+Storage version four adds the required compact merged-pull-request baseline
+collection. Migration `202608260002` seeds that collection empty while retaining
+every version-three pull-request observation. The first successful cursor commit
+on the new runtime derives compact baselines from those full merged observations
+and removes the full entries atomically, so migration neither loses the prior
+comparison state nor requires manual cursor surgery. A version-four reader
+requires the collection rather than treating its absence as empty. Each baseline
+records the signal-reviewer filter that produced its retained reactions; a later
+hydration suppresses reaction transitions when that filter changed and replaces
+the baseline with the newly filtered provider state. Compact check suites, check
+runs, reviews, and threads are canonical by provider identity, and the
+collection is canonical by pull-request number. A duplicate identity is storage
+corruption rather than a value for a reader or public constructor to choose
+between.
+
+A compact baseline remains while the merged pull request's recurring streams
+remain in the identity frontier. Evicting the baseline alone would make a later
+refresh look like an initial observation and synthesize occurrences for facts
+that did not change; releasing it therefore belongs to the same future
+subject-lifecycle mechanism as releasing those streams. A pull request first
+observed after merge need not have produced an occurrence stream yet, so the
+cursor independently refuses more than 1,000,000 retained baseline subjects. The
+frontier's existing 1,000,000-stream safety ceiling continues to bound the
+recurring streams those subjects own.
 
 No lifecycle releases a stream today, and none may be added without deciding
 which subject provably produces no further occurrence. A merged pull request is
@@ -1356,13 +1390,24 @@ progressing drain also yields after the deployment-owned
 last terminal delivery, so a slow but productive page returns before consuming
 the outer deadline and does not enter failure backoff. Configuring that policy
 as `"none"` disables the progress yield; the outer deadline still bounds a stuck
-operation. Before each drain, the runtime reads the stored byte size of the
-latest cursor document without deserializing it. That read derives the deadlines
-below and so cannot be covered by them; it carries its own ten-second bound,
-whose expiry fails the attempt as a persistence failure rather than leaving one
+operation. Before each drain, the runtime first settles any retained targeted
+cursor completion and then reads the logical JSON byte size of the resulting
+latest cursor document without decoding it in the daemon. Measuring the logical
+document rather than PostgreSQL's compressed storage prevents TOAST compression
+from understating decode cost. Settlement and sizing derive the deadlines below
+and so cannot be covered by them; together they carry one ten-second bound,
+whose expiry fails the attempt as a persistence failure rather than leaving an
 unbounded step ahead of every attempt. The outer deadline is the greater of 60
-seconds and 30 seconds per started MiB of stored cursor payload, capped at 15
-minutes. It spans the drain's provider and database work. Expiry cancels that
+seconds and 30 seconds per started MiB of logical cursor payload, capped at 15
+minutes. The stall monitor sizes the logical cursor under the same bound on each
+inspection and uses that payload-derived drain deadline as its unchanged-head
+threshold. Once it observes one queue head, later inspections may increase but
+never reduce that head's threshold; advancing the receipt sequence starts a new
+observation. A cursor compacted during an in-flight drain therefore cannot make
+the same healthy large-cursor attempt look stalled before its earlier bound.
+Both the sizing read and the monitor's pending-receipt inspection are preempted
+by daemon shutdown, rather than making shutdown wait for their database bounds.
+The deadline spans the drain's provider and database work. Expiry cancels that
 attempt, leaves unfinished deliveries pending, invalidates partial provider
 freshness, emits the closed `webhook_projection_drain_timed_out` cause, and,
 unless only post-terminal dispatch work expired, enters the same bounded
@@ -1489,10 +1534,11 @@ identity and receipt time only and never the admitted body. That cadence is
 anchored, so a slow inspection does not push the next one out by its own
 duration, and the inspection is bounded at ten seconds so a connection pool
 exhausted by wedged repositories produces a closed timeout cause rather than
-silence; once the oldest delivery has remained undispositioned for one minute it
-emits an error-level stall signal with the repository, delivery identity,
-receipt sequence, pending age, and closed stall cause. Because the observer is
-not the serialized drain task, a task wedged in polling, projection,
+silence; once the oldest delivery has remained undispositioned beyond the
+payload-derived threshold pinned for that queue head (between one and fifteen
+minutes), it emits an error-level stall signal with the repository, delivery
+identity, receipt sequence, pending age, and closed stall cause. Because the
+observer is not the serialized drain task, a task wedged in polling, projection,
 disposition, or dispatch cannot silence that signal, and the observer's own
 inspection is cancelled by shutdown so an unresponsive database cannot hold
 daemon termination.
@@ -1523,25 +1569,31 @@ contains its transition and be recorded as a duplicate. The poll marks the
 baseline superseded instead, and the first drain that finds its page empty
 performs the replacement, deciding both without an await between them. A
 targeted query reconciles just the pull requests it names, so its commit is left
-to the cursor and the shadow is kept; the accepted cost is that what a targeted
-query learns reaches the shadow at the next full poll rather than immediately.
-Pending deliveries are drained before a full poll as well as after it. That
-drain failing is reported and not propagated: acceleration is not allowed to
-cancel the reconciliation sweep, so one delivery whose targeted request keeps
-failing cannot abort every scheduled poll. A poll that observes the same
-transition as an already-admitted delivery cannot advance the cursor past it and
-leave the delivery applying to state that already contains it. A delivery's
-targeted provider queries complete before anything is recorded, so a transient
-provider failure leaves the delivery pending. Once those queries succeed, the
-exact projections and terminal disposition form the durable recovery handoff
-before the cursor write. A later cursor failure does not reopen the delivery;
-the in-memory shadow is discarded so subsequent work reloads the durable cursor
-baseline, while a cursor conflict hands ownership to the intervening poll. On
-daemon restart the baseline is re-seeded from the durable cursor, which is the
-same complete reconciliation a full poll performs. The divergence a re-seeding
-leaves is accepted rather than removed: a delivery projected against a freshly
-seeded baseline records `cross_drain_shadow_gap` on its projections, so the gap
-is explained in the parity view instead of being carried by a durable shadow
+to the cursor. A landed targeted refresh also advances the shadow immediately to
+its refreshed observation and compact baselines while retaining the projection
+frontier already derived for that delivery, so a later delivery cannot compare
+against stale pre-hydration state. A commit-SHA check-rollup query resolves its
+target through either an ordinary pull-request observation or a compact merged
+baseline, keeping post-merge deliveries targetable. Pending deliveries are
+drained before a full poll as well as after it. That drain failing is reported
+and not propagated: acceleration is not allowed to cancel the reconciliation
+sweep, so one delivery whose targeted request keeps failing cannot abort every
+scheduled poll. A poll that observes the same transition as an already-admitted
+delivery cannot advance the cursor past it and leave the delivery applying to
+state that already contains it. A delivery's targeted provider queries complete
+before anything is recorded, so a transient provider failure leaves the delivery
+pending. Once those queries succeed, the exact projections and terminal
+disposition form the durable recovery handoff before the cursor write. A later
+cursor failure does not reopen the delivery; the in-memory shadow is discarded
+so subsequent work reloads the durable cursor baseline, while a cursor conflict
+hands ownership to the intervening poll. On any targeted-completion failure,
+unpublished provider freshness is invalidated so a later unrelated cursor commit
+cannot authorize reuse of state that never reached that cursor. On daemon
+restart the baseline is re-seeded from the durable cursor, which is the same
+complete reconciliation a full poll performs. The divergence a re-seeding leaves
+is accepted rather than removed: a delivery projected against a freshly seeded
+baseline records `cross_drain_shadow_gap` on its projections, so the gap is
+explained in the parity view instead of being carried by a durable shadow
 cursor. `repo_watch_webhook_projection` records each resulting version-one
 content identity and event kind, and the cause of any divergence the producing
 delivery already knows, while `repo_watch_webhook_disposition` atomically

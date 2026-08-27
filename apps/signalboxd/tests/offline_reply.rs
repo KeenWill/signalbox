@@ -11,20 +11,21 @@ use std::{error::Error, process::Command, time::Duration};
 use signalbox_application::{
     ClassifyOperatorFailure, CorrelatedToolExecutorEvidence, CreateSessionOutcome,
     CreateSessionRequest, CreateSessionService, EligibilityNudge, GoalAwareEligibilityPass,
-    InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
-    ModelCallCredentialReference, NoToolCatalog, OperatorFailureClass, SchedulerLoop,
-    SchedulerLoopExit, StartEligibleTurnService, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputService, ToolExecutionInvocation, ToolExecutor, UuidV7SessionIdGenerator,
-    UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator,
+    GoalPassDisposition, InProcessAttemptDispatchGate, InProcessEligibilityWorkSource,
+    InProcessToolDispatchGate, ModelCallCredentialReference, NoToolCatalog, OperatorFailureClass,
+    SchedulerLoop, SchedulerLoopExit, StartEligibleTurnService, SubmitInputOutcome,
+    SubmitInputRequest, SubmitInputService, ToolExecutionInvocation, ToolExecutor,
+    UuidV7SessionIdGenerator, UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
-    AcceptedInputId, DeliveryRequest, DirectModelSelection, DurableCommandId, Goal,
+    AcceptedInputId, AcceptedInputTurnActivationIdentities, ContextFrontierId, DeliveryRequest,
+    DirectModelSelection, DurableCommandId, FailedModelCallTurnIdentities, Goal,
     GoalBlockProvenance, GoalBlockedReasonKind, GoalCommandResult, GoalEvent, GoalEventKind,
     GoalState, GoalStatement, GoalUserAction, GoalUserCommand, ModelSelectionOverride,
     ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, PerInputConfigurationChoices,
-    ProviderModelIdentity, ResolvedProviderTarget, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionId, SubmitInputAppliedResult, SubmitInputResult,
-    TurnId, UserContent,
+    ProviderModelIdentity, ResolvedProviderTarget, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
+    SubmitInputAppliedResult, SubmitInputResult, TurnAttemptId, TurnId, UserContent,
 };
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
@@ -37,19 +38,19 @@ use signalbox_persistence::{
     create_session::CreateSessionRepository,
     disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels,
-    goal::{GoalCommandHandlingOutcome, GoalRepository},
+    goal::{GoalCommandHandlingOutcome, GoalExecutionFailureRecoveryCause, GoalRepository},
     goal_turn::GoalTurnCandidates,
     local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository,
     process_read::{ProcessReadRepository, ProcessTranscriptEntry},
     scheduler::PostgresEligibilitySweep,
-    start_eligible_turn::StartEligibleTurnRepository,
+    start_eligible_turn::{CommitCompactionFailurePreviewOutcome, StartEligibleTurnRepository},
     submit_input::SubmitInputRepository,
 };
 use signalbox_test_bin::test_bin_path;
 use signalboxd::{
-    ActivatedTurnPass, FatalExecutionSupervisor, GoalModeNumericBounds,
-    PostgresGoalPassDisposition, PostgresProviderModelExecution,
+    ActivatedTurnPass, CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED, FatalExecutionSupervisor,
+    GoalModeNumericBounds, PostgresGoalPassDisposition, PostgresProviderModelExecution,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -595,7 +596,7 @@ async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_re
             pool.clone(),
             configuration,
             nudge,
-            GoalModeNumericBounds::new(None, None, None, None),
+            GoalModeNumericBounds::new(None, None, None, None, None),
         ),
     );
     let mut scheduler = SchedulerLoop::new(work_source, pass);
@@ -631,6 +632,127 @@ async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_re
     assert_eq!(goal_turn_count, 2);
     assert_eq!(runtime.received_operations().len(), 2);
     assert_ne!(first_turn.turn(), execution_failure_turn(&goal));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-048: a goal turn whose durable recovery cause requires an operator is
+/// parked by the shared resume planner, not only by the direct disposition
+/// callback that reads the cause.
+///
+/// This drives the sequence that reaches `reconcile_success` with the cause
+/// already recorded: the turn terminalizes as a call-free compaction failure
+/// writing its `goal_execution_failure_recovery` row, the direct
+/// `block_execution_failure` callback never runs — which is what a daemon
+/// restart between the failing commit and the disposition future does — and the
+/// next pass reconciles the still-undisposed terminal turn. The appended block
+/// must carry the operator-required need, because planning it from block
+/// provenance alone armed a resume into the same impossible compaction.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s_goal_inv048_reconciled_success_parks_a_durably_non_resumable_failure()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x2001));
+    let mut create = CreateSessionService::new(
+        UuidV7SessionIdGenerator,
+        CreateSessionRepository::new(pool.clone(), configuration.session_credential_pin()),
+    );
+    let CreateSessionOutcome::Applied(created) = create
+        .execute(CreateSessionRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x2301)),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+        )?)
+        .await?
+    else {
+        panic!("the unique fixture command must create its session")
+    };
+    let session = created.session();
+    let attached_turn = goal_turn_candidates(0x2401);
+    let goal_repository = GoalRepository::new(pool.clone());
+    let attached = goal_repository
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x2302)),
+                session,
+                GoalUserAction::Attach(goal_statement("finish the commissioned task")),
+            ),
+            Some(attached_turn),
+            |_| None,
+        )
+        .await?;
+    assert_goal_command_applied(attached);
+
+    let activation = StartEligibleTurnRepository::new(pool.clone());
+    let preview = activation
+        .preview(
+            session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x2501)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x2502)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x2503)),
+                TurnAttemptId::from_uuid(Uuid::from_u128(0x2504)),
+            ),
+        )
+        .await?
+        .expect("the queued goal turn has an activation preview");
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        DirectModelSelection::from_uuid(Uuid::from_u128(0x2601)),
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(0x2602))),
+    )])
+    .expect("one fixture target forms a catalog");
+    let closure = activation
+        .commit_compaction_failure_preview(
+            preview,
+            &PostgresModelCallRepository::new(
+                pool.clone(),
+                targets,
+                ModelCallCredentialReference::new("compaction-failure-test-provider"),
+            ),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x2701)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x2702)),
+            ),
+            Some(GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit),
+        )
+        .await?;
+
+    assert_eq!(
+        closure,
+        CommitCompactionFailurePreviewOutcome::Failed(attached_turn.turn())
+    );
+    assert_eq!(
+        goal_repository
+            .execution_failure_recovery_cause(session, attached_turn.turn())
+            .await?,
+        Some(GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit)
+    );
+
+    let (nudge, _work_source) =
+        InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
+    PostgresGoalPassDisposition::new(
+        pool.clone(),
+        configuration,
+        nudge,
+        GoalModeNumericBounds::new(None, None, None, None, None),
+    )
+    .reconcile_success(session)
+    .await?;
+
+    let goal = goal_repository
+        .load_goal(session)
+        .await?
+        .expect("the attached goal remains readable");
+    let GoalState::Blocked { reason, need } = goal.current().state() else {
+        panic!("the reconciled terminal failure must block the goal")
+    };
+
+    assert_eq!(*reason, GoalBlockedReasonKind::ExecutionFailure);
+    assert_eq!(need.as_str(), CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED);
+    assert_eq!(execution_failure_turn(&goal), attached_turn.turn());
 
     pool.close().await;
     drop(container);

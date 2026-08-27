@@ -1276,8 +1276,28 @@ struct ProjectedFrontierMember {
     summary_range: Option<(SemanticTranscriptEntryRef, SemanticTranscriptEntryRef)>,
 }
 
+/// Names one committed frontier's model-visible entries in projected order.
+///
+/// Entries a compaction summarized away are absent: they are no longer part of
+/// any request built on this frontier. Callers scoring prospective content read
+/// membership here rather than from physical frontier positions, which a
+/// summary appended after its own boundary reorders.
+pub(crate) async fn projected_frontier_membership(
+    connection: &mut sqlx::PgConnection,
+    session: SessionId,
+    frontier: ContextFrontierId,
+) -> Result<Vec<SemanticTranscriptEntryRef>, ContextCompactionRepositoryError> {
+    Ok(
+        load_projected_frontier_members(connection, session, frontier)
+            .await?
+            .into_iter()
+            .map(|member| member.reference)
+            .collect(),
+    )
+}
+
 async fn load_projected_frontier_members(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    connection: &mut sqlx::PgConnection,
     session: SessionId,
     frontier: ContextFrontierId,
 ) -> Result<Vec<ProjectedFrontierMember>, ContextCompactionRepositoryError> {
@@ -1298,7 +1318,7 @@ async fn load_projected_frontier_members(
     )
     .bind(session_id_to_uuid(session))
     .bind(frontier.into_uuid())
-    .fetch_all(&mut **transaction)
+    .fetch_all(&mut *connection)
     .await?;
     let mut complete = Vec::with_capacity(rows.len());
     for row in rows {

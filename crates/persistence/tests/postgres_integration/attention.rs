@@ -8,6 +8,7 @@ use signalbox_application::{
 use signalbox_domain::{ReplaceSessionMetadata, SessionMetadataContent};
 use signalbox_persistence::attention::{
     AttentionCorruption, AttentionRepository, AttentionRepositoryError,
+    AutomaticResumeAttemptBounds,
 };
 use signalbox_persistence::session_metadata::SessionMetadataRepository;
 
@@ -16,7 +17,8 @@ const FLEET_SEED: u128 = 0xa770_0000;
 /// These reads turn on fleet size and journal length, never on how many
 /// automatic resumptions a deployment still owes, so they state the unbounded
 /// automatic-resume budget instead of a number their story never uses.
-const UNBOUNDED_AUTOMATIC_RESUME_BUDGET: Option<u32> = None;
+const UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS: AutomaticResumeAttemptBounds =
+    AutomaticResumeAttemptBounds::unbounded();
 
 async fn create_mixed_scale_fleet(pool: &PgPool) -> Result<(), Box<dyn Error>> {
     for offset in 0..FLEET_SIZE {
@@ -61,7 +63,7 @@ fn identity_query(continuation: Option<AttentionContinuation>) -> AttentionQuery
 async fn bounded_pages_cover_large_fleet() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     create_mixed_scale_fleet(&pool).await?;
-    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET);
+    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS);
     let first = repository.snapshot(identity_query(None)).await?;
     let second = repository
         .snapshot(identity_query(first.continuation.clone()))
@@ -120,7 +122,6 @@ async fn bounded_pages_cover_large_fleet() -> Result<(), Box<dyn Error>> {
             .expect("the activity continuation is bounded"),
         )
         .await?;
-
     assert_eq!(
         first.summaries.len(),
         usize::from(max_attention_snapshot_items())
@@ -256,7 +257,7 @@ async fn legacy_attention_page_avoids_the_catalog_total_projection() -> Result<(
     let (container, pool, _database_url) = migrated_postgres().await?;
     create_attention_session(&pool, 0).await?;
     create_attention_session(&pool, 1).await?;
-    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET);
+    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS);
     let page = repository.page(identity_query(None)).await?;
 
     assert_eq!(page.summaries.len(), 2);
@@ -272,7 +273,7 @@ async fn legacy_attention_page_avoids_the_catalog_total_projection() -> Result<(
 async fn oversized_change_burst_requires_resync() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     create_attention_session(&pool, 0).await?;
-    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET);
+    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS);
     let first = repository.snapshot(AttentionQuery::hot_page()).await?;
     let changed_session = first.summaries[0].session;
     sqlx::query(
@@ -299,7 +300,7 @@ async fn missing_activity_fact_fails_the_default_catalog_page_closed() -> Result
     let (container, pool, _database_url) = migrated_postgres().await?;
     create_attention_session(&pool, 0).await?;
     create_attention_session(&pool, 1).await?;
-    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET);
+    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS);
     let complete = repository.snapshot(AttentionQuery::hot_page()).await?;
     assert_eq!(complete.summaries.len(), 2);
     assert_eq!(complete.total, 2);
@@ -332,7 +333,7 @@ async fn missing_activity_fact_fails_the_default_catalog_page_closed() -> Result
 async fn mismatched_activity_key_fails_the_catalog_closed() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     create_attention_session(&pool, 0).await?;
-    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET);
+    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS);
     let complete = repository.snapshot(AttentionQuery::hot_page()).await?;
     let session = complete.summaries[0].session;
     sqlx::query(
@@ -366,7 +367,7 @@ async fn metadata_activity_drives_hot_sort_filters_counts_and_resync() -> Result
     let (container, pool, _database_url) = migrated_postgres().await?;
     create_attention_session(&pool, 0).await?;
     create_attention_session(&pool, 1).await?;
-    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET);
+    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS);
     let before = repository.snapshot(AttentionQuery::hot_page()).await?;
     let target = SessionId::from_uuid(Uuid::from_u128(FLEET_SEED + FLEET_SIZE));
     let prior_activity = before
