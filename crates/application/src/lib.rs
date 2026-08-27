@@ -47,9 +47,12 @@ pub use approval_judge::{
 };
 pub use attention::{
     AttentionAction, AttentionActivity, AttentionActivityKind, AttentionBlockedReason,
-    AttentionChanges, AttentionCursor, AttentionGoalBlock, AttentionJudgeFacts, AttentionReader,
-    AttentionSnapshot, AttentionState, AttentionSummary, max_attention_change_items,
+    AttentionChanges, AttentionContinuation, AttentionCursor, AttentionGoalBlock,
+    AttentionJudgeFacts, AttentionQuery, AttentionQueryError, AttentionReader, AttentionSnapshot,
+    AttentionSort, AttentionState, AttentionSummary, max_attention_change_items,
+    max_attention_filter_tags, max_attention_filter_utf8_bytes,
     max_attention_goal_summary_characters, max_attention_snapshot_items,
+    max_attention_title_characters,
 };
 pub use blob_derivation::{
     BlobDerivationIdGenerator, BlobDerivationRecordOutcome, BlobDerivationServiceError,
@@ -121,7 +124,9 @@ pub use repo_watch::{
     RepoWatchDispatchServiceError, RepoWatchDispatchTransaction, RepoWatchEventContentIdentityV1,
     RepoWatchEventIdGenerator, RepoWatchEventIdentityFrontierEntryV1,
     RepoWatchEventIdentityFrontierError, RepoWatchEventIdentityFrontierV1,
-    RepoWatchEventOccurrenceV1, RepoWatchObservation, RepoWatchPreparedDispatchAction,
+    RepoWatchEventOccurrenceV1, RepoWatchMergedCheckRunBaselineV1,
+    RepoWatchMergedCheckSuiteBaselineV1, RepoWatchMergedPullRequestBaselineInputV1,
+    RepoWatchMergedPullRequestBaselineV1, RepoWatchObservation, RepoWatchPreparedDispatchAction,
     RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
     RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateError,
     RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate, RepoWatchReviewDecision,
@@ -130,6 +135,7 @@ pub use repo_watch::{
     RepoWatchStaleReviewClearanceCandidateError, RepoWatchTemplateResolver,
     RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunObservation,
     UuidV7RepoWatchDispatchIdGenerator, UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
+    derive_repo_watch_events_with_merged_baselines,
     repo_watch_events_have_equal_identified_content,
 };
 pub use repo_watch_operations::{
@@ -184,11 +190,12 @@ pub use scheduler::{
     SchedulerPassExpiryHandler, SchedulerPassOccupancyBound, scheduler_ordinary_pass_limit,
 };
 pub use search::{
-    SearchArtifactId, SearchArtifactProjection, SearchArtifactProjectionClass, SearchContentClass,
-    SearchCursor, SearchHighlight, SearchPage, SearchPageLimit, SearchPageLimitError,
-    SearchProjectionText, SearchProjectionTextError, SearchProjectionWriter, SearchQuery,
-    SearchReader, SearchResult, SearchResultSource, SearchScope, SearchService, SearchStrategy,
-    SearchText, SearchTextError, max_search_page_items, max_search_projection_text_bytes,
+    MAX_SEARCH_HIGHLIGHTS_PER_RESULT, SearchArtifactId, SearchArtifactProjection,
+    SearchArtifactProjectionClass, SearchContentClass, SearchCursor, SearchHighlight, SearchPage,
+    SearchPageLimit, SearchPageLimitError, SearchProjectionText, SearchProjectionTextError,
+    SearchProjectionWriter, SearchQuery, SearchReader, SearchResult, SearchResultSource,
+    SearchScope, SearchService, SearchStrategy, SearchText, SearchTextError,
+    max_search_highlights_per_result, max_search_page_items, max_search_projection_text_bytes,
     max_search_query_bytes, max_search_snippet_bytes,
 };
 pub use session_delegation::DelegationMessageDeliveryProjection;

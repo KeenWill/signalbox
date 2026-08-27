@@ -8,6 +8,7 @@ use std::{
     collections::{BTreeSet, HashSet},
     error::Error,
     num::{NonZeroU16, NonZeroU64},
+    time::Duration,
 };
 
 use signalbox_application::{
@@ -70,6 +71,7 @@ const CHECK_RUN_NAME: &str = "required";
 const WORKFLOW_NAME: &str = "required checks";
 const REVIEW_THREAD: &str = "review-thread-1";
 const REACTION_CONTENT: &str = "+1";
+const COMPRESSIBLE_CURSOR_PADDING_BYTES: i32 = 128 * 1024;
 // Distinct from the context's `author` and `head_sha` on purpose. Reusing those
 // would let a decoder that read `author` where it should read `review_reviewer`
 // — or `head_sha` where it should read `review_commit` — still satisfy the
@@ -81,6 +83,7 @@ const REACTOR: &str = "fixture-reactor";
 const PULL_REQUEST: u64 = 41;
 const CONTENT_IDENTITY_MIGRATION: i64 = 202608150001;
 const FRONTIER_OWNERSHIP_MIGRATION: i64 = 202608250501;
+const MERGED_BASELINE_MIGRATION: i64 = 202608260002;
 const CARRIED_STREAM_IDENTITY: [u8; 32] = [0x99; 32];
 const CARRIED_SEQUENCE: u64 = 7;
 const CHECK_SUITE_ID: u64 = 51;
@@ -614,8 +617,33 @@ async fn cursor_payload_size_reports_the_latest_stored_document() -> Result<(), 
             RepoWatchCommitRequest::new(None, candidate(Some(INITIAL_HEAD))?, Vec::new()),
         )
         .await?;
+    let mut connection = pool.acquire().await?;
+    sqlx::query("SET session_replication_role = replica")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query(
+        "UPDATE repo_watch_cursor
+            SET cursor_payload = cursor_payload ||
+                jsonb_build_object('sizing_fixture', repeat('x', $2))
+          WHERE repository = $1",
+    )
+    .bind(repository.as_str())
+    .bind(COMPRESSIBLE_CURSOR_PADDING_BYTES)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query("SET session_replication_role = origin")
+        .execute(&mut *connection)
+        .await?;
     let reported = store.load_cursor_payload_bytes(&repository).await?;
-    let stored: i64 = sqlx::query_scalar(
+    let logical: i64 = sqlx::query_scalar(
+        "SELECT octet_length(cursor_payload::text)::bigint
+           FROM repo_watch_cursor
+          WHERE repository = $1",
+    )
+    .bind(repository.as_str())
+    .fetch_one(&pool)
+    .await?;
+    let compressed: i64 = sqlx::query_scalar(
         "SELECT pg_column_size(cursor_payload)::bigint
            FROM repo_watch_cursor
           WHERE repository = $1",
@@ -625,7 +653,8 @@ async fn cursor_payload_size_reports_the_latest_stored_document() -> Result<(), 
     .await?;
 
     assert_eq!(absent, None);
-    assert_eq!(reported, Some(u64::try_from(stored)?));
+    assert_eq!(reported, Some(u64::try_from(logical)?));
+    assert!(compressed < logical);
     Ok(())
 }
 
@@ -727,7 +756,7 @@ async fn content_identity_migration_carries_existing_cursor_and_event_to_version
     // Applying the content-identity migration applies every later migration
     // with it, so the version this observes is the current storage version and
     // not the two that migration introduced.
-    assert_eq!(cursor_version, 3);
+    assert_eq!(cursor_version, 4);
     assert_eq!(frontier, serde_json::json!([]));
     assert_eq!(event_identity.content_identity_version, 1);
     assert_eq!(event_identity.content_identity.len(), 32);
@@ -813,7 +842,7 @@ async fn frontier_ownership_migration_keeps_every_occurrence_sequence() -> Resul
         .entries()
         .collect::<Vec<_>>();
 
-    assert_eq!(cursor_version, 3);
+    assert_eq!(cursor_version, 4);
     assert_eq!(
         frontier,
         serde_json::json!([{
@@ -828,6 +857,93 @@ async fn frontier_ownership_migration_keeps_every_occurrence_sequence() -> Resul
             CARRIED_STREAM_IDENTITY,
             NonZeroU64::new(CARRIED_SEQUENCE).expect("fixture sequence is positive"),
         )]
+    );
+    Ok(())
+}
+
+async fn seed_version_three_cursor_with_merged_pull_request(
+    pool: &PgPool,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query(
+        "INSERT INTO repo_watch_cursor (
+            repository, generation, storage_version, cursor_payload
+         ) VALUES ($1, 1, 3, $2)",
+    )
+    .bind(REPOSITORY)
+    .bind(sqlx::types::Json(serde_json::json!({
+        "storage_version": 3,
+        "signal_reviewers": [],
+        "event_identity_frontier": [],
+        "state": {
+            "pull_requests": [{
+                "number": PULL_REQUEST,
+                "head_sha": INITIAL_HEAD,
+                "head_repository": HEAD_REPOSITORY,
+                "base_branch": BASE_BRANCH,
+                "head_branch": HEAD_BRANCH,
+                "title": TITLE,
+                "body": BODY,
+                "labels": [],
+                "draft": false,
+                "author": AUTHOR,
+                "lifecycle": "merged",
+                "mergeable_state": "mergeable",
+                "completed_check_suites": [],
+                "completed_check_runs": [],
+                "reviews": [],
+                "threads": [],
+                "reactions": []
+            }],
+            "workflow_runs": [],
+            "branch_heads": []
+        }
+    })))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn merged_baseline_migration_preserves_full_prior_state_until_runtime_compaction()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = postgres_before_migration(MERGED_BASELINE_MIGRATION).await?;
+    seed_version_three_cursor_with_merged_pull_request(&pool).await?;
+
+    apply_migrations_from(&pool, MERGED_BASELINE_MIGRATION).await?;
+
+    let stored: (i16, serde_json::Value, serde_json::Value) = sqlx::query_as(
+        "SELECT storage_version,
+                cursor_payload -> 'merged_pull_request_baselines',
+                cursor_payload -> 'state' -> 'pull_requests'
+           FROM repo_watch_cursor
+          WHERE repository = $1",
+    )
+    .bind(REPOSITORY)
+    .fetch_one(&pool)
+    .await?;
+    let loaded = PostgresRepoWatchStore::new(pool)
+        .load_cursor(&repository()?)
+        .await?
+        .expect("migrated cursor remains readable");
+
+    assert_eq!(stored.0, 4);
+    assert_eq!(stored.1, serde_json::json!([]));
+    assert_eq!(stored.2.as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        loaded
+            .candidate()
+            .observation()
+            .state()
+            .pull_requests()
+            .len(),
+        1
+    );
+    assert!(
+        loaded
+            .candidate()
+            .merged_pull_request_baselines()
+            .is_empty()
     );
     Ok(())
 }
@@ -1041,6 +1157,207 @@ async fn cursor_events_assessment_and_seal_commit_atomically() -> Result<(), Box
     assert_eq!(event_count, expected_event_count);
     assert_eq!(assessment_count, 1);
     assert_eq!(seal_count, 1);
+    Ok(())
+}
+
+/// A restarting daemon measures what is left of its poll cadence from this
+/// record, so only the complete provider sweep may write it. The cursor cannot
+/// stand in: a targeted webhook refresh commits generations of its own, and a
+/// sweep that finds the repository unchanged commits none at all, so neither the
+/// newest generation's age nor its existence measures the sweep cadence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn only_a_complete_sweep_records_the_poll_cadence() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let baseline = candidate(None)?;
+    let first_generation = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(None, baseline.clone(), Vec::new()),
+            )
+            .await?,
+    );
+
+    let after_webhook_commit = store.load_complete_poll_age(&repository).await?;
+
+    let current_observation = observation(Some(INITIAL_HEAD))?;
+    let mut current_frontier = baseline.event_identity_frontier().clone();
+    let events = derive_repo_watch_events(
+        &repository,
+        Some(baseline.observation()),
+        &current_observation,
+        &mut current_frontier,
+        &mut FixedEventIds::default(),
+    )?;
+    let current = RepoWatchCursorCandidate::with_event_identity_frontier(
+        current_observation,
+        current_frontier,
+    );
+    let swept_generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(Some(first_generation), current.clone(), events),
+                &[merge_ready_assessment(INITIAL_HEAD, BASE_REVISION)?],
+            )
+            .await?,
+    );
+    let after_sweep = store.load_complete_poll_age(&repository).await?;
+    let swept_at = recorded_complete_poll(&pool).await?;
+
+    // A sweep whose commit conflicts never observed the repository completely,
+    // so it must leave the previous deadline in force.
+    let conflicted = store
+        .commit_with_convergence(
+            &repository,
+            RepoWatchCommitRequest::new(
+                Some(first_generation),
+                candidate(Some(CHANGED_HEAD))?,
+                Vec::new(),
+            ),
+            &[merge_ready_assessment(CHANGED_HEAD, BASE_REVISION)?],
+        )
+        .await?;
+    let after_conflict = recorded_complete_poll(&pool).await?;
+
+    // A sweep that finds the repository unchanged writes no cursor generation
+    // and is still the completed sweep the cadence measures.
+    let unchanged = store
+        .commit_with_convergence(
+            &repository,
+            RepoWatchCommitRequest::new(Some(swept_generation), current, Vec::new()),
+            &[merge_ready_assessment(INITIAL_HEAD, BASE_REVISION)?],
+        )
+        .await?;
+    let after_unchanged = recorded_complete_poll(&pool).await?;
+
+    assert_eq!(
+        after_webhook_commit, None,
+        "a cursor generation is not evidence that a sweep completed"
+    );
+    assert!(
+        after_sweep.is_some(),
+        "the completed sweep records the cadence the next restart reads"
+    );
+    assert!(matches!(
+        conflicted,
+        RepoWatchCommitOutcome::Conflict { .. }
+    ));
+    assert_eq!(
+        after_conflict, swept_at,
+        "a rolled-back sweep leaves the previous deadline in force"
+    );
+    assert!(matches!(unchanged, RepoWatchCommitOutcome::Unchanged(_)));
+    assert_ne!(
+        after_unchanged, swept_at,
+        "an unchanged sweep still completed, and commits no generation to measure"
+    );
+    Ok(())
+}
+
+async fn recorded_complete_poll(pool: &PgPool) -> Result<Option<String>, Box<dyn Error>> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT completed_at::text FROM repo_watch_complete_poll WHERE repository = $1",
+    )
+    .bind(REPOSITORY)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// Waits until a backend other than this test's is queued behind an advisory
+/// lock in this database.
+///
+/// The observation has to be positive for the caller to be a classifier at all:
+/// a fixed delay before marking the clock passes against a transaction-start
+/// stamp whenever the spawned sweep is slower to reach the lock than the delay,
+/// which is exactly what a loaded runner produces. Waiting on the contention
+/// itself makes the marker provably later than the sweep's transaction start.
+async fn await_repository_lock_contention(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+    const PROBE_INTERVAL: Duration = Duration::from_millis(10);
+    // Only reached when the sweep never queues at all, and failing is then the
+    // correct outcome, so this buys patience rather than encoding a latency.
+    const PROBE_ATTEMPTS: u32 = 3_000;
+
+    for _ in 0..PROBE_ATTEMPTS {
+        let contended: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1
+                  FROM pg_locks
+                 WHERE locktype = 'advisory'
+                   AND NOT granted
+                   AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+             )",
+        )
+        .fetch_one(pool)
+        .await?;
+        if contended {
+            return Ok(());
+        }
+        tokio::time::sleep(PROBE_INTERVAL).await;
+    }
+    Err("no backend ever queued behind the repository's advisory lock".into())
+}
+
+/// The cadence stamp measures when the sweep committed, not when its
+/// transaction opened. Those differ by the wait for the per-repository advisory
+/// lock — a sweep can queue behind a targeted webhook commit — and a stamp taken
+/// from the transaction's start hands that wait to the next restart as elapsed
+/// cadence, bringing the following sweep forward by it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn the_cadence_stamp_excludes_the_wait_for_the_repository_lock() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let baseline = candidate(None)?;
+    let mut blocker = pool.acquire().await?;
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+        .bind(REPOSITORY)
+        .execute(&mut *blocker)
+        .await?;
+
+    let sweeping = tokio::spawn({
+        let store = store.clone();
+        let repository = repository.clone();
+        async move {
+            store
+                .commit_with_convergence(
+                    &repository,
+                    RepoWatchCommitRequest::new(None, baseline, Vec::new()),
+                    &[],
+                )
+                .await
+        }
+    });
+    await_repository_lock_contention(&pool).await?;
+    let held_until: String = sqlx::query_scalar("SELECT clock_timestamp()::text")
+        .fetch_one(&mut *blocker)
+        .await?;
+    let released: bool = sqlx::query_scalar("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+        .bind(REPOSITORY)
+        .fetch_one(&mut *blocker)
+        .await?;
+    let swept = sweeping.await??;
+
+    assert!(released, "the fixture releases its deliberate lock");
+    assert!(matches!(swept, RepoWatchCommitOutcome::Committed(_)));
+    let stamped_after_the_wait: bool = sqlx::query_scalar(
+        "SELECT completed_at > $2::timestamptz
+           FROM repo_watch_complete_poll
+          WHERE repository = $1",
+    )
+    .bind(REPOSITORY)
+    .bind(&held_until)
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        stamped_after_the_wait,
+        "the stamp is taken once the lock is held, not when the transaction opened"
+    );
     Ok(())
 }
 
@@ -1846,7 +2163,7 @@ async fn malformed_cursor_document_fails_closed_on_read() -> Result<(), Box<dyn 
         .execute(&mut *corruption_connection)
         .await?;
     sqlx::query(
-        "UPDATE repo_watch_cursor SET cursor_payload = '{\"storage_version\":3}'::jsonb WHERE repository = $1",
+        "UPDATE repo_watch_cursor SET cursor_payload = '{\"storage_version\":4}'::jsonb WHERE repository = $1",
     )
     .bind(repository.as_str())
     .execute(&mut *corruption_connection)

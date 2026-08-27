@@ -123,6 +123,37 @@ pub struct ProspectiveModelCall {
     credential_reference: ModelCallCredentialReference,
     system_prompt: Option<signalbox_domain::SessionSystemPrompt>,
     tool_entries: Box<[ResolvedToolConversationEntry]>,
+    projected_members: Box<[SemanticTranscriptEntryRef]>,
+    uncommitted_content_bytes: u64,
+}
+
+/// The model-visible input whose unreported content one usage read scores.
+///
+/// Membership is the canonical projection the renderer sends, not physical
+/// frontier order: entries a compaction summarized away are no longer model
+/// visible and are not part of the next request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProspectiveModelInput<'a> {
+    /// One committed frontier, projected from its durable membership.
+    Committed(ContextFrontierId),
+    /// One uncommitted activation preview.
+    ///
+    /// A preview's starting frontier and the entries it mints exist only in
+    /// memory — its transaction is discarded before any caller can read them —
+    /// so the preview carries its own projected membership and the exact
+    /// content bytes of the entries no durable row can score.
+    Preview {
+        /// Model-visible members in projected order.
+        projected_members: &'a [SemanticTranscriptEntryRef],
+        /// UTF-8 content bytes of the members the preview minted.
+        uncommitted_content_bytes: u64,
+    },
+}
+
+impl From<ContextFrontierId> for ProspectiveModelInput<'_> {
+    fn from(frontier: ContextFrontierId) -> Self {
+        Self::Committed(frontier)
+    }
 }
 
 /// Latest terminal-call usage usable as a conservative next-call lower bound.
@@ -130,6 +161,7 @@ pub struct ProspectiveModelCall {
 pub struct ReportedModelCallUsage {
     usage: ProviderReportedTokenUsage,
     input_includes_cache_tokens: bool,
+    input_is_retained: bool,
     output_is_retained: bool,
     projected_unreported_content_bytes: u64,
 }
@@ -143,6 +175,17 @@ impl ReportedModelCallUsage {
     /// Whether the stored input field already includes the cache axes.
     pub const fn input_includes_cache_tokens(self) -> bool {
         self.input_includes_cache_tokens
+    }
+
+    /// Whether the reported input is still model-visible for the next call.
+    ///
+    /// An ordinary call's input is the transcript prefix its successor resends.
+    /// A dedicated compaction call's input is the source text its summary
+    /// replaced, so none of it survives into the next request; that call's
+    /// retained material is its summary output plus the content the compaction
+    /// did not summarize, which the projected-content allowance counts.
+    pub const fn input_is_retained(self) -> bool {
+        self.input_is_retained
     }
 
     /// Whether reported output became assistant transcript for the next call.
@@ -173,6 +216,18 @@ impl ProspectiveModelCall {
             tools,
             &self.tool_entries,
         )
+    }
+
+    /// Names the model-visible input this preview would send.
+    ///
+    /// The preview's own starting frontier is never committed, so a usage read
+    /// scores this membership and content instead of a frontier identity that
+    /// resolves to no durable rows.
+    pub fn prospective_input(&self) -> ProspectiveModelInput<'_> {
+        ProspectiveModelInput::Preview {
+            projected_members: &self.projected_members,
+            uncommitted_content_bytes: self.uncommitted_content_bytes,
+        }
     }
 
     const fn prepared(&self) -> &signalbox_domain::PreparedInitialModelCall {
@@ -610,27 +665,48 @@ impl PostgresModelCallRepository {
     /// A later failed call with no usage does not erase the last provider-confirmed
     /// context size. Callers may use this only as a lower bound: later transcript
     /// entries can make the next request larger, never smaller absent compaction.
-    pub async fn latest_reported_usage(
+    ///
+    /// The prospective input names the model-visible entries the next request
+    /// would carry. Membership is compared against the reported call's own
+    /// frontier, so the allowance covers exactly the content appended after the
+    /// provider counted its input.
+    pub async fn latest_reported_usage<'a>(
         &self,
         session: SessionId,
         target: ResolvedProviderTarget,
-        prospective_frontier: ContextFrontierId,
+        prospective: impl Into<ProspectiveModelInput<'a>>,
     ) -> Result<Option<ReportedModelCallUsage>, ModelCallRepositoryError> {
-        // An ordinary successor normally extends the reported frontier through
-        // its immutable header chain. A compaction successor extends the
-        // compaction result frontier while retaining only the unsummarized
-        // source suffix. Read those bounded pieces directly; independently
-        // assembled frontiers retain the exact complete-membership comparison.
+        let (projected_members, uncommitted_content_bytes) = match prospective.into() {
+            ProspectiveModelInput::Committed(frontier) => {
+                let mut connection = self.pool.acquire().await?;
+                let members = crate::context_compaction::projected_frontier_membership(
+                    &mut connection,
+                    session,
+                    frontier,
+                )
+                .await
+                .map_err(map_projected_membership_error)?;
+                (members, 0)
+            }
+            ProspectiveModelInput::Preview {
+                projected_members,
+                uncommitted_content_bytes,
+            } => (projected_members.to_vec(), uncommitted_content_bytes),
+        };
+        let member_sessions = projected_members
+            .iter()
+            .map(|member| session_id_to_uuid(member.source_session()))
+            .collect::<Vec<_>>();
+        let member_entries = projected_members
+            .iter()
+            .map(|member| member.entry().into_uuid())
+            .collect::<Vec<_>>();
         // Calls no newer than the latest compaction cannot win the final call-ID
         // ordering, so discard them before the exact summary-membership probe.
         let row = sqlx::query(
-            "WITH RECURSIVE latest_compaction AS MATERIALIZED (
-                SELECT compaction.context_compaction_id,
-                       compaction.source_frontier_id,
-                       compaction.result_frontier_id,
+            "WITH latest_compaction AS MATERIALIZED (
+                SELECT compaction.source_frontier_id,
                        compaction.summary_entry_id,
-                       compaction.through_source_session_id,
-                       compaction.through_entry_id,
                        call.model_call_id,
                        call.resolved_provider_model_identity_id,
                        call.state_kind,
@@ -643,7 +719,7 @@ impl PostgresModelCallRepository {
                            usage_cache_creation_input_tokens,
                        call.cache_read_input_tokens AS usage_cache_read_input_tokens
                   FROM context_compaction AS compaction
-                 JOIN context_compaction_model_call AS call
+                  JOIN context_compaction_model_call AS call
                     ON call.session_id = compaction.session_id
                    AND call.model_call_id = compaction.producing_call_id
                  WHERE compaction.session_id = $1
@@ -658,14 +734,13 @@ impl PostgresModelCallRepository {
                 SELECT 'ordinary'::text AS call_kind,
                        model_call.model_call_id,
                        model_call.context_frontier_id,
-                       NULL::uuid AS compaction_result_frontier_id,
                        model_call.usage_input_includes_cache_tokens,
+                       true AS input_is_retained,
                        model_call.terminal_disposition_kind = 'completed' AS output_is_retained,
                        model_call.usage_input_tokens,
                        model_call.usage_output_tokens,
                        model_call.usage_cache_creation_input_tokens,
                        model_call.usage_cache_read_input_tokens,
-                       NULL::numeric AS reported_through_position,
                        NULL::uuid AS reported_summary_entry_id,
                        headroom.projected_result_content_bytes AS
                            proven_unreported_content_bytes
@@ -696,25 +771,25 @@ impl PostgresModelCallRepository {
                         )
                    )
              ), compaction_candidate AS (
+                -- A dedicated compaction call's reported input is the source
+                -- text its summary replaced: the summary removed exactly that
+                -- material from model visibility, so none of it bounds the next
+                -- request. Its reported output is the retained summary, and the
+                -- content the compaction did not summarize stays in the
+                -- projected membership below.
                 SELECT 'context_compaction'::text AS call_kind,
                        latest.model_call_id,
                        latest.source_frontier_id AS context_frontier_id,
-                       latest.result_frontier_id AS compaction_result_frontier_id,
                        latest.usage_input_includes_cache_tokens,
+                       false AS input_is_retained,
                        true AS output_is_retained,
                        latest.usage_input_tokens,
                        latest.usage_output_tokens,
                        latest.usage_cache_creation_input_tokens,
                        latest.usage_cache_read_input_tokens,
-                       member.member_position AS reported_through_position,
                        latest.summary_entry_id AS reported_summary_entry_id,
                        NULL::numeric AS proven_unreported_content_bytes
                   FROM latest_compaction AS latest
-                  JOIN context_frontier_member AS member
-                    ON member.owning_session_id = $1
-                   AND member.context_frontier_id = latest.source_frontier_id
-                   AND member.source_session_id = latest.through_source_session_id
-                   AND member.semantic_entry_id = latest.through_entry_id
                  WHERE latest.resolved_provider_model_identity_id = $2
                    AND latest.state_kind = 'terminal'
                    AND latest.terminal_disposition_kind = 'completed'
@@ -728,141 +803,57 @@ impl PostgresModelCallRepository {
                   ) AS candidate
                  ORDER BY model_call_id DESC
                  LIMIT 1
-             ), prospective_chain (
-                    context_frontier_id,
-                    prefix_context_frontier_id
-                ) AS MATERIALIZED (
-                SELECT frontier.context_frontier_id,
-                       frontier.prefix_context_frontier_id
-                  FROM context_frontier AS frontier
-                 WHERE frontier.owning_session_id = $1
-                   AND frontier.context_frontier_id = $3
-                UNION
-                SELECT prefix.context_frontier_id,
-                       prefix.prefix_context_frontier_id
-                  FROM prospective_chain AS chain
-                  JOIN latest_call ON true
-                  JOIN context_frontier AS prefix
-                    ON prefix.owning_session_id = $1
-                   AND prefix.context_frontier_id =
-                       chain.prefix_context_frontier_id
-                 WHERE chain.context_frontier_id <>
-                       latest_call.context_frontier_id
-             ), compaction_source_suffix_chain (
-                    context_frontier_id,
-                    prefix_context_frontier_id
-                ) AS MATERIALIZED (
-                SELECT frontier.context_frontier_id,
-                       frontier.prefix_context_frontier_id
-                  FROM latest_call
-                  JOIN context_frontier AS frontier
-                    ON frontier.owning_session_id = $1
-                   AND frontier.context_frontier_id =
-                       latest_call.context_frontier_id
-                   AND frontier.member_count >
-                       latest_call.reported_through_position
-                 WHERE latest_call.call_kind = 'context_compaction'
-                UNION
-                SELECT prefix.context_frontier_id,
-                       prefix.prefix_context_frontier_id
-                  FROM compaction_source_suffix_chain AS chain
-                  JOIN latest_call ON true
-                  JOIN context_frontier AS prefix
-                    ON prefix.owning_session_id = $1
-                   AND prefix.context_frontier_id =
-                       chain.prefix_context_frontier_id
-                   AND prefix.member_count >
-                       latest_call.reported_through_position
-             ), preserved_header_prefix AS MATERIALIZED (
-                SELECT (
-                           latest_call.call_kind = 'ordinary'
-                           AND EXISTS (
-                               SELECT 1
-                                 FROM prospective_chain AS chain
-                                WHERE chain.context_frontier_id =
-                                      latest_call.context_frontier_id
-                           )
-                       ) OR (
-                           latest_call.call_kind = 'context_compaction'
-                           AND EXISTS (
-                               SELECT 1
-                                 FROM prospective_chain AS chain
-                                WHERE chain.context_frontier_id =
-                                      latest_call.context_frontier_id
-                           )
-                           AND EXISTS (
-                               SELECT 1
-                                 FROM prospective_chain AS chain
-                                WHERE chain.context_frontier_id =
-                                      latest_call.compaction_result_frontier_id
-                           )
-                       ) AS preserved
-                  FROM latest_call
              ), unreported_member AS MATERIALIZED (
-                SELECT delta.source_session_id, delta.semantic_entry_id
+                -- An ordinary call's reported input is its own frontier, so
+                -- only projected members outside that membership are new. A
+                -- compaction call reports no retained input at all: every
+                -- projected member except its summary is content the next
+                -- request adds to that summary.
+                SELECT prospective.source_session_id, prospective.semantic_entry_id
+                  FROM UNNEST($3::uuid[], $4::uuid[])
+                       AS prospective(source_session_id, semantic_entry_id)
+                EXCEPT
+                SELECT reported.source_session_id, reported.semantic_entry_id
                   FROM latest_call
-                  JOIN preserved_header_prefix AS header ON header.preserved
-                  JOIN prospective_chain AS chain
-                    ON chain.context_frontier_id <>
+                  JOIN context_frontier_member AS reported
+                    ON reported.owning_session_id = $1
+                   AND reported.context_frontier_id =
                        latest_call.context_frontier_id
-                  JOIN context_frontier_delta AS delta
-                    ON delta.owning_session_id = $1
-                   AND delta.context_frontier_id = chain.context_frontier_id
-                UNION ALL
-                SELECT retained.source_session_id, retained.semantic_entry_id
-                  FROM latest_call
-                  JOIN preserved_header_prefix AS header ON header.preserved
-                  JOIN compaction_source_suffix_chain AS chain ON true
-                  JOIN context_frontier_delta AS retained
-                    ON retained.owning_session_id = $1
-                   AND retained.context_frontier_id =
-                       chain.context_frontier_id
-                   AND retained.member_position >
-                       latest_call.reported_through_position
-                 WHERE latest_call.call_kind = 'context_compaction'
-                UNION ALL
-                SELECT fallback.source_session_id,
-                       fallback.semantic_entry_id
-                  FROM preserved_header_prefix AS header
-                  CROSS JOIN LATERAL (
-                      SELECT prospective.source_session_id,
-                             prospective.semantic_entry_id
-                        FROM context_frontier_member AS prospective
-                       WHERE NOT header.preserved
-                         AND prospective.owning_session_id = $1
-                         AND prospective.context_frontier_id = $3
-                      EXCEPT
-                      SELECT reported.source_session_id,
-                             reported.semantic_entry_id
-                        FROM latest_call
-                        JOIN context_frontier_member AS reported
-                          ON reported.owning_session_id = $1
-                         AND reported.context_frontier_id =
-                             latest_call.context_frontier_id
-                         AND (
-                             latest_call.call_kind = 'ordinary'
-                             OR reported.member_position <=
-                                latest_call.reported_through_position
-                         )
-                       WHERE NOT header.preserved
-                  ) AS fallback
-                 WHERE NOT header.preserved
+                 WHERE latest_call.call_kind = 'ordinary'
              )
-             SELECT usage_input_includes_cache_tokens, output_is_retained,
+             SELECT usage_input_includes_cache_tokens, input_is_retained,
+                    output_is_retained,
                     usage_input_tokens, usage_output_tokens,
                     usage_cache_creation_input_tokens,
                     usage_cache_read_input_tokens,
                     COALESCE(latest_call.proven_unreported_content_bytes, 0)
+                    -- Entries an uncommitted preview minted have no durable row
+                    -- to score; the preview measured their content itself.
+                    + $5::numeric
                     + (
                         SELECT COALESCE(SUM(
                             CASE
+                                -- The durable proof already measured every
+                                -- result the producing call's round projected,
+                                -- including a returning foreground delegation's
+                                -- child result. Each correlates to that call
+                                -- through the request that produced it.
                                 WHEN latest_call.proven_unreported_content_bytes IS NOT NULL
-                                     AND entry.payload_kind IN (
-                                         'tool_execution_result',
-                                         'tool_denied'
+                                     AND (
+                                         (
+                                             entry.payload_kind IN (
+                                                 'tool_execution_result',
+                                                 'tool_denied'
+                                             )
+                                             AND result_request.producing_model_call_id =
+                                                 latest_call.model_call_id
+                                         )
+                                         OR (
+                                             entry.payload_kind = 'delegation_result'
+                                             AND awaiting_request.producing_model_call_id =
+                                                 latest_call.model_call_id
+                                         )
                                      )
-                                     AND result_request.producing_model_call_id =
-                                         latest_call.model_call_id
                                 THEN 0
                                 ELSE CASE entry.payload_kind
                                     WHEN 'imported_entry' THEN
@@ -934,6 +925,10 @@ impl PostgresModelCallRepository {
                                    entry.tool_result_request_id
                                )
                            AND result_request.session_id = entry.source_session_id
+                          LEFT JOIN tool_request AS awaiting_request
+                            ON awaiting_request.request_id =
+                               entry.delegation_result_awaiting_tool_request_id
+                           AND awaiting_request.session_id = entry.source_session_id
                           LEFT JOIN tool_approval_decision AS decision
                             ON decision.request_id = entry.tool_result_request_id
                           LEFT JOIN session_delegation_initial_task AS task
@@ -969,7 +964,9 @@ impl PostgresModelCallRepository {
         )
         .bind(session_id_to_uuid(session))
         .bind(target.identity().into_uuid())
-        .bind(prospective_frontier.into_uuid())
+        .bind(&member_sessions)
+        .bind(&member_entries)
+        .bind(Decimal::from(uncommitted_content_bytes))
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {
@@ -997,6 +994,7 @@ impl PostgresModelCallRepository {
                 .with_cache_creation_input_tokens(decode("usage_cache_creation_input_tokens")?)
                 .with_cache_read_input_tokens(decode("usage_cache_read_input_tokens")?),
             input_includes_cache_tokens: row.try_get("usage_input_includes_cache_tokens")?,
+            input_is_retained: row.try_get("input_is_retained")?,
             output_is_retained: row.try_get("output_is_retained")?,
             projected_unreported_content_bytes: decode("projected_unreported_content_bytes")?
                 .ok_or(ModelCallCorruption::Missing(
@@ -1177,6 +1175,25 @@ impl PostgresModelCallRepository {
             load_tool_result_correlations(&mut transaction, &frontier_entries).await?;
         let tool_denial_correlations =
             load_tool_denial_correlations(&mut transaction, &frontier_entries).await?;
+        // The canonical projection the renderer sends. A preview never commits
+        // its starting frontier, so a later usage read cannot resolve that
+        // identity to membership and takes this instead.
+        let projected_members =
+            signalbox_domain::ContextFrontierProjection::from_complete_entries(&frontier_entries)
+                .map_err(|_| ModelCallCorruption::Inconsistent("preview frontier projection"))?
+                .ordered_entries()
+                .collect::<Box<[SemanticTranscriptEntryRef]>>();
+        // The entries this preview minted are equally uncommitted, so the
+        // durable payload-kind accounting a usage read applies to committed
+        // members cannot see them. Every other projected member resolved
+        // through the scheduling projection and is scored durably there.
+        let uncommitted_content_bytes = projected_members
+            .iter()
+            .filter(|reference| scheduling.semantic_entry(**reference).is_none())
+            .filter_map(|reference| starting_entries.get(reference))
+            .fold(0_u64, |total, entry| {
+                total.saturating_add(preview_entry_content_bytes(entry, &origin_contents))
+            });
         let execution = ModelCallExecutionReconstitutionInput::new(
             preview.turn(),
             self.targets.clone(),
@@ -1258,6 +1275,8 @@ impl PostgresModelCallRepository {
             credential_reference,
             system_prompt,
             tool_entries,
+            projected_members,
+            uncommitted_content_bytes,
         }))
     }
 
@@ -3213,6 +3232,27 @@ async fn load_tool_continuation_headroom_evidence(
                               JOIN tool_approval_decision AS decision
                                 ON decision.request_id = request.request_id
                              WHERE entry.payload_kind = 'tool_denied'
+                               AND request.producing_model_call_id = model_call.model_call_id
+                               AND request.session_id = model_call.session_id
+                               AND request.turn_id = model_call.turn_id
+
+                            UNION ALL
+
+                            -- A returning foreground await renders the child's
+                            -- delivered result as this round's tool result, so
+                            -- its content joins the round through the awaiting
+                            -- request this call issued.
+                            SELECT COALESCE(octet_length(child_result.content_text), 0)
+                                       AS content_bytes
+                              FROM semantic_transcript_entry AS entry
+                              JOIN tool_request AS request
+                                ON request.request_id =
+                                   entry.delegation_result_awaiting_tool_request_id
+                               AND request.session_id = entry.source_session_id
+                              JOIN session_child_result AS child_result
+                                ON child_result.spawning_tool_request_id =
+                                   entry.delegation_result_spawning_tool_request_id
+                             WHERE entry.payload_kind = 'delegation_result'
                                AND request.producing_model_call_id = model_call.model_call_id
                                AND request.session_id = model_call.session_id
                                AND request.turn_id = model_call.turn_id
@@ -9914,6 +9954,78 @@ async fn finish_optional_commit<T>(
         Err(error) => {
             transaction.rollback().await?;
             Err(error)
+        }
+    }
+}
+
+/// Measures one uncommitted preview entry the way the durable read measures
+/// its committed equivalent.
+///
+/// Each arm mirrors the payload-kind term `latest_reported_usage` applies to a
+/// committed member: accepted input sums its text parts and leaves attachment
+/// stubs to their own accounting, and delegated material carries the exact
+/// delivered content. Kinds a preview never mints contribute nothing.
+fn preview_entry_content_bytes(
+    entry: &SemanticTranscriptEntry,
+    origin_contents: &[ModelCallOriginContent],
+) -> u64 {
+    match entry.payload() {
+        SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
+        | SemanticTranscriptEntryPayload::SteeringAcceptedInput { accepted_input, .. } => {
+            origin_contents
+                .iter()
+                .find(|origin| origin.accepted_input() == *accepted_input)
+                .map_or(0, |origin| accepted_input_text_bytes(origin.content()))
+        }
+        SemanticTranscriptEntryPayload::DelegatedTask { content, .. }
+        | SemanticTranscriptEntryPayload::DelegationMessage { content, .. } => {
+            utf8_byte_length(content.as_str())
+        }
+        SemanticTranscriptEntryPayload::DelegationResult { outcome, .. } => outcome
+            .content()
+            .map_or(0, |content| utf8_byte_length(content.as_str())),
+        SemanticTranscriptEntryPayload::Imported { .. }
+        | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+        | SemanticTranscriptEntryPayload::ContextSummary { .. }
+        | SemanticTranscriptEntryPayload::TurnFailed { .. }
+        | SemanticTranscriptEntryPayload::AssistantText { .. }
+        | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+        | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+        | SemanticTranscriptEntryPayload::ToolDenied { .. }
+        | SemanticTranscriptEntryPayload::ToolClosed { .. }
+        | SemanticTranscriptEntryPayload::TurnCompleted { .. }
+        | SemanticTranscriptEntryPayload::TurnCancelled { .. } => 0,
+    }
+}
+
+/// Sums the text parts of one accepted input, as `octet_length` does durably.
+fn accepted_input_text_bytes(content: &UserContent) -> u64 {
+    content
+        .parts()
+        .iter()
+        .fold(0_u64, |total, part| match part {
+            signalbox_domain::UserContentPart::Text { value } => {
+                total.saturating_add(utf8_byte_length(value.as_str()))
+            }
+            signalbox_domain::UserContentPart::Attachment { .. } => total,
+        })
+}
+
+fn utf8_byte_length(value: &str) -> u64 {
+    u64::try_from(value.len()).unwrap_or(u64::MAX)
+}
+
+fn map_projected_membership_error(
+    error: crate::context_compaction::ContextCompactionRepositoryError,
+) -> ModelCallRepositoryError {
+    use crate::context_compaction::ContextCompactionRepositoryError as ProjectionError;
+    match error {
+        ProjectionError::Database(error) => error.into(),
+        ProjectionError::CommitAmbiguous(error) => {
+            ModelCallRepositoryError::from_database(error, true)
+        }
+        ProjectionError::IdentityCollision | ProjectionError::Corruption(_) => {
+            ModelCallCorruption::Inconsistent("projected prospective frontier membership").into()
         }
     }
 }

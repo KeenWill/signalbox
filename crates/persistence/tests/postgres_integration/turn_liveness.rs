@@ -520,3 +520,319 @@ async fn pending_steering_leaves_a_wedged_turn_visible_and_unreachable()
     drop(container);
     Ok(())
 }
+
+/// The narrower bound this recovery installs before the session locks, in the
+/// shape the acquisition budget takes.
+const RECOVERY_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// The wider bound the write phase is owed once the scheduler row is held.
+const RECOVERY_WRITE_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(1_500);
+
+/// S10: slot-held recovery switches to its write budget once the scheduler row
+/// is held, so the outbox sequence row every writer holds until it commits is
+/// ordinary contention rather than a stall refused at the acquisition budget.
+///
+/// Without the switch every statement after the scheduler row runs at the
+/// narrower acquisition bound, and a busy daemon's ordinary outbox traffic
+/// refuses all four detached attempts — leaving the session occupied until the
+/// thirty-minute watchdog.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s10_slot_held_recovery_spends_its_write_budget_on_the_outbox_row()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let issued = checkpoint_restart_model_call(&pool, 0x15_900, true).await?;
+    let repository = PostgresTurnLivenessRepository::new(
+        pool.clone(),
+        TurnLivenessPersistenceBounds::new(
+            Some(RECOVERY_LOCK_WAIT),
+            Some(std::time::Duration::from_millis(250)),
+            Some(RECOVERY_WRITE_LOCK_WAIT),
+        ),
+    );
+    let observed = repository
+        .observed_slot_held_turn(issued.session)
+        .await?
+        .expect("the issued provider call holds the session slot");
+    let mut allocator_holder = pool.begin().await?;
+    sqlx::query("SELECT singleton FROM outbox_sequence_state WHERE singleton FOR UPDATE")
+        .execute(&mut *allocator_holder)
+        .await?;
+    let mut ids = UuidV7StartupScanIdGenerator;
+
+    let started = std::time::Instant::now();
+    let error = repository
+        .recover_observed_slot_held_turn(
+            observed,
+            AcceptedInputTurnFailureIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x15_910)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x15_911)),
+            ),
+            &mut ids,
+        )
+        .await
+        .expect_err("the held outbox sequence row outlasts even the write budget");
+    let waited = started.elapsed();
+    allocator_holder.rollback().await?;
+
+    assert_eq!(observed.turn(), issued.turn);
+    assert_eq!(
+        error.operator_failure_cause_code(),
+        "turn_liveness_terminalization_lock_unavailable"
+    );
+    assert!(
+        waited >= RECOVERY_WRITE_LOCK_WAIT,
+        "the write budget is what expired, so {waited:?} spans it"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+struct AbandonedCompactionFixture {
+    session: SessionId,
+    call: ModelCallId,
+    command: DurableCommandId,
+}
+
+/// Leaves the exact durable shape a pre-activation compaction abandons: its
+/// dedicated call authorized but never observed, and its command still pending,
+/// together holding the session's compaction boundary against every queued turn.
+async fn abandoned_pre_activation_compaction(
+    pool: &PgPool,
+    seed: u128,
+) -> Result<AbandonedCompactionFixture, Box<dyn Error>> {
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(pool, seed).await?;
+    let assistant = AssistantText::try_new(String::from("context before compaction"))
+        .expect("fixture assistant text is admitted");
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Completed {
+            assistant_text: vec![assistant],
+        });
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 0x20,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x22)),
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+
+    let command = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x30));
+    let call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0x31));
+    let compaction_repository = ContextCompactionRepository::new(pool.clone());
+    let prepared = compaction_repository
+        .prepare(PrepareContextCompactionRequest {
+            command,
+            session: fixture.session,
+            requested_through_position: Some(1),
+            automatic_for_turn: None,
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
+            selection: DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
+            target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+                Uuid::from_u128(seed + 6),
+            )),
+            input_includes_cache_tokens: true,
+            credential_reference: String::from("abandoned compaction fixture credential"),
+            call,
+            compaction: ContextCompactionId::from_uuid(Uuid::from_u128(seed + 0x32)),
+            summary_entry: SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x33)),
+            result_frontier: ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x34)),
+        })
+        .await?;
+    let PrepareContextCompactionOutcome::Prepared(_) = prepared else {
+        panic!("the completed turn has a compactable frontier")
+    };
+
+    Ok(AbandonedCompactionFixture {
+        session: fixture.session,
+        call,
+        command,
+    })
+}
+
+/// S11: the expiry handoff's compaction recovery acts on the abandoned
+/// compaction itself, so a session that holds none is left exactly as found.
+///
+/// The handoff runs detached, its admission slot is released the moment the
+/// pass expires, and it sleeps between attempts, so a later eligibility sweep
+/// can activate a healthy successor turn before it runs. Recovery that falls
+/// through to whichever turn is active now would terminalize that successor.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s11_compaction_recovery_spares_a_session_holding_no_abandoned_compaction()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let successor = checkpoint_restart_model_call(&pool, 0x15_a00, true).await?;
+    let repository = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
+
+    let recovered = repository
+        .recover_abandoned_compaction(
+            successor.session,
+            ModelCallId::from_uuid(Uuid::from_u128(0x15_a20)),
+        )
+        .await?;
+    let state: (String,) = sqlx::query_as(
+        "SELECT state_kind FROM turn_lifecycle WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(successor.session.into_uuid())
+    .bind(successor.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(
+        recovered.is_none(),
+        "no compaction holds the boundary, so {recovered:?} must report nothing to recover"
+    );
+    assert_eq!(state, (String::from("active"),));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S12: an authorized compaction whose pass expired before it finished is the
+/// evidence the handoff acts on, so recovery terminalizes it and frees the
+/// session boundary that was holding every queued turn out.
+///
+/// This is the wedge itself: the compaction call and its pending command own
+/// the boundary, and nothing else terminalizes them before a daemon restart.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s12_compaction_recovery_terminalizes_the_boundary_its_expired_pass_abandoned()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let abandoned = abandoned_pre_activation_compaction(&pool, 0x15_b00).await?;
+    let repository = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
+
+    let recovered = repository
+        .recover_abandoned_compaction(abandoned.session, abandoned.call)
+        .await?;
+    let call: (String, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind
+           FROM context_compaction_model_call
+          WHERE session_id = $1 AND model_call_id = $2",
+    )
+    .bind(abandoned.session.into_uuid())
+    .bind(abandoned.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let command: (String,) = sqlx::query_as(
+        "SELECT result_kind FROM compact_session_command WHERE session_id = $1 AND command_id = $2",
+    )
+    .bind(abandoned.session.into_uuid())
+    .bind(abandoned.command.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(
+        matches!(
+            recovered,
+            Some(StartupScanSessionOutcome::RecoveredContextCompaction { .. })
+        ),
+        "the abandoned compaction is the evidence recovery acts on, not {recovered:?}"
+    );
+    assert_eq!(
+        call,
+        (String::from("terminal"), Some(String::from("known_failed")))
+    );
+    assert_eq!(command, (String::from("failed"),));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S13: compaction recovery installs its lock budget server-side, so a
+/// contended scheduler row is refused inside the budget instead of stranding
+/// the wait on a checked-out pooled connection.
+///
+/// The handoff drives this detached under a wall-clock deadline, and a deadline
+/// cannot cancel a statement already waiting in the backend: abandoning the
+/// future would leave that wait running, and repeated attempts across several
+/// simultaneous expiries would exhaust the pool.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s13_compaction_recovery_refuses_a_contended_scheduler_row_inside_its_budget()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let abandoned = abandoned_pre_activation_compaction(&pool, 0x15_c00).await?;
+    let repository = PostgresTurnLivenessRepository::new(
+        pool.clone(),
+        TurnLivenessPersistenceBounds::new(
+            Some(RECOVERY_LOCK_WAIT),
+            Some(RECOVERY_LOCK_WAIT),
+            Some(RECOVERY_WRITE_LOCK_WAIT),
+        ),
+    );
+    let mut scheduler_holder = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE")
+        .bind(abandoned.session.into_uuid())
+        .execute(&mut *scheduler_holder)
+        .await?;
+
+    let error = repository
+        .recover_abandoned_compaction(abandoned.session, abandoned.call)
+        .await
+        .expect_err("the held scheduler row outlasts the budget before that row is reached");
+    scheduler_holder.rollback().await?;
+
+    assert_eq!(
+        error.operator_failure_cause_code(),
+        "turn_liveness_terminalization_lock_unavailable"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S14: compaction recovery names the exact call its expired window made
+/// durable, so a later pass's live compaction is not the one it terminalizes.
+///
+/// Expiry inside the read-only preflight leaves no durable call at all, and the
+/// handoff waits between attempts, so by the time it reaches the database a
+/// later admitted pass can be running a different compaction for the same
+/// session. Selecting on the session alone would terminalize that one.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s14_compaction_recovery_spares_a_compaction_its_window_never_prepared()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let successor = abandoned_pre_activation_compaction(&pool, 0x15_d00).await?;
+    let repository = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
+
+    let recovered = repository
+        .recover_abandoned_compaction(
+            successor.session,
+            ModelCallId::from_uuid(Uuid::from_u128(0x15_d99)),
+        )
+        .await?;
+    let call: (String, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind
+           FROM context_compaction_model_call
+          WHERE session_id = $1 AND model_call_id = $2",
+    )
+    .bind(successor.session.into_uuid())
+    .bind(successor.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(
+        recovered.is_none(),
+        "this compaction belongs to a later pass, so {recovered:?} must report nothing to recover"
+    );
+    assert_eq!(call, (String::from("prepared"), None));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

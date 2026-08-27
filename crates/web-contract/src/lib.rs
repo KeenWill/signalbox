@@ -10,9 +10,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Value, json};
 use signalbox_application::{
-    max_search_page_items, max_search_query_bytes, max_search_snippet_bytes,
-    max_timeline_window_bytes, max_timeline_window_items, max_usage_aggregate_calls,
-    max_usage_aggregate_groups, max_usage_call_page_items,
+    MAX_SEARCH_HIGHLIGHTS_PER_RESULT, max_search_page_items, max_search_query_bytes,
+    max_search_snippet_bytes, max_timeline_window_bytes, max_timeline_window_items,
+    max_usage_aggregate_calls, max_usage_aggregate_groups, max_usage_call_page_items,
 };
 
 /// Exact browser HTTP contract version served by this daemon build.
@@ -975,7 +975,7 @@ pub struct WebSearchResult {
     pub content_class: WebSearchContentClass,
     #[schemars(length(max = 512))]
     pub snippet: String,
-    #[schemars(length(max = 512))]
+    #[schemars(length(max = MAX_SEARCH_HIGHLIGHTS_PER_RESULT))]
     pub highlights: Vec<WebSearchHighlight>,
 }
 
@@ -1386,6 +1386,25 @@ pub struct WebApiErrorResponse {
     pub error: WebApiError,
 }
 
+/// Title summaries carry at most this many Unicode scalar values; production
+/// truncates longer stored titles to exactly this bound and marks
+/// `title_truncated`.
+const MAX_ATTENTION_TITLE_SCALARS: u32 = 128;
+
+fn nullable_title_summary_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": ["string", "null"],
+        "maxLength": MAX_ATTENTION_TITLE_SCALARS,
+    })
+}
+
+fn nullable_attention_action_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let action = generator.subschema_for::<WebAttentionAction>();
+    schemars::json_schema!({
+        "anyOf": [action, {"type": "null"}],
+    })
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WebAttentionState {
@@ -1506,6 +1525,68 @@ pub enum WebAttentionStreamEvent {
         #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
         cursor: String,
     },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionCatalogActivity {
+    pub unix_microseconds: WebU64,
+    pub kind: WebAttentionActivityKind,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionCatalogSummary {
+    pub session_id: WebSessionId,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required, schema_with = "nullable_title_summary_schema")]
+    pub title_summary: Option<String>,
+    pub title_truncated: bool,
+    pub archived: bool,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
+    pub current_turn_id: Option<WebUuid>,
+    pub active_turn_count: WebU64,
+    pub queued_turn_count: WebU64,
+    pub state: WebAttentionState,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required, schema_with = "nullable_attention_action_schema")]
+    pub action: Option<WebAttentionAction>,
+    pub goal_block: Option<WebAttentionGoalBlock>,
+    pub judge: WebAttentionJudgeFacts,
+    pub last_activity: WebSessionCatalogActivity,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSessionCatalogSort {
+    LastActivityDescending,
+    SessionIdentityAscending,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebSessionCatalogContinuation {
+    LastActivity {
+        unix_microseconds: WebU64,
+        session_id: WebSessionId,
+    },
+    SessionIdentity {
+        session_id: WebSessionId,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionCatalogSnapshot {
+    pub cursor: WebU64,
+    pub total: WebU64,
+    pub sort: WebSessionCatalogSort,
+    #[schemars(length(max = 32))]
+    pub summaries: Vec<WebSessionCatalogSummary>,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
+    pub continuation: Option<WebSessionCatalogContinuation>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -1963,6 +2044,19 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
     make_property_nullable(&mut timeline_window_schema, "continuation_before")?;
     make_property_nullable(&mut timeline_window_schema, "continuation_after")?;
 
+    let attention_snapshot_schema =
+        canonical_schema(schemars::schema_for!(WebAttentionSnapshot).to_value());
+    let attention_event_schema =
+        canonical_schema(schemars::schema_for!(WebAttentionStreamEvent).to_value());
+
+    let mut session_catalog_schema =
+        canonical_schema(schemars::schema_for!(WebSessionCatalogSnapshot).to_value());
+    make_property_nullable(&mut session_catalog_schema, "continuation")?;
+    make_pointer_nullable(
+        &mut session_catalog_schema,
+        "/$defs/WebSessionCatalogSummary/properties/current_turn_id",
+    )?;
+
     let mut search_page_schema = schemars::schema_for!(WebSearchPage).to_value();
     search_page_schema["properties"]["results"]["maxItems"] = json!(max_search_page_items());
     make_property_nullable(&mut search_page_schema, "continuation")?;
@@ -2009,12 +2103,17 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
         ContractSchema {
             name: "WebAttentionSnapshot",
             decoder: "decodeWebAttentionSnapshot",
-            schema: canonical_schema(schemars::schema_for!(WebAttentionSnapshot).to_value()),
+            schema: attention_snapshot_schema,
         },
         ContractSchema {
             name: "WebAttentionStreamEvent",
             decoder: "decodeWebAttentionStreamEvent",
-            schema: canonical_schema(schemars::schema_for!(WebAttentionStreamEvent).to_value()),
+            schema: attention_event_schema,
+        },
+        ContractSchema {
+            name: "WebSessionCatalogSnapshot",
+            decoder: "decodeWebSessionCatalogSnapshot",
+            schema: session_catalog_schema,
         },
         ContractSchema {
             name: "WebImportListRequest",
@@ -2114,8 +2213,15 @@ fn make_property_nullable(
     schema: &mut Value,
     property_name: &str,
 ) -> Result<(), GenerateWebContractError> {
+    make_pointer_nullable(schema, &format!("/properties/{property_name}"))
+}
+
+fn make_pointer_nullable(
+    schema: &mut Value,
+    pointer: &str,
+) -> Result<(), GenerateWebContractError> {
     let property = schema
-        .pointer_mut(&format!("/properties/{property_name}"))
+        .pointer_mut(pointer)
         .ok_or(GenerateWebContractError::UnsupportedSchema)?;
     let concrete = property.take();
     *property = json!({ "anyOf": [concrete, { "type": "null" }] });
@@ -2388,6 +2494,46 @@ function assertAttentionSummary(summary, path) {{
   }}
 }}
 
+function assertSessionCatalogSummary(summary, path) {{
+  assertAttentionSummary(summary, path);
+  const turnBacked = [
+    "active",
+    "queued",
+    "awaiting_approval",
+    "ambiguous",
+    "awaiting_tool_recovery",
+    "awaiting_reconciliation",
+  ].includes(summary.state);
+  if (turnBacked && summary.current_turn_id === null) {{
+    fail(`${{path}}.current_turn_id`, `a turn identity for state ${{summary.state}}`);
+  }}
+  const activeBacked = [
+    "active",
+    "awaiting_approval",
+    "ambiguous",
+    "awaiting_tool_recovery",
+  ].includes(summary.state);
+  if (activeBacked && BigInt(summary.active_turn_count) === 0n) {{
+    fail(`${{path}}.active_turn_count`, `at least one active turn for state ${{summary.state}}`);
+  }}
+  if (summary.state === "queued" && BigInt(summary.queued_turn_count) === 0n) {{
+    fail(`${{path}}.queued_turn_count`, "at least one queued turn for queued state");
+  }}
+  if (summary.title_summary === null && summary.title_truncated) {{
+    fail(`${{path}}.title_truncated`, "false when title_summary is null");
+  }}
+  if (
+    summary.title_truncated &&
+    summary.title_summary !== null &&
+    Array.from(summary.title_summary).length !== {max_attention_title_scalars}
+  ) {{
+    fail(
+      `${{path}}.title_summary`,
+      "exactly {max_attention_title_scalars} Unicode scalar values when title_truncated is true",
+    );
+  }}
+}}
+
 function assertAttentionSummaries(summaries, path) {{
   summaries.forEach((summary, index) =>
     assertAttentionSummary(summary, `${{path}}[${{index}}]`),
@@ -2403,6 +2549,61 @@ function assertAttentionSnapshot(snapshot, path) {{
       fail(
         `${{path}}.continuation_after_session_id`,
         "the last returned session identity",
+      );
+    }}
+  }}
+}}
+
+function assertSessionCatalogSnapshot(snapshot, path) {{
+  snapshot.summaries.forEach((summary, index) =>
+    assertSessionCatalogSummary(summary, `${{path}}.summaries[${{index}}]`),
+  );
+  for (let index = 1; index < snapshot.summaries.length; index += 1) {{
+    const previous = snapshot.summaries[index - 1];
+    const current = snapshot.summaries[index];
+    let ordered;
+    if (snapshot.sort === "session_identity_ascending") {{
+      ordered = previous.session_id < current.session_id;
+    }} else {{
+      const previousActivity = BigInt(previous.last_activity.unix_microseconds);
+      const currentActivity = BigInt(current.last_activity.unix_microseconds);
+      ordered =
+        previousActivity > currentActivity ||
+        (previousActivity === currentActivity && previous.session_id < current.session_id);
+    }}
+    if (!ordered) {{
+      fail(`${{path}}.summaries[${{index}}]`, `strictly ordered by sort ${{snapshot.sort}}`);
+    }}
+  }}
+  if (BigInt(snapshot.total) < BigInt(snapshot.summaries.length)) {{
+    fail(`${{path}}.total`, "at least the number of returned summaries");
+  }}
+  const continuationKind = snapshot.continuation?.kind ?? null;
+  const expectedContinuationKind = {{
+    last_activity_descending: "last_activity",
+    session_identity_ascending: "session_identity",
+  }}[snapshot.sort];
+  if (continuationKind !== null && continuationKind !== expectedContinuationKind) {{
+    fail(`${{path}}.continuation`, `the continuation required by sort ${{snapshot.sort}}`);
+  }}
+  if (snapshot.continuation !== null) {{
+    const boundary = snapshot.summaries.at(-1);
+    if (boundary === undefined) {{
+      fail(`${{path}}.continuation`, "absent when no summaries are returned");
+    }}
+    if (snapshot.continuation.session_id !== boundary.session_id) {{
+      fail(
+        `${{path}}.continuation.session_id`,
+        "the session of the last returned summary",
+      );
+    }}
+    if (
+      snapshot.continuation.kind === "last_activity" &&
+      snapshot.continuation.unix_microseconds !== boundary.last_activity.unix_microseconds
+    ) {{
+      fail(
+        `${{path}}.continuation.unix_microseconds`,
+        "the activity timestamp of the last returned summary",
       );
     }}
   }}
@@ -2793,6 +2994,17 @@ export function decodeWebAttentionStreamEvent(value) {{
   return value;
 }}
 
+export function decodeWebSessionCatalogSnapshot(value) {{
+  assertSchema(
+    schemas.WebSessionCatalogSnapshot,
+    schemas.WebSessionCatalogSnapshot,
+    value,
+    "session_catalog_snapshot",
+  );
+  assertSessionCatalogSnapshot(value, "session_catalog_snapshot");
+  return value;
+}}
+
 function validSearchSourceCorrelation(result) {{
   switch (result.source.kind) {{
     case "session":
@@ -2820,19 +3032,6 @@ function validSearchSourceCorrelation(result) {{
 
 export function decodeWebSearchPage(value) {{
   assertSchema(schemas.WebSearchPage, schemas.WebSearchPage, value, "search_page");
-  if (value.continuation !== null) {{
-    const lastResult = value.results.at(-1);
-    if (
-      lastResult === undefined ||
-      value.continuation.address.event_sequence !== lastResult.address.event_sequence ||
-      value.continuation.projection_id !== lastResult.projection_id
-    ) {{
-      fail(
-        "search_page.continuation",
-        "a cursor anchored to the final search result",
-      );
-    }}
-  }}
   const encoder = new TextEncoder();
   let previousKey = null;
   value.results.forEach((result, resultIndex) => {{
@@ -2881,6 +3080,16 @@ export function decodeWebSearchPage(value) {{
       previousEnd = highlight.end_byte;
     }});
   }});
+  if (value.continuation != null) {{
+    const last = value.results.at(-1);
+    if (
+      last === undefined ||
+      value.continuation.address.event_sequence !== last.address.event_sequence ||
+      value.continuation.projection_id !== last.projection_id
+    ) {{
+      fail("search_page.continuation", "the last result ordering key");
+    }}
+  }}
   return value;
 }}
 
@@ -3045,6 +3254,7 @@ function assertUsageEvidence(inputSemantics, tokens, cost, path, allowHiddenInva
   }}
 }}
 "##,
+        max_attention_title_scalars = MAX_ATTENTION_TITLE_SCALARS,
         max_search_snippet_bytes = max_search_snippet_bytes(),
     );
     for schema in schemas {
@@ -3057,6 +3267,7 @@ function assertUsageEvidence(inputSemantics, tokens, cost, path, allowHiddenInva
             "WebBlobDescriptor"
                 | "WebAttentionSnapshot"
                 | "WebAttentionStreamEvent"
+                | "WebSessionCatalogSnapshot"
                 | "WebSearchPage"
                 | "WebUsageSummary"
                 | "WebUsageCallPage"

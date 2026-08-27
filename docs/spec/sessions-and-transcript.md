@@ -3,10 +3,12 @@
 The bounded browser session descriptor and historical timeline foundation are
 verified against this PR (`agent/web-session-timeline`). The bounded
 lexical-search projection and query boundary are verified against this PR
-(`agent/web-search-usage`).
+(`agent/web-product-surface-search`), which carries the `agent/web-search-usage`
+boundary it extends. The bounded browser session catalog is verified against
+this PR (`agent/web-session-catalog-follow`).
 
 Dedicated-compaction usage as the next queued-turn headroom baseline is verified
-against this PR (`agent/daemon-live-compaction-source-headroom`).
+against this PR (`agent/fix-headroom-accounting`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
@@ -678,6 +680,40 @@ partial session.
 Why (fail closed): a fabricated or partial session would mask corruption and
 launder invalid durable state into valid-looking domain values.
 
+## Bounded browser session catalog
+
+`GET /api/sessions` is the one fleet-wide session chooser and attention read
+model. It returns at most 32 rows from one read-only repeatable-read snapshot,
+the exact filtered total, and the durable attention-journal cursor. The total
+counts filtered session and metadata rows; it never scans transcript or timeline
+records. Each row carries session identity, a title summary of at most 128
+Unicode scalar values with an explicit truncation bit, archive posture, current
+turn, active and queued turn counts, the closed current attention state, exact
+operator action when one is owed, bounded blocked-goal and approval-judge facts,
+and the last explicitly timestamped durable activity. No timestamp is inferred
+from UUID identity bits.
+
+The sequence-backed attention journal is authoritative for activity kind and
+timestamp. A per-session last-activity timestamp maintained from that journal is
+only the indexed keyset substrate; missing substrate fails the catalog read
+closed rather than hiding a session. Session metadata changes publish a session
+fact through the same journal and therefore invalidate a hot follow snapshot.
+
+The default order is descending last activity with ascending session identity as
+the total tie-breaker. The alternate order is ascending session identity. Both
+use exclusive typed keyset continuations; a continuation for one order is
+invalid under the other. Search is an exact case-sensitive substring of title or
+canonical session UUID. A query may additionally require at most eight exact
+tags, whose combined UTF-8 bytes together with search text are at most 1,024,
+and may include archived sessions. Sort and filter state are client-local inputs
+to these bounded reads, not durable session state.
+
+This extends the fleet attention projection rather than maintaining a second
+session-state classifier. Runner loss, tool recovery, recovery ambiguity,
+reconciliation, approval wait, blocked goal, active, queued, and idle remain
+distinct. Page and change reads derive them from the same durable facts and fail
+closed on unknown states or inconsistent shapes.
+
 ## Bounded browser session timeline
 
 The browser historical plane addresses every durable session event by the pair
@@ -757,25 +793,27 @@ functionality: no present producer calls it. The compatibility constraint is
 that a producer adopting the port publishes only text its durable contract
 explicitly supplies, and only after its own source exists.
 
-Every result carries its session, stable timeline address, typed owning
-session/input/turn transcript entry/tool request/tool attempt/attachment/derived
-artifact identity, closed content class, and a plain-text snippet with UTF-8
-byte highlight ranges. The address is directly usable with the timeline `around`
-read even when the matching region is not loaded. Each returned source is
-correlated with both its canonical record and the exact durable event that
-supplies its reveal address — an input's acceptance event, an assistant entry's
-terminal call transition, a summary's compaction event, a tool item's batch
-transition, the session's creation event — and a transcript-entry source must
-carry the payload kind its content class asserts. An unknown stored source or
-content class, malformed identity, invalid address, mismatched reveal event, or
-contradictory source shape fails closed, including when the offending row is
-only the unreturned lookahead item fetched to decide a continuation.
+Every result carries its session, stable timeline address, positive projection
+identity, typed owning session/input/turn transcript entry/tool request/tool
+attempt/attachment/derived artifact identity, closed content class, and a
+plain-text snippet with UTF-8 byte highlight ranges. The address is directly
+usable with the timeline `around` read even when the matching region is not
+loaded. Each returned source is correlated with both its canonical record and
+the exact durable event that supplies its reveal address — an input's acceptance
+event, an assistant entry's terminal call transition, a summary's compaction
+event, a tool item's batch transition, the session's creation event — and a
+transcript-entry source must carry the payload kind its content class asserts.
+An unknown stored source or content class, malformed identity, invalid address,
+mismatched reveal event, or contradictory source shape fails closed, including
+when the offending row is only the unreturned lookahead item fetched to decide a
+continuation.
 
 Requests accept 1 through 100 results and at most 512 UTF-8 query bytes. Each
-returned snippet is at most 512 UTF-8 bytes. Results have a stable strict
-newest-address-first keyset order by `(event_sequence, projection_id)`; the
-adapter fetches at most one item beyond the requested page to decide whether to
-return a continuation. A bounded per-term GIN probe runs first: a query
+returned snippet is at most 512 UTF-8 bytes and carries at most 64 ordered,
+non-overlapping highlight ranges on UTF-8 boundaries. Results have a stable
+strict newest-address-first keyset order by `(event_sequence, projection_id)`;
+the adapter fetches at most one item beyond the requested page to decide whether
+to return a continuation. A bounded per-term GIN probe runs first: a query
 containing a term with no match returns an empty page immediately, a query whose
 rarest term stays under a fixed candidate cap is served from that term's
 index-driven candidate set, and only queries in which every term is common use

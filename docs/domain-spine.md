@@ -6168,6 +6168,9 @@ impl WorkspaceRecord {
 pub const fn max_attention_snapshot_items() -> u16;
 pub const fn max_attention_goal_summary_characters() -> u16;
 pub const fn max_attention_change_items() -> u16;
+pub const fn max_attention_title_characters() -> u16;
+pub const fn max_attention_filter_tags() -> u8;
+pub const fn max_attention_filter_utf8_bytes() -> u16;
 
 pub struct AttentionCursor(/* private */);
 impl AttentionCursor {
@@ -6185,6 +6188,43 @@ pub enum AttentionState {
     AwaitingReconciliation,
     RunnerLost,
     Idle,
+}
+
+pub enum AttentionSort {
+    LastActivityDescending,
+    SessionIdentityAscending,
+}
+
+pub enum AttentionContinuation {
+    LastActivity { recorded_at: SystemTime, session: SessionId },
+    SessionIdentity(SessionId),
+}
+
+pub struct AttentionQuery { /* private */ }
+impl AttentionQuery {
+    pub fn hot_page() -> Self;
+    pub fn identity_page(after: Option<SessionId>) -> Self;
+    pub fn try_new(
+        search: Option<String>,
+        required_tags: Vec<String>,
+        include_archived: bool,
+        sort: AttentionSort,
+        continuation: Option<AttentionContinuation>,
+    ) -> Result<Self, AttentionQueryError>;
+    pub fn search(&self) -> Option<&str>;
+    pub fn required_tags(&self) -> impl ExactSizeIterator<Item = &str>;
+    pub const fn include_archived(&self) -> bool;
+    pub const fn sort(&self) -> AttentionSort;
+    pub const fn continuation(&self) -> Option<&AttentionContinuation>;
+}
+
+pub enum AttentionQueryError {
+    TooManyTags,
+    InvalidTag,
+    DuplicateTag,
+    InvalidSearch,
+    FilterTooLarge,
+    ContinuationSortMismatch,
 }
 
 pub enum AttentionAction {
@@ -6228,7 +6268,12 @@ pub enum AttentionActivityKind {
 
 pub struct AttentionSummary {
     pub session: SessionId,
+    pub title_summary: Option<String>,
+    pub title_truncated: bool,
+    pub archived: bool,
     pub current_turn: Option<TurnId>,
+    pub active_turn_count: u64,
+    pub queued_turn_count: u64,
     pub state: AttentionState,
     pub action: Option<AttentionAction>,
     pub goal_block: Option<AttentionGoalBlock>,
@@ -6238,8 +6283,10 @@ pub struct AttentionSummary {
 
 pub struct AttentionSnapshot {
     pub cursor: AttentionCursor,
+    pub total: u64,
+    pub sort: AttentionSort,
     pub summaries: Vec<AttentionSummary>,
-    pub continuation_after: Option<SessionId>,
+    pub continuation: Option<AttentionContinuation>,
 }
 
 pub enum AttentionChanges {
@@ -6254,7 +6301,7 @@ pub trait AttentionReader {
     type Error;
     fn snapshot(
         &self,
-        after: Option<SessionId>,
+        query: AttentionQuery,
     ) -> impl Future<Output = Result<AttentionSnapshot, Self::Error>> + Send;
     fn changes_after(
         &self,
@@ -7347,9 +7394,12 @@ impl<Reader: SessionReader> LoadSessionService<Reader> {
 ## application: search
 
 ```rust
+pub const MAX_SEARCH_HIGHLIGHTS_PER_RESULT: usize;
+
 pub const fn max_search_query_bytes() -> usize;
 pub const fn max_search_page_items() -> u16;
 pub const fn max_search_snippet_bytes() -> usize;
+pub const fn max_search_highlights_per_result() -> usize;
 pub const fn max_search_projection_text_bytes() -> usize;
 
 pub enum SearchTextError { Empty, TooLong, ContainsNul }
@@ -8928,6 +8978,51 @@ impl RepoWatchReactionObservation {
     // accessors: subject(), reactor(), content()
 }
 
+pub struct RepoWatchMergedCheckSuiteBaselineV1 { /* private */ }
+impl RepoWatchMergedCheckSuiteBaselineV1 {
+    pub const fn new(
+        id: GitHubObjectId,
+        completion_generation: RepoWatchCheckCompletionGeneration,
+    ) -> Self;
+    // accessors: id(), completion_generation()
+}
+
+pub struct RepoWatchMergedCheckRunBaselineV1 { /* private */ }
+impl RepoWatchMergedCheckRunBaselineV1 {
+    pub const fn new(
+        id: GitHubObjectId,
+        completion_generation: RepoWatchCheckCompletionGeneration,
+        conclusion: CheckConclusion,
+    ) -> Self;
+    // accessors: id(), completion_generation(), conclusion()
+}
+
+pub struct RepoWatchMergedPullRequestBaselineInputV1 {
+    pub number: PullRequestNumber,
+    pub head_sha: CommitSha,
+    pub signal_reviewers: Vec<RepoWatchAuthorLogin>,
+    pub labels: Vec<LabelName>,
+    pub mergeable_state: MergeableState,
+    pub completed_check_suites: Vec<RepoWatchMergedCheckSuiteBaselineV1>,
+    pub completed_check_runs: Vec<RepoWatchMergedCheckRunBaselineV1>,
+    pub review_ids: Vec<GitHubObjectId>,
+    pub threads: Vec<RepoWatchThreadObservation>,
+    pub reactions: Vec<RepoWatchReactionObservation>,
+}
+
+pub struct RepoWatchMergedPullRequestBaselineV1 { /* private */ }
+impl RepoWatchMergedPullRequestBaselineV1 {
+    pub fn try_new(
+        input: RepoWatchMergedPullRequestBaselineInputV1,
+    ) -> Result<Self, RepoWatchRepositoryStateError>;
+    pub fn from_merged_state(
+        state: &RepoWatchPullRequestState,
+        signal_reviewers: &[RepoWatchAuthorLogin],
+    ) -> Result<Option<Self>, RepoWatchRepositoryStateError>;
+    // accessors: number(), head_sha(), signal_reviewers(), labels(), mergeable_state(),
+    // completed_check_suites(), completed_check_runs(), review_ids(), threads(), reactions()
+}
+
 pub struct RepoWatchPullRequestStateInput {
     pub context: PullRequestEventContext,
     pub lifecycle: RepoWatchPullRequestLifecycle,
@@ -8992,6 +9087,7 @@ impl RepoWatchObservation {
 
 pub enum RepoWatchRepositoryStateError {
     DuplicatePullRequest(PullRequestNumber),
+    MergedPullRequestBaselineLimit,
     DuplicateCheckSuite(GitHubObjectId),
     DuplicateCheckRun(GitHubObjectId),
     DuplicateReview(GitHubObjectId),
@@ -9001,6 +9097,7 @@ pub enum RepoWatchRepositoryStateError {
 }
 
 pub enum RepoWatchDifferFailureKind {
+    BaselineCollection,
     EventConstruction,
     IdentityFrontier,
 }
@@ -9018,6 +9115,15 @@ pub fn repo_watch_events_have_equal_identified_content(
 pub fn derive_repo_watch_events(
     repository: &RepositorySlug,
     previous: Option<&RepoWatchObservation>,
+    current: &RepoWatchObservation,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
+    ids: &mut impl RepoWatchEventIdGenerator,
+) -> Result<Vec<RepoWatchEventOccurrenceV1>, RepoWatchDifferError>;
+
+pub fn derive_repo_watch_events_with_merged_baselines(
+    repository: &RepositorySlug,
+    previous: Option<&RepoWatchObservation>,
+    merged_baselines: &[RepoWatchMergedPullRequestBaselineV1],
     current: &RepoWatchObservation,
     identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
     ids: &mut impl RepoWatchEventIdGenerator,
@@ -12920,7 +13026,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | **signalbox-domain total**                         | **859 (+12 free fn)**            |
 | application: repo_watch_operations                 | 33 (+2 free fn) (incl. 1 trait)  |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
-| application: attention                             | 12 (+3 free fn) (incl. 1 trait)  |
+| application: attention                             | 16 (+6 free fn) (incl. 1 trait)  |
 | application: blob_derivation                       | 9 (incl. 3 traits)               |
 | application: commissioned_dispatch                 | 6 (incl. 1 trait)                |
 | application: conversation_import                   | 12 (incl. 4 traits)              |
@@ -12929,7 +13035,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)               |
 | application: list_conversations                    | 8 (incl. 2 traits)               |
 | application: load_session                          | 2 (incl. 1 trait)                |
-| application: search                                | 21 (+4 free fn) (incl. 2 traits) |
+| application: search                                | 22 (+5 free fn) (incl. 2 traits) |
 | application: usage                                 | 37 (+4 free fn) (incl. 1 trait)  |
 | application: session_timeline                      | 14 (+3 free fn) (incl. 1 trait)  |
 | application: model_execution                       | 41 (incl. 8 traits)              |
@@ -12938,7 +13044,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: session_delegation                    | 1 (incl. 1 trait)                |
 | application: replace_session_defaults              | 5 (incl. 1 trait)                |
 | application: convergence_reconciliation            | 6 (+1 free fn)                   |
-| application: repo_watch                            | 45 (+2 free fn) (incl. 4 traits) |
+| application: repo_watch                            | 49 (+3 free fn) (incl. 4 traits) |
 | application: repo_watch_webhook                    | 18 (+2 free fn)                  |
 | application: review_orchestration                  | 37 (incl. 2 traits)              |
 | application: review_workflow                       | 9 (incl. 2 traits)               |
@@ -12952,4 +13058,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop_ports                       | 10 (incl. 3 traits)              |
 | application: turn_liveness                         | 14                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **461 (+24 free fn)**            |
+| **signalbox-application total**                    | **470 (+29 free fn)**            |

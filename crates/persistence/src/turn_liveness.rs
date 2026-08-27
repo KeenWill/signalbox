@@ -16,7 +16,8 @@ use signalbox_application::{
     StartupScanSessionOutcome, TurnLivenessEvidence,
 };
 use signalbox_domain::{
-    AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, SessionId, TurnAttemptId,
+    AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, ModelCallId, SessionId,
+    TurnAttemptId,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Decimal, types::Uuid};
 use tokio::time::timeout;
@@ -275,10 +276,15 @@ impl PostgresTurnLivenessRepository {
             .execute(&mut *transaction)
             .await
             .map_err(TurnLivenessRepositoryError::terminalization)?;
-        let decision =
-            recover_observed_slot_held_in_transaction(&mut transaction, candidate, identities, ids)
-                .await
-                .map_err(TurnLivenessRepositoryError::from)?;
+        let decision = recover_observed_slot_held_in_transaction(
+            &mut transaction,
+            candidate,
+            identities,
+            self.bounds.write_lock_wait,
+            ids,
+        )
+        .await
+        .map_err(TurnLivenessRepositoryError::from)?;
         match decision {
             None => {
                 transaction
@@ -301,6 +307,65 @@ impl PostgresTurnLivenessRepository {
                     .rollback()
                     .await
                     .map_err(TurnLivenessRepositoryError::terminalization)?;
+                Ok(Some(outcome))
+            }
+        }
+    }
+
+    /// Recovers the compaction an expired pre-activation pass left behind.
+    ///
+    /// The budgets are the pair the slot-held sibling installs, in the same
+    /// order and for the same reason: a caller's wall-clock deadline cannot
+    /// cancel a statement already waiting in the backend, so abandoning the
+    /// future would leave that wait running on a checked-out pooled connection.
+    /// Bounding the acquisition and both lock waits server-side is what makes
+    /// the caller's deadline a backstop rather than the only bound.
+    ///
+    /// `abandoned_call` names the exact compaction the expired window made
+    /// durable. The session alone would not distinguish it from a compaction a
+    /// later admitted pass is running now, which a delayed attempt would
+    /// otherwise terminalize.
+    ///
+    /// `Ok(None)` means that call no longer holds the boundary — it committed
+    /// before the pass future was dropped, or a prior attempt of this same
+    /// handoff already terminalized it — and nothing was touched.
+    pub async fn recover_abandoned_compaction(
+        &self,
+        session: SessionId,
+        abandoned_call: ModelCallId,
+    ) -> Result<Option<StartupScanSessionOutcome>, TurnLivenessRepositoryError> {
+        let mut transaction = optional_timeout(self.bounds.acquire_wait, self.pool.begin())
+            .await
+            .unwrap_or(Err(sqlx::Error::PoolTimedOut))
+            .map_err(TurnLivenessRepositoryError::terminalization)?;
+        sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+            .bind(postgres_lock_timeout(self.bounds.lock_wait))
+            .execute(&mut *transaction)
+            .await
+            .map_err(TurnLivenessRepositoryError::terminalization)?;
+        let recovered = crate::startup::recover_abandoned_compaction_in_transaction(
+            &mut transaction,
+            session,
+            abandoned_call,
+            self.bounds.write_lock_wait,
+        )
+        .await
+        .map_err(TurnLivenessRepositoryError::from)?;
+        match recovered {
+            None => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(TurnLivenessRepositoryError::terminalization)?;
+                Ok(None)
+            }
+            Some(outcome) => {
+                transaction.commit().await.map_err(|error| {
+                    TurnLivenessRepositoryError::TerminalizationDatabase {
+                        commit_ambiguous: crate::commit_failure_is_ambiguous(&error),
+                        source: error,
+                    }
+                })?;
                 Ok(Some(outcome))
             }
         }
@@ -866,7 +931,7 @@ where
     }
 }
 
-fn postgres_lock_timeout(bound: Option<Duration>) -> String {
+pub(crate) fn postgres_lock_timeout(bound: Option<Duration>) -> String {
     match bound {
         Some(bound) => format!("{}us", bound.as_micros().max(1)),
         None => String::from("0"),

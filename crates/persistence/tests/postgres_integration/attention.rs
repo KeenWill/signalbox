@@ -2,9 +2,15 @@
 
 use crate::*;
 use signalbox_application::{
-    AttentionChanges, AttentionCursor, max_attention_change_items, max_attention_snapshot_items,
+    AttentionChanges, AttentionContinuation, AttentionCursor, AttentionQuery, AttentionSort,
+    max_attention_change_items, max_attention_snapshot_items,
 };
-use signalbox_persistence::attention::{AttentionRepository, AutomaticResumeAttemptBounds};
+use signalbox_domain::{ReplaceSessionMetadata, SessionMetadataContent};
+use signalbox_persistence::attention::{
+    AttentionCorruption, AttentionRepository, AttentionRepositoryError,
+    AutomaticResumeAttemptBounds,
+};
+use signalbox_persistence::session_metadata::SessionMetadataRepository;
 
 const FLEET_SIZE: u128 = 258;
 const FLEET_SEED: u128 = 0xa770_0000;
@@ -41,22 +47,81 @@ fn resync_cursor(changes: AttentionChanges) -> AttentionCursor {
     cursor
 }
 
+fn identity_query(continuation: Option<AttentionContinuation>) -> AttentionQuery {
+    AttentionQuery::try_new(
+        None,
+        Vec::new(),
+        false,
+        AttentionSort::SessionIdentityAscending,
+        continuation,
+    )
+    .expect("the fixture catalog query is bounded")
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn bounded_pages_cover_large_fleet() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     create_mixed_scale_fleet(&pool).await?;
     let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS);
-    let first = repository.snapshot(None).await?;
-    let second = repository.snapshot(first.continuation_after).await?;
-    let third = repository.snapshot(second.continuation_after).await?;
-    let fourth = repository.snapshot(third.continuation_after).await?;
-    let fifth = repository.snapshot(fourth.continuation_after).await?;
-    let sixth = repository.snapshot(fifth.continuation_after).await?;
-    let seventh = repository.snapshot(sixth.continuation_after).await?;
-    let eighth = repository.snapshot(seventh.continuation_after).await?;
-    let ninth = repository.snapshot(eighth.continuation_after).await?;
-
+    let first = repository.snapshot(identity_query(None)).await?;
+    let second = repository
+        .snapshot(identity_query(first.continuation.clone()))
+        .await?;
+    let third = repository
+        .snapshot(identity_query(second.continuation.clone()))
+        .await?;
+    let fourth = repository
+        .snapshot(identity_query(third.continuation.clone()))
+        .await?;
+    let fifth = repository
+        .snapshot(identity_query(fourth.continuation.clone()))
+        .await?;
+    let sixth = repository
+        .snapshot(identity_query(fifth.continuation.clone()))
+        .await?;
+    let seventh = repository
+        .snapshot(identity_query(sixth.continuation.clone()))
+        .await?;
+    let eighth = repository
+        .snapshot(identity_query(seventh.continuation.clone()))
+        .await?;
+    let ninth = repository
+        .snapshot(identity_query(eighth.continuation.clone()))
+        .await?;
+    let searched_session = first.summaries[7].session;
+    let searched = repository
+        .snapshot(
+            AttentionQuery::try_new(
+                Some(searched_session.into_uuid().to_string()),
+                Vec::new(),
+                false,
+                AttentionSort::LastActivityDescending,
+                None,
+            )
+            .expect("the exact-identity search is bounded"),
+        )
+        .await?;
+    sqlx::query(
+        "INSERT INTO operator_attention_change (session_id, fact_kind, recorded_at)
+         SELECT session_id, 'session', TIMESTAMPTZ '2026-08-26 12:00:00+00'
+           FROM session",
+    )
+    .execute(&pool)
+    .await?;
+    let activity_first = repository.snapshot(AttentionQuery::hot_page()).await?;
+    let activity_second = repository
+        .snapshot(
+            AttentionQuery::try_new(
+                None,
+                Vec::new(),
+                false,
+                AttentionSort::LastActivityDescending,
+                activity_first.continuation.clone(),
+            )
+            .expect("the activity continuation is bounded"),
+        )
+        .await?;
     assert_eq!(
         first.summaries.len(),
         usize::from(max_attention_snapshot_items())
@@ -95,6 +160,23 @@ async fn bounded_pages_cover_large_fleet() -> Result<(), Box<dyn Error>> {
             .expect("the final page size fits usize")
     );
     assert_eq!(
+        first.total,
+        u64::try_from(FLEET_SIZE).expect("the fleet size fits the exact total")
+    );
+    assert_eq!(searched.total, 1);
+    assert_eq!(searched.summaries[0].session, searched_session);
+    assert_eq!(
+        activity_first.summaries.len(),
+        usize::from(max_attention_snapshot_items())
+    );
+    assert_eq!(
+        activity_second.summaries.len(),
+        usize::from(max_attention_snapshot_items())
+    );
+    assert!(
+        activity_first.summaries.last().unwrap().session < activity_second.summaries[0].session
+    );
+    assert_eq!(
         first.summaries.len()
             + second.summaries.len()
             + third.summaries.len()
@@ -107,38 +189,54 @@ async fn bounded_pages_cover_large_fleet() -> Result<(), Box<dyn Error>> {
         usize::try_from(FLEET_SIZE).expect("the fleet size fits usize")
     );
     assert_eq!(
-        first.continuation_after,
-        Some(first.summaries.last().unwrap().session)
+        first.continuation,
+        Some(AttentionContinuation::SessionIdentity(
+            first.summaries.last().unwrap().session
+        ))
     );
     assert_eq!(
-        second.continuation_after,
-        Some(second.summaries.last().unwrap().session)
+        second.continuation,
+        Some(AttentionContinuation::SessionIdentity(
+            second.summaries.last().unwrap().session
+        ))
     );
     assert_eq!(
-        third.continuation_after,
-        Some(third.summaries.last().unwrap().session)
+        third.continuation,
+        Some(AttentionContinuation::SessionIdentity(
+            third.summaries.last().unwrap().session
+        ))
     );
     assert_eq!(
-        fourth.continuation_after,
-        Some(fourth.summaries.last().unwrap().session)
+        fourth.continuation,
+        Some(AttentionContinuation::SessionIdentity(
+            fourth.summaries.last().unwrap().session
+        ))
     );
     assert_eq!(
-        fifth.continuation_after,
-        Some(fifth.summaries.last().unwrap().session)
+        fifth.continuation,
+        Some(AttentionContinuation::SessionIdentity(
+            fifth.summaries.last().unwrap().session
+        ))
     );
     assert_eq!(
-        sixth.continuation_after,
-        Some(sixth.summaries.last().unwrap().session)
+        sixth.continuation,
+        Some(AttentionContinuation::SessionIdentity(
+            sixth.summaries.last().unwrap().session
+        ))
     );
     assert_eq!(
-        seventh.continuation_after,
-        Some(seventh.summaries.last().unwrap().session)
+        seventh.continuation,
+        Some(AttentionContinuation::SessionIdentity(
+            seventh.summaries.last().unwrap().session
+        ))
     );
     assert_eq!(
-        eighth.continuation_after,
-        Some(eighth.summaries.last().unwrap().session)
+        eighth.continuation,
+        Some(AttentionContinuation::SessionIdentity(
+            eighth.summaries.last().unwrap().session
+        ))
     );
-    assert_eq!(ninth.continuation_after, None);
+    assert_eq!(ninth.continuation, None);
     assert!(first.summaries.last().unwrap().session < second.summaries[0].session);
     assert!(second.summaries.last().unwrap().session < third.summaries[0].session);
     assert!(third.summaries.last().unwrap().session < fourth.summaries[0].session);
@@ -155,11 +253,28 @@ async fn bounded_pages_cover_large_fleet() -> Result<(), Box<dyn Error>> {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn legacy_attention_page_avoids_the_catalog_total_projection() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    create_attention_session(&pool, 0).await?;
+    create_attention_session(&pool, 1).await?;
+    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS);
+    let page = repository.page(identity_query(None)).await?;
+
+    assert_eq!(page.summaries.len(), 2);
+    assert_eq!(page.sort, AttentionSort::SessionIdentityAscending);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn oversized_change_burst_requires_resync() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     create_attention_session(&pool, 0).await?;
     let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS);
-    let first = repository.snapshot(None).await?;
+    let first = repository.snapshot(AttentionQuery::hot_page()).await?;
     let changed_session = first.summaries[0].session;
     sqlx::query(
         "INSERT INTO operator_attention_change (session_id, fact_kind)
@@ -172,6 +287,168 @@ async fn oversized_change_burst_requires_resync() -> Result<(), Box<dyn Error>> 
     let resync = resync_cursor(repository.changes_after(first.cursor).await?);
 
     assert!(resync > first.cursor);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn missing_activity_fact_fails_the_default_catalog_page_closed() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    create_attention_session(&pool, 0).await?;
+    create_attention_session(&pool, 1).await?;
+    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS);
+    let complete = repository.snapshot(AttentionQuery::hot_page()).await?;
+    assert_eq!(complete.summaries.len(), 2);
+    assert_eq!(complete.total, 2);
+    sqlx::query("DELETE FROM session_timeline_fact WHERE session_id = $1")
+        .bind(complete.summaries[0].session.into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO operator_attention_change (session_id, fact_kind) VALUES ($1, 'runner')",
+    )
+    .bind(complete.summaries[0].session.into_uuid())
+    .execute(&pool)
+    .await?;
+    let error = repository
+        .snapshot(AttentionQuery::hot_page())
+        .await
+        .expect_err("a session missing its activity fact is projection corruption, not absence");
+
+    let AttentionRepositoryError::Corruption(AttentionCorruption::Missing(_)) = error else {
+        panic!("missing activity facts must report projection corruption");
+    };
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn mismatched_activity_key_fails_the_catalog_closed() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    create_attention_session(&pool, 0).await?;
+    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS);
+    let complete = repository.snapshot(AttentionQuery::hot_page()).await?;
+    let session = complete.summaries[0].session;
+    sqlx::query(
+        "UPDATE session_timeline_fact
+            SET attention_activity_recorded_at = attention_activity_recorded_at
+                                             - INTERVAL '1 second'
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await?;
+    let error = repository
+        .snapshot(AttentionQuery::hot_page())
+        .await
+        .expect_err("a keyset timestamp that differs from the journal is corruption");
+
+    assert!(matches!(
+        error,
+        AttentionRepositoryError::Corruption(AttentionCorruption::Invalid("session activity fact"))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn metadata_activity_drives_hot_sort_filters_counts_and_resync() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    create_attention_session(&pool, 0).await?;
+    create_attention_session(&pool, 1).await?;
+    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS);
+    let before = repository.snapshot(AttentionQuery::hot_page()).await?;
+    let target = SessionId::from_uuid(Uuid::from_u128(FLEET_SEED + FLEET_SIZE));
+    let prior_activity = before
+        .summaries
+        .iter()
+        .find(|summary| summary.session == target)
+        .expect("the target session is in the initial catalog")
+        .last_activity
+        .recorded_at;
+    let visible_metadata = SessionMetadataContent::try_new(
+        Some("needle catalog title".to_owned()),
+        vec!["focus".to_owned()],
+        Vec::new(),
+        false,
+    )
+    .expect("the visible metadata fixture is valid");
+    SessionMetadataRepository::new(pool.clone())
+        .handle(ReplaceSessionMetadata::new(
+            DurableCommandId::from_uuid(Uuid::from_u128(FLEET_SEED + FLEET_SIZE * 4)),
+            target,
+            visible_metadata,
+        ))
+        .await?;
+    let visible = repository.snapshot(AttentionQuery::hot_page()).await?;
+    let filtered = repository
+        .snapshot(
+            AttentionQuery::try_new(
+                Some("needle".to_owned()),
+                vec!["focus".to_owned()],
+                false,
+                AttentionSort::LastActivityDescending,
+                None,
+            )
+            .expect("the metadata filter is bounded"),
+        )
+        .await?;
+    let follow = repository.changes_after(before.cursor).await?;
+
+    assert_eq!(visible.summaries[0].session, target);
+    assert_eq!(
+        visible.summaries[0].title_summary.as_deref(),
+        Some("needle catalog title")
+    );
+    assert!(visible.summaries[0].last_activity.recorded_at > prior_activity);
+    assert_eq!(filtered.total, 1);
+    assert_eq!(filtered.summaries[0].session, target);
+    let AttentionChanges::ResyncRequired { .. } = follow else {
+        panic!("metadata changes must require a filtered catalog resync");
+    };
+
+    let archived_metadata = SessionMetadataContent::try_new(
+        Some("needle catalog title".to_owned()),
+        vec!["focus".to_owned()],
+        Vec::new(),
+        true,
+    )
+    .expect("the archived metadata fixture is valid");
+    SessionMetadataRepository::new(pool.clone())
+        .handle(ReplaceSessionMetadata::new(
+            DurableCommandId::from_uuid(Uuid::from_u128(FLEET_SEED + FLEET_SIZE * 4 + 1)),
+            target,
+            archived_metadata,
+        ))
+        .await?;
+    let default_after_archive = repository.snapshot(AttentionQuery::hot_page()).await?;
+    let archived = repository
+        .snapshot(
+            AttentionQuery::try_new(
+                None,
+                vec!["focus".to_owned()],
+                true,
+                AttentionSort::LastActivityDescending,
+                None,
+            )
+            .expect("the archive filter is bounded"),
+        )
+        .await?;
+
+    assert_eq!(default_after_archive.total, 1);
+    assert_eq!(archived.total, 1);
+    assert!(archived.summaries[0].archived);
 
     pool.close().await;
     drop(container);
@@ -267,12 +544,12 @@ async fn unknown_session_goal_rejection_is_recorded_and_publishes_no_attention()
     .fetch_one(&pool)
     .await?;
 
-    assert!(matches!(
-        outcome,
-        GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Rejected(
-            GoalCommandRejection::SessionNotFound
-        ))
-    ));
+    let GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Rejected(
+        GoalCommandRejection::SessionNotFound,
+    )) = outcome
+    else {
+        panic!("an unknown session must retain its typed goal rejection");
+    };
     assert_eq!(recorded, 1);
     assert_eq!(published, 0);
 

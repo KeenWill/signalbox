@@ -14,7 +14,7 @@ use std::{
     ffi::OsStr,
     fmt,
     fs::File,
-    io::{self, Read},
+    io::{self, Read, Seek, SeekFrom},
     os::fd::OwnedFd,
     os::unix::ffi::OsStrExt,
     path::{Component, Path, PathBuf},
@@ -345,13 +345,29 @@ pub trait WorkspaceFileSystem: Clone + Send + Sync + 'static {
         max_inspections: usize,
         max_path_bytes: usize,
     ) -> Result<WorkspaceDirectoryRead, WorkspaceResolveError>;
+    /// Reads a bounded window plus four lookahead bytes from a regular file,
+    /// beginning at `offset` bytes from the start.
+    ///
+    /// An `offset` at or past the file's end reads no bytes; `total_bytes`
+    /// still describes the whole file, so a caller can tell an exhausted
+    /// cursor from an empty file.
+    fn read_file_range(
+        &self,
+        root: &WorkspaceRoot,
+        path: &Path,
+        offset: u64,
+        max_bytes: usize,
+    ) -> Result<WorkspaceFileBytes, WorkspaceResolveError>;
+
     /// Reads a bounded prefix plus four lookahead bytes from a regular file.
     fn read_file_prefix(
         &self,
         root: &WorkspaceRoot,
         path: &Path,
         max_bytes: usize,
-    ) -> Result<WorkspaceFileBytes, WorkspaceResolveError>;
+    ) -> Result<WorkspaceFileBytes, WorkspaceResolveError> {
+        self.read_file_range(root, path, 0, max_bytes)
+    }
 }
 
 /// Production adapter over descriptor-relative `rustix` operations.
@@ -443,10 +459,11 @@ impl WorkspaceFileSystem for LocalWorkspaceFileSystem {
         })
     }
 
-    fn read_file_prefix(
+    fn read_file_range(
         &self,
         root: &WorkspaceRoot,
         path: &Path,
+        offset: u64,
         max_bytes: usize,
     ) -> Result<WorkspaceFileBytes, WorkspaceResolveError> {
         let descriptor = open_relative(root, path, OFlags::RDONLY | OFlags::NONBLOCK)?;
@@ -461,9 +478,23 @@ impl WorkspaceFileSystem for LocalWorkspaceFileSystem {
             ));
         }
         let initial_total_bytes = status.st_size.max(0) as u64;
+        // An exhausted cursor is answered before the seek rather than through
+        // it: `lseek` carries a signed offset, so a `u64` past that range
+        // fails the read outright instead of returning the empty page this
+        // contract promises for every offset at or past the end.
+        if offset >= initial_total_bytes {
+            return Ok(WorkspaceFileBytes {
+                bytes: Vec::new(),
+                total_bytes: initial_total_bytes,
+                truncated: false,
+                mode: status.st_mode as _,
+            });
+        }
         let lookahead = max_bytes.saturating_add(4);
         let mut bytes = Vec::with_capacity(lookahead);
         let mut file = File::from(descriptor);
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|source| resolve_std_io(path, source))?;
         (&mut file)
             .take(lookahead as u64)
             .read_to_end(&mut bytes)
@@ -472,10 +503,12 @@ impl WorkspaceFileSystem for LocalWorkspaceFileSystem {
             .metadata()
             .map_err(|source| resolve_std_io(path, source))?
             .len();
-        let total_bytes = initial_total_bytes
-            .max(final_total_bytes)
-            .max(bytes.len() as u64);
-        let truncated = bytes.len() > max_bytes || total_bytes > bytes.len() as u64;
+        let read_end = offset.saturating_add(bytes.len() as u64);
+        // An exhausted cursor sits past the end, so it proves nothing about
+        // the file's size and never raises the observed total.
+        let observed_end = if bytes.is_empty() { 0 } else { read_end };
+        let total_bytes = initial_total_bytes.max(final_total_bytes).max(observed_end);
+        let truncated = bytes.len() > max_bytes || total_bytes > read_end;
         Ok(WorkspaceFileBytes {
             bytes,
             total_bytes,

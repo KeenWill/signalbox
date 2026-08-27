@@ -54,12 +54,14 @@ through PR #465 (`agent/anthropic-api-smoke`), and the OpenAI compatibility
 smoke through PR `#466` (`agent/openai-api-smoke`). The cross-adapter
 `ToolCallsAtLoss` fact carried in boundary-loss evidence is verified against
 this PR (`agent/typed-loss-cause`), against every streamed and buffered loss
-path in the four adapters. This page covers the provider-neutral operation,
-observation, and evidence vocabulary; SSE framing; structured-output and tool
-decode; `ScriptedModel`; the four provider adapters; and their credential
-boundaries. Layer-2 authorization and evidence classification
-([model-call-execution](model-call-execution.md)), credential channels,
-delivery, and rotation discipline
+path in the four adapters. A credential-suppressed proposal's participation in
+the structured-output multiplicity guard and in the Claude CLI named tool choice
+is verified against this PR (`agent/fix-client-tools-judge`). This page covers
+the provider-neutral operation, observation, and evidence vocabulary; SSE
+framing; structured-output and tool decode; `ScriptedModel`; the four provider
+adapters; and their credential boundaries. Layer-2 authorization and evidence
+classification ([model-call-execution](model-call-execution.md)), credential
+channels, delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
 authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
@@ -454,10 +456,20 @@ provider-specific output values that require caller-side transformation.
 `decode_structured` and `decode_structured_json` are pure functions over
 already-delivered response parts: exactly one proposal under the contract name
 must exist, and failures are typed — `NoStructuredValue`,
-`MultipleStructuredValues` (never silently picking one), `JsonSyntax`,
-`SchemaMismatch`, and `DomainInvalid` carrying the caller's own
-`DomainValidator` issues. Decoding never performs a model call; a repair attempt
-is a new, explicitly authorized operation owned by the caller.
+`MultipleStructuredValues` (never silently picking one),
+`SuppressedStructuredValue`, `JsonSyntax`, `SchemaMismatch`, and `DomainInvalid`
+carrying the caller's own `DomainValidator` issues. Decoding never performs a
+model call; a repair attempt is a new, explicitly authorized operation owned by
+the caller.
+
+A contract-named proposal whose whole argument object a CLI adapter's credential
+boundary suppressed is a proposal for the contract, counted by the exactly-one
+guard exactly as an admitted one is: alone it fails as
+`SuppressedStructuredValue`, and beside an admitted contract-named proposal it
+fails as `MultipleStructuredValues`. Suppression withholds a proposal's
+arguments, never its admitted tool name, so it can neither hide a second
+conflicting value from a caller that decodes without a terminal classification
+step nor satisfy a named tool choice under a foreign name.
 
 `decode_tool_arguments` decodes a `ToolCallProposal`'s raw argument JSON (kept
 verbatim as produced, never re-serialized) into a typed value, distinguishing

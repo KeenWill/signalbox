@@ -1,7 +1,14 @@
 import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
-import { type CSSProperties, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import {
+  type CSSProperties,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react'
 import {
   type CommandContext,
   globalHotkeyBindings,
@@ -70,6 +77,7 @@ export function Workspace({
   route: SearchUsageRouteState
   onRouteChange: (patch: Partial<SearchUsageRouteState>) => void
 }) {
+  const primaryRef = useRef<HTMLElement>(null)
   const navigate = useNavigate()
   const knownId = scenarios.some((scenario) => scenario.id === scenarioId)
     ? (scenarioId as ScenarioId)
@@ -150,6 +158,10 @@ export function Workspace({
     document.documentElement.dataset.theme = app.theme
     document.documentElement.dataset.density = app.density
   }, [app.density, app.theme])
+
+  useEffect(() => {
+    if (timeline !== undefined && fleet !== undefined) primaryRef.current?.focus()
+  }, [fleet, timeline])
 
   useEffect(() => {
     document.title = `${transport.scenario.title} · Signalbox scenarios`
@@ -261,7 +273,7 @@ export function Workspace({
       <aside className="navigation-pane">
         <ScenarioNavigation activeId={knownId} />
       </aside>
-      <main className="workspace">
+      <main className="workspace" tabIndex={-1} ref={primaryRef}>
         <header className="workspace-header">
           <div className="scenario-title">
             <span className={`connection connection-${transport.scenario.connection}`}>

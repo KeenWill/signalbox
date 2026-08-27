@@ -159,6 +159,19 @@ pub(crate) const STARTUP_RECOVERY: &str = "SELECT
                    AND NOT delegation_runtime_terminal
             )";
 
+/// Enrolls newly parked recovery-waiting turns, one bounded page per lap.
+///
+/// The page locks each turn row `FOR NO KEY UPDATE`, at the same strength an
+/// accepting operator interrupt's terminalizing `UPDATE` takes. Without that
+/// lock nothing made the two contend: under `READ COMMITTED` discovery's
+/// snapshot could still read a turn as recovery-waiting while an interrupt's
+/// terminalization sat uncommitted, and the interrupt's own supersession could
+/// not see discovery's uncommitted insert, so both committed and left a
+/// terminal turn beside a live `scheduled` recovery row — the shape
+/// `process_read` rejects as corruption. Contending settles it either way:
+/// the interrupt commits first and this statement's re-check drops the row, or
+/// discovery commits first and the interrupt's supersession sees the row it
+/// inserted.
 pub(crate) const AUTOMATIC_RECONCILIATION_DISCOVERY: &str = "WITH discovery AS (
             SELECT after_turn_id, high_turn_id
               FROM automatic_reconciliation_discovery_state
@@ -204,6 +217,7 @@ pub(crate) const AUTOMATIC_RECONCILIATION_DISCOVERY: &str = "WITH discovery AS (
                AND turn_id <= bounds.high_turn_id
              ORDER BY turn_id
              LIMIT $1
+             FOR NO KEY UPDATE OF turn_lifecycle
          ), inserted AS (
             INSERT INTO automatic_reconciliation
                 (turn_id, session_id, model_call_id, tool_attempt_id)

@@ -14,7 +14,8 @@ use std::{
 use reqwest::{
     Client, Method, Response, StatusCode, Url,
     header::{
-        ACCEPT, AUTHORIZATION, CONTENT_TYPE, ETAG, HeaderValue, IF_NONE_MATCH, LINK, USER_AGENT,
+        ACCEPT, AUTHORIZATION, CONTENT_TYPE, ETAG, HeaderMap, HeaderValue, IF_NONE_MATCH, LINK,
+        RETRY_AFTER, USER_AGENT,
     },
     redirect::Policy,
 };
@@ -25,19 +26,20 @@ use signalbox_application::{
     RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
     RepoWatchCheckSuiteObservation, RepoWatchConvergenceAssessment,
     RepoWatchConvergenceAssessmentInput, RepoWatchDifferFailureKind, RepoWatchDispatchService,
-    RepoWatchDispatchTransaction, RepoWatchEventIdentityFrontierV1, RepoWatchEventOccurrenceV1,
-    RepoWatchObservation, RepoWatchObservationApplyV1, RepoWatchObservationPatchV1,
-    RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
-    RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
-    RepoWatchReviewDecision, RepoWatchReviewObservation, RepoWatchRuleEvaluation,
-    RepoWatchRuleEvaluationOutcome, RepoWatchStaleReviewClearanceCandidate,
-    RepoWatchTargetedRefreshCoalescerV1, RepoWatchTargetedRefreshV1, RepoWatchThreadObservation,
-    RepoWatchThreadState, RepoWatchWebhookDeliveryV1, RepoWatchWebhookDeliveryV1Input,
-    RepoWatchWebhookIgnoredReasonV1, RepoWatchWebhookMappedNoChangeV1,
-    RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1, RepoWatchWorkflowRunObservation,
-    UuidV7RepoWatchDispatchIdGenerator, UuidV7RepoWatchEventIdGenerator,
-    apply_repo_watch_observation_patch_v1, derive_repo_watch_events,
-    map_repo_watch_webhook_delivery_v1,
+    RepoWatchDispatchTransaction, RepoWatchEventIdentityFrontierEntryV1,
+    RepoWatchEventIdentityFrontierV1, RepoWatchEventOccurrenceV1,
+    RepoWatchMergedPullRequestBaselineV1, RepoWatchObservation, RepoWatchObservationApplyV1,
+    RepoWatchObservationPatchV1, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
+    RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
+    RepoWatchRepositoryStateInput, RepoWatchReviewDecision, RepoWatchReviewObservation,
+    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
+    RepoWatchStaleReviewClearanceCandidate, RepoWatchTargetedRefreshCoalescerV1,
+    RepoWatchTargetedRefreshV1, RepoWatchThreadObservation, RepoWatchThreadState,
+    RepoWatchWebhookDeliveryV1, RepoWatchWebhookDeliveryV1Input, RepoWatchWebhookIgnoredReasonV1,
+    RepoWatchWebhookMappedNoChangeV1, RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1,
+    RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
+    UuidV7RepoWatchEventIdGenerator, apply_repo_watch_observation_patch_v1,
+    derive_repo_watch_events_with_merged_baselines, map_repo_watch_webhook_delivery_v1,
 };
 use signalbox_domain::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, DurableCommandId,
@@ -132,10 +134,6 @@ const WEBHOOK_DRAIN_RETRY_MAX_DOUBLINGS: u32 = 6;
 // serialized repository task cannot also silence the observer meant to
 // expose it.
 const WEBHOOK_DRAIN_MONITOR_INTERVAL: Duration = Duration::from_secs(30);
-// Pending webhook work ordinarily drains in seconds. One minute leaves ample
-// room for an in-flight bounded provider request while ensuring a task wedge
-// becomes an operator-visible error well before the next full poll.
-const WEBHOOK_DRAIN_STALL_THRESHOLD: Duration = Duration::from_secs(60);
 // The minimum drain deadline covers a cursor up to two scaling quanta. Larger
 // cursor documents receive proportional time below, while this floor preserves
 // the original bound for ordinary repositories.
@@ -184,6 +182,27 @@ const WEBHOOK_CURSOR_SIZING_TIMEOUT: Duration = Duration::from_secs(10);
 // performs it, so remaining work re-arms its own wake after this bounded
 // quantum instead of holding the worker across poll deadlines.
 const WEBHOOK_DRAIN_PAGE_LIMIT: usize = 1;
+// How many consecutive webhook preemptions one still-due complete poll yields
+// to before it runs uninterruptibly. The termination argument for preemption is
+// that a bounded page stops re-arming once it observes no remainder, but while
+// authenticated deliveries keep the durable backlog nonempty every successful
+// page requests a continuation, the next fresh sweep observes that wake, and the
+// poll is preempted again: at ingress meeting or exceeding drain throughput the
+// authoritative completeness sweep never commits, and the facts outside the
+// webhook mapping — reactions, missed deliveries — stop being reconciled for as
+// long as the backlog lasts.
+//
+// Counted in preemptions, but chosen against the pages they cost, because a
+// preempted pass drains two: the poll's own pre-poll drain in
+// `run_attempt_prelude` and then the attempt the admission wake runs. The
+// suppressed pass that ends the cycle drains one more, so the sweep waits behind
+// `2 * MAX_CONSECUTIVE_POLL_PREEMPTIONS + 1` bounded pages — nine here, about
+// 225 deliveries at WEBHOOK_PENDING_PAGE_SIZE each, which covers a merge
+// batch. Raising this raises that ceiling twice as fast, and every page may
+// spend its own deadline. Remaining backlog re-arms the scheduler immediately
+// after the sweep, so suppression delays webhook work rather than dropping it.
+// numeric-bound: guard - prevents sustained webhook ingress from starving the complete poll
+const MAX_CONSECUTIVE_POLL_PREEMPTIONS: u32 = 4;
 // One repository scheduling phase may settle this many cutoff or dispatch
 // records before returning to the webhook-aware outer loop. The remaining work
 // is durable and re-arms that loop; bounding the phase prevents an event backlog
@@ -452,10 +471,17 @@ impl RepositoryWatchRuntime {
         for task in self.tasks {
             if task.webhook_work.is_some() {
                 let repository = task.repository.clone();
-                let store = task.webhook_store.clone();
+                let webhook_store = task.webhook_store.clone();
+                let cursor_store = task.store.clone();
                 let monitor_shutdown = task_shutdown.clone();
                 tasks.spawn(async move {
-                    monitor_webhook_drain(repository, store, monitor_shutdown).await;
+                    monitor_webhook_drain(
+                        repository,
+                        webhook_store,
+                        cursor_store,
+                        monitor_shutdown,
+                    )
+                    .await;
                     RepositoryWatchChildExit::WebhookMonitor
                 });
             }
@@ -610,6 +636,45 @@ enum WebhookPollInterrupt {
 impl WebhookPollInterrupt {
     const fn is_enabled(self) -> bool {
         matches!(self, Self::Enabled)
+    }
+}
+
+/// Whether projection backoff is in force for the drain retry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DrainRetryBackoff {
+    InForce,
+    Clear,
+}
+
+impl DrainRetryBackoff {
+    fn of(retry: &WebhookDrainRetry) -> Self {
+        if retry.is_backing_off() {
+            Self::InForce
+        } else {
+            Self::Clear
+        }
+    }
+}
+
+/// Whether a still-due complete poll may yield to webhook admission again.
+///
+/// A drain retry in backoff already suppresses admission preemption so the
+/// retry deadline stays authoritative. Beyond that, consecutive preemptions of
+/// the same due poll are counted and bounded: each one drains a bounded page and
+/// returns the poll to a fresh interruptible pass, so nothing in that cycle ends
+/// it while ingress keeps the durable backlog nonempty. Suppression does not
+/// discard the wake — it is latched, and the scheduler admits it as ordinary
+/// webhook work as soon as the sweep commits.
+const fn poll_webhook_interrupt(
+    backoff: DrainRetryBackoff,
+    consecutive_preemptions: u32,
+) -> WebhookPollInterrupt {
+    if matches!(backoff, DrainRetryBackoff::InForce)
+        || consecutive_preemptions >= MAX_CONSECUTIVE_POLL_PREEMPTIONS
+    {
+        WebhookPollInterrupt::Suppressed
+    } else {
+        WebhookPollInterrupt::Enabled
     }
 }
 
@@ -914,12 +979,38 @@ enum WebhookAttemptPhase {
 
 impl WebhookAttemptPhase {
     /// The outcome a cancellation during this step reports.
-    const fn cancelled_outcome(self, error: RepositoryWatchAttemptError) -> WebhookAttemptOutcome {
+    ///
+    /// The drain performs its own post-terminal dispatch work, which the phase
+    /// alone cannot separate from projection: that window sits inside the drain
+    /// and is marked by `dispatch_in_flight` instead. The delivery it follows is
+    /// already terminal and will not be reloaded, so a cancellation there is the
+    /// surrounding dispatch work's failure exactly as one after the drain is —
+    /// reporting it as a drain failure would grow the projection backoff, and
+    /// suppress admission wakes and poll drains for up to its cap, while no
+    /// projection remained.
+    const fn cancelled_outcome(
+        self,
+        error: RepositoryWatchAttemptError,
+        dispatch_in_flight: bool,
+    ) -> WebhookAttemptOutcome {
         match self {
             Self::BeforeDrain => WebhookAttemptOutcome::FailedBeforeDrain(error),
+            Self::Drain if dispatch_in_flight => WebhookAttemptOutcome::DrainedThenFailed(error),
             Self::Drain => WebhookAttemptOutcome::DrainFailed(error),
             Self::AfterDrain => WebhookAttemptOutcome::DrainedThenFailed(error),
         }
+    }
+
+    /// Whether a cancellation during this step may have left a durable delivery
+    /// pending, so the next cursor-advancing poll must be fenced.
+    ///
+    /// Only the drain owns pending deliveries. A cancellation there is
+    /// indistinguishable from the drain's own deadline as far as the durable
+    /// queue is concerned: work the drain had loaded may never have reached a
+    /// terminal record, and a complete poll that commits past it would advance
+    /// the cursor over a delivery still waiting to be projected.
+    const fn cancellation_fences_complete_poll(self) -> bool {
+        matches!(self, Self::Drain)
     }
 
     /// The operator-facing label for the cancelled step.
@@ -940,6 +1031,7 @@ impl WebhookAttemptPhase {
 #[derive(Debug)]
 enum WebhookCursorSizingError {
     Store(RepoWatchStoreError),
+    Settlement(RepositoryWatchAttemptError),
     TimedOut,
 }
 
@@ -947,6 +1039,11 @@ impl fmt::Display for WebhookCursorSizingError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Store(error) => error.fmt(formatter),
+            Self::Settlement(error) => write!(
+                formatter,
+                "retained webhook completion failed ({})",
+                error.cause_code()
+            ),
             Self::TimedOut => write!(
                 formatter,
                 "durable cursor sizing exceeded its {}-second bound",
@@ -954,6 +1051,32 @@ impl fmt::Display for WebhookCursorSizingError {
             ),
         }
     }
+}
+
+async fn load_webhook_attempt_deadlines(
+    store: &PostgresRepoWatchStore,
+    repository: &RepositorySlug,
+) -> Result<WebhookAttemptDeadlines, WebhookCursorSizingError> {
+    timeout(
+        WEBHOOK_CURSOR_SIZING_TIMEOUT,
+        load_webhook_attempt_deadlines_unbounded(store, repository),
+    )
+    .await
+    .map_err(|_| WebhookCursorSizingError::TimedOut)?
+}
+
+async fn load_webhook_attempt_deadlines_unbounded(
+    store: &PostgresRepoWatchStore,
+    repository: &RepositorySlug,
+) -> Result<WebhookAttemptDeadlines, WebhookCursorSizingError> {
+    let cursor_payload_bytes = store
+        .load_cursor_payload_bytes(repository)
+        .await
+        .map_err(WebhookCursorSizingError::Store)?
+        .unwrap_or(0);
+    Ok(WebhookAttemptDeadlines::for_cursor_payload(
+        cursor_payload_bytes,
+    ))
 }
 
 /// Payload-derived bounds for one serialized webhook attempt.
@@ -981,6 +1104,10 @@ impl WebhookAttemptDeadlines {
             attempt: drain.saturating_add(WEBHOOK_ATTEMPT_TIMEOUT_MARGIN),
             cursor_payload_bytes,
         }
+    }
+
+    const fn stall_threshold(self) -> Duration {
+        self.drain
     }
 }
 
@@ -1072,19 +1199,32 @@ fn next_cadence_deadline(previous: Instant, interval: Duration, now: Instant) ->
     }
 }
 
-/// Schedules a first-ever repository baseline immediately and a warm restart
-/// at the ordinary cadence.
+/// Schedules a first-ever repository baseline immediately and a warm restart at
+/// whatever remains of the ordinary cadence.
 ///
 /// Startup has already drained durable webhook work before reaching this
-/// decision. A durable cursor therefore remains an authoritative baseline
-/// until the next scheduled completeness sweep; paying that same sweep on
-/// every daemon restart would let operational restarts multiply provider quota
-/// independently of the configured poll interval.
-fn initial_poll_deadline(now: Instant, interval: Duration, durable_cursor_exists: bool) -> Instant {
-    if durable_cursor_exists {
-        now + interval
-    } else {
-        now
+/// decision. A completed sweep therefore remains an authoritative baseline until
+/// the next scheduled one; paying that same sweep on every daemon restart would
+/// let operational restarts multiply provider quota independently of the
+/// configured poll interval.
+///
+/// What remains is measured from the durable record of the last completed sweep,
+/// never from this process's own start. Anchoring on startup made the deadline a
+/// full interval away every time, so a daemon restarting more often than a
+/// repository's interval — the tight deployment cycle this scheduling was
+/// written for — never reached it at all: a polling-only repository's signal
+/// went unobserved indefinitely, and a webhook-enabled one lost the completeness
+/// sweep for every fact its targeted projections do not cover. A repository
+/// whose last sweep is already older than the interval, or that has none on
+/// record, polls immediately.
+fn initial_poll_deadline(
+    now: Instant,
+    interval: Duration,
+    complete_poll_age: Option<Duration>,
+) -> Instant {
+    match complete_poll_age {
+        Some(age) => now + interval.saturating_sub(age),
+        None => now,
     }
 }
 
@@ -1093,6 +1233,15 @@ fn repository_reconciliation_quantum_exhausted(
     reconciliation_quantum: Option<usize>,
 ) -> bool {
     reconciliation_quantum.is_some_and(|quantum| processed >= quantum)
+}
+
+fn repository_reconciliation_should_yield(
+    processed: usize,
+    reconciliation_quantum: Option<usize>,
+    continuation_available: bool,
+) -> bool {
+    continuation_available
+        && repository_reconciliation_quantum_exhausted(processed, reconciliation_quantum)
 }
 
 /// Awaits `work`, leaving it cancellable by shutdown.
@@ -1123,7 +1272,8 @@ where
 
 async fn monitor_webhook_drain(
     repository: RepositorySlug,
-    store: PostgresRepoWatchWebhookStore,
+    webhook_store: PostgresRepoWatchWebhookStore,
+    cursor_store: PostgresRepoWatchStore,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut next_inspection = Instant::now() + WEBHOOK_DRAIN_MONITOR_INTERVAL;
@@ -1148,18 +1298,37 @@ async fn monitor_webhook_drain(
             WEBHOOK_DRAIN_MONITOR_INTERVAL,
             Instant::now(),
         );
-        // The inspection acquires a pooled connection and queries, neither of
-        // which this task bounds. Awaiting it outside shutdown would hold this
-        // child while PostgreSQL was unresponsive, and the supervisor joins
-        // every child before aborting the set, so the daemon could not stop.
+        // The sizing read acquires a pooled connection and queries, for the
+        // same reason the inspection below is raced with shutdown: its own
+        // ten-second bound is still ten seconds this child would hold the
+        // supervisor while PostgreSQL was unresponsive.
+        let Some(sized) = run_until_shutdown(
+            &mut shutdown,
+            load_webhook_attempt_deadlines(&cursor_store, &repository),
+        )
+        .await
+        else {
+            return;
+        };
+        let stall_threshold = match sized {
+            Ok(deadlines) => deadlines.stall_threshold(),
+            Err(error) => {
+                tracing::error!(
+                    repository = %repository.as_str(),
+                    cause_code = "webhook_drain_monitor_cursor_sizing_failed",
+                    cause = %error,
+                    "repository-watch webhook drain monitor could not size the durable cursor"
+                );
+                continue;
+            }
+        };
+        // The pending-receipt inspection acquires a pooled connection and
+        // queries. Awaiting it outside shutdown would hold this child while
+        // PostgreSQL was unresponsive, and the supervisor joins every child
+        // before aborting the set, so the daemon could not stop.
         if run_until_shutdown(
             &mut shutdown,
-            inspect_webhook_drain(
-                &repository,
-                &store,
-                WEBHOOK_DRAIN_STALL_THRESHOLD,
-                &mut progress,
-            ),
+            inspect_webhook_drain(&repository, &webhook_store, stall_threshold, &mut progress),
         )
         .await
         .is_none()
@@ -1174,17 +1343,29 @@ struct WebhookDrainProgress {
     // This is observation state, not recovery authority: pending receipts remain
     // durable. A fresh daemon deliberately observes one full threshold before
     // declaring an old queue head stalled.
-    unchanged_head: Option<(NonZeroU64, Instant)>,
+    unchanged_head: Option<(NonZeroU64, Instant, Duration)>,
 }
 
 impl WebhookDrainProgress {
-    fn observe(&mut self, receipt_sequence: NonZeroU64, observed_at: Instant) -> Option<Duration> {
+    fn observe(
+        &mut self,
+        receipt_sequence: NonZeroU64,
+        observed_at: Instant,
+        stall_threshold: Duration,
+    ) -> Option<(Duration, Duration)> {
         match self.unchanged_head {
-            Some((previous_sequence, unchanged_since)) if previous_sequence == receipt_sequence => {
-                Some(observed_at.saturating_duration_since(unchanged_since))
+            Some((previous_sequence, unchanged_since, retained_threshold))
+                if previous_sequence == receipt_sequence =>
+            {
+                let pinned_threshold = retained_threshold.max(stall_threshold);
+                self.unchanged_head = Some((previous_sequence, unchanged_since, pinned_threshold));
+                Some((
+                    observed_at.saturating_duration_since(unchanged_since),
+                    pinned_threshold,
+                ))
             }
             _ => {
-                self.unchanged_head = Some((receipt_sequence, observed_at));
+                self.unchanged_head = Some((receipt_sequence, observed_at, stall_threshold));
                 None
             }
         }
@@ -1236,10 +1417,12 @@ async fn inspect_webhook_drain(
         }
     };
     let pending_for = oldest.pending_for();
-    let Some(stalled_for) = progress.observe(oldest.receipt().sequence(), Instant::now()) else {
+    let Some((stalled_for, pinned_threshold)) =
+        progress.observe(oldest.receipt().sequence(), Instant::now(), stall_threshold)
+    else {
         return;
     };
-    if pending_for < stall_threshold || stalled_for < stall_threshold {
+    if pending_for < pinned_threshold || stalled_for < pinned_threshold {
         return;
     }
     tracing::error!(
@@ -1459,21 +1642,39 @@ impl RepositoryWatchTask {
                 return;
             }
         }
+        // The lookup acquires a pooled connection and queries, neither of which
+        // this task bounds, and the supervisor joins every child before aborting
+        // the set — an uncancellable await here would hold daemon termination
+        // for as long as PostgreSQL stayed unresponsive.
+        let Some(complete_poll_age) = run_until_shutdown(
+            &mut shutdown,
+            self.store.load_complete_poll_age(&self.repository),
+        )
+        .await
+        else {
+            return;
+        };
+        // Anchored after the lookup rather than before it. PostgreSQL measures
+        // the age when the statement runs, so whatever time the lookup itself
+        // spent is already subtracted once; anchoring ahead of it subtracts the
+        // same delay a second time and brings the sweep forward by however long
+        // a contended pool made this read take.
         let poll_schedule_started = Instant::now();
-        let durable_cursor_exists = match self.store.load_cursor(&self.repository).await {
-            Ok(cursor) => cursor.is_some(),
+        let complete_poll_age = match complete_poll_age {
+            Ok(age) => age,
             Err(error) => {
                 tracing::warn!(
                     repository = %self.repository.as_str(),
-                    cause_code = "repository_watch_startup_cursor_unavailable",
+                    cause_code = "repository_watch_startup_poll_cadence_unavailable",
                     error = ?error,
-                    "repository-watch startup could not inspect its durable cursor; an immediate full poll remains scheduled"
+                    "repository-watch startup could not inspect its durable poll cadence; an immediate full poll remains scheduled"
                 );
-                false
+                None
             }
         };
         let mut next_poll =
-            initial_poll_deadline(poll_schedule_started, self.interval, durable_cursor_exists);
+            initial_poll_deadline(poll_schedule_started, self.interval, complete_poll_age);
+        let mut consecutive_poll_preemptions = 0_u32;
         loop {
             if *shutdown.borrow() {
                 return;
@@ -1493,10 +1694,10 @@ impl RepositoryWatchTask {
                     let drain = webhook_retry.poll_drain();
                     let mut drained = None;
                     let mut trailing_failure = None;
-                    let webhook_interrupt = match webhook_retry.is_backing_off() {
-                        true => WebhookPollInterrupt::Suppressed,
-                        false => WebhookPollInterrupt::Enabled,
-                    };
+                    let webhook_interrupt = poll_webhook_interrupt(
+                        DrainRetryBackoff::of(&webhook_retry),
+                        consecutive_poll_preemptions,
+                    );
                     let outcome = self
                         .run_preemptible_attempt_until_shutdown(
                             drain,
@@ -1559,8 +1760,11 @@ impl RepositoryWatchTask {
                             ) {
                                 return;
                             }
+                            consecutive_poll_preemptions =
+                                consecutive_poll_preemptions.saturating_add(1);
                             tracing::debug!(
                                 repository = %self.repository.as_str(),
+                                consecutive_preemptions = consecutive_poll_preemptions,
                                 "repository-watch webhook work preempted a full poll"
                             );
                             // Return the still-due poll to the scheduler rather
@@ -1569,7 +1773,9 @@ impl RepositoryWatchTask {
                             // remains, so each fresh attempt drains another page
                             // before entering an interruptible provider sweep.
                             // Once the page observes no remainder it stops
-                            // re-arming and the complete poll proceeds.
+                            // re-arming and the complete poll proceeds; until
+                            // then the count above is what ends the cycle, since
+                            // sustained ingress alone never does.
                             continue;
                         }
                     };
@@ -1615,6 +1821,9 @@ impl RepositoryWatchTask {
                     if result.is_err_and(RepositoryWatchAttemptError::is_permanent) {
                         return;
                     }
+                    // The poll committed, so the next one starts its own
+                    // preemption budget.
+                    consecutive_poll_preemptions = 0;
                     next_poll = next_cadence_deadline(cycle_started, self.interval, Instant::now());
                 }
                 RepositoryWatchWake::WebhookWork => {
@@ -2111,6 +2320,7 @@ impl RepositoryWatchTask {
     }
 
     async fn run_webhook_attempt_with_payload_deadline(&mut self) -> WebhookAttemptOutcome {
+        self.webhook_drain_timed_out = false;
         let deadlines = match self.webhook_attempt_deadlines().await {
             Ok(deadlines) => deadlines,
             Err(error) => {
@@ -2136,7 +2346,16 @@ impl RepositoryWatchTask {
             Ok(outcome) => outcome,
             Err(_) => {
                 let phase = self.webhook_attempt_phase;
-                self.finish_cancelled_webhook_attempt().await;
+                let dispatch_in_flight = self.finish_cancelled_webhook_attempt().await;
+                // The drain's own deadline records this; the enclosing attempt
+                // deadline can cancel the same drain — the reconciliation ahead
+                // of it spends the margin between the two bounds — and left
+                // unrecorded the fence in `run_attempt_prelude` never fires, so
+                // the following complete poll commits a cursor past a delivery
+                // this cancellation left pending.
+                if phase.cancellation_fences_complete_poll() {
+                    self.webhook_drain_timed_out = true;
+                }
                 let error = RepositoryWatchAttemptError::WebhookAttemptTimedOut;
                 tracing::error!(
                     repository = %self.repository.as_str(),
@@ -2150,12 +2369,13 @@ impl RepositoryWatchTask {
                 // Cancellation carries no failure of its own, so the cancelled
                 // step decides the outcome: only a drain the deadline
                 // interrupted has earned the growing projection backoff.
-                phase.cancelled_outcome(error)
+                phase.cancelled_outcome(error, dispatch_in_flight)
             }
         }
     }
 
-    /// Sizes the durable cursor under its own fixed bound.
+    /// Settles any retained cursor commit, then sizes the resulting durable
+    /// cursor under one fixed bound.
     ///
     /// The deadlines this returns are derived from the read, so they cannot
     /// bound it. Without this the sizing read would precede every attempt's
@@ -2163,19 +2383,16 @@ impl RepositoryWatchTask {
     /// repository task — and, through startup's unbounded join, the daemon —
     /// with no deadline to report.
     async fn webhook_attempt_deadlines(
-        &self,
+        &mut self,
     ) -> Result<WebhookAttemptDeadlines, WebhookCursorSizingError> {
-        let cursor_payload_bytes = timeout(
-            WEBHOOK_CURSOR_SIZING_TIMEOUT,
-            self.store.load_cursor_payload_bytes(&self.repository),
-        )
+        timeout(WEBHOOK_CURSOR_SIZING_TIMEOUT, async {
+            if let Some(settlement) = self.settle_webhook_targeted_completion().await {
+                settlement.map_err(WebhookCursorSizingError::Settlement)?;
+            }
+            load_webhook_attempt_deadlines_unbounded(&self.store, &self.repository).await
+        })
         .await
         .map_err(|_| WebhookCursorSizingError::TimedOut)?
-        .map_err(WebhookCursorSizingError::Store)?
-        .unwrap_or(0);
-        Ok(WebhookAttemptDeadlines::for_cursor_payload(
-            cursor_payload_bytes,
-        ))
     }
 
     /// Performs the cleanup every cancelled webhook attempt owes its successor.
@@ -2186,7 +2403,14 @@ impl RepositoryWatchTask {
     /// no-interleaving policy. Either deadline can cancel a projected terminal
     /// write, so the carried shadow is settled here rather than at one call
     /// site.
-    async fn finish_cancelled_webhook_attempt(&mut self) {
+    ///
+    /// Reports whether the cancellation landed in the drain's post-terminal
+    /// dispatch window and clears that marker, because nothing else does: a flag
+    /// left set outlives its attempt and makes a later drain timeout report a
+    /// dispatch failure for a projection that never terminalized, clearing the
+    /// projection backoff and re-enabling poll drains.
+    async fn finish_cancelled_webhook_attempt(&mut self) -> bool {
+        let dispatch_in_flight = std::mem::take(&mut self.webhook_dispatch_in_flight);
         if timeout(
             WEBHOOK_CANCELLED_FETCH_DRAIN_TIMEOUT,
             self.poller.drain_fetches(),
@@ -2211,6 +2435,7 @@ impl RepositoryWatchTask {
             self.webhook_shadow_superseded = false;
             self.webhook_terminal_ambiguous = Some(key);
         }
+        dispatch_in_flight
     }
 
     async fn process_webhook_deliveries(&mut self) -> WebhookDrainOutcome {
@@ -2391,6 +2616,7 @@ impl RepositoryWatchTask {
     }
 
     async fn process_webhook_deliveries_with_timeout(&mut self) -> WebhookDrainOutcome {
+        self.webhook_drain_timed_out = false;
         let deadlines = match self.webhook_attempt_deadlines().await {
             Ok(deadlines) => deadlines,
             Err(error) => {
@@ -2427,7 +2653,7 @@ impl RepositoryWatchTask {
                 // cleanup bounds that join and settles the carried shadow, so
                 // the poller's next attempt drains the same shared set before
                 // it can spawn, preserving the no-interleaving policy.
-                self.finish_cancelled_webhook_attempt().await;
+                let dispatch_in_flight = self.finish_cancelled_webhook_attempt().await;
                 let first_failure = self.webhook_drain_first_failure.take();
                 let projection_failure = self.webhook_drain_projection_failure.take();
                 if let Some(first_failure) = first_failure {
@@ -2445,10 +2671,8 @@ impl RepositoryWatchTask {
                     "repository-watch webhook drain exceeded its attempt deadline"
                 );
                 if let Some(projection_failure) = projection_failure {
-                    self.webhook_dispatch_in_flight = false;
                     WebhookDrainOutcome::ProjectionFailed(projection_failure)
-                } else if self.webhook_dispatch_in_flight {
-                    self.webhook_dispatch_in_flight = false;
+                } else if dispatch_in_flight {
                     WebhookDrainOutcome::DispatchFailedAfterTerminal(first_failure.unwrap_or(error))
                 } else {
                     WebhookDrainOutcome::ProjectionFailed(error)
@@ -2571,7 +2795,7 @@ impl RepositoryWatchTask {
                     .seed_webhook_shadow()
                     .await?
                     .then_some(RepoWatchWebhookParityCauseV1::CrossDrainShadowGap);
-                let Some(shadow) = self.webhook_shadow.as_ref() else {
+                let Some(shadow) = self.webhook_shadow.clone() else {
                     return Err(RepositoryWatchAttemptError::Persistence);
                 };
                 let applied =
@@ -2622,7 +2846,7 @@ impl RepositoryWatchTask {
                     RepoWatchObservationApplyV1::Applied(observation) => {
                         let (projections, identity_frontier) = shadow_event_projections(
                             &self.repository,
-                            shadow,
+                            &shadow,
                             &observation,
                             cause,
                         )?;
@@ -2642,6 +2866,9 @@ impl RepositoryWatchTask {
                         self.webhook_shadow = Some(WebhookShadowBaseline {
                             observation,
                             identity_frontier,
+                            merged_pull_request_baselines: shadow
+                                .merged_pull_request_baselines
+                                .clone(),
                         });
                         self.webhook_shadow_superseded = false;
                         Ok(())
@@ -2652,7 +2879,7 @@ impl RepositoryWatchTask {
                     } => {
                         let (mut projections, identity_frontier) = shadow_event_projections(
                             &self.repository,
-                            shadow,
+                            &shadow,
                             &observation,
                             cause,
                         )?;
@@ -2707,6 +2934,9 @@ impl RepositoryWatchTask {
                                     WebhookShadowBaseline {
                                         observation,
                                         identity_frontier,
+                                        merged_pull_request_baselines: shadow
+                                            .merged_pull_request_baselines
+                                            .clone(),
                                     },
                                 )
                                 .await?;
@@ -2729,6 +2959,9 @@ impl RepositoryWatchTask {
                             self.webhook_shadow = Some(WebhookShadowBaseline {
                                 observation,
                                 identity_frontier,
+                                merged_pull_request_baselines: shadow
+                                    .merged_pull_request_baselines
+                                    .clone(),
                             });
                             self.webhook_shadow_superseded = false;
                         }
@@ -2836,7 +3069,11 @@ impl RepositoryWatchTask {
         // terminal against state the poller never observed.
         let unissued = page.unissued(&refreshes);
         let (observation, issued) = match self
-            .prepare_primary_webhook_refresh(&observation, &unissued)
+            .prepare_primary_webhook_refresh(
+                &observation,
+                &baseline.merged_pull_request_baselines,
+                &unissued,
+            )
             .await?
         {
             PreparedPrimaryRefreshOutcome::SupersededTarget => {
@@ -2859,6 +3096,11 @@ impl RepositoryWatchTask {
         };
         let (events, identity_frontier) =
             primary_committed_occurrences(&self.repository, &baseline, &observation)?;
+        let compacted = compact_cursor_observation(
+            &observation,
+            Some(&baseline.observation),
+            &baseline.merged_pull_request_baselines,
+        )?;
         // A primary delivery records no event projection. Parity compares
         // projections against poll-produced rows, and this delivery's own commit
         // is the durable row; projecting it too would leave a permanent
@@ -2873,10 +3115,12 @@ impl RepositoryWatchTask {
             .collect::<Result<Vec<_>, _>>()?;
         let request = RepoWatchCommitRequest::from_webhook(
             Some(cursor.generation()),
-            RepoWatchCursorCandidate::with_event_identity_frontier(
-                observation.clone(),
+            RepoWatchCursorCandidate::try_with_event_identity_frontier_and_merged_baselines(
+                compacted.observation.clone(),
                 identity_frontier.clone(),
-            ),
+                compacted.merged_pull_request_baselines.clone(),
+            )
+            .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
             events,
         );
         let settlement = self
@@ -2885,8 +3129,9 @@ impl RepositoryWatchTask {
                 pending.key(),
                 projections,
                 WebhookShadowBaseline {
-                    observation,
+                    observation: compacted.observation,
                     identity_frontier,
+                    merged_pull_request_baselines: compacted.merged_pull_request_baselines,
                 },
             )
             .await?;
@@ -2924,6 +3169,7 @@ impl RepositoryWatchTask {
     async fn prepare_primary_webhook_refresh(
         &self,
         patched: &RepoWatchObservation,
+        merged_pull_request_baselines: &[RepoWatchMergedPullRequestBaselineV1],
         refreshes: &[RepoWatchTargetedRefreshV1],
     ) -> Result<PreparedPrimaryRefreshOutcome, RepositoryWatchAttemptError> {
         if refreshes.is_empty() {
@@ -2932,7 +3178,7 @@ impl RepositoryWatchTask {
                 queried: Vec::new(),
             });
         }
-        let targets = targeted_pull_requests(patched, refreshes)?;
+        let targets = targeted_pull_requests(patched, merged_pull_request_baselines, refreshes)?;
         if targets.is_empty() {
             return Ok(PreparedPrimaryRefreshOutcome::Refreshed {
                 observation: patched.clone(),
@@ -3066,7 +3312,11 @@ impl RepositoryWatchTask {
             .await
             .map_err(|_| RepositoryWatchAttemptError::Persistence)?
             .ok_or(RepositoryWatchAttemptError::Persistence)?;
-        let targets = targeted_pull_requests(cursor.candidate().observation(), refreshes)?;
+        let targets = targeted_pull_requests(
+            cursor.candidate().observation(),
+            cursor.candidate().merged_pull_request_baselines(),
+            refreshes,
+        )?;
         if targets.is_empty() {
             return Ok(PreparedTargetedRefreshOutcome::NoTargets);
         }
@@ -3097,24 +3347,37 @@ impl RepositoryWatchTask {
             .filter(|refresh| refresh_reaches_a_target(refresh, &applied_targets))
             .cloned()
             .collect::<Vec<_>>();
-        let events = derive_repo_watch_events(
+        let targeted_pull_requests = applied_targets
+            .iter()
+            .map(|target| target.number)
+            .collect::<Vec<_>>();
+        let events = derive_repo_watch_events_with_merged_baselines(
             &self.repository,
             Some(cursor.candidate().observation()),
+            cursor.candidate().merged_pull_request_baselines(),
             &observation,
             &mut event_identity_frontier,
             &mut UuidV7RepoWatchEventIdGenerator,
         )
         .map_err(|_| RepositoryWatchAttemptError::Differ)?;
-        let cursor_observation = compact_cursor_observation(&observation)?;
+        let compacted = compact_cursor_observation(
+            &observation,
+            Some(cursor.candidate().observation()),
+            cursor.candidate().merged_pull_request_baselines(),
+        )?;
         Ok(PreparedTargetedRefreshOutcome::Prepared(
             PreparedTargetedRefresh {
                 generation: cursor.generation(),
-                candidate: RepoWatchCursorCandidate::with_event_identity_frontier(
-                    cursor_observation,
-                    event_identity_frontier,
-                ),
+                candidate:
+                    RepoWatchCursorCandidate::try_with_event_identity_frontier_and_merged_baselines(
+                        compacted.observation,
+                        event_identity_frontier,
+                        compacted.merged_pull_request_baselines,
+                    )
+                    .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
                 events,
                 queried,
+                targeted_pull_requests,
             },
         ))
     }
@@ -3131,12 +3394,17 @@ impl RepositoryWatchTask {
         // A targeted refresh reconciles through the poller's own credential and
         // normalizer, so the rows it produces are poll-produced facts even when
         // a delivery asked for them.
+        let refreshed_shadow = merge_targeted_refresh_into_webhook_shadow(
+            shadow,
+            &prepared.candidate,
+            &prepared.targeted_pull_requests,
+        )?;
         let request = RepoWatchCommitRequest::new(
             Some(prepared.generation),
             prepared.candidate,
             prepared.events,
         );
-        self.complete_webhook_cursor_commit(request, key, projections, shadow)
+        self.complete_webhook_cursor_commit(request, key, projections, refreshed_shadow)
             .await
     }
 
@@ -3271,12 +3539,14 @@ impl RepositoryWatchTask {
                 key,
                 WebhookTerminalRecordError::Ambiguous,
             )) => {
+                self.poller.invalidate_freshness();
                 self.webhook_shadow = None;
                 self.webhook_shadow_superseded = false;
                 self.webhook_terminal_ambiguous = Some(key);
                 Some(Err(RepositoryWatchAttemptError::Persistence))
             }
             Err(TargetedWebhookCompletionError::Cursor) => {
+                self.poller.invalidate_freshness();
                 // The terminal disposition and exact projections are durable,
                 // but the cursor outcome is unknown. Reload the durable cursor
                 // before projecting any later pending receipt.
@@ -3284,7 +3554,10 @@ impl RepositoryWatchTask {
                 self.webhook_shadow_superseded = false;
                 Some(Err(RepositoryWatchAttemptError::Persistence))
             }
-            Err(_) => Some(Err(RepositoryWatchAttemptError::Persistence)),
+            Err(_) => {
+                self.poller.invalidate_freshness();
+                Some(Err(RepositoryWatchAttemptError::Persistence))
+            }
         }
     }
 
@@ -3349,11 +3622,16 @@ impl RepositoryWatchTask {
                         error = %error,
                         "repository-watch lifecycle cutoff quarantined a corrupt goal; dispatch processing continues"
                     );
+                    processed = processed.saturating_add(1);
+                    if self.yield_after_reconciliation_quantum("lifecycle_cutoff", processed) {
+                        return Ok(());
+                    }
                     continue;
                 }
                 Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
             }
         }
+        let mut processed = 0_usize;
         loop {
             match self
                 .dispatch_store
@@ -3362,7 +3640,12 @@ impl RepositoryWatchTask {
                 })
                 .await
             {
-                Ok(true) => {}
+                Ok(true) => {
+                    processed = processed.saturating_add(1);
+                    if self.yield_after_reconciliation_quantum("convergence_cutoff", processed) {
+                        return Ok(());
+                    }
+                }
                 Ok(false) => break,
                 Err(RepoWatchDispatchRepositoryError::GoalCutoff(
                     error @ signalbox_persistence::goal::GoalRepositoryError::Corruption(_),
@@ -3373,6 +3656,10 @@ impl RepositoryWatchTask {
                         error = %error,
                         "repository-watch convergence cutoff quarantined a corrupt goal; dispatch processing continues"
                     );
+                    processed = processed.saturating_add(1);
+                    if self.yield_after_reconciliation_quantum("convergence_cutoff", processed) {
+                        return Ok(());
+                    }
                     continue;
                 }
                 Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
@@ -3489,7 +3776,11 @@ impl RepositoryWatchTask {
     }
 
     fn yield_after_reconciliation_quantum(&self, phase: &'static str, processed: usize) -> bool {
-        if !repository_reconciliation_quantum_exhausted(processed, self.reconciliation_quantum) {
+        if !repository_reconciliation_should_yield(
+            processed,
+            self.reconciliation_quantum,
+            self.webhook_nudge.is_some(),
+        ) {
             return false;
         }
         self.request_webhook_drain_continuation();
@@ -3550,14 +3841,20 @@ impl RepositoryWatchTask {
             .poller
             .poll_against_cursor(previous, cursor_generation)
             .await?;
-        let events = derive_repo_watch_events(
+        let merged_pull_request_baselines = cursor
+            .as_ref()
+            .map(|cursor| cursor.candidate().merged_pull_request_baselines())
+            .unwrap_or_default();
+        let events = derive_repo_watch_events_with_merged_baselines(
             &self.repository,
             previous,
+            merged_pull_request_baselines,
             &polled.observation,
             &mut event_identity_frontier,
             &mut UuidV7RepoWatchEventIdGenerator,
         )
         .map_err(|error| match error.kind() {
+            RepoWatchDifferFailureKind::BaselineCollection => RepositoryWatchAttemptError::Differ,
             RepoWatchDifferFailureKind::EventConstruction => RepositoryWatchAttemptError::Differ,
             // Its own cause code, because the frontier and a differ defect call
             // for different operator responses. The attempt stays retryable: a
@@ -3572,24 +3869,32 @@ impl RepositoryWatchTask {
                 RepositoryWatchAttemptError::IdentityFrontier
             }
         })?;
-        let cursor_observation = compact_cursor_observation(&polled.observation)?;
+        let compacted = compact_cursor_observation(
+            &polled.observation,
+            previous,
+            merged_pull_request_baselines,
+        )?;
+        let retained_pull_requests = compacted
+            .observation
+            .state()
+            .pull_requests()
+            .iter()
+            .map(|pull_request| pull_request.context().number())
+            .collect::<HashSet<_>>();
         let convergence = polled
             .convergence
             .into_iter()
-            .filter(|assessment| {
-                cursor_observation
-                    .state()
-                    .pull_requests()
-                    .iter()
-                    .any(|pull_request| pull_request.context().number() == assessment.number())
-            })
+            .filter(|assessment| retained_pull_requests.contains(&assessment.number()))
             .collect();
         Ok(PreparedCompletePoll {
             cursor_generation,
-            candidate: RepoWatchCursorCandidate::with_event_identity_frontier(
-                cursor_observation,
-                event_identity_frontier,
-            ),
+            candidate:
+                RepoWatchCursorCandidate::try_with_event_identity_frontier_and_merged_baselines(
+                    compacted.observation,
+                    event_identity_frontier,
+                    compacted.merged_pull_request_baselines,
+                )
+                .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
             events,
             convergence,
             stale_review_clearances: polled.stale_review_clearances,
@@ -3916,6 +4221,8 @@ struct PreparedTargetedRefresh {
     events: Vec<RepoWatchEventOccurrenceV1>,
     /// The requested refreshes a provider request was actually issued for.
     queried: Vec<RepoWatchTargetedRefreshV1>,
+    /// Pull requests whose refreshed state reached the candidate.
+    targeted_pull_requests: Vec<PullRequestNumber>,
 }
 
 /// What one webhook drain has already projected, carried across the batch.
@@ -3929,6 +4236,7 @@ struct PreparedTargetedRefresh {
 struct WebhookShadowBaseline {
     observation: RepoWatchObservation,
     identity_frontier: RepoWatchEventIdentityFrontierV1,
+    merged_pull_request_baselines: Vec<RepoWatchMergedPullRequestBaselineV1>,
 }
 
 impl WebhookShadowBaseline {
@@ -3936,8 +4244,117 @@ impl WebhookShadowBaseline {
         Self {
             observation: cursor.candidate().observation().clone(),
             identity_frontier: cursor.candidate().event_identity_frontier().clone(),
+            merged_pull_request_baselines: cursor
+                .candidate()
+                .merged_pull_request_baselines()
+                .to_vec(),
         }
     }
+}
+
+/// Applies only the refreshed pull requests to the accumulated payload shadow.
+///
+/// The targeted candidate starts at the durable cursor, while the shadow may
+/// already carry unrelated payload changes from this drain. Replacing either
+/// collection wholesale would silently discard those newer changes.
+fn merge_targeted_refresh_into_webhook_shadow(
+    shadow: WebhookShadowBaseline,
+    candidate: &RepoWatchCursorCandidate,
+    targeted_pull_requests: &[PullRequestNumber],
+) -> Result<WebhookShadowBaseline, RepositoryWatchAttemptError> {
+    let targets = targeted_pull_requests
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut pull_requests = shadow
+        .observation
+        .state()
+        .pull_requests()
+        .iter()
+        .filter(|pull_request| !targets.contains(&pull_request.context().number()))
+        .cloned()
+        .collect::<Vec<_>>();
+    pull_requests.extend(
+        candidate
+            .observation()
+            .state()
+            .pull_requests()
+            .iter()
+            .filter(|pull_request| targets.contains(&pull_request.context().number()))
+            .cloned(),
+    );
+    let state = RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+        pull_requests,
+        workflow_runs: shadow.observation.state().workflow_runs().to_vec(),
+        branch_heads: shadow.observation.state().branch_heads().to_vec(),
+    })
+    .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+
+    let mut baselines = shadow
+        .merged_pull_request_baselines
+        .into_iter()
+        .filter(|baseline| !targets.contains(&baseline.number()))
+        .map(|baseline| (baseline.number(), baseline))
+        .collect::<BTreeMap<_, _>>();
+    baselines.extend(
+        candidate
+            .merged_pull_request_baselines()
+            .iter()
+            .filter(|baseline| targets.contains(&baseline.number()))
+            .cloned()
+            .map(|baseline| (baseline.number(), baseline)),
+    );
+
+    Ok(WebhookShadowBaseline {
+        observation: RepoWatchObservation::new(
+            shadow.observation.signal_reviewers().to_vec(),
+            state,
+        ),
+        identity_frontier: merge_event_identity_frontiers(
+            shadow.identity_frontier,
+            candidate.event_identity_frontier(),
+        )?,
+        merged_pull_request_baselines: baselines.into_values().collect(),
+    })
+}
+
+/// Joins two advances from the same durable frontier without moving a stream
+/// backwards. A pull-request subject can be learned by either branch but
+/// cannot conflict.
+fn merge_event_identity_frontiers(
+    shadow: RepoWatchEventIdentityFrontierV1,
+    candidate: &RepoWatchEventIdentityFrontierV1,
+) -> Result<RepoWatchEventIdentityFrontierV1, RepositoryWatchAttemptError> {
+    let mut entries = shadow
+        .entries()
+        .map(|entry| (*entry.stream_identity(), entry))
+        .collect::<BTreeMap<_, _>>();
+    for candidate_entry in candidate.entries() {
+        let identity = *candidate_entry.stream_identity();
+        let Some(shadow_entry) = entries.get_mut(&identity) else {
+            entries.insert(identity, candidate_entry);
+            continue;
+        };
+        if let (Some(shadow_subject), Some(candidate_subject)) = (
+            shadow_entry.pull_request_number(),
+            candidate_entry.pull_request_number(),
+        ) && shadow_subject != candidate_subject
+        {
+            return Err(RepositoryWatchAttemptError::Normalization);
+        }
+        let sequence = shadow_entry.sequence().max(candidate_entry.sequence());
+        let subject = shadow_entry
+            .pull_request_number()
+            .or(candidate_entry.pull_request_number());
+        *shadow_entry = match subject {
+            Some(number) => {
+                RepoWatchEventIdentityFrontierEntryV1::for_pull_request(identity, sequence, number)
+            }
+            None => RepoWatchEventIdentityFrontierEntryV1::new(identity, sequence),
+        };
+    }
+    RepoWatchEventIdentityFrontierV1::try_from_entries(entries.into_values().collect())
+        .map_err(|_| RepositoryWatchAttemptError::Normalization)
 }
 
 /// Derives the occurrences one primary-mode delivery commits.
@@ -3957,9 +4374,10 @@ fn primary_committed_occurrences(
     RepositoryWatchAttemptError,
 > {
     let mut identity_frontier = baseline.identity_frontier.clone();
-    let occurrences = derive_repo_watch_events(
+    let occurrences = derive_repo_watch_events_with_merged_baselines(
         repository,
         Some(&baseline.observation),
+        &baseline.merged_pull_request_baselines,
         observation,
         &mut identity_frontier,
         &mut UuidV7RepoWatchEventIdGenerator,
@@ -3985,9 +4403,10 @@ fn shadow_event_projections(
     RepositoryWatchAttemptError,
 > {
     let mut identity_frontier = baseline.identity_frontier.clone();
-    let projections = derive_repo_watch_events(
+    let projections = derive_repo_watch_events_with_merged_baselines(
         repository,
         Some(&baseline.observation),
+        &baseline.merged_pull_request_baselines,
         observation,
         &mut identity_frontier,
         &mut UuidV7RepoWatchEventIdGenerator,
@@ -4042,6 +4461,7 @@ fn targeted_query_projection(
 
 fn targeted_pull_requests(
     previous: &RepoWatchObservation,
+    merged_pull_request_baselines: &[RepoWatchMergedPullRequestBaselineV1],
     refreshes: &[RepoWatchTargetedRefreshV1],
 ) -> Result<Vec<TargetedPullRequest>, RepositoryWatchAttemptError> {
     let mut targets = BTreeMap::new();
@@ -4070,6 +4490,15 @@ fn targeted_pull_requests(
                         insert_targeted_pull_request(
                             &mut targets,
                             pull_request.context().number(),
+                            Some(head.clone()),
+                        )?;
+                    }
+                }
+                for baseline in merged_pull_request_baselines {
+                    if baseline.head_sha() == head {
+                        insert_targeted_pull_request(
+                            &mut targets,
+                            baseline.number(),
                             Some(head.clone()),
                         )?;
                     }
@@ -4650,21 +5079,132 @@ impl RepositoryWatchAttemptError {
     /// a poisoned receipt must not starve a healthy peer. Credential, transport,
     /// throttling, and provider-outage failures are repository-wide, so issuing
     /// the same doomed hydration for every peer only amplifies the outage.
+    ///
+    /// An exhausted resource budget joins them for a reason of its own: the
+    /// budgets it reports — the request count and the wire bytes — are the
+    /// attempt's, and a drain page runs inside one attempt. Once either is
+    /// spent every later hydration on the page is refused, so continuing only
+    /// spends transfer the ledger can no longer account for to learn the same
+    /// failure once per receipt. A per-target pagination ceiling reports the
+    /// same variant; stopping there is the conservative reading, and the
+    /// receipts it leaves undrained are durable and re-attempted.
+    ///
+    /// `ResponseTooLarge` stays target-specific beside it: that ceiling is one
+    /// response's, and a peer's response can still fit under it.
     const fn stops_webhook_page(self) -> bool {
         matches!(
             self,
-            Self::Credential | Self::Request | Self::ProviderUnavailable
+            Self::Credential | Self::Request | Self::ProviderUnavailable | Self::ResourceLimit
         )
     }
 }
 
-fn rejected_response_error(status: StatusCode) -> RepositoryWatchAttemptError {
+/// Classifies a rejected REST response.
+///
+/// `403` carries two unrelated meanings on this provider, and only one of them
+/// is repository-wide. A throttled request is reported as `403` and stopping the
+/// page is right: every later targeted request would meet the same limit. A
+/// credential that is simply not scoped for one endpoint — the Checks endpoints
+/// are the live case — is also `403`, and is specific to that resource. Treating
+/// the second as a provider outage stops the drain at the same oldest receipt on
+/// every retry, so later payload-only and ignored deliveries behind it are never
+/// attempted: an ordinary under-scoped token becomes a permanent per-repository
+/// drain stall.
+fn rejected_response_error(
+    status: StatusCode,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> RepositoryWatchAttemptError {
     if status == StatusCode::UNAUTHORIZED {
         RepositoryWatchAttemptError::Credential
-    } else if status == StatusCode::FORBIDDEN
-        || status == StatusCode::TOO_MANY_REQUESTS
+    } else if status == StatusCode::TOO_MANY_REQUESTS
         || status.is_server_error()
+        || (status == StatusCode::FORBIDDEN && response_is_throttled(headers, body))
     {
+        RepositoryWatchAttemptError::ProviderUnavailable
+    } else {
+        RepositoryWatchAttemptError::Rejected
+    }
+}
+
+/// Whether the provider says a rejection is one of its own rate limits.
+///
+/// The provider documents three ordered signals, and only the first two are
+/// headers: `Retry-After` for a secondary limit, an exhausted
+/// `X-RateLimit-Remaining` for a primary one. The third case is a secondary
+/// limit carrying neither — the documented guidance there is to wait anyway —
+/// and the rejection's own message is what names it. Reading the headers alone
+/// would classify that case as a permission rejection and let the drain re-issue
+/// the same doomed request for every later delivery on the page, which is the
+/// amplification the page-stopping predicate exists to prevent. A
+/// permission-scoped rejection carries neither the headers nor the message.
+fn response_is_throttled(headers: &HeaderMap, body: &[u8]) -> bool {
+    headers_report_a_rate_limit(headers) || rejection_reports_a_rate_limit(body)
+}
+
+/// The two header signals, which decide on their own when either is present.
+fn headers_report_a_rate_limit(headers: &HeaderMap) -> bool {
+    headers.contains_key(RETRY_AFTER)
+        || headers
+            .get("x-ratelimit-remaining")
+            .and_then(|remaining| remaining.to_str().ok())
+            .and_then(|remaining| remaining.trim().parse::<u64>().ok())
+            .is_some_and(|remaining| remaining == 0)
+}
+
+/// Whether classifying this rejection still depends on reading its message.
+///
+/// Only the `403` carrying neither header is ambiguous. Every other rejection —
+/// `401`, `429`, a server error, or a `403` a header already named as throttled
+/// — is decided by the status and headers, and reading its body would buy
+/// nothing while a slow-streaming or stalled response held the serialized
+/// repository task to the request timeout, spending the drain deadline during
+/// exactly the outage that produces those statuses.
+fn rejection_needs_its_message(status: StatusCode, headers: &HeaderMap) -> bool {
+    status == StatusCode::FORBIDDEN && !headers_report_a_rate_limit(headers)
+}
+
+/// Whether a rejection's own message names one of the provider's rate limits.
+///
+/// Read from the typed error envelope rather than by scanning the response
+/// bytes. A body that was read successfully but carries no message, or none that
+/// parses, is not evidence of throttling and leaves the classification to the
+/// status and headers. A body that could not be read at all never reaches here:
+/// that is a transport failure with a page-stopping meaning of its own, and the
+/// caller reports it rather than reading an empty message as a permission
+/// rejection.
+fn rejection_reports_a_rate_limit(body: &[u8]) -> bool {
+    // The provider's two documented spellings for a secondary limit; the older
+    // one still appears on the same responses.
+    const MARKERS: [&str; 2] = ["secondary rate limit", "abuse detection mechanism"];
+    serde_json::from_slice::<ProviderRejection>(body)
+        .ok()
+        .and_then(|rejection| rejection.message)
+        .is_some_and(|message| {
+            let message = message.to_ascii_lowercase();
+            MARKERS.iter().any(|marker| message.contains(marker))
+        })
+}
+
+/// The provider's error envelope, of which only the operator-facing message
+/// carries a classification signal this runtime reads.
+#[derive(Deserialize)]
+struct ProviderRejection {
+    #[serde(default)]
+    message: Option<String>,
+}
+
+/// Classifies an `HTTP 200` GraphQL error envelope.
+///
+/// Throttling and provider outage are reported through this envelope rather than
+/// a status code, and both are repository-wide: thread hydration runs during
+/// targeted refreshes, so a page that keeps going re-issues the identical doomed
+/// request for every later delivery on it. Every other error type stays
+/// `Rejected` and defers only its own receipt — a query-scoped `INTERNAL`
+/// failure or a missing node is not evidence that a peer's request cannot make
+/// independent progress.
+fn graphql_envelope_error(errors: &[GraphQlError]) -> RepositoryWatchAttemptError {
+    if errors.iter().any(GraphQlError::is_repository_wide) {
         RepositoryWatchAttemptError::ProviderUnavailable
     } else {
         RepositoryWatchAttemptError::Rejected
@@ -5654,7 +6194,7 @@ impl GitHubRepositoryPoller {
                 )
                 .await?;
             if !response.errors.is_empty() {
-                return Err(RepositoryWatchAttemptError::Rejected);
+                return Err(graphql_envelope_error(&response.errors));
             }
             let connection = response
                 .data
@@ -5723,7 +6263,7 @@ impl GitHubRepositoryPoller {
                 )
                 .await?;
             if !response.errors.is_empty() {
-                return Err(RepositoryWatchAttemptError::Rejected);
+                return Err(graphql_envelope_error(&response.errors));
             }
             let pull_request = response
                 .data
@@ -5859,7 +6399,7 @@ impl GitHubRepositoryPoller {
                 )
                 .await?;
             if !response.errors.is_empty() {
-                return Err(RepositoryWatchAttemptError::Rejected);
+                return Err(graphql_envelope_error(&response.errors));
             }
             let pull_request = response
                 .data
@@ -6046,7 +6586,7 @@ impl GitHubRepositoryPoller {
             )
             .await?;
         if !response.errors.is_empty() {
-            return Err(RepositoryWatchAttemptError::Rejected);
+            return Err(graphql_envelope_error(&response.errors));
         }
         let review = response
             .data
@@ -6083,7 +6623,7 @@ impl GitHubRepositoryPoller {
                 )
                 .await?;
             if !response.errors.is_empty() {
-                return Err(RepositoryWatchAttemptError::Rejected);
+                return Err(graphql_envelope_error(&response.errors));
             }
             let review = response
                 .data
@@ -6637,7 +7177,22 @@ impl GitHubRepositoryPoller {
             return Ok(accepted);
         }
         if response.status() != StatusCode::OK {
-            return Err(rejected_response_error(response.status()));
+            let status = response.status();
+            if !rejection_needs_its_message(status, response.headers()) {
+                return Err(rejected_response_error(status, response.headers(), &[]));
+            }
+            // The provider separates a secondary rate limit from a
+            // permission-scoped rejection by the message alone when neither
+            // rate-limit header is present, so this one rejection is read —
+            // under the same ceiling every other body uses — before it is
+            // classified. A read that fails is reported as the transport failure
+            // it is: that already stops the page, while the permission rejection
+            // an empty body would be read as does not, and continuing to hydrate
+            // later deliveries over a transport that just failed is the
+            // amplification this classification exists to prevent.
+            let headers = response.headers().clone();
+            let body = self.read_bounded(resource_kind, response).await?;
+            return Err(rejected_response_error(status, &headers, &body));
         }
         // The cached pair stays in place while this body is read and parsed.
         // Two open pull requests sharing a head SHA fetch the same check-suite
@@ -6997,10 +7552,56 @@ impl PollCache {
 /// webhook refreshes repeatedly transfer and decode terminal history. Closed
 /// but unmerged pull requests remain for one later complete poll, preserving
 /// the existing current-state view for that distinct lifecycle.
+struct CompactedCursorObservation {
+    observation: RepoWatchObservation,
+    merged_pull_request_baselines: Vec<RepoWatchMergedPullRequestBaselineV1>,
+}
+
 fn compact_cursor_observation(
     observation: &RepoWatchObservation,
-) -> Result<RepoWatchObservation, RepositoryWatchAttemptError> {
+    previous: Option<&RepoWatchObservation>,
+    retained_merged_baselines: &[RepoWatchMergedPullRequestBaselineV1],
+) -> Result<CompactedCursorObservation, RepositoryWatchAttemptError> {
     let state = observation.state();
+    // A storage-version-three cursor carries its merged pull requests in full
+    // and no baselines at all, and a complete poll fetches only listed open
+    // pull requests and previously open ones, so those merged entries are
+    // absent from `observation`. Deriving baselines from the current
+    // observation alone would drop exactly the state the migration preserved
+    // for this commit to compact. Seed from the prior observation first so the
+    // retained baselines and the current observation below still win wherever
+    // they carry a fresher form of the same pull request.
+    let mut merged_pull_request_baselines = BTreeMap::new();
+    if let Some(previous) = previous {
+        for pull_request in previous.state().pull_requests() {
+            if let Some(baseline) = RepoWatchMergedPullRequestBaselineV1::from_merged_state(
+                pull_request,
+                previous.signal_reviewers(),
+            )
+            .map_err(|_| RepositoryWatchAttemptError::Normalization)?
+            {
+                merged_pull_request_baselines.insert(baseline.number(), baseline);
+            }
+        }
+    }
+    merged_pull_request_baselines.extend(
+        retained_merged_baselines
+            .iter()
+            .cloned()
+            .map(|baseline| (baseline.number(), baseline)),
+    );
+    for pull_request in state.pull_requests() {
+        if let Some(baseline) = RepoWatchMergedPullRequestBaselineV1::from_merged_state(
+            pull_request,
+            observation.signal_reviewers(),
+        )
+        .map_err(|_| RepositoryWatchAttemptError::Normalization)?
+        {
+            merged_pull_request_baselines.insert(baseline.number(), baseline);
+        } else {
+            merged_pull_request_baselines.remove(&pull_request.context().number());
+        }
+    }
     let compacted = RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
         pull_requests: state
             .pull_requests()
@@ -7014,10 +7615,10 @@ fn compact_cursor_observation(
         branch_heads: state.branch_heads().to_vec(),
     })
     .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-    Ok(RepoWatchObservation::new(
-        observation.signal_reviewers().to_vec(),
-        compacted,
-    ))
+    Ok(CompactedCursorObservation {
+        observation: RepoWatchObservation::new(observation.signal_reviewers().to_vec(), compacted),
+        merged_pull_request_baselines: merged_pull_request_baselines.into_values().collect(),
+    })
 }
 
 fn pull_request_base_revision<'a>(
@@ -7420,7 +8021,47 @@ struct GraphQlEnvelope<T> {
 }
 
 #[derive(Clone, Deserialize)]
-struct GraphQlError {}
+struct GraphQlError {
+    // The provider's closed error taxonomy. Absent on a query the server
+    // rejected without one, which is target-specific by construction.
+    #[serde(rename = "type", default)]
+    error_type: Option<String>,
+    // The same taxonomy's second carrier. The provider spells a classification
+    // in `type` or in `extensions.code` depending on which layer rejected the
+    // query, and `RATE_LIMITED` in particular is carried here on the envelopes
+    // the API's own documentation shows. `crates/tools-github` reads both for
+    // the same reason.
+    #[serde(default)]
+    extensions: Option<GraphQlErrorExtensions>,
+}
+
+#[derive(Clone, Deserialize)]
+struct GraphQlErrorExtensions {
+    #[serde(default)]
+    code: Option<String>,
+}
+
+impl GraphQlError {
+    /// The classifications that describe the repository's provider rather than
+    /// the query, so no later request on the page can succeed either.
+    const REPOSITORY_WIDE_CODES: [&'static str; 2] = ["RATE_LIMITED", "SERVICE_UNAVAILABLE"];
+
+    fn is_repository_wide(&self) -> bool {
+        self.classifications().any(|classification| {
+            Self::REPOSITORY_WIDE_CODES
+                .iter()
+                .any(|wide| wide.eq_ignore_ascii_case(classification))
+        })
+    }
+
+    fn classifications(&self) -> impl Iterator<Item = &str> {
+        self.error_type.as_deref().into_iter().chain(
+            self.extensions
+                .as_ref()
+                .and_then(|extensions| extensions.code.as_deref()),
+        )
+    }
+}
 
 #[derive(Clone, Deserialize)]
 struct ThreadData {
@@ -7740,6 +8381,7 @@ mod tests {
         time::Duration,
     };
 
+    use signalbox_application::derive_repo_watch_events;
     use tempfile::TempDir;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -7750,12 +8392,14 @@ mod tests {
     };
 
     use super::{
-        CheckConclusion, ChecksOutcome, ConvergenceCheck, EntityTag, FileCredentialAccess,
-        GitHubRepositoryPoller, ListedPullRequest, MAX_CACHED_WIRE_BYTES,
+        CheckConclusion, ChecksOutcome, ConvergenceCheck, DrainRetryBackoff, EntityTag,
+        FileCredentialAccess, GitHubRepositoryPoller, GraphQlEnvelope, GraphQlError,
+        GraphQlErrorExtensions, HeaderMap, HeaderValue, ListedPullRequest, MAX_CACHED_WIRE_BYTES,
         MAX_CHECK_SUITES_PER_COMMIT_CHECK_RUN_SEARCH, MAX_CONCURRENT_PULL_REQUEST_FETCHES,
-        MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS, MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE,
-        PollAttemptWait, PollCache, PreparedTargetedRefresh, PullRequestSettlement, PullResponse,
-        ReactionContent, RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchConvergenceAssessment,
+        MAX_CONSECUTIVE_POLL_PREEMPTIONS, MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS,
+        MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE, PollAttemptWait, PollCache,
+        PreparedTargetedRefresh, PullRequestSettlement, PullResponse, RETRY_AFTER, ReactionContent,
+        RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchConvergenceAssessment,
         RepoWatchConvergenceAssessmentInput, RepoWatchCursorGeneration, RepoWatchEventKindNameV1,
         RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
         RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
@@ -7764,26 +8408,28 @@ mod tests {
         RepoWatchWorkflowRunObservation, RepositorySlug, RepositoryWatchAttemptError,
         RepositoryWatchChildExit, RepositoryWatchRuntimeConstructionError,
         RepositoryWatchRuntimeError, RepositoryWatchTask, RepositoryWatchWake, ResourceKey,
-        ReviewState, TargetedPollOutcome, TargetedPullRequest, TargetedRefreshSettlement, Url,
-        UuidV7RepoWatchEventIdGenerator, WEBHOOK_CURSOR_SIZING_TIMEOUT,
-        WEBHOOK_DRAIN_ATTEMPT_TIMEOUT, WEBHOOK_DRAIN_MAX_ATTEMPT_TIMEOUT,
-        WEBHOOK_DRAIN_RETRY_DELAY, WEBHOOK_DRAIN_RETRY_MAX_DELAY,
-        WEBHOOK_DRAIN_TIMEOUT_PAYLOAD_QUANTUM_BYTES, WEBHOOK_DRAIN_TIMEOUT_PER_PAYLOAD_QUANTUM,
-        WEBHOOK_PENDING_PAGE_SIZE, WebhookAttemptDeadlines, WebhookAttemptOutcome,
-        WebhookAttemptPhase, WebhookDrain, WebhookDrainOutcome, WebhookDrainProgress,
-        WebhookDrainRetry, WebhookPayloadPurgeSchedule, WebhookPollInterrupt,
-        WebhookShadowBaseline, WorkflowName, WorkflowResponse, await_poll_or_interrupt,
-        commit_check_run_search_is_complete, compact_cursor_observation, derive_repo_watch_events,
-        dispatch_context_json, initial_poll_deadline, inspect_webhook_drain, next_cadence_deadline,
+        ReviewState, StatusCode, TargetedPollOutcome, TargetedPullRequest,
+        TargetedRefreshSettlement, Url, UuidV7RepoWatchEventIdGenerator,
+        WEBHOOK_CURSOR_SIZING_TIMEOUT, WEBHOOK_DRAIN_ATTEMPT_TIMEOUT,
+        WEBHOOK_DRAIN_MAX_ATTEMPT_TIMEOUT, WEBHOOK_DRAIN_RETRY_DELAY,
+        WEBHOOK_DRAIN_RETRY_MAX_DELAY, WEBHOOK_DRAIN_TIMEOUT_PAYLOAD_QUANTUM_BYTES,
+        WEBHOOK_DRAIN_TIMEOUT_PER_PAYLOAD_QUANTUM, WEBHOOK_PENDING_PAGE_SIZE,
+        WebhookAttemptDeadlines, WebhookAttemptOutcome, WebhookAttemptPhase, WebhookDrain,
+        WebhookDrainOutcome, WebhookDrainProgress, WebhookDrainRetry, WebhookPayloadPurgeSchedule,
+        WebhookPollInterrupt, WebhookShadowBaseline, WorkflowName, WorkflowResponse,
+        await_poll_or_interrupt, commit_check_run_search_is_complete, compact_cursor_observation,
+        dispatch_context_json, graphql_envelope_error, initial_poll_deadline,
+        inspect_webhook_drain, merge_targeted_refresh_into_webhook_shadow, next_cadence_deadline,
         next_repository_wake, normalize_checks_outcome, normalize_pull_request_context, object_id,
         observe_webhook_work_before_drain, owed_dispatch_context_json_parts,
-        record_dispatch_start_nudge_outcome, repository_reconciliation_quantum_exhausted,
-        rule_activation_error, run_until_shutdown, supervise_repository_tasks,
-        targeted_pull_requests,
+        poll_webhook_interrupt, record_dispatch_start_nudge_outcome, rejected_response_error,
+        rejection_needs_its_message, repository_reconciliation_should_yield, rule_activation_error,
+        run_until_shutdown, supervise_repository_tasks, targeted_pull_requests,
     };
     use signalbox_application::{
-        EligibilityNudgeOutcome, InProcessEligibilityWorkSource, RepoWatchEventIdentityFrontierV1,
-        RepoWatchTargetedRefreshV1,
+        EligibilityNudgeOutcome, InProcessEligibilityWorkSource,
+        RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventIdentityFrontierV1,
+        RepoWatchMergedPullRequestBaselineV1, RepoWatchTargetedRefreshV1,
     };
     use signalbox_domain::{
         BranchName, CommitSha, PullRequestBody, PullRequestEventContext,
@@ -8021,6 +8667,25 @@ mod tests {
 
     const fn drain_failure() -> Result<(), RepositoryWatchAttemptError> {
         Err(RepositoryWatchAttemptError::Persistence)
+    }
+
+    /// A delivery outside the mapped set, which reaches terminal state without
+    /// a provider request of its own.
+    fn ignored_admission(delivery: u128) -> Result<RepoWatchWebhookAdmission, Box<dyn Error>> {
+        let body = serde_json::json!({
+            "action": "queued",
+            "repository": {"full_name": WATCHED_REPOSITORY},
+        })
+        .to_string()
+        .into_bytes();
+        Ok(RepoWatchWebhookAdmission::try_new(
+            webhook_delivery_key(delivery),
+            RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())?,
+            "workflow_job".to_owned(),
+            Some("queued".to_owned()),
+            [WEBHOOK_BODY_DIGEST_FILL; 32],
+            body,
+        )?)
     }
 
     fn synchronize_admission(delivery: u128) -> Result<RepoWatchWebhookAdmission, Box<dyn Error>> {
@@ -8832,6 +9497,39 @@ mod tests {
         )
     }
 
+    fn merged_baseline_for_number(
+        source: &RepoWatchPullRequestState,
+        number: PullRequestNumber,
+        signal_reviewers: &[RepoWatchAuthorLogin],
+    ) -> RepoWatchMergedPullRequestBaselineV1 {
+        let context = source.context();
+        let merged = RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
+            context: PullRequestEventContext::new(PullRequestEventContextInput {
+                number,
+                head_sha: context.head_sha().clone(),
+                head_repository: context.head_repository().clone(),
+                base_branch: context.base_branch().clone(),
+                head_branch: context.head_branch().clone(),
+                title: context.title().clone(),
+                body: context.body().clone(),
+                labels: context.labels().to_vec(),
+                draft: context.draft(),
+                author: context.author().cloned(),
+            }),
+            lifecycle: RepoWatchPullRequestLifecycle::Merged,
+            mergeable_state: source.mergeable_state(),
+            completed_check_suites: source.completed_check_suites().to_vec(),
+            completed_check_runs: source.completed_check_runs().to_vec(),
+            reviews: source.reviews().to_vec(),
+            threads: source.threads().to_vec(),
+            reactions: source.reactions().to_vec(),
+        })
+        .expect("fixture merged pull request is canonical");
+        RepoWatchMergedPullRequestBaselineV1::from_merged_state(&merged, signal_reviewers)
+            .expect("fixture compact baseline is canonical")
+            .expect("fixture merged pull request produces a baseline")
+    }
+
     fn submitted_review(id: u64) -> RepoWatchReviewObservation {
         RepoWatchReviewObservation::new(
             object_id(id).expect("fixture review identity is positive"),
@@ -8921,6 +9619,8 @@ mod tests {
         status: &'static str,
         entity_tag: Option<&'static str>,
         link: Option<&'static str>,
+        retry_after: Option<&'static str>,
+        declared_content_length: Option<usize>,
         body: String,
         delay: Duration,
     }
@@ -8935,6 +9635,8 @@ mod tests {
                 status: "200 OK",
                 entity_tag: Some(ENTITY_TAG),
                 link: None,
+                retry_after: None,
+                declared_content_length: None,
                 body: body.0,
                 delay: Duration::ZERO,
             }
@@ -8949,6 +9651,8 @@ mod tests {
                 status: "200 OK",
                 entity_tag: Some(ENTITY_TAG),
                 link: Some(NEXT_PAGE_LINK),
+                retry_after: None,
+                declared_content_length: None,
                 body: body.0,
                 delay: Duration::ZERO,
             }
@@ -8963,6 +9667,8 @@ mod tests {
                 status: "200 OK",
                 entity_tag: Some(ENTITY_TAG),
                 link: None,
+                retry_after: None,
+                declared_content_length: None,
                 body: body.0,
                 delay: Duration::ZERO,
             }
@@ -8977,6 +9683,8 @@ mod tests {
                 status: "404 Not Found",
                 entity_tag: None,
                 link: None,
+                retry_after: None,
+                declared_content_length: None,
                 body: String::from("{}"),
                 delay: Duration::ZERO,
             }
@@ -8991,6 +9699,8 @@ mod tests {
                 status: "403 Forbidden",
                 entity_tag: None,
                 link: None,
+                retry_after: None,
+                declared_content_length: None,
                 body: String::from("{}"),
                 delay: Duration::ZERO,
             }
@@ -9005,6 +9715,8 @@ mod tests {
                 status: "304 Not Modified",
                 entity_tag: None,
                 link: None,
+                retry_after: None,
+                declared_content_length: None,
                 body: String::new(),
                 delay: Duration::ZERO,
             }
@@ -9012,6 +9724,26 @@ mod tests {
 
         fn delayed(mut self, delay: Duration) -> Self {
             self.delay = delay;
+            self
+        }
+
+        /// Marks a rejection as the provider's own rate limit.
+        ///
+        /// A secondary limit is what carries this header, and it is what
+        /// separates a throttled `403` from the permission-scoped `403` an
+        /// under-scoped credential receives on one endpoint.
+        fn throttled(mut self) -> Self {
+            self.retry_after = Some("60");
+            self
+        }
+
+        /// Promises more body than the connection then delivers.
+        ///
+        /// The declared length outruns the bytes written and the socket closes,
+        /// so the client's body stream fails part-way — the transport failure a
+        /// rejection can hit while it is being read for classification.
+        fn truncated(mut self) -> Self {
+            self.declared_content_length = Some(self.body.len() + 1);
             self
         }
 
@@ -9024,6 +9756,8 @@ mod tests {
                 status: "200 OK",
                 entity_tag: None,
                 link: None,
+                retry_after: None,
+                declared_content_length: None,
                 body: body.0,
                 delay: Duration::ZERO,
             }
@@ -9228,12 +9962,19 @@ mod tests {
             .link
             .map(|value| format!("Link: {value}\r\n"))
             .unwrap_or_default();
+        let retry_after = response
+            .retry_after
+            .map(|value| format!("Retry-After: {value}\r\n"))
+            .unwrap_or_default();
         let encoded = format!(
-            "HTTP/1.1 {}\r\nContent-Type: application/json\r\n{}{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 {}\r\nContent-Type: application/json\r\n{}{}{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
             response.status,
             entity_tag,
             link,
-            response.body.len(),
+            retry_after,
+            response
+                .declared_content_length
+                .unwrap_or(response.body.len()),
             response.body,
         );
         stream
@@ -10028,6 +10769,100 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn targeted_refresh_merge_preserves_accumulated_shadow_state_and_frontiers()
+    -> Result<(), Box<dyn Error>> {
+        let observation = complete_typed_observation().await;
+        let target = observation.state().pull_requests()[0].context().number();
+        let unrelated = PullRequestNumber::new(
+            NonZeroU64::new(PULL_NUMBER + 1).expect("fixture pull-request number is positive"),
+        );
+        let unrelated_baseline = merged_baseline_for_number(
+            &observation.state().pull_requests()[0],
+            unrelated,
+            observation.signal_reviewers(),
+        );
+        let advanced_branch = RepoWatchBranchHead::new(
+            observation.state().branch_heads()[0].branch().clone(),
+            CommitSha::try_new(String::from(OWED_EVENT_HEAD_SHA))?,
+        );
+        let shadow_state = RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: observation.state().pull_requests().to_vec(),
+            workflow_runs: observation.state().workflow_runs().to_vec(),
+            branch_heads: vec![advanced_branch.clone()],
+        })?;
+        let shadow_frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![
+            RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+                [1; 32],
+                NonZeroU64::new(2).expect("fixture sequence is positive"),
+                target,
+            ),
+            RepoWatchEventIdentityFrontierEntryV1::new([2; 32], NonZeroU64::MIN),
+        ])?;
+        let merged = observation_with_pull_lifecycle(RepoWatchPullRequestLifecycle::Merged).await;
+        let compacted = compact_cursor_observation(&merged, None, &[])
+            .expect("fixture merged observation compacts");
+        let candidate_frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![
+            RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+                [1; 32],
+                NonZeroU64::new(3).expect("fixture sequence is positive"),
+                target,
+            ),
+            RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+                [3; 32],
+                NonZeroU64::MIN,
+                target,
+            ),
+        ])?;
+        let candidate =
+            RepoWatchCursorCandidate::try_with_event_identity_frontier_and_merged_baselines(
+                compacted.observation,
+                candidate_frontier,
+                compacted.merged_pull_request_baselines,
+            )?;
+        let expected_frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![
+            RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+                [1; 32],
+                NonZeroU64::new(3).expect("fixture sequence is positive"),
+                target,
+            ),
+            RepoWatchEventIdentityFrontierEntryV1::new([2; 32], NonZeroU64::MIN),
+            RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+                [3; 32],
+                NonZeroU64::MIN,
+                target,
+            ),
+        ])?;
+
+        let refreshed = merge_targeted_refresh_into_webhook_shadow(
+            WebhookShadowBaseline {
+                observation: RepoWatchObservation::new(
+                    observation.signal_reviewers().to_vec(),
+                    shadow_state,
+                ),
+                identity_frontier: shadow_frontier,
+                merged_pull_request_baselines: vec![unrelated_baseline],
+            },
+            &candidate,
+            &[target],
+        )
+        .expect("targeted refresh merges into the accumulated shadow");
+
+        assert!(refreshed.observation.state().pull_requests().is_empty());
+        assert_eq!(
+            refreshed.observation.state().branch_heads(),
+            [advanced_branch]
+        );
+        assert_eq!(refreshed.identity_frontier, expected_frontier);
+        assert_eq!(refreshed.merged_pull_request_baselines.len(), 2);
+        assert_eq!(refreshed.merged_pull_request_baselines[0].number(), target);
+        assert_eq!(
+            refreshed.merged_pull_request_baselines[1].number(),
+            unrelated
+        );
+        Ok(())
+    }
+
     struct FreshnessOnDrop {
         poller: Arc<GitHubRepositoryPoller>,
     }
@@ -10102,7 +10937,7 @@ mod tests {
             },
         ];
 
-        let targets = targeted_pull_requests(&previous, &refreshes)
+        let targets = targeted_pull_requests(&previous, &[], &refreshes)
             .expect("compatible targeted queries coalesce");
 
         assert_eq!(
@@ -10135,9 +10970,35 @@ mod tests {
             },
         ];
 
-        let result = targeted_pull_requests(&previous, &refreshes);
+        let result = targeted_pull_requests(&previous, &[], &refreshes);
 
         assert_eq!(result, Err(RepositoryWatchAttemptError::Normalization));
+    }
+
+    #[tokio::test]
+    async fn a_compact_merged_baseline_is_a_target_for_its_commit_rollup() {
+        let merged = observation_with_pull_lifecycle(RepoWatchPullRequestLifecycle::Merged).await;
+        let compacted = compact_cursor_observation(&merged, None, &[])
+            .expect("fixture observation compacts canonically");
+        let baseline = &compacted.merged_pull_request_baselines[0];
+        let refreshes = [RepoWatchTargetedRefreshV1::CheckRollupForCommit {
+            head: baseline.head_sha().clone(),
+        }];
+
+        let targets = targeted_pull_requests(
+            &compacted.observation,
+            &compacted.merged_pull_request_baselines,
+            &refreshes,
+        )
+        .expect("a compact subject remains targetable");
+
+        assert_eq!(
+            targets,
+            vec![TargetedPullRequest {
+                number: baseline.number(),
+                expected_head: Some(baseline.head_sha().clone()),
+            }]
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -11098,17 +11959,41 @@ mod tests {
         let error = RepositoryWatchAttemptError::WebhookAttemptTimedOut;
 
         assert_eq!(
-            WebhookAttemptPhase::BeforeDrain.cancelled_outcome(error),
+            WebhookAttemptPhase::BeforeDrain.cancelled_outcome(error, false),
             WebhookAttemptOutcome::FailedBeforeDrain(error)
         );
         assert_eq!(
-            WebhookAttemptPhase::Drain.cancelled_outcome(error),
+            WebhookAttemptPhase::Drain.cancelled_outcome(error, false),
             WebhookAttemptOutcome::DrainFailed(error)
         );
         assert_eq!(
-            WebhookAttemptPhase::AfterDrain.cancelled_outcome(error),
+            WebhookAttemptPhase::AfterDrain.cancelled_outcome(error, false),
             WebhookAttemptOutcome::DrainedThenFailed(error)
         );
+    }
+
+    /// The drain's own post-terminal dispatch window sits inside the drain
+    /// phase, and its delivery is already terminal. Reporting a cancellation
+    /// there as a drain failure would grow the projection backoff — suppressing
+    /// admission wakes and poll drains to its cap — for a projection that had
+    /// already committed.
+    #[test]
+    fn a_cancelled_post_terminal_dispatch_arms_the_follow_up_instead_of_the_backoff() {
+        let error = RepositoryWatchAttemptError::WebhookAttemptTimedOut;
+
+        assert_eq!(
+            WebhookAttemptPhase::Drain.cancelled_outcome(error, true),
+            WebhookAttemptOutcome::DrainedThenFailed(error)
+        );
+    }
+
+    /// Only the drain owns pending deliveries, so only a cancellation there can
+    /// leave one unprojected behind a cursor a later poll would advance.
+    #[test]
+    fn only_a_cancelled_drain_fences_the_next_cursor_advancing_poll() {
+        assert!(!WebhookAttemptPhase::BeforeDrain.cancellation_fences_complete_poll());
+        assert!(WebhookAttemptPhase::Drain.cancellation_fences_complete_poll());
+        assert!(!WebhookAttemptPhase::AfterDrain.cancellation_fences_complete_poll());
     }
 
     #[test]
@@ -11127,6 +12012,9 @@ mod tests {
             WEBHOOK_DRAIN_TIMEOUT_PER_PAYLOAD_QUANTUM.saturating_mul(3)
         );
         assert_eq!(maximum.drain, WEBHOOK_DRAIN_MAX_ATTEMPT_TIMEOUT);
+        assert_eq!(ordinary.stall_threshold(), ordinary.drain);
+        assert_eq!(larger.stall_threshold(), larger.drain);
+        assert_eq!(maximum.stall_threshold(), maximum.drain);
         assert!(ordinary.attempt > ordinary.drain);
         assert!(larger.attempt > larger.drain);
         assert!(maximum.attempt > maximum.drain);
@@ -11142,6 +12030,173 @@ mod tests {
 
         assert!(WEBHOOK_CURSOR_SIZING_TIMEOUT < floor.drain);
         assert!(WEBHOOK_CURSOR_SIZING_TIMEOUT < floor.attempt);
+    }
+
+    /// The attempt deadline is the drain deadline plus a margin the leading
+    /// reconciliation spends, so any leading work that outlasts that margin
+    /// makes the outer deadline — not the drain's own — cancel an in-flight
+    /// drain. That cancellation leaves the same pending delivery behind, so it
+    /// owes the same fence: without it the next complete poll advances the
+    /// durable cursor past a delivery nothing has projected.
+    #[tokio::test(start_paused = true)]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn an_attempt_deadline_reached_inside_the_drain_fences_the_next_complete_poll()
+    -> Result<(), Box<dyn Error>> {
+        // A paused clock auto-advances whenever the runtime goes idle, and
+        // container startup spends nearly all of its time waiting on the
+        // container daemon, so keep the clock runnable across setup.
+        let clock_guard = keep_paused_clock_runnable();
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let admission = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&admission).await?;
+        webhook_store
+            .inject_projection_wedge(admission.key(), WEBHOOK_PROJECTION_ADVISORY_LOCK)
+            .await?;
+        let mut blocker = pool.acquire().await?;
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(WEBHOOK_PROJECTION_ADVISORY_LOCK)
+            .execute(&mut *blocker)
+            .await?;
+        let mut fixture = webhook_task(&pool).await?;
+        {
+            // The drain deadline is deliberately far beyond the attempt's, so
+            // the cancellation observed below can only be the outer one.
+            let attempt =
+                fixture
+                    .task
+                    .run_webhook_attempt_with_deadlines(WebhookAttemptDeadlines {
+                        drain: Duration::from_secs(600),
+                        attempt: Duration::from_secs(60),
+                        cursor_payload_bytes: 0,
+                    });
+            tokio::pin!(attempt);
+            tokio::select! {
+                () = wait_for_webhook_projection_wedge(&webhook_store) => {}
+                outcome = &mut attempt => {
+                    panic!("the deliberate projection wedge completed early: {outcome:?}");
+                }
+            }
+
+            clock_guard.abort();
+            clock_guard.await.ok();
+            tokio::time::advance(Duration::from_secs(60)).await;
+            assert_eq!(
+                attempt.await,
+                WebhookAttemptOutcome::DrainFailed(
+                    RepositoryWatchAttemptError::WebhookAttemptTimedOut
+                ),
+                "the drain was what the outer deadline interrupted"
+            );
+        }
+        let clock_guard = keep_paused_clock_runnable();
+        assert!(
+            fixture.task.webhook_drain_timed_out,
+            "an outer deadline reached inside the drain records the same timeout the drain's own deadline does"
+        );
+        // Taken and restored so the assertion below isolates the general
+        // timeout fence from the delivery-specific ambiguity fence beside it.
+        let ambiguous = fixture.task.webhook_terminal_ambiguous.take();
+        let mut deferred_drain = None;
+        let mut deferred_dispatch_failure = None;
+        assert_eq!(
+            fixture
+                .task
+                .run_attempt_prelude(
+                    WebhookDrain::Deferred,
+                    &mut deferred_drain,
+                    &mut deferred_dispatch_failure,
+                )
+                .await,
+            Err(RepositoryWatchAttemptError::WebhookDrainTimedOut),
+            "the cancelled drain's pending delivery blocks the cursor-advancing poll"
+        );
+        fixture.task.webhook_terminal_ambiguous = ambiguous;
+        assert!(!webhook_disposition_exists(&webhook_store, admission.key()).await?);
+        let unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
+            .bind(WEBHOOK_PROJECTION_ADVISORY_LOCK)
+            .fetch_one(&mut *blocker)
+            .await?;
+
+        let retried = fixture.task.process_webhook_deliveries().await;
+
+        assert!(unlocked, "the fixture releases its deliberate drain wedge");
+        assert_eq!(retried, WebhookDrainOutcome::Drained);
+        assert!(webhook_disposition_exists(&webhook_store, admission.key()).await?);
+        clock_guard.abort();
+        clock_guard.await.ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn cursor_sizing_failure_clears_an_earlier_drain_timeout_marker()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let mut fixture = webhook_task(&pool).await?;
+        fixture.task.webhook_drain_timed_out = true;
+        pool.close().await;
+
+        let outcome = fixture.task.process_webhook_deliveries_with_timeout().await;
+
+        assert_eq!(
+            outcome,
+            WebhookDrainOutcome::ProjectionFailed(RepositoryWatchAttemptError::Persistence)
+        );
+        assert!(!fixture.task.webhook_drain_timed_out);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn cursor_sizing_settles_a_retained_completion_before_reading_the_cursor()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let mut fixture = webhook_task(&pool).await?;
+        let key = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?.key();
+        fixture.task.webhook_targeted_completion =
+            Some(super::RetainedTargetedWebhookCompletion::new(tokio::spawn(
+                async move { Ok(super::TargetedWebhookCompletion::CursorSuperseded { key }) },
+            )));
+
+        let deadlines = fixture
+            .task
+            .webhook_attempt_deadlines()
+            .await
+            .expect("retained completion settles before cursor sizing");
+
+        assert!(fixture.task.webhook_targeted_completion.is_none());
+        assert_eq!(
+            deadlines,
+            super::load_webhook_attempt_deadlines(&fixture.task.store, &fixture.task.repository)
+                .await
+                .expect("settled cursor can be sized independently")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn failed_pre_sizing_settlement_invalidates_unpublished_freshness()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let mut fixture = webhook_task(&pool).await?;
+        fixture.task.poller.record_fetched_pull_request(
+            PULL_NUMBER,
+            &listed_pull_request(HEAD_SHA),
+            PullRequestSettlement::Settled,
+            Vec::new(),
+        );
+        fixture.task.webhook_targeted_completion =
+            Some(super::RetainedTargetedWebhookCompletion::new(tokio::spawn(
+                async move { Err(super::TargetedWebhookCompletionError::Cursor) },
+            )));
+
+        let result = fixture.task.webhook_attempt_deadlines().await;
+
+        assert!(result.is_err());
+        assert!(fixture.task.poller.freshness().is_empty());
+        Ok(())
     }
 
     #[tokio::test]
@@ -11400,9 +12455,9 @@ mod tests {
         let tail = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
         webhook_store.admit(&throttled).await?;
         webhook_store.admit(&tail).await?;
-        let server = ScriptedServer::start(vec![ScriptedResponse::forbidden(RequestTarget(
-            PULL_DETAIL_TARGET.to_owned(),
-        ))])
+        let server = ScriptedServer::start(vec![
+            ScriptedResponse::forbidden(RequestTarget(PULL_DETAIL_TARGET.to_owned())).throttled(),
+        ])
         .await;
         let mut fixture = webhook_task_against(&pool, server.base_url.clone()).await?;
 
@@ -11415,6 +12470,111 @@ mod tests {
         );
         assert!(!webhook_disposition_exists(&webhook_store, throttled.key()).await?);
         assert!(!webhook_disposition_exists(&webhook_store, tail.key()).await?);
+        Ok(())
+    }
+
+    /// A credential that lacks permission on one endpoint answers `403` without
+    /// the provider's rate-limit headers. Stopping the page there would break
+    /// the drain at that same oldest receipt on every retry, so every later
+    /// delivery behind it is never attempted — a permanent per-repository stall
+    /// reachable with an ordinary under-scoped token.
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_permission_scoped_rejection_leaves_the_rest_of_the_page_attempted()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let unscoped = synchronize_admission(THIRD_WEBHOOK_DELIVERY)?;
+        let tail = ignored_admission(FIRST_WEBHOOK_DELIVERY)?;
+        webhook_store.admit(&unscoped).await?;
+        webhook_store.admit(&tail).await?;
+        let server = ScriptedServer::start(vec![ScriptedResponse::forbidden(RequestTarget(
+            PULL_DETAIL_TARGET.to_owned(),
+        ))])
+        .await;
+        let mut fixture = webhook_task_against(&pool, server.base_url.clone()).await?;
+
+        let attempt = fixture.task.process_webhook_deliveries().await;
+
+        server.finish().await;
+        assert_eq!(
+            attempt,
+            WebhookDrainOutcome::ProjectionFailed(RepositoryWatchAttemptError::Rejected)
+        );
+        assert!(!webhook_disposition_exists(&webhook_store, unscoped.key()).await?);
+        assert!(
+            webhook_disposition_exists(&webhook_store, tail.key()).await?,
+            "the receipt behind the unscoped one is still attempted"
+        );
+        Ok(())
+    }
+
+    /// A rejection the headers already classify is never read, which is what
+    /// keeps a stalled or broken body from holding the serialized repository
+    /// task to the request timeout during the outage that produced it. The
+    /// scripted response promises a byte it never sends: a drain that read it
+    /// would report that transport failure instead of the throttle the headers
+    /// had already named.
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_header_signalled_rejection_is_classified_without_reading_its_body()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let throttled = synchronize_admission(THIRD_WEBHOOK_DELIVERY)?;
+        webhook_store.admit(&throttled).await?;
+        let server = ScriptedServer::start(vec![
+            ScriptedResponse::forbidden(RequestTarget(PULL_DETAIL_TARGET.to_owned()))
+                .throttled()
+                .truncated(),
+        ])
+        .await;
+        let mut fixture = webhook_task_against(&pool, server.base_url.clone()).await?;
+
+        let attempt = fixture.task.process_webhook_deliveries().await;
+
+        server.finish().await;
+        assert_eq!(
+            attempt,
+            WebhookDrainOutcome::ProjectionFailed(RepositoryWatchAttemptError::ProviderUnavailable)
+        );
+        assert!(!webhook_disposition_exists(&webhook_store, throttled.key()).await?);
+        Ok(())
+    }
+
+    /// A headerless `403` is the one rejection whose body has to be read before
+    /// it can be classified, so it is also the one whose read can fail. That
+    /// failure is a transport failure and stops the page: reading it as the
+    /// empty-bodied permission rejection instead would keep hydrating later
+    /// deliveries over a transport that had just broken.
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_rejection_whose_body_fails_mid_read_stops_the_whole_page()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let unreadable = synchronize_admission(THIRD_WEBHOOK_DELIVERY)?;
+        let behind_it = ignored_admission(FIRST_WEBHOOK_DELIVERY)?;
+        webhook_store.admit(&unreadable).await?;
+        webhook_store.admit(&behind_it).await?;
+        let server = ScriptedServer::start(vec![
+            ScriptedResponse::forbidden(RequestTarget(PULL_DETAIL_TARGET.to_owned())).truncated(),
+        ])
+        .await;
+        let mut fixture = webhook_task_against(&pool, server.base_url.clone()).await?;
+
+        let attempt = fixture.task.process_webhook_deliveries().await;
+
+        server.finish().await;
+        assert_eq!(
+            attempt,
+            WebhookDrainOutcome::ProjectionFailed(RepositoryWatchAttemptError::Request)
+        );
+        assert!(!webhook_disposition_exists(&webhook_store, unreadable.key()).await?);
+        assert!(
+            !webhook_disposition_exists(&webhook_store, behind_it.key()).await?,
+            "the page stops rather than hydrating over the failed transport"
+        );
         Ok(())
     }
 
@@ -11452,20 +12612,51 @@ mod tests {
         let first_sequence = NonZeroU64::new(41).expect("fixture sequence is positive");
         let next_sequence = NonZeroU64::new(42).expect("fixture sequence is positive");
         let started_at = Instant::now();
+        let threshold = Duration::from_secs(60);
         let mut progress = WebhookDrainProgress::default();
 
-        assert_eq!(progress.observe(first_sequence, started_at), None);
         assert_eq!(
-            progress.observe(first_sequence, started_at + Duration::from_secs(31)),
-            Some(Duration::from_secs(31))
-        );
-        assert_eq!(
-            progress.observe(next_sequence, started_at + Duration::from_secs(32)),
+            progress.observe(first_sequence, started_at, threshold),
             None
         );
         assert_eq!(
-            progress.observe(next_sequence, started_at + Duration::from_secs(90)),
-            Some(Duration::from_secs(58))
+            progress.observe(
+                first_sequence,
+                started_at + Duration::from_secs(31),
+                threshold,
+            ),
+            Some((Duration::from_secs(31), threshold))
+        );
+        assert_eq!(
+            progress.observe(
+                next_sequence,
+                started_at + Duration::from_secs(32),
+                threshold,
+            ),
+            None
+        );
+        assert_eq!(
+            progress.observe(
+                next_sequence,
+                started_at + Duration::from_secs(90),
+                threshold,
+            ),
+            Some((Duration::from_secs(58), threshold))
+        );
+    }
+
+    #[test]
+    fn an_unchanged_webhook_head_never_reduces_its_stall_threshold() {
+        let sequence = NonZeroU64::new(41).expect("fixture sequence is positive");
+        let started_at = Instant::now();
+        let larger = Duration::from_secs(300);
+        let smaller = Duration::from_secs(60);
+        let mut progress = WebhookDrainProgress::default();
+
+        assert_eq!(progress.observe(sequence, started_at, larger), None);
+        assert_eq!(
+            progress.observe(sequence, started_at + smaller, smaller),
+            Some((smaller, larger))
         );
     }
 
@@ -12418,19 +13609,52 @@ mod tests {
         let observation =
             observation_with_pull_lifecycle(RepoWatchPullRequestLifecycle::Merged).await;
 
-        let compacted = compact_cursor_observation(&observation)
+        let compacted = compact_cursor_observation(&observation, None, &[])
             .expect("fixture observation compacts canonically");
 
-        assert!(compacted.state().pull_requests().is_empty());
+        assert!(compacted.observation.state().pull_requests().is_empty());
+        assert_eq!(compacted.merged_pull_request_baselines.len(), 1);
         assert_eq!(
-            compacted.state().workflow_runs(),
+            compacted.merged_pull_request_baselines[0].number(),
+            observation.state().pull_requests()[0].context().number()
+        );
+        assert_eq!(
+            compacted.observation.state().workflow_runs(),
             observation.state().workflow_runs()
         );
         assert_eq!(
-            compacted.state().branch_heads(),
+            compacted.observation.state().branch_heads(),
             observation.state().branch_heads()
         );
-        assert_eq!(compacted.signal_reviewers(), observation.signal_reviewers());
+        assert_eq!(
+            compacted.observation.signal_reviewers(),
+            observation.signal_reviewers()
+        );
+    }
+
+    /// A storage-version-three cursor migrated to version four holds its merged
+    /// pull requests in full and no baselines. A complete poll fetches only
+    /// listed open pull requests and previously open ones, so that merged entry
+    /// is absent from the polled observation. Compacting the polled observation
+    /// alone would drop it without leaving the baseline the migration promises,
+    /// and the next post-merge hydration would then have nothing to compare.
+    #[tokio::test]
+    async fn a_durable_cursor_seeds_baselines_from_migrated_merged_pull_requests() {
+        let previous = observation_with_pull_lifecycle(RepoWatchPullRequestLifecycle::Merged).await;
+        let polled = compact_cursor_observation(&previous, None, &[])
+            .expect("fixture observation compacts canonically")
+            .observation;
+        assert!(polled.state().pull_requests().is_empty());
+
+        let compacted = compact_cursor_observation(&polled, Some(&previous), &[])
+            .expect("fixture observation compacts canonically");
+
+        assert_eq!(compacted.merged_pull_request_baselines.len(), 1);
+        assert_eq!(
+            compacted.merged_pull_request_baselines[0].number(),
+            previous.state().pull_requests()[0].context().number()
+        );
+        assert!(compacted.observation.state().pull_requests().is_empty());
     }
 
     #[tokio::test]
@@ -12438,13 +13662,14 @@ mod tests {
         let observation =
             observation_with_pull_lifecycle(RepoWatchPullRequestLifecycle::Closed).await;
 
-        let compacted = compact_cursor_observation(&observation)
+        let compacted = compact_cursor_observation(&observation, None, &[])
             .expect("fixture observation compacts canonically");
 
         assert_eq!(
-            compacted.state().pull_requests(),
+            compacted.observation.state().pull_requests(),
             observation.state().pull_requests()
         );
+        assert!(compacted.merged_pull_request_baselines.is_empty());
     }
 
     #[tokio::test]
@@ -12568,7 +13793,7 @@ mod tests {
     }
 
     #[test]
-    fn reconciliation_yields_at_the_audited_quantum() {
+    fn reconciliation_yields_at_the_audited_quantum_only_with_a_continuation_wake() {
         let quantum = checked_in_example_configuration()
             .expect("checked-in example parses")
             .numeric_bounds()
@@ -12576,13 +13801,20 @@ mod tests {
             .flatten()
             .and_then(|value| usize::try_from(value).ok())
             .expect("example reconciliation quantum fits usize");
-        assert!(!repository_reconciliation_quantum_exhausted(
+        assert!(!repository_reconciliation_should_yield(
             quantum - 1,
             Some(quantum),
+            true,
         ));
-        assert!(repository_reconciliation_quantum_exhausted(
+        assert!(repository_reconciliation_should_yield(
             quantum,
             Some(quantum),
+            true,
+        ));
+        assert!(!repository_reconciliation_should_yield(
+            quantum,
+            Some(quantum),
+            false,
         ));
     }
 
@@ -12590,7 +13822,7 @@ mod tests {
     fn a_first_repository_baseline_polls_immediately() {
         let now = Instant::now();
 
-        assert_eq!(initial_poll_deadline(now, POLL_INTERVAL, false), now);
+        assert_eq!(initial_poll_deadline(now, POLL_INTERVAL, None), now);
     }
 
     #[test]
@@ -12598,9 +13830,434 @@ mod tests {
         let now = Instant::now();
 
         assert_eq!(
-            initial_poll_deadline(now, POLL_INTERVAL, true),
+            initial_poll_deadline(now, POLL_INTERVAL, Some(Duration::ZERO)),
             now + POLL_INTERVAL
         );
+    }
+
+    /// A restart resumes what the durable record says is left of the cadence.
+    /// Anchoring on this process's start instead would hand every restart a
+    /// fresh full interval.
+    #[test]
+    fn a_warm_restart_waits_only_for_the_remainder_of_the_cadence() {
+        let now = Instant::now();
+        let elapsed = POLL_INTERVAL / 4;
+
+        assert_eq!(
+            initial_poll_deadline(now, POLL_INTERVAL, Some(elapsed)),
+            now + (POLL_INTERVAL - elapsed)
+        );
+    }
+
+    /// Restarts more frequent than the interval must not postpone the
+    /// authoritative sweep: once the durable record is older than the interval,
+    /// the sweep is due no matter how recently this process started.
+    #[test]
+    fn a_restart_polls_immediately_once_the_recorded_sweep_is_older_than_the_interval() {
+        let now = Instant::now();
+
+        assert_eq!(
+            initial_poll_deadline(now, POLL_INTERVAL, Some(POLL_INTERVAL)),
+            now
+        );
+        assert_eq!(
+            initial_poll_deadline(now, POLL_INTERVAL, Some(POLL_INTERVAL * 9)),
+            now
+        );
+    }
+
+    /// A bounded drain page re-arms its wake while durable remainder exists, so
+    /// nothing in the preemption cycle itself ends it: sustained ingress would
+    /// preempt every fresh pass and the complete poll would never commit.
+    #[test]
+    fn consecutive_webhook_preemptions_stop_starving_the_complete_poll() {
+        assert_eq!(
+            poll_webhook_interrupt(DrainRetryBackoff::Clear, 0),
+            WebhookPollInterrupt::Enabled
+        );
+        assert_eq!(
+            poll_webhook_interrupt(
+                DrainRetryBackoff::Clear,
+                MAX_CONSECUTIVE_POLL_PREEMPTIONS - 1
+            ),
+            WebhookPollInterrupt::Enabled
+        );
+        assert_eq!(
+            poll_webhook_interrupt(DrainRetryBackoff::Clear, MAX_CONSECUTIVE_POLL_PREEMPTIONS),
+            WebhookPollInterrupt::Suppressed
+        );
+        assert_eq!(
+            poll_webhook_interrupt(
+                DrainRetryBackoff::Clear,
+                MAX_CONSECUTIVE_POLL_PREEMPTIONS + 1
+            ),
+            WebhookPollInterrupt::Suppressed
+        );
+    }
+
+    /// An owed drain retry keeps its own deadline authoritative regardless of
+    /// how many preemptions the still-due poll has left.
+    #[test]
+    fn a_backing_off_drain_retry_still_suppresses_admission_preemption() {
+        assert_eq!(
+            poll_webhook_interrupt(DrainRetryBackoff::InForce, 0),
+            WebhookPollInterrupt::Suppressed
+        );
+    }
+
+    /// The labelled axis is only worth its label if it reads the retry
+    /// faithfully — including the case the axis exists to separate, a
+    /// follow-up deadline, which is owed but is not backoff.
+    #[tokio::test(start_paused = true)]
+    async fn the_backoff_axis_reads_the_retry_it_is_taken_from() {
+        let mut retry = WebhookDrainRetry::default();
+        assert_eq!(DrainRetryBackoff::of(&retry), DrainRetryBackoff::Clear);
+
+        retry.update_after(&drain_failure());
+        assert_eq!(DrainRetryBackoff::of(&retry), DrainRetryBackoff::InForce);
+
+        let mut following_up = WebhookDrainRetry::default();
+        following_up.arm_follow_up(Instant::now());
+        assert_eq!(
+            DrainRetryBackoff::of(&following_up),
+            DrainRetryBackoff::Clear
+        );
+    }
+
+    /// The budget is counted in preemptions but chosen against the pages they
+    /// cost, and the two are not the same number: a preempted pass drains the
+    /// poll's own pre-poll page and then the page the admission wake's attempt
+    /// runs, and the suppressed pass that ends the cycle drains one more. Keeping
+    /// that conversion in a test is what stops the constant and the ceiling it
+    /// was chosen for from drifting apart.
+    #[test]
+    fn the_preemption_budget_holds_the_sweep_within_its_page_ceiling() {
+        const DRAINS_PER_PREEMPTED_PASS: u32 = 2;
+        const SUPPRESSED_PASS_DRAINS: u32 = 1;
+        const MAX_DELIVERIES_BEFORE_THE_SWEEP: u32 = 225;
+
+        let pages =
+            MAX_CONSECUTIVE_POLL_PREEMPTIONS * DRAINS_PER_PREEMPTED_PASS + SUPPRESSED_PASS_DRAINS;
+
+        assert_eq!(pages, 9);
+        assert_eq!(
+            pages * u32::from(WEBHOOK_PENDING_PAGE_SIZE.get()),
+            MAX_DELIVERIES_BEFORE_THE_SWEEP
+        );
+    }
+
+    /// What the provider returns when a valid credential lacks permission on one
+    /// endpoint: an error envelope naming no rate limit.
+    const PERMISSION_REJECTION_BODY: &[u8] = br#"{"message":"Resource not accessible by personal access token","documentation_url":"https://docs.github.com/rest"}"#;
+    /// What it returns for the secondary limit that carries neither rate-limit
+    /// header, where the message is the only signal.
+    const SECONDARY_RATE_LIMIT_BODY: &[u8] = br#"{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}"#;
+
+    /// A credential that lacks permission on one endpoint answers `403` with no
+    /// rate-limit signal of any kind. Treating that as a provider outage stops
+    /// the drain page at the same oldest receipt on every retry, so every later
+    /// delivery behind it — payload-only and ignored ones included — is never
+    /// attempted.
+    #[test]
+    fn a_permission_scoped_rejection_defers_only_its_own_receipt() {
+        let error = rejected_response_error(
+            StatusCode::FORBIDDEN,
+            &HeaderMap::new(),
+            PERMISSION_REJECTION_BODY,
+        );
+
+        assert_eq!(error, RepositoryWatchAttemptError::Rejected);
+        assert!(!error.stops_webhook_page());
+    }
+
+    /// The provider answers a `403` with its quota intact when the rejection is
+    /// about permission rather than rate, so an unexhausted counter is no more a
+    /// throttle than an absent one.
+    #[test]
+    fn a_rejection_with_quota_remaining_defers_only_its_own_receipt() {
+        let mut remaining = HeaderMap::new();
+        remaining.insert("x-ratelimit-remaining", HeaderValue::from_static("4999"));
+
+        assert_eq!(
+            rejected_response_error(StatusCode::FORBIDDEN, &remaining, PERMISSION_REJECTION_BODY),
+            RepositoryWatchAttemptError::Rejected
+        );
+    }
+
+    /// The provider documents three ordered signals for its own rate limits, and
+    /// each one has to stop the page: a secondary limit's `Retry-After`, a
+    /// primary limit's exhausted counter, and — the case neither header covers —
+    /// a secondary limit named only by the rejection's own message.
+    #[test]
+    fn a_throttled_rejection_stops_the_whole_page() {
+        let mut retry_after = HeaderMap::new();
+        retry_after.insert(RETRY_AFTER, HeaderValue::from_static("60"));
+        let mut exhausted = HeaderMap::new();
+        exhausted.insert("x-ratelimit-remaining", HeaderValue::from_static("0"));
+        let mut unexhausted = HeaderMap::new();
+        unexhausted.insert("x-ratelimit-remaining", HeaderValue::from_static("4999"));
+
+        let signalled_by_header = rejected_response_error(
+            StatusCode::FORBIDDEN,
+            &retry_after,
+            PERMISSION_REJECTION_BODY,
+        );
+        let signalled_by_quota =
+            rejected_response_error(StatusCode::FORBIDDEN, &exhausted, PERMISSION_REJECTION_BODY);
+        let signalled_by_message = rejected_response_error(
+            StatusCode::FORBIDDEN,
+            &unexhausted,
+            SECONDARY_RATE_LIMIT_BODY,
+        );
+
+        assert_eq!(
+            signalled_by_header,
+            RepositoryWatchAttemptError::ProviderUnavailable
+        );
+        assert_eq!(
+            signalled_by_quota,
+            RepositoryWatchAttemptError::ProviderUnavailable
+        );
+        assert_eq!(
+            signalled_by_message,
+            RepositoryWatchAttemptError::ProviderUnavailable
+        );
+        assert!(signalled_by_message.stops_webhook_page());
+    }
+
+    /// Only the `403` carrying neither header leaves anything for the message to
+    /// decide. Reading the others would hold the serialized repository task to
+    /// the request timeout on a stalled rejection — during the very outage that
+    /// produces them — for a classification the status already fixed.
+    #[test]
+    fn only_a_headerless_forbidden_rejection_is_read_before_it_is_classified() {
+        let mut retry_after = HeaderMap::new();
+        retry_after.insert(RETRY_AFTER, HeaderValue::from_static("60"));
+        let mut exhausted = HeaderMap::new();
+        exhausted.insert("x-ratelimit-remaining", HeaderValue::from_static("0"));
+        let mut unexhausted = HeaderMap::new();
+        unexhausted.insert("x-ratelimit-remaining", HeaderValue::from_static("4999"));
+
+        assert!(rejection_needs_its_message(
+            StatusCode::FORBIDDEN,
+            &HeaderMap::new()
+        ));
+        assert!(rejection_needs_its_message(
+            StatusCode::FORBIDDEN,
+            &unexhausted
+        ));
+        assert!(!rejection_needs_its_message(
+            StatusCode::FORBIDDEN,
+            &retry_after
+        ));
+        assert!(!rejection_needs_its_message(
+            StatusCode::FORBIDDEN,
+            &exhausted
+        ));
+        assert!(!rejection_needs_its_message(
+            StatusCode::TOO_MANY_REQUESTS,
+            &HeaderMap::new()
+        ));
+        assert!(!rejection_needs_its_message(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &HeaderMap::new()
+        ));
+        assert!(!rejection_needs_its_message(
+            StatusCode::UNAUTHORIZED,
+            &HeaderMap::new()
+        ));
+        assert!(!rejection_needs_its_message(
+            StatusCode::NOT_FOUND,
+            &HeaderMap::new()
+        ));
+    }
+
+    /// The provider's older spelling for the same secondary limit still reaches
+    /// live responses, so it stops the page on the same terms.
+    #[test]
+    fn the_legacy_secondary_limit_message_stops_the_whole_page() {
+        assert_eq!(
+            rejected_response_error(
+                StatusCode::FORBIDDEN,
+                &HeaderMap::new(),
+                br#"{"message":"You have triggered an abuse detection mechanism."}"#,
+            ),
+            RepositoryWatchAttemptError::ProviderUnavailable
+        );
+    }
+
+    /// A rejection whose body is absent or unparseable is not evidence of
+    /// throttling, so it classifies from the status and headers alone.
+    #[test]
+    fn an_unreadable_rejection_body_is_not_read_as_a_throttle() {
+        assert_eq!(
+            rejected_response_error(StatusCode::FORBIDDEN, &HeaderMap::new(), b""),
+            RepositoryWatchAttemptError::Rejected
+        );
+        assert_eq!(
+            rejected_response_error(
+                StatusCode::FORBIDDEN,
+                &HeaderMap::new(),
+                b"<html>429</html>"
+            ),
+            RepositoryWatchAttemptError::Rejected
+        );
+    }
+
+    #[test]
+    fn a_too_many_requests_response_stops_the_whole_page() {
+        assert_eq!(
+            rejected_response_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                &HeaderMap::new(),
+                PERMISSION_REJECTION_BODY
+            ),
+            RepositoryWatchAttemptError::ProviderUnavailable
+        );
+    }
+
+    #[test]
+    fn a_provider_server_error_stops_the_whole_page() {
+        assert_eq!(
+            rejected_response_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &HeaderMap::new(),
+                PERMISSION_REJECTION_BODY
+            ),
+            RepositoryWatchAttemptError::ProviderUnavailable
+        );
+    }
+
+    #[test]
+    fn an_unauthorized_response_reports_a_credential_failure() {
+        assert_eq!(
+            rejected_response_error(
+                StatusCode::UNAUTHORIZED,
+                &HeaderMap::new(),
+                PERMISSION_REJECTION_BODY
+            ),
+            RepositoryWatchAttemptError::Credential
+        );
+    }
+
+    #[test]
+    fn an_ordinary_rejection_defers_only_its_own_receipt() {
+        let error = rejected_response_error(
+            StatusCode::NOT_FOUND,
+            &HeaderMap::new(),
+            PERMISSION_REJECTION_BODY,
+        );
+
+        assert_eq!(error, RepositoryWatchAttemptError::Rejected);
+        assert!(!error.stops_webhook_page());
+    }
+
+    /// The request count and the wire budget are the attempt's, and the drain
+    /// page runs inside one attempt, so a spent budget refuses every later
+    /// hydration on the page. Continuing spends transfer the ledger can no
+    /// longer account for to learn the same failure once per receipt.
+    #[test]
+    fn an_exhausted_attempt_budget_stops_the_whole_page() {
+        assert!(RepositoryWatchAttemptError::ResourceLimit.stops_webhook_page());
+    }
+
+    /// The size ceiling beside it is one response's, not the attempt's: a peer's
+    /// hydration can still fit under it, so page isolation holds.
+    #[test]
+    fn an_oversized_response_defers_only_its_own_receipt() {
+        assert!(!RepositoryWatchAttemptError::ResponseTooLarge.stops_webhook_page());
+    }
+
+    /// Throttling and provider outage arrive as an `HTTP 200` GraphQL error
+    /// envelope. Classified as a target-specific rejection, thread hydration
+    /// re-issues the identical doomed request for every later delivery on the
+    /// page — the amplification the page-stopping predicate exists to prevent.
+    #[test]
+    fn a_repository_wide_graphql_error_stops_the_whole_page() {
+        let error = graphql_envelope_error(&[graphql_error("RATE_LIMITED")]);
+
+        assert_eq!(error, RepositoryWatchAttemptError::ProviderUnavailable);
+        assert!(error.stops_webhook_page());
+        assert_eq!(
+            graphql_envelope_error(&[graphql_error("SERVICE_UNAVAILABLE")]),
+            RepositoryWatchAttemptError::ProviderUnavailable
+        );
+        assert_eq!(
+            graphql_envelope_error(&[graphql_error("NOT_FOUND"), graphql_error("RATE_LIMITED")]),
+            RepositoryWatchAttemptError::ProviderUnavailable
+        );
+    }
+
+    /// The provider spells one taxonomy across two carriers, choosing by which
+    /// layer rejected the query: reading only `type` leaves an `extensions.code`
+    /// throttle classified as target-specific, and thread hydration re-issues it
+    /// for every later delivery on the page.
+    #[test]
+    fn a_repository_wide_graphql_error_is_read_from_either_carrier() {
+        let error = graphql_envelope_error(&[graphql_error_extension("RATE_LIMITED")]);
+
+        assert_eq!(error, RepositoryWatchAttemptError::ProviderUnavailable);
+        assert!(error.stops_webhook_page());
+        assert_eq!(
+            graphql_envelope_error(&[graphql_error_extension("undefinedField")]),
+            RepositoryWatchAttemptError::Rejected
+        );
+    }
+
+    /// The classifier reads the provider's envelope, not a hand-built value, so
+    /// the carrier has to survive deserialization to be read at all.
+    #[test]
+    fn the_extension_carrier_survives_the_wire() {
+        const THROTTLED_ENVELOPE: &str = r#"{"data":null,"errors":[{"message":"API rate limit exceeded","extensions":{"code":"RATE_LIMITED"}}]}"#;
+
+        let envelope: GraphQlEnvelope<serde_json::Value> =
+            serde_json::from_str(THROTTLED_ENVELOPE).expect("the throttled envelope parses");
+
+        assert_eq!(
+            graphql_envelope_error(&envelope.errors),
+            RepositoryWatchAttemptError::ProviderUnavailable
+        );
+    }
+
+    /// A query-scoped failure is not evidence that a peer's request cannot make
+    /// independent progress, so it defers only its own receipt.
+    #[test]
+    fn a_query_scoped_graphql_error_defers_only_its_own_receipt() {
+        let error = graphql_envelope_error(&[graphql_error("NOT_FOUND"), untyped_graphql_error()]);
+
+        assert_eq!(error, RepositoryWatchAttemptError::Rejected);
+        assert!(!error.stops_webhook_page());
+        assert_eq!(
+            graphql_envelope_error(&[untyped_graphql_error()]),
+            RepositoryWatchAttemptError::Rejected
+        );
+        assert_eq!(
+            graphql_envelope_error(&[graphql_error("INTERNAL")]),
+            RepositoryWatchAttemptError::Rejected
+        );
+    }
+
+    fn graphql_error(error_type: &str) -> GraphQlError {
+        GraphQlError {
+            error_type: Some(error_type.to_owned()),
+            extensions: None,
+        }
+    }
+
+    fn graphql_error_extension(code: &str) -> GraphQlError {
+        GraphQlError {
+            error_type: None,
+            extensions: Some(GraphQlErrorExtensions {
+                code: Some(code.to_owned()),
+            }),
+        }
+    }
+
+    fn untyped_graphql_error() -> GraphQlError {
+        GraphQlError {
+            error_type: None,
+            extensions: None,
+        }
     }
 
     #[tokio::test]
@@ -13054,6 +14711,7 @@ mod tests {
             candidate: RepoWatchCursorCandidate::new(review_only_blocked_observation().await),
             events: Vec::new(),
             queried: vec![RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request }],
+            targeted_pull_requests: vec![pull_request],
         };
 
         let settlement = fixture
@@ -13065,6 +14723,7 @@ mod tests {
                 WebhookShadowBaseline {
                     observation,
                     identity_frontier: RepoWatchEventIdentityFrontierV1::default(),
+                    merged_pull_request_baselines: Vec::new(),
                 },
             )
             .await
@@ -13107,11 +14766,25 @@ mod tests {
         let pull_request = PullRequestNumber::new(
             NonZeroU64::new(PULL_NUMBER).expect("fixture pull-request number is positive"),
         );
+        let refreshed = compact_cursor_observation(
+            &observation_with_pull_lifecycle(RepoWatchPullRequestLifecycle::Merged).await,
+            None,
+            &[],
+        )
+        .expect("fixture observation compacts canonically");
+        let expected_shadow_observation = refreshed.observation.clone();
+        let expected_shadow_baselines = refreshed.merged_pull_request_baselines.clone();
         let prepared = PreparedTargetedRefresh {
             generation: RepoWatchCursorGeneration::INITIAL,
-            candidate: RepoWatchCursorCandidate::new(review_only_blocked_observation().await),
+            candidate:
+                RepoWatchCursorCandidate::try_with_event_identity_frontier_and_merged_baselines(
+                    refreshed.observation,
+                    RepoWatchEventIdentityFrontierV1::default(),
+                    refreshed.merged_pull_request_baselines,
+                )?,
             events: Vec::new(),
             queried: vec![RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request }],
+            targeted_pull_requests: vec![pull_request],
         };
 
         let settlement = fixture
@@ -13123,6 +14796,7 @@ mod tests {
                 WebhookShadowBaseline {
                     observation,
                     identity_frontier: RepoWatchEventIdentityFrontierV1::default(),
+                    merged_pull_request_baselines: Vec::new(),
                 },
             )
             .await
@@ -13141,6 +14815,16 @@ mod tests {
             disposition.disposition(),
             RepoWatchWebhookDisposition::Projected,
             "a shadow targeted refresh is not the repository's first primary commit"
+        );
+        let carried_shadow = fixture
+            .task
+            .webhook_shadow
+            .as_ref()
+            .expect("a landed targeted refresh advances the shadow");
+        assert_eq!(carried_shadow.observation, expected_shadow_observation);
+        assert_eq!(
+            carried_shadow.merged_pull_request_baselines,
+            expected_shadow_baselines
         );
         Ok(())
     }

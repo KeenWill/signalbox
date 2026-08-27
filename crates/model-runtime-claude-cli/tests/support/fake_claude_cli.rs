@@ -303,6 +303,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tool_result(fixtures::OTHER_TOOL_ID)?;
             success("tool_use", None)?;
         }
+        "named_choice_suppressed_extra_tool" => {
+            assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+            assistant_tool_with_raw_arguments(
+                fixtures::OTHER_TOOL_ID,
+                fixtures::OTHER_TOOL_NAME,
+                fixtures::SUPPRESSED_TOOL_ARGUMENTS,
+            )?;
+            tool_result(fixtures::TOOL_ID)?;
+            tool_result(fixtures::OTHER_TOOL_ID)?;
+            success("tool_use", None)?;
+        }
         "redacted_tool_ids" => {
             assistant_tool(fixtures::CREDENTIAL_TOOL_ID_ONE, fixtures::TOOL_NAME)?;
             assistant_tool(fixtures::CREDENTIAL_TOOL_ID_TWO, fixtures::TOOL_NAME)?;

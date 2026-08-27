@@ -42,6 +42,16 @@ pub const fn max_search_snippet_bytes() -> usize {
     SEARCH_SNIPPET_BYTE_CEILING
 }
 
+/// Maximum highlighted ranges retained for one bounded search result.
+// numeric-bound: guard - prevents one search result from exhausting memory with highlight ranges
+pub const MAX_SEARCH_HIGHLIGHTS_PER_RESULT: usize = 64;
+
+/// Returns the shared ceiling for highlighted ranges in one bounded search result.
+#[must_use]
+pub const fn max_search_highlights_per_result() -> usize {
+    MAX_SEARCH_HIGHLIGHTS_PER_RESULT
+}
+
 /// Returns the hard safety ceiling on one explicit artifact projection.
 #[must_use]
 pub const fn max_search_projection_text_bytes() -> usize {

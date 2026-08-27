@@ -27,11 +27,14 @@ import { ArtifactInspector, emptyArtifactInspectorState } from './ArtifactInspec
 import { AttentionSurface } from './AttentionSurface'
 import type { CommandContext, CommandId } from './commands'
 import { invokeCommand } from './commands'
+import { ArtifactRenderer } from './features/artifacts/ArtifactRenderer'
+import type { ArtifactItem } from './features/artifacts/artifactTypes'
 import { HttpImportApi } from './imports/api'
 import { ImportsWorkspace } from './imports/ImportsWorkspace'
 import {
   ProductContractError,
   type ProductRouteId,
+  type ProductSearchState,
   ProductTransportError,
   productRoutes,
   productSurfaceCacheLabel,
@@ -46,6 +49,7 @@ import {
   productHotkeyBindings,
   productHotkeySequenceBindings,
 } from './productCommands'
+import { SearchSurface } from './SearchSurface'
 import { type SessionSelectionEvidence, SessionWorkspaceSurface } from './SessionWorkspaceSurface'
 import { SettingsSurface } from './SettingsSurface'
 import { hasValidSessionTimelineContract } from './session-timeline/model'
@@ -97,6 +101,17 @@ const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; ques
     title: 'Settings',
     question: 'How should this workstation present information?',
   },
+}
+
+// A keystroke aimed at an editing control belongs to that control, never to a global binding.
+const isEditableTarget = (target: EventTarget | null) => {
+  if (!(target instanceof HTMLElement)) return false
+  return (
+    target.isContentEditable ||
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement
+  )
 }
 
 const productNavigationCommandIds: Record<ProductRouteId, CommandId> = {
@@ -183,7 +198,13 @@ export function ProductNavigation({
   )
 }
 
-function CommandPalette({ context }: { context: ProductCommandContext }) {
+function CommandPalette({
+  context,
+  openerRef,
+}: {
+  context: ProductCommandContext
+  openerRef: RefObject<HTMLElement | null>
+}) {
   const open = useAppSelector((state) => state.app.overlay === 'palette')
   const focusTimelineAfterClose = useRef(false)
   return (
@@ -199,10 +220,18 @@ function CommandPalette({ context }: { context: ProductCommandContext }) {
           className="dialog-content product-palette"
           aria-describedby="product-palette-description"
           onCloseAutoFocus={(event) => {
-            if (!focusTimelineAfterClose.current) return
+            if (focusTimelineAfterClose.current) {
+              event.preventDefault()
+              focusTimelineAfterClose.current = false
+              context.focusTimeline()
+              return
+            }
+            // Hand the palette's keystroke back to the control it was invoked from, unless another
+            // overlay has already taken over the surface.
+            const opener = openerRef.current
+            if (context.getState().app.overlay !== null || !opener?.isConnected) return
             event.preventDefault()
-            focusTimelineAfterClose.current = false
-            context.focusTimeline()
+            opener.focus()
           }}
         >
           <div className="dialog-heading">
@@ -333,6 +362,33 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
   return (
     <div className="surface-body">
       <SurfaceUnavailable surface={surface} />
+    </div>
+  )
+}
+
+const reviewEvidenceUnavailable: ArtifactItem = {
+  id: 'review-evidence-unavailable',
+  displayName: 'Review evidence',
+  kind: 'blocked',
+  attemptedKind: 'review evidence artifact',
+  reason: 'Review evidence is not exposed by the current daemon contract.',
+}
+
+function ReviewsArtifactSurface({ commandContext }: { commandContext: CommandContext }) {
+  return (
+    <div className="surface-body reviews-artifact-surface">
+      <SurfaceUnavailable surface="reviews" />
+      <section aria-labelledby="review-artifact-heading">
+        <header>
+          <span className="eyebrow">Typed artifact view</span>
+          <h2 id="review-artifact-heading">Review evidence</h2>
+          <p>
+            Review facts and their artifact identities are not exposed by this daemon contract. The
+            client preserves that missing typed boundary instead of fabricating a preview.
+          </p>
+        </header>
+        <ArtifactRenderer artifact={reviewEvidenceUnavailable} commandContext={commandContext} />
+      </section>
     </div>
   )
 }
@@ -486,7 +542,13 @@ function SelectionInspector({
   )
 }
 
-export function ProductApp({ surface }: { surface: ProductRouteId }) {
+export function ProductApp({
+  surface,
+  search,
+}: {
+  surface: ProductRouteId
+  search: ProductSearchState
+}) {
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
@@ -560,7 +622,17 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       artifactOriginalIds: [],
       timelineWindowAvailable: surface === 'sessions' && timelineWindowAvailable,
       configuresTranscriptDetail: surface === 'settings',
-      focusTimeline: surfaceContext?.focusTimeline ?? (() => timelineRef.current?.focus()),
+      focusTimeline:
+        surfaceContext?.focusTimeline ??
+        (() => {
+          if (timelineRef.current !== null) {
+            timelineRef.current.focus()
+            return
+          }
+          // A surface with no timeline still has to release an editing control on unwind, but
+          // Escape with nothing to unwind must leave focus exactly where it is.
+          if (isEditableTarget(document.activeElement)) mainRef.current?.focus()
+        }),
       unwindSurface: () => surfaceEscapeRef.current?.() ?? false,
       openArtifactInspector: artifactAvailable ? () => setArtifactOpen(true) : undefined,
       loadTimelineWindow: (anchor) =>
@@ -602,15 +674,14 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   useHotkeys(
     productHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
+      // Product surfaces own text fields, so the palette binding must never steal a keystroke the
+      // field is editing.
+      options: binding.commandId === 'palette.open' ? { ignoreInputs: true } : undefined,
       callback: (event) => {
         if (artifactSheetOwnsFocus) return
-        const target = event.target
         if (
-          binding.commandId === 'surface.escape' &&
-          (target instanceof HTMLInputElement ||
-            target instanceof HTMLTextAreaElement ||
-            target instanceof HTMLSelectElement ||
-            (target instanceof HTMLElement && target.isContentEditable))
+          (binding.commandId === 'palette.open' || binding.commandId === 'surface.escape') &&
+          isEditableTarget(event.target)
         ) {
           return
         }
@@ -625,6 +696,10 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           ) {
             context.focusTimeline()
           }
+          if (binding.commandId === 'layout.toggle' && app.layout === 'workbench') {
+            // Focus leaves the navigation pane before the focus layout hides it.
+            mainRef.current?.focus()
+          }
           invokeProductCommand(binding.commandId, context)
         }
       },
@@ -633,8 +708,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   useHotkeySequences(
     productHotkeySequenceBindings.map((binding) => ({
       sequence: binding.sequence,
-      callback: () => {
+      callback: (event) => {
         if (artifactSheetOwnsFocus) return
+        if (isEditableTarget(event.target)) return
         if (store.getState().app.overlay === null) {
           if (
             binding.commandId.startsWith('selection.') &&
@@ -718,6 +794,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     }
   }, [copy.title])
 
+  const updateSearch = (next: ProductSearchState) =>
+    void navigate({ to: '/$surface', params: { surface }, search: next })
+
   const content =
     surface === 'attention' && bootstrap.isSuccess ? (
       <AttentionSurface registerEscapeHandler={registerSurfaceEscape} />
@@ -787,6 +866,44 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         timelineRef={timelineRef}
         windowRequest={windowRequest}
       />
+    ) : surface === 'search' && bootstrap.isError ? (
+      <div className="surface-body">
+        <section className="surface-empty" role="alert">
+          <AlertTriangle aria-hidden="true" />
+          <div>
+            <h2>Search availability could not be checked</h2>
+            <p>
+              {bootstrap.error instanceof ProductContractError
+                ? 'The daemon response is incompatible with the generated web contract.'
+                : 'Signalbox could not be reached. Retry the contract check when transport is available.'}
+            </p>
+          </div>
+        </section>
+      </div>
+    ) : surface === 'search' && bootstrap.data === undefined ? (
+      <div className="surface-body">
+        <p className="search-notice">Checking whether bounded search is available…</p>
+      </div>
+    ) : surface === 'search' &&
+      (bootstrap.data?.capabilities.bounded_json === false ||
+        bootstrap.data?.capabilities.bounded_lexical_search === false) ? (
+      <div className="surface-body">
+        <section className="surface-empty" aria-labelledby="search-unavailable-heading">
+          <AlertTriangle aria-hidden="true" />
+          <div>
+            <span className="availability-tag">Committed · unavailable</span>
+            <h2 id="search-unavailable-heading">
+              This daemon contract does not advertise bounded lexical search
+            </h2>
+            <p>
+              The search surface is ready, but the connected daemon does not expose the bounded
+              search capability. Signalbox will not infer or fabricate results.
+            </p>
+          </div>
+        </section>
+      </div>
+    ) : surface === 'search' ? (
+      <SearchSurface bootstrap={bootstrap.data} state={search} onStateChange={updateSearch} />
     ) : surface === 'settings' ? (
       <SettingsSurface context={context} />
     ) : surface === 'imports' && bootstrap.isSuccess && productImportApi !== null ? (
@@ -813,6 +930,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           </div>
         </section>
       </div>
+    ) : surface === 'reviews' ? (
+      <ReviewsArtifactSurface commandContext={context} />
     ) : (
       <DeferredSurface surface={surface} />
     )
@@ -904,7 +1023,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           )}
         </aside>
       )}
-      <CommandPalette context={context} />
+      <CommandPalette context={context} openerRef={paletteOpenerRef} />
       <KeyboardHelp context={context} />
       <Dialog.Root
         open={app.overlay === 'navigation'}

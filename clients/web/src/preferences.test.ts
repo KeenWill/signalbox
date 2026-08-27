@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  applyStoredVisualPreferences,
   BROWSER_PREFERENCES_KEY,
   decodeBrowserPreferences,
   defaultBrowserPreferences,
@@ -189,5 +190,35 @@ describe('browser preferences', () => {
         lastLogicalPositions: JSON.parse('{"__proto__":"7"}'),
       }),
     ).toThrow('preferences.lastLogicalPositions keys or values are out of bounds')
+  })
+
+  const stubDocumentDataset = () => {
+    const dataset: Record<string, string> = {}
+    vi.stubGlobal('document', { documentElement: { dataset } })
+    return dataset
+  }
+
+  it('paints the stored theme and density before the application mounts', () => {
+    const stored = { ...defaultBrowserPreferences, theme: 'light', density: 'comfortable' } as const
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => (key === BROWSER_PREFERENCES_KEY ? JSON.stringify(stored) : null),
+      setItem: () => undefined,
+    })
+    const dataset = stubDocumentDataset()
+
+    applyStoredVisualPreferences()
+
+    expect(dataset.theme).toBe('light')
+    expect(dataset.density).toBe('comfortable')
+  })
+
+  it('paints the default presentation when nothing is stored', () => {
+    vi.stubGlobal('localStorage', { getItem: () => null, setItem: () => undefined })
+    const dataset = stubDocumentDataset()
+
+    applyStoredVisualPreferences()
+
+    expect(dataset.theme).toBe(defaultBrowserPreferences.theme)
+    expect(dataset.density).toBe(defaultBrowserPreferences.density)
   })
 })
