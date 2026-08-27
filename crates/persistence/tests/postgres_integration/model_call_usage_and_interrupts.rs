@@ -218,6 +218,7 @@ async fn ambiguous_model_call_usage_is_available_to_pre_activation_compaction()
 
     assert_eq!(retained.usage(), reported_usage);
     assert!(!retained.input_includes_cache_tokens());
+    assert!(retained.input_is_retained());
     assert!(!retained.output_is_retained());
     assert_eq!(retained.projected_unreported_content_bytes(), 0);
 
@@ -228,7 +229,9 @@ async fn ambiguous_model_call_usage_is_available_to_pre_activation_compaction()
 
 /// A successful dedicated compaction call becomes the provider-confirmed
 /// baseline until a later ordinary call reports usage. Its retained summary is
-/// already represented by reported output tokens and is not counted twice.
+/// already represented by reported output tokens and is not counted twice,
+/// while the reported input measures the source text that summary replaced and
+/// is retained by nothing.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn context_compaction_usage_is_available_to_pre_activation_compaction()
@@ -344,6 +347,10 @@ async fn context_compaction_usage_is_available_to_pre_activation_compaction()
         .with_cache_read_input_tokens(Some(19));
     assert_eq!(retained.usage(), expected_usage);
     assert!(retained.input_includes_cache_tokens());
+    assert!(
+        !retained.input_is_retained(),
+        "the summarized-away source the compaction reported as input is gone"
+    );
     assert!(retained.output_is_retained());
     assert_eq!(
         retained.projected_unreported_content_bytes(),
@@ -364,6 +371,260 @@ async fn context_compaction_usage_is_available_to_pre_activation_compaction()
             .as_database_error()
             .and_then(|error| error.constraint()),
         Some("context_compaction_input_semantics_immutable")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The queued-turn preflight scores the exact input it is about to send. Its
+/// production caller previews an activation whose starting frontier and origin
+/// entry no transaction has committed, so the reported-usage read takes the
+/// preview's own model-visible membership and the content of the entries it
+/// minted rather than a frontier identity durable rows cannot resolve.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn queued_turn_activation_preview_scores_its_own_input() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6d80;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let correlation = authorized.observation_correlation();
+    let reported_usage = ProviderReportedTokenUsage::unreported()
+        .with_input_tokens(Some(4_000))
+        .with_output_tokens(Some(0));
+    let assistant = AssistantText::try_new(String::from("preview headroom historical reply"))
+        .expect("fixture assistant text is admitted");
+    let observation = correlation.bind_terminal_observation_with_usage(
+        ModelCallTerminalObservation::Completed {
+            assistant_text: vec![assistant],
+        },
+        reported_usage,
+    );
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 0x20,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x22)),
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+
+    // Twenty-two ASCII characters and one two-byte "é": 24 UTF-8 bytes.
+    let queued_input = "queued preview suffix é";
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 0x40,
+                seed + 1,
+                queued_input,
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x41)),
+            Some(TurnId::from_uuid(Uuid::from_u128(seed + 0x42))),
+        )
+        .await?;
+    let previewed_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x45));
+    let preview = StartEligibleTurnRepository::new(pool.clone())
+        .preview(
+            fixture.session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x43)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x44)),
+                previewed_frontier,
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x46)),
+            ),
+        )
+        .await?
+        .expect("the queued turn has one uncommitted activation preview");
+    let prospective = repository
+        .preview_activation_operation(
+            preview.prepared(),
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 0x47)),
+        )
+        .await?
+        .expect("the preview reconstitutes its prospective first call");
+    let operation = prospective.render(Box::new([]))?;
+    assert_eq!(
+        operation.request().call().frontier().snapshot(),
+        previewed_frontier,
+        "the preview call carries the starting frontier no transaction committed"
+    );
+    let committed_frontiers: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM context_frontier
+          WHERE owning_session_id = $1
+            AND context_frontier_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(previewed_frontier.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(committed_frontiers, 0);
+
+    let reported = repository
+        .latest_reported_usage(
+            fixture.session,
+            correlation.target(),
+            prospective.prospective_input(),
+        )
+        .await?
+        .expect("the completed call reported input usage");
+
+    assert_eq!(reported.usage(), reported_usage);
+    assert!(reported.input_is_retained());
+    assert!(reported.output_is_retained());
+    assert_eq!(reported.projected_unreported_content_bytes(), 24);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Compaction coverage follows model-visible projected order. A successor
+/// compaction that summarizes its predecessor's summary leaves that summary
+/// invisible, so the retained-content allowance excludes it even though the
+/// summary was appended physically after the successor's through-entry.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn successor_compaction_coverage_follows_projected_order() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6d88;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let assistant = AssistantText::try_new(String::from("summarized away by the successor"))
+        .expect("fixture assistant text is admitted");
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Completed {
+            assistant_text: vec![assistant],
+        });
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 0x20,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x22)),
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+    let compaction_repository = ContextCompactionRepository::new(pool.clone());
+    let PrepareContextCompactionOutcome::Prepared(predecessor) = compaction_repository
+        .prepare(PrepareContextCompactionRequest {
+            command: DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x30)),
+            session: fixture.session,
+            requested_through_position: Some(1),
+            automatic_for_turn: None,
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
+            selection: DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
+            target,
+            input_includes_cache_tokens: true,
+            credential_reference: String::from("predecessor compaction credential"),
+            call: ModelCallId::from_uuid(Uuid::from_u128(seed + 0x31)),
+            compaction: ContextCompactionId::from_uuid(Uuid::from_u128(seed + 0x32)),
+            summary_entry: SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x33)),
+            result_frontier: ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x34)),
+        })
+        .await?
+    else {
+        panic!("the completed turn has a compactable frontier")
+    };
+    compaction_repository.authorize(&predecessor).await?;
+    compaction_repository
+        .complete(
+            &predecessor,
+            "predecessor summary the successor summarizes away",
+            ContextCompactionTokenUsage::unreported()
+                .with_input_tokens(Some(101))
+                .with_output_tokens(Some(11)),
+        )
+        .await?;
+
+    let PrepareContextCompactionOutcome::Prepared(successor) = compaction_repository
+        .prepare(PrepareContextCompactionRequest {
+            command: DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x38)),
+            session: fixture.session,
+            requested_through_position: Some(2),
+            automatic_for_turn: None,
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
+            selection: DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
+            target,
+            input_includes_cache_tokens: true,
+            credential_reference: String::from("successor compaction credential"),
+            call: ModelCallId::from_uuid(Uuid::from_u128(seed + 0x39)),
+            compaction: ContextCompactionId::from_uuid(Uuid::from_u128(seed + 0x3a)),
+            summary_entry: SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x3b)),
+            result_frontier: ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x3c)),
+        })
+        .await?
+    else {
+        panic!("the predecessor summary and its retained suffix compact again")
+    };
+    compaction_repository.authorize(&successor).await?;
+    compaction_repository
+        .complete(
+            &successor,
+            "successor summary",
+            ContextCompactionTokenUsage::unreported()
+                .with_input_tokens(Some(103))
+                .with_output_tokens(Some(13)),
+        )
+        .await?;
+
+    // Twenty-eight ASCII characters and one two-byte "é": 30 UTF-8 bytes.
+    let appended_input = "successor compaction suffix é";
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 0x40,
+                seed + 1,
+                appended_input,
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x41)),
+            Some(TurnId::from_uuid(Uuid::from_u128(seed + 0x42))),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: fixture.session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 0x43),
+            starting_frontier: Uuid::from_u128(seed + 0x44),
+            initial_attempt: Uuid::from_u128(seed + 0x45),
+        },
+    )
+    .await?;
+
+    let retained = repository
+        .latest_reported_usage(
+            fixture.session,
+            target,
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x44)),
+        )
+        .await?
+        .expect("the successor compaction usage becomes the current baseline");
+
+    assert!(!retained.input_is_retained());
+    assert_eq!(
+        retained.projected_unreported_content_bytes(),
+        30,
+        "only the appended input remains model-visible after the successor compaction"
     );
 
     pool.close().await;

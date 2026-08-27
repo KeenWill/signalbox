@@ -6,7 +6,7 @@ lexical-search projection and query boundary are verified against this PR
 (`agent/web-search-usage`).
 
 Dedicated-compaction usage as the next queued-turn headroom baseline is verified
-against this PR (`agent/daemon-live-compaction-source-headroom`).
+against this PR (`agent/fix-headroom-accounting`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
