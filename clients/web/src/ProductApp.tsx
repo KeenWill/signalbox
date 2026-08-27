@@ -27,6 +27,8 @@ import { ArtifactInspector, emptyArtifactInspectorState } from './ArtifactInspec
 import { AttentionSurface } from './AttentionSurface'
 import type { CommandContext, CommandId } from './commands'
 import { invokeCommand } from './commands'
+import { ArtifactRenderer } from './features/artifacts/ArtifactRenderer'
+import type { ArtifactItem } from './features/artifacts/artifactTypes'
 import { HttpImportApi } from './imports/api'
 import { ImportsWorkspace } from './imports/ImportsWorkspace'
 import {
@@ -360,6 +362,33 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
   return (
     <div className="surface-body">
       <SurfaceUnavailable surface={surface} />
+    </div>
+  )
+}
+
+const reviewEvidenceUnavailable: ArtifactItem = {
+  id: 'review-evidence-unavailable',
+  displayName: 'Review evidence',
+  kind: 'blocked',
+  attemptedKind: 'review evidence artifact',
+  reason: 'Review evidence is not exposed by the current daemon contract.',
+}
+
+function ReviewsArtifactSurface({ commandContext }: { commandContext: CommandContext }) {
+  return (
+    <div className="surface-body reviews-artifact-surface">
+      <SurfaceUnavailable surface="reviews" />
+      <section aria-labelledby="review-artifact-heading">
+        <header>
+          <span className="eyebrow">Typed artifact view</span>
+          <h2 id="review-artifact-heading">Review evidence</h2>
+          <p>
+            Review facts and their artifact identities are not exposed by this daemon contract. The
+            client preserves that missing typed boundary instead of fabricating a preview.
+          </p>
+        </header>
+        <ArtifactRenderer artifact={reviewEvidenceUnavailable} commandContext={commandContext} />
+      </section>
     </div>
   )
 }
@@ -901,6 +930,8 @@ export function ProductApp({
           </div>
         </section>
       </div>
+    ) : surface === 'reviews' ? (
+      <ReviewsArtifactSurface commandContext={context} />
     ) : (
       <DeferredSurface surface={surface} />
     )

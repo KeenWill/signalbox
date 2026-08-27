@@ -4478,8 +4478,7 @@ async fn await_turn_terminal(
             return Ok(terminal);
         }
         queued_turn_recovery(&mut snapshot, turn_id)?;
-        let mut poll_automatic_recovery =
-            automatic_model_call_recovery_pending(&mut snapshot, turn_id)?;
+        let mut poll_automatic_recovery = automatic_recovery_pending(&mut snapshot, turn_id)?;
         let mut observed_cursor = snapshot.cursor();
         loop {
             let message = if poll_automatic_recovery {
@@ -4495,7 +4494,7 @@ async fn await_turn_terminal(
                         }
                         queued_turn_recovery(&mut refreshed, turn_id)?;
                         poll_automatic_recovery =
-                            automatic_model_call_recovery_pending(&mut refreshed, turn_id)?;
+                            automatic_recovery_pending(&mut refreshed, turn_id)?;
                         continue;
                     }
                 }
@@ -4523,7 +4522,7 @@ async fn await_turn_terminal(
                         }
                         queued_turn_recovery(&mut refreshed, turn_id)?;
                         poll_automatic_recovery =
-                            automatic_model_call_recovery_pending(&mut refreshed, turn_id)?;
+                            automatic_recovery_pending(&mut refreshed, turn_id)?;
                         if poll_automatic_recovery {
                             continue;
                         }
@@ -4540,7 +4539,7 @@ async fn await_turn_terminal(
                             return Ok(terminal);
                         }
                         poll_automatic_recovery =
-                            automatic_model_call_recovery_pending(&mut refreshed, turn_id)?;
+                            automatic_recovery_pending(&mut refreshed, turn_id)?;
                     }
                     if session_recovery_transition(&event) {
                         let mut refreshed = transcript(client, session_id).await?;
@@ -4550,7 +4549,7 @@ async fn await_turn_terminal(
                         }
                         queued_turn_recovery(&mut refreshed, turn_id)?;
                         poll_automatic_recovery =
-                            automatic_model_call_recovery_pending(&mut refreshed, turn_id)?;
+                            automatic_recovery_pending(&mut refreshed, turn_id)?;
                     }
                 }
                 ServerMessage::ProviderTextDelta {
@@ -4576,7 +4575,13 @@ async fn await_turn_terminal(
     }
 }
 
-fn automatic_model_call_recovery_pending(
+/// Reports whether bounded daemon reconciliation still owns the wait the
+/// follow is blocked on, so the follower keeps polling instead of exiting.
+///
+/// Both recovery waits carry the same durable budget and the same
+/// `operator_action_required` projection, so a tool wait is followed on
+/// exactly the terms a model-call wait is.
+fn automatic_recovery_pending(
     snapshot: &mut TranscriptSnapshot,
     selected_turn: CanonicalUuid,
 ) -> Result<bool, ClientError> {
@@ -4588,6 +4593,9 @@ fn automatic_model_call_recovery_pending(
     if matches!(
         selected_state,
         TurnState::ActiveAwaitingModelCallRecovery {
+            operator_action_required: false,
+            ..
+        } | TurnState::ActiveAwaitingToolRecovery {
             operator_action_required: false,
             ..
         }
@@ -4602,10 +4610,15 @@ fn automatic_model_call_recovery_pending(
     };
     Ok(matches!(
         snapshot.turn_state(active_turn)?,
-        Some(TurnState::ActiveAwaitingModelCallRecovery {
-            operator_action_required: false,
-            ..
-        })
+        Some(
+            TurnState::ActiveAwaitingModelCallRecovery {
+                operator_action_required: false,
+                ..
+            } | TurnState::ActiveAwaitingToolRecovery {
+                operator_action_required: false,
+                ..
+            }
+        )
     ))
 }
 
@@ -4639,8 +4652,15 @@ fn blocker_recovery_snapshot_state(state: &TurnState) -> Result<(), ClientError>
             operator_action_required: true,
             ..
         }
-        | TurnState::ActiveAwaitingToolRecovery { .. } => Err(ClientError::TurnRecoveryRequired),
+        | TurnState::ActiveAwaitingToolRecovery {
+            operator_action_required: true,
+            ..
+        } => Err(ClientError::TurnRecoveryRequired),
         TurnState::ActiveAwaitingModelCallRecovery {
+            operator_action_required: false,
+            ..
+        }
+        | TurnState::ActiveAwaitingToolRecovery {
             operator_action_required: false,
             ..
         } => Ok(()),
@@ -4772,17 +4792,26 @@ fn terminal_snapshot_state(state: Option<&TurnState>) -> Result<Option<TurnTermi
             | TurnState::ActiveAwaitingToolApproval { .. }
             | TurnState::ActiveAwaitingChild { .. },
         ) => Ok(None),
-        Some(TurnState::ActiveAwaitingModelCallRecovery {
-            operator_action_required: true,
-            ..
-        })
-        | Some(TurnState::ActiveAwaitingToolRecovery { .. }) => {
-            Err(ClientError::TurnRecoveryRequired)
-        }
-        Some(TurnState::ActiveAwaitingModelCallRecovery {
-            operator_action_required: false,
-            ..
-        }) => Ok(None),
+        Some(
+            TurnState::ActiveAwaitingModelCallRecovery {
+                operator_action_required: true,
+                ..
+            }
+            | TurnState::ActiveAwaitingToolRecovery {
+                operator_action_required: true,
+                ..
+            },
+        ) => Err(ClientError::TurnRecoveryRequired),
+        Some(
+            TurnState::ActiveAwaitingModelCallRecovery {
+                operator_action_required: false,
+                ..
+            }
+            | TurnState::ActiveAwaitingToolRecovery {
+                operator_action_required: false,
+                ..
+            },
+        ) => Ok(None),
         Some(TurnState::ActiveAwaitingRunnerRecovery { .. }) => {
             Err(ClientError::RunnerRecoveryRequired)
         }
@@ -7297,6 +7326,60 @@ mod tests {
     }
 
     #[test]
+    fn send_waits_while_automatic_tool_recovery_owns_the_decision() {
+        let state = TurnState::ActiveAwaitingToolRecovery {
+            ended_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            recovery_tool_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            automatic_reconciliation_attempts: CanonicalU64::new(0),
+            operator_action_required: false,
+        };
+
+        assert!(matches!(terminal_snapshot_state(Some(&state)), Ok(None)));
+    }
+
+    #[test]
+    fn send_fails_when_tool_recovery_requires_operator_action() {
+        let state = TurnState::ActiveAwaitingToolRecovery {
+            ended_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            recovery_tool_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            automatic_reconciliation_attempts: CanonicalU64::new(5),
+            operator_action_required: true,
+        };
+
+        assert!(matches!(
+            terminal_snapshot_state(Some(&state)),
+            Err(ClientError::TurnRecoveryRequired)
+        ));
+    }
+
+    #[test]
+    fn queued_send_waits_while_automatic_tool_recovery_owns_its_blocker() {
+        let blocker = TurnState::ActiveAwaitingToolRecovery {
+            ended_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            recovery_tool_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            automatic_reconciliation_attempts: CanonicalU64::new(0),
+            operator_action_required: false,
+        };
+
+        assert!(matches!(blocker_recovery_snapshot_state(&blocker), Ok(())));
+    }
+
+    #[test]
+    fn queued_send_fails_when_its_tool_recovery_blocker_requires_operator_action() {
+        let blocker = TurnState::ActiveAwaitingToolRecovery {
+            ended_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            recovery_tool_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            automatic_reconciliation_attempts: CanonicalU64::new(5),
+            operator_action_required: true,
+        };
+
+        assert!(matches!(
+            blocker_recovery_snapshot_state(&blocker),
+            Err(ClientError::TurnRecoveryRequired)
+        ));
+    }
+
+    #[test]
     fn send_fails_explicitly_when_runner_recovery_is_required() {
         let state = TurnState::ActiveAwaitingRunnerRecovery {
             runner_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
@@ -7651,6 +7734,139 @@ mod tests {
                         terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
                         terminal_attempt_id: attempt_id,
                         terminal_model_call_id: model_call_id,
+                    },
+                )?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let terminal = await_turn_terminal(&mut client, session_id, turn_id).await?;
+
+        assert_eq!(terminal, TurnTerminal::ReconciliationRequired);
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn selected_send_polls_after_an_automatic_tool_recovery_transition()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let attempt_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
+        let model_call_id = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+        let tool_attempt_id = CanonicalUuid::from_uuid(Uuid::from_u128(6));
+        let server = tokio::spawn(async move {
+            let snapshot = |version, request_id, cursor, state| -> io::Result<Vec<u8>> {
+                let frame = |message| {
+                    ServerFrame::try_new_for_version(version, request_id, message)
+                        .map_err(io::Error::other)
+                };
+                let mut response =
+                    encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                        session_id,
+                        cursor: CanonicalU64::new(cursor),
+                        runner: None,
+                    })?)
+                    .map_err(io::Error::other)?;
+                response.extend_from_slice(
+                    &encode_server_line(&frame(ServerMessage::TranscriptTurn {
+                        turn_id,
+                        acceptance_position: CanonicalU64::new(1),
+                        model_settings: None,
+                        state,
+                    })?)
+                    .map_err(io::Error::other)?,
+                );
+                response.extend_from_slice(
+                    &encode_server_line(&frame(ServerMessage::TranscriptModelCallsEnd {
+                        model_call_count: CanonicalU64::new(0),
+                    })?)
+                    .map_err(io::Error::other)?,
+                );
+                response.extend_from_slice(
+                    &encode_server_line(&frame(ServerMessage::TranscriptSnapshotEnd {
+                        session_id,
+                        cursor: CanonicalU64::new(cursor),
+                        turn_count: CanonicalU64::new(1),
+                        entry_count: CanonicalU64::new(0),
+                    })?)
+                    .map_err(io::Error::other)?,
+                );
+                Ok(response)
+            };
+
+            let (stream, mut writer) = listener.accept().await?.0.into_split();
+            let mut reader = BufReader::new(stream);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let follow_request = decode_client_line(&line).map_err(io::Error::other)?;
+            let mut initial = snapshot(
+                follow_request.version(),
+                follow_request.request_id(),
+                0,
+                TurnState::ActiveRunning {
+                    current_attempt_id: attempt_id,
+                    current_model_call: None,
+                },
+            )?;
+            initial.extend_from_slice(
+                &encode_server_line(
+                    &ServerFrame::try_new_for_version(
+                        follow_request.version(),
+                        follow_request.request_id(),
+                        ServerMessage::SessionEvent {
+                            cursor: CanonicalU64::new(1),
+                            session_id,
+                            event: SessionEvent::ToolBatchTransition {
+                                turn_id,
+                                model_call_id,
+                                state: ToolBatchState::RecoveryRequired { tool_attempt_id },
+                            },
+                        },
+                    )
+                    .map_err(io::Error::other)?,
+                )
+                .map_err(io::Error::other)?,
+            );
+            writer.write_all(&initial).await?;
+
+            let (refresh_stream, mut refresh_writer) = listener.accept().await?.0.into_split();
+            let mut refresh_reader = BufReader::new(refresh_stream);
+            let mut refresh_line = Vec::new();
+            refresh_reader.read_until(b'\n', &mut refresh_line).await?;
+            let refresh_request = decode_client_line(&refresh_line).map_err(io::Error::other)?;
+            refresh_writer
+                .write_all(&snapshot(
+                    refresh_request.version(),
+                    refresh_request.request_id(),
+                    1,
+                    TurnState::ActiveAwaitingToolRecovery {
+                        ended_attempt_id: attempt_id,
+                        recovery_tool_attempt_id: tool_attempt_id,
+                        automatic_reconciliation_attempts: CanonicalU64::new(0),
+                        operator_action_required: false,
+                    },
+                )?)
+                .await?;
+
+            let (poll_stream, mut poll_writer) = listener.accept().await?.0.into_split();
+            let mut poll_reader = BufReader::new(poll_stream);
+            let mut poll_line = Vec::new();
+            poll_reader.read_until(b'\n', &mut poll_line).await?;
+            let poll_request = decode_client_line(&poll_line).map_err(io::Error::other)?;
+            poll_writer
+                .write_all(&snapshot(
+                    poll_request.version(),
+                    poll_request.request_id(),
+                    1,
+                    TurnState::ToolReconciliationRequired {
+                        terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
+                        terminal_attempt_id: attempt_id,
+                        terminal_tool_attempt_id: tool_attempt_id,
                     },
                 )?)
                 .await?;

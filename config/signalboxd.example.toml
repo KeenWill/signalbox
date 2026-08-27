@@ -78,10 +78,12 @@ convergence_sweep_retry_backoff_base = "60s"
 convergence_sweep_retry_backoff_cap = "900s"
 # Stale turns terminalized during one liveness scan.
 terminalizations_per_liveness_scan = 64
-# Time allowed for one liveness recovery transaction.
-turn_liveness_recovery_attempt_bound = "60s"
+# Time allowed for one slot-held liveness recovery transaction.
+turn_liveness_recovery_attempt_bound = "10s"
 # Automatic reconciliation transactions performed in one liveness scan.
 automatic_reconciliations_per_liveness_scan = 64
+# Time allowed for one automatic reconciliation transaction.
+automatic_reconciliation_attempt_bound = "60s"
 # Credentialed targets retained by one convergence sweep.
 max_convergence_sweep_targets = 256
 # Longest configured convergence census interval.
@@ -94,6 +96,8 @@ automatic_resume_base_backoff = "120s"
 automatic_resume_backoff_cap = "1800s"
 # Automatic resumption attempts spent by one failed goal turn.
 automatic_resume_attempt_budget = 20
+# Automatic resumption attempts one blocked goal may ever make, spent or exempt.
+automatic_resume_attempt_ceiling = 100
 # Delay between startup automatic-resumption inventory retries.
 automatic_resume_startup_retry_delay = "1s"
 # Time allowed to reap a killed model-provider child.

@@ -53,7 +53,9 @@ use signalbox_domain::{
     BlobDerivation, BlobDerivationProducer, BlobDigest, ModelCallId, ProviderModelIdentity,
     ResolvedProviderTarget, SessionId, TurnId,
 };
-use signalbox_persistence::attention::{AttentionRepository, AttentionRepositoryError};
+use signalbox_persistence::attention::{
+    AttentionRepository, AttentionRepositoryError, AutomaticResumeAttemptBounds,
+};
 use signalbox_persistence::process_read::ProcessModelCallInputTokenSemantics;
 use signalbox_persistence::search::{SearchRepository, SearchRepositoryError};
 use signalbox_persistence::session_timeline::{
@@ -439,12 +441,12 @@ fn production_router_with_budget(
         blobs,
         blob_read_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_WEB_BLOB_READS)),
     };
-    let automatic_resume_attempt_budget =
-        configured_automatic_resume_attempt_budget(model_configuration.as_ref());
+    let automatic_resume_attempts =
+        configured_automatic_resume_attempts(model_configuration.as_ref());
     let state = WebApiState {
         attention: pool
             .clone()
-            .map(|pool| AttentionRepository::new(pool, automatic_resume_attempt_budget)),
+            .map(|pool| AttentionRepository::new(pool, automatic_resume_attempts)),
         timeline: pool.clone().map(SessionTimelineRepository::new),
         search: pool.clone().map(SearchRepository::new),
         usage: pool.clone().map(UsageRepository::new),
@@ -478,7 +480,7 @@ fn production_router_with_budget(
     let repository_watch_reads = crate::web_repo_watch::router(
         pool.clone(),
         snapshot_reader_budget,
-        automatic_resume_attempt_budget,
+        automatic_resume_attempts,
     )
     .route_layer(middleware::from_fn(validate_loopback_host));
     // Every route that reads session-attached content sits behind the
@@ -521,24 +523,30 @@ fn production_router_with_budget(
     same_origin_router(asset_root, api)
 }
 
-/// Reads the deployment's automatic-resume attempt budget for the attention
+/// Reads the deployment's automatic-resume attempt limits for the attention
 /// projection.
 ///
 /// The projection reports a blocked goal as still owed automatic resumption
-/// until this budget is spent, so it must read the same configured number the
-/// daemon's resume planner reads (`goal_mode::GoalModeNumericBounds`). An
-/// absent or unbounded setting leaves the budget unbounded there as well.
-fn configured_automatic_resume_attempt_budget(
+/// until one of these limits ends its run, so both must be the configured
+/// numbers the daemon's resume planner reads
+/// (`goal_mode::GoalModeNumericBounds`). An absent or unbounded setting leaves
+/// that limit unbounded there as well.
+fn configured_automatic_resume_attempts(
     model_configuration: Option<&HubModelConfiguration>,
+) -> AutomaticResumeAttemptBounds {
+    AutomaticResumeAttemptBounds::new(
+        configured_automatic_resume_limit(model_configuration, "automatic_resume_attempt_budget"),
+        configured_automatic_resume_limit(model_configuration, "automatic_resume_attempt_ceiling"),
+    )
+}
+
+fn configured_automatic_resume_limit(
+    model_configuration: Option<&HubModelConfiguration>,
+    field: &'static str,
 ) -> Option<u32> {
     model_configuration
-        .and_then(|configuration| {
-            configuration
-                .numeric_bounds()
-                .integer("automatic_resume_attempt_budget")
-                .flatten()
-        })
-        .and_then(|budget| u32::try_from(budget).ok())
+        .and_then(|configuration| configuration.numeric_bounds().integer(field).flatten())
+        .and_then(|limit| u32::try_from(limit).ok())
 }
 
 fn same_origin_router(asset_root: Option<PathBuf>, api: Router) -> Router {
@@ -3975,27 +3983,36 @@ mod tests {
     }
 
     /// The projection reports a blocked goal as still owed automatic
-    /// resumption until the deployment's attempt budget is spent, so it must
-    /// read the budget the daemon's resume planner spends
-    /// (`goal_mode::GoalModeNumericBounds`) rather than a compiled-in number.
+    /// resumption until one of the deployment's two attempt limits ends its
+    /// run, so it must read both numbers the daemon's resume planner applies
+    /// (`goal_mode::GoalModeNumericBounds`) rather than compiled-in ones.
     #[test]
-    fn the_attention_projection_reads_the_configured_automatic_resume_budget() {
+    fn the_attention_projection_reads_both_configured_automatic_resume_limits() {
         let configuration = crate::configuration::checked_in_example_configuration()
             .expect("checked-in example parses");
-        let configured = configuration
+        let configured_budget = configuration
             .numeric_bounds()
             .integer("automatic_resume_attempt_budget")
             .flatten()
             .and_then(|budget| u32::try_from(budget).ok())
             .expect("the example configures an automatic-resume attempt budget");
+        let configured_ceiling = configuration
+            .numeric_bounds()
+            .integer("automatic_resume_attempt_ceiling")
+            .flatten()
+            .and_then(|ceiling| u32::try_from(ceiling).ok())
+            .expect("the example configures an automatic-resume attempt ceiling");
 
         assert_eq!(
-            super::configured_automatic_resume_attempt_budget(Some(&configuration)),
-            Some(configured)
+            super::configured_automatic_resume_attempts(Some(&configuration)),
+            super::AutomaticResumeAttemptBounds::new(
+                Some(configured_budget),
+                Some(configured_ceiling),
+            )
         );
         assert_eq!(
-            super::configured_automatic_resume_attempt_budget(None),
-            None
+            super::configured_automatic_resume_attempts(None),
+            super::AutomaticResumeAttemptBounds::unbounded()
         );
     }
 

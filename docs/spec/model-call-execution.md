@@ -10,14 +10,13 @@ Pre-activation reconciliation from durable terminal-call usage is verified
 against this PR (`agent/daemon-live-ambiguous-usage-compaction`).
 
 Same-turn tool-continuation headroom closure is verified against this PR
-(`agent/daemon-live-tool-result-headroom`). Queued-turn post-usage transcript
-headroom is verified against this PR
-(`agent/daemon-live-post-usage-transcript-headroom`), and its durable proof on a
-successor frontier is verified against this PR
+(`agent/fix-headroom-accounting`). Queued-turn post-usage transcript headroom is
+verified against this PR (`agent/fix-headroom-accounting`), and its durable
+proof on a successor frontier is verified against this PR
 (`agent/daemon-live-headroom-disjoint-suffix`). Dedicated-compaction usage as
 the next queued-turn baseline is verified against this PR
-(`agent/daemon-live-compaction-source-headroom`). Automatic compaction's exact
-model-visible input boundary is verified against this PR
+(`agent/fix-headroom-accounting`). Automatic compaction's exact model-visible
+input boundary is verified against this PR
 (`agent/daemon-live-compaction-rendered-input-bound`). Codex advisory output
 reservation behavior is re-verified against this PR
 (`agent/daemon-live-codex-output-reservation`). Failed automatic-compaction
@@ -469,49 +468,61 @@ compaction call itself. The terminal disposition does not erase usage from an
 ordinary provider round that may have been accepted: ambiguous and failed calls
 therefore protect a resumed session from re-sending a request whose reported
 size already exhausted headroom. If the reported input, interpreted with the
-stored cache-inclusion semantics, plus output only when completion retained it
-in the model-visible transcript, a conservative UTF-8 byte allowance for
-model-visible entries appended after that input, and the next configured output
-reservation exceeds the context window, the daemon performs one bounded
-automatic compaction before activation. The allowance counts durable content and
-excludes ordinary assistant content or the dedicated summary when reported
-output already accounts for it. A typed same-turn headroom-exhaustion record
-preserves its exact projected tool-result byte count even when a successor
-turn's prospective frontier omits those result entries. The allowance adds other
-unreported successor content and counts any proved result entry present in that
-frontier exactly once. Historical dedicated calls prepared before that semantics
-became durable retain an unknown value; the guard treats unknown as
-cache-exclusive so it may overcount but cannot omit reported cache axes. A
-definitive request-size failure on a frontier preserved by the prospective call
-also forces one automatic compaction when no later provider-accepted ordinary
-call or completed compaction on that lineage supersedes it, even when the
-failure reported no usage. A queued turn spends at most one automatic attempt.
-If the attempt fails, still cannot make the prospective request fit, or durable
-evidence says it was already spent, the scheduler atomically activates and fails
-the turn without preparing or dispatching an ordinary call. Goal disposition can
-then apply its bounded resumption policy to a fresh turn, except when the
-durable no-fitting-input cause requires the operator instead, rather than either
-wedging the queue or sending the known-oversized request. After a nominal
-completion, the daemon retains adapter-reported usage and the completed
-observation even when reported output exceeds `max_output_tokens` or the
-reported input-plus-output lower bound exceeds `context_window_tokens`; it emits
-a closed operator cause for the overage rather than discarding assistant
-material after the provider has already accepted and served the request. Missing
-usage fields remain missing and are never invented. Adapters need no separate
-counting operation.
+stored cache-inclusion semantics and counted only when the next request still
+carries it, plus output only when completion retained it in the model-visible
+transcript, a conservative UTF-8 byte allowance for model-visible entries that
+input does not cover, and the next configured output reservation exceeds the
+context window, the daemon performs one bounded automatic compaction before
+activation. An ordinary call's reported input is the transcript prefix its
+successor resends. A dedicated compaction call's reported input measures the
+source text its summary replaced, which no later request carries, so that
+baseline is the retained summary output plus the allowance over everything the
+compaction did not summarize. The allowance measures the prospective request's
+model-visible projection, from which every summarized entry is absent whatever
+its physical frontier position; the queued turn is an uncommitted activation
+preview, so that preview supplies both the projected membership and the content
+of the entries it has minted but not committed. The allowance otherwise counts
+durable content and excludes ordinary assistant content or the dedicated summary
+when reported output already accounts for it. A typed same-turn
+headroom-exhaustion record preserves its exact projected tool-result byte count
+even when a successor turn's prospective frontier omits those result entries.
+The allowance adds other unreported successor content and counts any proved
+result entry present in that frontier exactly once. Historical dedicated calls
+prepared before that semantics became durable retain an unknown value; the guard
+treats unknown as cache-exclusive so it may overcount but cannot omit reported
+cache axes. A definitive request-size failure on a frontier preserved by the
+prospective call also forces one automatic compaction when no later
+provider-accepted ordinary call or completed compaction on that lineage
+supersedes it, even when the failure reported no usage. A queued turn spends at
+most one automatic attempt. If the attempt fails, still cannot make the
+prospective request fit, or durable evidence says it was already spent, the
+scheduler atomically activates and fails the turn without preparing or
+dispatching an ordinary call. Goal disposition can then apply its bounded
+resumption policy to a fresh turn, except when the durable no-fitting-input
+cause requires the operator instead, rather than either wedging the queue or
+sending the known-oversized request. After a nominal completion, the daemon
+retains adapter-reported usage and the completed observation even when reported
+output exceeds `max_output_tokens` or the reported input-plus-output lower bound
+exceeds `context_window_tokens`; it emits a closed operator cause for the
+overage rather than discarding assistant material after the provider has already
+accepted and served the request. Missing usage fields remain missing and are
+never invented. Adapters need no separate counting operation.
 
 The same guard runs inside the atomic tool-result continuation transaction
 against the exact completed tool-producing call. It combines reported usage, the
 UTF-8 byte length of newly projected result and denial content as a conservative
-token allowance, and the next configured output reservation. When that bound
-exceeds the context window, the daemon commits the tool results but prepares no
-continuation call. It ends the turn `Failed` with an append-only
-context-headroom record naming the producing call, reported usage semantics,
-projected-content allowance, and configured limits. Automatic goal resumption
-does not charge that daemon-owned boundary against the session's attempt budget;
-the successor queued-turn activation performs the existing bounded automatic
-compaction before calling the provider again. Missing usage does not trigger the
-boundary, and inconsistent producing-call evidence fails closed.
+token allowance, and the next configured output reservation. That allowance
+covers every result the round projects for a request the producing call issued,
+including the child result a returning foreground delegation delivers as its
+awaiting request's result. When that bound exceeds the context window, the
+daemon commits the tool results but prepares no continuation call. It ends the
+turn `Failed` with an append-only context-headroom record naming the producing
+call, reported usage semantics, projected-content allowance, and configured
+limits. Automatic goal resumption does not charge that daemon-owned boundary
+against the session's attempt budget; the successor queued-turn activation
+performs the existing bounded automatic compaction before calling the provider
+again. Missing usage does not trigger the boundary, and inconsistent
+producing-call evidence fails closed.
 
 The explicit trigger uses the same compaction transaction and provider-call
 lifecycle. An explicit command first resolves its user-global replay state; an

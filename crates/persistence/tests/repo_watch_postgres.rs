@@ -29,7 +29,9 @@ use signalbox_domain::{
     WorkflowName,
 };
 use signalbox_persistence::{
-    MIGRATOR, disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
+    MIGRATOR,
+    attention::AutomaticResumeAttemptBounds,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
     repo_watch::{
         PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
@@ -68,6 +70,7 @@ const CHECK_RUN_NAME: &str = "required";
 const WORKFLOW_NAME: &str = "required checks";
 const REVIEW_THREAD: &str = "review-thread-1";
 const REACTION_CONTENT: &str = "+1";
+const COMPRESSIBLE_CURSOR_PADDING_BYTES: i32 = 128 * 1024;
 // Distinct from the context's `author` and `head_sha` on purpose. Reusing those
 // would let a decoder that read `author` where it should read `review_reviewer`
 // — or `head_sha` where it should read `review_commit` — still satisfy the
@@ -79,6 +82,7 @@ const REACTOR: &str = "fixture-reactor";
 const PULL_REQUEST: u64 = 41;
 const CONTENT_IDENTITY_MIGRATION: i64 = 202608150001;
 const FRONTIER_OWNERSHIP_MIGRATION: i64 = 202608250501;
+const MERGED_BASELINE_MIGRATION: i64 = 202608260002;
 const CARRIED_STREAM_IDENTITY: [u8; 32] = [0x99; 32];
 const CARRIED_SEQUENCE: u64 = 7;
 const CHECK_SUITE_ID: u64 = 51;
@@ -88,7 +92,8 @@ const REVIEW_COMMENT_ID: u64 = 62;
 /// This operator read turns on the durable pull-request projection, never on
 /// how many automatic resumptions a deployment still owes, so it states the
 /// unbounded automatic-resume budget instead of a number its story never uses.
-const UNBOUNDED_AUTOMATIC_RESUME_BUDGET: Option<u32> = None;
+const UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS: AutomaticResumeAttemptBounds =
+    AutomaticResumeAttemptBounds::unbounded();
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -611,8 +616,33 @@ async fn cursor_payload_size_reports_the_latest_stored_document() -> Result<(), 
             RepoWatchCommitRequest::new(None, candidate(Some(INITIAL_HEAD))?, Vec::new()),
         )
         .await?;
+    let mut connection = pool.acquire().await?;
+    sqlx::query("SET session_replication_role = replica")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query(
+        "UPDATE repo_watch_cursor
+            SET cursor_payload = cursor_payload ||
+                jsonb_build_object('sizing_fixture', repeat('x', $2))
+          WHERE repository = $1",
+    )
+    .bind(repository.as_str())
+    .bind(COMPRESSIBLE_CURSOR_PADDING_BYTES)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query("SET session_replication_role = origin")
+        .execute(&mut *connection)
+        .await?;
     let reported = store.load_cursor_payload_bytes(&repository).await?;
-    let stored: i64 = sqlx::query_scalar(
+    let logical: i64 = sqlx::query_scalar(
+        "SELECT octet_length(cursor_payload::text)::bigint
+           FROM repo_watch_cursor
+          WHERE repository = $1",
+    )
+    .bind(repository.as_str())
+    .fetch_one(&pool)
+    .await?;
+    let compressed: i64 = sqlx::query_scalar(
         "SELECT pg_column_size(cursor_payload)::bigint
            FROM repo_watch_cursor
           WHERE repository = $1",
@@ -622,7 +652,8 @@ async fn cursor_payload_size_reports_the_latest_stored_document() -> Result<(), 
     .await?;
 
     assert_eq!(absent, None);
-    assert_eq!(reported, Some(u64::try_from(stored)?));
+    assert_eq!(reported, Some(u64::try_from(logical)?));
+    assert!(compressed < logical);
     Ok(())
 }
 
@@ -655,7 +686,7 @@ async fn pull_request_pages_read_the_current_projection_without_decoding_the_cur
     drop(connection);
 
     let page =
-        PostgresRepoWatchOperations::new(fixture.pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET)
+        PostgresRepoWatchOperations::new(fixture.pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS)
             .pull_requests(fixture.repository.clone(), None)
             .await?;
 
@@ -724,7 +755,7 @@ async fn content_identity_migration_carries_existing_cursor_and_event_to_version
     // Applying the content-identity migration applies every later migration
     // with it, so the version this observes is the current storage version and
     // not the two that migration introduced.
-    assert_eq!(cursor_version, 3);
+    assert_eq!(cursor_version, 4);
     assert_eq!(frontier, serde_json::json!([]));
     assert_eq!(event_identity.content_identity_version, 1);
     assert_eq!(event_identity.content_identity.len(), 32);
@@ -810,7 +841,7 @@ async fn frontier_ownership_migration_keeps_every_occurrence_sequence() -> Resul
         .entries()
         .collect::<Vec<_>>();
 
-    assert_eq!(cursor_version, 3);
+    assert_eq!(cursor_version, 4);
     assert_eq!(
         frontier,
         serde_json::json!([{
@@ -825,6 +856,93 @@ async fn frontier_ownership_migration_keeps_every_occurrence_sequence() -> Resul
             CARRIED_STREAM_IDENTITY,
             NonZeroU64::new(CARRIED_SEQUENCE).expect("fixture sequence is positive"),
         )]
+    );
+    Ok(())
+}
+
+async fn seed_version_three_cursor_with_merged_pull_request(
+    pool: &PgPool,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query(
+        "INSERT INTO repo_watch_cursor (
+            repository, generation, storage_version, cursor_payload
+         ) VALUES ($1, 1, 3, $2)",
+    )
+    .bind(REPOSITORY)
+    .bind(sqlx::types::Json(serde_json::json!({
+        "storage_version": 3,
+        "signal_reviewers": [],
+        "event_identity_frontier": [],
+        "state": {
+            "pull_requests": [{
+                "number": PULL_REQUEST,
+                "head_sha": INITIAL_HEAD,
+                "head_repository": HEAD_REPOSITORY,
+                "base_branch": BASE_BRANCH,
+                "head_branch": HEAD_BRANCH,
+                "title": TITLE,
+                "body": BODY,
+                "labels": [],
+                "draft": false,
+                "author": AUTHOR,
+                "lifecycle": "merged",
+                "mergeable_state": "mergeable",
+                "completed_check_suites": [],
+                "completed_check_runs": [],
+                "reviews": [],
+                "threads": [],
+                "reactions": []
+            }],
+            "workflow_runs": [],
+            "branch_heads": []
+        }
+    })))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn merged_baseline_migration_preserves_full_prior_state_until_runtime_compaction()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = postgres_before_migration(MERGED_BASELINE_MIGRATION).await?;
+    seed_version_three_cursor_with_merged_pull_request(&pool).await?;
+
+    apply_migrations_from(&pool, MERGED_BASELINE_MIGRATION).await?;
+
+    let stored: (i16, serde_json::Value, serde_json::Value) = sqlx::query_as(
+        "SELECT storage_version,
+                cursor_payload -> 'merged_pull_request_baselines',
+                cursor_payload -> 'state' -> 'pull_requests'
+           FROM repo_watch_cursor
+          WHERE repository = $1",
+    )
+    .bind(REPOSITORY)
+    .fetch_one(&pool)
+    .await?;
+    let loaded = PostgresRepoWatchStore::new(pool)
+        .load_cursor(&repository()?)
+        .await?
+        .expect("migrated cursor remains readable");
+
+    assert_eq!(stored.0, 4);
+    assert_eq!(stored.1, serde_json::json!([]));
+    assert_eq!(stored.2.as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        loaded
+            .candidate()
+            .observation()
+            .state()
+            .pull_requests()
+            .len(),
+        1
+    );
+    assert!(
+        loaded
+            .candidate()
+            .merged_pull_request_baselines()
+            .is_empty()
     );
     Ok(())
 }
@@ -1843,7 +1961,7 @@ async fn malformed_cursor_document_fails_closed_on_read() -> Result<(), Box<dyn 
         .execute(&mut *corruption_connection)
         .await?;
     sqlx::query(
-        "UPDATE repo_watch_cursor SET cursor_payload = '{\"storage_version\":3}'::jsonb WHERE repository = $1",
+        "UPDATE repo_watch_cursor SET cursor_payload = '{\"storage_version\":4}'::jsonb WHERE repository = $1",
     )
     .bind(repository.as_str())
     .execute(&mut *corruption_connection)

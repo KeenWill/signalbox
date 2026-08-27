@@ -2481,6 +2481,85 @@ final class ProcessProtocolTests: XCTestCase {
       )
     }
   }
+
+  /// Both recovery turn states carry the daemon's complete four-member
+  /// serialization, so a transcript parked on either wait decodes rather than
+  /// failing session synchronization on an unadmitted field.
+  func testModelCallRecoveryTurnDecodesItsAutomaticReconciliationStatus() throws {
+    let attemptID = "55555555-5555-4555-8555-555555555555"
+    let modelCallID = "66666666-6666-4666-8666-666666666666"
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: Data(
+        """
+        {
+          "version":1,
+          "request_id":"9",
+          "message":{
+            "type":"transcript_turn",
+            "turn_id":"\(turnID)",
+            "acceptance_position":"1",
+            "state":{
+              "type":"active_awaiting_model_call_recovery",
+              "ended_attempt_id":"\(attemptID)",
+              "recovery_model_call_id":"\(modelCallID)",
+              "automatic_reconciliation_attempts":"2",
+              "operator_action_required":false
+            }
+          }
+        }
+        """.utf8
+      )
+    )
+    let expected = SignalboxTranscriptTurnState.activeAwaitingModelCallRecovery(
+      endedAttemptID: try SignalboxCanonicalUUID(validating: attemptID),
+      recoveryModelCallID: try SignalboxCanonicalUUID(validating: modelCallID),
+      automaticReconciliationAttempts: SignalboxCanonicalUInt64(rawValue: 2),
+      operatorActionRequired: false
+    )
+
+    XCTAssertEqual(
+      ProcessProtocolFixture.transcriptTurnState(in: frame.message),
+      expected
+    )
+  }
+
+  func testToolRecoveryTurnDecodesItsAutomaticReconciliationStatus() throws {
+    let attemptID = "55555555-5555-4555-8555-555555555555"
+    let toolAttemptID = "77777777-7777-4777-8777-777777777777"
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: Data(
+        """
+        {
+          "version":1,
+          "request_id":"9",
+          "message":{
+            "type":"transcript_turn",
+            "turn_id":"\(turnID)",
+            "acceptance_position":"1",
+            "state":{
+              "type":"active_awaiting_tool_recovery",
+              "ended_attempt_id":"\(attemptID)",
+              "recovery_tool_attempt_id":"\(toolAttemptID)",
+              "automatic_reconciliation_attempts":"5",
+              "operator_action_required":true
+            }
+          }
+        }
+        """.utf8
+      )
+    )
+    let expected = SignalboxTranscriptTurnState.activeAwaitingToolRecovery(
+      endedAttemptID: try SignalboxCanonicalUUID(validating: attemptID),
+      recoveryToolAttemptID: try SignalboxCanonicalUUID(validating: toolAttemptID),
+      automaticReconciliationAttempts: SignalboxCanonicalUInt64(rawValue: 5),
+      operatorActionRequired: true
+    )
+
+    XCTAssertEqual(
+      ProcessProtocolFixture.transcriptTurnState(in: frame.message),
+      expected
+    )
+  }
 }
 
 private enum ProcessProtocolFixture {
@@ -3606,6 +3685,15 @@ private enum ProcessProtocolFixture {
       return nil
     }
     return reason
+  }
+
+  static func transcriptTurnState(
+    in message: SignalboxProcessServerMessage
+  ) -> SignalboxTranscriptTurnState? {
+    guard case .transcriptTurn(let turn) = message else {
+      return nil
+    }
+    return turn.state
   }
 
   static func toolApprovalDecisionDiagnostic(

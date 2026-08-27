@@ -64,7 +64,13 @@ const GOAL_DECLARE_REJECTED: &str =
 const GOAL_DECLARE_RESULT: &str = "{\"status\":\"applied\"}";
 const EXECUTION_FAILURE_NEED: &str =
     "Resolve the failed goal turn's execution condition, then resume the goal.";
-const CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED: &str = "No safe context-compaction boundary fits the configured model window. Start a fresh session or reduce the imported context before resuming this goal; no automatic resumption is scheduled.";
+/// Need text an execution-failure block carries when its durable recovery cause
+/// proves no unchanged resumption can progress.
+///
+/// It is the only need text that distinguishes a block planned from that cause
+/// from one planned from block provenance alone, so it is exported for a
+/// consumer asserting which of the two a lineage recorded.
+pub const CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED: &str = "No safe context-compaction boundary fits the configured model window. Start a fresh session or reduce the imported context before resuming this goal; no automatic resumption is scheduled.";
 /// Preamble for an execution-failure block automatic resumption still owes.
 ///
 /// The repair follows it rather than replacing it with a promise of automation,
@@ -88,6 +94,7 @@ pub struct GoalModeNumericBounds {
     base_backoff: Option<Duration>,
     backoff_cap: Option<Duration>,
     attempt_budget: Option<u32>,
+    attempt_ceiling: Option<u32>,
     startup_retry_delay: Option<Duration>,
 }
 
@@ -97,12 +104,14 @@ impl GoalModeNumericBounds {
         base_backoff: Option<Duration>,
         backoff_cap: Option<Duration>,
         attempt_budget: Option<u32>,
+        attempt_ceiling: Option<u32>,
         startup_retry_delay: Option<Duration>,
     ) -> Self {
         Self {
             base_backoff,
             backoff_cap,
             attempt_budget,
+            attempt_ceiling,
             startup_retry_delay,
         }
     }
@@ -533,25 +542,41 @@ impl PostgresGoalPassDisposition {
     ///
     /// The plan is read before the block is appended because the appended need
     /// text states whether automatic resumption is still owed.
+    ///
+    /// Durable recovery evidence for the failed turn is read first and decides
+    /// alone, because a recorded cause proves an unchanged resumption cannot
+    /// progress whatever the attempt accounting says. Every caller reaches the
+    /// classification here: a caller that named no turn derives it from the
+    /// generation's current turn, which is the turn a still-undisposed failure
+    /// left terminal.
     async fn plan_automatic_resumption(
         &self,
         session: SessionId,
         failed_turn: Option<TurnId>,
     ) -> Result<AutomaticResumption, PostgresGoalPassDispositionError> {
         let goal = self.repository.load_goal(session).await?;
-        let Some(goal) = goal else {
-            return Ok(AutomaticResumption::after_spent_attempts(
-                0,
-                self.numeric_bounds,
-            ));
-        };
-        let failed_turn = match failed_turn {
-            Some(turn) => Some(turn),
-            None => {
+        let failed_turn = match (failed_turn, goal.as_ref()) {
+            (Some(turn), _) => Some(turn),
+            (None, Some(goal)) => {
                 self.repository
                     .load_current_goal_turn(session, goal.current().generation())
                     .await?
             }
+            (None, None) => None,
+        };
+        if let Some(turn) = failed_turn
+            && let Some(cause) = self
+                .repository
+                .execution_failure_recovery_cause(session, turn)
+                .await?
+        {
+            return Ok(AutomaticResumption::OperatorRequired { cause });
+        }
+        let Some(goal) = goal else {
+            return Ok(AutomaticResumption::after_spent_attempts(
+                SpentAutomaticResumeAttempts::none(),
+                self.numeric_bounds,
+            ));
         };
         let spent_failures = automatic_resume_failure_turns(&goal, failed_turn);
         let unchargeable_failures = self
@@ -559,7 +584,7 @@ impl PostgresGoalPassDisposition {
             .unchargeable_automatic_resume_turns(session, &spent_failures)
             .await?;
         Ok(AutomaticResumption::after_spent_attempts(
-            chargeable_automatic_resume_attempts(&spent_failures, &unchargeable_failures),
+            SpentAutomaticResumeAttempts::over(&spent_failures, &unchargeable_failures),
             self.numeric_bounds,
         ))
     }
@@ -580,6 +605,16 @@ impl PostgresGoalPassDisposition {
                     attempt_budget = ?self.numeric_bounds.attempt_budget,
                     cause_code = "goal_automatic_resume_exhausted",
                     "blocked goal exhausted automatic resumption and awaits an operator"
+                );
+                return;
+            }
+            AutomaticResumption::CeilingReached { .. } => {
+                tracing::warn!(
+                    session = %session.into_uuid(),
+                    event_ordinal = blocked.get(),
+                    attempt_ceiling = ?self.numeric_bounds.attempt_ceiling,
+                    cause_code = "goal_automatic_resume_ceiling_reached",
+                    "blocked goal reached its automatic-resumption ceiling and awaits an operator"
                 );
                 return;
             }
@@ -816,6 +851,11 @@ impl PostgresGoalPassDisposition {
     /// database is retried here rather than abandoned. Arming a block some
     /// other pass already armed is harmless, because both derive the same
     /// identity and the second attempt replays.
+    ///
+    /// The block's own failed turn is named to the planner, so a block whose
+    /// durable cause requires an operator is planned from that cause rather
+    /// than from provenance alone: the trailing event's provenance says a turn
+    /// failed, never that resuming it could ever progress.
     async fn reconcile_ambiguous_block(&self, session: SessionId) {
         let mut remaining = AUTOMATIC_RESUME_INFRASTRUCTURE_RETRIES;
         loop {
@@ -829,7 +869,11 @@ impl PostgresGoalPassDisposition {
                     else {
                         return;
                     };
-                    let resumption = match self.plan_automatic_resumption(session, None).await {
+                    let failed_turn = execution_failure_turn(event);
+                    let resumption = match self
+                        .plan_automatic_resumption(session, failed_turn)
+                        .await
+                    {
                         Ok(resumption) => resumption,
                         Err(error) => {
                             tracing::error!(
@@ -948,18 +992,9 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let adapter = self.clone();
         async move {
-            let resumption = match adapter
-                .repository
-                .execution_failure_recovery_cause(session, turn)
-                .await?
-            {
-                Some(cause) => AutomaticResumption::OperatorRequired { cause },
-                None => {
-                    adapter
-                        .plan_automatic_resumption(session, Some(turn))
-                        .await?
-                }
-            };
+            let resumption = adapter
+                .plan_automatic_resumption(session, Some(turn))
+                .await?;
             let outcome = match adapter
                 .repository
                 .block_execution_failure(
@@ -1011,8 +1046,10 @@ enum AutomaticResumption {
         /// Backoff before the attempt.
         delay: Option<Duration>,
     },
-    /// The consecutive-attempt budget is spent; only an operator can resume.
+    /// The chargeable-attempt budget is spent; only an operator can resume.
     Exhausted { attempt_budget: u32 },
+    /// Every attempt the lifetime ceiling admits is spent; only an operator can resume.
+    CeilingReached { attempt_ceiling: u32 },
     /// Durable failure evidence proves unchanged automatic resumption cannot progress.
     OperatorRequired {
         /// Exact recorded reason the automatic path cannot make progress.
@@ -1021,15 +1058,28 @@ enum AutomaticResumption {
 }
 
 impl AutomaticResumption {
-    fn after_spent_attempts(spent: u32, numeric_bounds: GoalModeNumericBounds) -> Self {
+    /// Plans the next attempt from what the current run has already spent.
+    ///
+    /// The lifetime ceiling is tested first because it bounds attempts the
+    /// chargeable budget deliberately never charges: a run whose every failure
+    /// is exempt spends nothing, so the budget alone can never end it.
+    fn after_spent_attempts(
+        spent: SpentAutomaticResumeAttempts,
+        numeric_bounds: GoalModeNumericBounds,
+    ) -> Self {
+        if let Some(attempt_ceiling) = numeric_bounds.attempt_ceiling
+            && spent.total >= attempt_ceiling
+        {
+            return Self::CeilingReached { attempt_ceiling };
+        }
         if let Some(attempt_budget) = numeric_bounds.attempt_budget
-            && spent >= attempt_budget
+            && spent.chargeable >= attempt_budget
         {
             return Self::Exhausted { attempt_budget };
         }
         Self::Scheduled {
             delay: numeric_bounds.base_backoff.map(|base| {
-                let delay = base.saturating_mul(2_u32.saturating_pow(spent));
+                let delay = base.saturating_mul(2_u32.saturating_pow(spent.total));
                 numeric_bounds
                     .backoff_cap
                     .map_or(delay, |cap| delay.min(cap))
@@ -1045,6 +1095,9 @@ impl AutomaticResumption {
             }
             Self::Exhausted { attempt_budget } => format!(
                 "Automatic resumption is exhausted after {attempt_budget} consecutive execution failures. {EXECUTION_FAILURE_NEED}"
+            ),
+            Self::CeilingReached { attempt_ceiling } => format!(
+                "Automatic resumption reached its ceiling of {attempt_ceiling} consecutive attempts. {EXECUTION_FAILURE_NEED}"
             ),
             Self::OperatorRequired {
                 cause: GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit,
@@ -1108,15 +1161,43 @@ fn automatic_resume_failure_turns(goal: &Goal, current_failure: Option<TurnId>) 
     }
 }
 
-fn chargeable_automatic_resume_attempts(
-    failed_turns: &[TurnId],
-    unchargeable_turns: &[TurnId],
-) -> u32 {
-    let spent = failed_turns
-        .iter()
-        .filter(|turn| !unchargeable_turns.contains(turn))
-        .count();
-    u32::try_from(spent).unwrap_or(u32::MAX)
+/// What one execution-failure run's automatic resumptions have already spent.
+///
+/// Two counts, because one number cannot answer both questions the plan asks.
+/// Pacing is owed to every attempt already made, spent or exempt, since each
+/// one is a model call the daemon issued. The chargeable budget is owed only to
+/// failures the session caused, which is what keeps a rate-limiting provider
+/// from exhausting work the session did not fail. Keying both to the chargeable
+/// count left a run of exempt failures at zero forever: the base delay never
+/// doubled and the budget was never reached.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SpentAutomaticResumeAttempts {
+    /// Attempts made, whatever their failure evidence proved.
+    total: u32,
+    /// Attempts whose failure the session caused.
+    chargeable: u32,
+}
+
+impl SpentAutomaticResumeAttempts {
+    /// The run a first execution failure starts, which has spent nothing.
+    const fn none() -> Self {
+        Self {
+            total: 0,
+            chargeable: 0,
+        }
+    }
+
+    /// Counts one run's failed turns against the exempt subset of them.
+    fn over(failed_turns: &[TurnId], unchargeable_turns: &[TurnId]) -> Self {
+        let chargeable = failed_turns
+            .iter()
+            .filter(|turn| !unchargeable_turns.contains(turn))
+            .count();
+        Self {
+            total: u32::try_from(failed_turns.len()).unwrap_or(u32::MAX),
+            chargeable: u32::try_from(chargeable).unwrap_or(u32::MAX),
+        }
+    }
 }
 
 fn automatic_resume_guidance(unchargeable: bool) -> Result<Option<GoalGuidance>, GoalTextError> {
@@ -1285,14 +1366,41 @@ mod tests {
                 .flatten()
                 .and_then(|value| u32::try_from(value).ok()),
             bounds
+                .integer("automatic_resume_attempt_ceiling")
+                .flatten()
+                .and_then(|value| u32::try_from(value).ok()),
+            bounds
                 .duration("automatic_resume_startup_retry_delay")
                 .flatten(),
         )
     }
 
+    fn example_attempt_budget() -> u32 {
+        example_numeric_bounds()
+            .attempt_budget
+            .expect("example attempt budget is bounded")
+    }
+
+    fn example_attempt_ceiling() -> u32 {
+        example_numeric_bounds()
+            .attempt_ceiling
+            .expect("example attempt ceiling is bounded")
+    }
+
+    /// Plans the lineage's next attempt with every failure charged.
     fn planned(goal: &Goal) -> AutomaticResumption {
+        let failures = automatic_resume_failure_turns(goal, None);
         AutomaticResumption::after_spent_attempts(
-            spent_automatic_resume_attempts(goal),
+            SpentAutomaticResumeAttempts::over(&failures, &[]),
+            example_numeric_bounds(),
+        )
+    }
+
+    /// Plans the lineage's next attempt with every failure exempt.
+    fn planned_with_every_failure_exempt(goal: &Goal) -> AutomaticResumption {
+        let failures = automatic_resume_failure_turns(goal, None);
+        AutomaticResumption::after_spent_attempts(
+            SpentAutomaticResumeAttempts::over(&failures, &failures),
             example_numeric_bounds(),
         )
     }
@@ -1345,12 +1453,124 @@ mod tests {
         let failures = [external_failure, runtime_failure];
 
         assert_eq!(
-            chargeable_automatic_resume_attempts(&failures, &[external_failure]),
+            SpentAutomaticResumeAttempts::over(&failures, &[external_failure]).chargeable,
             1
         );
         assert_eq!(
-            chargeable_automatic_resume_attempts(&failures, &failures),
+            SpentAutomaticResumeAttempts::over(&failures, &failures).chargeable,
             0
+        );
+    }
+
+    /// Every attempt is a model call the daemon issued, whatever the failure
+    /// evidence later proved about who caused it, so the count that paces the
+    /// next attempt counts them all.
+    #[test]
+    fn every_attempt_counts_toward_the_total_however_its_failure_is_classified() {
+        let runtime_failure = TurnId::from_uuid(Uuid::from_u128(0x02));
+        let external_failure = TurnId::from_uuid(Uuid::from_u128(0x03));
+        let failures = [external_failure, runtime_failure];
+
+        assert_eq!(
+            SpentAutomaticResumeAttempts::over(&failures, &[external_failure]).total,
+            2
+        );
+        assert_eq!(
+            SpentAutomaticResumeAttempts::over(&failures, &failures).total,
+            2
+        );
+    }
+
+    /// The backoff is owed to every attempt already made, not only the charged
+    /// ones. Keying the exponent to the chargeable count instead pinned a run
+    /// of exempt failures at the base delay: a resume every base delay for as
+    /// long as the exempting condition lasted.
+    #[test]
+    fn exempt_failures_still_double_the_backoff_by_total_attempts() {
+        let second = failed(automatically_resumed(failed(pursuing_goal(), 0x01)), 0x02);
+
+        assert_eq!(
+            SpentAutomaticResumeAttempts::over(
+                &automatic_resume_failure_turns(&second, None),
+                &automatic_resume_failure_turns(&second, None)
+            )
+            .chargeable,
+            0
+        );
+        assert_eq!(
+            planned_with_every_failure_exempt(&second),
+            AutomaticResumption::Scheduled {
+                delay: example_numeric_bounds()
+                    .base_backoff
+                    .map(|base| base.saturating_mul(2))
+            }
+        );
+    }
+
+    /// A run whose every failure is exempt charges nothing, so the chargeable
+    /// budget can never end it. The lifetime ceiling is the only limit that
+    /// does, and without it such a run resumed forever, appending a goal event
+    /// per cycle.
+    #[test]
+    fn a_run_of_exempt_failures_ends_at_the_lifetime_ceiling() {
+        let ceiling = example_attempt_ceiling();
+        let exempt_run = SpentAutomaticResumeAttempts::over(&[], &[]);
+        let at_ceiling = SpentAutomaticResumeAttempts {
+            total: ceiling,
+            chargeable: 0,
+        };
+
+        assert_eq!(exempt_run.chargeable, 0);
+        assert_eq!(
+            AutomaticResumption::after_spent_attempts(at_ceiling, example_numeric_bounds()),
+            AutomaticResumption::CeilingReached {
+                attempt_ceiling: ceiling
+            }
+        );
+        // Startup inventories blocks by the exact scheduled need text, so a
+        // ceiling-parked block must not carry it or a restart would re-arm the
+        // run the ceiling just ended.
+        assert_ne!(
+            AutomaticResumption::CeilingReached {
+                attempt_ceiling: ceiling
+            }
+            .need()
+            .expect("the ceiling need is admitted"),
+            AutomaticResumption::Scheduled {
+                delay: example_numeric_bounds().base_backoff
+            }
+            .need()
+            .expect("the scheduled need is admitted")
+        );
+    }
+
+    /// The two limits are separate: reaching the chargeable budget still ends a
+    /// run far below the ceiling, and the ceiling ends one that never charged.
+    #[test]
+    fn the_chargeable_budget_and_the_lifetime_ceiling_end_a_run_independently() {
+        let budget = example_attempt_budget();
+        let ceiling = example_attempt_ceiling();
+        let charged = SpentAutomaticResumeAttempts {
+            total: budget,
+            chargeable: budget,
+        };
+        let below_both = SpentAutomaticResumeAttempts {
+            total: budget,
+            chargeable: budget.saturating_sub(1),
+        };
+
+        assert!(budget < ceiling);
+        assert_eq!(
+            AutomaticResumption::after_spent_attempts(charged, example_numeric_bounds()),
+            AutomaticResumption::Exhausted {
+                attempt_budget: budget
+            }
+        );
+        assert_eq!(
+            AutomaticResumption::after_spent_attempts(below_both, example_numeric_bounds()),
+            AutomaticResumption::Scheduled {
+                delay: example_numeric_bounds().backoff_cap
+            }
         );
     }
 
@@ -1390,12 +1610,14 @@ mod tests {
 
     #[test]
     fn an_exhausted_budget_blocks_permanently_and_states_the_operator_requirement() {
-        let attempt_budget = example_numeric_bounds()
-            .attempt_budget
-            .expect("example attempt budget is bounded");
+        let attempt_budget = example_attempt_budget();
+        let spent = SpentAutomaticResumeAttempts {
+            total: attempt_budget,
+            chargeable: attempt_budget,
+        };
         let exhausted = AutomaticResumption::Exhausted { attempt_budget };
         assert_eq!(
-            AutomaticResumption::after_spent_attempts(attempt_budget, example_numeric_bounds()),
+            AutomaticResumption::after_spent_attempts(spent, example_numeric_bounds()),
             exhausted
         );
         assert_eq!(
@@ -1411,10 +1633,14 @@ mod tests {
 
     #[test]
     fn unbounded_attempts_remain_scheduled_without_a_finite_delay() {
-        let bounds = GoalModeNumericBounds::new(None, None, None, None);
+        let bounds = GoalModeNumericBounds::new(None, None, None, None, None);
+        let spent = SpentAutomaticResumeAttempts {
+            total: u32::MAX,
+            chargeable: u32::MAX,
+        };
 
         assert_eq!(
-            AutomaticResumption::after_spent_attempts(u32::MAX, bounds),
+            AutomaticResumption::after_spent_attempts(spent, bounds),
             AutomaticResumption::Scheduled { delay: None }
         );
     }
@@ -1453,12 +1679,15 @@ mod tests {
         .need()
         .expect("the scheduled need is admitted");
         let exhausted = AutomaticResumption::Exhausted {
-            attempt_budget: example_numeric_bounds()
-                .attempt_budget
-                .expect("example attempt budget is bounded"),
+            attempt_budget: example_attempt_budget(),
         }
         .need()
         .expect("the exhausted need is admitted");
+        let ceiling_reached = AutomaticResumption::CeilingReached {
+            attempt_ceiling: example_attempt_ceiling(),
+        }
+        .need()
+        .expect("the ceiling need is admitted");
         let operator_required = AutomaticResumption::OperatorRequired {
             cause: GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit,
         }
@@ -1467,6 +1696,7 @@ mod tests {
 
         assert!(scheduled.as_str().ends_with(EXECUTION_FAILURE_NEED));
         assert!(exhausted.as_str().ends_with(EXECUTION_FAILURE_NEED));
+        assert!(ceiling_reached.as_str().ends_with(EXECUTION_FAILURE_NEED));
         assert_eq!(
             operator_required.as_str(),
             CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED

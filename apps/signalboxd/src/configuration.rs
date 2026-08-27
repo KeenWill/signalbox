@@ -836,12 +836,20 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
         "automatic_reconciliations_per_liveness_scan",
         NumericBoundKind::Integer,
     ),
+    (
+        "automatic_reconciliation_attempt_bound",
+        NumericBoundKind::Duration,
+    ),
     ("max_convergence_sweep_targets", NumericBoundKind::Integer),
     ("max_convergence_sweep_interval", NumericBoundKind::Duration),
     ("max_convergence_sweep_cool_off", NumericBoundKind::Duration),
     ("automatic_resume_base_backoff", NumericBoundKind::Duration),
     ("automatic_resume_backoff_cap", NumericBoundKind::Duration),
     ("automatic_resume_attempt_budget", NumericBoundKind::Integer),
+    (
+        "automatic_resume_attempt_ceiling",
+        NumericBoundKind::Integer,
+    ),
     (
         "automatic_resume_startup_retry_delay",
         NumericBoundKind::Duration,
@@ -4635,14 +4643,16 @@ convergence_sweep_request_retry_delay = "250ms"
 convergence_sweep_retry_backoff_base = "60s"
 convergence_sweep_retry_backoff_cap = "900s"
 terminalizations_per_liveness_scan = 64
-turn_liveness_recovery_attempt_bound = "60s"
+turn_liveness_recovery_attempt_bound = "10s"
 automatic_reconciliations_per_liveness_scan = 64
+automatic_reconciliation_attempt_bound = "60s"
 max_convergence_sweep_targets = 256
 max_convergence_sweep_interval = "300s"
 max_convergence_sweep_cool_off = "1800s"
 automatic_resume_base_backoff = "120s"
 automatic_resume_backoff_cap = "1800s"
 automatic_resume_attempt_budget = 20
+automatic_resume_attempt_ceiling = 100
 automatic_resume_startup_retry_delay = "1s"
 post_kill_reap_bound = "5s"
 stale_active_turn_bound = "1800s"

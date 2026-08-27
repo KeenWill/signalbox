@@ -647,6 +647,271 @@ async fn inv014_tool_continuation_headroom_closes_before_another_call() -> Resul
     Ok(())
 }
 
+/// INV-014: a returning foreground delegation result is model-visible
+/// continuation content. The same-turn headroom bound counts its delivered
+/// child-result bytes alongside executed tool results, so a round whose child
+/// returned a large result takes the compaction boundary instead of preparing
+/// the oversized continuation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv014_tool_continuation_headroom_counts_delegation_results() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x8900;
+    let (fixture, _, _, requests) = checkpoint_tool_batch_with_approval_and_usage(
+        &pool,
+        seed,
+        &[("spawn_session", "{}"), ("await_session", "{}")],
+        InitialToolApproval::Confirm,
+        ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(70))
+            .with_output_tokens(Some(5)),
+    )
+    .await?;
+    let [spawning_request, awaiting_request] = requests.as_slice() else {
+        panic!("the foreground delegation fixture has spawn and await requests")
+    };
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(seed + 0x100, seed + 0x101, direct(seed + 5)))
+        .await?;
+    let child = Uuid::from_u128(seed + 0x101);
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    let issuing_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe0));
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd0)),
+                *spawning_request,
+                ToolApprovalDecision::Approve,
+            ),
+            || panic!("the first approval does not start execution"),
+        )
+        .await?;
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd1)),
+                *awaiting_request,
+                ToolApprovalDecision::Approve,
+            ),
+            || issuing_attempt,
+        )
+        .await?;
+    let spawn_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            spawn_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?
+        .expect("the approved spawn request prepares one attempt");
+    let authorized_spawn = tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, spawn_attempt)
+        .await?;
+    // The spawn result names the child session: a hyphenated UUID is 36 bytes.
+    let spawn_result = child.to_string();
+    tool_repository
+        .commit_observation(authorized_spawn.executor_fence().bind(
+            ToolAttemptObservation::Completed {
+                result: ToolResultContent::Text(
+                    ToolResultText::try_new(spawn_result).expect("bounded child identity"),
+                ),
+            },
+        ))
+        .await?;
+    let await_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0xe2));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            await_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?
+        .expect("the approved await request prepares one attempt");
+
+    // Forty-two ASCII characters and one two-byte "é": 44 UTF-8 bytes.
+    let child_result = "delivered foreground child result content é";
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_event DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_wait DISABLE TRIGGER ALL;
+         ALTER TABLE session_child_result DISABLE TRIGGER ALL;
+         ALTER TABLE session_child_result_delivery DISABLE TRIGGER ALL;
+         ALTER TABLE tool_attempt DISABLE TRIGGER ALL;",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation
+            (spawning_tool_request_id, parent_session_id, parent_turn_id,
+             child_session_id, policy_kind)
+         VALUES ($1, $2, $3, $4, 'background')",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(child)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             provenance_kind, provenance_session_id, provenance_turn_id,
+             provenance_tool_request_id)
+         VALUES ($1, 1, 'spawned', 'tool_request', $2, $3, $1)",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             outcome_kind, reason_kind, provenance_kind,
+             provenance_session_id, provenance_turn_id)
+         VALUES ($1, 2, 'outcome_recorded', 'result_returned',
+                 'child_completed', 'child_turn', $2, $3)",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(child)
+    .bind(Uuid::from_u128(seed + 0x102))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_child_result
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             outcome_kind, content_text)
+         VALUES ($1, 2, 'outcome_recorded', 'result_returned', $2)",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(child_result)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_wait
+            (awaiting_tool_request_id, spawning_tool_request_id,
+             parent_session_id, parent_turn_id, child_session_id, wait_mode)
+         VALUES ($1, $2, $3, $4, $5, 'foreground')",
+    )
+    .bind(awaiting_request.into_uuid())
+    .bind(spawning_request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(child)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_child_result_delivery
+            (awaiting_tool_request_id, spawning_tool_request_id,
+             parent_session_id, delivery_sequence, delivery_kind)
+         VALUES ($1, $2, $3, NULL, NULL)",
+    )
+    .bind(awaiting_request.into_uuid())
+    .bind(spawning_request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE tool_attempt
+            SET state_kind = 'terminal',
+                terminal_disposition_kind = 'awaiting_child',
+                wait_spawning_request_id = $1,
+                wait_child_session_id = $2
+          WHERE attempt_id = $3",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(child)
+    .bind(await_attempt.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation ENABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_event ENABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_wait ENABLE TRIGGER ALL;
+         ALTER TABLE session_child_result ENABLE TRIGGER ALL;
+         ALTER TABLE session_child_result_delivery ENABLE TRIGGER ALL;
+         ALTER TABLE tool_attempt ENABLE TRIGGER ALL;",
+    )
+    .execute(&pool)
+    .await?;
+
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("one continuation target forms a catalog");
+    let result_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xe6));
+    let continuation_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0xe8));
+    let model_repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+            .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+                target,
+                FastMode::Disabled,
+                10,
+                130,
+            )]);
+    let outcome = model_repository
+        .tool_loop_repository()
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0xe4)),
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0xe5)),
+                ],
+                result_frontier,
+                continuation_call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0xe9)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xea)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xeb)),
+            ),
+            |_| panic!("fixture has no pending steering"),
+        )
+        .await?;
+
+    let signalbox_application::PrepareToolContinuationOutcome::ContextCompactionRequired(required) =
+        outcome
+    else {
+        panic!("the delivered child result exhausts the configured continuation headroom");
+    };
+    assert_eq!(required.producing_call(), fixture.call);
+    let stored_bytes: Decimal = sqlx::query_scalar(
+        "SELECT projected_result_content_bytes
+           FROM tool_continuation_context_headroom
+          WHERE session_id = $1
+            AND turn_id = $2
+            AND producing_model_call_id = $3",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored_bytes, Decimal::from(36 + 44_u64));
+    let reported = model_repository
+        .latest_reported_usage(fixture.session, target, result_frontier)
+        .await?
+        .expect("the producing call reported input usage");
+    assert_eq!(
+        reported.projected_unreported_content_bytes(),
+        36 + 44,
+        "a proved delegation result present in the successor projection is counted once"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S02 / S08 / INV-016 / INV-036: a NextSafePoint input accepted while a tool
 /// round executes is consumed by the same-turn continuation call, and the
 /// committed continuation shape reloads through the scheduling projection —
