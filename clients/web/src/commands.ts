@@ -165,9 +165,9 @@ export const commandRegistry = [
   {
     id: 'navigate.activity',
     title: 'Go to Activity',
-    description: 'Open the system-wide event stream.',
+    description: 'Open bounded repository ingestion and automation reads.',
     category: 'Navigate',
-    bindings: [],
+    bindings: [{ label: 'g t', registration: { kind: 'sequence', sequence: ['G', 'T'] } }],
     available: productNavigation,
     run: (context) => context.navigate?.('/activity'),
   },

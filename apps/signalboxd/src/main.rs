@@ -45,7 +45,6 @@ use signalbox_persistence::{
     automatic_reconciliation::RETRY_LADDER_ARITY,
     blob::BlobCatalogRepository,
     convergence_sweep::PostgresConvergenceSweepStore,
-    conversation_import::backfill_imported_conversation_display_titles,
     hub_fence::FENCED_POOL_MAX_CONNECTIONS,
     migrate,
     model_execution::PostgresModelCallRepository,
@@ -1517,6 +1516,7 @@ async fn run_hub(
         configured_duration("automatic_resume_base_backoff"),
         configured_duration("automatic_resume_backoff_cap"),
         configured_u32("automatic_resume_attempt_budget")?,
+        configured_u32("automatic_resume_attempt_ceiling")?,
         configured_duration("automatic_resume_startup_retry_delay"),
     );
     let diagnostic_model_identity_limit = configured_usize("diagnostic_model_identity_limit")?;
@@ -1804,18 +1804,8 @@ async fn run_hub(
                     SanitizedStartupCause::Static("database_migration_failed"),
                 )
             })?;
-            let resolved_display_titles =
-                backfill_imported_conversation_display_titles(&migration_pool)
-                    .await
-                    .map_err(|_| {
-                        erase_startup_cause(
-                            RuntimePhase::Migration,
-                            SanitizedStartupCause::Static("imported_title_backfill_failed"),
-                        )
-                    })?;
             tracing::info!(
                 phase = ?RuntimePhase::Migration,
-                resolved_display_titles,
                 "daemon startup phase completed"
             );
             Ok(())
@@ -2133,6 +2123,7 @@ async fn run_hub(
         pool.clone(),
         web_blob_runtime,
         model_configuration.clone(),
+        blob_store_registry.clone(),
         Arc::clone(&snapshot_reader_budget),
     )
     .await

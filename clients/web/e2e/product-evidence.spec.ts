@@ -51,6 +51,17 @@ const useDeterministicBootstrap = async (page: Page) => {
   await page.route('**/api/attention', (route) => route.fulfill({ json: emptyAttentionFixture }))
 }
 
+const emptyRepositoryWatchFixture = {
+  continuation_after_repository: null,
+  repositories: [],
+} as const
+
+// Only the Activity route reads this adapter; every other route ignores it.
+const useDeterministicRepositoryWatchApi = (page: Page) =>
+  page.route('**/api/repository-watch/repositories**', (route) =>
+    route.fulfill({ json: emptyRepositoryWatchFixture }),
+  )
+
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }
   page.on('console', (message) => {
@@ -114,6 +125,7 @@ const captureRouteEvidence = async (page: Page, evidence: RouteEvidence) => {
   await useDeterministicBootstrap(page)
   // Only the Imports route reads this adapter; every other route ignores it.
   await useDeterministicImportApi(page)
+  await useDeterministicRepositoryWatchApi(page)
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto(evidence.path)
   await expect(page.getByRole('heading', { name: evidence.title, level: 1 })).toBeVisible()

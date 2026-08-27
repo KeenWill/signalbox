@@ -96,6 +96,8 @@ automatic_resume_base_backoff = "120s"
 automatic_resume_backoff_cap = "1800s"
 # Automatic resumption attempts spent by one failed goal turn.
 automatic_resume_attempt_budget = 20
+# Automatic resumption attempts one blocked goal may ever make, spent or exempt.
+automatic_resume_attempt_ceiling = 100
 # Delay between startup automatic-resumption inventory retries.
 automatic_resume_startup_retry_delay = "1s"
 # Time allowed to reap a killed model-provider child.

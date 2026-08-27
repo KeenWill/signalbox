@@ -847,6 +847,10 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
     ("automatic_resume_backoff_cap", NumericBoundKind::Duration),
     ("automatic_resume_attempt_budget", NumericBoundKind::Integer),
     (
+        "automatic_resume_attempt_ceiling",
+        NumericBoundKind::Integer,
+    ),
+    (
         "automatic_resume_startup_retry_delay",
         NumericBoundKind::Duration,
     ),
@@ -4648,6 +4652,7 @@ max_convergence_sweep_cool_off = "1800s"
 automatic_resume_base_backoff = "120s"
 automatic_resume_backoff_cap = "1800s"
 automatic_resume_attempt_budget = 20
+automatic_resume_attempt_ceiling = 100
 automatic_resume_startup_retry_delay = "1s"
 post_kill_reap_bound = "5s"
 stale_active_turn_bound = "1800s"

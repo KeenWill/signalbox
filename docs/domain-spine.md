@@ -1789,6 +1789,43 @@ pub enum ImportedSessionReconstitutionFailure {
     Seed(ImportedSessionSeedReconstitutionFailure),
 }
 
+pub struct ImportedSessionNormalizedReconstitutionInput { /* private */ }
+impl ImportedSessionNormalizedReconstitutionInput {
+    pub fn new(
+        requested_session: SessionId,
+        stored_session: SessionId,
+        provenance: SessionCreationProvenance,
+        current_defaults_session: SessionId,
+        current_defaults_version: SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        placement: SessionPlacementReconstitutionFacts,
+        imported_entries: Vec<ImportedTranscriptEntryInput>,
+        seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
+        seed_snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
+        semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
+    ) -> Self;
+    pub fn reconstitute(
+        self,
+    ) -> Result<
+        ReconstitutedImportedSession,
+        ImportedSessionNormalizedReconstitutionError,
+    >;
+}
+
+pub struct ImportedSessionNormalizedReconstitutionError { /* private */ }
+// sealed: Err of ImportedSessionNormalizedReconstitutionInput::reconstitute
+impl ImportedSessionNormalizedReconstitutionError {
+    pub fn into_parts(
+        self,
+    ) -> (
+        ImportedSessionNormalizedReconstitutionInput,
+        ImportedSessionReconstitutionFailure,
+    );
+    // accessors: failure(), input()
+}
+
 pub struct ImportedSessionReconstitutionError { /* private */ }
 // sealed: Err of ImportedSessionReconstitutionInput::reconstitute
 impl ImportedSessionReconstitutionError {
@@ -12849,7 +12886,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: git_remote                                 | 4 (+2 free fn)                   |
 | domain: session                                    | 22                               |
 | domain: session_delegation                         | 37 (+3 free fn)                  |
-| domain: imported_session                           | 18                               |
+| domain: imported_session                           | 20                               |
 | domain: configuration                              | 24                               |
 | domain: model_settings                             | 25                               |
 | domain: accepted_input                             | 5                                |
@@ -12880,7 +12917,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
 | domain: workspace_instruction                      | 18                               |
-| **signalbox-domain total**                         | **857 (+12 free fn)**            |
+| **signalbox-domain total**                         | **859 (+12 free fn)**            |
 | application: repo_watch_operations                 | 33 (+2 free fn) (incl. 1 trait)  |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: attention                             | 12 (+3 free fn) (incl. 1 trait)  |

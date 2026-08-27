@@ -11,6 +11,7 @@ publish.workspace = true
 test-support = [
     "signalbox-blob-store-filesystem/test-support",
     "signalbox-blob-store-s3/test-support",
+    "signalbox-persistence/postgres-integration",
     "signalbox-persistence/test-support",
 ]
 
@@ -21,7 +22,7 @@ axum = { version = "0.8.9", default-features = false, features = [
     "query",
     "tokio",
 ] }
-base64 = "0.22.1"
+base64 = "0.23.0"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 hmac = { version = "0.13.0", default-features = false }
 image = { version = "0.25.8", default-features = false, features = [

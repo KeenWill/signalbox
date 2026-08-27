@@ -16,8 +16,7 @@ use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::{
     conversation_import::{
-        DISPLAY_TITLE_STATE_DERIVED, DISPLAY_TITLE_STATE_PENDING, DISPLAY_TITLE_STATE_UNDERIVABLE,
-        decode_format, positive_u64,
+        DISPLAY_TITLE_STATE_DERIVED, DISPLAY_TITLE_STATE_UNDERIVABLE, decode_format, positive_u64,
     },
     mapping::{PositiveOrdinalMappingError, defaults_version_from_numeric},
 };
@@ -35,10 +34,7 @@ const IMPORTED_ORIGIN_RANK: i32 = 1;
 /// exclusive cursor identity and origin rank, `$3` selects native rows, `$4`
 /// includes archived native rows, `$5` is the exact case-sensitive title
 /// substring, and `$6` selects imported rows. A `NULL` native title or
-/// resolved-absent imported display title matches no title filter, while a
-/// transitional `pending` row survives every title filter so the serving
-/// decode fails closed on it rather than letting a filtered page silently
-/// omit an unresolved row.
+/// resolved-absent imported display title matches no title filter.
 const UNIFIED_PAGE_ITEM_SQL: &str = "SELECT unified.origin_rank, unified.conversation_id,
            unified.title, unified.archived, unified.defaults_version,
            unified.source_format, unified.converter_version,
@@ -73,11 +69,7 @@ const UNIFIED_PAGE_ITEM_SQL: &str = "SELECT unified.origin_rank, unified.convers
                imported.display_title_state
           FROM imported_conversation AS imported
          WHERE $6
-           AND (
-               $5::text IS NULL
-               OR imported.display_title_state = 'pending'
-               OR strpos(imported.display_title, $5) > 0
-           )
+           AND ($5::text IS NULL OR strpos(imported.display_title, $5) > 0)
     ) AS unified
     WHERE (
         $1::uuid IS NULL
@@ -103,11 +95,7 @@ const UNIFIED_PAGE_PROBE_SQL: &str = "SELECT EXISTS (
                imported.imported_conversation_id AS conversation_id
           FROM imported_conversation AS imported
          WHERE $6
-           AND (
-               $5::text IS NULL
-               OR imported.display_title_state = 'pending'
-               OR strpos(imported.display_title, $5) > 0
-           )
+           AND ($5::text IS NULL OR strpos(imported.display_title, $5) > 0)
     ) AS unified
     WHERE (
         $1::uuid IS NULL
@@ -136,8 +124,6 @@ pub enum ConversationListingCorruption {
     },
     /// A stored display title violates the derived-shape contract.
     InvalidDisplayTitle,
-    /// A serving read observed a display title the startup backfill owns.
-    UnresolvedDisplayTitle,
     /// Two durable facts that must agree do not.
     Inconsistent(&'static str),
 }
@@ -163,9 +149,6 @@ impl fmt::Display for ConversationListingCorruption {
             Self::InvalidDisplayTitle => {
                 formatter.write_str("stored imported display title violates its shape contract")
             }
-            Self::UnresolvedDisplayTitle => formatter.write_str(
-                "unified listing observed a pending display title the startup backfill owns",
-            ),
             Self::Inconsistent(relationship) => {
                 write!(
                     formatter,
@@ -466,11 +449,7 @@ fn decode_list_item(
     }
 }
 
-/// Requires a resolved display-title state and validates the stored shape.
-///
-/// The startup backfill resolves every transitional `'pending'` row before
-/// the daemon serves, so a serving read observing one fails closed rather
-/// than presenting a row whose derivation never ran.
+/// Requires a final display-title state and validates the stored shape.
 fn decode_resolved_display_title(
     title: Option<String>,
     display_title_state: &str,
@@ -490,9 +469,6 @@ fn decode_resolved_display_title(
                 .into());
             }
             Ok(None)
-        }
-        DISPLAY_TITLE_STATE_PENDING => {
-            Err(ConversationListingCorruption::UnresolvedDisplayTitle.into())
         }
         other => Err(ConversationListingCorruption::Unsupported {
             field: "display-title state",

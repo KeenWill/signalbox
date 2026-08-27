@@ -117,11 +117,13 @@ pub use imported_session::{
     CreateSessionFromImportedFrontierPreparationFailure,
     CreateSessionFromImportedFrontierReconstitutionError,
     CreateSessionFromImportedFrontierReconstitutionFailure,
-    CreateSessionFromImportedFrontierReconstitutionInput, ImportedSessionReconstitutionError,
-    ImportedSessionReconstitutionFailure, ImportedSessionReconstitutionInput,
-    ImportedSessionSeedHeaderReconstitutionInput, ImportedSessionSeedReconstitutionFailure,
-    ImportedSessionSeedReconstitutionInput, PreparedCreateSessionFromImportedFrontier,
-    ReconstitutedImportedSession, ReconstitutedSessionCreationFromImportedFrontier,
+    CreateSessionFromImportedFrontierReconstitutionInput,
+    ImportedSessionNormalizedReconstitutionError, ImportedSessionNormalizedReconstitutionInput,
+    ImportedSessionReconstitutionError, ImportedSessionReconstitutionFailure,
+    ImportedSessionReconstitutionInput, ImportedSessionSeedHeaderReconstitutionInput,
+    ImportedSessionSeedReconstitutionFailure, ImportedSessionSeedReconstitutionInput,
+    PreparedCreateSessionFromImportedFrontier, ReconstitutedImportedSession,
+    ReconstitutedSessionCreationFromImportedFrontier,
 };
 pub use model_call::{
     CurrentModelCall, CurrentModelCallState, EndedModelCall, ModelCallDisposition,

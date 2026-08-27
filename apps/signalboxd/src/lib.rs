@@ -60,6 +60,7 @@ mod credential_pools;
 mod daemon_tools;
 mod fenced_database;
 mod goal_mode;
+mod imported_source_blobs;
 mod local_socket;
 pub mod model_adapter;
 mod process_runtime;
@@ -76,6 +77,7 @@ pub mod usage_limits;
 mod web_blob_runtime;
 pub mod web_http;
 mod web_imports;
+mod web_repo_watch;
 mod workspace_instruction_runtime;
 
 pub use attachment_preparation_runtime::AttachmentPreparingModelCallProvider;
@@ -121,7 +123,8 @@ pub use fenced_database::{
     reconcile_fenced_pool_floor,
 };
 pub use goal_mode::{
-    GoalModeNumericBounds, PostgresGoalPassDisposition, PostgresGoalPassDispositionError,
+    CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED, GoalModeNumericBounds, PostgresGoalPassDisposition,
+    PostgresGoalPassDispositionError,
 };
 pub use local_socket::{LocalProcessListener, LocalSocketError};
 pub use process_runtime::{
