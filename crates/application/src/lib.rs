@@ -190,11 +190,12 @@ pub use scheduler::{
     SchedulerPassExpiryHandler, SchedulerPassOccupancyBound, scheduler_ordinary_pass_limit,
 };
 pub use search::{
-    SearchArtifactId, SearchArtifactProjection, SearchArtifactProjectionClass, SearchContentClass,
-    SearchCursor, SearchHighlight, SearchPage, SearchPageLimit, SearchPageLimitError,
-    SearchProjectionText, SearchProjectionTextError, SearchProjectionWriter, SearchQuery,
-    SearchReader, SearchResult, SearchResultSource, SearchScope, SearchService, SearchStrategy,
-    SearchText, SearchTextError, max_search_page_items, max_search_projection_text_bytes,
+    MAX_SEARCH_HIGHLIGHTS_PER_RESULT, SearchArtifactId, SearchArtifactProjection,
+    SearchArtifactProjectionClass, SearchContentClass, SearchCursor, SearchHighlight, SearchPage,
+    SearchPageLimit, SearchPageLimitError, SearchProjectionText, SearchProjectionTextError,
+    SearchProjectionWriter, SearchQuery, SearchReader, SearchResult, SearchResultSource,
+    SearchScope, SearchService, SearchStrategy, SearchText, SearchTextError,
+    max_search_highlights_per_result, max_search_page_items, max_search_projection_text_bytes,
     max_search_query_bytes, max_search_snippet_bytes,
 };
 pub use session_delegation::DelegationMessageDeliveryProjection;

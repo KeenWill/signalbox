@@ -69,7 +69,7 @@ IDENTITY_SECTION = "lib.rs — identities"
 
 MODIFIERS = r"(?:(?:async|unsafe|const)\s+|extern\s+\"[^\"]*\"\s+)*"
 DECLARATION = re.compile(
-    rf"^pub {MODIFIERS}(?:struct|enum|trait|fn) ([A-Za-z_][A-Za-z0-9_]*)"
+    rf"^pub {MODIFIERS}(?:struct|enum|trait|fn|static|type|const) ([A-Za-z_][A-Za-z0-9_]*)"
 )
 ROOT_DECLARATION = re.compile(
     rf"^pub {MODIFIERS}(?:struct|enum|union|trait|fn|static|type|const) ([A-Za-z_][A-Za-z0-9_]*)",
