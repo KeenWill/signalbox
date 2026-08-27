@@ -3221,6 +3221,7 @@ async fn session_live_snapshot(
     State(state): State<WebApiState>,
     Path(session_id): Path<String>,
 ) -> Response {
+    let mut shutdown = state.shutdown;
     let session = match parse_session_id(&session_id) {
         Ok(session) => session,
         Err(error) => return error.into_response(),
@@ -3231,10 +3232,17 @@ async fn session_live_snapshot(
     let Some(budget) = state.snapshot_reader_budget else {
         return live_projection_unavailable();
     };
-    let Ok(_snapshot_permit) = budget.acquire().await else {
+    let snapshot_permit = tokio::select! {
+        () = live_follow_shutdown(&mut shutdown) => return live_projection_unavailable(),
+        permit = budget.acquire() => permit,
+    };
+    let Ok(_snapshot_permit) = snapshot_permit else {
         return live_projection_unavailable();
     };
-    match repository.read_live_snapshot(session).await {
+    match tokio::select! {
+        () = live_follow_shutdown(&mut shutdown) => return live_projection_unavailable(),
+        snapshot = repository.read_live_snapshot(session) => snapshot,
+    } {
         Ok(Some(snapshot)) => match live_snapshot_dto(snapshot) {
             Some(snapshot) => Json(snapshot).into_response(),
             None => live_projection_corruption(),
@@ -4866,6 +4874,27 @@ mod tests {
         )
     }
 
+    fn router_with_snapshot_reader_shutdown(
+        budget: Arc<Semaphore>,
+        shutdown: watch::Receiver<bool>,
+    ) -> Router {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://signalbox:signalbox@localhost/signalbox")
+            .expect("the unused fixture pool URL is valid");
+        super::production_router_with_budget(
+            None,
+            Some(pool),
+            None,
+            None,
+            None,
+            super::ProductionReadRuntime {
+                snapshot_reader_budget: Some(budget),
+                shutdown: Some(shutdown),
+                monitor: None,
+            },
+        )
+    }
+
     #[test]
     fn http_byte_ranges_cover_closed_open_and_suffix_forms() {
         let closed = parse_byte_range(&header::HeaderValue::from_static("bytes=2-5"), 10);
@@ -5691,6 +5720,39 @@ mod tests {
         let response = router_with_closed_snapshot_reader_budget(None)
             .oneshot(request)
             .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the typed application failure is JSON");
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "session_live_projection_unavailable");
+    }
+
+    #[tokio::test]
+    async fn live_snapshot_reader_wait_stops_when_web_shutdown_begins() {
+        let budget = Arc::new(Semaphore::new(1));
+        let _held = Arc::clone(&budget)
+            .acquire_owned()
+            .await
+            .expect("the fixture holds the snapshot reader permit");
+        let (shutdown, shutdown_receiver) = watch::channel(false);
+        let request = Request::get("/api/sessions/00000000-0000-0000-0000-000000000991/live")
+            .header(header::HOST, "localhost")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let waiting = tokio::spawn(
+            router_with_snapshot_reader_shutdown(budget, shutdown_receiver).oneshot(request),
+        );
+        tokio::task::yield_now().await;
+
+        shutdown
+            .send(true)
+            .expect("the snapshot request still observes web shutdown");
+        let response = tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .expect("the snapshot request exits promptly on shutdown")
+            .expect("the snapshot request task completes cleanly")
             .expect("the production router responds");
         let status = response.status();
         let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
