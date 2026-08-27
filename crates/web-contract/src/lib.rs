@@ -11,8 +11,8 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Value, json};
 use signalbox_application::{
     max_search_page_items, max_search_query_bytes, max_search_snippet_bytes,
-    max_timeline_window_bytes, max_timeline_window_items, max_usage_aggregate_calls,
-    max_usage_aggregate_groups, max_usage_call_page_items,
+    max_session_live_queued_turns, max_timeline_window_bytes, max_timeline_window_items,
+    max_usage_aggregate_calls, max_usage_aggregate_groups, max_usage_call_page_items,
 };
 
 /// Exact browser HTTP contract version served by this daemon build.
@@ -24,6 +24,11 @@ pub const WEB_CONTRACT_NAME: &str = "signalbox.web-http";
 pub const MAX_JSON_BODY_BYTES: usize = 64 * 1024;
 /// Hard safety ceiling protecting client and daemon memory per NDJSON item.
 pub const MAX_NDJSON_ITEM_BYTES: usize = 64 * 1024;
+/// Hard safety ceiling on one ephemeral provider text fragment. Production
+/// splits deltas at this bound, so the generated decoder rejects anything
+/// larger as a value the server cannot emit.
+// numeric-bound: hard safety - leaves room for worst-case JSON escaping and the event envelope
+pub const MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES: usize = 8_192;
 
 /// Identity of the one exact browser contract this daemon serves.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -57,6 +62,8 @@ pub struct WebContractCapabilities {
     pub imported_continuations: bool,
     /// Stable bounded session descriptors and historical windows are available.
     pub bounded_session_timeline: bool,
+    /// Bounded current snapshots and snapshot-first live follow are available.
+    pub bounded_session_live: bool,
     /// Bounded lexical search with stable history reveal addresses is available.
     pub bounded_lexical_search: bool,
     /// Dedicated bounded aggregate and per-call usage/cost reads are available.
@@ -75,6 +82,8 @@ pub struct WebContractLimits {
     pub max_timeline_window_items: u32,
     /// Maximum projected structured item bytes in one timeline window.
     pub max_timeline_window_bytes: u32,
+    /// Maximum queued turn identities retained in one live snapshot.
+    pub max_session_live_queued_turns: u32,
     /// Maximum UTF-8 bytes in one product search expression.
     pub max_search_query_bytes: u32,
     /// Maximum results in one search page.
@@ -124,6 +133,7 @@ impl WebContractBootstrap {
                 import_discovery: true,
                 imported_continuations: true,
                 bounded_session_timeline: true,
+                bounded_session_live: true,
                 bounded_lexical_search: true,
                 bounded_usage_cost: true,
             },
@@ -132,6 +142,7 @@ impl WebContractBootstrap {
                 max_ndjson_item_bytes: MAX_NDJSON_ITEM_BYTES as u32,
                 max_timeline_window_items: u32::from(max_timeline_window_items()),
                 max_timeline_window_bytes: max_timeline_window_bytes(),
+                max_session_live_queued_turns: u32::from(max_session_live_queued_turns()),
                 max_search_query_bytes: max_search_query_bytes() as u32,
                 max_search_page_items: u32::from(max_search_page_items()),
                 max_search_snippet_bytes: max_search_snippet_bytes() as u32,
@@ -637,6 +648,36 @@ impl<'de> Deserialize<'de> for WebSessionId {
     }
 }
 
+/// Checked canonical UUID used for browser-visible turn identities.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebTurnId(
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    String,
+);
+
+impl WebTurnId {
+    /// Constructs a canonical lowercase UUID from its 16 wire-order bytes.
+    #[must_use]
+    pub fn from_uuid_bytes(bytes: [u8; 16]) -> Self {
+        Self(WebSessionId::from_uuid_bytes(bytes).0)
+    }
+}
+
+impl<'de> Deserialize<'de> for WebTurnId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        canonical_session_id(&value)
+            .then_some(Self(value))
+            .ok_or_else(|| de::Error::custom("turn ID must be a canonical lowercase UUID"))
+    }
+}
+
 /// Checked canonical UUID used for browser-visible non-session identities.
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(transparent)]
@@ -673,6 +714,36 @@ impl<'de> Deserialize<'de> for WebUuid {
     }
 }
 
+/// Checked canonical UUID used for browser-visible live resource identities.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebLiveResourceId(
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    String,
+);
+
+impl WebLiveResourceId {
+    /// Constructs a canonical lowercase UUID from its 16 wire-order bytes.
+    #[must_use]
+    pub fn from_uuid_bytes(bytes: [u8; 16]) -> Self {
+        Self(WebSessionId::from_uuid_bytes(bytes).0)
+    }
+}
+
+impl<'de> Deserialize<'de> for WebLiveResourceId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        canonical_session_id(&value)
+            .then_some(Self(value))
+            .ok_or_else(|| de::Error::custom("live resource ID must be a canonical lowercase UUID"))
+    }
+}
+
 impl WebTimelineEventSequence {
     /// Encodes one already-validated positive durable-event sequence.
     #[must_use]
@@ -697,6 +768,41 @@ impl<'de> Deserialize<'de> for WebTimelineEventSequence {
         if positive.is_none() {
             return Err(de::Error::custom(
                 "timeline event sequence must be a canonical positive u64",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Checked positive unsigned 64-bit value encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebPositiveU64(#[schemars(regex(pattern = r"^[1-9][0-9]*$"))] String);
+
+impl WebPositiveU64 {
+    /// Encodes one already-validated positive value in canonical decimal form.
+    #[must_use]
+    pub fn from_nonzero(value: std::num::NonZeroU64) -> Self {
+        Self(value.get().to_string())
+    }
+
+    /// Returns the canonical positive decimal wire spelling.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for WebPositiveU64 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let positive = canonical_u64(&value).and_then(std::num::NonZeroU64::new);
+        if positive.is_none() {
+            return Err(de::Error::custom(
+                "wire value must be a canonical positive u64",
             ));
         }
         Ok(Self(value))
@@ -862,6 +968,131 @@ where
     T: Deserialize<'de>,
 {
     Option::<T>::deserialize(deserializer)
+}
+
+/// Current durable state of one active turn.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebSessionLiveActiveState {
+    Running {
+        #[serde(deserialize_with = "deserialize_present_option")]
+        #[schemars(required)]
+        model_call_id: Option<WebLiveResourceId>,
+    },
+    AwaitingModelCallRecovery {
+        model_call_id: WebLiveResourceId,
+    },
+    AwaitingToolApproval {
+        tool_request_id: WebLiveResourceId,
+    },
+    AwaitingChild {
+        tool_request_id: WebLiveResourceId,
+        child_session_id: WebSessionId,
+    },
+    AwaitingToolRecovery {
+        tool_attempt_id: WebLiveResourceId,
+    },
+    AwaitingRunnerRecovery {
+        runner_id: WebLiveResourceId,
+        placement_revision: WebPositiveU64,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionLiveActiveTurn {
+    pub turn_id: WebTurnId,
+    pub state: WebSessionLiveActiveState,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebSessionLiveReconciliation {
+    ModelCall {
+        turn_id: WebTurnId,
+        model_call_id: WebLiveResourceId,
+    },
+    ToolAttempt {
+        turn_id: WebTurnId,
+        tool_attempt_id: WebLiveResourceId,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSessionLiveRunnerConnectionHealth {
+    Connected,
+    Suspect,
+    Shutdown,
+    Lost,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebSessionLiveRunner {
+    Unpinned {
+        placement_revision: WebPositiveU64,
+    },
+    Pinned {
+        runner_id: WebLiveResourceId,
+        placement_revision: WebPositiveU64,
+        connection_health: WebSessionLiveRunnerConnectionHealth,
+    },
+    RunnerLostBeforePin {
+        runner_id: WebLiveResourceId,
+        placement_revision: WebPositiveU64,
+    },
+    RunnerLost {
+        runner_id: WebLiveResourceId,
+        placement_revision: WebPositiveU64,
+    },
+    RunnerAbandoned {
+        runner_id: WebLiveResourceId,
+        placement_revision: WebPositiveU64,
+    },
+}
+
+/// Bounded repeatable-read current projection for one open workspace.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionLiveSnapshot {
+    pub session_id: WebSessionId,
+    pub observed_through: WebPositiveU64,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
+    pub active: Option<WebSessionLiveActiveTurn>,
+    pub queued_turn_count: WebU64,
+    pub queued_turn_ids: Vec<WebTurnId>,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
+    pub reconciliation: Option<WebSessionLiveReconciliation>,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
+    pub runner: Option<WebSessionLiveRunner>,
+}
+
+/// Snapshot-first event stream for one open workspace.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebSessionLiveStreamEvent {
+    Snapshot {
+        snapshot: Box<WebSessionLiveSnapshot>,
+    },
+    Durable {
+        cursor: WebU64,
+        address: WebTimelineAddress,
+        event_kind: WebSessionTimelineEventKind,
+    },
+    ProviderTextDelta {
+        turn_id: WebTurnId,
+        model_call_id: WebLiveResourceId,
+        part_index: u32,
+        content: String,
+    },
+    ResyncRequired {
+        /// Positive because production starts from a positive snapshot cursor.
+        cursor: WebPositiveU64,
+    },
 }
 
 /// Closed browser-visible class of matched indexed content.
@@ -2057,6 +2288,45 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
         "/$defs/WebSessionCatalogSummary/properties/current_turn_id",
     )?;
 
+    let mut live_snapshot_schema =
+        canonical_schema(schemars::schema_for!(WebSessionLiveSnapshot).to_value());
+    make_property_nullable(&mut live_snapshot_schema, "active")?;
+    make_property_nullable(&mut live_snapshot_schema, "reconciliation")?;
+    make_property_nullable(&mut live_snapshot_schema, "runner")?;
+    make_pointer_nullable(
+        &mut live_snapshot_schema,
+        "/$defs/WebSessionLiveActiveState/oneOf/0/properties/model_call_id",
+    )?;
+    set_array_max_items(
+        &mut live_snapshot_schema,
+        "/properties/queued_turn_ids",
+        u64::from(max_session_live_queued_turns()),
+    )?;
+
+    let mut live_event_schema =
+        canonical_schema(schemars::schema_for!(WebSessionLiveStreamEvent).to_value());
+    make_pointer_nullable(
+        &mut live_event_schema,
+        "/$defs/WebSessionLiveSnapshot/properties/active",
+    )?;
+    make_pointer_nullable(
+        &mut live_event_schema,
+        "/$defs/WebSessionLiveSnapshot/properties/reconciliation",
+    )?;
+    make_pointer_nullable(
+        &mut live_event_schema,
+        "/$defs/WebSessionLiveSnapshot/properties/runner",
+    )?;
+    make_pointer_nullable(
+        &mut live_event_schema,
+        "/$defs/WebSessionLiveActiveState/oneOf/0/properties/model_call_id",
+    )?;
+    set_array_max_items(
+        &mut live_event_schema,
+        "/$defs/WebSessionLiveSnapshot/properties/queued_turn_ids",
+        u64::from(max_session_live_queued_turns()),
+    )?;
+
     let mut search_page_schema = schemars::schema_for!(WebSearchPage).to_value();
     search_page_schema["properties"]["results"]["maxItems"] = json!(max_search_page_items());
     make_property_nullable(&mut search_page_schema, "continuation")?;
@@ -2114,6 +2384,16 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             name: "WebSessionCatalogSnapshot",
             decoder: "decodeWebSessionCatalogSnapshot",
             schema: session_catalog_schema,
+        },
+        ContractSchema {
+            name: "WebSessionLiveSnapshot",
+            decoder: "decodeWebSessionLiveSnapshot",
+            schema: live_snapshot_schema,
+        },
+        ContractSchema {
+            name: "WebSessionLiveStreamEvent",
+            decoder: "decodeWebSessionLiveStreamEvent",
+            schema: live_event_schema,
         },
         ContractSchema {
             name: "WebImportListRequest",
@@ -2243,6 +2523,19 @@ fn make_definition_property_nullable(
         .ok_or(GenerateWebContractError::UnsupportedSchema)?;
     let concrete = property.take();
     *property = json!({ "anyOf": [concrete, { "type": "null" }] });
+    Ok(())
+}
+
+fn set_array_max_items(
+    schema: &mut Value,
+    pointer: &str,
+    maximum: u64,
+) -> Result<(), GenerateWebContractError> {
+    let property = schema
+        .pointer_mut(pointer)
+        .and_then(Value::as_object_mut)
+        .ok_or(GenerateWebContractError::UnsupportedSchema)?;
+    property.insert("maxItems".to_owned(), Value::from(maximum));
     Ok(())
 }
 
@@ -2458,6 +2751,43 @@ function assertSchema(root, schema, value, path) {{
   }}
   if (typeof value !== schema.type) {{
     fail(path, schema.type);
+  }}
+}}
+
+function assertLiveSnapshot(snapshot, path) {{
+  const queuedTurnCount = BigInt(snapshot.queued_turn_count);
+  const previewLimit = BigInt({live_preview_limit});
+  const expectedPreviewLength = queuedTurnCount > previewLimit ? previewLimit : queuedTurnCount;
+  if (BigInt(snapshot.queued_turn_ids.length) !== expectedPreviewLength) {{
+    fail(`${{path}}.queued_turn_ids`, `exactly ${{expectedPreviewLength}} IDs for queued_turn_count`);
+  }}
+  if (new Set(snapshot.queued_turn_ids).size !== snapshot.queued_turn_ids.length) {{
+    fail(`${{path}}.queued_turn_ids`, "unique turn IDs");
+  }}
+  const occupiedTurnId = snapshot.active?.turn_id ?? snapshot.reconciliation?.turn_id;
+  if (occupiedTurnId !== undefined && snapshot.queued_turn_ids.includes(occupiedTurnId)) {{
+    fail(`${{path}}.queued_turn_ids`, "disjoint from active and reconciliation turn IDs");
+  }}
+  if (snapshot.active != null && snapshot.reconciliation != null) {{
+    fail(`${{path}}.reconciliation`, "absent while an active turn is present");
+  }}
+  if (
+    snapshot.active?.state.kind === "awaiting_child" &&
+    snapshot.active.state.child_session_id === snapshot.session_id
+  ) {{
+    fail(`${{path}}.active.state.child_session_id`, "different from the parent session ID");
+  }}
+  if (snapshot.active?.state.kind === "awaiting_runner_recovery") {{
+    const recovery = snapshot.active.state;
+    const runner = snapshot.runner;
+    const compatibleRunner =
+      runner != null &&
+      (runner.state === "runner_lost" || runner.state === "runner_lost_before_pin") &&
+      runner.runner_id === recovery.runner_id &&
+      runner.placement_revision === recovery.placement_revision;
+    if (!compatibleRunner) {{
+      fail(`${{path}}.runner`, "the runner placement required by awaiting_runner_recovery");
+    }}
   }}
 }}
 
@@ -3258,6 +3588,7 @@ function assertUsageEvidence(inputSemantics, tokens, cost, path, allowHiddenInva
 }}
 "##,
         max_attention_title_scalars = MAX_ATTENTION_TITLE_SCALARS,
+        live_preview_limit = max_session_live_queued_turns(),
         max_search_snippet_bytes = max_search_snippet_bytes(),
     );
     for schema in schemas {
@@ -3285,7 +3616,7 @@ function assertUsageEvidence(inputSemantics, tokens, cost, path, allowHiddenInva
         ));
         if schema.name == "WebContractBootstrap" {
             output.push_str(&format!(
-                "  if (value.contract.name !== {name:?} || value.contract.version !== {version:?} ||\n      value.capabilities.bounded_json !== {bounded_json} ||\n      value.capabilities.same_origin_json_mutations !== {same_origin_json_mutations} ||\n      value.capabilities.ndjson_streaming !== {ndjson_streaming} ||\n      value.capabilities.import_discovery !== {import_discovery} ||\n      value.capabilities.imported_continuations !== {imported_continuations} ||\n      value.limits.max_json_body_bytes !== {max_json_body_bytes} ||\n      value.limits.max_ndjson_item_bytes !== {max_ndjson_item_bytes}) {{\n    throw new TypeError(\"bootstrap carries an incompatible web contract\");\n  }}\n",
+                "  if (value.contract.name !== {name:?} || value.contract.version !== {version:?} ||\n      value.capabilities.bounded_json !== {bounded_json} ||\n      value.capabilities.same_origin_json_mutations !== {same_origin_json_mutations} ||\n      value.capabilities.ndjson_streaming !== {ndjson_streaming} ||\n      value.capabilities.import_discovery !== {import_discovery} ||\n      value.capabilities.imported_continuations !== {imported_continuations} ||\n      value.capabilities.bounded_session_live !== {bounded_session_live} ||\n      value.limits.max_json_body_bytes !== {max_json_body_bytes} ||\n      value.limits.max_ndjson_item_bytes !== {max_ndjson_item_bytes} ||\n      value.limits.max_session_live_queued_turns !== {max_session_live_queued_turns}) {{\n    throw new TypeError(\"bootstrap carries an incompatible web contract\");\n  }}\n",
                 name = WEB_CONTRACT_NAME,
                 version = WEB_CONTRACT_VERSION,
                 bounded_json = current_bootstrap.capabilities.bounded_json,
@@ -3293,8 +3624,21 @@ function assertUsageEvidence(inputSemantics, tokens, cost, path, allowHiddenInva
                 ndjson_streaming = current_bootstrap.capabilities.ndjson_streaming,
                 import_discovery = current_bootstrap.capabilities.import_discovery,
                 imported_continuations = current_bootstrap.capabilities.imported_continuations,
+                bounded_session_live = current_bootstrap.capabilities.bounded_session_live,
                 max_json_body_bytes = current_bootstrap.limits.max_json_body_bytes,
                 max_ndjson_item_bytes = current_bootstrap.limits.max_ndjson_item_bytes,
+                max_session_live_queued_turns = current_bootstrap.limits.max_session_live_queued_turns,
+            ));
+        }
+        if schema.name == "WebSessionLiveSnapshot" {
+            output.push_str("  assertLiveSnapshot(value, \"session_live_snapshot\");\n");
+        }
+        if schema.name == "WebSessionLiveStreamEvent" {
+            output.push_str(
+                "  if (value.kind === \"snapshot\") {\n    assertLiveSnapshot(value.snapshot, \"session_live_event.snapshot\");\n  }\n  if (value.kind === \"durable\" && value.cursor !== value.address.event_sequence) {\n    fail(\"session_live_event.address.event_sequence\", \"equal to cursor\");\n  }\n",
+            );
+            output.push_str(&format!(
+                "  if (value.kind === \"provider_text_delta\" && new TextEncoder().encode(value.content).length > {MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES}) {{\n    fail(\"session_live_event.content\", \"at most {MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES} UTF-8 bytes\");\n  }}\n"
             ));
         }
         output.push_str("  return value;\n}\n\n");

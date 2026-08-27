@@ -208,10 +208,10 @@ async fn live_snapshot_reports_reconciliation_behind_a_queued_successor()
     let (container, pool, _database_url) = migrated_postgres().await?;
     let parked =
         crate::model_call_execution_and_recovery::park_restart_ambiguity(&pool, 0xD7_0000).await?;
-    let reconciliation = PostgresModelCallReconciliationRepository::new(pool.clone());
+    let reconciliation = PostgresAutomaticReconciliationRepository::new(pool.clone());
     let batch = reconciliation.claim_due().await?;
     let outcome = reconciliation.reconcile(batch.claimed()[0]).await?;
-    assert_eq!(outcome, ModelCallReconciliationOutcome::Reconciled);
+    assert_eq!(outcome, AutomaticReconciliationOutcome::Reconciled);
     let successor = TurnId::from_uuid(Uuid::from_u128(0xD7_1003));
     let queued = SubmitInputRepository::new(pool.clone())
         .handle(

@@ -27,12 +27,12 @@ use signalbox_application::{
     ReplaceSessionMetadataService, ReviewPassCompletionStatus, ReviewWorkflowCommand,
     ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult, ReviewWorkflowCommandService,
     ReviewWorkflowOperation, ReviewWorkflowOperationKind, SessionMetadataListItem,
-    SessionMetadataListQuery, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
-    SubmitInputTransaction, UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest,
-    UpdateSessionPlacementService, UuidV7CommissionedDispatchIdGenerator,
-    UuidV7CreateSessionFromImportedFrontierIdGenerator, UuidV7ImportedConversationIdGenerator,
-    UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator, UuidV7ToolLoopIdGenerator,
-    render_model_user_content,
+    SessionMetadataListQuery, SessionTimelineEventKind, SubmitInputOutcome, SubmitInputRequest,
+    SubmitInputService, SubmitInputTransaction, UpdateSessionPlacementOutcome,
+    UpdateSessionPlacementRequest, UpdateSessionPlacementService,
+    UuidV7CommissionedDispatchIdGenerator, UuidV7CreateSessionFromImportedFrontierIdGenerator,
+    UuidV7ImportedConversationIdGenerator, UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator,
+    UuidV7ToolLoopIdGenerator, render_model_user_content,
 };
 use signalbox_blob_store::ExpectedBlob;
 use signalbox_conversation_import_claude_code::{
@@ -368,6 +368,7 @@ pub struct ProcessRuntime {
 struct ProcessFanouts {
     durable: broadcast::Sender<ProcessUpdate>,
     streaming: broadcast::Sender<ProcessUpdate>,
+    monitor: broadcast::Sender<ProcessMonitorUpdate>,
 }
 
 impl ProcessRuntime {
@@ -404,6 +405,7 @@ impl ProcessRuntime {
         );
         let (durable_updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
         let (streaming_updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
+        let (monitor_updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
         Self {
             recovery_reporter: None,
             listener,
@@ -419,6 +421,7 @@ impl ProcessRuntime {
             fanouts: ProcessFanouts {
                 durable: durable_updates,
                 streaming: streaming_updates,
+                monitor: monitor_updates,
             },
         }
     }
@@ -469,6 +472,14 @@ impl ProcessRuntime {
     pub fn provider_text_delta_sink(&self) -> ProcessProviderTextDeltaSink {
         ProcessProviderTextDeltaSink {
             updates: self.fanouts.streaming.clone(),
+            monitor: self.fanouts.monitor.clone(),
+        }
+    }
+
+    /// Returns the daemon's one bounded browser monitor source.
+    pub fn monitor(&self) -> ProcessMonitor {
+        ProcessMonitor {
+            updates: self.fanouts.monitor.clone(),
         }
     }
 
@@ -508,11 +519,20 @@ impl ProcessRuntime {
 #[derive(Clone, Debug)]
 pub struct ProcessProviderTextDeltaSink {
     updates: broadcast::Sender<ProcessUpdate>,
+    monitor: broadcast::Sender<ProcessMonitorUpdate>,
 }
 
 impl ProviderTextDeltaSink for ProcessProviderTextDeltaSink {
     fn publish(&self, delta: ProviderTextDelta) {
+        let monitor = ProcessMonitorUpdate::ProviderTextDelta {
+            session: delta.session(),
+            turn: delta.turn(),
+            call: delta.call(),
+            part_index: delta.part_index(),
+            text: delta.shared_text(),
+        };
         let _ = self.updates.send(ProcessUpdate::ProviderTextDelta(delta));
+        let _ = self.monitor.send(monitor);
     }
 }
 
@@ -538,6 +558,11 @@ async fn dispatch_updates(
                     event.kind(),
                 );
                 nudge_delegation_wake(&eligibility_nudge, event.session(), event.kind());
+                let _ = fanouts.monitor.send(ProcessMonitorUpdate::Durable {
+                    cursor: event.sequence(),
+                    session: event.session(),
+                    kind: monitor_event_kind(event.kind()),
+                });
                 if let Some(update) = ProcessUpdate::from_outbox(event) {
                     let _ = fanouts.durable.send(update.clone());
                     let _ = fanouts.streaming.send(update);
@@ -558,6 +583,131 @@ async fn dispatch_updates(
                 return Err(ProcessRuntimeError::UnexpectedDispatcherRetry);
             }
         }
+    }
+}
+
+/// Cloneable source for the daemon's one bounded browser monitor fan-out.
+#[derive(Clone, Debug)]
+pub struct ProcessMonitor {
+    updates: broadcast::Sender<ProcessMonitorUpdate>,
+}
+
+impl ProcessMonitor {
+    pub fn subscribe(&self) -> ProcessMonitorSubscription {
+        ProcessMonitorSubscription {
+            receiver: self.updates.subscribe(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_channel() -> Self {
+        let (updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
+        Self { updates }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_for_test(&self, update: ProcessMonitorUpdate) {
+        let _ = self.updates.send(update);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fill_for_test(&self, update: ProcessMonitorUpdate) {
+        for _ in 0..=PROCESS_UPDATE_CAPACITY {
+            let _ = self.updates.send(update.clone());
+        }
+    }
+}
+
+/// One monitor subscriber; lag is explicit and requires resynchronization.
+#[derive(Debug)]
+pub struct ProcessMonitorSubscription {
+    receiver: broadcast::Receiver<ProcessMonitorUpdate>,
+}
+
+impl ProcessMonitorSubscription {
+    pub fn queued_len(&self) -> usize {
+        self.receiver.len()
+    }
+
+    /// True when this subscriber's unread queue has reached the bounded
+    /// fan-out capacity, so the next broadcast drops its oldest unread record.
+    pub fn is_saturated(&self) -> bool {
+        self.receiver.len() >= PROCESS_UPDATE_CAPACITY
+    }
+
+    pub async fn recv(&mut self) -> Result<ProcessMonitorUpdate, ProcessMonitorReceiveError> {
+        self.receiver.recv().await.map_err(|error| match error {
+            broadcast::error::RecvError::Lagged(skipped) => {
+                ProcessMonitorReceiveError::Lagged(usize::try_from(skipped).unwrap_or(usize::MAX))
+            }
+            broadcast::error::RecvError::Closed => ProcessMonitorReceiveError::Closed,
+        })
+    }
+}
+
+/// Current-runtime update exposed to browser HTTP without process frames.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProcessMonitorUpdate {
+    Durable {
+        cursor: u64,
+        session: SessionId,
+        kind: SessionTimelineEventKind,
+    },
+    ProviderTextDelta {
+        session: SessionId,
+        turn: TurnId,
+        call: ModelCallId,
+        part_index: u32,
+        text: Arc<str>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessMonitorReceiveError {
+    Lagged(usize),
+    Closed,
+}
+
+fn monitor_event_kind(event: &DispatchedOutboxEventKind) -> SessionTimelineEventKind {
+    match event {
+        DispatchedOutboxEventKind::SessionCreated => SessionTimelineEventKind::SessionCreated,
+        DispatchedOutboxEventKind::SessionModelSettingsChanged(_) => {
+            SessionTimelineEventKind::SessionModelSettingsChanged
+        }
+        DispatchedOutboxEventKind::TurnModelSettingsResolved(_) => {
+            SessionTimelineEventKind::TurnModelSettingsResolved
+        }
+        DispatchedOutboxEventKind::InputAccepted { .. } => SessionTimelineEventKind::InputAccepted,
+        DispatchedOutboxEventKind::GoalTurnRetired { .. } => {
+            SessionTimelineEventKind::GoalTurnRetired
+        }
+        DispatchedOutboxEventKind::TurnActivated { .. } => SessionTimelineEventKind::TurnActivated,
+        DispatchedOutboxEventKind::TurnFailed { .. } => SessionTimelineEventKind::TurnFailed,
+        DispatchedOutboxEventKind::ModelCallTransition { .. } => {
+            SessionTimelineEventKind::ModelCallTransition
+        }
+        DispatchedOutboxEventKind::ToolBatchTransition { .. } => {
+            SessionTimelineEventKind::ToolBatchTransition
+        }
+        DispatchedOutboxEventKind::ToolApprovalDecided { .. } => {
+            SessionTimelineEventKind::ToolApprovalDecided
+        }
+        DispatchedOutboxEventKind::ContextCompacted { .. } => {
+            SessionTimelineEventKind::ContextCompacted
+        }
+        DispatchedOutboxEventKind::TurnCompleted { .. } => SessionTimelineEventKind::TurnCompleted,
+        DispatchedOutboxEventKind::TurnRefused { .. } => SessionTimelineEventKind::TurnRefused,
+        DispatchedOutboxEventKind::TurnCancelled { .. } => SessionTimelineEventKind::TurnCancelled,
+        DispatchedOutboxEventKind::TurnReconciliationRequired { .. } => {
+            SessionTimelineEventKind::TurnReconciliationRequired
+        }
+        DispatchedOutboxEventKind::RunnerStateTransition { .. } => {
+            SessionTimelineEventKind::RunnerStateTransition
+        }
+        DispatchedOutboxEventKind::DelegationUpdate(_) => {
+            SessionTimelineEventKind::DelegationUpdate
+        }
+        DispatchedOutboxEventKind::DelegationWake(_) => SessionTimelineEventKind::DelegationWake,
     }
 }
 

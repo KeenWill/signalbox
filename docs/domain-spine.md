@@ -7878,6 +7878,65 @@ impl<Reader: SessionTimelineReader> ReadSessionTimelineService<Reader> {
 }
 ```
 
+## application: session_live
+
+```rust
+pub const fn max_session_live_queued_turns() -> u8;
+
+pub enum SessionLiveActiveState {
+    Running { model_call: Option<ModelCallId> },
+    AwaitingModelCallRecovery { call: ModelCallId },
+    AwaitingToolApproval { request: ToolRequestId },
+    AwaitingChild { request: ToolRequestId, child: SessionId },
+    AwaitingToolRecovery { attempt: ToolAttemptId },
+    AwaitingRunnerRecovery { runner: RunnerId, placement_revision: u64 },
+}
+pub struct SessionLiveActiveTurn {
+    pub turn: TurnId,
+    pub state: SessionLiveActiveState,
+}
+pub enum SessionLiveReconciliation {
+    ModelCall { turn: TurnId, call: ModelCallId },
+    ToolAttempt { turn: TurnId, attempt: ToolAttemptId },
+}
+pub enum SessionLiveRunnerState {
+    Unpinned,
+    Pinned,
+    RunnerLostBeforePin,
+    RunnerLost,
+    RunnerAbandoned,
+}
+pub enum SessionLiveRunnerConnectionHealth { Connected, Suspect, Shutdown, Lost }
+pub struct SessionLiveRunner {
+    pub runner: Option<RunnerId>,
+    pub placement_revision: u64,
+    pub state: SessionLiveRunnerState,
+    pub connection_health: Option<SessionLiveRunnerConnectionHealth>,
+}
+pub struct SessionLiveSnapshot {
+    pub session: SessionId,
+    pub observed_through: u64,
+    pub active: Option<SessionLiveActiveTurn>,
+    pub queued_turn_count: u64,
+    pub queued_turns: Vec<TurnId>,
+    pub reconciliation: Option<SessionLiveReconciliation>,
+    pub runner: Option<SessionLiveRunner>,
+}
+pub trait SessionLiveReader {
+    type Error;
+    fn read_live_snapshot(&self, session: SessionId)
+        -> impl Future<Output = Result<Option<SessionLiveSnapshot>, Self::Error>> + Send;
+}
+pub struct ReadSessionLiveService<Reader> { /* private */ }
+impl<Reader> ReadSessionLiveService<Reader> {
+    pub const fn new(reader: Reader) -> Self;
+}
+impl<Reader: SessionLiveReader> ReadSessionLiveService<Reader> {
+    pub async fn snapshot(&self, session: SessionId)
+        -> Result<Option<SessionLiveSnapshot>, Reader::Error>;
+}
+```
+
 ## application: model_execution
 
 ```rust
@@ -13035,6 +13094,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: search                                | 21 (+4 free fn) (incl. 2 traits) |
 | application: usage                                 | 37 (+4 free fn) (incl. 1 trait)  |
 | application: session_timeline                      | 14 (+3 free fn) (incl. 1 trait)  |
+| application: session_live                          | 9 (+1 free fn) (incl. 1 trait)   |
 | application: model_execution                       | 41 (incl. 8 traits)              |
 | application: tool_loop                             | 28 (incl. 5 traits)              |
 | application: operator_failure                      | 2 (incl. 1 trait)                |
@@ -13055,4 +13115,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop_ports                       | 10 (incl. 3 traits)              |
 | application: turn_liveness                         | 14                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **469 (+28 free fn)**            |
+| **signalbox-application total**                    | **478 (+29 free fn)**            |

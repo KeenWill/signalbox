@@ -730,6 +730,10 @@ const schemas = {
             "description": "Bounded lexical search with stable history reveal addresses is available.",
             "type": "boolean"
           },
+          "bounded_session_live": {
+            "description": "Bounded current snapshots and snapshot-first live follow are available.",
+            "type": "boolean"
+          },
           "bounded_session_timeline": {
             "description": "Stable bounded session descriptors and historical windows are available.",
             "type": "boolean"
@@ -773,6 +777,7 @@ const schemas = {
           "import_discovery",
           "imported_continuations",
           "bounded_session_timeline",
+          "bounded_session_live",
           "bounded_lexical_search",
           "bounded_usage_cost"
         ],
@@ -831,6 +836,12 @@ const schemas = {
             "minimum": 0,
             "type": "integer"
           },
+          "max_session_live_queued_turns": {
+            "description": "Maximum queued turn identities retained in one live snapshot.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "max_timeline_window_bytes": {
             "description": "Maximum projected structured item bytes in one timeline window.",
             "format": "uint32",
@@ -861,6 +872,7 @@ const schemas = {
           "max_ndjson_item_bytes",
           "max_timeline_window_items",
           "max_timeline_window_bytes",
+          "max_session_live_queued_turns",
           "max_search_query_bytes",
           "max_search_page_items",
           "max_search_snippet_bytes",
@@ -4028,6 +4040,917 @@ const schemas = {
     "title": "WebSessionCatalogSnapshot",
     "type": "object"
   },
+  "WebSessionLiveSnapshot": {
+    "$defs": {
+      "WebLiveResourceId": {
+        "description": "Checked canonical UUID used for browser-visible live resource identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebPositiveU64": {
+        "description": "Checked positive unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebSessionLiveActiveState": {
+        "description": "Current durable state of one active turn.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "running",
+                "type": "string"
+              },
+              "model_call_id": {
+                "anyOf": [
+                  {
+                    "description": "Checked canonical UUID used for browser-visible live resource identities.",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "model_call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "awaiting_model_call_recovery",
+                "type": "string"
+              },
+              "model_call_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "model_call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "awaiting_tool_approval",
+                "type": "string"
+              },
+              "tool_request_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_request_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "child_session_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "kind": {
+                "const": "awaiting_child",
+                "type": "string"
+              },
+              "tool_request_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_request_id",
+              "child_session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "awaiting_tool_recovery",
+                "type": "string"
+              },
+              "tool_attempt_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_attempt_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "awaiting_runner_recovery",
+                "type": "string"
+              },
+              "placement_revision": {
+                "$ref": "#/$defs/WebPositiveU64"
+              },
+              "runner_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "runner_id",
+              "placement_revision"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebSessionLiveRunnerConnectionHealth": {
+        "enum": [
+          "connected",
+          "suspect",
+          "shutdown",
+          "lost"
+        ],
+        "type": "string"
+      },
+      "WebTurnId": {
+        "description": "Checked canonical UUID used for browser-visible turn identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebU64": {
+        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Bounded repeatable-read current projection for one open workspace.",
+    "properties": {
+      "active": {
+        "anyOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "state": {
+                "$ref": "#/$defs/WebSessionLiveActiveState"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebTurnId"
+              }
+            },
+            "required": [
+              "turn_id",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "observed_through": {
+        "$ref": "#/$defs/WebPositiveU64"
+      },
+      "queued_turn_count": {
+        "$ref": "#/$defs/WebU64"
+      },
+      "queued_turn_ids": {
+        "items": {
+          "$ref": "#/$defs/WebTurnId"
+        },
+        "maxItems": 32,
+        "type": "array"
+      },
+      "reconciliation": {
+        "anyOf": [
+          {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "model_call",
+                    "type": "string"
+                  },
+                  "model_call_id": {
+                    "$ref": "#/$defs/WebLiveResourceId"
+                  },
+                  "turn_id": {
+                    "$ref": "#/$defs/WebTurnId"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "turn_id",
+                  "model_call_id"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "tool_attempt",
+                    "type": "string"
+                  },
+                  "tool_attempt_id": {
+                    "$ref": "#/$defs/WebLiveResourceId"
+                  },
+                  "turn_id": {
+                    "$ref": "#/$defs/WebTurnId"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "turn_id",
+                  "tool_attempt_id"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "runner": {
+        "anyOf": [
+          {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "placement_revision": {
+                    "$ref": "#/$defs/WebPositiveU64"
+                  },
+                  "state": {
+                    "const": "unpinned",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "placement_revision"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "connection_health": {
+                    "$ref": "#/$defs/WebSessionLiveRunnerConnectionHealth"
+                  },
+                  "placement_revision": {
+                    "$ref": "#/$defs/WebPositiveU64"
+                  },
+                  "runner_id": {
+                    "$ref": "#/$defs/WebLiveResourceId"
+                  },
+                  "state": {
+                    "const": "pinned",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "runner_id",
+                  "placement_revision",
+                  "connection_health"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "placement_revision": {
+                    "$ref": "#/$defs/WebPositiveU64"
+                  },
+                  "runner_id": {
+                    "$ref": "#/$defs/WebLiveResourceId"
+                  },
+                  "state": {
+                    "const": "runner_lost_before_pin",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "runner_id",
+                  "placement_revision"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "placement_revision": {
+                    "$ref": "#/$defs/WebPositiveU64"
+                  },
+                  "runner_id": {
+                    "$ref": "#/$defs/WebLiveResourceId"
+                  },
+                  "state": {
+                    "const": "runner_lost",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "runner_id",
+                  "placement_revision"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "placement_revision": {
+                    "$ref": "#/$defs/WebPositiveU64"
+                  },
+                  "runner_id": {
+                    "$ref": "#/$defs/WebLiveResourceId"
+                  },
+                  "state": {
+                    "const": "runner_abandoned",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "runner_id",
+                  "placement_revision"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "session_id": {
+        "$ref": "#/$defs/WebSessionId"
+      }
+    },
+    "required": [
+      "session_id",
+      "observed_through",
+      "active",
+      "queued_turn_count",
+      "queued_turn_ids",
+      "reconciliation",
+      "runner"
+    ],
+    "title": "WebSessionLiveSnapshot",
+    "type": "object"
+  },
+  "WebSessionLiveStreamEvent": {
+    "$defs": {
+      "WebLiveResourceId": {
+        "description": "Checked canonical UUID used for browser-visible live resource identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebPositiveU64": {
+        "description": "Checked positive unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebSessionLiveActiveState": {
+        "description": "Current durable state of one active turn.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "running",
+                "type": "string"
+              },
+              "model_call_id": {
+                "anyOf": [
+                  {
+                    "description": "Checked canonical UUID used for browser-visible live resource identities.",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "model_call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "awaiting_model_call_recovery",
+                "type": "string"
+              },
+              "model_call_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "model_call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "awaiting_tool_approval",
+                "type": "string"
+              },
+              "tool_request_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_request_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "child_session_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "kind": {
+                "const": "awaiting_child",
+                "type": "string"
+              },
+              "tool_request_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_request_id",
+              "child_session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "awaiting_tool_recovery",
+                "type": "string"
+              },
+              "tool_attempt_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_attempt_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "awaiting_runner_recovery",
+                "type": "string"
+              },
+              "placement_revision": {
+                "$ref": "#/$defs/WebPositiveU64"
+              },
+              "runner_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "runner_id",
+              "placement_revision"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebSessionLiveRunnerConnectionHealth": {
+        "enum": [
+          "connected",
+          "suspect",
+          "shutdown",
+          "lost"
+        ],
+        "type": "string"
+      },
+      "WebSessionLiveSnapshot": {
+        "additionalProperties": false,
+        "description": "Bounded repeatable-read current projection for one open workspace.",
+        "properties": {
+          "active": {
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "state": {
+                    "$ref": "#/$defs/WebSessionLiveActiveState"
+                  },
+                  "turn_id": {
+                    "$ref": "#/$defs/WebTurnId"
+                  }
+                },
+                "required": [
+                  "turn_id",
+                  "state"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observed_through": {
+            "$ref": "#/$defs/WebPositiveU64"
+          },
+          "queued_turn_count": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "queued_turn_ids": {
+            "items": {
+              "$ref": "#/$defs/WebTurnId"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "reconciliation": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": {
+                        "const": "model_call",
+                        "type": "string"
+                      },
+                      "model_call_id": {
+                        "$ref": "#/$defs/WebLiveResourceId"
+                      },
+                      "turn_id": {
+                        "$ref": "#/$defs/WebTurnId"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "turn_id",
+                      "model_call_id"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": {
+                        "const": "tool_attempt",
+                        "type": "string"
+                      },
+                      "tool_attempt_id": {
+                        "$ref": "#/$defs/WebLiveResourceId"
+                      },
+                      "turn_id": {
+                        "$ref": "#/$defs/WebTurnId"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "turn_id",
+                      "tool_attempt_id"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "runner": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement_revision": {
+                        "$ref": "#/$defs/WebPositiveU64"
+                      },
+                      "state": {
+                        "const": "unpinned",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "placement_revision"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "connection_health": {
+                        "$ref": "#/$defs/WebSessionLiveRunnerConnectionHealth"
+                      },
+                      "placement_revision": {
+                        "$ref": "#/$defs/WebPositiveU64"
+                      },
+                      "runner_id": {
+                        "$ref": "#/$defs/WebLiveResourceId"
+                      },
+                      "state": {
+                        "const": "pinned",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "runner_id",
+                      "placement_revision",
+                      "connection_health"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement_revision": {
+                        "$ref": "#/$defs/WebPositiveU64"
+                      },
+                      "runner_id": {
+                        "$ref": "#/$defs/WebLiveResourceId"
+                      },
+                      "state": {
+                        "const": "runner_lost_before_pin",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "runner_id",
+                      "placement_revision"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement_revision": {
+                        "$ref": "#/$defs/WebPositiveU64"
+                      },
+                      "runner_id": {
+                        "$ref": "#/$defs/WebLiveResourceId"
+                      },
+                      "state": {
+                        "const": "runner_lost",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "runner_id",
+                      "placement_revision"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement_revision": {
+                        "$ref": "#/$defs/WebPositiveU64"
+                      },
+                      "runner_id": {
+                        "$ref": "#/$defs/WebLiveResourceId"
+                      },
+                      "state": {
+                        "const": "runner_abandoned",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "runner_id",
+                      "placement_revision"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "session_id": {
+            "$ref": "#/$defs/WebSessionId"
+          }
+        },
+        "required": [
+          "session_id",
+          "observed_through",
+          "active",
+          "queued_turn_count",
+          "queued_turn_ids",
+          "reconciliation",
+          "runner"
+        ],
+        "type": "object"
+      },
+      "WebSessionTimelineEventKind": {
+        "description": "Closed durable event categories in the browser timeline foundation.",
+        "enum": [
+          "session_created",
+          "session_model_settings_changed",
+          "turn_model_settings_resolved",
+          "input_accepted",
+          "goal_turn_retired",
+          "turn_activated",
+          "turn_failed",
+          "model_call_transition",
+          "tool_batch_transition",
+          "tool_approval_decided",
+          "context_compacted",
+          "turn_completed",
+          "turn_refused",
+          "turn_cancelled",
+          "turn_reconciliation_required",
+          "runner_state_transition",
+          "delegation_update",
+          "delegation_wake"
+        ],
+        "type": "string"
+      },
+      "WebTimelineAddress": {
+        "additionalProperties": false,
+        "description": "Stable browser-visible location of one durable session event.",
+        "properties": {
+          "event_sequence": {
+            "$ref": "#/$defs/WebTimelineEventSequence",
+            "description": "Positive global durable event sequence encoded losslessly for JavaScript."
+          }
+        },
+        "required": [
+          "event_sequence"
+        ],
+        "type": "object"
+      },
+      "WebTimelineEventSequence": {
+        "description": "Checked positive durable-event sequence encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebTurnId": {
+        "description": "Checked canonical UUID used for browser-visible turn identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebU64": {
+        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Snapshot-first event stream for one open workspace.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "snapshot",
+            "type": "string"
+          },
+          "snapshot": {
+            "$ref": "#/$defs/WebSessionLiveSnapshot"
+          }
+        },
+        "required": [
+          "kind",
+          "snapshot"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "address": {
+            "$ref": "#/$defs/WebTimelineAddress"
+          },
+          "cursor": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "event_kind": {
+            "$ref": "#/$defs/WebSessionTimelineEventKind"
+          },
+          "kind": {
+            "const": "durable",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "cursor",
+          "address",
+          "event_kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "provider_text_delta",
+            "type": "string"
+          },
+          "model_call_id": {
+            "$ref": "#/$defs/WebLiveResourceId"
+          },
+          "part_index": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "turn_id": {
+            "$ref": "#/$defs/WebTurnId"
+          }
+        },
+        "required": [
+          "kind",
+          "turn_id",
+          "model_call_id",
+          "part_index",
+          "content"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "$ref": "#/$defs/WebPositiveU64",
+            "description": "Positive because production starts from a positive snapshot cursor."
+          },
+          "kind": {
+            "const": "resync_required",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "cursor"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WebSessionLiveStreamEvent"
+  },
   "WebSessionTimelineDescriptor": {
     "$defs": {
       "WebSessionId": {
@@ -5014,6 +5937,43 @@ function assertSchema(root, schema, value, path) {
   }
 }
 
+function assertLiveSnapshot(snapshot, path) {
+  const queuedTurnCount = BigInt(snapshot.queued_turn_count);
+  const previewLimit = BigInt(32);
+  const expectedPreviewLength = queuedTurnCount > previewLimit ? previewLimit : queuedTurnCount;
+  if (BigInt(snapshot.queued_turn_ids.length) !== expectedPreviewLength) {
+    fail(`${path}.queued_turn_ids`, `exactly ${expectedPreviewLength} IDs for queued_turn_count`);
+  }
+  if (new Set(snapshot.queued_turn_ids).size !== snapshot.queued_turn_ids.length) {
+    fail(`${path}.queued_turn_ids`, "unique turn IDs");
+  }
+  const occupiedTurnId = snapshot.active?.turn_id ?? snapshot.reconciliation?.turn_id;
+  if (occupiedTurnId !== undefined && snapshot.queued_turn_ids.includes(occupiedTurnId)) {
+    fail(`${path}.queued_turn_ids`, "disjoint from active and reconciliation turn IDs");
+  }
+  if (snapshot.active != null && snapshot.reconciliation != null) {
+    fail(`${path}.reconciliation`, "absent while an active turn is present");
+  }
+  if (
+    snapshot.active?.state.kind === "awaiting_child" &&
+    snapshot.active.state.child_session_id === snapshot.session_id
+  ) {
+    fail(`${path}.active.state.child_session_id`, "different from the parent session ID");
+  }
+  if (snapshot.active?.state.kind === "awaiting_runner_recovery") {
+    const recovery = snapshot.active.state;
+    const runner = snapshot.runner;
+    const compatibleRunner =
+      runner != null &&
+      (runner.state === "runner_lost" || runner.state === "runner_lost_before_pin") &&
+      runner.runner_id === recovery.runner_id &&
+      runner.placement_revision === recovery.placement_revision;
+    if (!compatibleRunner) {
+      fail(`${path}.runner`, "the runner placement required by awaiting_runner_recovery");
+    }
+  }
+}
+
 function assertAttentionSummary(summary, path) {
   const action = summary.action ?? null;
   const goalBlock = summary.goal_block ?? null;
@@ -5817,8 +6777,10 @@ export function decodeWebContractBootstrap(value) {
       value.capabilities.ndjson_streaming !== true ||
       value.capabilities.import_discovery !== true ||
       value.capabilities.imported_continuations !== true ||
+      value.capabilities.bounded_session_live !== true ||
       value.limits.max_json_body_bytes !== 65536 ||
-      value.limits.max_ndjson_item_bytes !== 65536) {
+      value.limits.max_ndjson_item_bytes !== 65536 ||
+      value.limits.max_session_live_queued_turns !== 32) {
     throw new TypeError("bootstrap carries an incompatible web contract");
   }
   return value;
@@ -5841,6 +6803,26 @@ export function decodeWebSessionTimelineDescriptor(value) {
 
 export function decodeWebSessionTimelineWindow(value) {
   assertSchema(schemas.WebSessionTimelineWindow, schemas.WebSessionTimelineWindow, value, "websessiontimelinewindow");
+  return value;
+}
+
+export function decodeWebSessionLiveSnapshot(value) {
+  assertSchema(schemas.WebSessionLiveSnapshot, schemas.WebSessionLiveSnapshot, value, "websessionlivesnapshot");
+  assertLiveSnapshot(value, "session_live_snapshot");
+  return value;
+}
+
+export function decodeWebSessionLiveStreamEvent(value) {
+  assertSchema(schemas.WebSessionLiveStreamEvent, schemas.WebSessionLiveStreamEvent, value, "websessionlivestreamevent");
+  if (value.kind === "snapshot") {
+    assertLiveSnapshot(value.snapshot, "session_live_event.snapshot");
+  }
+  if (value.kind === "durable" && value.cursor !== value.address.event_sequence) {
+    fail("session_live_event.address.event_sequence", "equal to cursor");
+  }
+  if (value.kind === "provider_text_delta" && new TextEncoder().encode(value.content).length > 8192) {
+    fail("session_live_event.content", "at most 8192 UTF-8 bytes");
+  }
   return value;
 }
 
