@@ -2300,14 +2300,17 @@ async fn session_timeline_region_detail(
         Ok(session) => session,
         Err(error) => return error.into_response(),
     };
-    let first = query
-        .first
-        .as_deref()
-        .and_then(|value| parse_timeline_address(value).ok());
-    let through = query
-        .through
-        .as_deref()
-        .and_then(|value| parse_timeline_address(value).ok());
+    let (Some(first), Some(through)) = (query.first.as_deref(), query.through.as_deref()) else {
+        return invalid_timeline_detail_query();
+    };
+    let first = match parse_timeline_address(first) {
+        Ok(address) => address,
+        Err(error) => return error.into_response(),
+    };
+    let through = match parse_timeline_address(through) {
+        Ok(address) => address,
+        Err(error) => return error.into_response(),
+    };
     let detail_query = TimelineDetailQuery {
         max_items: query.max_items,
         max_bytes: query.max_bytes,
@@ -2316,9 +2319,7 @@ async fn session_timeline_region_detail(
         cursor_member: query.cursor_member,
         cursor_offset: query.cursor_offset,
     };
-    let (Some(first), Some(through), Some((limits, cursor))) =
-        (first, through, parse_detail_query(&detail_query))
-    else {
+    let Some((limits, cursor)) = parse_detail_query(&detail_query) else {
         return invalid_timeline_detail_query();
     };
     let Some(repository) = state.timeline else {
@@ -2413,7 +2414,8 @@ fn repository_projection_error(error: SessionTimelineRepositoryError) -> Respons
             return invalid_timeline_detail_query();
         }
         SessionTimelineRepositoryError::Database(_) => "infrastructure",
-        SessionTimelineRepositoryError::Corruption(_) => "fail_closed_corruption",
+        SessionTimelineRepositoryError::InvalidStoredUtf8
+        | SessionTimelineRepositoryError::Corruption(_) => "fail_closed_corruption",
         SessionTimelineRepositoryError::Outbox(OutboxDispatchError::Database(_)) => {
             "infrastructure"
         }

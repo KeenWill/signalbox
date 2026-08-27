@@ -7914,14 +7914,26 @@ pub struct TimelineModelUsage {
 }
 pub enum TimelineTurnLifecycleKind { Activated, Terminalized }
 pub enum SessionTimelineDetailBody {
-    UserInput { turn_id: TurnId, /* excerpt and references */ },
+    UserInput {
+        turn_id: TurnId,
+        text: TimelineTextExcerpt,
+        attachments: Vec<TimelineBlobReference>,
+    },
     ModelCall {
         turn_id: TurnId,
         model_call_id: ModelCallId,
+        state: TimelineModelCallState,
         model_identity_id: ProviderModelIdentity,
-        /* state, bounded response, usage, and cause */
+        request_context_items: u64,
+        response: Option<TimelineTextExcerpt>,
+        usage: TimelineModelUsage,
+        provider_failure_cause: Option<ProviderModelCallFailureCause>,
     },
-    TurnLifecycle { turn_id: TurnId, /* lifecycle and cause */ },
+    TurnLifecycle {
+        turn_id: TurnId,
+        lifecycle: TimelineTurnLifecycleKind,
+        cause_code: String,
+    },
     EventFact { kind: SessionTimelineEventKind },
 }
 pub struct SessionTimelineDetail {

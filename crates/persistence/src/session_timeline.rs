@@ -7,13 +7,15 @@ use signalbox_application::{
     SessionTimelineBounds, SessionTimelineDescriptor, SessionTimelineDetail,
     SessionTimelineDetailBody, SessionTimelineDetailPage, SessionTimelineEventKind,
     SessionTimelineItem, SessionTimelineReader, SessionTimelineSizeFacts, SessionTimelineWindow,
-    SessionWorkFacts, TimelineAddress, TimelineBodyContinuation, TimelineBodyField,
-    TimelineContinuation, TimelineDetailContinuation, TimelineDetailCursor, TimelineDetailLimits,
-    TimelineModelCallDisposition, TimelineModelCallState, TimelineModelUsage, TimelineTextExcerpt,
-    TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
+    SessionWorkFacts, TimelineAddress, TimelineBlobReference, TimelineBodyContinuation,
+    TimelineBodyField, TimelineContinuation, TimelineDetailContinuation, TimelineDetailCursor,
+    TimelineDetailLimits, TimelineModelCallDisposition, TimelineModelCallState, TimelineModelUsage,
+    TimelineTextExcerpt, TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
     timeline_detail_envelope_bytes,
 };
-use signalbox_domain::{ProviderModelCallFailureCause, ProviderModelIdentity, SessionId, TurnId};
+use signalbox_domain::{
+    BlobDigest, ProviderModelCallFailureCause, ProviderModelIdentity, SessionId, TurnId,
+};
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 
 use crate::{
@@ -68,6 +70,7 @@ impl Error for SessionTimelineCorruption {}
 pub enum SessionTimelineRepositoryError {
     Database(sqlx::Error),
     InvalidDetailQuery,
+    InvalidStoredUtf8,
     Corruption(SessionTimelineCorruption),
     Outbox(OutboxDispatchError),
 }
@@ -81,6 +84,9 @@ impl fmt::Display for SessionTimelineRepositoryError {
             Self::InvalidDetailQuery => {
                 formatter.write_str("invalid session timeline detail query")
             }
+            Self::InvalidStoredUtf8 => {
+                formatter.write_str("session timeline detail contains invalid stored UTF-8")
+            }
             Self::Corruption(error) => error.fmt(formatter),
             Self::Outbox(error) => {
                 write!(formatter, "session timeline detail decode failed: {error}")
@@ -93,7 +99,7 @@ impl Error for SessionTimelineRepositoryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Database(error) => Some(error),
-            Self::InvalidDetailQuery => None,
+            Self::InvalidDetailQuery | Self::InvalidStoredUtf8 => None,
             Self::Corruption(error) => Some(error),
             Self::Outbox(error) => Some(error),
         }
@@ -686,6 +692,7 @@ enum DetailEvent {
         sequence: u64,
         turn: TurnId,
         content: ModelResponseSlice,
+        attachments: Vec<TimelineBlobReference>,
     },
     EventFact {
         sequence: u64,
@@ -734,13 +741,14 @@ async fn load_detail_event(
         let row = sqlx::query(
             r#"
 SELECT event.turn_id,
+       accepted.accepted_input_id,
        accepted.acceptance_position,
-       octet_length(accepted.content_text)::numeric AS total_bytes,
+       octet_length(parts.content_text)::numeric AS total_bytes,
        substring(
-           convert_to(accepted.content_text, 'UTF8')
+           convert_to(parts.content_text, 'UTF8')
            FROM (least(
                $3::numeric,
-               octet_length(accepted.content_text)::numeric
+               octet_length(parts.content_text)::numeric
            ) + 1)::integer
            FOR $4::integer
        ) AS content_bytes
@@ -750,14 +758,21 @@ SELECT event.turn_id,
    AND accepted.session_id = event.session_id
    AND accepted.acceptance_position = event.acceptance_position
    AND accepted.origin_turn_id = event.turn_id
+  JOIN LATERAL (
+       SELECT COALESCE(
+                  string_agg(part.text_value, '' ORDER BY part.position)
+                      FILTER (WHERE part.part_kind = 'text'),
+                  ''
+              ) AS content_text
+         FROM accepted_input_content_part AS part
+        WHERE part.accepted_input_id = accepted.accepted_input_id
+  ) AS parts ON TRUE
   LEFT JOIN submit_input_command AS command
     ON command.command_id = accepted.accepting_command_id
    AND command.session_id = event.session_id
    AND command.result_session_id = event.session_id
    AND command.result_kind = 'applied'
    AND command.result_accepted_input_id = event.accepted_input_id
-   AND command.content_kind = 'text'
-   AND command.content_text = accepted.content_text
   LEFT JOIN goal_turn AS goal
     ON goal.session_id = event.session_id
    AND goal.accepted_input_id = event.accepted_input_id
@@ -802,6 +817,33 @@ SELECT event.turn_id,
         .ok_or(SessionTimelineCorruption::MissingDetailRecord)?;
         input_position_from_numeric(row.try_get("acceptance_position")?)
             .map_err(|_| SessionTimelineCorruption::InvalidOrdinal("input acceptance position"))?;
+        let accepted_input_id: uuid::Uuid = row.try_get("accepted_input_id")?;
+        let attachment_rows = sqlx::query(
+            "SELECT part.blob_digest, blob.byte_length, part.declared_media_type
+               FROM accepted_input_content_part AS part
+               JOIN blob ON blob.digest = part.blob_digest
+              WHERE part.accepted_input_id = $1
+                AND part.part_kind = 'attachment'
+              ORDER BY part.position",
+        )
+        .bind(accepted_input_id)
+        .fetch_all(&mut **transaction)
+        .await?;
+        let mut attachments = Vec::with_capacity(attachment_rows.len());
+        for attachment in attachment_rows {
+            let digest: [u8; 32] = attachment
+                .try_get::<Vec<u8>, _>("blob_digest")?
+                .try_into()
+                .map_err(|_| SessionTimelineCorruption::InvalidOrdinal("attachment digest"))?;
+            attachments.push(TimelineBlobReference {
+                blob_id: BlobDigest::from_bytes(digest),
+                length_bytes: nonnegative(
+                    attachment.try_get("byte_length")?,
+                    "attachment byte length",
+                )?,
+                media_type: attachment.try_get("declared_media_type")?,
+            });
+        }
         let total_bytes = nonnegative(row.try_get("total_bytes")?, "input byte length")?;
         if offset > total_bytes {
             return Err(SessionTimelineRepositoryError::InvalidDetailQuery);
@@ -814,6 +856,7 @@ SELECT event.turn_id,
                 offset_bytes: offset,
                 total_bytes,
             },
+            attachments,
         }));
     }
     if header.discriminator == OutboxEventDiscriminator::DelegationUpdate {
@@ -854,7 +897,12 @@ async fn project_detail_event(
     }
     let mut remaining = max_bytes - DETAIL_ENVELOPE_BYTES;
     let (kind, body, body_continuation) = match event {
-        DetailEvent::InputAccepted { turn, content, .. } => {
+        DetailEvent::InputAccepted {
+            turn,
+            content,
+            attachments,
+            ..
+        } => {
             let text = bounded_text_excerpt(
                 content,
                 address,
@@ -867,7 +915,7 @@ async fn project_detail_event(
                 SessionTimelineDetailBody::UserInput {
                     turn_id: *turn,
                     text,
-                    attachments: Vec::new(),
+                    attachments: attachments.clone(),
                 },
                 continuation,
             )
@@ -895,9 +943,16 @@ async fn project_detail_event(
                         | DispatchedModelCallState::CancellationRequested => false,
                         DispatchedModelCallState::Terminal(_) => true,
                     };
+                    let include_response = matches!(
+                        state,
+                        DispatchedModelCallState::Terminal(
+                            DispatchedModelCallDisposition::Completed
+                        )
+                    );
                     let row = load_model_detail(
                         transaction,
                         *call,
+                        include_response,
                         include_terminal_evidence,
                         response_offset,
                         remaining,
@@ -1097,6 +1152,7 @@ struct ModelResponseSlice {
 async fn load_model_detail(
     transaction: &mut Transaction<'_, Postgres>,
     call: signalbox_domain::ModelCallId,
+    include_response: bool,
     include_terminal_evidence: bool,
     response_offset: u64,
     max_response_bytes: u32,
@@ -1130,7 +1186,7 @@ SELECT call.session_id,
 "#,
     )
     .bind(call.into_uuid())
-    .bind(include_terminal_evidence)
+    .bind(include_response)
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(SessionTimelineCorruption::MissingDetailRecord)?;
@@ -1265,7 +1321,7 @@ fn bounded_text_excerpt(
     let valid_bytes = match std::str::from_utf8(&response.bytes) {
         Ok(_) => response.bytes.len(),
         Err(error) if error.error_len().is_none() => error.valid_up_to(),
-        Err(_) => return Err(SessionTimelineRepositoryError::InvalidDetailQuery),
+        Err(_) => return Err(SessionTimelineRepositoryError::InvalidStoredUtf8),
     };
     let available = usize::try_from(*remaining)
         .map_err(|_| SessionTimelineCorruption::DetailProjectionOverflow)?;
@@ -1274,7 +1330,7 @@ fn bounded_text_excerpt(
         selected -= 1;
     }
     let text = std::str::from_utf8(&response.bytes[..selected])
-        .map_err(|_| SessionTimelineRepositoryError::InvalidDetailQuery)?
+        .map_err(|_| SessionTimelineRepositoryError::InvalidStoredUtf8)?
         .to_owned();
     let charged =
         u32::try_from(selected).map_err(|_| SessionTimelineCorruption::DetailProjectionOverflow)?;
@@ -1820,7 +1876,7 @@ mod tests {
 
         assert!(matches!(
             response_excerpt(response, address, &mut budget),
-            Err(SessionTimelineRepositoryError::InvalidDetailQuery)
+            Err(SessionTimelineRepositoryError::InvalidStoredUtf8)
         ));
     }
 }

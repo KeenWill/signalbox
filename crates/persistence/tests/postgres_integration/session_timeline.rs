@@ -8,26 +8,29 @@
 use std::{error::Error, num::NonZeroU64};
 
 use signalbox_application::{
-    SessionTimelineDetailBody, SessionTimelineEventKind, TimelineAddress, TimelineContinuation,
-    TimelineDetailLimits, TimelineWindowAnchor, TimelineWindowLimits,
+    SessionTimelineDetailBody, SessionTimelineEventKind, TimelineAddress, TimelineBlobReference,
+    TimelineContinuation, TimelineDetailLimits, TimelineTextExcerpt, TimelineWindowAnchor,
+    TimelineWindowLimits,
 };
 use signalbox_domain::{
-    CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
-    SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
-    TranscriptAncestry,
+    AcceptedInputId, BlobDigest, CreateSession, DirectModelSelection, DurableCommandId,
+    ModelSelectionOverride, ModelSelectionRequest, SessionConfigurationDefaults,
+    SessionCreationCause, SessionCreationProvenance, SessionId, TranscriptAncestry, TurnId,
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
     session_timeline::{
         SessionTimelineCorruption, SessionTimelineRepository, SessionTimelineRepositoryError,
     },
+    submit_input::SubmitInputRepository,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::{
-    Decimal, commission_fixture_session_goal, insert_frontier, migrated_postgres,
-    prepared_complete_delegation_outbox, stop_fixture_session_goal, test_session_credential_pin,
+    Decimal, TestSubmitInputHandle, commission_fixture_session_goal, insert_frontier,
+    migrated_postgres, prepared_complete_delegation_outbox, start_input_with_attachment,
+    stop_fixture_session_goal, test_session_credential_pin,
 };
 
 fn credential_pin() -> signalbox_persistence::SessionCredentialPin {
@@ -162,6 +165,96 @@ async fn item_and_region_details_share_the_stable_creation_address() -> Result<(
     assert!(item.projected_body_bytes <= limits.max_projected_bytes());
     assert_eq!(item.continuation, None);
     assert_eq!(region, item);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn accepted_input_detail_reads_multipart_text_and_attachment_references()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let identity = session(0x995);
+    let fixture_seed = 0x0009_9500;
+    create_session(&pool, identity).await?;
+    let payload = b"timeline attachment";
+    let digest = BlobDigest::digest(payload);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO blob_store_binding (store_name, namespace_id)
+         VALUES ('timeline_detail', $1)",
+    )
+    .bind(Uuid::from_u128(fixture_seed + 1))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, $2)")
+        .bind(digest.as_bytes().as_slice())
+        .bind(Decimal::from(payload.len()))
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "INSERT INTO blob_replica (digest, store_name, object_key)
+         VALUES ($1, 'timeline_detail', 'attachment')",
+    )
+    .bind(digest.as_bytes().as_slice())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    let content = "multipart timeline input";
+    let accepted_input_id = AcceptedInputId::from_uuid(Uuid::from_u128(fixture_seed + 2));
+    let turn = TurnId::from_uuid(Uuid::from_u128(fixture_seed + 3));
+    SubmitInputRepository::new(pool.clone())
+        .with_attachment_maximum_bytes(1_024)
+        .handle(
+            start_input_with_attachment(
+                fixture_seed + 4,
+                identity.as_uuid().as_u128(),
+                content,
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+                Some(digest),
+            ),
+            accepted_input_id,
+            Some(turn),
+        )
+        .await?;
+    let sequence: i64 = sqlx::query_scalar(
+        "SELECT event_sequence::bigint
+           FROM input_accepted_outbox_event
+          WHERE accepted_input_id = $1",
+    )
+    .bind(accepted_input_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    let address = TimelineAddress::new(
+        NonZeroU64::new(u64::try_from(sequence)?).expect("fixture address is positive"),
+    );
+    let limits = TimelineDetailLimits::new(1, 512).expect("fixture limits are bounded");
+    let detail = SessionTimelineRepository::new(pool.clone())
+        .read_item_details(identity, address, None, limits)
+        .await?
+        .expect("the accepted input detail exists");
+
+    assert_eq!(
+        detail.items[0].body,
+        SessionTimelineDetailBody::UserInput {
+            turn_id: turn,
+            text: TimelineTextExcerpt {
+                text: content.to_owned(),
+                offset_bytes: 0,
+                total_bytes: u64::try_from(content.len())?,
+                continuation: None,
+            },
+            attachments: vec![TimelineBlobReference {
+                blob_id: digest,
+                length_bytes: u64::try_from(payload.len())?,
+                media_type: Some(String::from("application/octet-stream")),
+            }],
+        }
+    );
 
     pool.close().await;
     drop(container);
