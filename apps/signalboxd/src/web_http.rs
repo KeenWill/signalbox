@@ -480,7 +480,7 @@ fn production_router_with_budget(
     let repository_watch_reads = crate::web_repo_watch::router(
         pool.clone(),
         snapshot_reader_budget,
-        automatic_resume_attempt_budget,
+        automatic_resume_attempts,
     )
     .route_layer(middleware::from_fn(validate_loopback_host));
     // Every route that reads session-attached content sits behind the

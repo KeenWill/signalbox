@@ -30,8 +30,9 @@ use signalbox_domain::{
     MergeableState, PullRequestNumber, RepoWatchDispatchId, RepoWatchEventKindNameV1,
     RepositorySlug, SessionId,
 };
-use signalbox_persistence::repo_watch_operations::{
-    PostgresRepoWatchOperations, RepoWatchOperationsError,
+use signalbox_persistence::{
+    attention::AutomaticResumeAttemptBounds,
+    repo_watch_operations::{PostgresRepoWatchOperations, RepoWatchOperationsError},
 };
 use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, WebRepoWatchActivityPage, WebRepoWatchAutomationStatus,
@@ -62,17 +63,21 @@ struct RepoWatchApiState {
 }
 
 /// Binds the repository-watch projections to the deployment's
-/// automatic-resume attempt budget.
+/// automatic-resume attempt limits.
 ///
 /// These projections carry the same attention summaries the fleet projection
-/// serves, so they must read the budget the daemon's resume planner applies
-/// (`automatic_resume_attempt_budget`) rather than a different number. `None`
-/// is the configured unbounded budget, under which automatic resumption never
-/// exhausts — never a stand-in for an unread setting.
+/// serves, so they must read the limits the daemon's resume planner applies
+/// rather than different numbers. The planner ends a run at whichever of its
+/// chargeable-attempt budget and its lifetime attempt ceiling it reaches first,
+/// so both travel together: reading only the budget would report a
+/// ceiling-parked goal as still owed a resume, which is the same drift reading
+/// the wrong budget would cause. An unbounded limit is the configured policy
+/// under which a run never ends for that reason — never a stand-in for an
+/// unread setting.
 pub(crate) fn router(
     pool: Option<PgPool>,
     snapshot_reader_budget: Option<Arc<Semaphore>>,
-    automatic_resume_attempt_budget: Option<u32>,
+    automatic_resume_attempts: AutomaticResumeAttemptBounds,
 ) -> Router {
     Router::new()
         .route("/repository-watch/repositories", get(repository_statuses))
@@ -81,9 +86,8 @@ pub(crate) fn router(
         .route("/repository-watch/sessions", get(pull_request_sessions))
         .route("/repository-watch/activity", get(activity))
         .with_state(RepoWatchApiState {
-            operations: pool.map(|pool| {
-                PostgresRepoWatchOperations::new(pool, automatic_resume_attempt_budget)
-            }),
+            operations: pool
+                .map(|pool| PostgresRepoWatchOperations::new(pool, automatic_resume_attempts)),
             snapshot_reader_budget,
         })
 }
@@ -1163,15 +1167,17 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        bounded_projection_response, cursor_timestamp, event_cursor, held_cursor, postgres_bigint,
-        session_cursor, timestamp_from_units, unix_microseconds, validate_activity_window,
+        AutomaticResumeAttemptBounds, bounded_projection_response, cursor_timestamp, event_cursor,
+        held_cursor, postgres_bigint, session_cursor, timestamp_from_units, unix_microseconds,
+        validate_activity_window,
     };
 
     /// This test turns on query rejection ahead of any database read, never on
     /// how many automatic resumptions a deployment still owes, so it states the
-    /// unbounded automatic-resume budget instead of a number its story never
+    /// unbounded automatic-resume limits instead of numbers its story never
     /// uses.
-    const UNBOUNDED_AUTOMATIC_RESUME_BUDGET: Option<u32> = None;
+    const UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS: AutomaticResumeAttemptBounds =
+        AutomaticResumeAttemptBounds::unbounded();
 
     #[tokio::test]
     async fn oversized_repository_projection_fails_closed_with_a_bounded_error() {
@@ -1250,7 +1256,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_typed_query_returns_the_json_api_error_contract() {
-        let response = super::router(None, None, UNBOUNDED_AUTOMATIC_RESUME_BUDGET)
+        let response = super::router(None, None, UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS)
             .oneshot(
                 Request::builder()
                     .uri(
