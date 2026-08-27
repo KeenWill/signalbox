@@ -2768,6 +2768,12 @@ async fn session_live_snapshot(
     let Some(repository) = state.live else {
         return live_projection_unavailable();
     };
+    let Some(budget) = state.snapshot_reader_budget else {
+        return live_projection_unavailable();
+    };
+    let Ok(_snapshot_permit) = budget.acquire().await else {
+        return live_projection_unavailable();
+    };
     match repository.read_live_snapshot(session).await {
         Ok(Some(snapshot)) => match live_snapshot_dto(snapshot) {
             Some(snapshot) => Json(snapshot).into_response(),
@@ -2786,6 +2792,7 @@ async fn session_live_follow(
     State(state): State<WebApiState>,
     Path(session_id): Path<String>,
 ) -> Response {
+    let mut shutdown = state.shutdown;
     let session = match parse_session_id(&session_id) {
         Ok(session) => session,
         Err(error) => return error.into_response(),
@@ -2800,12 +2807,23 @@ async fn session_live_follow(
             "the live session monitor is not configured",
         );
     };
+    let Some(budget) = state.snapshot_reader_budget else {
+        return live_projection_unavailable();
+    };
+    let snapshot_permit = tokio::select! {
+        () = live_follow_shutdown(&mut shutdown) => return empty_ndjson_response(),
+        permit = Arc::clone(&budget).acquire_owned() => permit,
+    };
+    let Ok(snapshot_permit) = snapshot_permit else {
+        return live_projection_unavailable();
+    };
     let subscription = monitor.subscribe();
     let covered_at_snapshot = subscription.queued_len();
-    let snapshot = match repository
-        .read_live_snapshot_at_completion(session, || subscription.queued_len())
-        .await
-    {
+    let snapshot = match tokio::select! {
+        () = live_follow_shutdown(&mut shutdown) => return empty_ndjson_response(),
+        snapshot = repository
+            .read_live_snapshot_at_completion(session, || subscription.queued_len()) => snapshot,
+    } {
         Ok(Some(snapshot)) => snapshot,
         Ok(None) => {
             return application_error(
@@ -2816,6 +2834,7 @@ async fn session_live_follow(
         }
         Err(error) => return live_projection_error(error),
     };
+    drop(snapshot_permit);
     let (snapshot, queued_at_snapshot) = snapshot;
     let Some(observed_through) = NonZeroU64::new(snapshot.observed_through) else {
         return live_projection_corruption();
@@ -2836,7 +2855,7 @@ async fn session_live_follow(
             queued_at_snapshot,
             pending,
             provider_fragment: None,
-            shutdown: state.shutdown,
+            shutdown,
             ended: false,
         },
         live_follow_next,
@@ -4308,6 +4327,7 @@ mod tests {
     };
 
     use axum::{
+        Router,
         body::{Body, Bytes},
         http::{Request, StatusCode, header},
     };
@@ -4341,7 +4361,7 @@ mod tests {
         single_range_header, try_acquire_web_blob_read_permit, usage_aggregate_cost_dto,
         usage_cost_dto,
     };
-    use crate::HubModelConfiguration;
+    use crate::{HubModelConfiguration, ProcessMonitor};
 
     /// A descriptor method rejection must name the method clients can use.
     #[tokio::test]
@@ -4364,6 +4384,26 @@ mod tests {
         "127.0.0.1:0"
             .parse()
             .expect("the test listener address is valid")
+    }
+
+    fn router_with_closed_snapshot_reader_budget(monitor: Option<ProcessMonitor>) -> Router {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://signalbox:signalbox@localhost/signalbox")
+            .expect("the unused fixture pool URL is valid");
+        let budget = Arc::new(Semaphore::new(1));
+        budget.close();
+        super::production_router_with_budget(
+            None,
+            Some(pool),
+            None,
+            None,
+            None,
+            super::ProductionReadRuntime {
+                snapshot_reader_budget: Some(budget),
+                shutdown: None,
+                monitor,
+            },
+        )
     }
 
     #[test]
@@ -5180,6 +5220,43 @@ mod tests {
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["error"]["code"], "attention_projection_unavailable");
+    }
+
+    #[tokio::test]
+    async fn live_snapshot_requires_an_available_snapshot_reader_permit() {
+        let request = Request::get("/api/sessions/00000000-0000-0000-0000-000000000991/live")
+            .header(header::HOST, "localhost")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = router_with_closed_snapshot_reader_budget(None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the typed application failure is JSON");
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "session_live_projection_unavailable");
+    }
+
+    #[tokio::test]
+    async fn live_follow_requires_an_available_snapshot_reader_permit() {
+        let request = Request::get("/api/sessions/00000000-0000-0000-0000-000000000991/follow")
+            .header(header::HOST, "localhost")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response =
+            router_with_closed_snapshot_reader_budget(Some(ProcessMonitor::test_channel()))
+                .oneshot(request)
+                .await
+                .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the typed application failure is JSON");
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "session_live_projection_unavailable");
     }
 
     #[tokio::test]
