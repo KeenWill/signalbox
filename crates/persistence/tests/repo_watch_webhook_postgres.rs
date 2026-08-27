@@ -13,16 +13,19 @@ use std::{
 use rust_decimal::Decimal;
 use signalbox_application::RepoWatchEventContentIdentityV1;
 use signalbox_application::{
-    RepoWatchObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
+    RepoWatchObservation, RepoWatchPagePosition, RepoWatchRepositoryState,
+    RepoWatchRepositoryStateInput, max_repo_watch_activity_page_items,
 };
 use signalbox_domain::{CommitSha, PullRequestNumber, RepoWatchEventKindNameV1, RepositorySlug};
 use signalbox_persistence::{
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    attention::AutomaticResumeAttemptBounds,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
     repo_watch::{
         PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
         RepoWatchCursorCandidate, RepoWatchCursorGeneration,
     },
+    repo_watch_operations::PostgresRepoWatchOperations,
     repo_watch_webhook::{
         MAX_PENDING_PAGE_BYTES, PostgresRepoWatchWebhookStore, RepoWatchWebhookAdmission,
         RepoWatchWebhookAdmissionOutcome, RepoWatchWebhookDeliveryKey, RepoWatchWebhookDisposition,
@@ -62,6 +65,17 @@ const MATCHED_IDENTITY: [u8; 32] = [0x31; 32];
 const WEBHOOK_ONLY_IDENTITY: [u8; 32] = [0x32; 32];
 const POLL_ONLY_IDENTITY: [u8; 32] = [0x33; 32];
 const HISTORICAL_IDENTITY: [u8; 32] = [0x35; 32];
+const SHADOW_POLL_IDENTITY: [u8; 32] = [0x36; 32];
+const PROMOTION_IDENTITY: [u8; 32] = [0x37; 32];
+const BACKSTOP_POLL_IDENTITY: [u8; 32] = [0x38; 32];
+const OPERATIONS_BURST_BASE: u128 = 0xa00;
+const OPERATIONS_BURST_COUNT: usize = 101;
+/// These operator reads turn on webhook intake and repository health, never on
+/// how many automatic resumptions a deployment still owes, so they state the
+/// unbounded automatic-resume budget instead of a number their story never
+/// uses.
+const UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS: AutomaticResumeAttemptBounds =
+    AutomaticResumeAttemptBounds::unbounded();
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -69,7 +83,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -161,6 +175,17 @@ fn projected_request(
     )?)
 }
 
+/// The terminal request a primary delivery records in place of a projected one.
+fn committed_request(
+    projections: Vec<RepoWatchWebhookProjection>,
+) -> Result<RepoWatchWebhookTerminalRequest, Box<dyn Error>> {
+    Ok(RepoWatchWebhookTerminalRequest::try_new(
+        projections,
+        RepoWatchWebhookDisposition::Committed,
+        None,
+    )?)
+}
+
 fn event_projection(identity: [u8; 32]) -> Result<RepoWatchWebhookProjection, Box<dyn Error>> {
     Ok(RepoWatchWebhookProjection::event(
         RepoWatchEventContentIdentityV1::from_bytes(identity),
@@ -186,6 +211,22 @@ async fn admit_fixture(
         .await?)
 }
 
+async fn seed_operations_webhook_burst(
+    store: &PostgresRepoWatchWebhookStore,
+) -> Result<(), Box<dyn Error>> {
+    for offset in 0..OPERATIONS_BURST_COUNT {
+        let key = delivery_key(OPERATIONS_BURST_BASE + offset as u128);
+        admit_fixture(store, key).await?;
+        store
+            .record_terminal(
+                key,
+                &projected_request(vec![event_projection(MATCHED_IDENTITY)?])?,
+            )
+            .await?;
+    }
+    Ok(())
+}
+
 fn admitted_receipt(
     outcome: RepoWatchWebhookAdmissionOutcome,
 ) -> signalbox_persistence::repo_watch_webhook::RepoWatchWebhookReceipt {
@@ -200,13 +241,14 @@ async fn seed_poll_parity_events(pool: &PgPool) -> Result<(), Box<dyn Error>> {
     sqlx::query(
         "INSERT INTO repo_watch_cursor (
             repository, generation, storage_version, cursor_payload
-         ) VALUES ($1, 1, 2, $2)",
+         ) VALUES ($1, 1, 4, $2)",
     )
     .bind(REPOSITORY)
     .bind(sqlx::types::Json(serde_json::json!({
-        "storage_version": 2,
+        "storage_version": 4,
         "signal_reviewers": [],
         "event_identity_frontier": [],
+        "merged_pull_request_baselines": [],
         "state": {
             "pull_requests": [],
             "workflow_runs": [],
@@ -243,6 +285,151 @@ async fn seed_poll_parity_events(pool: &PgPool) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Whether the promoting delivery's applied observation derived an event row.
+///
+/// A primary delivery whose observed change falls outside the event families —
+/// a `pull_request: edited` carrying only a new title — commits the cursor and
+/// derives nothing, so the promoted repository writes no webhook-produced row.
+/// The boundary has to hold in both cases, which is why it reads the committed
+/// disposition rather than that row.
+#[derive(Clone, Copy)]
+enum PromotionEvent {
+    Derived,
+    None,
+}
+
+/// Seeds the shadow interval and the promotion that ends it.
+///
+/// One poll event lands while the repository is still measuring parity, the
+/// committed disposition that follows is the durable evidence that this
+/// repository began committing deliveries, and the last poll event is what the
+/// backstop sweep produces afterwards. Each is placed relative to the fixture
+/// delivery's own receipt, so every one of them falls inside the shadow window
+/// the view opens at that receipt.
+async fn seed_promotion_boundary_events(
+    pool: &PgPool,
+    promotion_event: PromotionEvent,
+) -> Result<(), Box<dyn Error>> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_cursor (
+            repository, generation, storage_version, cursor_payload
+         ) VALUES ($1, 1, 4, $2)",
+    )
+    .bind(REPOSITORY)
+    .bind(sqlx::types::Json(serde_json::json!({
+        "storage_version": 4,
+        "signal_reviewers": [],
+        "event_identity_frontier": [],
+        "merged_pull_request_baselines": [],
+        "state": {
+            "pull_requests": [],
+            "workflow_runs": [],
+            "branch_heads": []
+        }
+    })))
+    .execute(&mut *transaction)
+    .await?;
+    insert_produced_event(
+        &mut transaction,
+        Uuid::from_u128(0xA01),
+        1,
+        SHADOW_POLL_IDENTITY,
+        "poll",
+        1,
+    )
+    .await?;
+    insert_committed_disposition(&mut transaction, 2).await?;
+    if matches!(promotion_event, PromotionEvent::Derived) {
+        insert_produced_event(
+            &mut transaction,
+            Uuid::from_u128(0xA02),
+            2,
+            PROMOTION_IDENTITY,
+            "webhook",
+            2,
+        )
+        .await?;
+    }
+    insert_produced_event(
+        &mut transaction,
+        Uuid::from_u128(0xA03),
+        3,
+        BACKSTOP_POLL_IDENTITY,
+        "poll",
+        3,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// Promotes the fixture repository, the given number of seconds after its first
+/// webhook receipt.
+///
+/// The committed disposition is what a primary delivery records in place of a
+/// projected one, and it is the repository's promotion. It is written directly
+/// rather than through the store so its `recorded_at` sits on the same seeded
+/// timeline as the surrounding event rows; the fixture admits one delivery per
+/// repository, and its pending row is what the retiring trigger requires.
+async fn insert_committed_disposition(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    seconds_after_receipt: i32,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query(
+        "INSERT INTO repo_watch_webhook_disposition (
+            hook_id, delivery_id, disposition, recorded_at
+         )
+         SELECT delivery.hook_id, delivery.delivery_id, 'committed',
+                (
+                    SELECT min(received_at)
+                      FROM repo_watch_webhook_delivery
+                     WHERE repository = $1
+                ) + make_interval(secs => $2)
+           FROM repo_watch_webhook_delivery AS delivery
+          WHERE delivery.repository = $1",
+    )
+    .bind(REPOSITORY)
+    .bind(f64::from(seconds_after_receipt))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+/// Seeds one event of the named producer, recorded the given number of seconds
+/// after the repository's first webhook receipt.
+async fn insert_produced_event(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    event_id: Uuid,
+    ordinal: i32,
+    identity: [u8; 32],
+    producer: &str,
+    seconds_after_receipt: i32,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query(
+        "INSERT INTO repo_watch_event (
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, content_identity_version, content_identity,
+            producer, target_kind, event_kind, conclusion,
+            workflow_branch, workflow_name, recorded_at
+         )
+         SELECT $1, $2, 1, $3, 1, 1, $4, $5, 'branch',
+                'branch_workflow_run_completed', 'success', 'main', 'checks',
+                min(delivery.received_at) + make_interval(secs => $6)
+           FROM repo_watch_webhook_delivery AS delivery
+          WHERE delivery.repository = $2",
+    )
+    .bind(event_id)
+    .bind(REPOSITORY)
+    .bind(ordinal)
+    .bind(identity.as_slice())
+    .bind(producer)
+    .bind(f64::from(seconds_after_receipt))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 /// Seeds one poll-produced event. Exactly one content-identity version is
 /// storable, so the version the parity view filters on is not a fixture axis.
 /// Seeds one poll event of a family webhooks are not designed to reproduce.
@@ -251,13 +438,14 @@ async fn seed_poll_only_family_event(pool: &PgPool) -> Result<(), Box<dyn Error>
     sqlx::query(
         "INSERT INTO repo_watch_cursor (
             repository, generation, storage_version, cursor_payload
-         ) VALUES ($1, 1, 2, $2)",
+         ) VALUES ($1, 1, 4, $2)",
     )
     .bind(REPOSITORY)
     .bind(sqlx::types::Json(serde_json::json!({
-        "storage_version": 2,
+        "storage_version": 4,
         "signal_reviewers": [],
         "event_identity_frontier": [],
+        "merged_pull_request_baselines": [],
         "state": {
             "pull_requests": [],
             "workflow_runs": [],
@@ -544,15 +732,14 @@ async fn oldest_pending_receipt_is_read_without_its_payload() -> Result<(), Box<
     Ok(())
 }
 
-/// The monitor reads the oldest pending delivery, so a delivery reaching
-/// terminal state has to hand that position to the next one and the last one
-/// has to leave nothing pending at all.
+/// The transactional pending inventory, rather than disposition-history scans,
+/// advances the monitor and page reads as deliveries reach terminal state.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn the_oldest_pending_receipt_advances_as_deliveries_reach_terminal_state()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let store = PostgresRepoWatchWebhookStore::new(pool);
+    let store = PostgresRepoWatchWebhookStore::new(pool.clone());
     let oldest = delivery_key(0x411);
     let newer = delivery_key(0x412);
     admit_fixture(&store, oldest).await?;
@@ -568,6 +755,13 @@ async fn the_oldest_pending_receipt_advances_as_deliveries_reach_terminal_state(
     store
         .record_terminal(oldest, &projected_request(Vec::new())?)
         .await?;
+
+    sqlx::query(
+        "ALTER TABLE repo_watch_webhook_disposition
+         RENAME TO repo_watch_webhook_disposition_hidden",
+    )
+    .execute(&pool)
+    .await?;
     assert_eq!(
         store
             .load_oldest_pending_receipt(&repository()?)
@@ -575,6 +769,19 @@ async fn the_oldest_pending_receipt_advances_as_deliveries_reach_terminal_state(
             .map(|pending| pending.key()),
         Some(newer)
     );
+    assert_eq!(
+        store
+            .load_pending(&repository()?, pending_page_size(), None)
+            .await?[0]
+            .key(),
+        newer
+    );
+    sqlx::query(
+        "ALTER TABLE repo_watch_webhook_disposition_hidden
+         RENAME TO repo_watch_webhook_disposition",
+    )
+    .execute(&pool)
+    .await?;
 
     store
         .record_terminal(newer, &projected_request(Vec::new())?)
@@ -584,6 +791,70 @@ async fn the_oldest_pending_receipt_advances_as_deliveries_reach_terminal_state(
         store.load_oldest_pending_receipt(&repository()?).await?,
         None
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn pending_inventory_changes_only_with_admission_and_disposition()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let key = delivery_key(0x413);
+    admit_fixture(&store, key).await?;
+
+    let pending_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_webhook_pending
+          WHERE hook_id = $1 AND delivery_id = $2",
+    )
+    .bind(Decimal::from(key.hook_id().get()))
+    .bind(key.delivery_id())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(pending_count, 1);
+
+    let update_error = sqlx::query(
+        "UPDATE repo_watch_webhook_pending
+            SET repository = $1
+          WHERE hook_id = $2 AND delivery_id = $3",
+    )
+    .bind(OTHER_REPOSITORY)
+    .bind(Decimal::from(key.hook_id().get()))
+    .bind(key.delivery_id())
+    .execute(&pool)
+    .await
+    .expect_err("pending inventory rejects updates");
+    assert!(update_error.to_string().contains("cannot be updated"));
+
+    let delete_error = sqlx::query(
+        "DELETE FROM repo_watch_webhook_pending
+          WHERE hook_id = $1 AND delivery_id = $2",
+    )
+    .bind(Decimal::from(key.hook_id().get()))
+    .bind(key.delivery_id())
+    .execute(&pool)
+    .await
+    .expect_err("pending inventory rejects deletion before disposition");
+    assert!(
+        delete_error
+            .to_string()
+            .contains("retires only with its disposition")
+    );
+
+    store
+        .record_terminal(key, &projected_request(Vec::new())?)
+        .await?;
+    let terminal_pending_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_webhook_pending
+          WHERE hook_id = $1 AND delivery_id = $2",
+    )
+    .bind(Decimal::from(key.hook_id().get()))
+    .bind(key.delivery_id())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(terminal_pending_count, 0);
     Ok(())
 }
 
@@ -654,6 +925,120 @@ async fn terminal_disposition_drains_pending_delivery() -> Result<(), Box<dyn Er
     Ok(())
 }
 
+async fn operations_webhook_fixture() -> Result<
+    (
+        ContainerAsync<Postgres>,
+        RepositorySlug,
+        PostgresRepoWatchOperations,
+    ),
+    Box<dyn Error>,
+> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let event_store = PostgresRepoWatchStore::new(pool.clone());
+    event_store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                None,
+                RepoWatchCursorCandidate::new(RepoWatchObservation::new(
+                    Vec::new(),
+                    RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput::default())?,
+                )),
+                Vec::new(),
+            ),
+        )
+        .await?;
+    let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    seed_operations_webhook_burst(&webhook_store).await?;
+    let reader = PostgresRepoWatchOperations::new(pool, UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS);
+    Ok((container, repository, reader))
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operations_webhook_window_counts_recent_projected_deliveries() -> Result<(), Box<dyn Error>>
+{
+    let (_container, _repository, reader) = operations_webhook_fixture().await?;
+    let statuses = reader.repository_statuses(None).await?;
+
+    assert_eq!(statuses.repositories.len(), 1);
+    assert_eq!(
+        statuses.repositories[0].previous_five_minutes.received,
+        u64::try_from(OPERATIONS_BURST_COUNT)?
+    );
+    assert_eq!(
+        statuses.repositories[0].previous_five_minutes.projected,
+        u64::try_from(OPERATIONS_BURST_COUNT)?
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn repository_health_includes_webhook_intake_before_the_first_cursor()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let webhook = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let key = delivery_key(OPERATIONS_BURST_BASE);
+    admit_fixture(&webhook, key).await?;
+
+    let statuses = PostgresRepoWatchOperations::new(pool, UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS)
+        .repository_statuses(None)
+        .await?;
+
+    assert_eq!(statuses.repositories.len(), 1);
+    assert_eq!(statuses.repositories[0].repository, repository()?);
+    assert_eq!(statuses.repositories[0].cursor_generation, None);
+    assert_eq!(statuses.repositories[0].observed_at, None);
+    assert_eq!(
+        statuses.repositories[0]
+            .latest_webhook
+            .as_ref()
+            .map(|webhook| webhook.receipt_sequence),
+        Some(1)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operations_webhook_activity_is_bounded_and_keyset_paged() -> Result<(), Box<dyn Error>> {
+    let (_container, repository, reader) = operations_webhook_fixture().await?;
+    let first = reader
+        .activity(
+            repository.clone(),
+            RepoWatchPagePosition::Start,
+            RepoWatchPagePosition::Start,
+        )
+        .await?;
+    let second = reader
+        .activity(
+            repository,
+            RepoWatchPagePosition::Exhausted,
+            first.webhook_continuation_before,
+        )
+        .await?;
+
+    assert_eq!(
+        first.webhooks.len(),
+        usize::from(max_repo_watch_activity_page_items())
+    );
+    assert_eq!(
+        second.webhooks.len(),
+        OPERATIONS_BURST_COUNT - usize::from(max_repo_watch_activity_page_items())
+    );
+    assert_eq!(
+        first.webhooks[0].receipt_sequence,
+        u64::try_from(OPERATIONS_BURST_COUNT)?
+    );
+    assert_eq!(
+        second.webhooks[0].receipt_sequence,
+        first.webhooks[first.webhooks.len() - 1].receipt_sequence - 1
+    );
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn pending_page_stops_at_the_retained_byte_ceiling() -> Result<(), Box<dyn Error>> {
@@ -689,27 +1074,34 @@ async fn one_body_above_the_page_ceiling_still_drains() -> Result<(), Box<dyn Er
     Ok(())
 }
 
+/// Primary mode restores the spelling the shadow-only ruling withdrew.
+///
+/// 202608170005 narrowed the disposition CHECK to refuse `committed` because the
+/// write mode had not been decided; 202608250500 is that decision and drops the
+/// narrowing. The spelling is what a delivery owning a cursor advance records,
+/// and the parity view's promotion bound reads it, so both the schema and the
+/// encoder-decoder pairing have to admit it.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn committed_disposition_is_refused_by_the_schema() -> Result<(), Box<dyn Error>> {
+async fn a_committed_disposition_is_admitted_and_reads_back() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = PostgresRepoWatchWebhookStore::new(pool.clone());
     let key = delivery_key(0x501);
     admit_fixture(&store, key).await?;
 
-    let rejected = sqlx::query(
-        "INSERT INTO repo_watch_webhook_disposition (hook_id, delivery_id, disposition)
-         VALUES ($1, $2, 'committed')",
-    )
-    .bind(Decimal::from(key.hook_id().get()))
-    .bind(key.delivery_id())
-    .execute(&pool)
-    .await;
+    store
+        .record_terminal(key, &committed_request(Vec::new())?)
+        .await?;
 
-    assert!(
-        rejected.is_err(),
-        "shadow mode reserves no committed disposition"
+    let recorded = store
+        .load_disposition(key)
+        .await?
+        .expect("a committed delivery reaches a terminal disposition");
+    assert_eq!(
+        recorded.disposition(),
+        RepoWatchWebhookDisposition::Committed
     );
+    assert_eq!(recorded.outcome_code(), None);
     Ok(())
 }
 
@@ -909,6 +1301,78 @@ async fn an_uncaused_divergence_fails_the_parity_gate() -> Result<(), Box<dyn Er
     .await?;
 
     assert_eq!(unexplained, 1);
+    Ok(())
+}
+
+/// Parity measures the shadow experiment, and promotion ends it.
+///
+/// The complete sweep keeps running under primary mode as the backstop, while a
+/// primary delivery records no event projection for one of its rows to match.
+/// An unbounded poll side would therefore report every later backstop row as an
+/// uncaused `poll_only` divergence and permanently fail the gate the experiment
+/// reports, so rows the repository produced before its own promotion keep their
+/// classification and rows produced after it are out of the measurement.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn promotion_bounds_the_poll_side_of_parity() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let key = delivery_key(0x604);
+    admit_fixture(&store, key).await?;
+    seed_promotion_boundary_events(&pool, PromotionEvent::Derived).await?;
+
+    let measured = sqlx::query_as::<_, (String, Option<String>, Option<Vec<u8>>)>(
+        "SELECT status, cause, content_identity FROM repo_watch_webhook_parity",
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    assert_eq!(
+        measured,
+        vec![(
+            "poll_only".to_owned(),
+            None,
+            Some(SHADOW_POLL_IDENTITY.to_vec())
+        )]
+    );
+    Ok(())
+}
+
+/// The bound is the first committed delivery, not the first webhook-produced
+/// row.
+///
+/// An applied primary delivery is a cursor advance, and one whose observed
+/// change falls outside the event families derives no event at all — a
+/// `pull_request: edited` carrying only a new title commits the context and
+/// emits nothing. A bound read from event rows would stay inert for as long as
+/// a repository commits only such deliveries, and every backstop row the sweep
+/// produced meanwhile would stand as a permanent uncaused `poll_only`
+/// divergence, which is the exact corruption the bound exists to prevent. It
+/// would not heal later either: the bound admits rows recorded before it, so a
+/// delivery that finally does derive an event leaves those rows measured.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_promotion_that_derived_no_event_still_bounds_parity() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let key = delivery_key(0x605);
+    admit_fixture(&store, key).await?;
+    seed_promotion_boundary_events(&pool, PromotionEvent::None).await?;
+
+    let measured = sqlx::query_as::<_, (String, Option<String>, Option<Vec<u8>>)>(
+        "SELECT status, cause, content_identity FROM repo_watch_webhook_parity",
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    assert_eq!(
+        measured,
+        vec![(
+            "poll_only".to_owned(),
+            None,
+            Some(SHADOW_POLL_IDENTITY.to_vec())
+        )]
+    );
     Ok(())
 }
 

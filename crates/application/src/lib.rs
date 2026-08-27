@@ -5,6 +5,7 @@
 
 mod approval_judge;
 mod attention;
+mod blob_derivation;
 mod commissioned_dispatch;
 mod convergence_reconciliation;
 mod conversation_import;
@@ -16,10 +17,12 @@ mod model_execution;
 mod operator_failure;
 mod replace_session_defaults;
 mod repo_watch;
+mod repo_watch_operations;
 mod repo_watch_webhook;
 mod review_orchestration;
 mod review_workflow;
 mod scheduler;
+mod search;
 mod session_delegation;
 mod session_metadata;
 mod session_timeline;
@@ -33,6 +36,8 @@ mod tool_loop;
 mod tool_loop_ports;
 mod turn_liveness;
 mod update_session_placement;
+mod usage;
+mod workspace_instructions;
 
 pub use approval_judge::{
     ApprovalJudgeAuthorization, ApprovalJudgeBranchAuthority, ApprovalJudgeBranchAuthorityInput,
@@ -48,6 +53,11 @@ pub use attention::{
     max_attention_filter_tags, max_attention_filter_utf8_bytes,
     max_attention_goal_summary_characters, max_attention_snapshot_items,
     max_attention_title_characters,
+};
+pub use blob_derivation::{
+    BlobDerivationIdGenerator, BlobDerivationRecordOutcome, BlobDerivationServiceError,
+    BlobDerivationServiceOutcome, BlobDerivationStore, DeterministicBlobDerivationRequest,
+    DeterministicBlobDerivationService, DeterministicBlobProducer, UuidV7BlobDerivationIdGenerator,
 };
 pub use commissioned_dispatch::{
     CommissionDispatchPreparationError, CommissionDispatchRequest, CommissionedDispatchFence,
@@ -83,19 +93,21 @@ pub use list_conversations::{
 };
 pub use load_session::{LoadSessionService, SessionReader};
 pub use model_execution::{
-    AttemptDispatchGate, AuthorizeModelCallOutcome, AuthorizeModelCallTransaction,
-    AvailabilitySuccessorOutcome, CommitModelCallObservationTransaction,
-    CredentialPoolExhaustedOutcome, FailPreparedModelCallTransaction, InProcessAttemptDispatchGate,
-    InProcessAttemptDispatchPermit, ModelCallAuthorizationReread, ModelCallCapabilityPreparation,
+    AttachmentPreparationFailure, AttemptDispatchGate, AuthorizeModelCallOutcome,
+    AuthorizeModelCallTransaction, AvailabilitySuccessorOutcome,
+    CommitModelCallObservationTransaction, CredentialPoolExhaustedOutcome,
+    FailPreparedModelCallTransaction, InProcessAttemptDispatchGate, InProcessAttemptDispatchPermit,
+    ModelAttachmentStub, ModelCallAuthorizationReread, ModelCallCapabilityPreparation,
     ModelCallCredentialReference, ModelCallExecutionError, ModelCallExecutionIdGenerator,
     ModelCallExecutionOutcome, ModelCallExecutionService, ModelCallInputTokenCount,
     ModelCallInputTokenCounter, ModelCallObservationCommitOutcome, ModelCallProvider,
     ModelCallTerminalIdentityCandidates, ModelConversationMessage, ModelFrontierRenderingError,
-    ModelToolResultContent, PrepareModelCallOutcome, PrepareModelCallTransaction,
-    PreparedModelCallFailureCause, PreparedModelOperation, RetainedModelCallExecutionState,
-    RetainedModelCallObservationStatus, RetainedPreparedFailureStatus, ScriptedModelCallCapability,
-    ScriptedModelCallError, ScriptedModelCallProvider, ScriptedModelCallStep,
-    UuidV7ModelCallExecutionIdGenerator,
+    ModelToolResultContent, ModelUserContent, ModelUserContentPart, PrepareModelCallOutcome,
+    PrepareModelCallTransaction, PreparedModelCallFailureCause, PreparedModelOperation,
+    RetainedModelCallExecutionState, RetainedModelCallObservationStatus,
+    RetainedPreparedFailureStatus, ScriptedModelCallCapability, ScriptedModelCallError,
+    ScriptedModelCallProvider, ScriptedModelCallStep, UuidV7ModelCallExecutionIdGenerator,
+    render_model_user_content,
 };
 pub use operator_failure::{ClassifyOperatorFailure, OperatorFailureClass};
 pub use replace_session_defaults::{
@@ -112,15 +124,32 @@ pub use repo_watch::{
     RepoWatchDispatchServiceError, RepoWatchDispatchTransaction, RepoWatchEventContentIdentityV1,
     RepoWatchEventIdGenerator, RepoWatchEventIdentityFrontierEntryV1,
     RepoWatchEventIdentityFrontierError, RepoWatchEventIdentityFrontierV1,
-    RepoWatchEventOccurrenceV1, RepoWatchObservation, RepoWatchPreparedDispatchAction,
+    RepoWatchEventOccurrenceV1, RepoWatchMergedCheckRunBaselineV1,
+    RepoWatchMergedCheckSuiteBaselineV1, RepoWatchMergedPullRequestBaselineInputV1,
+    RepoWatchMergedPullRequestBaselineV1, RepoWatchObservation, RepoWatchPreparedDispatchAction,
     RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
     RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateError,
     RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate, RepoWatchReviewDecision,
     RepoWatchReviewObservation, RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
-    RepoWatchSingletonKey, RepoWatchTemplateResolver, RepoWatchThreadObservation,
-    RepoWatchThreadState, RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
-    UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
+    RepoWatchSingletonKey, RepoWatchStaleReviewClearanceCandidate,
+    RepoWatchStaleReviewClearanceCandidateError, RepoWatchTemplateResolver,
+    RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunObservation,
+    UuidV7RepoWatchDispatchIdGenerator, UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
+    derive_repo_watch_events_with_merged_baselines,
     repo_watch_events_have_equal_identified_content,
+};
+pub use repo_watch_operations::{
+    RepoWatchActivityPage, RepoWatchAutomationStatus, RepoWatchChecksStatus, RepoWatchDraftStatus,
+    RepoWatchEventCursor, RepoWatchEventKindCount, RepoWatchHeldCursor, RepoWatchHeldSlot,
+    RepoWatchHeldSlotBlocker, RepoWatchLatestWebhook, RepoWatchObligationCursor,
+    RepoWatchObligationId, RepoWatchObligationReadiness, RepoWatchOperationsReader,
+    RepoWatchOperatorDispatch, RepoWatchOperatorEvent, RepoWatchOperatorSettlement,
+    RepoWatchPagePosition, RepoWatchPullRequestOperations, RepoWatchPullRequestOperationsFacts,
+    RepoWatchPullRequestPage, RepoWatchPullRequestSession, RepoWatchPullRequestSessionPage,
+    RepoWatchQueuedObligation, RepoWatchRepositoryStatus, RepoWatchRepositoryStatusPage,
+    RepoWatchReviewStatus, RepoWatchSessionCursor, RepoWatchSessionPurpose,
+    RepoWatchWebhookActivity, RepoWatchWebhookDisposition, RepoWatchWebhookWindow,
+    RepoWatchWorkPage, max_repo_watch_activity_page_items, max_repo_watch_operations_page_items,
 };
 pub use repo_watch_webhook::{
     RepoWatchBranchHeadPreviousV1, RepoWatchObservationApplyV1, RepoWatchObservationChangeV1,
@@ -158,7 +187,15 @@ pub use scheduler::{
     InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
     InvalidSchedulerPassOccupancyBound, ReconciliationSweepInterval, SchedulerLoop,
     SchedulerLoopExit, SchedulerOccupancyObserver, SchedulerOldestInFlightPass,
-    SchedulerPassExpiryHandler, SchedulerPassOccupancyBound, scheduler_pass_admission_cap,
+    SchedulerPassExpiryHandler, SchedulerPassOccupancyBound, scheduler_ordinary_pass_limit,
+};
+pub use search::{
+    SearchArtifactId, SearchArtifactProjection, SearchArtifactProjectionClass, SearchContentClass,
+    SearchCursor, SearchHighlight, SearchPage, SearchPageLimit, SearchPageLimitError,
+    SearchProjectionText, SearchProjectionTextError, SearchProjectionWriter, SearchQuery,
+    SearchReader, SearchResult, SearchResultSource, SearchScope, SearchService, SearchStrategy,
+    SearchText, SearchTextError, max_search_page_items, max_search_projection_text_bytes,
+    max_search_query_bytes, max_search_snippet_bytes,
 };
 pub use session_delegation::DelegationMessageDeliveryProjection;
 pub use session_metadata::{
@@ -202,22 +239,40 @@ pub use tool_loop::{
     ToolDefinition, ToolExecutionIdGenerator, ToolExecutionInvocation, ToolExecutionService,
     ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor, ToolExecutorDisposition,
     ToolExecutorEvidence, ToolInputSchema, ToolInputSchemaError, ToolInputSchemaFailure,
-    UuidV7ToolLoopIdGenerator,
+    ToolPreauthorization, UuidV7ToolLoopIdGenerator,
 };
 pub use tool_loop_ports::{
     DecideToolRequestTransaction, OverrideDeniedToolRequestTransaction,
     PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
-    RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
-    ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
+    RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationOutcome,
+    ToolAttemptAuthorizationStatus, ToolContinuationIdentities, ToolCrashClosureIdentities,
+    ToolExecutionTransaction,
 };
 pub use turn_liveness::{
-    ClaimedModelCallReconciliation, ExhaustedModelCallReconciliation,
-    ModelCallReconciliationAttempt, ModelCallReconciliationBatch,
-    ModelCallReconciliationFailureKind, ModelCallReconciliationOutcome, StaleActiveTurnBound,
-    StaleTurnCandidate, StaleTurnOutcome, TurnLivenessBoundError, TurnLivenessEvidence,
-    TurnLivenessLedger, TurnLivenessScanInterval,
+    AutomaticReconciliationAttempt, AutomaticReconciliationBatch,
+    AutomaticReconciliationFailureKind, AutomaticReconciliationOperation,
+    AutomaticReconciliationOutcome, ClaimedAutomaticReconciliation,
+    ExhaustedAutomaticReconciliation, StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome,
+    TurnLivenessBoundError, TurnLivenessEvidence, TurnLivenessLedger, TurnLivenessScanInterval,
 };
 pub use update_session_placement::{
     UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest, UpdateSessionPlacementService,
     UpdateSessionPlacementTransaction,
+};
+pub use usage::{
+    UsageAggregateCompleteness, UsageAggregateGroup, UsageAggregateGroupError, UsageAggregateKey,
+    UsageAggregateReport, UsageAggregateReportError, UsageAggregateTokenAxes,
+    UsageCacheNormalization, UsageCallCursor, UsageCallEvidence, UsageCallKind, UsageCallOrder,
+    UsageCallPage, UsageCallPageContinuation, UsageCallPageError, UsageCallPageLimit,
+    UsageCallPageLimitError, UsageCallQuery, UsageCallScope, UsageCredentialProfileLabel,
+    UsageCredentialProfileLabelError, UsageInputTokenSemantics, UsageProvenance, UsageQuery,
+    UsageReader, UsageSelection, UsageService, UsageTimeFromInclusive, UsageTimeRange,
+    UsageTimeRangeError, UsageTimeToExclusive, UsageTimestampError, UsageTimestampMicros,
+    UsageTokenAxes, UsageTokenAxis, UsageTokenCoverage, UsageTokenPresence,
+    max_usage_aggregate_calls, max_usage_aggregate_groups, max_usage_call_page_items,
+    max_usage_credential_profile_utf8_bytes,
+};
+pub use workspace_instructions::{
+    InstructionDiscoveryFinding, InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind,
+    InstructionDiscoveryRoot, InstructionDiscoverySnapshot, discover_workspace_instructions,
 };

@@ -4,6 +4,8 @@
     reason = "the standalone integration test uses assertion panics and explicit fixture expectations"
 )]
 
+mod support;
+
 use std::{
     collections::{HashSet, VecDeque},
     error::Error,
@@ -27,36 +29,45 @@ use signalbox_application::{
     CreateSessionFromImportedFrontierRequest, CreateSessionFromImportedFrontierService,
     EligibilityPass, EligibilitySweep, EligibilitySweepBatch, ImportConversationOutcome,
     ImportConversationService, ImportedConversationIdGenerator, InProcessAttemptDispatchGate,
-    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
-    ModelCallExecutionOutcome, ModelCallExecutionService, ModelCallInputTokenCount,
-    ModelCallInputTokenCounter, NoToolCatalog, OperatorFailureClass, PreparedModelOperation,
-    ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest, ReplaceSessionMetadataService,
-    SchedulerLoop, SchedulerLoopExit, ScriptedModelCallProvider, ScriptedModelCallStep,
+    InProcessEligibilityNudge, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
+    ModelCallCredentialReference, ModelCallExecutionOutcome, ModelCallExecutionService,
+    ModelCallInputTokenCount, ModelCallInputTokenCounter, NoToolCatalog, OperatorFailureClass,
+    PreparedModelOperation, ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest,
+    ReplaceSessionMetadataService, RepoWatchConvergenceVerdict, RepoWatchReviewDecision,
+    SchedulerLoop, SchedulerLoopExit, SchedulerPassExpiryHandler, SchedulerPassOccupancyBound,
+    ScriptedModelCallProvider, ScriptedModelCallStep, StaleActiveTurnBound,
     StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanService,
-    UuidV7ModelCallExecutionIdGenerator, UuidV7StartEligibleTurnIdGenerator,
-    UuidV7StartupScanIdGenerator, scheduler_pass_admission_cap,
+    TurnLivenessScanInterval, UuidV7ModelCallExecutionIdGenerator,
+    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
+    scheduler_ordinary_pass_limit,
 };
 use signalbox_blob_store::BlobObjectKey;
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
-    ActiveTurnPhase, Actor, AssistantResponsePart, AssistantText, BlobDigest, ContextCompactionId,
-    ContextCompactionTokenUsage, ContextFrontierId, DirectModelSelection, DurableCommandId,
-    FailedModelCallTurnIdentities, ImportedConversationFormat, ImportedConversationId,
-    ImportedSessionRelationship, ImportedTranscriptEntryId, InitialToolApproval, ModelCallId,
+    ActiveTurnPhase, Actor, AssistantResponsePart, AssistantText, BlobDigest, BranchName,
+    CheckRunName, CommitSha, ContextCompactionId, ContextCompactionTokenUsage, ContextFrontierId,
+    DirectModelSelection, DurableCommandId, FailedModelCallTurnIdentities,
+    ImportedConversationFormat, ImportedConversationId, ImportedSessionRelationship,
+    ImportedTranscriptEntryId, InitialToolApproval, MergeableState, ModelCallId,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
     ModelSelectionRequest, ModelTargetCatalog, NormalizedToolArguments, ProviderModelIdentity,
-    ReplaceSessionMetadataResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
-    SessionMetadataContent, ToolCallProposal, ToolName, ToolRequestId, ToolResponsePartIdentity,
-    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TurnId,
+    PullRequestNumber, ReplaceSessionMetadataResult, RepoWatchAuthorLogin, RepositorySlug,
+    ResolvedProviderTarget, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent, ToolCallProposal,
+    ToolName, ToolRequestId, ToolResponsePartIdentity, ToolRoundModelCallIdentities,
+    ToolUsingAssistantResponse, TurnId,
 };
-use signalbox_model_provider_runtime::{RuntimeContextCompactionModel, RuntimeModelCallProvider};
+use signalbox_model_provider_runtime::{
+    RuntimeContextCompactionModel, RuntimeInputTokenCountError, RuntimeModelCallProvider,
+    RuntimeModelCallProviderError,
+};
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CancellationSignal, CompletionEvidence, CompletionFinish,
     DeliveryMode, ExchangeFacts, InputTokenCountOutcome, LossCause, MessagePart,
-    ModelInputTokenCounter, ModelOperation, ModelRuntime, Observation, ObservationFact,
-    ObservationSink, PreparationOutcome, ProviderReportedModel, Script, ScriptedModel,
-    ScriptedPrepared, TerminalEvidence, TerminalReport, TokenUsage, ToolCallsAtLoss,
+    ModelInputTokenCounter, ModelOperation, ModelRuntime, NativeErrorFacts, Observation,
+    ObservationFact, ObservationSink, PreparationOutcome, ProviderErrorEvidence, ProviderErrorKind,
+    ProviderReportedModel, Script, ScriptedModel, ScriptedPrepared, TerminalEvidence,
+    TerminalReport, TokenUsage, ToolCallsAtLoss,
 };
 use signalbox_persistence::{
     blob::BlobCatalogRepository,
@@ -67,14 +78,18 @@ use signalbox_persistence::{
     },
     conversation_import::ImportedConversationRepository,
     create_session_from_imported_frontier::ImportedSessionRepository,
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
     scheduler::PostgresEligibilitySweep,
     session_metadata::SessionMetadataRepository,
     start_eligible_turn::StartEligibleTurnRepository,
     startup::PostgresStartupScanRepository,
-    test_support::{FleetSoakCensus, FleetSoakCensusRepository},
+    test_support::{
+        FleetSoakCensus, FleetSoakCensusRepository, OperatorStatusConvergenceFixture,
+        OperatorStatusFixtureRepository, OperatorStatusStaleReviewClearanceFixture,
+    },
+    turn_liveness::TurnLivenessPersistenceBounds,
 };
 use signalbox_process_protocol::{
     BlobChunk, CanonicalBlobDigest, CanonicalDigest, CanonicalU64, CanonicalUuid, ClientFrame,
@@ -83,9 +98,12 @@ use signalbox_process_protocol::{
     DescendantTerminationScope, EffectiveModelSettings, ErrorCode, ErrorDetail, FastMode,
     GoalHistoryEvent, GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
     ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
-    MetadataActor, ModelChangeAdjustment, ModelSelection, ModelSettingSource, ModelSettingsOverlay,
-    ModelSettingsPrecedence, ModelSettingsSnapshot, ProtocolVersion, ReasoningLevel,
-    RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewDiffSide,
+    MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MetadataActor, ModelChangeAdjustment, ModelSelection,
+    ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence, ModelSettingsSnapshot,
+    OperatorStatusConvergenceVerdict, OperatorStatusEndMessage, OperatorStatusMergeableState,
+    OperatorStatusMessage, OperatorStatusPendingStaleReviewClearanceMessage,
+    OperatorStatusPullRequestConvergenceMessage, OperatorStatusReviewDecision, ProtocolVersion,
+    ReasoningLevel, RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewDiffSide,
     ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
     ReviewImportTerminalOutcome, ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome,
     ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus,
@@ -94,13 +112,15 @@ use signalbox_process_protocol::{
     ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject,
     ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, SessionMetadata, SessionPlacement,
     SettingOverlay, SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry,
-    TranscriptTextEntry, TurnState, decode_server_line, encode_client_line,
+    TranscriptTextEntry, TurnState, UserInputContent, decode_server_line, encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, BlobStorageClass, BlobStoreRegistry, ContextGuardedTurnPass,
-    ContextGuardedTurnPassError, FatalExecutionSupervisor, HubModelConfiguration,
-    LocalProcessListener, PostgresProviderModelExecution, ProcessProviderTextDeltaSink,
-    ProcessRuntime, ProcessRuntimeError, SessionTemplateConfiguration,
+    ContextGuardedTurnPassError, ExpiredPassRecoveryPolicy, FatalExecutionSupervisor,
+    HubModelConfiguration, LocalProcessListener, PostgresProviderModelExecution,
+    ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError, ReportedUsageCompaction,
+    ReportedUsageCompactionError, SessionTemplateConfiguration, TurnLivenessNumericBounds,
+    TurnLivenessRuntime,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tempfile::TempDir;
@@ -134,6 +154,49 @@ fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin 
     ])
     .expect("test credential pin is valid")
 }
+
+#[track_caller]
+fn exactly_one_credential_reference(references: &[String]) -> &str {
+    match references {
+        [reference] => reference.as_str(),
+        _ => panic!("the fixture pins exactly one credential family"),
+    }
+}
+
+#[track_caller]
+fn reported_usage_still_exceeded_turn(outcome: Result<(), ReportedUsageCompactionError>) -> TurnId {
+    match outcome {
+        Err(ReportedUsageCompactionError::Compaction {
+            turn,
+            cause_code: "reported_usage_context_still_exceeded",
+            ..
+        }) => turn,
+        other => panic!("expected a still-exceeded compaction failure, got {other:?}"),
+    }
+}
+
+#[track_caller]
+fn failed_automatic_compaction_turn(
+    outcome: Result<
+        (),
+        ContextGuardedTurnPassError<
+            RuntimeInputTokenCountError,
+            signalboxd::WorkspaceInstructionPreparedExecutionError<
+                signalboxd::PostgresProviderModelExecutionError<RuntimeModelCallProviderError>,
+            >,
+        >,
+    >,
+) -> TurnId {
+    match outcome {
+        Err(ContextGuardedTurnPassError::Compaction {
+            turn,
+            cause_code: "context_compaction_model",
+            ..
+        }) => turn,
+        other => panic!("expected a failed automatic compaction, got {other:?}"),
+    }
+}
+
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const OVERSIZED_SUBMITTED_INPUT_BYTES: usize = MAX_SUBMITTED_INPUT_BYTES + 1;
 const STREAMING_DELTA_COUNT: usize = 192;
@@ -292,7 +355,7 @@ async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -665,7 +728,7 @@ where
         let witness = self.witness.clone();
         async move {
             let batch = self.inner.find_sessions().await?;
-            let (sessions, continuation) = batch.clone().into_parts();
+            let (sessions, _dispatch_starts, continuation) = batch.clone().into_parts();
             witness.record_batch(&sessions, continuation);
             Ok(batch)
         }
@@ -697,11 +760,32 @@ where
         Pass::failure_turn(error)
     }
 
+    // The decorator must forward every boundary the inner pass overrides.
+    // Inheriting the trait defaults here silently drops the composed pass's
+    // occupancy-expiry handoff and its reserved dispatch-start lane, which the
+    // fleet-soak scenarios below depend on.
+    fn occupancy_expiry_handler(&self) -> Option<Arc<dyn SchedulerPassExpiryHandler>> {
+        self.inner.occupancy_expiry_handler()
+    }
+
     fn run(
         &mut self,
         session: SessionId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let execution = self.inner.run(session);
+        let witness = self.witness.clone();
+        async move {
+            let outcome = execution.await;
+            witness.record_processed_session(session);
+            outcome
+        }
+    }
+
+    fn run_dispatch_start(
+        &mut self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let execution = self.inner.run_dispatch_start(session);
         let witness = self.witness.clone();
         async move {
             let outcome = execution.await;
@@ -719,6 +803,7 @@ struct RunningRuntime {
     socket_directory: SocketDirectory,
     shutdown: watch::Sender<bool>,
     runtime_task: Option<JoinHandle<Result<(), ProcessRuntimeError>>>,
+    eligibility_nudge: InProcessEligibilityNudge,
     work_source: Option<InProcessEligibilityWorkSource<RuntimeEligibilitySweep>>,
     reconciliation_witness: ReconciliationWitness,
     provider_text_deltas: ProcessProviderTextDeltaSink,
@@ -774,7 +859,7 @@ impl RunningRuntime {
             || String::from(MODEL_CONFIGURATION),
             BlobStorageFixture::model_configuration,
         );
-        let model_configuration = HubModelConfiguration::parse(&configuration)?;
+        let model_configuration = support::parse_model_configuration(&configuration)?;
         let blob_store_registry = match blob_storage {
             BlobStorageFixtureMode::Disabled => None,
             BlobStorageFixtureMode::Enabled => BlobStoreRegistry::initialize_for_conformance(
@@ -789,7 +874,7 @@ impl RunningRuntime {
         let mut runtime = ProcessRuntime::new_with_templates(
             listener,
             pool.clone(),
-            eligibility_nudge,
+            eligibility_nudge.clone(),
             InProcessToolDispatchGate::default(),
             model_configuration,
             template_configuration,
@@ -812,6 +897,7 @@ impl RunningRuntime {
             socket_directory,
             shutdown,
             runtime_task: Some(runtime_task),
+            eligibility_nudge,
             work_source: Some(work_source),
             reconciliation_witness,
             provider_text_deltas,
@@ -833,7 +919,7 @@ impl RunningRuntime {
         &mut self,
         configuration: &str,
     ) -> Result<usize, Box<dyn Error>> {
-        let model_configuration = HubModelConfiguration::parse(configuration)?;
+        let model_configuration = support::parse_model_configuration(configuration)?;
         let template_configuration = session_template_configuration(&model_configuration)?;
         self.restart_with_templates(configuration, template_configuration)
             .await
@@ -880,11 +966,11 @@ impl RunningRuntime {
             reconciliation_witness.clone(),
         );
         let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
-        let model_configuration = HubModelConfiguration::parse(configuration)?;
+        let model_configuration = support::parse_model_configuration(configuration)?;
         let mut runtime = ProcessRuntime::new_with_templates(
             listener,
             self.pool.clone(),
-            eligibility_nudge,
+            eligibility_nudge.clone(),
             InProcessToolDispatchGate::default(),
             model_configuration,
             template_configuration,
@@ -896,6 +982,7 @@ impl RunningRuntime {
         let (shutdown, shutdown_receiver) = watch::channel(false);
         self.shutdown = shutdown;
         self.runtime_task = Some(tokio::spawn(runtime.run(shutdown_receiver)));
+        self.eligibility_nudge = eligibility_nudge;
         self.work_source = Some(work_source);
         self.reconciliation_witness = reconciliation_witness;
         self.provider_text_deltas = provider_text_deltas;
@@ -912,12 +999,13 @@ impl RunningRuntime {
             .expect("a running runtime has an installed task");
         runtime_task.abort();
         let killed = runtime_task.await;
+        let killed = killed.expect_err("the killed runtime task must not return normally");
         assert!(
-            matches!(&killed, Err(error) if error.is_cancelled()),
-            "the runtime task must stop by cancellation, not by returning: {killed:?}"
+            killed.is_cancelled(),
+            "the runtime task must stop by cancellation, got {killed}"
         );
 
-        let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+        let model_configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
         let template_configuration = session_template_configuration(&model_configuration)?;
         self.restart_after_stop(MODEL_CONFIGURATION, template_configuration)
             .await
@@ -1818,7 +1906,7 @@ async fn submit_first_input(
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
-                content: InputContent::new(content),
+                content: UserInputContent::text(content),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -2183,6 +2271,7 @@ fn direct_compaction_request(
         target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
             3,
         ))),
+        input_includes_cache_tokens: false,
         credential_reference: String::from("synthetic-compaction-transaction-credential"),
         call: ModelCallId::from_uuid(Uuid::from_u128(identity_base)),
         compaction: ContextCompactionId::from_uuid(Uuid::from_u128(identity_base + 1)),
@@ -2207,20 +2296,24 @@ async fn execute_streamed_turn_until(
     turn_id: CanonicalUuid,
     settle: TurnSettle,
 ) -> Result<ScriptedModel<ModelCallId>, Box<dyn Error>> {
-    let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+    let model_configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
     let probe = scripted.clone();
     let provider =
-        RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog())
+        RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog(), None)
             .with_text_delta_sink(runtime.provider_text_delta_sink());
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            PostgresModelCallRepository::new(
-                runtime.pool.clone(),
-                model_configuration.target_catalog(),
-                ModelCallCredentialReference::new("streaming-fixture"),
+        FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                PostgresModelCallRepository::new(
+                    runtime.pool.clone(),
+                    model_configuration.target_catalog(),
+                    ModelCallCredentialReference::new("streaming-fixture"),
+                ),
+                InProcessAttemptDispatchGate::default(),
+                provider,
+                None,
             ),
-            InProcessAttemptDispatchGate::default(),
-            provider,
+            signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -2257,17 +2350,21 @@ async fn execute_recorded_turn(
 ) -> Result<RecordingCountedScriptedModel, Box<dyn Error>> {
     let probe = scripted.clone();
     let provider =
-        RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog())
+        RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog(), None)
             .with_text_delta_sink(runtime.provider_text_delta_sink());
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            PostgresModelCallRepository::new(
-                runtime.pool.clone(),
-                model_configuration.target_catalog(),
-                ModelCallCredentialReference::new("recording-fixture"),
+        FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                PostgresModelCallRepository::new(
+                    runtime.pool.clone(),
+                    model_configuration.target_catalog(),
+                    ModelCallCredentialReference::new("recording-fixture"),
+                ),
+                InProcessAttemptDispatchGate::default(),
+                provider,
+                None,
             ),
-            InProcessAttemptDispatchGate::default(),
-            provider,
+            signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -2330,7 +2427,7 @@ async fn execute_guarded_turn(
 ) -> Result<RecordingCountedScriptedModel, Box<dyn Error>> {
     let probe = scripted.clone();
     let runtime_models = model_configuration.runtime_model_catalog();
-    let provider = RuntimeModelCallProvider::new(scripted, runtime_models.clone())
+    let provider = RuntimeModelCallProvider::new(scripted, runtime_models.clone(), None)
         .with_text_delta_sink(runtime.provider_text_delta_sink());
     let counter = provider.clone();
     let repository = PostgresModelCallRepository::new(
@@ -2341,10 +2438,14 @@ async fn execute_guarded_turn(
     .with_session_credentials(model_configuration.credential_family_catalog());
     let guarded_repository = repository.clone();
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            repository,
-            InProcessAttemptDispatchGate::default(),
-            provider,
+        FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                repository,
+                InProcessAttemptDispatchGate::default(),
+                provider,
+                None,
+            ),
+            signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
         ));
     let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
         Arc::new(RuntimeContextCompactionModel::new(
@@ -2360,7 +2461,12 @@ async fn execute_guarded_turn(
         model_configuration,
         compaction_model,
         execution,
-    );
+    )
+    .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+        runtime.pool.clone(),
+        None,
+        Vec::new(),
+    ));
     let mut scheduler = SchedulerLoop::new(runtime.take_work_source(), pass);
     let observation_pool = runtime.pool.clone();
     let session = SessionId::from_uuid(session_id.into_uuid());
@@ -2391,30 +2497,39 @@ fn completed_script(provider_model: &str, text: &str, usage: TokenUsage) -> Scri
     }))
 }
 
-// Fleet-soak foundation for issue #1027.
-//
-// The default CI mode proves that current main still exhibits the hung-call
-// failure signature without making the PostgreSQL integration job red. Set
-// `SIGNALBOX_ENFORCE_FLEET_LIVENESS=1` to invert that probe into the desired
-// bounded-occupancy assertion. Restart recovery separately verifies the
-// specification-mandated ambiguity park without inventing automatic recovery
-// authority. Slow/failing tools, boundary loss, an
+// Fleet-soak coverage for issue #1027. Slow/failing tools, boundary loss, an
 // unprovisioned workspace, and scheduled goal resumption are named follow-on
 // slices: they need the same fleet census but not more boot infrastructure.
 
-// numeric-bound: derived ceiling from SCHEDULER_PASS_ADMISSION_CAP
-const FLEET_SESSION_COUNT: usize = scheduler_pass_admission_cap();
-// numeric-bound: tunable - keeps each fault observation short in CI
+// numeric-bound: test fixture - mirrors the `scheduler_pass_admission_cap`
+// numeric bound that `config/signalboxd.example.toml` supplies, which
+// `support::parse_model_configuration` splices into this fixture's
+// configuration. The cap is deployment configuration rather than a compiled
+// constant, so the derived ordinary limit below is stated against it.
+const FLEET_PASS_ADMISSION_CAP: usize = 16;
+// numeric-bound: derived ceiling from the configured pass admission cap.
+// One place inside the shared admission cap stays reserved for a
+// repository-watch dispatch start, so a fleet that saturates ordinary
+// scheduler capacity is one session smaller than the cap itself.
+const FLEET_SESSION_COUNT: usize = scheduler_ordinary_pass_limit(FLEET_PASS_ADMISSION_CAP);
+// numeric-bound: test setup - preserves the ordinary production occupancy fixture
+const FLEET_BASELINE_OCCUPANCY_BOUND: Duration = Duration::from_secs(900);
+// numeric-bound: test deadline - exercises the production recovery path promptly
+const FLEET_OCCUPANCY_BOUND: Duration = Duration::from_secs(1);
+// numeric-bound: test deadline - keeps each fault observation short in CI
 const FLEET_ASSERTION_BOUND: Duration = Duration::from_secs(2);
-// numeric-bound: tunable - admits contended CI scheduling without weakening assertions
-const FLEET_SETUP_BOUND: Duration = Duration::from_secs(60);
-const FLEET_ENFORCEMENT_ENV: &str = "SIGNALBOX_ENFORCE_FLEET_LIVENESS";
+// numeric-bound: test setup - admits a full contended fleet inside two CI minutes
+const FLEET_SETUP_BOUND: Duration = Duration::from_secs(120);
 
 struct FleetPrepared {
     correlation: ModelCallId,
     inner: ScriptedPrepared<ModelCallId>,
 }
 
+/// How many scripted executions complete and how many hang.
+///
+/// The completions are served first: a scenario that stands a healthy baseline
+/// fleet up before injecting one fault gets the fault on the last execution.
 #[derive(Clone, Copy)]
 struct FleetModelCardinality {
     hanging: usize,
@@ -2424,6 +2539,7 @@ struct FleetModelCardinality {
 #[derive(Clone)]
 struct FleetScriptedModel {
     inner: ScriptedModel<ModelCallId>,
+    completions_before_hangs: Arc<AtomicUsize>,
     hangs_remaining: Arc<AtomicUsize>,
     in_flight_hangs: Arc<AtomicUsize>,
     completed_calls: Arc<Mutex<Vec<ModelCallId>>>,
@@ -2440,6 +2556,7 @@ impl FleetScriptedModel {
                 ),
                 cardinality.hanging + cardinality.completing,
             )),
+            completions_before_hangs: Arc::new(AtomicUsize::new(cardinality.completing)),
             hangs_remaining: Arc::new(AtomicUsize::new(cardinality.hanging)),
             in_flight_hangs: Arc::new(AtomicUsize::new(0)),
             completed_calls: Arc::new(Mutex::new(Vec::new())),
@@ -2455,6 +2572,13 @@ impl FleetScriptedModel {
             .lock()
             .expect("the fleet completion lock is available")
             .clone()
+    }
+
+    fn record_completed_call(&self, correlation: ModelCallId) {
+        self.completed_calls
+            .lock()
+            .expect("the fleet completion lock is available")
+            .push(correlation);
     }
 }
 
@@ -2505,6 +2629,18 @@ impl ModelRuntime<ModelCallId> for FleetScriptedModel {
         sink: &mut (dyn ObservationSink<ModelCallId> + Send),
         cancellation: CancellationSignal,
     ) -> TerminalReport<ModelCallId> {
+        let correlation = prepared.correlation;
+        let completes = self
+            .completions_before_hangs
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok();
+        if completes {
+            let report = self.inner.execute(prepared.inner, sink, cancellation).await;
+            self.record_completed_call(correlation);
+            return report;
+        }
         let hangs = self
             .hangs_remaining
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
@@ -2513,19 +2649,15 @@ impl ModelRuntime<ModelCallId> for FleetScriptedModel {
             .is_ok();
         if hangs {
             sink.observe(Observation {
-                correlation: prepared.correlation,
+                correlation,
                 fact: ObservationFact::SendCommenced,
             });
             self.in_flight_hangs.fetch_add(1, Ordering::SeqCst);
             let _guard = FleetHangGuard(Arc::clone(&self.in_flight_hangs));
             pending::<TerminalReport<ModelCallId>>().await
         } else {
-            let correlation = prepared.correlation;
             let report = self.inner.execute(prepared.inner, sink, cancellation).await;
-            self.completed_calls
-                .lock()
-                .expect("the fleet completion lock is available")
-                .push(correlation);
+            self.record_completed_call(correlation);
             report
         }
     }
@@ -2536,10 +2668,15 @@ struct CommissionedFleet {
     sessions: Vec<CanonicalUuid>,
 }
 
-async fn commission_fleet(runtime: &RunningRuntime) -> Result<CommissionedFleet, Box<dyn Error>> {
+async fn commission_fleet(
+    runtime: &RunningRuntime,
+    first_index: usize,
+    session_count: usize,
+) -> Result<CommissionedFleet, Box<dyn Error>> {
     let mut connection = Connection::connect(runtime.socket()).await?;
-    let mut sessions = Vec::with_capacity(FLEET_SESSION_COUNT);
-    for index in 0..FLEET_SESSION_COUNT {
+    let mut sessions = Vec::with_capacity(session_count);
+    for offset in 0..session_count {
+        let index = first_index + offset;
         connection
             .request(
                 u64::try_from(index + 2)?,
@@ -2564,6 +2701,53 @@ async fn commission_fleet(runtime: &RunningRuntime) -> Result<CommissionedFleet,
     Ok(CommissionedFleet { sessions })
 }
 
+struct FleetRuntimeTasks {
+    shutdown: watch::Sender<bool>,
+    scheduler: JoinHandle<SchedulerLoopExit>,
+    turn_liveness: JoinHandle<()>,
+}
+
+impl FleetRuntimeTasks {
+    async fn stop(self) -> Result<(), Box<dyn Error>> {
+        self.shutdown.send_replace(true);
+        let scheduler_exit = timeout(Duration::from_secs(10), self.scheduler).await??;
+        timeout(Duration::from_secs(10), self.turn_liveness).await??;
+        if scheduler_exit != SchedulerLoopExit::Shutdown {
+            return Err(io::Error::other("fleet scheduler returned a non-shutdown exit").into());
+        }
+        Ok(())
+    }
+
+    async fn kill(self) -> Result<(), Box<dyn Error>> {
+        self.scheduler.abort();
+        self.turn_liveness.abort();
+        let scheduler = self.scheduler.await;
+        let turn_liveness = self.turn_liveness.await;
+        let scheduler = scheduler.expect_err("the killed scheduler task must not return normally");
+        let turn_liveness =
+            turn_liveness.expect_err("the killed turn-liveness task must not return normally");
+        assert!(
+            scheduler.is_cancelled(),
+            "the scheduler task must stop by cancellation, got {scheduler}"
+        );
+        assert!(
+            turn_liveness.is_cancelled(),
+            "the turn-liveness task must stop by cancellation, got {turn_liveness}"
+        );
+        Ok(())
+    }
+}
+
+async fn wait_for_fleet_shutdown(mut shutdown: watch::Receiver<bool>) {
+    while !*shutdown.borrow_and_update() {
+        if shutdown.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Commissions one extra session after a restart, as a readiness control that
+/// proves the replacement scheduler is admitting fresh work.
 async fn commission_fleet_control(
     runtime: &RunningRuntime,
 ) -> Result<CanonicalUuid, Box<dyn Error>> {
@@ -2595,43 +2779,148 @@ async fn commission_fleet_control(
 fn start_fleet_scheduler(
     runtime: &mut RunningRuntime,
     model: FleetScriptedModel,
-) -> Result<JoinHandle<SchedulerLoopExit>, Box<dyn Error>> {
-    let configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
-    let provider = RuntimeModelCallProvider::new(model, configuration.runtime_model_catalog())
-        .with_text_delta_sink(runtime.provider_text_delta_sink());
-    let (execution, fatal) = FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-        PostgresModelCallRepository::new(
-            runtime.pool.clone(),
-            configuration.target_catalog(),
-            ModelCallCredentialReference::new("fleet-soak-fixture"),
-        ),
-        InProcessAttemptDispatchGate::default(),
-        provider,
-    ));
+    occupancy_bound: SchedulerPassOccupancyBound,
+) -> Result<FleetRuntimeTasks, Box<dyn Error>> {
+    let configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
+    let bounds = configuration.numeric_bounds();
+    let expired_pass_recovery_policy = ExpiredPassRecoveryPolicy::new(
+        bounds
+            .integer("expired_pass_recovery_attempts")
+            .flatten()
+            .and_then(|value| u32::try_from(value).ok()),
+        bounds
+            .duration("expired_pass_recovery_attempt_bound")
+            .flatten(),
+        bounds
+            .duration("expired_pass_recovery_lock_retry_delay")
+            .flatten(),
+        bounds
+            .duration("expired_pass_recovery_conservative_retry_delay")
+            .flatten(),
+    );
+    let turn_liveness_persistence_bounds = TurnLivenessPersistenceBounds::new(
+        bounds.duration("terminalization_lock_wait").flatten(),
+        bounds.duration("terminalization_acquire_wait").flatten(),
+        bounds.duration("terminalization_write_lock_wait").flatten(),
+    );
+    let turn_liveness_numeric_bounds = TurnLivenessNumericBounds::new(
+        bounds
+            .integer("terminalizations_per_liveness_scan")
+            .flatten()
+            .and_then(|value| usize::try_from(value).ok()),
+        bounds
+            .duration("turn_liveness_recovery_attempt_bound")
+            .flatten(),
+        bounds
+            .integer("automatic_reconciliations_per_liveness_scan")
+            .flatten()
+            .and_then(|value| usize::try_from(value).ok()),
+        bounds
+            .duration("automatic_reconciliation_attempt_bound")
+            .flatten(),
+        turn_liveness_persistence_bounds,
+    );
+    let stale_active_turn_bound = bounds
+        .duration("stale_active_turn_bound")
+        .flatten()
+        .map(StaleActiveTurnBound::try_new)
+        .transpose()?;
+    let turn_liveness_scan_interval = bounds
+        .duration("turn_liveness_scan_interval")
+        .flatten()
+        .map(TurnLivenessScanInterval::try_new)
+        .transpose()?;
+    let automatic_reconciliation_attempt_budget = bounds
+        .integer("automatic_reconciliation_attempt_budget")
+        .flatten()
+        .and_then(|value| u32::try_from(value).ok());
+    let automatic_reconciliation_base_backoff = bounds
+        .duration("automatic_reconciliation_base_backoff")
+        .flatten();
+    let automatic_reconciliation_backoff_cap = bounds
+        .duration("automatic_reconciliation_backoff_cap")
+        .flatten();
+    let provider =
+        RuntimeModelCallProvider::new(model, configuration.runtime_model_catalog(), None)
+            .with_text_delta_sink(runtime.provider_text_delta_sink());
+    let (execution, fatal_execution) =
+        FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                PostgresModelCallRepository::new(
+                    runtime.pool.clone(),
+                    configuration.target_catalog(),
+                    ModelCallCredentialReference::new("fleet-soak-fixture"),
+                ),
+                InProcessAttemptDispatchGate::default(),
+                provider,
+                None,
+            ),
+            signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
+        ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
             UuidV7StartEligibleTurnIdGenerator,
             StartEligibleTurnRepository::new(runtime.pool.clone()),
         ),
         execution,
+    )
+    .with_occupancy_recovery(
+        runtime.pool.clone(),
+        runtime.eligibility_nudge.clone(),
+        expired_pass_recovery_policy,
+        turn_liveness_persistence_bounds,
     );
     let pass = WitnessedEligibilityPass::new(pass, runtime.reconciliation_witness());
-    let mut scheduler = SchedulerLoop::new(runtime.take_work_source(), pass);
-    Ok(tokio::spawn(async move {
-        scheduler.run_until(fatal.wait()).await
-    }))
+    let mut scheduler =
+        SchedulerLoop::new(runtime.take_work_source(), pass).with_occupancy_bound(occupancy_bound);
+    let turn_liveness = TurnLivenessRuntime::new(
+        runtime.pool.clone(),
+        stale_active_turn_bound,
+        turn_liveness_scan_interval,
+        automatic_reconciliation_attempt_budget,
+        automatic_reconciliation_base_backoff,
+        automatic_reconciliation_backoff_cap,
+        turn_liveness_numeric_bounds,
+    );
+    let (shutdown, shutdown_receiver) = watch::channel(false);
+    let scheduler_shutdown = shutdown_receiver.clone();
+    let scheduler = tokio::spawn(async move {
+        scheduler
+            .run_until(async move {
+                tokio::select! {
+                    () = fatal_execution.wait() => {}
+                    () = wait_for_fleet_shutdown(scheduler_shutdown) => {}
+                }
+            })
+            .await
+    });
+    let turn_liveness = tokio::spawn(turn_liveness.run(shutdown_receiver));
+    Ok(FleetRuntimeTasks {
+        shutdown,
+        scheduler,
+        turn_liveness,
+    })
 }
 
 async fn wait_for_hangs(model: &FleetScriptedModel, expected: usize) -> Result<(), Box<dyn Error>> {
-    timeout(FLEET_SETUP_BOUND, async {
+    let observed = timeout(FLEET_SETUP_BOUND, async {
         while model.in_flight_hangs() != expected {
             tokio::task::yield_now().await;
         }
     })
-    .await?;
+    .await;
+    if observed.is_err() {
+        return Err(io::Error::other(format!(
+            "fleet hang setup expected {expected} in flight, observed {}",
+            model.in_flight_hangs()
+        ))
+        .into());
+    }
     Ok(())
 }
 
+/// Waits for one drained eligibility cycle, so a replacement scheduler's
+/// reconciliation pass is observed as completed rather than slept for.
 async fn wait_for_reconciliation(witness: &ReconciliationWitness) -> Result<(), Box<dyn Error>> {
     timeout(FLEET_SETUP_BOUND, async {
         while witness.completed_cycles() == 0 {
@@ -2642,11 +2931,19 @@ async fn wait_for_reconciliation(witness: &ReconciliationWitness) -> Result<(), 
     Ok(())
 }
 
-async fn abort_fleet_scheduler(
-    scheduler: JoinHandle<SchedulerLoopExit>,
-) -> Result<(), Box<dyn Error>> {
+/// Tears the scheduler and turn-liveness tasks down from whatever state they
+/// are in, so a panicking scenario still releases the fixture.
+async fn abort_fleet_scheduler(tasks: FleetRuntimeTasks) -> Result<(), Box<dyn Error>> {
+    let FleetRuntimeTasks {
+        shutdown,
+        scheduler,
+        turn_liveness,
+    } = tasks;
+    shutdown.send_replace(true);
     scheduler.abort();
+    turn_liveness.abort();
     let stopped = scheduler.await;
+    let liveness = turn_liveness.await;
     if !matches!(&stopped, Ok(SchedulerLoopExit::Shutdown))
         && !matches!(&stopped, Err(error) if error.is_cancelled())
     {
@@ -2655,92 +2952,13 @@ async fn abort_fleet_scheduler(
         ))
         .into());
     }
-    Ok(())
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FleetFatalShutdownOutcome {
-    Live,
-    Restarted,
-}
-
-enum FleetSchedulerWait {
-    Elapsed,
-    Stopped(Result<SchedulerLoopExit, tokio::task::JoinError>),
-}
-
-fn classify_fleet_scheduler_wait(
-    wait: FleetSchedulerWait,
-) -> Result<FleetFatalShutdownOutcome, Box<dyn Error>> {
-    match wait {
-        FleetSchedulerWait::Elapsed => Ok(FleetFatalShutdownOutcome::Live),
-        FleetSchedulerWait::Stopped(Ok(SchedulerLoopExit::Shutdown)) => {
-            Ok(FleetFatalShutdownOutcome::Restarted)
-        }
-        FleetSchedulerWait::Stopped(stopped) => Err(io::Error::other(format!(
-            "the fleet scheduler must stop by fatal-driven shutdown: {stopped:?}"
+    if !matches!(&liveness, Ok(())) && !matches!(&liveness, Err(error) if error.is_cancelled()) {
+        return Err(io::Error::other(format!(
+            "the fleet turn-liveness runtime must stop by cancellation or shutdown: {liveness:?}"
         ))
-        .into()),
+        .into());
     }
-}
-
-#[test]
-fn fleet_scheduler_wait_classifies_elapsed_as_live() -> Result<(), Box<dyn Error>> {
-    assert_eq!(
-        classify_fleet_scheduler_wait(FleetSchedulerWait::Elapsed)?,
-        FleetFatalShutdownOutcome::Live
-    );
     Ok(())
-}
-
-#[test]
-fn fleet_scheduler_wait_classifies_shutdown_as_restarted() -> Result<(), Box<dyn Error>> {
-    assert_eq!(
-        classify_fleet_scheduler_wait(FleetSchedulerWait::Stopped(Ok(
-            SchedulerLoopExit::Shutdown,
-        )))?,
-        FleetFatalShutdownOutcome::Restarted
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn fleet_scheduler_wait_rejects_join_error() {
-    let scheduler = tokio::spawn(pending::<SchedulerLoopExit>());
-    scheduler.abort();
-    let stopped = scheduler.await;
-    let error = classify_fleet_scheduler_wait(FleetSchedulerWait::Stopped(stopped))
-        .expect_err("a cancelled scheduler join must not select a fleet oracle");
-    assert!(
-        error
-            .to_string()
-            .contains("the fleet scheduler must stop by fatal-driven shutdown")
-    );
-}
-
-async fn restart_after_fatal_shutdown(
-    scheduler: &mut Option<JoinHandle<SchedulerLoopExit>>,
-    runtime: &mut RunningRuntime,
-) -> Result<FleetFatalShutdownOutcome, Box<dyn Error>> {
-    let stopped = timeout(
-        FLEET_ASSERTION_BOUND,
-        scheduler
-            .as_mut()
-            .expect("the fatal-driven fleet scheduler was installed"),
-    )
-    .await;
-    let wait = match stopped {
-        Ok(stopped) => {
-            scheduler.take();
-            FleetSchedulerWait::Stopped(stopped)
-        }
-        Err(_) => FleetSchedulerWait::Elapsed,
-    };
-    let outcome = classify_fleet_scheduler_wait(wait)?;
-    if outcome == FleetFatalShutdownOutcome::Restarted {
-        runtime.kill_and_restart().await?;
-    }
-    Ok(outcome)
 }
 
 async fn wait_for_completed_calls(
@@ -2829,46 +3047,52 @@ async fn wait_for_terminal_turns(
     Ok(())
 }
 
-fn enforce_fleet_liveness() -> bool {
-    std::env::var(FLEET_ENFORCEMENT_ENV).is_ok_and(|value| value == "1")
+/// Waits for exactly `hung_model_call` to reach its typed ambiguity park with
+/// its execution released, rather than counting parks across the database.
+async fn wait_for_ambiguity_park(
+    repository: &FleetSoakCensusRepository,
+    model: &FleetScriptedModel,
+    hung_model_call: ModelCallId,
+    bound: Duration,
+) -> Result<(), Box<dyn Error>> {
+    timeout(bound, async {
+        loop {
+            if repository
+                .has_ambiguous_recovery_park(hung_model_call)
+                .await?
+                && model.in_flight_hangs() == 0
+            {
+                return Ok::<(), Box<dyn Error>>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| io::Error::other("fleet model call did not reach its ambiguity park"))??;
+    Ok(())
 }
 
 fn assert_hung_fleet_outcome(
-    enforce_liveness: bool,
     model: &FleetScriptedModel,
     census: FleetSoakCensus,
     hung_call_has_ambiguity_park: bool,
-    fatal_shutdown: FleetFatalShutdownOutcome,
 ) -> Result<(), Box<dyn Error>> {
     let active = census.active_turns();
     let terminal = census.terminal_turns();
     let typed_terminal_calls = census.terminal_model_calls();
-    if enforce_liveness {
-        if model.in_flight_hangs() != 0
-            || active != 1
-            || terminal != i64::try_from(FLEET_SESSION_COUNT - 1)?
-            || typed_terminal_calls != i64::try_from(FLEET_SESSION_COUNT)?
-            || census.awaiting_model_call_recovery_turns() != 1
-            || census.ambiguous_model_calls() != 1
-            || !hung_call_has_ambiguity_park
-        {
-            return Err(io::Error::other(format!(
-                "fleet liveness failed: fatal_shutdown={fatal_shutdown:?}, hangs={}, active={active}, terminal={terminal}, typed_terminal_calls={typed_terminal_calls}, recovery_parks={}, ambiguous_calls={}, hung_call_has_ambiguity_park={hung_call_has_ambiguity_park}",
-                model.in_flight_hangs(),
-                census.awaiting_model_call_recovery_turns(),
-                census.ambiguous_model_calls()
-            ))
-            .into());
-        }
-    } else if fatal_shutdown != FleetFatalShutdownOutcome::Live
-        || model.in_flight_hangs() != 1
+    if model.in_flight_hangs() != 0
         || active != 1
         || terminal != i64::try_from(FLEET_SESSION_COUNT - 1)?
-        || typed_terminal_calls != i64::try_from(FLEET_SESSION_COUNT - 1)?
+        || typed_terminal_calls != i64::try_from(FLEET_SESSION_COUNT)?
+        || census.awaiting_model_call_recovery_turns() != 1
+        || census.ambiguous_model_calls() != 1
+        || !hung_call_has_ambiguity_park
     {
         return Err(io::Error::other(format!(
-            "issue #1027 no longer reproduces: fatal_shutdown={fatal_shutdown:?}, hangs={}, active={active}, terminal={terminal}, typed_terminal_calls={typed_terminal_calls}",
-            model.in_flight_hangs()
+            "fleet liveness failed: hangs={}, active={active}, terminal={terminal}, typed_terminal_calls={typed_terminal_calls}, recovery_parks={}, ambiguous_calls={}, hung_call_has_ambiguity_park={hung_call_has_ambiguity_park}",
+            model.in_flight_hangs(),
+            census.awaiting_model_call_recovery_turns(),
+            census.ambiguous_model_calls()
         ))
         .into());
     }
@@ -2879,20 +3103,16 @@ fn assert_restarted_fleet_outcome(
     census: FleetSoakCensus,
     original_model: &FleetScriptedModel,
     replacement_model: &FleetScriptedModel,
-    control_model_call: ModelCallId,
 ) -> Result<(), Box<dyn Error>> {
-    let replacement_completions = replacement_model.completed_call_ids();
-    if census.active_turns() != i64::try_from(FLEET_SESSION_COUNT)?
-        || census.terminal_turns() != 0
-        || census.awaiting_model_call_recovery_turns() != i64::try_from(FLEET_SESSION_COUNT)?
+    if census.active_turns() != 0
+        || census.terminal_turns() != i64::try_from(FLEET_SESSION_COUNT)?
+        || census.awaiting_model_call_recovery_turns() != 0
         || census.terminal_model_calls() != i64::try_from(FLEET_SESSION_COUNT)?
-        || census.ambiguous_model_calls() != i64::try_from(FLEET_SESSION_COUNT)?
         || original_model.in_flight_hangs() != 0
         || replacement_model.in_flight_hangs() != 0
-        || replacement_completions.as_slice() != [control_model_call]
     {
         return Err(io::Error::other(format!(
-            "restart must preserve the ambiguity park after releasing original executions while the replacement scheduler completes only its readiness control: census={census:?}, original_hangs={}, replacement_hangs={}, replacement_completions={replacement_completions:?}, control_model_call={control_model_call:?}",
+            "restart must release every original execution and reconcile every ambiguous operation into a terminal turn without a user decision: census={census:?}, original_hangs={}, replacement_hangs={}",
             original_model.in_flight_hangs(),
             replacement_model.in_flight_hangs()
         ))
@@ -2901,35 +3121,52 @@ fn assert_restarted_fleet_outcome(
     Ok(())
 }
 
-/// Issue #1027 expected failure: a hung model call retains one authoritative
-/// scheduler pass and has no durable typed terminal record beyond the stated
-/// occupancy bound. Enforcement mode asserts the intended inverse.
+/// Issue #1027: a post-acceptance model hang releases its authoritative pass
+/// and reaches a durable typed ambiguity park inside the occupancy bound.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposition()
 -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
-    let mut scheduler = None;
+    let mut tasks: Option<FleetRuntimeTasks> = None;
     let scenario = AssertUnwindSafe(async {
-        let enforce_liveness = enforce_fleet_liveness();
-        let fleet = commission_fleet(&runtime).await?;
         let census_repository = FleetSoakCensusRepository::new(runtime.pool.clone());
+        let baseline_fleet = commission_fleet(&runtime, 0, FLEET_SESSION_COUNT - 1).await?;
         let model = FleetScriptedModel::new(FleetModelCardinality {
             hanging: 1,
             completing: FLEET_SESSION_COUNT - 1,
         });
-        scheduler = Some(start_fleet_scheduler(&mut runtime, model.clone())?);
-        wait_for_hangs(&model, 1).await?;
+        tasks = Some(start_fleet_scheduler(
+            &mut runtime,
+            model.clone(),
+            SchedulerPassOccupancyBound::try_new(FLEET_BASELINE_OCCUPANCY_BOUND)?,
+        )?);
         let completed_calls = wait_for_completed_calls(&model, FLEET_SESSION_COUNT - 1).await?;
         wait_for_terminal_calls(&census_repository, &completed_calls).await?;
         wait_for_terminal_turns(&census_repository, &completed_calls).await?;
-        let fatal_shutdown = restart_after_fatal_shutdown(&mut scheduler, &mut runtime).await?;
+        tasks
+            .take()
+            .expect("the baseline fleet scheduler was installed")
+            .stop()
+            .await?;
+        runtime.restart().await?;
+        let fault_fleet = commission_fleet(&runtime, FLEET_SESSION_COUNT - 1, 1).await?;
+        tasks = Some(start_fleet_scheduler(
+            &mut runtime,
+            model.clone(),
+            SchedulerPassOccupancyBound::try_new(FLEET_OCCUPANCY_BOUND)?,
+        )?);
+        wait_for_hangs(&model, 1).await?;
         let model_calls = census_repository.model_call_ids().await?;
-        let census = census_repository.census_for(&model_calls).await?;
         assert_eq!(
-            fleet.sessions.len(),
-            FLEET_SESSION_COUNT,
-            "fleet session cardinality mismatch"
+            baseline_fleet.sessions.len(),
+            FLEET_SESSION_COUNT - 1,
+            "baseline fleet session cardinality mismatch"
+        );
+        assert_eq!(
+            fault_fleet.sessions.len(),
+            1,
+            "fault fleet session cardinality mismatch"
         );
         assert_eq!(
             model_calls.len(),
@@ -2947,22 +3184,24 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
             ))
             .into());
         };
+        wait_for_ambiguity_park(
+            &census_repository,
+            &model,
+            *hung_model_call,
+            FLEET_ASSERTION_BOUND,
+        )
+        .await?;
+        let census = census_repository.census_for(&model_calls).await?;
         let hung_call_has_ambiguity_park = census_repository
             .has_ambiguous_recovery_park(*hung_model_call)
             .await?;
-        assert_hung_fleet_outcome(
-            enforce_liveness,
-            &model,
-            census,
-            hung_call_has_ambiguity_park,
-            fatal_shutdown,
-        )
+        assert_hung_fleet_outcome(&model, census, hung_call_has_ambiguity_park)
     })
     .catch_unwind()
     .await;
 
-    let scheduler_cleanup = match scheduler {
-        Some(scheduler) => abort_fleet_scheduler(scheduler).await,
+    let scheduler_cleanup = match tasks {
+        Some(tasks) => abort_fleet_scheduler(tasks).await,
         None => Ok(()),
     };
     let runtime_cleanup = runtime.stop().await;
@@ -2984,22 +3223,29 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
     }
 }
 
-/// INV-034: killing the daemon with a full fleet after every send leaves each model
-/// call ambiguous. Recovery must release local scheduler ownership while
-/// preserving every turn in the specification-mandated user-decision park.
+/// Issue #1027 / INV-034: killing the daemon with a full fleet in model
+/// execution leaves every model call ambiguous. Ambiguous-operation
+/// reconciliation must release local scheduler ownership and then resume or
+/// terminalize every such turn once a replacement daemon takes over, without
+/// waiting on a user decision.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn fleet_soak_kill_restart_preserves_every_ambiguity_park() -> Result<(), Box<dyn Error>> {
+async fn fleet_soak_kill_restart_resumes_or_terminalizes_every_active_turn()
+-> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
-    let mut scheduler = None;
+    let mut tasks: Option<FleetRuntimeTasks> = None;
     let scenario = AssertUnwindSafe(async {
-        let fleet = commission_fleet(&runtime).await?;
         let census_repository = FleetSoakCensusRepository::new(runtime.pool.clone());
+        let fleet = commission_fleet(&runtime, 0, FLEET_SESSION_COUNT).await?;
         let hanging_model = FleetScriptedModel::new(FleetModelCardinality {
             hanging: FLEET_SESSION_COUNT,
             completing: 0,
         });
-        scheduler = Some(start_fleet_scheduler(&mut runtime, hanging_model.clone())?);
+        tasks = Some(start_fleet_scheduler(
+            &mut runtime,
+            hanging_model.clone(),
+            SchedulerPassOccupancyBound::try_new(FLEET_BASELINE_OCCUPANCY_BOUND)?,
+        )?);
         wait_for_hangs(&hanging_model, FLEET_SESSION_COUNT).await?;
         let pre_kill_model_call_ids = census_repository.model_call_ids().await?;
         assert_eq!(
@@ -3007,29 +3253,31 @@ async fn fleet_soak_kill_restart_preserves_every_ambiguity_park() -> Result<(), 
             FLEET_SESSION_COUNT,
             "pre-kill model-call cardinality mismatch"
         );
-        abort_fleet_scheduler(
-            scheduler
-                .take()
-                .expect("the first fleet scheduler was installed"),
-        )
-        .await?;
+        tasks
+            .take()
+            .expect("the first fleet scheduler was installed")
+            .kill()
+            .await?;
         wait_for_hangs(&hanging_model, 0).await?;
         let _recovered = runtime.kill_and_restart().await?;
+        // One script per recoverable turn plus the readiness control, so the
+        // fixture does not decide whether reconciliation reissues a call.
         let replacement_model = FleetScriptedModel::new(FleetModelCardinality {
             hanging: 0,
-            completing: FLEET_SESSION_COUNT,
+            completing: FLEET_SESSION_COUNT + 1,
         });
         let replacement_reconciliation = runtime.reconciliation_witness();
-        scheduler = Some(start_fleet_scheduler(
+        tasks = Some(start_fleet_scheduler(
             &mut runtime,
             replacement_model.clone(),
+            SchedulerPassOccupancyBound::try_new(FLEET_BASELINE_OCCUPANCY_BOUND)?,
         )?);
         wait_for_reconciliation(&replacement_reconciliation).await?;
         let control_session = commission_fleet_control(&runtime).await?;
         let control_model_call =
             wait_for_model_call_for_session(&census_repository, control_session).await?;
         wait_for_completed_call(&replacement_model, control_model_call).await?;
-        tokio::time::sleep(FLEET_ASSERTION_BOUND).await;
+        wait_for_terminal_turns(&census_repository, &pre_kill_model_call_ids).await?;
         let census = census_repository
             .census_for(&pre_kill_model_call_ids)
             .await?;
@@ -3038,18 +3286,13 @@ async fn fleet_soak_kill_restart_preserves_every_ambiguity_park() -> Result<(), 
             FLEET_SESSION_COUNT,
             "fleet session cardinality mismatch"
         );
-        assert_restarted_fleet_outcome(
-            census,
-            &hanging_model,
-            &replacement_model,
-            control_model_call,
-        )
+        assert_restarted_fleet_outcome(census, &hanging_model, &replacement_model)
     })
     .catch_unwind()
     .await;
 
-    let scheduler_cleanup = match scheduler {
-        Some(scheduler) => abort_fleet_scheduler(scheduler).await,
+    let scheduler_cleanup = match tasks {
+        Some(tasks) => abort_fleet_scheduler(tasks).await,
         None => Ok(()),
     };
     let runtime_cleanup = runtime.stop().await;
@@ -3181,7 +3424,7 @@ struct InputAcceptedEventFacts {
     session_id: CanonicalUuid,
     accepted_input_id: CanonicalUuid,
     acceptance_position: u64,
-    content: InputContent,
+    content: UserInputContent,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -3317,10 +3560,15 @@ async fn activate_turn(pool: &PgPool, session: SessionId) -> Result<(), Box<dyn 
         UuidV7StartEligibleTurnIdGenerator,
         StartEligibleTurnRepository::new(pool.clone()),
     );
-    assert!(matches!(
-        service.execute(session).await?,
-        StartEligibleTurnOutcome::Activated(_)
-    ));
+    let StartEligibleTurnOutcome::Activated(activated) = service.execute(session).await? else {
+        return Err(io::Error::other("the fixture turn must activate").into());
+    };
+    let recorded = signalboxd::WorkspaceInstructionRuntime::new(pool.clone(), None, Vec::new())
+        .prepare(session, activated.turn())
+        .await?;
+    if !recorded {
+        return Err(io::Error::other("the fixture instruction manifest must record").into());
+    }
     Ok(())
 }
 
@@ -3349,6 +3597,7 @@ async fn complete_active_text_turn(
             },
         )]),
         InProcessAttemptDispatchGate::default(),
+        None,
     );
     assert!(matches!(
         service.execute(session).await?,
@@ -3930,6 +4179,137 @@ async fn process_runtime_lists_the_alias_session_projection() -> Result<(), Box<
     runtime.stop().await
 }
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn process_runtime_reads_an_empty_operator_status_snapshot() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    connection
+        .request(1, ClientRequest::ReadOperatorStatus {})
+        .await?;
+
+    let start = response_within(&mut connection).await?;
+    assert_eq!(
+        start.message(),
+        &ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::Start {}))
+    );
+    let end = response_within(&mut connection).await?;
+    assert_eq!(
+        end.message(),
+        &ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::End(Box::new(
+            OperatorStatusEndMessage {
+                held_slot_count: CanonicalU64::new(0),
+                queued_obligation_count: CanonicalU64::new(0),
+                pull_request_convergence_count: CanonicalU64::new(0),
+                pending_stale_review_clearance_count: CanonicalU64::new(0),
+            },
+        ))))
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn process_runtime_reads_populated_convergence_status_rows() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let repository = RepositorySlug::try_new(String::from("example/repo"))?;
+    let gating_check = CheckRunName::try_new(String::from("ci"))?;
+    let clearance_fixture = OperatorStatusStaleReviewClearanceFixture {
+        review_node_id: String::from("PRR_node"),
+        reviewer: RepoWatchAuthorLogin::try_new(String::from("reviewer"))?,
+        reviewed_head_sha: CommitSha::try_new(String::from(
+            "3333333333333333333333333333333333333333",
+        ))?,
+        dismissal_message: String::from("Superseded by the current head."),
+    };
+    let convergence_fixture = OperatorStatusConvergenceFixture {
+        number: PullRequestNumber::new(41.try_into()?),
+        head_sha: CommitSha::try_new(String::from("1111111111111111111111111111111111111111"))?,
+        base_branch: BranchName::try_new(String::from("main"))?,
+        base_revision: CommitSha::try_new(String::from(
+            "2222222222222222222222222222222222222222",
+        ))?,
+        mergeable_state: MergeableState::Mergeable,
+        settled: true,
+        review_decision: RepoWatchReviewDecision::ChangesRequested,
+        unresolved_threads: Vec::new(),
+        gating_check_count: 1,
+        non_green_gating_checks: vec![gating_check.clone()],
+        verdict: RepoWatchConvergenceVerdict::NotConverged,
+        stale_review_clearance: Some(clearance_fixture.clone()),
+    };
+    OperatorStatusFixtureRepository::new(runtime.pool.clone())
+        .seed_pull_request_convergences(&repository, std::slice::from_ref(&convergence_fixture))
+        .await?;
+
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    connection
+        .request(1, ClientRequest::ReadOperatorStatus {})
+        .await?;
+
+    let start = response_within(&mut connection).await?;
+    assert_eq!(
+        start.message(),
+        &ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::Start {}))
+    );
+    let convergence = response_within(&mut connection).await?;
+    assert_eq!(
+        convergence.message(),
+        &ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
+            Box::new(OperatorStatusPullRequestConvergenceMessage {
+                repository: repository.as_str().to_owned(),
+                pull_request_number: CanonicalU64::new(convergence_fixture.number.get()),
+                head_sha: convergence_fixture.head_sha.as_str().to_owned(),
+                base_branch: convergence_fixture.base_branch.as_str().to_owned(),
+                base_revision: convergence_fixture.base_revision.as_str().to_owned(),
+                mergeable_state: OperatorStatusMergeableState::Mergeable,
+                review_decision: OperatorStatusReviewDecision::ChangesRequested,
+                unresolved_thread_count: CanonicalU64::new(0),
+                gating_check_count: CanonicalU64::new(convergence_fixture.gating_check_count),
+                non_green_gating_checks: vec![gating_check.as_str().to_owned()],
+                verdict: OperatorStatusConvergenceVerdict::NotConverged,
+                seal: None,
+                assessed_seconds_ago: CanonicalU64::new(0),
+            },)
+        ),))
+    );
+    let clearance = response_within(&mut connection).await?;
+    assert_eq!(
+        clearance.message(),
+        &ServerMessage::OperatorStatus(Box::new(
+            OperatorStatusMessage::PendingStaleReviewClearance(Box::new(
+                OperatorStatusPendingStaleReviewClearanceMessage {
+                    repository: repository.as_str().to_owned(),
+                    pull_request_number: CanonicalU64::new(convergence_fixture.number.get()),
+                    current_head_sha: convergence_fixture.head_sha.as_str().to_owned(),
+                    review_node_id: clearance_fixture.review_node_id.clone(),
+                    reviewer: clearance_fixture.reviewer.as_str().to_owned(),
+                    reviewed_head_sha: clearance_fixture.reviewed_head_sha.as_str().to_owned(),
+                    pending_for_seconds: CanonicalU64::new(0),
+                },
+            )),
+        ))
+    );
+    let end = response_within(&mut connection).await?;
+    assert_eq!(
+        end.message(),
+        &ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::End(Box::new(
+            OperatorStatusEndMessage {
+                held_slot_count: CanonicalU64::new(0),
+                queued_obligation_count: CanonicalU64::new(0),
+                pull_request_convergence_count: CanonicalU64::new(1),
+                pending_stale_review_clearance_count: CanonicalU64::new(1),
+            },
+        ))))
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
 /// S33 / INV-008 / INV-012 / INV-046: one complete replacement
 /// request through the durable command boundary and validates catalog input
 /// before claiming a new command identity.
@@ -4031,9 +4411,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
 async fn metadata_shape_failure_is_a_malformed_frame() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
-    let required_tags = (0..=256)
-        .map(|index| format!("tag-{index:03}"))
-        .collect::<Vec<_>>();
+    let required_tags = vec!["x".repeat(MAX_SESSION_METADATA_INDEXED_UTF8_BYTES + 1)];
     let frame = format!(
         "{{\"version\":1,\"request_id\":\"21\",\"request\":{{\"type\":\"list_session_metadata\",\"required_tags\":{},\"title_contains\":null,\"include_archived\":false,\"page_size\":\"50\",\"after_session_id\":null}}}}\n",
         serde_json::to_string(&required_tags)?
@@ -5017,7 +5395,7 @@ async fn s28_submit_accepts_imported_session_continuation() -> Result<(), Box<dy
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
-                content: InputContent::new(String::from("native continuation")),
+                content: UserInputContent::text(String::from("native continuation")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -5039,25 +5417,32 @@ async fn process_runtime_rejects_oversized_submitted_input() -> Result<(), Box<d
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
 
-    connection
-        .request(
-            2,
-            ClientRequest::SubmitInput {
-                command_id: command()?,
-                session_id,
-                content: InputContent::new("x".repeat(OVERSIZED_SUBMITTED_INPUT_BYTES)),
-                expected_defaults_version: Some(CanonicalU64::new(1)),
-                model_settings: ModelSettingsOverlay::inherit_all(),
-                delivery: None,
+    let frame = serde_json::json!({
+        "version": 1,
+        "request_id": "2",
+        "request": {
+            "type": "submit_input",
+            "command_id": command()?,
+            "session_id": session_id,
+            "content": [{
+                "type": "text",
+                "text": "x".repeat(OVERSIZED_SUBMITTED_INPUT_BYTES),
+            }],
+            "expected_defaults_version": "1",
+            "model_settings": {
+                "reasoning_level": { "kind": "inherit" },
+                "fast_mode": { "kind": "inherit" },
+                "service_tier": { "kind": "inherit" },
             },
-        )
-        .await?;
+        },
+    });
+    connection.raw_request(&format!("{frame}\n")).await?;
 
     let response = response_within(&mut connection).await?;
     assert!(matches!(
         response.message(),
         ServerMessage::Error {
-            code: ErrorCode::InvalidRequest,
+            code: ErrorCode::MalformedFrame,
             ..
         }
     ));
@@ -5094,15 +5479,9 @@ async fn park_turn_on_ambiguous_model_call(
     session_id: CanonicalUuid,
 ) -> Result<(), Box<dyn Error>> {
     let session = SessionId::from_uuid(session_id.into_uuid());
-    let mut activation = StartEligibleTurnService::new(
-        UuidV7StartEligibleTurnIdGenerator,
-        StartEligibleTurnRepository::new(pool.clone()),
-    );
-    let StartEligibleTurnOutcome::Activated(_) = activation.execute(session).await? else {
-        return Err(io::Error::other("the queued fixture turn must activate").into());
-    };
+    activate_turn(pool, session).await?;
 
-    let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+    let model_configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
     let calls = PostgresModelCallRepository::new(
         pool.clone(),
         model_configuration.target_catalog(),
@@ -5171,7 +5550,9 @@ async fn s04_inv029_reconcile_turn_releases_a_wedged_ambiguous_session()
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
-                content: InputContent::new(String::from("work while the ambiguity is unresolved")),
+                content: UserInputContent::text(String::from(
+                    "work while the ambiguity is unresolved",
+                )),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -5195,7 +5576,7 @@ async fn s04_inv029_reconcile_turn_releases_a_wedged_ambiguous_session()
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: parked_turn_id,
-                content: InputContent::new(String::from("continue after reconciliation")),
+                content: UserInputContent::text(String::from("continue after reconciliation")),
                 expected_defaults_version: CanonicalU64::new(1),
                 model_settings: ModelSettingsOverlay::inherit_all(),
             },
@@ -5327,7 +5708,7 @@ async fn connection_reconciles_the_parked_turn(
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: parked_turn_id,
-                content: InputContent::new(String::from("continue after the wedge")),
+                content: UserInputContent::text(String::from("continue after the wedge")),
                 expected_defaults_version: CanonicalU64::new(1),
                 model_settings: ModelSettingsOverlay::inherit_all(),
             },
@@ -5361,7 +5742,7 @@ async fn s04_inv029_reconcile_turn_refuses_a_turn_that_owes_no_decision()
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: unparked_turn_id,
-                content: InputContent::new(String::from("names no parked turn")),
+                content: UserInputContent::text(String::from("names no parked turn")),
                 expected_defaults_version: CanonicalU64::new(1),
                 model_settings: ModelSettingsOverlay::inherit_all(),
             },
@@ -5383,7 +5764,7 @@ async fn s04_inv029_reconcile_turn_refuses_a_turn_that_owes_no_decision()
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: parked_turn_id,
-                content: InputContent::new(String::from("continue after reconciliation")),
+                content: UserInputContent::text(String::from("continue after reconciliation")),
                 expected_defaults_version: CanonicalU64::new(1),
                 model_settings: ModelSettingsOverlay::inherit_all(),
             },
@@ -5399,7 +5780,7 @@ async fn s04_inv029_reconcile_turn_refuses_a_turn_that_owes_no_decision()
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: parked_turn_id,
-                content: InputContent::new(String::from("the decision is already recorded")),
+                content: UserInputContent::text(String::from("the decision is already recorded")),
                 expected_defaults_version: CanonicalU64::new(1),
                 model_settings: ModelSettingsOverlay::inherit_all(),
             },
@@ -5434,7 +5815,7 @@ async fn inv012_reconcile_turn_replays_a_committed_decision() -> Result<(), Box<
         command_id: command()?,
         session_id,
         expected_active_turn_id: parked_turn_id,
-        content: InputContent::new(String::from("continue after reconciliation")),
+        content: UserInputContent::text(String::from("continue after reconciliation")),
         expected_defaults_version: CanonicalU64::new(1),
         model_settings: ModelSettingsOverlay::inherit_all(),
     };
@@ -5479,7 +5860,7 @@ async fn s37_inv053_reconcile_turn_records_its_per_call_model_settings()
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: parked_turn_id,
-                content: InputContent::new(String::from("continue with deliberate reasoning")),
+                content: UserInputContent::text(String::from("continue with deliberate reasoning")),
                 expected_defaults_version: CanonicalU64::new(1),
                 model_settings: requested,
             },
@@ -5525,7 +5906,7 @@ async fn inv012_overlapping_equal_reconciliations_both_reach_the_committed_decis
         command_id: command()?,
         session_id,
         expected_active_turn_id: parked_turn_id,
-        content: InputContent::new(String::from("continue after reconciliation")),
+        content: UserInputContent::text(String::from("continue after reconciliation")),
         expected_defaults_version: CanonicalU64::new(1),
         model_settings: ModelSettingsOverlay::inherit_all(),
     };
@@ -5569,7 +5950,7 @@ async fn s04_reconcile_turn_reports_an_absent_session_exactly() -> Result<(), Bo
                 command_id: command()?,
                 session_id: absent_session_id,
                 expected_active_turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(0xB3)),
-                content: InputContent::new(String::from("names no session")),
+                content: UserInputContent::text(String::from("names no session")),
                 expected_defaults_version: CanonicalU64::new(1),
                 model_settings: ModelSettingsOverlay::inherit_all(),
             },
@@ -5616,7 +5997,7 @@ async fn process_runtime_reads_one_queued_transcript_snapshot() -> Result<(), Bo
         projected_state,
         TurnState::Queued {
             accepted_input_id: accepted_input,
-            content: InputContent::new(content),
+            content: UserInputContent::text(content),
         }
     );
     let model_calls_end = response_within(&mut connection).await?;
@@ -5658,7 +6039,7 @@ async fn s24_process_runtime_follow_snapshot_handoff_has_no_race() -> Result<(),
     // its start frame. Commit the next update before draining the snapshot so
     // only a subscription formed before snapshot transmission can retain it.
     let second_position = 2;
-    let second_content = InputContent::new(String::from("second input"));
+    let second_content = UserInputContent::text(String::from("second input"));
     commands
         .request(
             6,
@@ -5685,7 +6066,7 @@ async fn s24_process_runtime_follow_snapshot_handoff_has_no_race() -> Result<(),
         projected_state,
         TurnState::Queued {
             accepted_input_id: first_accepted_input,
-            content: InputContent::new(first_content),
+            content: UserInputContent::text(first_content),
         }
     );
     let model_calls_end = response_within(&mut follow).await?;
@@ -5912,7 +6293,7 @@ async fn authorize_issued_model_call(
 > {
     let session = SessionId::from_uuid(session_id.into_uuid());
     activate_turn(pool, session).await?;
-    let targets = HubModelConfiguration::parse(MODEL_CONFIGURATION)?.target_catalog();
+    let targets = support::parse_model_configuration(MODEL_CONFIGURATION)?.target_catalog();
     let calls = PostgresModelCallRepository::new(
         pool.clone(),
         targets,
@@ -6165,7 +6546,7 @@ async fn s07_inv029_stop_turn_cancels_the_activated_turn_and_queues_its_successo
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: stopped_turn_id,
-                content: InputContent::new(successor_content.clone()),
+                content: UserInputContent::text(successor_content.clone()),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
                 model_settings: ModelSettingsOverlay::inherit_all(),
@@ -6186,7 +6567,7 @@ async fn s07_inv029_stop_turn_cancels_the_activated_turn_and_queues_its_successo
     let TurnState::Queued { content, .. } = turn_state_of(&messages, successor_turn_id) else {
         panic!("fixture expected queued successor turn");
     };
-    assert_eq!(content.as_str(), successor_content);
+    assert_eq!(content.single_text(), Some(successor_content.as_str()));
     assert_eq!(cancellation_marker_count(&messages, stopped_turn_id), 1);
 
     drop(connection);
@@ -6196,7 +6577,7 @@ async fn s07_inv029_stop_turn_cancels_the_activated_turn_and_queues_its_successo
 /// S07 / INV-029: stopping an issued call records the durable cancellation
 /// request and retains the slot for lifecycle closure, and a distinct second
 /// stop is refused with the exact prior stop authority named.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn s07_inv029_stop_turn_requests_cancellation_of_an_issued_call_exactly_once()
 -> Result<(), Box<dyn Error>> {
@@ -6217,7 +6598,7 @@ async fn s07_inv029_stop_turn_requests_cancellation_of_an_issued_call_exactly_on
                 command_id: first_stop_command,
                 session_id,
                 expected_active_turn_id: stopped_turn_id,
-                content: InputContent::new(String::from("continue after the stop")),
+                content: UserInputContent::text(String::from("continue after the stop")),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
                 model_settings: ModelSettingsOverlay::inherit_all(),
@@ -6253,7 +6634,7 @@ async fn s07_inv029_stop_turn_requests_cancellation_of_an_issued_call_exactly_on
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: stopped_turn_id,
-                content: InputContent::new(String::from("a second distinct stop")),
+                content: UserInputContent::text(String::from("a second distinct stop")),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
                 model_settings: ModelSettingsOverlay::inherit_all(),
@@ -6292,7 +6673,7 @@ async fn s07_stop_turn_refusals_are_typed_and_exact() -> Result<(), Box<dyn Erro
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: unstarted_turn_id,
-                content: InputContent::new(String::from("names no active turn")),
+                content: UserInputContent::text(String::from("names no active turn")),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
                 model_settings: ModelSettingsOverlay::inherit_all(),
@@ -6318,7 +6699,7 @@ async fn s07_stop_turn_refusals_are_typed_and_exact() -> Result<(), Box<dyn Erro
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: unstarted_turn_id,
-                content: InputContent::new(String::from("names a stale turn")),
+                content: UserInputContent::text(String::from("names a stale turn")),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
                 model_settings: ModelSettingsOverlay::inherit_all(),
@@ -6354,7 +6735,7 @@ async fn inv012_stop_turn_replays_its_recorded_successor() -> Result<(), Box<dyn
         command_id: command()?,
         session_id,
         expected_active_turn_id: stopped_turn_id,
-        content: InputContent::new(String::from("continue after the stop")),
+        content: UserInputContent::text(String::from("continue after the stop")),
         expected_defaults_version: CanonicalU64::new(1),
         descendant_scope: DescendantTerminationScope::ParentAlone,
         model_settings: ModelSettingsOverlay::inherit_all(),
@@ -6399,7 +6780,7 @@ async fn s37_inv053_stop_turn_records_its_per_call_model_settings() -> Result<()
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: stopped_turn_id,
-                content: InputContent::new(String::from("continue with deliberate reasoning")),
+                content: UserInputContent::text(String::from("continue with deliberate reasoning")),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
                 model_settings: requested,
@@ -6449,7 +6830,7 @@ async fn s07_s10_inv029_stop_against_a_tool_round_stays_fail_closed_then_deny_an
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: parked_turn_id,
-                content: InputContent::new(String::from("stop during the approval wait")),
+                content: UserInputContent::text(String::from("stop during the approval wait")),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
                 model_settings: ModelSettingsOverlay::inherit_all(),
@@ -6509,7 +6890,7 @@ async fn s07_s10_inv029_stop_against_a_tool_round_stays_fail_closed_then_deny_an
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: parked_turn_id,
-                content: InputContent::new(String::from("continue after the denied round")),
+                content: UserInputContent::text(String::from("continue after the denied round")),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
                 model_settings: ModelSettingsOverlay::inherit_all(),
@@ -6525,7 +6906,7 @@ async fn s07_s10_inv029_stop_against_a_tool_round_stays_fail_closed_then_deny_an
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
-                content: InputContent::new(String::from("ordinary later work")),
+                content: UserInputContent::text(String::from("ordinary later work")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -6809,7 +7190,7 @@ async fn inv012_decide_tool_request_replays_equally_and_refuses_conflicting_reus
             ClientRequest::SubmitInput {
                 command_id: submit_command,
                 session_id,
-                content: InputContent::new(String::from("claims a submit identity")),
+                content: UserInputContent::text(String::from("claims a submit identity")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -6958,7 +7339,7 @@ async fn submit_queued_input(
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
-                content: InputContent::new(content.to_owned()),
+                content: UserInputContent::text(content.to_owned()),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Queue {
@@ -6983,6 +7364,15 @@ async fn activate_expected_turn(
         StartEligibleTurnOutcome::Activated(activated)
             if activated.turn().into_uuid() == expected_turn.into_uuid() =>
         {
+            let recorded =
+                signalboxd::WorkspaceInstructionRuntime::new(pool.clone(), None, Vec::new())
+                    .prepare(session, activated.turn())
+                    .await?;
+            if !recorded {
+                return Err(
+                    io::Error::other("the fixture instruction manifest must record").into(),
+                );
+            }
             Ok(())
         }
         StartEligibleTurnOutcome::Activated(activated) => Err(io::Error::other(format!(
@@ -7013,7 +7403,7 @@ async fn s08_steering_without_an_active_turn_is_a_typed_rejection() -> Result<()
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
-                content: InputContent::new(String::from("steer no turn")),
+                content: UserInputContent::text(String::from("steer no turn")),
                 expected_defaults_version: None,
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Steer {
@@ -7068,7 +7458,7 @@ async fn s09_queued_inputs_deliver_in_acceptance_order_after_the_active_turn()
     .await?;
     assert_ne!(first_queued_turn, second_queued_turn);
 
-    let targets = HubModelConfiguration::parse(MODEL_CONFIGURATION)?.target_catalog();
+    let targets = support::parse_model_configuration(MODEL_CONFIGURATION)?.target_catalog();
     complete_active_text_turn(&runtime.pool, session, targets.clone()).await?;
     activate_expected_turn(&runtime.pool, session, first_queued_turn).await?;
     complete_active_text_turn(&runtime.pool, session, targets).await?;
@@ -7951,7 +8341,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
-                content: InputContent::new(second_user.clone()),
+                content: UserInputContent::text(second_user.clone()),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -7970,7 +8360,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
     let second_probe = execute_recorded_turn(
         &mut runtime,
         second_model,
-        HubModelConfiguration::parse(MODEL_CONFIGURATION)?,
+        support::parse_model_configuration(MODEL_CONFIGURATION)?,
         session_id,
         second_turn,
     )
@@ -8012,6 +8402,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
             target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
                 Uuid::from_u128(3),
             )),
+            input_includes_cache_tokens: false,
             credential_reference: String::from("synthetic-compaction-credential"),
             call: prepared_call,
             compaction: ContextCompactionId::from_uuid(Uuid::from_u128(0xcc22)),
@@ -8058,6 +8449,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
             target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
                 Uuid::from_u128(3),
             )),
+            input_includes_cache_tokens: false,
             credential_reference: String::from("synthetic-compaction-credential"),
             call: in_flight_call,
             compaction: ContextCompactionId::from_uuid(Uuid::from_u128(0xcc27)),
@@ -8335,7 +8727,7 @@ async fn inv009_inv014_compaction_preparation_serializes_turn_activation()
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
-                content: InputContent::new(String::from(
+                content: UserInputContent::text(String::from(
                     "scheduler race successor remains singular",
                 )),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
@@ -8432,7 +8824,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
-                content: InputContent::new(second_user.clone()),
+                content: UserInputContent::text(second_user.clone()),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -8440,12 +8832,12 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
         )
         .await?;
     let second_turn = accepted_successor_turn(&mut successor, session_id, 2).await?;
-    let guarded_configuration = HubModelConfiguration::parse(
+    let guarded_configuration = support::parse_model_configuration(
         &MODEL_CONFIGURATION
             .replace("max_output_tokens = 256", "max_output_tokens = 1")
             .replace(
                 "context_window_tokens = 200000",
-                "context_window_tokens = 5",
+                "context_window_tokens = 4096",
             ),
     )?;
     let ordinary_runtime = RecordingCountedScriptedModel::following(
@@ -8454,7 +8846,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
             "automatic guard current reply",
             TokenUsage::unreported(),
         )],
-        [40, 4],
+        [8192, 4],
     );
     let summary_text = String::from("automatic guard summary");
     let summary_runtime = ScriptedModel::single(completed_script(
@@ -8529,28 +8921,274 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
     runtime.stop().await
 }
 
-#[track_caller]
-fn assert_context_still_exceeded<CountError, ExecutionError>(
-    outcome: Result<(), ContextGuardedTurnPassError<CountError, ExecutionError>>,
-    expected_turn: CanonicalUuid,
-) where
-    CountError: std::fmt::Debug,
-    ExecutionError: std::fmt::Debug,
-{
-    match outcome {
-        Err(ContextGuardedTurnPassError::ContextStillExceeded(actual_turn)) => {
-            assert_eq!(*actual_turn.as_uuid(), expected_turn.into_uuid());
-        }
-        other => panic!("expected ContextStillExceeded, got {other:?}"),
-    }
-}
-
-/// S01 / S03 / INV-014 / INV-015: one queued candidate retains its durable
-/// automatic-attempt marker across eligibility retries, so an oversized suffix
-/// cannot issue a paid successor compaction on every sweep.
+/// S01 / S03 / INV-014 / INV-015: provider-reported preflight rechecks the
+/// completed summary and closes the queued candidate call-free when reserved
+/// headroom is still unavailable. The compaction retains its summary output,
+/// not the source input that summary replaced, so a summary larger than the
+/// window is what leaves the queued turn unservable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_turn()
+async fn s01_s03_inv014_inv015_reported_usage_rechecks_compaction_headroom()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, first_turn) = submit_first_input(
+        &mut connection,
+        session_id,
+        String::from("reported usage historical request"),
+    )
+    .await?;
+    let saturated_usage = TokenUsage {
+        input_tokens: Some(5000),
+        output_tokens: Some(0),
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+    };
+    let first_runtime = ScriptedModel::single(completed_script(
+        "fixture-model",
+        "reported usage historical reply",
+        saturated_usage,
+    ));
+    let first_probe =
+        execute_streamed_turn(&mut runtime, first_runtime, session_id, first_turn).await?;
+    assert_eq!(first_probe.received_operations().len(), 1);
+
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            40,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: UserInputContent::text(String::from("reported usage queued suffix")),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                delivery: None,
+            },
+        )
+        .await?;
+    let queued_turn = accepted_successor_turn(&mut connection, session_id, 2).await?;
+    let configuration = support::parse_model_configuration(
+        &MODEL_CONFIGURATION
+            .replace("max_output_tokens = 256", "max_output_tokens = 1")
+            .replace(
+                "context_window_tokens = 200000",
+                "context_window_tokens = 4096",
+            ),
+    )?;
+    let runtime_models = configuration.runtime_model_catalog();
+    let saturated_summary_usage = TokenUsage {
+        input_tokens: Some(5000),
+        output_tokens: Some(5000),
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+    };
+    let summary_runtime = ScriptedModel::single(completed_script(
+        "fixture-model",
+        "reported usage summary remains saturated",
+        saturated_summary_usage,
+    ));
+    let summary_probe = summary_runtime.clone();
+    let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
+        Arc::new(RuntimeContextCompactionModel::new(
+            summary_runtime,
+            runtime_models.clone(),
+        ));
+    let repository = PostgresModelCallRepository::new(
+        runtime.pool.clone(),
+        configuration.target_catalog(),
+        ModelCallCredentialReference::new("reported-usage-recheck-fixture"),
+    )
+    .with_session_credentials(configuration.credential_family_catalog());
+    let compaction = ReportedUsageCompaction::new(
+        StartEligibleTurnRepository::new(runtime.pool.clone()),
+        repository,
+        NoToolCatalog,
+        runtime_models,
+        configuration,
+        compaction_model,
+    );
+
+    let failed_turn = reported_usage_still_exceeded_turn(
+        compaction
+            .compact_if_needed(SessionId::from_uuid(session_id.into_uuid()), None)
+            .await,
+    );
+
+    assert_eq!(*failed_turn.as_uuid(), queued_turn.into_uuid());
+    assert_eq!(summary_probe.received_operations().len(), 1);
+    let ordinary_call_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM model_call WHERE turn_id = $1")
+            .bind(queued_turn.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(ordinary_call_count, 0);
+    let lifecycle: (String, Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind, terminal_model_call_id
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session_id.into_uuid())
+    .bind(queued_turn.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(
+        lifecycle,
+        (String::from("terminal"), Some(String::from("failed")), None)
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S01 / S03 / INV-014 / INV-015: the provider-reported preflight scores the
+/// queued turn's own input. Reported usage that fits on its own exhausts the
+/// reserved headroom once the waiting input is counted, and the daemon compacts
+/// that queued turn before activating it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s01_s03_inv014_inv015_reported_usage_preflight_counts_the_queued_input()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, first_turn) = submit_first_input(
+        &mut connection,
+        session_id,
+        String::from("queued input preflight historical request"),
+    )
+    .await?;
+    // The declared window below is 4096 with a one-token output reservation, so
+    // this reported input leaves 95 tokens of headroom on its own.
+    let fitting_usage = TokenUsage {
+        input_tokens: Some(4000),
+        output_tokens: Some(0),
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+    };
+    let first_runtime = ScriptedModel::single(completed_script(
+        "fixture-model",
+        "queued input preflight historical reply",
+        fitting_usage,
+    ));
+    let first_probe =
+        execute_streamed_turn(&mut runtime, first_runtime, session_id, first_turn).await?;
+    assert_eq!(first_probe.received_operations().len(), 1);
+
+    // 103 ASCII characters: under the byte-per-token allowance the queued input
+    // alone exceeds the remaining headroom.
+    let queued_input = String::from(
+        "queued input preflight suffix long enough on its own to exhaust the remaining declared context headroom",
+    );
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            40,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: UserInputContent::text(queued_input),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                delivery: None,
+            },
+        )
+        .await?;
+    let queued_turn = accepted_successor_turn(&mut connection, session_id, 2).await?;
+    let configuration = support::parse_model_configuration(
+        &MODEL_CONFIGURATION
+            .replace("max_output_tokens = 256", "max_output_tokens = 1")
+            .replace(
+                "context_window_tokens = 200000",
+                "context_window_tokens = 4096",
+            ),
+    )?;
+    let runtime_models = configuration.runtime_model_catalog();
+    let summary_text = String::from("queued input preflight summary");
+    let summary_runtime = ScriptedModel::single(completed_script(
+        "fixture-model",
+        &summary_text,
+        TokenUsage {
+            input_tokens: Some(4000),
+            output_tokens: Some(20),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        },
+    ));
+    let summary_probe = summary_runtime.clone();
+    let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
+        Arc::new(RuntimeContextCompactionModel::new(
+            summary_runtime,
+            runtime_models.clone(),
+        ));
+    let repository = PostgresModelCallRepository::new(
+        runtime.pool.clone(),
+        configuration.target_catalog(),
+        ModelCallCredentialReference::new("queued-input-preflight-fixture"),
+    )
+    .with_session_credentials(configuration.credential_family_catalog());
+    let compaction = ReportedUsageCompaction::new(
+        StartEligibleTurnRepository::new(runtime.pool.clone()),
+        repository,
+        NoToolCatalog,
+        runtime_models,
+        configuration,
+        compaction_model,
+    );
+
+    // No occupancy-recovery window surrounds this fixture's guard call, so
+    // preparation has no window to name its compaction to. That is the case the
+    // window's own contract states: a window that prepared nothing owes no
+    // recovery. What this fixture exercises is the queued-turn headroom
+    // arithmetic, not window-named recovery.
+    compaction
+        .compact_if_needed(SessionId::from_uuid(session_id.into_uuid()), None)
+        .await?;
+
+    assert_eq!(summary_probe.received_operations().len(), 1);
+    let compaction_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM context_compaction
+          WHERE session_id = $1",
+    )
+    .bind(session_id.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(compaction_count, 1);
+    let summary_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM semantic_transcript_entry
+          WHERE source_session_id = $1
+            AND payload_kind = 'context_summary'
+            AND context_summary_value = $2",
+    )
+    .bind(session_id.into_uuid())
+    .bind(&summary_text)
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(summary_count, 1);
+    let lifecycle: (String, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session_id.into_uuid())
+    .bind(queued_turn.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(lifecycle, (String::from("queued"), None));
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S01 / S03 / INV-014 / INV-015: a failed automatic compaction closes the
+/// queued candidate call-free, so a later eligibility pass cannot dispatch
+/// the known-oversized ordinary request.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s01_s03_inv014_inv015_failed_automatic_compaction_closes_turn_call_free()
 -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
@@ -8578,7 +9216,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
-                content: InputContent::new(oversized_suffix),
+                content: UserInputContent::text(oversized_suffix),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -8586,25 +9224,30 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
         )
         .await?;
     let queued_turn = accepted_successor_turn(&mut connection, session_id, 2).await?;
-    let guarded_configuration = HubModelConfiguration::parse(
+    let guarded_configuration = support::parse_model_configuration(
         &MODEL_CONFIGURATION
             .replace("max_output_tokens = 256", "max_output_tokens = 1")
             .replace(
                 "context_window_tokens = 200000",
-                "context_window_tokens = 5",
+                "context_window_tokens = 4096",
             ),
     )?;
     let ordinary_runtime =
-        RecordingCountedScriptedModel::following(std::iter::empty::<Script>(), [40, 40, 40]);
+        RecordingCountedScriptedModel::following(std::iter::empty::<Script>(), [8192, 8192, 8192]);
     let ordinary_probe = ordinary_runtime.clone();
-    let summary_runtime = ScriptedModel::single(completed_script(
-        "fixture-model",
-        "one durable retry summary",
-        TokenUsage::unreported(),
+    let summary_runtime = ScriptedModel::single(Script::delivering(
+        TerminalEvidence::ProviderError(ProviderErrorEvidence {
+            exchange: ExchangeFacts::default(),
+            reported_model: None,
+            kind: ProviderErrorKind::Unrecognized,
+            non_acceptance_proven: true,
+            native: NativeErrorFacts::default(),
+            usage: TokenUsage::unreported(),
+        }),
     ));
     let summary_probe = summary_runtime.clone();
     let runtime_models = guarded_configuration.runtime_model_catalog();
-    let provider = RuntimeModelCallProvider::new(ordinary_runtime, runtime_models.clone())
+    let provider = RuntimeModelCallProvider::new(ordinary_runtime, runtime_models.clone(), None)
         .with_text_delta_sink(runtime.provider_text_delta_sink());
     let counter = provider.clone();
     let repository = PostgresModelCallRepository::new(
@@ -8615,10 +9258,14 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
     .with_session_credentials(guarded_configuration.credential_family_catalog());
     let guarded_repository = repository.clone();
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            repository,
-            InProcessAttemptDispatchGate::default(),
-            provider,
+        FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                repository,
+                InProcessAttemptDispatchGate::default(),
+                provider,
+                None,
+            ),
+            signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
         ));
     let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
         Arc::new(RuntimeContextCompactionModel::new(
@@ -8632,9 +9279,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
         .credentials()
         .map(|credential| credential.credential_reference().to_owned())
         .collect();
-    let [expected_compaction_credential] = pinned_references.as_slice() else {
-        panic!("the fixture pins exactly one credential family")
-    };
+    let expected_compaction_credential = exactly_one_credential_reference(&pinned_references);
     let mut pass = ContextGuardedTurnPass::new(
         StartEligibleTurnRepository::new(runtime.pool.clone()),
         guarded_repository,
@@ -8644,28 +9289,33 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
         guarded_configuration,
         compaction_model,
         execution,
-    );
+    )
+    .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+        runtime.pool.clone(),
+        None,
+        Vec::new(),
+    ));
     let session = SessionId::from_uuid(session_id.into_uuid());
-    let first_attempt = pass.run(session).await;
-    assert_context_still_exceeded(first_attempt, queued_turn);
+    let turn = failed_automatic_compaction_turn(pass.run(session).await);
+    assert_eq!(*turn.as_uuid(), queued_turn.into_uuid());
     let second_attempt = pass.run(session).await;
-    assert_context_still_exceeded(second_attempt, queued_turn);
+    assert!(second_attempt.is_ok());
     assert!(!fatal_execution.is_triggered());
-    assert_eq!(ordinary_probe.counted_operations().len(), 3);
+    assert_eq!(ordinary_probe.counted_operations().len(), 1);
     assert_eq!(ordinary_probe.prepared_operations().len(), 0);
     assert_eq!(summary_probe.received_operations().len(), 1);
     assert_eq!(
         summary_probe.received_operations()[0]
             .credential_reference
             .as_str(),
-        expected_compaction_credential.as_str()
+        expected_compaction_credential
     );
     let compaction_count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM context_compaction WHERE session_id = $1")
             .bind(session_id.into_uuid())
             .fetch_one(&runtime.pool)
             .await?;
-    assert_eq!(compaction_count, 1);
+    assert_eq!(compaction_count, 0);
     let automatic_command_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM compact_session_command
           WHERE session_id = $1 AND automatic_for_turn_id = $2",
@@ -8675,6 +9325,37 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
     .fetch_one(&runtime.pool)
     .await?;
     assert_eq!(automatic_command_count, 1);
+    let compaction_call: (String, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind
+           FROM context_compaction_model_call
+          WHERE session_id = $1",
+    )
+    .bind(session_id.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(
+        compaction_call,
+        (String::from("terminal"), Some(String::from("known_failed")))
+    );
+    let ordinary_call_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM model_call WHERE turn_id = $1")
+            .bind(queued_turn.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(ordinary_call_count, 0);
+    let lifecycle: (String, Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind, terminal_model_call_id
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session_id.into_uuid())
+    .bind(queued_turn.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(
+        lifecycle,
+        (String::from("terminal"), Some(String::from("failed")), None)
+    );
 
     drop(connection);
     runtime.stop().await
@@ -8740,11 +9421,12 @@ async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
         String::from("ambiguous guarded stage request"),
     )
     .await?;
-    let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+    let model_configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
     let runtime_models = model_configuration.runtime_model_catalog();
     let provider = RuntimeModelCallProvider::new(
         ScriptedModel::<ModelCallId>::following(std::iter::empty::<Script>()),
         runtime_models.clone(),
+        None,
     )
     .with_text_delta_sink(runtime.provider_text_delta_sink());
     let repository = PostgresModelCallRepository::new(
@@ -8754,10 +9436,14 @@ async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
     );
     let guarded_repository = repository.clone();
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            repository,
-            InProcessAttemptDispatchGate::default(),
-            provider,
+        FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                repository,
+                InProcessAttemptDispatchGate::default(),
+                provider,
+                None,
+            ),
+            signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
         ));
     let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
         Arc::new(RuntimeContextCompactionModel::new(
@@ -8773,7 +9459,12 @@ async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
         model_configuration,
         compaction_model,
         execution,
-    );
+    )
+    .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+        runtime.pool.clone(),
+        None,
+        Vec::new(),
+    ));
     let session = SessionId::from_uuid(session_id.into_uuid());
 
     let outcome = pass.run(session).await;
@@ -9217,7 +9908,7 @@ impl ReviewRuntimeDriver {
                 ClientRequest::SubmitInput {
                     command_id: command()?,
                     session_id: session,
-                    content: InputContent::new(format!("review pass fixture {seed}")),
+                    content: UserInputContent::text(format!("review pass fixture {seed}")),
                     expected_defaults_version: Some(CanonicalU64::new(1)),
                     model_settings: ModelSettingsOverlay::inherit_all(),
                     delivery: None,
@@ -9278,7 +9969,7 @@ impl ReviewRuntimeDriver {
             },
         )
         .await?;
-        let targets = HubModelConfiguration::parse(MODEL_CONFIGURATION)?.target_catalog();
+        let targets = support::parse_model_configuration(MODEL_CONFIGURATION)?.target_catalog();
         complete_active_text_turn(
             &self.pool,
             SessionId::from_uuid(session.into_uuid()),

@@ -2,6 +2,230 @@
 
 use crate::*;
 
+/// Registers one verified replica so a fixture attachment names a catalogued blob.
+///
+/// The attachment part itself travels with the fixture's submit input rather
+/// than being inserted afterwards, because content parts are immutable outside
+/// the transaction that creates their parent.
+async fn register_fixture_blob(
+    pool: &PgPool,
+    seed: u128,
+    digest: BlobDigest,
+) -> Result<(), Box<dyn Error>> {
+    let store = BlobStoreName::try_new(format!("fixture-{seed:x}"))?;
+    let expected = ExpectedBlob::try_new(digest, 1)?;
+    let binding = BlobStoreBindingRecord::new(store.clone(), Uuid::from_u128(seed + 0x90));
+    BlobCatalogRepository::new(pool.clone())
+        .register_verified_replica(
+            expected,
+            binding,
+            BlobReplicaRecord::new(store, BlobObjectKey::for_digest(digest)),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn prepare_confirmed_tool_attempt(
+    pool: &PgPool,
+    seed: u128,
+    arguments: &str,
+    attachment: Option<BlobDigest>,
+) -> Result<(RestartModelCallFixture, ToolAttemptId), Box<dyn Error>> {
+    let (fixture, _, _, request) = checkpoint_confirmed_tool_round_with_attachment(
+        pool,
+        seed,
+        "blob_read",
+        arguments,
+        attachment,
+    )
+    .await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xa0)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xa1)),
+        )
+        .await?;
+    let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0xa2));
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?;
+    Ok((fixture, attempt))
+}
+
+/// One durable `blob_read_tool_charge` projection with its labels preserved.
+#[derive(Debug, sqlx::FromRow)]
+struct StoredBlobReadCharge {
+    blob_digest: Vec<u8>,
+    decoded_byte_count: Decimal,
+    admission: bool,
+}
+
+/// Whether a recorded charge granted the request its decoded bytes.
+#[derive(Debug, Eq, PartialEq)]
+enum BlobReadChargeAdmission {
+    Admitted,
+    Rejected,
+}
+
+impl StoredBlobReadCharge {
+    fn admission(&self) -> BlobReadChargeAdmission {
+        if self.admission {
+            BlobReadChargeAdmission::Admitted
+        } else {
+            BlobReadChargeAdmission::Rejected
+        }
+    }
+}
+
+/// INV-091: blob-read visibility and decoded-byte charges commit before
+/// dispatch authority.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv091_blob_read_preauthorization_is_visible_bounded_and_durable()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let visible_seed = 0xd000;
+    let visible_digest = BlobDigest::digest(b"visible");
+    let visible_decoded_bytes = 524_288_u64;
+    let visible_arguments = format!(
+        r#"{{"digest":"{visible_digest}","offset_bytes":"0","length_bytes":"{visible_decoded_bytes}"}}"#
+    );
+    register_fixture_blob(&pool, visible_seed, visible_digest).await?;
+    let (visible_fixture, visible_attempt) = prepare_confirmed_tool_attempt(
+        &pool,
+        visible_seed,
+        &visible_arguments,
+        Some(visible_digest),
+    )
+    .await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let visible = repository
+        .authorize_attempt_with_preauthorization(
+            visible_fixture.session,
+            visible_fixture.turn,
+            visible_attempt,
+            ToolPreauthorization::BlobRead {
+                digest: visible_digest,
+                decoded_bytes: NonZeroU64::new(visible_decoded_bytes)
+                    .expect("the fixture bound is positive"),
+            },
+        )
+        .await?;
+    assert!(matches!(
+        visible,
+        ToolAttemptAuthorizationOutcome::Authorized(_)
+    ));
+    let charge: StoredBlobReadCharge = sqlx::query_as(
+        "SELECT blob_digest, decoded_byte_count, admitted AS admission
+           FROM blob_read_tool_charge
+          WHERE request_id = (
+                SELECT request_id FROM tool_attempt WHERE attempt_id = $1)",
+    )
+    .bind(visible_attempt.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(charge.blob_digest, visible_digest.as_bytes().as_slice());
+    assert_eq!(
+        charge.decoded_byte_count,
+        Decimal::from(visible_decoded_bytes)
+    );
+    assert_eq!(charge.admission(), BlobReadChargeAdmission::Admitted);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-091: an unattached blob-read digest is rejected before dispatch and
+/// leaves the durable attempt Prepared.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv091_unattached_blob_read_is_rejected_before_dispatch() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+
+    let hidden_seed = 0xd200;
+    let hidden_digest = BlobDigest::digest(b"hidden");
+    let hidden_decoded_bytes = 1_u64;
+    let hidden_arguments = format!(
+        r#"{{"digest":"{hidden_digest}","offset_bytes":"0","length_bytes":"{hidden_decoded_bytes}"}}"#
+    );
+    let (hidden_fixture, hidden_attempt) =
+        prepare_confirmed_tool_attempt(&pool, hidden_seed, &hidden_arguments, None).await?;
+    let hidden = repository
+        .authorize_attempt_with_preauthorization(
+            hidden_fixture.session,
+            hidden_fixture.turn,
+            hidden_attempt,
+            ToolPreauthorization::BlobRead {
+                digest: hidden_digest,
+                decoded_bytes: NonZeroU64::new(hidden_decoded_bytes)
+                    .expect("the fixture byte is positive"),
+            },
+        )
+        .await?;
+    assert_eq!(
+        hidden,
+        ToolAttemptAuthorizationOutcome::PreauthorizationRejected {
+            detail: ToolExecutionErrorDetail::try_new(String::from("blob_not_visible"))
+                .expect("the fixed rejection detail is valid"),
+        }
+    );
+    let hidden_state: String =
+        sqlx::query_scalar("SELECT state_kind FROM tool_attempt WHERE attempt_id = $1")
+            .bind(hidden_attempt.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(hidden_state, "prepared");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+async fn lock_tool_continuation_outbox_allocator(
+    pool: &sqlx::PgPool,
+) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, Box<dyn Error>> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT singleton FROM outbox_sequence_state WHERE singleton FOR UPDATE")
+        .execute(&mut *transaction)
+        .await?;
+    Ok(transaction)
+}
+
+async fn lock_tool_continuation_result_writes(
+    pool: &sqlx::PgPool,
+) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, Box<dyn Error>> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("LOCK TABLE semantic_transcript_entry IN SHARE MODE")
+        .execute(&mut *transaction)
+        .await?;
+    Ok(transaction)
+}
+
+async fn tool_continuation_order_guard_is_available(
+    pool: &sqlx::PgPool,
+) -> Result<bool, Box<dyn Error>> {
+    let mut transaction = pool.begin().await?;
+    let available: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind("model_call_outbox_order_guard:v1")
+            .fetch_one(&mut *transaction)
+            .await?;
+    transaction.rollback().await?;
+    Ok(available)
+}
+
 #[derive(Debug, sqlx::FromRow)]
 struct StoredReclassifiedSteeringFacts {
     disposition_kind: String,
@@ -27,6 +251,665 @@ impl From<Option<Uuid>> for TurnOriginPresence {
 struct ReclassifiedSteeringFacts {
     disposition_kind: String,
     origin: TurnOriginPresence,
+}
+
+/// INV-007 / INV-009 / INV-012: a tool-result continuation materializes and
+/// reconstructs its transaction-local results before taking the shared
+/// model-call ordering guard, then takes that guard before its results-projected
+/// outbox append can wait on the allocator. This excludes both long reads from
+/// the global writer critical section and the allocator-to-guard edge that
+/// would deadlock against counted activation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv007_inv009_inv012_tool_continuation_guards_before_result_outbox()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7ef8;
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, "current_time", "{}").await?;
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    let continuation_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x22));
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || continuation_attempt,
+        )
+        .await?;
+    let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0x23));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            tool_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    let authorized = tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
+        .await?;
+    tool_repository
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(String::from("2026-08-22T04:00:00Z"))
+                            .expect("bounded result"),
+                    ),
+                }),
+        )
+        .await?;
+
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("one continuation target forms a catalog");
+    let continuing_repository = PostgresToolLoopRepository::with_model_calls(
+        pool.clone(),
+        targets,
+        model_credential_reference(),
+    );
+    let session = fixture.session;
+    let turn = fixture.turn;
+    let producing_call = fixture.call;
+    let continuation_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0x28));
+    let result_holder = lock_tool_continuation_result_writes(&pool).await?;
+    let allocator_holder = lock_tool_continuation_outbox_allocator(&pool).await?;
+    let continuation = tokio::spawn(async move {
+        continuing_repository
+            .prepare_continuation(
+                session,
+                turn,
+                producing_call,
+                signalbox_application::ToolContinuationIdentities::new(
+                    vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                        seed + 0x26,
+                    ))],
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x27)),
+                    continuation_call,
+                    FailedModelCallTurnIdentities::new(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x29)),
+                        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2a)),
+                    ),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2b)),
+                ),
+                |_| panic!("fixture has no pending steering"),
+            )
+            .await
+    });
+    assert!(blocked_backends_reached(&pool, 1).await?);
+    assert!(tool_continuation_order_guard_is_available(&pool).await?);
+    result_holder.rollback().await?;
+    assert!(blocked_backends_reached(&pool, 1).await?);
+    assert!(!tool_continuation_order_guard_is_available(&pool).await?);
+    allocator_holder.rollback().await?;
+    assert_eq!(
+        continuation.await??,
+        signalbox_application::PrepareToolContinuationOutcome::Checkpointed(continuation_call)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A turn-state check does not rescan immutable historical tool-round
+/// frontiers; the round-specific validator still owns that exact evidence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn deferred_turn_validation_skips_immutable_tool_round_frontiers()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7efa;
+    let (fixture, _, _, _) =
+        checkpoint_confirmed_tool_round(&pool, seed, "current_time", "{}").await?;
+
+    let mut frontier_holder = pool.begin().await?;
+    sqlx::query("LOCK TABLE context_frontier_member IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *frontier_holder)
+        .await?;
+    sqlx::query("SELECT assert_turn_lifecycle_final_state($1)")
+        .bind(fixture.turn.into_uuid())
+        .execute(&pool)
+        .await?;
+
+    let round_validation = tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            sqlx::query("SELECT assert_tool_round_final_state($1)")
+                .bind(fixture.call.into_uuid())
+                .execute(&pool)
+                .await
+        }
+    });
+    assert!(blocked_backends_reached(&pool, 1).await?);
+    frontier_holder.rollback().await?;
+    round_validation.await??;
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-014: provider usage plus newly projected result content that exhausts
+/// configured headroom preserves the results, closes the turn with typed
+/// evidence, and prepares no oversized continuation call. The daemon-owned
+/// closure is budget-neutral for goals.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv014_tool_continuation_headroom_closes_before_another_call() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7ef9;
+    let (fixture, _, _, request) = checkpoint_confirmed_tool_round_with_usage(
+        &pool,
+        seed,
+        "current_time",
+        "{}",
+        ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(70))
+            .with_output_tokens(Some(5)),
+    )
+    .await?;
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    let continuation_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x22));
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || continuation_attempt,
+        )
+        .await?;
+    let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0x23));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            tool_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    let authorized = tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
+        .await?;
+    let result_text = String::from("2026-08-22T04:00:00Z");
+    let result_content_bytes = u64::try_from(result_text.len())?;
+    tool_repository
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(result_text).expect("bounded result"),
+                    ),
+                }),
+        )
+        .await?;
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("one continuation target forms a catalog");
+    let continuation_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0x28));
+    let model_repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+            .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+                target,
+                FastMode::Disabled,
+                10,
+                100,
+            )]);
+    let continuing_repository = model_repository.tool_loop_repository();
+    let result_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x27));
+    let outcome = continuing_repository
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 0x26,
+                ))],
+                result_frontier,
+                continuation_call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x29)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2a)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2b)),
+            ),
+            |_| panic!("fixture has no pending steering"),
+        )
+        .await?;
+    let signalbox_application::PrepareToolContinuationOutcome::ContextCompactionRequired(required) =
+        outcome
+    else {
+        panic!("reported usage closes the continuation for compaction");
+    };
+    assert_eq!(required.producing_call(), fixture.call);
+    assert_eq!(required.failed().turn(), fixture.turn);
+    let reported = model_repository
+        .latest_reported_usage(fixture.session, target, result_frontier)
+        .await?
+        .expect("the producing call reported input usage");
+    assert_eq!(
+        reported.projected_unreported_content_bytes(),
+        result_content_bytes
+    );
+    let producing_frontier: Uuid = sqlx::query_scalar(
+        "SELECT context_frontier_id
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let successor_reported = model_repository
+        .latest_reported_usage(
+            fixture.session,
+            target,
+            ContextFrontierId::from_uuid(producing_frontier),
+        )
+        .await?
+        .expect("the durable headroom proof remains authoritative for a successor frontier");
+    assert_eq!(
+        successor_reported.projected_unreported_content_bytes(),
+        result_content_bytes
+    );
+    let disjoint_content = "successor content outside the proved tool-result batch";
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 0x200,
+                seed + 1,
+                disjoint_content,
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x201)),
+            Some(TurnId::from_uuid(Uuid::from_u128(seed + 0x202))),
+        )
+        .await?;
+    let disjoint_entry = Uuid::from_u128(seed + 0x203);
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: fixture.session.into_uuid(),
+            origin_entry: disjoint_entry,
+            starting_frontier: Uuid::from_u128(seed + 0x204),
+            initial_attempt: Uuid::from_u128(seed + 0x205),
+        },
+    )
+    .await?;
+    let producing_member_count: i64 = sqlx::query_scalar(
+        "SELECT member_count::bigint
+           FROM context_frontier
+          WHERE owning_session_id = $1
+            AND context_frontier_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(producing_frontier)
+    .fetch_one(&pool)
+    .await?;
+    let disjoint_frontier = Uuid::from_u128(seed + 0x206);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+             (owning_session_id, context_frontier_id, member_count,
+              prefix_context_frontier_id)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(disjoint_frontier)
+    .bind(producing_member_count + 1)
+    .bind(producing_frontier)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+             (owning_session_id, context_frontier_id, member_position,
+              source_session_id, semantic_entry_id)
+         VALUES ($1, $2, $3, $1, $4)",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(disjoint_frontier)
+    .bind(producing_member_count + 1)
+    .bind(disjoint_entry)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    let disjoint_reported = model_repository
+        .latest_reported_usage(
+            fixture.session,
+            target,
+            ContextFrontierId::from_uuid(disjoint_frontier),
+        )
+        .await?
+        .expect("durable proof and a disjoint successor suffix are both retained");
+    assert_eq!(
+        disjoint_reported.projected_unreported_content_bytes(),
+        result_content_bytes + u64::try_from(disjoint_content.len())?
+    );
+
+    let stored: (String, Option<Uuid>, Uuid, Decimal, Decimal, Decimal, i64) = sqlx::query_as(
+        "SELECT lifecycle.terminal_disposition_kind,
+                lifecycle.terminal_model_call_id,
+                headroom.producing_model_call_id,
+                headroom.projected_result_content_bytes,
+                headroom.max_output_tokens,
+                headroom.context_window_tokens,
+                (SELECT count(*) FROM model_call WHERE model_call_id = $3)
+           FROM turn_lifecycle AS lifecycle
+           JOIN tool_continuation_context_headroom AS headroom
+             ON headroom.terminal_attempt_id = lifecycle.terminal_attempt_id
+            AND headroom.turn_id = lifecycle.turn_id
+            AND headroom.session_id = lifecycle.session_id
+          WHERE lifecycle.session_id = $1
+            AND lifecycle.turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(continuation_call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        stored,
+        (
+            String::from("failed"),
+            None,
+            fixture.call.into_uuid(),
+            Decimal::from(result_content_bytes),
+            Decimal::from(10_u64),
+            Decimal::from(100_u64),
+            0,
+        )
+    );
+    assert_eq!(
+        GoalRepository::new(pool.clone())
+            .unchargeable_automatic_resume_turns(fixture.session, &[fixture.turn])
+            .await?
+            .as_ref(),
+        &[fixture.turn]
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-014: a returning foreground delegation result is model-visible
+/// continuation content. The same-turn headroom bound counts its delivered
+/// child-result bytes alongside executed tool results, so a round whose child
+/// returned a large result takes the compaction boundary instead of preparing
+/// the oversized continuation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv014_tool_continuation_headroom_counts_delegation_results() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x8900;
+    let (fixture, _, _, requests) = checkpoint_tool_batch_with_approval_and_usage(
+        &pool,
+        seed,
+        &[("spawn_session", "{}"), ("await_session", "{}")],
+        InitialToolApproval::Confirm,
+        ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(70))
+            .with_output_tokens(Some(5)),
+    )
+    .await?;
+    let [spawning_request, awaiting_request] = requests.as_slice() else {
+        panic!("the foreground delegation fixture has spawn and await requests")
+    };
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(seed + 0x100, seed + 0x101, direct(seed + 5)))
+        .await?;
+    let child = Uuid::from_u128(seed + 0x101);
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    let issuing_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe0));
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd0)),
+                *spawning_request,
+                ToolApprovalDecision::Approve,
+            ),
+            || panic!("the first approval does not start execution"),
+        )
+        .await?;
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd1)),
+                *awaiting_request,
+                ToolApprovalDecision::Approve,
+            ),
+            || issuing_attempt,
+        )
+        .await?;
+    let spawn_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            spawn_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?
+        .expect("the approved spawn request prepares one attempt");
+    let authorized_spawn = tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, spawn_attempt)
+        .await?;
+    // The spawn result names the child session: a hyphenated UUID is 36 bytes.
+    let spawn_result = child.to_string();
+    tool_repository
+        .commit_observation(authorized_spawn.executor_fence().bind(
+            ToolAttemptObservation::Completed {
+                result: ToolResultContent::Text(
+                    ToolResultText::try_new(spawn_result).expect("bounded child identity"),
+                ),
+            },
+        ))
+        .await?;
+    let await_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0xe2));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            await_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?
+        .expect("the approved await request prepares one attempt");
+
+    // Forty-two ASCII characters and one two-byte "é": 44 UTF-8 bytes.
+    let child_result = "delivered foreground child result content é";
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_event DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_wait DISABLE TRIGGER ALL;
+         ALTER TABLE session_child_result DISABLE TRIGGER ALL;
+         ALTER TABLE session_child_result_delivery DISABLE TRIGGER ALL;
+         ALTER TABLE tool_attempt DISABLE TRIGGER ALL;",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation
+            (spawning_tool_request_id, parent_session_id, parent_turn_id,
+             child_session_id, policy_kind)
+         VALUES ($1, $2, $3, $4, 'background')",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(child)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             provenance_kind, provenance_session_id, provenance_turn_id,
+             provenance_tool_request_id)
+         VALUES ($1, 1, 'spawned', 'tool_request', $2, $3, $1)",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             outcome_kind, reason_kind, provenance_kind,
+             provenance_session_id, provenance_turn_id)
+         VALUES ($1, 2, 'outcome_recorded', 'result_returned',
+                 'child_completed', 'child_turn', $2, $3)",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(child)
+    .bind(Uuid::from_u128(seed + 0x102))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_child_result
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             outcome_kind, content_text)
+         VALUES ($1, 2, 'outcome_recorded', 'result_returned', $2)",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(child_result)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_wait
+            (awaiting_tool_request_id, spawning_tool_request_id,
+             parent_session_id, parent_turn_id, child_session_id, wait_mode)
+         VALUES ($1, $2, $3, $4, $5, 'foreground')",
+    )
+    .bind(awaiting_request.into_uuid())
+    .bind(spawning_request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(child)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_child_result_delivery
+            (awaiting_tool_request_id, spawning_tool_request_id,
+             parent_session_id, delivery_sequence, delivery_kind)
+         VALUES ($1, $2, $3, NULL, NULL)",
+    )
+    .bind(awaiting_request.into_uuid())
+    .bind(spawning_request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE tool_attempt
+            SET state_kind = 'terminal',
+                terminal_disposition_kind = 'awaiting_child',
+                wait_spawning_request_id = $1,
+                wait_child_session_id = $2
+          WHERE attempt_id = $3",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(child)
+    .bind(await_attempt.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation ENABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_event ENABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_wait ENABLE TRIGGER ALL;
+         ALTER TABLE session_child_result ENABLE TRIGGER ALL;
+         ALTER TABLE session_child_result_delivery ENABLE TRIGGER ALL;
+         ALTER TABLE tool_attempt ENABLE TRIGGER ALL;",
+    )
+    .execute(&pool)
+    .await?;
+
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("one continuation target forms a catalog");
+    let result_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xe6));
+    let continuation_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0xe8));
+    let model_repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+            .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+                target,
+                FastMode::Disabled,
+                10,
+                130,
+            )]);
+    let outcome = model_repository
+        .tool_loop_repository()
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0xe4)),
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0xe5)),
+                ],
+                result_frontier,
+                continuation_call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0xe9)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xea)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xeb)),
+            ),
+            |_| panic!("fixture has no pending steering"),
+        )
+        .await?;
+
+    let signalbox_application::PrepareToolContinuationOutcome::ContextCompactionRequired(required) =
+        outcome
+    else {
+        panic!("the delivered child result exhausts the configured continuation headroom");
+    };
+    assert_eq!(required.producing_call(), fixture.call);
+    let stored_bytes: Decimal = sqlx::query_scalar(
+        "SELECT projected_result_content_bytes
+           FROM tool_continuation_context_headroom
+          WHERE session_id = $1
+            AND turn_id = $2
+            AND producing_model_call_id = $3",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored_bytes, Decimal::from(36 + 44_u64));
+    let reported = model_repository
+        .latest_reported_usage(fixture.session, target, result_frontier)
+        .await?
+        .expect("the producing call reported input usage");
+    assert_eq!(
+        reported.projected_unreported_content_bytes(),
+        36 + 44,
+        "a proved delegation result present in the successor projection is counted once"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
 }
 
 /// S02 / S08 / INV-016 / INV-036: a NextSafePoint input accepted while a tool
@@ -204,50 +1087,40 @@ async fn s02_s08_inv016_inv036_steering_consumed_at_continuation_reloads_and_sca
             &mut recovery_ids,
         )
         .await?;
-    let StartupScanSessionOutcome::RecoveredModelCall(recovered) = scan else {
-        panic!("the startup scan classifies the prepared continuation call instead of aborting");
-    };
-    assert!(
-        matches!(*recovered, ModelCallTerminalOutcome::Failed(_)),
-        "the lost prepared continuation call closes as a known failure"
+    assert_eq!(
+        scan,
+        StartupScanSessionOutcome::ResumablePreparedModelCall { turn: fixture.turn },
+        "the startup scan preserves the prepared continuation for resumption"
     );
-    let recovered_shape: (String, Option<Uuid>) = sqlx::query_as(
-        "SELECT terminal_disposition_kind, terminal_model_call_id
-           FROM turn_lifecycle
-          WHERE session_id = $1
-            AND turn_id = $2",
+    let recovered_shape: (String, Option<String>, Uuid, String, Option<String>) = sqlx::query_as(
+        "SELECT lifecycle.state_kind,
+                lifecycle.terminal_disposition_kind,
+                lifecycle.current_attempt_id,
+                continuation.state_kind,
+                continuation.terminal_disposition_kind
+           FROM turn_lifecycle AS lifecycle
+           JOIN model_call AS continuation
+             ON continuation.session_id = lifecycle.session_id
+            AND continuation.turn_id = lifecycle.turn_id
+            AND continuation.model_call_id = $3
+          WHERE lifecycle.session_id = $1
+            AND lifecycle.turn_id = $2",
     )
     .bind(fixture.session.into_uuid())
     .bind(fixture.turn.into_uuid())
+    .bind(continuation_call.into_uuid())
     .fetch_one(&pool)
     .await?;
     assert_eq!(
         recovered_shape,
-        (String::from("failed"), Some(continuation_call.into_uuid()),),
-        "restart recovery names the steering-consuming continuation call"
-    );
-
-    let post_recovery = SubmitInputRepository::new(pool.clone())
-        .handle(
-            start_input(
-                seed + 0x33,
-                seed + 1,
-                "work after recovered continuation",
-                1,
-                ModelSelectionOverride::UseSessionDefault,
-            ),
-            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x34)),
-            Some(TurnId::from_uuid(Uuid::from_u128(seed + 0x35))),
-        )
-        .await?;
-    assert!(
-        matches!(
-            post_recovery,
-            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-                SubmitInputAppliedResult::TurnOrigin(_)
-            ))
+        (
+            String::from("active"),
+            None,
+            continuation_attempt.into_uuid(),
+            String::from("prepared"),
+            None,
         ),
-        "the failed terminal continuation shape must reconstitute before the next submit"
+        "restart recovery leaves the steering-consuming continuation unchanged"
     );
 
     pool.close().await;
@@ -1164,10 +2037,17 @@ async fn s07_s10_inv012_inv028_parked_approval_interrupt_records_typed_rejection
         "the confirmed tool round must be parked before the interrupt"
     );
     assert_eq!(
-        signalbox_persistence::turn_liveness::PostgresTurnLivenessRepository::new(pool.clone())
-            .slot_held_active_turns(None)
-            .await?
-            .candidates(),
+        signalbox_persistence::turn_liveness::PostgresTurnLivenessRepository::new(
+            pool.clone(),
+            signalbox_persistence::turn_liveness::TurnLivenessPersistenceBounds::new(
+                Some(std::time::Duration::from_millis(7)),
+                Some(std::time::Duration::from_millis(11)),
+                Some(std::time::Duration::from_millis(13)),
+            ),
+        )
+        .slot_held_active_turns(None)
+        .await?
+        .candidates(),
         [],
         "the slot-held watchdog never treats an approval wait as daemon-owned work"
     );
@@ -1310,6 +2190,7 @@ async fn s07_s10_inv012_inv028_parked_approval_rejection_requires_a_recorded_app
         .fail_prepared_call(
             terminal.session,
             terminal.call,
+            None,
             FailedModelCallTurnIdentities::new(
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(terminal_seed + 14)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(terminal_seed + 15)),
@@ -1512,6 +2393,106 @@ async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity
     Ok(())
 }
 
+/// INV-006 / INV-025 / INV-029 / INV-037: the daemon's bounded recovery
+/// ledger terminalizes an exact tool ambiguity without inventing a user
+/// interrupt or erasing the physical outcome.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv006_inv025_inv029_inv037_automatic_tool_reconciliation_releases_the_slot()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x74d0;
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, "external-tool", "{}").await?;
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    let issuing_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 23));
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 24)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || issuing_attempt,
+        )
+        .await?;
+    let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 25));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            tool_attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?;
+    tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
+        .await?;
+    let mut recovery_ids = FixedStartupScanIds::new([], []);
+    assert_ambiguous_tool_recovery(
+        PostgresStartupScanRepository::new(pool.clone())
+            .recover(
+                fixture.session,
+                signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 26)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 27)),
+                ),
+                &mut recovery_ids,
+            )
+            .await?,
+    );
+
+    let repository = PostgresAutomaticReconciliationRepository::new(pool.clone());
+    let batch = repository.claim_due().await?;
+    assert_eq!(batch.claimed().len(), 1);
+    assert_eq!(
+        batch.claimed()[0].operation(),
+        AutomaticReconciliationOperation::ToolAttempt(tool_attempt)
+    );
+    assert_eq!(
+        repository.reconcile(batch.claimed()[0]).await?,
+        AutomaticReconciliationOutcome::Reconciled
+    );
+    let durable: (String, String, i32, i64) = sqlx::query_as(
+        "SELECT lifecycle.terminal_disposition_kind,
+                recovery.state_kind,
+                recovery.attempt_count,
+                (SELECT count(*)
+                   FROM automatic_reconciliation_attempt AS attempt
+                  WHERE attempt.turn_id = recovery.turn_id
+                    AND attempt.outcome_kind = 'reconciled')
+           FROM turn_lifecycle AS lifecycle
+           JOIN automatic_reconciliation AS recovery
+             ON recovery.turn_id = lifecycle.turn_id
+          WHERE lifecycle.turn_id = $1",
+    )
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        durable,
+        (
+            String::from("reconciliation_required"),
+            String::from("reconciled"),
+            1,
+            1
+        )
+    );
+    let snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(fixture.session)
+        .await?
+        .expect("automatically reconciled tool ambiguity remains readable");
+    assert_eq!(
+        process_tool_reconciliation_operation(snapshot.turns()[0].state()),
+        (issuing_attempt, tool_attempt)
+    );
+    assert_eq!(closed_tool_request(snapshot.entries()), request);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-006 / INV-025 / INV-029 / INV-037: eligibility replays pending
 /// steering reclassified behind an interrupted ambiguous tool attempt without
 /// requiring that reconciliation predecessor to own a model call.
@@ -1657,7 +2638,7 @@ async fn swept_sessions(pool: &PgPool) -> Result<Vec<SessionId>, Box<dyn Error>>
     let mut sweep = PostgresEligibilitySweep::new(pool.clone());
     let mut sessions = Vec::new();
     loop {
-        let (page, continuation) = sweep.find_sessions().await?.into_parts();
+        let (page, _dispatch_starts, continuation) = sweep.find_sessions().await?.into_parts();
         sessions.extend(page);
         if !continuation {
             break;
@@ -2039,7 +3020,11 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
         ProcessTurnState::ActiveAwaitingToolRecovery {
             ended_attempt,
             recovery_attempt,
+            automatic_reconciliation_attempts,
+            operator_action_required,
         } if *ended_attempt == crash_continuation && *recovery_attempt == crash_attempt
+            && *automatic_reconciliation_attempts == 0
+            && !operator_action_required
     ));
     let pending_ambiguous_disposition: String = sqlx::query_scalar(
         "SELECT disposition_kind

@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { ArrowRight, Search, X } from 'lucide-react'
 import { type FormEvent, useEffect, useRef, useState } from 'react'
-import type { WebAttentionSnapshot } from './generated/web-contract.mjs'
+import type { WebSessionCatalogSnapshot } from './generated/web-contract.mjs'
 import {
   admittedSessionSearch,
   ProductRequestError,
@@ -10,7 +10,7 @@ import {
 } from './product'
 import { useAppSelector } from './state'
 
-type SessionSummary = WebAttentionSnapshot['summaries'][number]
+type SessionSummary = WebSessionCatalogSnapshot['summaries'][number]
 
 const label = (value: string) => value.replaceAll('_', ' ')
 
@@ -41,6 +41,8 @@ export function SessionCatalogSurface({
   const returnFocus = useRef<HTMLButtonElement>(null)
   const sessionButtons = useRef(new Map<string, HTMLButtonElement>())
   const closeFocus = useRef<HTMLButtonElement>(null)
+  const inspector = useRef<HTMLElement>(null)
+  const workspaceAction = useRef<HTMLButtonElement>(null)
   const pageHeading = useRef<HTMLHeadingElement>(null)
   const errorHeading = useRef<HTMLHeadingElement>(null)
   const restorePageFocus = useRef(false)
@@ -94,8 +96,21 @@ export function SessionCatalogSurface({
     if (!narrowInspector || !selectedSessionId || overlay !== null) return
     const containFocus = (event: KeyboardEvent) => {
       if (event.key !== 'Tab') return
-      event.preventDefault()
-      closeFocus.current?.focus()
+      const first = closeFocus.current
+      const last = workspaceAction.current
+      const root = inspector.current
+      if (!first || !last || !root) return
+      const target = event.target
+      if (
+        !(target instanceof HTMLElement) ||
+        !root.contains(target) ||
+        (event.shiftKey && target === first) ||
+        (!event.shiftKey && target === last)
+      ) {
+        event.preventDefault()
+        if (event.shiftKey) last.focus()
+        else first.focus()
+      }
     }
     const frame = requestAnimationFrame(() => closeFocus.current?.focus())
     document.addEventListener('keydown', containFocus, true)
@@ -164,7 +179,15 @@ export function SessionCatalogSurface({
           <span>Search titles</span>
           <span>
             <Search aria-hidden="true" />
-            <input name="q" defaultValue={state.q} placeholder="Exact title terms" />
+            <input
+              name="q"
+              defaultValue={state.q}
+              placeholder="Exact title terms"
+              onKeyDown={(event) => {
+                if (event.key !== 'Escape') return
+                event.currentTarget.closest('main')?.focus()
+              }}
+            />
           </span>
         </label>
         <label>
@@ -195,7 +218,7 @@ export function SessionCatalogSurface({
             </h2>
             <p>
               {sessions.error instanceof ProductRequestError
-                ? `${sessions.error.code}: ${sessions.error.message}`
+                ? `${sessions.error.response.error.code}: ${sessions.error.message}`
                 : 'The response did not match the generated web contract.'}
             </p>
             <button
@@ -225,7 +248,17 @@ export function SessionCatalogSurface({
                   {sessions.data.total} sessions
                 </h2>
               </div>
-              <span>{sessions.data.summaries.length} on this page</span>
+              <div className="catalog-header-actions">
+                <span>{sessions.data.summaries.length} on this page</span>
+                {!selected && (
+                  <button
+                    type="button"
+                    onClick={() => onStateChange({ ...state, workspace: true })}
+                  >
+                    Open workspace by ID
+                  </button>
+                )}
+              </div>
             </header>
             {sessions.data.summaries.length === 0 ? (
               <p className="catalog-notice">No sessions match the current filters.</p>
@@ -270,16 +303,11 @@ export function SessionCatalogSurface({
 
           {selected && (
             <aside
+              ref={inspector}
               className="catalog-inspector"
               role="dialog"
               aria-modal={narrowInspector || undefined}
               aria-labelledby="catalog-inspector-heading"
-              onKeyDown={(event) => {
-                if (event.key === 'Tab' && narrowInspector && overlay === null) {
-                  event.preventDefault()
-                  closeFocus.current?.focus()
-                }
-              }}
             >
               <header>
                 <div>
@@ -339,8 +367,17 @@ export function SessionCatalogSurface({
                 </section>
               )}
               <p className="catalog-address-note">
-                Timeline opening remains on its isolated Session Workspace integration branch.
+                Open the bounded historical workspace for this session without re-entering its
+                identity.
               </p>
+              <button
+                ref={workspaceAction}
+                className="catalog-workspace-action"
+                type="button"
+                onClick={() => onStateChange({ ...state, workspace: true })}
+              >
+                Open timeline workspace
+              </button>
             </aside>
           )}
         </div>

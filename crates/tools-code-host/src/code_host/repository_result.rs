@@ -5,17 +5,13 @@ use std::collections::HashSet;
 use serde_json::{Value, json};
 
 use super::arguments::{CodeHostFilePath, CodeHostRepository, CodeHostRevision};
-use super::result::{
-    CodeHostResultCompleteness, MAX_ENCODED_RESULT_BYTES, MAX_RESULT_ITEMS, MAX_RESULT_TEXT_BYTES,
-    valid_text,
+use super::result::{CodeHostResultCompleteness, MAX_ENCODED_RESULT_BYTES};
+use super::{
+    CodeHostNumericBounds, RepositoryLineRange, RepositoryListDirectoryArguments,
+    RepositoryReadFileArguments,
 };
-use super::{RepositoryLineRange, RepositoryListDirectoryArguments, RepositoryReadFileArguments};
-
-/// Maximum retained UTF-8 content from one repository file read.
-// numeric-bound: tunable - controls retained repository-file content
-pub(super) const MAX_REPOSITORY_FILE_CONTENT_BYTES: usize = MAX_RESULT_TEXT_BYTES;
 /// Maximum source bytes inspected to serve one requested line range.
-// numeric-bound: tunable - the ranged-read size this tool advertises serving
+// numeric-bound: guard - one ranged repository-file read exhausting process memory
 pub(super) const MAX_REPOSITORY_FILE_SCAN_BYTES: usize = 1024 * 1024;
 /// Maximum entries GitHub can expose through one contents response.
 // numeric-bound: not-a-bound - GitHub's fixed contents-endpoint entry exposure
@@ -132,6 +128,7 @@ pub struct RepositoryReadFileResult {
 impl RepositoryReadFileResult {
     /// Validates one bounded UTF-8 file selection and its completeness facts.
     pub fn try_content(
+        bounds: CodeHostNumericBounds,
         arguments: &RepositoryReadFileArguments,
         fields: RepositoryFileContentFields,
     ) -> Option<Self> {
@@ -233,8 +230,9 @@ impl RepositoryReadFileResult {
         let retention_bound_consistent = match fields.completeness {
             CodeHostResultCompleteness::Complete => true,
             CodeHostResultCompleteness::Truncated => {
-                fields.content.len()
-                    >= MAX_REPOSITORY_FILE_CONTENT_BYTES - MAX_UTF8_BOUNDARY_DISCARD_BYTES
+                bounds.repository_file_content_bytes().is_some_and(|limit| {
+                    fields.content.len() >= limit.saturating_sub(MAX_UTF8_BOUNDARY_DISCARD_BYTES)
+                })
             }
         };
         let last_line_complete = fields.content.is_empty()
@@ -243,8 +241,10 @@ impl RepositoryReadFileResult {
         (path_can_be_file
             && returned_range_valid
             && returned_within_request
-            && valid_text(&fields.content)
-            && fields.content.len() <= MAX_REPOSITORY_FILE_CONTENT_BYTES
+            && !fields.content.contains('\0')
+            && bounds
+                .repository_file_content_bytes()
+                .is_none_or(|limit| fields.content.len() <= limit)
             && source_bytes_consistent
             && selected_source_bytes_consistent
             && complete_first_line_consistent
@@ -490,17 +490,24 @@ pub struct RepositoryListDirectoryResult {
 impl RepositoryListDirectoryResult {
     /// Validates one bounded prefix of directory entries.
     pub fn try_entries(
+        bounds: CodeHostNumericBounds,
         arguments: &RepositoryListDirectoryArguments,
         entries: Vec<RepositoryDirectoryEntry>,
         observed_entries: usize,
         completeness: CodeHostResultCompleteness,
     ) -> Option<Self> {
-        let result =
-            Self::try_entries_candidate(arguments, entries, observed_entries, completeness)?;
+        let result = Self::try_entries_candidate(
+            bounds,
+            arguments,
+            entries,
+            observed_entries,
+            completeness,
+        )?;
         (result.encoded_len()? <= MAX_ENCODED_RESULT_BYTES).then_some(result)
     }
 
     fn try_entries_candidate(
+        bounds: CodeHostNumericBounds,
         arguments: &RepositoryListDirectoryArguments,
         entries: Vec<RepositoryDirectoryEntry>,
         observed_entries: usize,
@@ -520,7 +527,7 @@ impl RepositoryListDirectoryResult {
             .collect::<HashSet<_>>()
             .len()
             == entries.len();
-        (entries.len() <= MAX_RESULT_ITEMS
+        (bounds.permits_result_items(entries.len())
             && observed_entries <= MAX_OBSERVED_DIRECTORY_ENTRIES
             && count_consistent
             && entries_belong_to_directory
@@ -536,12 +543,13 @@ impl RepositoryListDirectoryResult {
     }
 
     pub(super) fn entries_encoded_len(
+        bounds: CodeHostNumericBounds,
         arguments: &RepositoryListDirectoryArguments,
         entries: Vec<RepositoryDirectoryEntry>,
         observed_entries: usize,
         completeness: CodeHostResultCompleteness,
     ) -> Option<usize> {
-        Self::try_entries_candidate(arguments, entries, observed_entries, completeness)?
+        Self::try_entries_candidate(bounds, arguments, entries, observed_entries, completeness)?
             .encoded_len()
     }
 
@@ -647,6 +655,11 @@ mod tests {
 
     const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
     const OTHER_REVISION: &str = "89abcdef0123456789abcdef0123456789abcdef";
+    const TEST_FILE_CONTENT_BYTES: usize = 64;
+
+    const fn file_content_bounds() -> CodeHostNumericBounds {
+        CodeHostNumericBounds::new(None, None, None, None, None, Some(TEST_FILE_CONTENT_BYTES))
+    }
 
     fn file_arguments(
         path: &str,
@@ -674,7 +687,7 @@ mod tests {
     fn oversized_encoded_directory_entries() -> Vec<RepositoryDirectoryEntry> {
         let escaped_prefix =
             "\u{0001}".repeat(crate::code_host::arguments::MAX_FILE_PATH_BYTES - 3);
-        (0..MAX_RESULT_ITEMS)
+        (0..(MAX_ENCODED_RESULT_BYTES / crate::code_host::arguments::MAX_FILE_PATH_BYTES + 1))
             .map(|index| {
                 RepositoryDirectoryEntry::try_new(
                     format!("{escaped_prefix}{index:03}"),
@@ -703,6 +716,7 @@ mod tests {
             Some(json!({"end": REQUESTED_END, "start": REQUESTED_START})),
         );
         let result = RepositoryReadFileResult::try_content(
+            crate::code_host::test_numeric_bounds(),
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
@@ -733,6 +747,7 @@ mod tests {
             Some(json!({"end": REQUESTED_LINE, "start": REQUESTED_LINE})),
         );
         let result = RepositoryReadFileResult::try_content(
+            crate::code_host::test_numeric_bounds(),
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
@@ -765,6 +780,7 @@ mod tests {
             Some(json!({"end": REQUESTED_END, "start": REQUESTED_START})),
         );
         let result = RepositoryReadFileResult::try_content(
+            crate::code_host::test_numeric_bounds(),
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
@@ -788,7 +804,7 @@ mod tests {
     fn ranged_content_rejects_truncation_not_observed_inside_selection() {
         const REQUESTED_START: u32 = 2;
         const REQUESTED_END: u32 = 3;
-        let content = format!("{}\n", "x".repeat(MAX_REPOSITORY_FILE_CONTENT_BYTES - 1));
+        let content = format!("{}\n", "x".repeat(TEST_FILE_CONTENT_BYTES - 1));
         let returned_bytes = u64::try_from(content.len()).expect("fixture content size fits u64");
         let source_bytes = returned_bytes
             .checked_add(2)
@@ -799,6 +815,7 @@ mod tests {
             Some(json!({"end": REQUESTED_END, "start": REQUESTED_START})),
         );
         let result = RepositoryReadFileResult::try_content(
+            file_content_bounds(),
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
@@ -820,7 +837,7 @@ mod tests {
     #[test]
     fn ranged_content_rejects_truncation_after_the_requested_range() {
         const REQUESTED_LINE: u32 = 1;
-        let content = format!("{}\n", "a".repeat(MAX_REPOSITORY_FILE_CONTENT_BYTES - 1));
+        let content = format!("{}\n", "a".repeat(TEST_FILE_CONTENT_BYTES - 1));
         let returned_bytes = u64::try_from(content.len()).expect("fixture content size fits u64");
         let source_bytes = returned_bytes
             .checked_add(1)
@@ -831,6 +848,7 @@ mod tests {
             Some(json!({"end": REQUESTED_LINE, "start": REQUESTED_LINE})),
         );
         let result = RepositoryReadFileResult::try_content(
+            file_content_bounds(),
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
@@ -859,6 +877,7 @@ mod tests {
             Some(json!({"end": REQUESTED_LINE, "start": REQUESTED_LINE})),
         );
         let result = RepositoryReadFileResult::try_content(
+            crate::code_host::test_numeric_bounds(),
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
@@ -890,6 +909,7 @@ mod tests {
             Some(json!({"end": REQUESTED_END, "start": REQUESTED_START})),
         );
         let result = RepositoryReadFileResult::try_content(
+            crate::code_host::test_numeric_bounds(),
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
@@ -919,6 +939,7 @@ mod tests {
             Some(json!({"end": REQUESTED_END, "start": REQUESTED_START})),
         );
         let result = RepositoryReadFileResult::try_content(
+            crate::code_host::test_numeric_bounds(),
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
@@ -950,6 +971,7 @@ mod tests {
             Some(json!({"end": REQUESTED_END, "start": REQUESTED_START})),
         );
         let result = RepositoryReadFileResult::try_content(
+            crate::code_host::test_numeric_bounds(),
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
@@ -1004,6 +1026,7 @@ mod tests {
         );
         let source_bytes = u64::try_from(CONTENT.len()).expect("fixture source size fits u64");
         let content = RepositoryReadFileResult::try_content(
+            crate::code_host::test_numeric_bounds(),
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
@@ -1094,6 +1117,7 @@ mod tests {
         let source_bytes = u64::try_from(SOURCE.len()).expect("fixture source size fits u64");
         let arguments = file_arguments("src/lib.rs", REVISION, None);
         let result = RepositoryReadFileResult::try_content(
+            crate::code_host::test_numeric_bounds(),
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
@@ -1124,6 +1148,7 @@ mod tests {
         let observed_entries = entries.len();
         let arguments = directory_arguments("src");
         let result = RepositoryListDirectoryResult::try_entries(
+            crate::code_host::test_numeric_bounds(),
             &arguments,
             entries,
             observed_entries,
@@ -1138,6 +1163,7 @@ mod tests {
     fn directory_entries_reject_an_observation_above_the_endpoint_ceiling() {
         let arguments = directory_arguments("src");
         let result = RepositoryListDirectoryResult::try_entries(
+            crate::code_host::test_numeric_bounds(),
             &arguments,
             Vec::new(),
             MAX_OBSERVED_DIRECTORY_ENTRIES + 1,
@@ -1160,6 +1186,7 @@ mod tests {
         let observed_entries = entries.len();
         let arguments = directory_arguments("src");
         let result = RepositoryListDirectoryResult::try_entries(
+            crate::code_host::test_numeric_bounds(),
             &arguments,
             entries,
             observed_entries,
@@ -1177,6 +1204,7 @@ mod tests {
         let observed_entries = entries.len();
         let arguments = directory_arguments(".");
         let result = RepositoryListDirectoryResult::try_entries_candidate(
+            crate::code_host::test_numeric_bounds(),
             &arguments,
             entries,
             observed_entries,
@@ -1193,6 +1221,7 @@ mod tests {
         let observed_entries = entries.len();
         let arguments = directory_arguments(".");
         let result = RepositoryListDirectoryResult::try_entries(
+            crate::code_host::test_numeric_bounds(),
             &arguments,
             entries,
             observed_entries,
@@ -1215,6 +1244,7 @@ mod tests {
         let observed_entries = entries.len();
         let arguments = directory_arguments(".");
         let result = RepositoryListDirectoryResult::try_entries(
+            crate::code_host::test_numeric_bounds(),
             &arguments,
             entries,
             observed_entries,
@@ -1256,6 +1286,7 @@ mod tests {
         let arguments = file_arguments("src/lib.rs", REVISION, None);
         let source_bytes = u64::try_from(CONTENT.len() + 1).expect("fixture source size fits u64");
         let result = RepositoryReadFileResult::try_content(
+            crate::code_host::test_numeric_bounds(),
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
@@ -1275,12 +1306,12 @@ mod tests {
     /// UTF-8 boundary repair may discard at most three bytes from a capped prefix.
     #[test]
     fn truncated_content_accepts_the_utf8_boundary_allowance() {
-        let content =
-            "x".repeat(MAX_REPOSITORY_FILE_CONTENT_BYTES - MAX_UTF8_BOUNDARY_DISCARD_BYTES);
-        let source_bytes = u64::try_from(MAX_REPOSITORY_FILE_CONTENT_BYTES + 1)
-            .expect("fixture source size fits u64");
+        let content = "x".repeat(TEST_FILE_CONTENT_BYTES - MAX_UTF8_BOUNDARY_DISCARD_BYTES);
+        let source_bytes =
+            u64::try_from(TEST_FILE_CONTENT_BYTES + 1).expect("fixture source size fits u64");
         let arguments = file_arguments("src/lib.rs", REVISION, None);
         let result = RepositoryReadFileResult::try_content(
+            file_content_bounds(),
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
@@ -1305,6 +1336,7 @@ mod tests {
         let arguments = file_arguments("src/lib.rs", REVISION, None);
         let source_bytes = u64::try_from(CONTENT.len()).expect("fixture source size fits u64");
         let result = RepositoryReadFileResult::try_content(
+            crate::code_host::test_numeric_bounds(),
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
@@ -1329,6 +1361,7 @@ mod tests {
         let arguments = file_arguments("src/lib.rs", REVISION, None);
         let source_bytes = u64::try_from(CONTENT.len() + 1).expect("fixture source size fits u64");
         let result = RepositoryReadFileResult::try_content(
+            crate::code_host::test_numeric_bounds(),
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
@@ -1353,6 +1386,7 @@ mod tests {
         let arguments = file_arguments("src/lib.rs", REVISION, None);
         let source_bytes = u64::try_from(CONTENT.len() + 1).expect("fixture source size fits u64");
         let result = RepositoryReadFileResult::try_content(
+            crate::code_host::test_numeric_bounds(),
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,

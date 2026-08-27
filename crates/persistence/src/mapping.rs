@@ -7,8 +7,9 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use signalbox_application::{
-    RepoWatchConvergenceVerdict, RepoWatchPullRequestLifecycle, RepoWatchReviewDecision,
-    RepoWatchThreadState,
+    InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind, RepoWatchConvergenceVerdict,
+    RepoWatchPullRequestLifecycle, RepoWatchReviewDecision, RepoWatchThreadState,
+    SearchContentClass, UsageCallKind, UsageProvenance,
 };
 use signalbox_domain::{
     AcceptedInputId, AnthropicServiceTier, BoundChildAction, CheckConclusion, ChecksOutcome,
@@ -17,14 +18,15 @@ use signalbox_domain::{
     DelegationTransitionFailure, DelegationWaitMode, DeliveryKind, DescendantTerminationScope,
     DirectModelSelection, DurableCommandId, EffectiveModelSettings, FastMode, FastModeOverlay,
     FaultCause, GoalBlockedReasonKind, GoalCommandRejection, GoalEventKind,
-    GoalModelBlockedReasonKind, GoalUserAction, MergeableState, ModelChangeAdjustment,
-    ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier,
-    ProgramCapability, ReactionChange, ReactionSubject, ReasoningLevel, RejectReason,
-    RepoWatchEventKindNameV1, RequestKind, ReviewState, RunnerPlacementLossSource,
-    RunnerSandboxProfile, ScopeOperation, ServiceTier, SessionConfigurationDefaultsVersion,
-    SessionCreationCause, SessionId, SessionInputPosition, SessionPlacementEventKind,
-    SettingOverlay, ToolApprovalPosture, ToolAttemptId, ToolPermissionDefault, ToolRequestId,
-    TurnId, UpdateSessionPlacementRejectionKind, ValidatedModelSettings, WorkspaceOrigin,
+    GoalModelBlockedReasonKind, GoalUserAction, InstructionBundleKind,
+    InstructionDiscoveryRootKind, MergeableState, ModelChangeAdjustment, ModelSettingSource,
+    ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier, ProgramCapability,
+    ReactionChange, ReactionSubject, ReasoningLevel, RejectReason, RepoWatchEventKindNameV1,
+    RequestKind, ReviewState, RunnerPlacementLossSource, RunnerSandboxProfile, ScopeOperation,
+    ServiceTier, SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId,
+    SessionInputPosition, SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture,
+    ToolAttemptId, ToolPermissionDefault, ToolRequestId, TurnId,
+    UpdateSessionPlacementRejectionKind, ValidatedModelSettings, WorkspaceOrigin,
 };
 
 pub(crate) const SESSION_CREATED: &str = "session_created";
@@ -86,6 +88,110 @@ const fn outbox_event_kind_utf8_byte_bounds() -> (u64, u64) {
 
 pub(crate) const OUTBOX_EVENT_KIND_UTF8_BYTE_BOUNDS: (u64, u64) =
     outbox_event_kind_utf8_byte_bounds();
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SearchProjectionSourceKind {
+    SessionMetadata,
+    AcceptedInput,
+    SteeringInput,
+    SemanticEntry,
+    ToolRequest,
+    ToolAttempt,
+    Attachment,
+    DerivedArtifact,
+}
+
+pub(crate) const fn search_projection_source_kind_to_str(
+    value: SearchProjectionSourceKind,
+) -> &'static str {
+    match value {
+        SearchProjectionSourceKind::SessionMetadata => "session_metadata",
+        SearchProjectionSourceKind::AcceptedInput => "accepted_input",
+        SearchProjectionSourceKind::SteeringInput => "steering_input",
+        SearchProjectionSourceKind::SemanticEntry => "semantic_entry",
+        SearchProjectionSourceKind::ToolRequest => "tool_request",
+        SearchProjectionSourceKind::ToolAttempt => "tool_attempt",
+        SearchProjectionSourceKind::Attachment => "attachment",
+        SearchProjectionSourceKind::DerivedArtifact => "derived_artifact",
+    }
+}
+
+pub(crate) fn search_projection_source_kind_from_str(
+    value: &str,
+) -> Option<SearchProjectionSourceKind> {
+    Some(match value {
+        "session_metadata" => SearchProjectionSourceKind::SessionMetadata,
+        "accepted_input" => SearchProjectionSourceKind::AcceptedInput,
+        "steering_input" => SearchProjectionSourceKind::SteeringInput,
+        "semantic_entry" => SearchProjectionSourceKind::SemanticEntry,
+        "tool_request" => SearchProjectionSourceKind::ToolRequest,
+        "tool_attempt" => SearchProjectionSourceKind::ToolAttempt,
+        "attachment" => SearchProjectionSourceKind::Attachment,
+        "derived_artifact" => SearchProjectionSourceKind::DerivedArtifact,
+        _ => return None,
+    })
+}
+
+pub(crate) const fn search_projection_content_class_to_str(
+    value: SearchContentClass,
+) -> &'static str {
+    match value {
+        SearchContentClass::UserTranscript => "user_transcript",
+        SearchContentClass::AssistantTranscript => "assistant_transcript",
+        SearchContentClass::ToolArguments => "tool_arguments",
+        SearchContentClass::ToolResult => "tool_result",
+        SearchContentClass::SessionMetadata => "session_metadata",
+        SearchContentClass::AttachmentFilename => "attachment_filename",
+        SearchContentClass::AttachmentMediaMetadata => "attachment_media_metadata",
+        SearchContentClass::DerivedTextArtifact => "derived_text_artifact",
+    }
+}
+
+pub(crate) fn search_projection_content_class_from_str(value: &str) -> Option<SearchContentClass> {
+    Some(match value {
+        "user_transcript" => SearchContentClass::UserTranscript,
+        "assistant_transcript" => SearchContentClass::AssistantTranscript,
+        "tool_arguments" => SearchContentClass::ToolArguments,
+        "tool_result" => SearchContentClass::ToolResult,
+        "session_metadata" => SearchContentClass::SessionMetadata,
+        "attachment_filename" => SearchContentClass::AttachmentFilename,
+        "attachment_media_metadata" => SearchContentClass::AttachmentMediaMetadata,
+        "derived_text_artifact" => SearchContentClass::DerivedTextArtifact,
+        _ => return None,
+    })
+}
+
+pub(crate) const fn usage_call_kind_to_str(value: UsageCallKind) -> &'static str {
+    match value {
+        UsageCallKind::ModelCall => "model_call",
+        UsageCallKind::ApprovalJudge => "approval_judge",
+        UsageCallKind::ContextCompaction => "context_compaction",
+    }
+}
+
+pub(crate) fn usage_call_kind_from_str(value: &str) -> Option<UsageCallKind> {
+    match value {
+        "model_call" => Some(UsageCallKind::ModelCall),
+        "approval_judge" => Some(UsageCallKind::ApprovalJudge),
+        "context_compaction" => Some(UsageCallKind::ContextCompaction),
+        _ => None,
+    }
+}
+
+pub(crate) const fn usage_provenance_to_str(value: UsageProvenance) -> &'static str {
+    match value {
+        UsageProvenance::Reported => "reported",
+        UsageProvenance::Estimated => "estimated",
+    }
+}
+
+pub(crate) fn usage_provenance_from_str(value: &str) -> Option<UsageProvenance> {
+    match value {
+        "reported" => Some(UsageProvenance::Reported),
+        "estimated" => Some(UsageProvenance::Estimated),
+        _ => None,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OutboxEventDiscriminator {
@@ -290,6 +396,11 @@ pub(crate) fn program_reject_reason_from_str(value: &str) -> Option<RejectReason
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
 
+use crate::repo_watch::{
+    RepoWatchObservedReviewState, RepoWatchStaleReviewClearanceOutcome,
+    RepoWatchStaleReviewClearanceReason,
+};
+
 use crate::{
     approval_judge::FailedApprovalJudgeDisposition,
     convergence_sweep::{ConvergenceSweepDecision, ConvergenceSweepFailureKind},
@@ -486,6 +597,138 @@ pub fn evaluation_corpus_source_from_str(value: &str) -> Option<EvaluationCorpus
     }
 }
 
+/// Which filesystem owns workspace discovery for a stored placement state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WorkspaceInstructionAuthorityStorageKind {
+    Daemon,
+    Runner,
+}
+
+pub(crate) fn workspace_instruction_authority_from_placement_state(
+    value: &str,
+) -> Option<WorkspaceInstructionAuthorityStorageKind> {
+    match value {
+        "unpinned" | "pinned" | "runner_lost_before_pin" | "runner_lost" => {
+            Some(WorkspaceInstructionAuthorityStorageKind::Runner)
+        }
+        "runner_abandoned" => Some(WorkspaceInstructionAuthorityStorageKind::Daemon),
+        _ => None,
+    }
+}
+
+pub(crate) const fn instruction_root_kind_to_str(
+    value: InstructionDiscoveryRootKind,
+) -> &'static str {
+    match value {
+        InstructionDiscoveryRootKind::Workspace => "workspace",
+        InstructionDiscoveryRootKind::Configured => "configured",
+    }
+}
+
+/// Decodes one durable workspace-instruction root kind.
+pub fn instruction_root_kind_from_str(value: &str) -> Option<InstructionDiscoveryRootKind> {
+    match value {
+        "workspace" => Some(InstructionDiscoveryRootKind::Workspace),
+        "configured" => Some(InstructionDiscoveryRootKind::Configured),
+        _ => None,
+    }
+}
+
+pub(crate) const fn instruction_bundle_kind_to_str(value: InstructionBundleKind) -> &'static str {
+    match value {
+        InstructionBundleKind::AgentDocument => "agent_document",
+        InstructionBundleKind::AgentSkill => "agent_skill",
+    }
+}
+
+/// Decodes one durable workspace-instruction bundle kind.
+pub fn instruction_bundle_kind_from_str(value: &str) -> Option<InstructionBundleKind> {
+    match value {
+        "agent_document" => Some(InstructionBundleKind::AgentDocument),
+        "agent_skill" => Some(InstructionBundleKind::AgentSkill),
+        _ => None,
+    }
+}
+
+pub(crate) const fn instruction_finding_kind_to_str(
+    value: InstructionDiscoveryFindingKind,
+) -> &'static str {
+    match value {
+        InstructionDiscoveryFindingKind::RootUnavailable => "root_unavailable",
+        InstructionDiscoveryFindingKind::EntryUnreadable => "entry_unreadable",
+        InstructionDiscoveryFindingKind::NonUtf8SourcePath => "non_utf8_source_path",
+        InstructionDiscoveryFindingKind::NonUtf8Source => "non_utf8_source",
+        InstructionDiscoveryFindingKind::InvalidSkill => "invalid_skill",
+        InstructionDiscoveryFindingKind::LimitReached(limit) => match limit {
+            InstructionDiscoveryLimitKind::ClassifiedEntries => "limit_classified_entries",
+            InstructionDiscoveryLimitKind::Findings => "limit_findings",
+            InstructionDiscoveryLimitKind::CandidateSourceBytes => "limit_candidate_source_bytes",
+            InstructionDiscoveryLimitKind::ElapsedTime => "limit_elapsed_time",
+        },
+    }
+}
+
+/// Decodes one durable workspace-instruction discovery finding kind.
+pub fn instruction_finding_kind_from_str(value: &str) -> Option<InstructionDiscoveryFindingKind> {
+    match value {
+        "root_unavailable" => Some(InstructionDiscoveryFindingKind::RootUnavailable),
+        "entry_unreadable" => Some(InstructionDiscoveryFindingKind::EntryUnreadable),
+        "non_utf8_source_path" => Some(InstructionDiscoveryFindingKind::NonUtf8SourcePath),
+        "non_utf8_source" => Some(InstructionDiscoveryFindingKind::NonUtf8Source),
+        "invalid_skill" => Some(InstructionDiscoveryFindingKind::InvalidSkill),
+        "limit_classified_entries" => Some(InstructionDiscoveryFindingKind::LimitReached(
+            InstructionDiscoveryLimitKind::ClassifiedEntries,
+        )),
+        "limit_findings" => Some(InstructionDiscoveryFindingKind::LimitReached(
+            InstructionDiscoveryLimitKind::Findings,
+        )),
+        "limit_candidate_source_bytes" => Some(InstructionDiscoveryFindingKind::LimitReached(
+            InstructionDiscoveryLimitKind::CandidateSourceBytes,
+        )),
+        "limit_elapsed_time" => Some(InstructionDiscoveryFindingKind::LimitReached(
+            InstructionDiscoveryLimitKind::ElapsedTime,
+        )),
+        _ => None,
+    }
+}
+
+/// Closed active-turn phase discriminators stored by PostgreSQL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ActiveTurnPhaseStorageKind {
+    Running,
+    AwaitingToolApproval,
+    AwaitingChild,
+    AwaitingModelCallRecovery,
+    AwaitingToolRecovery,
+    AwaitingRunnerRecovery,
+}
+
+#[cfg(test)]
+pub(crate) const fn active_turn_phase_to_str(value: ActiveTurnPhaseStorageKind) -> &'static str {
+    match value {
+        ActiveTurnPhaseStorageKind::Running => "running",
+        ActiveTurnPhaseStorageKind::AwaitingToolApproval => "awaiting_tool_approval",
+        ActiveTurnPhaseStorageKind::AwaitingChild => "awaiting_child",
+        ActiveTurnPhaseStorageKind::AwaitingModelCallRecovery => "awaiting_model_call_recovery",
+        ActiveTurnPhaseStorageKind::AwaitingToolRecovery => "awaiting_tool_recovery",
+        ActiveTurnPhaseStorageKind::AwaitingRunnerRecovery => "awaiting_runner_recovery",
+    }
+}
+
+pub(crate) fn active_turn_phase_from_str(value: &str) -> Option<ActiveTurnPhaseStorageKind> {
+    match value {
+        "running" => Some(ActiveTurnPhaseStorageKind::Running),
+        "awaiting_tool_approval" => Some(ActiveTurnPhaseStorageKind::AwaitingToolApproval),
+        "awaiting_child" => Some(ActiveTurnPhaseStorageKind::AwaitingChild),
+        "awaiting_model_call_recovery" => {
+            Some(ActiveTurnPhaseStorageKind::AwaitingModelCallRecovery)
+        }
+        "awaiting_tool_recovery" => Some(ActiveTurnPhaseStorageKind::AwaitingToolRecovery),
+        "awaiting_runner_recovery" => Some(ActiveTurnPhaseStorageKind::AwaitingRunnerRecovery),
+        _ => None,
+    }
+}
+
 /// Closed stored states for one durable runner-loss propagation cursor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RunnerLossPropagationStateStorageKind {
@@ -576,6 +819,39 @@ pub(crate) fn tool_attempt_disposition_from_str(
     }
 }
 
+/// Closed `blob_read_tool_charge.rejection_reason` discriminators in PostgreSQL.
+///
+/// A visibility refusal never reaches a charge row, so it has no spelling on
+/// this axis: only a recorded turn-budget rejection is durable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BlobReadRejectionStorageKind {
+    /// The turn's admitted decoded-byte budget could not absorb this request.
+    TurnByteBudgetExceeded,
+    /// The turn's admitted distinct-request count could not absorb this request.
+    TurnReadCountExceeded,
+}
+
+pub(crate) const fn blob_read_rejection_to_str(
+    value: BlobReadRejectionStorageKind,
+) -> &'static str {
+    match value {
+        BlobReadRejectionStorageKind::TurnByteBudgetExceeded => "blob_turn_byte_budget_exceeded",
+        BlobReadRejectionStorageKind::TurnReadCountExceeded => "blob_turn_read_count_exceeded",
+    }
+}
+
+pub(crate) fn blob_read_rejection_from_str(value: &str) -> Option<BlobReadRejectionStorageKind> {
+    match value {
+        "blob_turn_byte_budget_exceeded" => {
+            Some(BlobReadRejectionStorageKind::TurnByteBudgetExceeded)
+        }
+        "blob_turn_read_count_exceeded" => {
+            Some(BlobReadRejectionStorageKind::TurnReadCountExceeded)
+        }
+        _ => None,
+    }
+}
+
 /// Closed delegated-session update discriminators in PostgreSQL.
 ///
 /// Public because the outbox decode tripwire drives these spellings with the
@@ -650,6 +926,7 @@ pub(crate) const fn repo_watch_webhook_disposition_to_str(
 ) -> &'static str {
     match value {
         RepoWatchWebhookDisposition::Projected => "projected",
+        RepoWatchWebhookDisposition::Committed => "committed",
         RepoWatchWebhookDisposition::DuplicateState => "duplicate_state",
         RepoWatchWebhookDisposition::Superseded => "superseded",
         RepoWatchWebhookDisposition::Ignored => "ignored",
@@ -659,12 +936,12 @@ pub(crate) const fn repo_watch_webhook_disposition_to_str(
 
 /// Paired with the encoder above so a renamed or added disposition cannot
 /// update the writer while leaving a reader interpreting the old spelling.
-#[cfg(feature = "test-support")]
 pub(crate) fn repo_watch_webhook_disposition_from_str(
     value: &str,
 ) -> Option<RepoWatchWebhookDisposition> {
     match value {
         "projected" => Some(RepoWatchWebhookDisposition::Projected),
+        "committed" => Some(RepoWatchWebhookDisposition::Committed),
         "duplicate_state" => Some(RepoWatchWebhookDisposition::DuplicateState),
         "superseded" => Some(RepoWatchWebhookDisposition::Superseded),
         "ignored" => Some(RepoWatchWebhookDisposition::Ignored),
@@ -994,6 +1271,7 @@ pub(crate) enum ToolApprovalDecisionSourceStorageKind {
     PolicyAuto,
     SessionBlanket,
     Delegate,
+    RuntimeSafety,
     UserOverride,
 }
 
@@ -1005,6 +1283,7 @@ pub(crate) const fn tool_approval_decision_source_to_str(
         ToolApprovalDecisionSourceStorageKind::PolicyAuto => "policy_auto",
         ToolApprovalDecisionSourceStorageKind::SessionBlanket => "session_blanket",
         ToolApprovalDecisionSourceStorageKind::Delegate => "delegate",
+        ToolApprovalDecisionSourceStorageKind::RuntimeSafety => "runtime_safety",
         ToolApprovalDecisionSourceStorageKind::UserOverride => "user_override",
     }
 }
@@ -1017,6 +1296,7 @@ pub(crate) fn tool_approval_decision_source_from_str(
         "policy_auto" => Some(ToolApprovalDecisionSourceStorageKind::PolicyAuto),
         "session_blanket" => Some(ToolApprovalDecisionSourceStorageKind::SessionBlanket),
         "delegate" => Some(ToolApprovalDecisionSourceStorageKind::Delegate),
+        "runtime_safety" => Some(ToolApprovalDecisionSourceStorageKind::RuntimeSafety),
         "user_override" => Some(ToolApprovalDecisionSourceStorageKind::UserOverride),
         _ => None,
     }
@@ -1482,6 +1762,7 @@ pub(crate) const fn repo_watch_event_target_to_str(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RepoWatchEventProducerStorageKind {
     Poll,
+    Webhook,
 }
 
 pub(crate) const fn repo_watch_event_producer_to_str(
@@ -1489,6 +1770,7 @@ pub(crate) const fn repo_watch_event_producer_to_str(
 ) -> &'static str {
     match value {
         RepoWatchEventProducerStorageKind::Poll => "poll",
+        RepoWatchEventProducerStorageKind::Webhook => "webhook",
     }
 }
 
@@ -1497,6 +1779,7 @@ pub(crate) fn repo_watch_event_producer_from_str(
 ) -> Option<RepoWatchEventProducerStorageKind> {
     match value {
         "poll" => Some(RepoWatchEventProducerStorageKind::Poll),
+        "webhook" => Some(RepoWatchEventProducerStorageKind::Webhook),
         _ => None,
     }
 }
@@ -1609,6 +1892,73 @@ pub fn repo_watch_review_decision_from_str(value: &str) -> Option<RepoWatchRevie
         "approved" => Some(RepoWatchReviewDecision::Approved),
         "review_required" => Some(RepoWatchReviewDecision::ReviewRequired),
         "changes_requested" => Some(RepoWatchReviewDecision::ChangesRequested),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_stale_review_clearance_outcome_to_str(
+    value: RepoWatchStaleReviewClearanceOutcome,
+) -> &'static str {
+    match value {
+        RepoWatchStaleReviewClearanceOutcome::Dismissed => "dismissed",
+        RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed => "already_dismissed",
+        RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere => "cleared_elsewhere",
+        RepoWatchStaleReviewClearanceOutcome::Superseded => "superseded",
+    }
+}
+
+pub fn repo_watch_stale_review_clearance_outcome_from_str(
+    value: &str,
+) -> Option<RepoWatchStaleReviewClearanceOutcome> {
+    match value {
+        "dismissed" => Some(RepoWatchStaleReviewClearanceOutcome::Dismissed),
+        "already_dismissed" => Some(RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed),
+        "cleared_elsewhere" => Some(RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere),
+        "superseded" => Some(RepoWatchStaleReviewClearanceOutcome::Superseded),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_stale_review_clearance_reason_to_str(
+    value: RepoWatchStaleReviewClearanceReason,
+) -> &'static str {
+    match value {
+        RepoWatchStaleReviewClearanceReason::OnlyStaleReviewBlocks => "only_stale_review_blocks",
+    }
+}
+
+pub(crate) fn repo_watch_stale_review_clearance_reason_from_str(
+    value: &str,
+) -> Option<RepoWatchStaleReviewClearanceReason> {
+    match value {
+        "only_stale_review_blocks" => {
+            Some(RepoWatchStaleReviewClearanceReason::OnlyStaleReviewBlocks)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_observed_review_state_to_str(
+    value: RepoWatchObservedReviewState,
+) -> &'static str {
+    match value {
+        RepoWatchObservedReviewState::Approved => "approved",
+        RepoWatchObservedReviewState::ChangesRequested => "changes_requested",
+        RepoWatchObservedReviewState::Commented => "commented",
+        RepoWatchObservedReviewState::Dismissed => "dismissed",
+        RepoWatchObservedReviewState::Pending => "pending",
+    }
+}
+
+pub fn repo_watch_observed_review_state_from_str(
+    value: &str,
+) -> Option<RepoWatchObservedReviewState> {
+    match value {
+        "approved" => Some(RepoWatchObservedReviewState::Approved),
+        "changes_requested" => Some(RepoWatchObservedReviewState::ChangesRequested),
+        "commented" => Some(RepoWatchObservedReviewState::Commented),
+        "dismissed" => Some(RepoWatchObservedReviewState::Dismissed),
+        "pending" => Some(RepoWatchObservedReviewState::Pending),
         _ => None,
     }
 }
@@ -2599,6 +2949,7 @@ mod tests {
 
     use rust_decimal::Decimal;
     use signalbox_application::{
+        InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind,
         RepoWatchConvergenceVerdict, RepoWatchPullRequestLifecycle, RepoWatchReviewDecision,
         RepoWatchThreadState,
     };
@@ -2607,22 +2958,25 @@ mod tests {
         DelegateApprovalRecommendation, DelegationMessageDirection, DelegationOutcomeKind,
         DelegationOutcomeReason, DelegationTransitionFailure, DelegationWaitMode,
         DescendantTerminationScope, DirectModelSelection, DurableCommandId, FastMode,
-        FastModeOverlay, FastModeSupport, MergeableState, ModelCapabilities, ModelChangeAdjustment,
-        ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier, ReactionChange,
-        ReasoningLevel, RepoWatchEventKindNameV1, ReviewState, RunnerPlacementLossSource,
-        RunnerSandboxProfile, ServiceTier, SessionConfigurationDefaultsVersion,
-        SessionCreationCause, SessionId, SessionInputPosition, SessionPlacementEventKind,
-        SettingOverlay, ToolApprovalPosture, ToolPermissionDefault, TurnId,
+        FastModeOverlay, FastModeSupport, InstructionBundleKind, InstructionDiscoveryRootKind,
+        MergeableState, ModelCapabilities, ModelChangeAdjustment, ModelSettingsOverlay,
+        ModelSettingsPrecedence, OpenAiServiceTier, ReactionChange, ReasoningLevel,
+        RepoWatchEventKindNameV1, ReviewState, RunnerPlacementLossSource, RunnerSandboxProfile,
+        ServiceTier, SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId,
+        SessionInputPosition, SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture,
+        ToolPermissionDefault, TurnId,
     };
     use sqlx::types::Uuid;
 
     use crate::{
         convergence_sweep::{ConvergenceSweepDecision, ConvergenceSweepFailureKind},
         outbox::DispatchedRunnerState,
+        repo_watch::{RepoWatchObservedReviewState, RepoWatchStaleReviewClearanceOutcome},
     };
 
     use super::{
-        ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
+        ActiveTurnPhaseStorageKind, ApprovalJudgeStateStorageKind,
+        ApprovalJudgeTerminalDispositionStorageKind, BlobReadRejectionStorageKind,
         ConvergenceSweepOutcomeStorageKind, ConvergenceSweepStateStorageKind,
         DelegationPolicyStorageKind, DelegationRejectionStorageKind, DelegationUpdateStorageKind,
         DelegationWakeStorageKind, DurableCommandIdMappingError, DurableCommandKind,
@@ -2632,11 +2986,13 @@ mod tests {
         SessionCreationCauseStorageKind, SessionPlacementRejectionStorageKind,
         SessionPlacementResultStorageKind, StoredModelSettingsError,
         ToolApprovalDecisionSourceStorageKind, ToolAttemptDispositionStorageKind,
-        accepted_input_id_from_uuid, accepted_input_id_to_uuid,
+        WorkspaceInstructionAuthorityStorageKind, accepted_input_id_from_uuid,
+        accepted_input_id_to_uuid, active_turn_phase_from_str, active_turn_phase_to_str,
         approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
         approval_judge_state_from_str, approval_judge_state_to_str,
         approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
-        bound_child_action_from_str, bound_child_action_to_str, convergence_sweep_decision_outcome,
+        blob_read_rejection_from_str, blob_read_rejection_to_str, bound_child_action_from_str,
+        bound_child_action_to_str, convergence_sweep_decision_outcome,
         convergence_sweep_failure_from_str, convergence_sweep_failure_outcome,
         convergence_sweep_failure_to_str, convergence_sweep_operator_need_from_str,
         convergence_sweep_operator_need_to_str, convergence_sweep_outcome_from_str,
@@ -2655,6 +3011,9 @@ mod tests {
         durable_command_id_from_uuid, durable_command_id_to_uuid, durable_command_kind_from_str,
         durable_command_kind_to_str, evaluation_corpus_source_from_str,
         evaluation_corpus_source_to_str, input_position_from_numeric, input_position_to_numeric,
+        instruction_bundle_kind_from_str, instruction_bundle_kind_to_str,
+        instruction_finding_kind_from_str, instruction_finding_kind_to_str,
+        instruction_root_kind_from_str, instruction_root_kind_to_str,
         model_change_adjustments_from_json, model_change_adjustments_to_json,
         model_settings_from_json, model_settings_overlay_from_json, model_settings_to_json,
         plan_event_kind_from_str, plan_event_kind_to_str, repo_watch_check_conclusion_from_str,
@@ -2665,11 +3024,13 @@ mod tests {
         repo_watch_event_kind_to_str, repo_watch_lifecycle_cutoff_disposition_from_str,
         repo_watch_lifecycle_cutoff_disposition_to_str, repo_watch_mergeable_state_from_str,
         repo_watch_mergeable_state_to_str, repo_watch_obligation_settlement_from_str,
-        repo_watch_obligation_settlement_to_str, repo_watch_pull_request_lifecycle_from_str,
+        repo_watch_obligation_settlement_to_str, repo_watch_observed_review_state_from_str,
+        repo_watch_observed_review_state_to_str, repo_watch_pull_request_lifecycle_from_str,
         repo_watch_pull_request_lifecycle_to_str, repo_watch_reaction_change_from_str,
         repo_watch_reaction_change_to_str, repo_watch_review_decision_from_str,
         repo_watch_review_decision_to_str, repo_watch_review_state_from_str,
-        repo_watch_review_state_to_str, repo_watch_thread_state_from_str,
+        repo_watch_review_state_to_str, repo_watch_stale_review_clearance_outcome_from_str,
+        repo_watch_stale_review_clearance_outcome_to_str, repo_watch_thread_state_from_str,
         repo_watch_thread_state_to_str, runner_loss_propagation_state_from_str,
         runner_loss_propagation_state_to_str, runner_placement_loss_source_from_str,
         runner_placement_loss_source_to_str, runner_sandbox_from_str, runner_sandbox_to_str,
@@ -2681,8 +3042,188 @@ mod tests {
         tool_approval_posture_from_str, tool_approval_posture_to_str,
         tool_attempt_disposition_from_str, tool_attempt_disposition_to_str,
         tool_permission_default_from_str, tool_permission_default_to_str, turn_id_from_uuid,
-        turn_id_to_uuid,
+        turn_id_to_uuid, workspace_instruction_authority_from_placement_state,
     };
+
+    #[test]
+    fn blob_read_rejection_mapping_is_closed() {
+        assert_eq!(
+            blob_read_rejection_from_str(blob_read_rejection_to_str(
+                BlobReadRejectionStorageKind::TurnByteBudgetExceeded,
+            )),
+            Some(BlobReadRejectionStorageKind::TurnByteBudgetExceeded)
+        );
+        assert_eq!(
+            blob_read_rejection_from_str(blob_read_rejection_to_str(
+                BlobReadRejectionStorageKind::TurnReadCountExceeded,
+            )),
+            Some(BlobReadRejectionStorageKind::TurnReadCountExceeded)
+        );
+        assert_eq!(blob_read_rejection_from_str("blob_not_visible"), None);
+    }
+
+    #[test]
+    fn active_turn_phase_mapping_is_closed() {
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::Running,
+            )),
+            Some(ActiveTurnPhaseStorageKind::Running)
+        );
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::AwaitingToolApproval,
+            )),
+            Some(ActiveTurnPhaseStorageKind::AwaitingToolApproval)
+        );
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::AwaitingChild,
+            )),
+            Some(ActiveTurnPhaseStorageKind::AwaitingChild)
+        );
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::AwaitingModelCallRecovery,
+            )),
+            Some(ActiveTurnPhaseStorageKind::AwaitingModelCallRecovery)
+        );
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::AwaitingToolRecovery,
+            )),
+            Some(ActiveTurnPhaseStorageKind::AwaitingToolRecovery)
+        );
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::AwaitingRunnerRecovery,
+            )),
+            Some(ActiveTurnPhaseStorageKind::AwaitingRunnerRecovery)
+        );
+        assert_eq!(active_turn_phase_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn inv061_workspace_instruction_root_and_bundle_mappings_are_closed() {
+        assert_eq!(
+            instruction_root_kind_to_str(InstructionDiscoveryRootKind::Workspace),
+            "workspace"
+        );
+        assert_eq!(
+            instruction_root_kind_from_str("workspace"),
+            Some(InstructionDiscoveryRootKind::Workspace)
+        );
+        assert_eq!(
+            instruction_root_kind_to_str(InstructionDiscoveryRootKind::Configured),
+            "configured"
+        );
+        assert_eq!(
+            instruction_root_kind_from_str("configured"),
+            Some(InstructionDiscoveryRootKind::Configured)
+        );
+        assert_eq!(instruction_root_kind_from_str("unknown"), None);
+        assert_eq!(
+            instruction_bundle_kind_to_str(InstructionBundleKind::AgentDocument),
+            "agent_document"
+        );
+        assert_eq!(
+            instruction_bundle_kind_from_str("agent_document"),
+            Some(InstructionBundleKind::AgentDocument)
+        );
+        assert_eq!(
+            instruction_bundle_kind_to_str(InstructionBundleKind::AgentSkill),
+            "agent_skill"
+        );
+        assert_eq!(
+            instruction_bundle_kind_from_str("agent_skill"),
+            Some(InstructionBundleKind::AgentSkill)
+        );
+        assert_eq!(instruction_bundle_kind_from_str("unknown"), None);
+    }
+
+    #[track_caller]
+    fn assert_instruction_finding_mapping(
+        finding: InstructionDiscoveryFindingKind,
+        spelling: &str,
+    ) {
+        assert_eq!(instruction_finding_kind_to_str(finding), spelling);
+        assert_eq!(instruction_finding_kind_from_str(spelling), Some(finding));
+    }
+
+    #[test]
+    fn inv061_workspace_instruction_finding_mapping_is_closed() {
+        assert_instruction_finding_mapping(
+            InstructionDiscoveryFindingKind::RootUnavailable,
+            "root_unavailable",
+        );
+        assert_instruction_finding_mapping(
+            InstructionDiscoveryFindingKind::EntryUnreadable,
+            "entry_unreadable",
+        );
+        assert_instruction_finding_mapping(
+            InstructionDiscoveryFindingKind::NonUtf8SourcePath,
+            "non_utf8_source_path",
+        );
+        assert_instruction_finding_mapping(
+            InstructionDiscoveryFindingKind::NonUtf8Source,
+            "non_utf8_source",
+        );
+        assert_instruction_finding_mapping(
+            InstructionDiscoveryFindingKind::InvalidSkill,
+            "invalid_skill",
+        );
+        assert_instruction_finding_mapping(
+            InstructionDiscoveryFindingKind::LimitReached(
+                InstructionDiscoveryLimitKind::ClassifiedEntries,
+            ),
+            "limit_classified_entries",
+        );
+        assert_instruction_finding_mapping(
+            InstructionDiscoveryFindingKind::LimitReached(InstructionDiscoveryLimitKind::Findings),
+            "limit_findings",
+        );
+        assert_instruction_finding_mapping(
+            InstructionDiscoveryFindingKind::LimitReached(
+                InstructionDiscoveryLimitKind::CandidateSourceBytes,
+            ),
+            "limit_candidate_source_bytes",
+        );
+        assert_instruction_finding_mapping(
+            InstructionDiscoveryFindingKind::LimitReached(
+                InstructionDiscoveryLimitKind::ElapsedTime,
+            ),
+            "limit_elapsed_time",
+        );
+        assert_eq!(instruction_finding_kind_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn inv061_workspace_instruction_placement_authority_mapping_is_closed() {
+        assert_eq!(
+            workspace_instruction_authority_from_placement_state("unpinned"),
+            Some(WorkspaceInstructionAuthorityStorageKind::Runner)
+        );
+        assert_eq!(
+            workspace_instruction_authority_from_placement_state("pinned"),
+            Some(WorkspaceInstructionAuthorityStorageKind::Runner)
+        );
+        assert_eq!(
+            workspace_instruction_authority_from_placement_state("runner_lost_before_pin"),
+            Some(WorkspaceInstructionAuthorityStorageKind::Runner)
+        );
+        assert_eq!(
+            workspace_instruction_authority_from_placement_state("runner_lost"),
+            Some(WorkspaceInstructionAuthorityStorageKind::Runner)
+        );
+        assert_eq!(
+            workspace_instruction_authority_from_placement_state("runner_abandoned"),
+            Some(WorkspaceInstructionAuthorityStorageKind::Daemon)
+        );
+        assert_eq!(
+            workspace_instruction_authority_from_placement_state("unknown"),
+            None
+        );
+    }
 
     #[test]
     fn convergence_sweep_state_mapping_is_closed() {
@@ -3285,6 +3826,12 @@ mod tests {
             Some(ToolApprovalDecisionSourceStorageKind::Delegate)
         );
         assert_eq!(
+            tool_approval_decision_source_from_str(tool_approval_decision_source_to_str(
+                ToolApprovalDecisionSourceStorageKind::RuntimeSafety,
+            )),
+            Some(ToolApprovalDecisionSourceStorageKind::RuntimeSafety)
+        );
+        assert_eq!(
             tool_approval_decision_source_from_str(UNKNOWN_DISCRIMINATOR),
             None
         );
@@ -3883,6 +4430,81 @@ mod tests {
             Some(RepoWatchConvergenceVerdict::MergeReady),
         );
         assert_eq!(repo_watch_convergence_verdict_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn repository_watch_review_clearance_outcome_mapping_is_closed() {
+        assert_eq!(
+            repo_watch_stale_review_clearance_outcome_from_str(
+                repo_watch_stale_review_clearance_outcome_to_str(
+                    RepoWatchStaleReviewClearanceOutcome::Dismissed,
+                ),
+            ),
+            Some(RepoWatchStaleReviewClearanceOutcome::Dismissed),
+        );
+        assert_eq!(
+            repo_watch_stale_review_clearance_outcome_from_str(
+                repo_watch_stale_review_clearance_outcome_to_str(
+                    RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed,
+                ),
+            ),
+            Some(RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed),
+        );
+        assert_eq!(
+            repo_watch_stale_review_clearance_outcome_from_str(
+                repo_watch_stale_review_clearance_outcome_to_str(
+                    RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere,
+                ),
+            ),
+            Some(RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere),
+        );
+        assert_eq!(
+            repo_watch_stale_review_clearance_outcome_from_str(
+                repo_watch_stale_review_clearance_outcome_to_str(
+                    RepoWatchStaleReviewClearanceOutcome::Superseded,
+                ),
+            ),
+            Some(RepoWatchStaleReviewClearanceOutcome::Superseded),
+        );
+        assert_eq!(
+            repo_watch_stale_review_clearance_outcome_from_str("unknown"),
+            None
+        );
+    }
+
+    #[test]
+    fn repository_watch_observed_review_state_mapping_is_closed() {
+        assert_eq!(
+            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
+                RepoWatchObservedReviewState::Approved,
+            )),
+            Some(RepoWatchObservedReviewState::Approved),
+        );
+        assert_eq!(
+            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
+                RepoWatchObservedReviewState::ChangesRequested,
+            ),),
+            Some(RepoWatchObservedReviewState::ChangesRequested),
+        );
+        assert_eq!(
+            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
+                RepoWatchObservedReviewState::Commented,
+            )),
+            Some(RepoWatchObservedReviewState::Commented),
+        );
+        assert_eq!(
+            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
+                RepoWatchObservedReviewState::Dismissed,
+            )),
+            Some(RepoWatchObservedReviewState::Dismissed),
+        );
+        assert_eq!(
+            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
+                RepoWatchObservedReviewState::Pending,
+            )),
+            Some(RepoWatchObservedReviewState::Pending),
+        );
+        assert_eq!(repo_watch_observed_review_state_from_str("unknown"), None);
     }
 
     #[test]

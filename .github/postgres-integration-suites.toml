@@ -46,18 +46,24 @@
 name = "persistence"
 package = "signalbox-persistence"
 features = ["postgres-integration"]
-# The long pole by an order of magnitude: 695 of the 1,134 ignored tests these
-# suites hold. Counts are a snapshot, taken with `cargo test --tests --
-# --ignored --list`; they justify the shard count and nothing depends on them
-# staying exact.
+# The long pole by an order of magnitude: 695 of the 1,134 ignored tests at
+# the original measured baseline. Counts are a snapshot, taken with `cargo
+# test --tests -- --ignored --list`; they justify the shard count and nothing
+# depends on them staying exact.
 #
-# Six shards were sized when every test database wrote to the shared scratch
-# disks. With that state in memory and sixteen tests running per shard, a
-# shard ran about 3m45s of which roughly 1m15s was fixed cost — archive
-# download, runner setup, image pull — so three shards spend three fewer pool
-# slots and their repeated fixed costs for the same tests. Not fewer than two,
-# so a failing shard can be re-run without re-running the whole suite.
-shards = 3
+# Two measurements shaped this count, from the two sides of a merge. With
+# every test database writing to the shared scratch disks, this branch's
+# expanded suite blew the workflow's 15-minute job ceiling at six shards, and
+# an eight-shard partition still spent thirteen minutes executing before the
+# fixed cap cancelled it — hence a twelve-way split. Separately, moving
+# database state into memory cut a baseline-suite shard to about 3m45s of
+# which roughly 1m15s was fixed cost — archive download, runner setup, image
+# pull — which recombined the baseline suite to three shards. Post-merge both
+# apply: the suite is larger than the three-shard measurement covered but runs
+# on the in-memory substrate, so six shards keep comfortable headroom under
+# the ceiling without spending twelve pool slots and their repeated fixed
+# costs.
+shards = 6
 skip = []
 exclude_binaries = ["runner_protocol_postgres"]
 

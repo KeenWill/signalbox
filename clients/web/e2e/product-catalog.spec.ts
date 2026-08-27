@@ -4,7 +4,7 @@ import bootstrapFixture from '../src/generated/web-contract-bootstrap.json' with
 const firstSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d'
 const secondSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c7e'
 const currentTurnId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5d80'
-const continuationSummaries = Array.from({ length: 14 }, (_, index) => ({
+const continuationSummaries = Array.from({ length: 30 }, (_, index) => ({
   action: null,
   active_turn_count: '0',
   archived: false,
@@ -95,6 +95,11 @@ const secondPage = {
   ],
   total: '48',
 } as const
+const emptyAttentionPage = {
+  continuation_after_session_id: null,
+  cursor: '0',
+  summaries: [],
+} as const
 
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }
@@ -107,6 +112,50 @@ const watchBrowser = (page: Page) => {
 
 const useCatalogFixture = async (page: Page) => {
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/attention/follow', (route) =>
+    route.fulfill({
+      body: `${JSON.stringify({ kind: 'snapshot', snapshot: emptyAttentionPage })}\n`,
+      contentType: 'application/x-ndjson',
+    }),
+  )
+  await page.route('**/api/attention', (route) => route.fulfill({ json: emptyAttentionPage }))
+  await page.route('**/api/sessions/**', (route) => {
+    const pathname = new URL(route.request().url()).pathname
+    const sessionId = decodeURIComponent(pathname.split('/')[3] ?? '')
+    if (pathname.endsWith('/timeline')) {
+      return route.fulfill({
+        json: {
+          session_id: sessionId,
+          items: [
+            {
+              address: { event_sequence: '41' },
+              kind: 'input_accepted',
+              projected_structured_bytes: 78,
+            },
+          ],
+          projected_structured_bytes: 78,
+          continuation_before: null,
+          continuation_after: null,
+        },
+      })
+    }
+    return route.fulfill({
+      json: {
+        session_id: sessionId,
+        sizes: {
+          item_count: '1',
+          projected_text_bytes: '0',
+          projected_structured_bytes: '78',
+          referenced_blob_count: '0',
+          referenced_blob_bytes: '0',
+        },
+        first_address: { event_sequence: '41' },
+        latest_address: { event_sequence: '41' },
+        work: { active_turn_count: '1', queued_turn_count: '2' },
+        observed_through: '41',
+      },
+    })
+  })
   await page.route('**/api/sessions?**', (route) => {
     const request = new URL(route.request().url())
     const response = request.searchParams.has('after_session_id')
@@ -301,6 +350,20 @@ test('uses the full catalog width until an inspector is selected', async ({ page
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('opens the selected catalog row in the landed timeline workspace', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  await page.goto('/sessions')
+
+  await page.getByRole('button', { name: firstPage.summaries[0].title_summary }).click()
+  await page.getByRole('button', { name: 'Open timeline workspace' }).click()
+
+  await expect.poll(() => new URL(page.url()).searchParams.get('workspace')).toBe('true')
+  await expect(page.getByRole('textbox', { name: 'Exact session ID' })).toHaveValue(firstSessionId)
+  await expect(page.getByText(`Session workspace loaded for ${firstSessionId}.`)).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('replaces history when switching the inspected session', async ({ page }) => {
   const problems = watchBrowser(page)
   await useCatalogFixture(page)
@@ -346,7 +409,7 @@ test('gates catalog reads on a successful bootstrap', async ({ page }) => {
   })
 
   await page.goto('/sessions')
-  await expect(page.getByText('Incompatible daemon contract')).toBeVisible()
+  await expect(page.getByText('Contract rejected')).toBeVisible()
   await expect(
     page.getByText('Sessions are unavailable until the browser contract handshake succeeds.'),
   ).toBeVisible()
@@ -399,7 +462,15 @@ test('focuses a deep-linked mobile inspector after data arrives', async ({ page 
   const inspector = page.getByRole('dialog', { name: firstPage.summaries[0].title_summary })
   await expect(inspector).toHaveAttribute('aria-modal', 'true')
   const close = page.getByRole('button', { name: 'Close session inspector' })
+  const openWorkspace = page.getByRole('button', { name: 'Open timeline workspace' })
   await expect(close).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(openWorkspace).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(close).toBeFocused()
+  await page.keyboard.press('Shift+Tab')
+  await expect(openWorkspace).toBeFocused()
+  await close.focus()
   await close.click()
   await expect(
     page.getByRole('button', { name: firstPage.summaries[0].title_summary }),
@@ -479,7 +550,7 @@ test('captures desktop dark, desktop light, and responsive catalog evidence', as
   await expect(mobileInspector).toBeVisible()
   await expect(mobileInspector).toHaveAttribute('aria-modal', 'true')
   await page.keyboard.press('Tab')
-  await expect(page.getByRole('button', { name: 'Close session inspector' })).toBeFocused()
+  await expect(page.getByRole('button', { name: 'Open timeline workspace' })).toBeFocused()
   await expect(page).toHaveScreenshot('catalog-mobile-light.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

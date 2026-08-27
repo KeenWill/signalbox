@@ -275,6 +275,13 @@ pub trait BlobStore: Send + Sync {
     /// Opens one recorded object as a stream without materializing it.
     fn open<'a>(&'a self, key: &'a BlobObjectKey) -> BlobStoreFuture<'a, OpenedBlob>;
 
+    /// Verifies one exact object generation, then rewinds and returns that generation.
+    fn open_verified<'a>(
+        &'a self,
+        expected: ExpectedBlob,
+        key: &'a BlobObjectKey,
+    ) -> BlobStoreFuture<'a, OpenedBlob>;
+
     /// Re-verifies one exact object generation while retaining one bounded range.
     fn open_range<'a>(
         &'a self,
@@ -292,6 +299,8 @@ pub enum BlobStoreFailureKind {
     NotFound,
     /// Stored or supplied bytes do not match the expected digest and length.
     VerificationFailed,
+    /// Publication may have completed, but exact verification could not decide.
+    PublicationAmbiguous,
     /// Backend I/O failed without proving absence or corruption.
     Unavailable,
 }
@@ -368,6 +377,16 @@ impl BlobStoreError {
     pub const fn unavailable(operation: &'static str) -> Self {
         Self {
             kind: BlobStoreFailureKind::Unavailable,
+            operation,
+            verification: None,
+            source: None,
+        }
+    }
+
+    /// Constructs a failure whose publication effect could not be reconciled.
+    pub const fn publication_ambiguous(operation: &'static str) -> Self {
+        Self {
+            kind: BlobStoreFailureKind::PublicationAmbiguous,
             operation,
             verification: None,
             source: None,

@@ -14,7 +14,7 @@ use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, ConversationRole,
     CredentialReference, DeliveryMode, LossCause, MessagePart, ModelOperation, ModelRuntime,
     Observation, ObservationFact, PreparationFailure, PreparationOutcome, ProviderErrorKind,
-    RequestedTarget, ResolvedTarget, StreamInterruption, StructuredDecodeFailure,
+    REDACTED, RequestedTarget, ResolvedTarget, StreamInterruption, StructuredDecodeFailure,
     StructuredOutputContract, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
     ToolCallsAtLoss, ToolChoice, ToolDefinition, ToolName, decode_structured,
 };
@@ -157,6 +157,9 @@ fn collect_assistant_parts(parts: &[AssistantPart], material: &mut Vec<String>) 
             }
             AssistantPart::RedactedThinking { data } => material.push(data.clone()),
             AssistantPart::ToolCall(proposal) => collect_tool_proposal(proposal, material),
+            AssistantPart::SuppressedToolCall(name) => {
+                material.push(name.as_str().to_string());
+            }
         }
     }
 }
@@ -438,6 +441,7 @@ async fn buffered_completion_is_terminal_only_after_turn_completed() {
     );
     assert_eq!(result.spawns, 1);
     assert!(result.argv.contains("exec\n--json\n--ephemeral"));
+    assert!(result.argv.contains("--output-last-message"));
     assert!(result.argv.contains("--ignore-user-config"));
     assert!(result.argv.contains("--ignore-rules"));
     assert!(result.argv.contains(&disabled_capability_argv()));
@@ -452,6 +456,42 @@ async fn buffered_completion_is_terminal_only_after_turn_completed() {
     assert!(result.argv.contains("--config\nproject_doc_max_bytes=0"));
     assert!(result.argv.contains(RESOLVED_TARGET));
     assert!(result.prompt.contains(scenario));
+}
+
+#[tokio::test]
+async fn completed_turn_recovers_the_clis_independently_retained_final_message() {
+    let result = execute_scenario(
+        "output_last_message_recovery",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert_eq!(
+        completed(&result.evidence).content,
+        vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
+    );
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: a final message recovered from the CLI-owned file still follows
+/// the preceding JSONL redaction state; the second channel cannot bypass a
+/// credential marker retained from an earlier event.
+#[tokio::test]
+async fn inv_035_output_last_message_consults_the_jsonl_redaction_state() {
+    let result = execute_scenario(
+        "output_last_message_split_credential",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = boundary_material(&result);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_STREAM_TOKEN));
+    assert!(diagnostic.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
 }
 
 /// Exact ordered argv fragment generated from the audited production fixture,
@@ -599,6 +639,15 @@ async fn inv_035_buffered_reasoning_marker_suppresses_tool_arguments() {
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
     assert!(diagnostic.contains("[redacted]"));
+    assert_eq!(
+        completed(&result.evidence).content,
+        vec![
+            AssistantPart::Text(REDACTED.to_string()),
+            AssistantPart::SuppressedToolCall(signalbox_model_runtime::ToolName::new(
+                fixtures::TOOL_NAME,
+            )),
+        ]
+    );
     assert_eq!(result.spawns, 1);
 }
 
@@ -1610,13 +1659,13 @@ async fn buffered_tool_call_retains_the_same_verbatim_arguments() {
     );
 }
 
-/// Defect regression (found by the gated compatibility smoke): the envelope
-/// carries each tool call's argument object as JSON text inside a string,
-/// because strict structured output forbids a free-form object member. A
-/// string that does not hold JSON is unintelligible-response boundary loss,
-/// never completion material.
+/// Defect regression: the envelope carries each tool call's provider-supplied
+/// argument text inside a string because strict structured output forbids a
+/// free-form object member. Malformed text remains an authoritative proposal
+/// the provider-independent typed decoders classify, which the tool loop
+/// projects as its `invalid_arguments` result.
 #[tokio::test]
-async fn non_json_string_carried_tool_arguments_are_boundary_loss() {
+async fn non_json_string_carried_tool_arguments_are_preserved() {
     let result = execute_scenario(
         "tool_call_bad_arguments",
         DeliveryMode::Buffered,
@@ -1624,16 +1673,36 @@ async fn non_json_string_carried_tool_arguments_are_boundary_loss() {
         CancellationSignal::never(),
     )
     .await;
+    let completed = completed(&result.evidence);
 
-    assert!(
-        response_unintelligible(&boundary_loss(&result.evidence).cause)
-            .contains("arguments are not valid JSON")
+    assert_eq!(
+        tool_proposal(&completed.content).arguments_json,
+        fixtures::MALFORMED_TOOL_ARGUMENTS
     );
 }
 
-/// The provider nesting bound applies to the argument text carried inside
-/// the envelope string, which the line-level and agent-message-level checks
-/// cannot see because string content does not nest the outer JSON.
+#[tokio::test]
+async fn non_object_string_carried_tool_arguments_are_preserved() {
+    let result = execute_scenario(
+        "tool_call_non_object_arguments",
+        DeliveryMode::Buffered,
+        OperationShape::Tool,
+        CancellationSignal::never(),
+    )
+    .await;
+    let completed = completed(&result.evidence);
+
+    assert_eq!(
+        tool_proposal(&completed.content).arguments_json,
+        fixtures::NON_OBJECT_TOOL_ARGUMENTS
+    );
+}
+
+/// Preservation stops at the shared nesting bound. The bound applies to the
+/// argument text carried inside the envelope string, which the line-level and
+/// agent-message-level checks cannot see because string content does not nest
+/// the outer JSON, and which the shared typed decoders could not decode past
+/// serde_json's recursion boundary.
 #[tokio::test]
 async fn over_deep_string_carried_tool_arguments_are_boundary_loss() {
     let result = execute_scenario(
@@ -2646,8 +2715,9 @@ async fn cancellation_kills_descendants_after_the_group_leader_exits() {
         fake_cli(),
         temporary.path(),
         CredentialReference::new(CREDENTIAL_REFERENCE),
+        None,
     );
-    config.exchange_timeout = Duration::from_secs(5);
+    config.exchange_timeout = Some(Duration::from_secs(5));
     config.interrupt_grace = Duration::from_millis(100);
     let runtime = CodexCliRuntime::new(config).expect("offline runtime configuration is valid");
     let prepared = prepare(
@@ -2719,8 +2789,9 @@ async fn cancellation_grace_cannot_extend_the_exchange_deadline() {
         fake_cli(),
         temporary.path(),
         CredentialReference::new(CREDENTIAL_REFERENCE),
+        None,
     );
-    config.exchange_timeout = Duration::from_secs(5);
+    config.exchange_timeout = Some(Duration::from_secs(5));
     config.interrupt_grace = Duration::from_secs(10);
     let runtime = CodexCliRuntime::new(config).expect("offline runtime configuration is valid");
     let prepared = prepare(
@@ -3375,6 +3446,72 @@ async fn subprocess_environment_is_allowlisted() {
     assert_eq!(result.spawns, 1);
 }
 
+#[tokio::test]
+async fn selected_member_home_reaches_each_spawn_and_changes_with_the_reference() {
+    // Pool rotation reaches the adapter by pinning the successor member's
+    // credential reference on the next operation. Exercise both sides of that
+    // boundary: the same runtime must deliver the pre- and post-rotation homes
+    // from those exact references.
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let first_home = temporary.path().join("synthetic-home-a");
+    let second_home = temporary.path().join("synthetic-home-b");
+    std::fs::create_dir(&first_home).expect("first synthetic home is created");
+    std::fs::create_dir(&second_home).expect("second synthetic home is created");
+    std::fs::write(first_home.join("fixture-marker"), "synthetic")
+        .expect("first synthetic home is nonempty");
+    std::fs::write(second_home.join("fixture-marker"), "synthetic")
+        .expect("second synthetic home is nonempty");
+    let first_reference = CredentialReference::new("codex-a");
+    let second_reference = CredentialReference::new("codex-b");
+    let mut config =
+        CodexCliConfig::new(fake_cli(), temporary.path(), first_reference.clone(), None)
+            .with_credential_homes([
+                (first_reference.clone(), first_home.clone()),
+                (second_reference.clone(), second_home.clone()),
+            ]);
+    config.exchange_timeout = Some(OFFLINE_HARNESS_TIMEOUT);
+    config.interrupt_grace = Duration::from_millis(100);
+    let runtime = CodexCliRuntime::new(config).expect("synthetic homes are admitted");
+    let mut first_operation = operation(
+        "selected_credential_home",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+    );
+    first_operation.credential_reference = first_reference;
+    let first_prepared = prepare(&runtime, first_operation).await;
+    let mut first_observations = Vec::new();
+    runtime
+        .execute(
+            first_prepared,
+            &mut first_observations,
+            CancellationSignal::never(),
+        )
+        .await;
+    let delivered_first =
+        std::fs::read_to_string(temporary.path().join("fake-codex-selected-home"))
+            .expect("first spawn records its synthetic home");
+    assert_eq!(delivered_first, first_home.to_string_lossy());
+    let mut second_operation = operation(
+        "selected_credential_home",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+    );
+    second_operation.credential_reference = second_reference;
+    let second_prepared = prepare(&runtime, second_operation).await;
+    let mut second_observations = Vec::new();
+    runtime
+        .execute(
+            second_prepared,
+            &mut second_observations,
+            CancellationSignal::never(),
+        )
+        .await;
+    let delivered_second =
+        std::fs::read_to_string(temporary.path().join("fake-codex-selected-home"))
+            .expect("second spawn records its synthetic home");
+    assert_eq!(delivered_second, second_home.to_string_lossy());
+}
+
 /// INV-035: credential-shaped CLI text and tool JSON are redacted before
 /// observations or terminal evidence leave the adapter.
 #[tokio::test]
@@ -3718,6 +3855,7 @@ fn relative_executable_is_rejected_at_construction() {
         "codex",
         temporary.path(),
         CredentialReference::new(CREDENTIAL_REFERENCE),
+        None,
     );
 
     let error = CodexCliRuntime::new(config)
@@ -3732,6 +3870,7 @@ fn relative_working_directory_is_rejected_at_construction() {
         fake_cli(),
         ".",
         CredentialReference::new(CREDENTIAL_REFERENCE),
+        None,
     );
 
     let error = CodexCliRuntime::new(config)
@@ -3747,8 +3886,9 @@ fn unrepresentable_exchange_timeout_is_rejected_at_construction() {
         fake_cli(),
         temporary.path(),
         CredentialReference::new(CREDENTIAL_REFERENCE),
+        None,
     );
-    config.exchange_timeout = Duration::MAX;
+    config.exchange_timeout = Some(Duration::MAX);
 
     let error = CodexCliRuntime::new(config)
         .expect_err("execution must never panic while constructing its process deadline");
@@ -3862,8 +4002,9 @@ fn runtime_with_timeout(
         executable,
         working_directory,
         CredentialReference::new(CREDENTIAL_REFERENCE),
+        None,
     );
-    config.exchange_timeout = exchange_timeout;
+    config.exchange_timeout = Some(exchange_timeout);
     config.interrupt_grace = Duration::from_millis(100);
     CodexCliRuntime::new(config).expect("offline runtime configuration is valid")
 }
@@ -4692,7 +4833,8 @@ fn tool_ids(content: &[AssistantPart]) -> Vec<&str> {
             AssistantPart::ToolCall(proposal) => Some(proposal.id.as_str()),
             AssistantPart::Text(_)
             | AssistantPart::Thinking { .. }
-            | AssistantPart::RedactedThinking { .. } => None,
+            | AssistantPart::RedactedThinking { .. }
+            | AssistantPart::SuppressedToolCall(_) => None,
         })
         .collect()
 }

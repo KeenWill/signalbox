@@ -12,10 +12,12 @@ function ScenarioResults({
   query,
   activeId,
   onSelect,
+  disabled = false,
 }: {
   query: string
   activeId: string
   onSelect?: () => void
+  disabled?: boolean
 }) {
   const [debouncedQuery] = useDebouncedValue(query, { wait: SCENARIO_SEARCH_DEBOUNCE_MS })
   const normalized = debouncedQuery.trim().toLowerCase()
@@ -31,7 +33,12 @@ function ScenarioResults({
           params={{ scenarioId: scenario.id }}
           className={activeId === scenario.id ? 'scenario-link active' : 'scenario-link'}
           aria-current={activeId === scenario.id ? 'page' : undefined}
-          onClick={onSelect}
+          aria-disabled={disabled || undefined}
+          tabIndex={disabled ? -1 : undefined}
+          onClick={(event) => {
+            if (disabled) event.preventDefault()
+            else onSelect?.()
+          }}
         >
           <span>{scenario.title}</span>
           <small>{scenario.description}</small>
@@ -44,9 +51,11 @@ function ScenarioResults({
 export function ScenarioNavigation({
   activeId,
   onSelect,
+  disabled = false,
 }: {
   activeId: string
   onSelect?: () => void
+  disabled?: boolean
 }) {
   const form = useForm({ defaultValues: { query: '' } })
   return (
@@ -72,7 +81,14 @@ export function ScenarioNavigation({
         </form>
       </search>
       <form.Subscribe selector={(state) => state.values.query}>
-        {(query) => <ScenarioResults query={query} activeId={activeId} onSelect={onSelect} />}
+        {(query) => (
+          <ScenarioResults
+            query={query}
+            activeId={activeId}
+            onSelect={onSelect}
+            disabled={disabled}
+          />
+        )}
       </form.Subscribe>
     </div>
   )

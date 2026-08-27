@@ -48,6 +48,7 @@ owned by a sibling page is linked, never restated.
 - [Turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md)
 - [Goal mode](goal-mode.md)
 - [Model-call execution](model-call-execution.md)
+- [Usage evidence](usage-evidence.md)
 - [Tool loop](tool-loop.md)
 - [Git authority threat model](git-authority-threat-model.md)
 - [Web egress threat model](web-egress-threat-model.md)
@@ -64,6 +65,7 @@ owned by a sibling page is linked, never restated.
 - [Process protocol](process-protocol.md)
 - [Repository watch and event dispatch](repo-watch.md)
 - [Pull-request convergence reconciliation](convergence-reconciliation.md)
+- [Workspace instructions and skills](workspace-instructions.md)
 - [Program substrate](program-substrate.md)
 - [Evaluation system](eval-system.md)
 

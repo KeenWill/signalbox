@@ -14,11 +14,11 @@ use signalbox_application::{
     RepoWatchBranchHead, RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
     RepoWatchCheckSuiteObservation, RepoWatchConvergenceAssessment,
     RepoWatchConvergenceAssessmentInput, RepoWatchEventContentIdentityV1,
-    RepoWatchEventIdGenerator, RepoWatchEventOccurrenceV1, RepoWatchObservation,
-    RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
-    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewDecision,
-    RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunObservation,
-    derive_repo_watch_events,
+    RepoWatchEventIdGenerator, RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventOccurrenceV1,
+    RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
+    RepoWatchPullRequestStateInput, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
+    RepoWatchReviewDecision, RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadObservation,
+    RepoWatchThreadState, RepoWatchWorkflowRunObservation, derive_repo_watch_events,
 };
 use signalbox_domain::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId, LabelName,
@@ -29,13 +29,16 @@ use signalbox_domain::{
     WorkflowName,
 };
 use signalbox_persistence::{
-    MIGRATOR, disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    MIGRATOR,
+    attention::AutomaticResumeAttemptBounds,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
     repo_watch::{
         PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
         RepoWatchCursorCandidate, RepoWatchCursorGeneration, RepoWatchEventPageSize,
         RepoWatchPersistenceCorruption, RepoWatchStoreError,
     },
+    repo_watch_operations::PostgresRepoWatchOperations,
 };
 use sqlx::{PgPool, migrate::Migrate, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -67,19 +70,30 @@ const CHECK_RUN_NAME: &str = "required";
 const WORKFLOW_NAME: &str = "required checks";
 const REVIEW_THREAD: &str = "review-thread-1";
 const REACTION_CONTENT: &str = "+1";
+const COMPRESSIBLE_CURSOR_PADDING_BYTES: i32 = 128 * 1024;
 // Distinct from the context's `author` and `head_sha` on purpose. Reusing those
 // would let a decoder that read `author` where it should read `review_reviewer`
 // — or `head_sha` where it should read `review_commit` — still satisfy the
 // round trip, so a cross-wired durable column would be invisible here.
 const REVIEW_REVIEWER: &str = "fixture-reviewer";
+const REVIEW_NODE: &str = "PRR_fixture_review_node";
 const REVIEW_COMMIT: &str = "3333333333333333333333333333333333333333";
 const REACTOR: &str = "fixture-reactor";
 const PULL_REQUEST: u64 = 41;
 const CONTENT_IDENTITY_MIGRATION: i64 = 202608150001;
+const FRONTIER_OWNERSHIP_MIGRATION: i64 = 202608250501;
+const MERGED_BASELINE_MIGRATION: i64 = 202608260002;
+const CARRIED_STREAM_IDENTITY: [u8; 32] = [0x99; 32];
+const CARRIED_SEQUENCE: u64 = 7;
 const CHECK_SUITE_ID: u64 = 51;
 const CHECK_RUN_ID: u64 = 52;
 const ISSUE_COMMENT_ID: u64 = 61;
 const REVIEW_COMMENT_ID: u64 = 62;
+/// This operator read turns on the durable pull-request projection, never on
+/// how many automatic resumptions a deployment still owes, so it states the
+/// unbounded automatic-resume budget instead of a number its story never uses.
+const UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS: AutomaticResumeAttemptBounds =
+    AutomaticResumeAttemptBounds::unbounded();
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -87,7 +101,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -104,14 +118,16 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
     Ok((container, pool))
 }
 
-async fn postgres_before_content_identity()
--> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+/// A database migrated up to, but not including, the named migration.
+async fn postgres_before_migration(
+    version: i64,
+) -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
         .with_db_name(DATABASE_NAME)
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -130,7 +146,7 @@ async fn postgres_before_content_identity()
         .await?;
     for migration in MIGRATOR
         .iter()
-        .take_while(|migration| migration.version < CONTENT_IDENTITY_MIGRATION)
+        .take_while(|migration| migration.version < version)
     {
         connection.apply("_sqlx_migrations", migration).await?;
     }
@@ -138,14 +154,15 @@ async fn postgres_before_content_identity()
     Ok((container, pool))
 }
 
-async fn apply_content_identity_migration(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+/// Applies the named migration and every migration after it.
+async fn apply_migrations_from(pool: &PgPool, version: i64) -> Result<(), Box<dyn Error>> {
     let mut connection = pool.acquire().await?;
     connection
         .ensure_migrations_table("_sqlx_migrations")
         .await?;
     for migration in MIGRATOR
         .iter()
-        .filter(|migration| migration.version >= CONTENT_IDENTITY_MIGRATION)
+        .filter(|migration| migration.version >= version)
     {
         connection.apply("_sqlx_migrations", migration).await?;
     }
@@ -196,6 +213,14 @@ fn pull_request_with_threads(
     head: &str,
     threads: Vec<RepoWatchThreadObservation>,
 ) -> Result<RepoWatchPullRequestState, Box<dyn Error>> {
+    pull_request_state(head, threads, MergeableState::Mergeable)
+}
+
+fn pull_request_state(
+    head: &str,
+    threads: Vec<RepoWatchThreadObservation>,
+    mergeable_state: MergeableState,
+) -> Result<RepoWatchPullRequestState, Box<dyn Error>> {
     Ok(RepoWatchPullRequestState::try_new(
         RepoWatchPullRequestStateInput {
             context: PullRequestEventContext::new(PullRequestEventContextInput {
@@ -211,7 +236,7 @@ fn pull_request_with_threads(
                 author: Some(RepoWatchAuthorLogin::try_new(AUTHOR.to_owned())?),
             }),
             lifecycle: RepoWatchPullRequestLifecycle::Open,
-            mergeable_state: MergeableState::Mergeable,
+            mergeable_state,
             completed_check_suites: vec![RepoWatchCheckSuiteObservation::new(
                 GitHubObjectId::new(CHECK_SUITE_ID.try_into()?),
                 RepoWatchCheckCompletionGeneration::try_new(String::from(
@@ -273,6 +298,129 @@ fn merge_ready_assessment(
             review_decision: RepoWatchReviewDecision::None,
             unresolved_threads: Vec::new(),
             gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        },
+    )?)
+}
+
+/// The same stale-review evidence with the gating check the candidate rule
+/// requires, so the head's only remaining blocker really is the review.
+fn clearable_stale_review_assessment(
+    head: &str,
+    base_revision: &str,
+) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+    Ok(RepoWatchConvergenceAssessment::try_new(
+        RepoWatchConvergenceAssessmentInput {
+            number: PullRequestNumber::new(PULL_REQUEST.try_into()?),
+            head_sha: CommitSha::try_new(head.to_owned())?,
+            base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+            base_revision: CommitSha::try_new(base_revision.to_owned())?,
+            mergeable_state: MergeableState::Mergeable,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        },
+    )?)
+}
+
+fn stale_review_clearance_candidate(
+    assessment: &RepoWatchConvergenceAssessment,
+) -> Result<RepoWatchStaleReviewClearanceCandidate, Box<dyn Error>> {
+    Ok(RepoWatchStaleReviewClearanceCandidate::try_new(
+        assessment,
+        String::from(REVIEW_NODE),
+        RepoWatchAuthorLogin::try_new(REVIEW_REVIEWER.to_owned())?,
+        CommitSha::try_new(REVIEW_COMMIT.to_owned())?,
+    )?)
+}
+
+/// The same stale-review evidence for a head that has not finished registering
+/// and completing its exact-head checks, so its empty non-green list is the
+/// absence of evidence rather than evidence of a green head.
+fn unsettled_stale_review_assessment(
+    head: &str,
+    base_revision: &str,
+) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+    Ok(RepoWatchConvergenceAssessment::try_new(
+        RepoWatchConvergenceAssessmentInput {
+            number: PullRequestNumber::new(PULL_REQUEST.try_into()?),
+            head_sha: CommitSha::try_new(head.to_owned())?,
+            base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+            base_revision: CommitSha::try_new(base_revision.to_owned())?,
+            mergeable_state: MergeableState::Mergeable,
+            settled: false,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        },
+    )?)
+}
+
+/// The same stale-review evidence recorded while GitHub had not decided the
+/// head's mergeability. `unknown` is that pending state, never affirmative
+/// evidence that the head merges.
+fn undecided_mergeability_stale_review_assessment(
+    head: &str,
+    base_revision: &str,
+) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+    Ok(RepoWatchConvergenceAssessment::try_new(
+        RepoWatchConvergenceAssessmentInput {
+            number: PullRequestNumber::new(PULL_REQUEST.try_into()?),
+            head_sha: CommitSha::try_new(head.to_owned())?,
+            base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+            base_revision: CommitSha::try_new(base_revision.to_owned())?,
+            mergeable_state: MergeableState::Unknown,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        },
+    )?)
+}
+
+/// The cursor an assessment carrying `unknown` mergeability is recorded
+/// against: recorded evidence must restate the observed mergeable state.
+fn undecided_mergeability_candidate(
+    head: &str,
+) -> Result<RepoWatchCursorCandidate, Box<dyn Error>> {
+    Ok(RepoWatchCursorCandidate::new(RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: vec![pull_request_state(
+                head,
+                Vec::new(),
+                MergeableState::Unknown,
+            )?],
+            workflow_runs: Vec::new(),
+            branch_heads: vec![RepoWatchBranchHead::new(
+                BranchName::try_new(BASE_BRANCH.to_owned())?,
+                CommitSha::try_new(BASE_REVISION.to_owned())?,
+            )],
+        })?,
+    )))
+}
+
+/// Stale-review evidence for a head that ran no gating check at all. Its empty
+/// non-green list is indistinguishable from a fully green head's.
+fn stale_review_assessment(
+    head: &str,
+    base_revision: &str,
+) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+    Ok(RepoWatchConvergenceAssessment::try_new(
+        RepoWatchConvergenceAssessmentInput {
+            number: PullRequestNumber::new(PULL_REQUEST.try_into()?),
+            head_sha: CommitSha::try_new(head.to_owned())?,
+            base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+            base_revision: CommitSha::try_new(base_revision.to_owned())?,
+            mergeable_state: MergeableState::Mergeable,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 0,
             non_green_gating_checks: Vec::new(),
         },
     )?)
@@ -454,6 +602,108 @@ async fn cursor_round_trip_retains_check_completion_generations() -> Result<(), 
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn cursor_payload_size_reports_the_latest_stored_document() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+
+    let absent = store.load_cursor_payload_bytes(&repository).await?;
+    store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(None, candidate(Some(INITIAL_HEAD))?, Vec::new()),
+        )
+        .await?;
+    let mut connection = pool.acquire().await?;
+    sqlx::query("SET session_replication_role = replica")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query(
+        "UPDATE repo_watch_cursor
+            SET cursor_payload = cursor_payload ||
+                jsonb_build_object('sizing_fixture', repeat('x', $2))
+          WHERE repository = $1",
+    )
+    .bind(repository.as_str())
+    .bind(COMPRESSIBLE_CURSOR_PADDING_BYTES)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query("SET session_replication_role = origin")
+        .execute(&mut *connection)
+        .await?;
+    let reported = store.load_cursor_payload_bytes(&repository).await?;
+    let logical: i64 = sqlx::query_scalar(
+        "SELECT octet_length(cursor_payload::text)::bigint
+           FROM repo_watch_cursor
+          WHERE repository = $1",
+    )
+    .bind(repository.as_str())
+    .fetch_one(&pool)
+    .await?;
+    let compressed: i64 = sqlx::query_scalar(
+        "SELECT pg_column_size(cursor_payload)::bigint
+           FROM repo_watch_cursor
+          WHERE repository = $1",
+    )
+    .bind(repository.as_str())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(absent, None);
+    assert_eq!(reported, Some(u64::try_from(logical)?));
+    assert!(compressed < logical);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn pull_request_pages_read_the_current_projection_without_decoding_the_cursor()
+-> Result<(), Box<dyn Error>> {
+    let fixture = committed_fixture().await?;
+    let mut connection = fixture.pool.acquire().await?;
+    sqlx::query("SET session_replication_role = replica")
+        .execute(&mut *connection)
+        .await?;
+    // The payload keeps only its storage version, which no decode accepts as a
+    // cursor. Copying that version from the column rather than naming a literal
+    // keeps the row inside the table's payload/column agreement check, so the
+    // corruption stays undecodable across a storage-version bump instead of
+    // failing the write the next bump lands.
+    sqlx::query(
+        "UPDATE repo_watch_cursor
+            SET cursor_payload = jsonb_build_object('storage_version', storage_version)
+          WHERE repository = $1 AND generation = $2",
+    )
+    .bind(fixture.repository.as_str())
+    .bind(i64::try_from(fixture.second_generation.get())?)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query("SET session_replication_role = origin")
+        .execute(&mut *connection)
+        .await?;
+    drop(connection);
+
+    let page =
+        PostgresRepoWatchOperations::new(fixture.pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS)
+            .pull_requests(fixture.repository.clone(), None)
+            .await?;
+
+    assert_eq!(page.pull_requests.len(), 1);
+    assert_eq!(
+        page.pull_requests[0].number,
+        fixture
+            .second_candidate
+            .observation()
+            .state()
+            .pull_requests()[0]
+            .context()
+            .number()
+    );
+    Ok(())
+}
+
 /// The durable identity columns the content-identity migrations write.
 #[derive(sqlx::FromRow)]
 struct MigratedEventIdentityRow {
@@ -466,10 +716,10 @@ struct MigratedEventIdentityRow {
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn content_identity_migration_carries_existing_cursor_and_event_to_version_one()
 -> Result<(), Box<dyn Error>> {
-    let (_container, pool) = postgres_before_content_identity().await?;
+    let (_container, pool) = postgres_before_migration(CONTENT_IDENTITY_MIGRATION).await?;
     let event = seed_legacy_repo_watch_event(&pool).await?;
 
-    apply_content_identity_migration(&pool).await?;
+    apply_migrations_from(&pool, CONTENT_IDENTITY_MIGRATION).await?;
 
     let cursor_version: i16 =
         sqlx::query_scalar("SELECT storage_version FROM repo_watch_cursor WHERE repository = $1")
@@ -502,7 +752,10 @@ async fn content_identity_migration_carries_existing_cursor_and_event_to_version
         .await?
         .expect("migrated event remains readable");
 
-    assert_eq!(cursor_version, 2);
+    // Applying the content-identity migration applies every later migration
+    // with it, so the version this observes is the current storage version and
+    // not the two that migration introduced.
+    assert_eq!(cursor_version, 4);
     assert_eq!(frontier, serde_json::json!([]));
     assert_eq!(event_identity.content_identity_version, 1);
     assert_eq!(event_identity.content_identity.len(), 32);
@@ -516,6 +769,181 @@ async fn content_identity_migration_carries_existing_cursor_and_event_to_version
         0
     );
     assert_eq!(loaded_event.id(), RepoWatchEventId::from_uuid(event));
+    Ok(())
+}
+
+/// Seeds one storage-version-two cursor whose frontier already counts a
+/// recurring stream, which is the state the ownership migration has to carry.
+async fn seed_version_two_cursor_with_a_counted_stream(
+    pool: &PgPool,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query(
+        "INSERT INTO repo_watch_cursor (
+            repository, generation, storage_version, cursor_payload
+         ) VALUES ($1, 1, 2, $2)",
+    )
+    .bind(REPOSITORY)
+    .bind(sqlx::types::Json(serde_json::json!({
+        "storage_version": 2,
+        "signal_reviewers": [],
+        "event_identity_frontier": [{
+            "stream_identity": CARRIED_STREAM_IDENTITY,
+            "sequence": CARRIED_SEQUENCE
+        }],
+        "state": {
+            "pull_requests": [],
+            "workflow_runs": [],
+            "branch_heads": []
+        }
+    })))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// The ownership migration adds a member; it must not restart a counter.
+///
+/// A frontier reset would hand the next occurrence on this stream sequence one,
+/// whose content identity a durable row from the stream's first occurrence
+/// already holds — and a commit coalesces an occurrence whose content identity
+/// is already durable under the same content, so that event and every dispatch
+/// it would have caused would be dropped without a trace.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn frontier_ownership_migration_keeps_every_occurrence_sequence() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = postgres_before_migration(FRONTIER_OWNERSHIP_MIGRATION).await?;
+    seed_version_two_cursor_with_a_counted_stream(&pool).await?;
+
+    apply_migrations_from(&pool, FRONTIER_OWNERSHIP_MIGRATION).await?;
+
+    let cursor_version: i16 =
+        sqlx::query_scalar("SELECT storage_version FROM repo_watch_cursor WHERE repository = $1")
+            .bind(REPOSITORY)
+            .fetch_one(&pool)
+            .await?;
+    let frontier: serde_json::Value = sqlx::query_scalar(
+        "SELECT cursor_payload -> 'event_identity_frontier'
+           FROM repo_watch_cursor
+          WHERE repository = $1",
+    )
+    .bind(REPOSITORY)
+    .fetch_one(&pool)
+    .await?;
+    let store = PostgresRepoWatchStore::new(pool);
+    let loaded_cursor = store
+        .load_cursor(&repository()?)
+        .await?
+        .expect("migrated cursor remains readable");
+    let carried = loaded_cursor
+        .candidate()
+        .event_identity_frontier()
+        .entries()
+        .collect::<Vec<_>>();
+
+    assert_eq!(cursor_version, 4);
+    assert_eq!(
+        frontier,
+        serde_json::json!([{
+            "stream_identity": CARRIED_STREAM_IDENTITY,
+            "sequence": CARRIED_SEQUENCE,
+            "pull_request_number": null
+        }])
+    );
+    assert_eq!(
+        carried,
+        vec![RepoWatchEventIdentityFrontierEntryV1::new(
+            CARRIED_STREAM_IDENTITY,
+            NonZeroU64::new(CARRIED_SEQUENCE).expect("fixture sequence is positive"),
+        )]
+    );
+    Ok(())
+}
+
+async fn seed_version_three_cursor_with_merged_pull_request(
+    pool: &PgPool,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query(
+        "INSERT INTO repo_watch_cursor (
+            repository, generation, storage_version, cursor_payload
+         ) VALUES ($1, 1, 3, $2)",
+    )
+    .bind(REPOSITORY)
+    .bind(sqlx::types::Json(serde_json::json!({
+        "storage_version": 3,
+        "signal_reviewers": [],
+        "event_identity_frontier": [],
+        "state": {
+            "pull_requests": [{
+                "number": PULL_REQUEST,
+                "head_sha": INITIAL_HEAD,
+                "head_repository": HEAD_REPOSITORY,
+                "base_branch": BASE_BRANCH,
+                "head_branch": HEAD_BRANCH,
+                "title": TITLE,
+                "body": BODY,
+                "labels": [],
+                "draft": false,
+                "author": AUTHOR,
+                "lifecycle": "merged",
+                "mergeable_state": "mergeable",
+                "completed_check_suites": [],
+                "completed_check_runs": [],
+                "reviews": [],
+                "threads": [],
+                "reactions": []
+            }],
+            "workflow_runs": [],
+            "branch_heads": []
+        }
+    })))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn merged_baseline_migration_preserves_full_prior_state_until_runtime_compaction()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = postgres_before_migration(MERGED_BASELINE_MIGRATION).await?;
+    seed_version_three_cursor_with_merged_pull_request(&pool).await?;
+
+    apply_migrations_from(&pool, MERGED_BASELINE_MIGRATION).await?;
+
+    let stored: (i16, serde_json::Value, serde_json::Value) = sqlx::query_as(
+        "SELECT storage_version,
+                cursor_payload -> 'merged_pull_request_baselines',
+                cursor_payload -> 'state' -> 'pull_requests'
+           FROM repo_watch_cursor
+          WHERE repository = $1",
+    )
+    .bind(REPOSITORY)
+    .fetch_one(&pool)
+    .await?;
+    let loaded = PostgresRepoWatchStore::new(pool)
+        .load_cursor(&repository()?)
+        .await?
+        .expect("migrated cursor remains readable");
+
+    assert_eq!(stored.0, 4);
+    assert_eq!(stored.1, serde_json::json!([]));
+    assert_eq!(stored.2.as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        loaded
+            .candidate()
+            .observation()
+            .state()
+            .pull_requests()
+            .len(),
+        1
+    );
+    assert!(
+        loaded
+            .candidate()
+            .merged_pull_request_baselines()
+            .is_empty()
+    );
     Ok(())
 }
 
@@ -936,8 +1364,8 @@ async fn evidence_replay_after_a_head_round_trip_uses_the_candidate_head()
             .fetch_one(&pool)
             .await?;
 
-    assert_eq!(assessment_count, 2);
-    assert_eq!(first_head_assessment_count, 1);
+    assert_eq!(assessment_count, 3);
+    assert_eq!(first_head_assessment_count, 2);
     assert_eq!(current_head, INITIAL_HEAD);
     assert_eq!(identity_count, 3);
     Ok(())
@@ -1024,8 +1452,8 @@ async fn evidence_replay_after_a_base_round_trip_uses_the_candidate_base()
             .fetch_one(&pool)
             .await?;
 
-    assert_eq!(assessment_count, 2);
-    assert_eq!(first_base_assessment_count, 1);
+    assert_eq!(assessment_count, 3);
+    assert_eq!(first_base_assessment_count, 2);
     assert_eq!(current_base, BASE_REVISION);
     assert_eq!(identity_count, 3);
     Ok(())
@@ -1252,6 +1680,272 @@ async fn append_only_guards_reject_update_delete_and_truncate() -> Result<(), Bo
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn inv073_stale_review_clearance_journals_are_append_only() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    store
+        .commit_with_convergence(
+            &repository,
+            RepoWatchCommitRequest::new(None, candidate(Some(INITIAL_HEAD))?, Vec::new()),
+            &[stale_review_assessment(INITIAL_HEAD, BASE_REVISION)?],
+        )
+        .await?;
+    let assessment_id: Uuid = sqlx::query_scalar(
+        "SELECT assessment_id
+           FROM repo_watch_pull_request_convergence_assessment
+          WHERE repository = $1 AND head_sha = $2",
+    )
+    .bind(repository.as_str())
+    .bind(INITIAL_HEAD)
+    .fetch_one(&pool)
+    .await?;
+    let clearance_id = Uuid::from_u128(0x70_001);
+    sqlx::query(
+        "INSERT INTO repo_watch_stale_review_clearance
+            (clearance_id, assessment_id, repository, pull_request_number,
+             current_head_sha, base_revision, review_node_id, reviewer,
+             reviewed_head_sha, dismissal_message)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+    )
+    .bind(clearance_id)
+    .bind(assessment_id)
+    .bind(repository.as_str())
+    .bind(i64::try_from(PULL_REQUEST)?)
+    .bind(INITIAL_HEAD)
+    .bind(BASE_REVISION)
+    .bind("review-node-70")
+    .bind(REVIEW_REVIEWER)
+    .bind(REVIEW_COMMIT)
+    .bind("fixture stale-review dismissal")
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_stale_review_clearance_result
+            (clearance_id, outcome_kind, provider_review_state)
+         VALUES ($1, 'dismissed', 'dismissed')",
+    )
+    .bind(clearance_id)
+    .execute(&pool)
+    .await?;
+
+    let intent_update = sqlx::query(
+        "UPDATE repo_watch_stale_review_clearance SET reviewer = $1 WHERE clearance_id = $2",
+    )
+    .bind(AUTHOR)
+    .bind(clearance_id)
+    .execute(&pool)
+    .await;
+    let intent_delete =
+        sqlx::query("DELETE FROM repo_watch_stale_review_clearance WHERE clearance_id = $1")
+            .bind(clearance_id)
+            .execute(&pool)
+            .await;
+    let intent_truncate = sqlx::query("TRUNCATE repo_watch_stale_review_clearance CASCADE")
+        .execute(&pool)
+        .await;
+    let result_update = sqlx::query(
+        "UPDATE repo_watch_stale_review_clearance_result SET observed_at = clock_timestamp() WHERE clearance_id = $1",
+    )
+    .bind(clearance_id)
+    .execute(&pool)
+    .await;
+    let result_delete =
+        sqlx::query("DELETE FROM repo_watch_stale_review_clearance_result WHERE clearance_id = $1")
+            .bind(clearance_id)
+            .execute(&pool)
+            .await;
+    let result_truncate = sqlx::query("TRUNCATE repo_watch_stale_review_clearance_result CASCADE")
+        .execute(&pool)
+        .await;
+
+    assert!(intent_update.is_err());
+    assert!(intent_delete.is_err());
+    assert!(intent_truncate.is_err());
+    assert!(result_update.is_err());
+    assert!(result_delete.is_err());
+    assert!(result_truncate.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_stale_review_clearance_plans_against_its_recorded_assessment()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let assessment = clearable_stale_review_assessment(INITIAL_HEAD, BASE_REVISION)?;
+    let generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(None, candidate(Some(INITIAL_HEAD))?, Vec::new()),
+                std::slice::from_ref(&assessment),
+            )
+            .await?,
+    );
+
+    let planned = store
+        .plan_stale_review_clearances(
+            &repository,
+            generation,
+            &[stale_review_clearance_candidate(&assessment)?],
+        )
+        .await?;
+
+    assert_eq!(planned.len(), 1);
+    assert_eq!(planned[0].review_node_id(), REVIEW_NODE);
+    assert_eq!(planned[0].reviewer().as_str(), REVIEW_REVIEWER);
+    assert_eq!(planned[0].reviewed_head_sha().as_str(), REVIEW_COMMIT);
+    assert_eq!(planned[0].current_head_sha().as_str(), INITIAL_HEAD);
+    assert_eq!(planned[0].base_revision().as_str(), BASE_REVISION);
+    Ok(())
+}
+
+/// The durable gate reads the recorded assessment, not the candidate's own
+/// evidence, so it refuses a head whose committed convergence row counted no
+/// gating check even when the in-memory candidate was admissible. Without that
+/// term the daemon would dismiss a blocking review on a pull request whose only
+/// gate was the review itself.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_recorded_assessment_without_a_gating_check_plans_no_clearance()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(None, candidate(Some(INITIAL_HEAD))?, Vec::new()),
+                &[stale_review_assessment(INITIAL_HEAD, BASE_REVISION)?],
+            )
+            .await?,
+    );
+    let candidate = stale_review_clearance_candidate(&clearable_stale_review_assessment(
+        INITIAL_HEAD,
+        BASE_REVISION,
+    )?)?;
+
+    let planned = store
+        .plan_stale_review_clearances(&repository, generation, &[candidate])
+        .await;
+
+    assert!(matches!(
+        planned,
+        Err(RepoWatchStoreError::StaleReviewClearanceMismatch)
+    ));
+    let intents: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_stale_review_clearance")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(intents, 0);
+    Ok(())
+}
+
+/// Another watcher can append a newer assessment for the unchanged cursor while
+/// this watcher reconciles the candidate it raised, and the durable gate reads
+/// that newest row. An unsettled head has not finished registering and
+/// completing its exact-head checks, so planning against it would link a
+/// dismissal intent claiming `only_stale_review_blocks` to evidence recording a
+/// second blocker.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_unsettled_newer_assessment_plans_no_clearance() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let assessment = clearable_stale_review_assessment(INITIAL_HEAD, BASE_REVISION)?;
+    let generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(None, candidate(Some(INITIAL_HEAD))?, Vec::new()),
+                std::slice::from_ref(&assessment),
+            )
+            .await?,
+    );
+    store
+        .record_convergence_assessments(
+            &repository,
+            generation,
+            &[unsettled_stale_review_assessment(
+                INITIAL_HEAD,
+                BASE_REVISION,
+            )?],
+        )
+        .await?;
+
+    let planned = store
+        .plan_stale_review_clearances(
+            &repository,
+            generation,
+            &[stale_review_clearance_candidate(&assessment)?],
+        )
+        .await;
+
+    assert!(matches!(
+        planned,
+        Err(RepoWatchStoreError::StaleReviewClearanceMismatch)
+    ));
+    let intents: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_stale_review_clearance")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(intents, 0);
+    Ok(())
+}
+
+/// The durable gate proves mergeability against the recorded row rather than
+/// inferring it from the settlement recorded beside it, so evidence GitHub had
+/// not decided plans nothing even when its writer called the head settled.
+/// `unknown` is that pending state, and dismissing against it would claim the
+/// review was the head's only blocker while the recorded evidence names
+/// mergeability as another.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_undecided_mergeability_assessment_plans_no_clearance() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    None,
+                    undecided_mergeability_candidate(INITIAL_HEAD)?,
+                    Vec::new(),
+                ),
+                &[undecided_mergeability_stale_review_assessment(
+                    INITIAL_HEAD,
+                    BASE_REVISION,
+                )?],
+            )
+            .await?,
+    );
+    let candidate = stale_review_clearance_candidate(&clearable_stale_review_assessment(
+        INITIAL_HEAD,
+        BASE_REVISION,
+    )?)?;
+
+    let planned = store
+        .plan_stale_review_clearances(&repository, generation, &[candidate])
+        .await;
+
+    assert!(matches!(
+        planned,
+        Err(RepoWatchStoreError::StaleReviewClearanceMismatch)
+    ));
+    let intents: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_stale_review_clearance")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(intents, 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn malformed_cursor_document_fails_closed_on_read() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let repository = repository()?;
@@ -1267,7 +1961,7 @@ async fn malformed_cursor_document_fails_closed_on_read() -> Result<(), Box<dyn 
         .execute(&mut *corruption_connection)
         .await?;
     sqlx::query(
-        "UPDATE repo_watch_cursor SET cursor_payload = '{\"storage_version\":2}'::jsonb WHERE repository = $1",
+        "UPDATE repo_watch_cursor SET cursor_payload = '{\"storage_version\":4}'::jsonb WHERE repository = $1",
     )
     .bind(repository.as_str())
     .execute(&mut *corruption_connection)

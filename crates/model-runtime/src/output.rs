@@ -86,9 +86,9 @@ impl<T> DomainValidator<T> for NoDomainConstraints {
 /// Why response material did not decode into the contracted type.
 ///
 /// The classes stay distinct so the caller can react differently to a
-/// response with no structured value, more than one, malformed JSON,
-/// well-formed JSON of the wrong shape, and a well-shaped value its domain
-/// rejects.
+/// response with no structured value, more than one, one whose arguments the
+/// credential boundary suppressed, malformed JSON, well-formed JSON of the
+/// wrong shape, and a well-shaped value its domain rejects.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StructuredDecodeFailure<I> {
     /// The response carries no proposal for the contract.
@@ -97,9 +97,14 @@ pub enum StructuredDecodeFailure<I> {
     /// promises exactly one value; picking one silently would let provider
     /// part ordering choose the result.
     MultipleStructuredValues {
-        /// How many proposals carried the contract's name.
+        /// How many proposals carried the contract's name, counting one whose
+        /// arguments the credential boundary suppressed.
         count: usize,
     },
+    /// The response carries exactly one proposal for the contract and the CLI
+    /// credential boundary suppressed its whole argument object, so no value
+    /// survives to decode.
+    SuppressedStructuredValue,
     /// The proposed value is not syntactically valid JSON.
     JsonSyntax {
         /// The parser's rendered description.
@@ -124,6 +129,12 @@ pub enum StructuredDecodeFailure<I> {
 /// present — then decodes and validates it via [`decode_structured_json`].
 /// [`crate::ModelOperation::validate`] reserves the contract name from
 /// ordinary declared tools before an adapter crosses the request boundary.
+///
+/// A contract-named [`AssistantPart::SuppressedToolCall`] is a proposal for
+/// the contract whose arguments the CLI credential boundary withheld. It
+/// counts toward the exactly-one multiplicity guard exactly as an admitted
+/// proposal does, so a second contract-named proposal cannot let the first be
+/// accepted silently, and alone it decodes to no value.
 pub fn decode_structured<T, V>(
     content: &[AssistantPart],
     contract: &StructuredOutputContract,
@@ -134,7 +145,8 @@ where
     V: DomainValidator<T>,
 {
     let mut matching = content.iter().filter_map(|part| match part {
-        AssistantPart::ToolCall(proposal) if proposal.name == contract.name => Some(proposal),
+        AssistantPart::ToolCall(proposal) if proposal.name == contract.name => Some(Some(proposal)),
+        AssistantPart::SuppressedToolCall(name) if *name == contract.name => Some(None),
         _ => None,
     });
     let Some(first) = matching.next() else {
@@ -144,6 +156,9 @@ where
     if extras > 0 {
         return Err(StructuredDecodeFailure::MultipleStructuredValues { count: extras + 1 });
     }
+    let Some(first) = first else {
+        return Err(StructuredDecodeFailure::SuppressedStructuredValue);
+    };
     decode_structured_json(&first.arguments_json, validator)
 }
 
@@ -224,6 +239,10 @@ mod tests {
         })
     }
 
+    fn suppressed_verdict_proposal() -> AssistantPart {
+        AssistantPart::SuppressedToolCall(ToolName::new("verdict"))
+    }
+
     #[test]
     fn generated_contract_schema_serializes_as_raw_json() {
         let contract = contract();
@@ -276,6 +295,44 @@ mod tests {
             failure,
             StructuredDecodeFailure::MultipleStructuredValues { count: 2 }
         );
+    }
+
+    #[test]
+    fn a_suppressed_second_contract_proposal_is_an_explicit_multiplicity_failure() {
+        let content = [
+            verdict_proposal(r#"{"approved":true,"score":7}"#),
+            suppressed_verdict_proposal(),
+        ];
+
+        let failure = decode_structured::<Verdict, _>(&content, &contract(), &NonNegativeScore)
+            .expect_err("a credential-suppressed sibling proposal must not become invisible");
+
+        assert_eq!(
+            failure,
+            StructuredDecodeFailure::MultipleStructuredValues { count: 2 }
+        );
+    }
+
+    #[test]
+    fn a_lone_suppressed_contract_proposal_carries_no_decodable_value() {
+        let content = [suppressed_verdict_proposal()];
+
+        let failure = decode_structured::<Verdict, _>(&content, &contract(), &NonNegativeScore)
+            .expect_err("a suppressed argument object leaves nothing to decode");
+
+        assert_eq!(failure, StructuredDecodeFailure::SuppressedStructuredValue);
+    }
+
+    #[test]
+    fn suppressed_proposal_under_another_name_is_no_structured_value() {
+        let content = [AssistantPart::SuppressedToolCall(ToolName::new(
+            "other_tool",
+        ))];
+
+        let failure = decode_structured::<Verdict, _>(&content, &contract(), &NonNegativeScore)
+            .expect_err("a suppressed proposal under another name is not the contracted value");
+
+        assert_eq!(failure, StructuredDecodeFailure::NoStructuredValue);
     }
 
     #[test]

@@ -1,24 +1,35 @@
 import { configureStore, createSlice, type Middleware } from '@reduxjs/toolkit'
 import { useDispatch, useSelector } from 'react-redux'
+import type { AttentionSyncPhase } from './attention'
 import {
   type BrowserPreferences,
+  createDefaultBrowserPreferences,
   isBoundedLogicalPosition,
   loadBrowserPreferences,
   MAX_SAVED_LOGICAL_POSITIONS,
-  type RemoteMediaPolicy,
   saveBrowserPreferences,
   serializeBrowserPreferences,
 } from './preferences'
+import type { RepoWatchHeldCursor, RepoWatchObligationCursor } from './product'
 
 export type LayoutMode = 'focus' | 'workbench'
 export type DensityMode = 'compact' | 'comfortable'
 export type DetailMode = 'full' | 'condensed' | 'results'
 export type ThemeMode = 'light' | 'dark'
 export type Overlay = 'palette' | 'help' | 'navigation' | null
+export type ArtifactOriginalState = 'loading' | 'loaded' | 'failed'
 
 export interface VisibleRange {
   start: number
   end: number
+}
+
+export interface ActivityControls {
+  repositoryAfter: string | null
+  repository: string | null
+  pullRequestAfter: string | null
+  heldAfter?: RepoWatchHeldCursor
+  obligationAfter?: RepoWatchObligationCursor
 }
 
 interface AppState extends BrowserPreferences {
@@ -27,19 +38,33 @@ interface AppState extends BrowserPreferences {
   detail: DetailMode
   theme: ThemeMode
   overlay: Overlay
+  attentionSync: AttentionSyncPhase
   selectedTimeline: string | null
+  selectedArtifact: string | null
+  expandedArtifacts: Record<string, boolean>
+  originalArtifacts: Record<string, ArtifactOriginalState>
   transcriptRange: VisibleRange
   tableRange: VisibleRange
   activitySequence: number
+  activityControls: ActivityControls
 }
 
 const initialState: AppState = {
   ...loadBrowserPreferences(),
   overlay: null,
+  attentionSync: 'idle',
   selectedTimeline: null,
+  selectedArtifact: null,
+  expandedArtifacts: {},
+  originalArtifacts: {},
   transcriptRange: { start: 0, end: 0 },
   tableRange: { start: 0, end: 0 },
   activitySequence: 0,
+  activityControls: {
+    repositoryAfter: null,
+    repository: null,
+    pullRequestAfter: null,
+  },
 }
 
 // Tunable effective ceiling: diagnostics retain a concise Redux activity tail for local triage.
@@ -71,8 +96,11 @@ const appSlice = createSlice({
       state.paneSizes = action.payload
       state.activitySequence += 1
     },
-    remoteMediaSet(state, action: { payload: RemoteMediaPolicy }) {
-      state.remoteMedia = action.payload
+    paneSizesPreviewed(state, action: { payload: BrowserPreferences['paneSizes'] }) {
+      state.paneSizes = action.payload
+    },
+    preferencesReset(state) {
+      Object.assign(state, createDefaultBrowserPreferences())
       state.activitySequence += 1
     },
     logicalPositionRecorded(state, action: { payload: { sessionId: string; position: string } }) {
@@ -90,9 +118,7 @@ const appSlice = createSlice({
           detail: state.detail,
           theme: state.theme,
           paneSizes: state.paneSizes,
-          remoteMedia: state.remoteMedia,
           lastLogicalPositions,
-          keyOverrides: state.keyOverrides,
         }) === null
       ) {
         return
@@ -103,8 +129,32 @@ const appSlice = createSlice({
       state.overlay = action.payload
       state.activitySequence += 1
     },
+    attentionSyncSet(state, action: { payload: AttentionSyncPhase }) {
+      if (state.attentionSync === action.payload) return
+      state.attentionSync = action.payload
+      state.activitySequence += 1
+    },
     timelineSelected(state, action: { payload: string | null }) {
       state.selectedTimeline = action.payload
+      state.activitySequence += 1
+    },
+    artifactSelected(state, action: { payload: string | null }) {
+      state.selectedArtifact = action.payload
+      state.activitySequence += 1
+    },
+    artifactExpansionSet(state, action: { payload: { id: string; expanded: boolean } }) {
+      state.expandedArtifacts[action.payload.id] = action.payload.expanded
+      state.activitySequence += 1
+    },
+    artifactOriginalRequested(state, action: { payload: string }) {
+      state.originalArtifacts[action.payload] = 'loading'
+      state.activitySequence += 1
+    },
+    artifactOriginalSettled(
+      state,
+      action: { payload: { id: string; result: 'loaded' | 'failed' } },
+    ) {
+      state.originalArtifacts[action.payload.id] = action.payload.result
       state.activitySequence += 1
     },
     transcriptRangeSet(state, action: { payload: VisibleRange }) {
@@ -112,6 +162,29 @@ const appSlice = createSlice({
     },
     tableRangeSet(state, action: { payload: VisibleRange }) {
       state.tableRange = action.payload
+    },
+    activityRepositoryPageSet(state, action: { payload: string | null }) {
+      state.activityControls.repositoryAfter = action.payload
+      state.activitySequence += 1
+    },
+    activityRepositorySelected(state, action: { payload: string | null }) {
+      state.activityControls.repository = action.payload
+      state.activityControls.pullRequestAfter = null
+      state.activityControls.heldAfter = undefined
+      state.activityControls.obligationAfter = undefined
+      state.activitySequence += 1
+    },
+    activityPullRequestPageSet(state, action: { payload: string | null }) {
+      state.activityControls.pullRequestAfter = action.payload
+      state.activitySequence += 1
+    },
+    activityHeldPageSet(state, action: { payload: RepoWatchHeldCursor | undefined }) {
+      state.activityControls.heldAfter = action.payload
+      state.activitySequence += 1
+    },
+    activityObligationPageSet(state, action: { payload: RepoWatchObligationCursor | undefined }) {
+      state.activityControls.obligationAfter = action.payload
+      state.activitySequence += 1
     },
   },
 })
@@ -137,7 +210,7 @@ const preferenceActionTypes = new Set<string>([
   appSlice.actions.detailSet.type,
   appSlice.actions.themeSet.type,
   appSlice.actions.paneSizesSet.type,
-  appSlice.actions.remoteMediaSet.type,
+  appSlice.actions.preferencesReset.type,
   appSlice.actions.logicalPositionRecorded.type,
 ])
 const preferenceMiddleware: Middleware = (api) => (next) => (action) => {
@@ -155,9 +228,7 @@ const preferenceMiddleware: Middleware = (api) => (next) => (action) => {
       detail: app.detail,
       theme: app.theme,
       paneSizes: app.paneSizes,
-      remoteMedia: app.remoteMedia,
       lastLogicalPositions: app.lastLogicalPositions,
-      keyOverrides: app.keyOverrides,
     })
   }
   return result
@@ -168,7 +239,7 @@ export const createAppStore = () =>
     reducer: { app: appSlice.reducer },
     middleware: (getDefaultMiddleware) =>
       getDefaultMiddleware().concat(traceMiddleware, preferenceMiddleware),
-    devTools: { maxAge: REDUX_DEVTOOLS_ACTIONS, trace: false },
+    devTools: import.meta.env.DEV ? { maxAge: REDUX_DEVTOOLS_ACTIONS, trace: false } : false,
   })
 
 export const store = createAppStore()

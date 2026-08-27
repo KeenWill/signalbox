@@ -1,21 +1,24 @@
+//! Deterministic file-media registration, candidate selection, and output admission governed by
+//! `docs/spec/file-and-media.md`.
+
 use std::{collections::BTreeMap, error::Error, fmt, str::FromStr};
 
 use crate::{
     BoundedMetadata, CanonicalMediaType, FileInspection, FileMediaCeilings, FileMediaFailure,
     FileMediaProcessor, FileMediaProviderDeclaration, FileMediaProviderReadRequest,
     FileMediaProviderValidationRequest, FileReadRequest, FileReadResult, InspectionRequest,
-    ProbeStrength, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
-    ReadAccessPattern, ReadContinuation, ReadContinuationCursor, ReadViewBounds, ReaderDeclaration,
-    ReaderIdentity, ReasonCode, StreamingTextFallback, ValidatedFile, ValidationEvidence,
-    VerifiedBlobSource,
+    MAX_READ_OPTIONS_BYTES, MAX_WORKER_WALL_SECONDS, ProbeStrength, ProcessorProbeOutput,
+    ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern, ReadContinuation,
+    ReadContinuationCursor, ReadViewBounds, ReaderDeclaration, ReaderIdentity, ReasonCode,
+    StreamingTextFallback, ValidatedFile, ValidationEvidence, VerifiedBlobSource,
 };
 
 // numeric-bound: ceiling - bounds process-lifetime provider inventory memory
 const MAX_REGISTRY_PROVIDERS: usize = 256;
 // numeric-bound: ceiling - bounds per-provider reader inventory memory and startup work
-const MAX_READERS_PER_PROVIDER: usize = 256;
+pub const MAX_READERS_PER_PROVIDER: usize = 256;
 // numeric-bound: ceiling - bounds aggregate process-lifetime reader inventory memory
-const MAX_REGISTRY_READERS: usize = 256;
+pub const MAX_REGISTRY_READERS: usize = 256;
 // numeric-bound: ceiling - bounds per-reader media-claim memory and conflict checks
 const MAX_MEDIA_TYPES_PER_READER: usize = 256;
 // numeric-bound: ceiling - bounds aggregate process-lifetime media-claim memory
@@ -38,6 +41,12 @@ const MAX_REGISTRY_REASON_CODES: usize = 4_096;
 const MAX_INSPECTION_PROBE_BYTES: u64 = 16 * 1_024 * 1_024;
 // numeric-bound: ceiling - bounds one inspection's aggregate probe request fan-out
 const MAX_INSPECTION_PROBE_READS: u32 = 1_024;
+// numeric-bound: ceiling - bounds collision-validation worker fan-out and source I/O
+const MAX_COLLISION_VALIDATION_CANDIDATES: usize = 2;
+// numeric-bound: ceiling - the tool contract permits this many input containers
+const MAX_READ_INPUT_CONTAINERS: u32 = 256;
+// numeric-bound: ceiling - every JSON node emits at least one serialized byte
+const MAX_READ_OPTIONS_NODES: usize = MAX_READ_OPTIONS_BYTES;
 // numeric-bound: ceiling - reserves processor-frame space for structured-body JSON escaping
 const MAX_STRUCTURED_BODY_BYTES: usize = 500 * 1_024;
 /// Immutable process-lifetime registry snapshot.
@@ -98,6 +107,14 @@ impl FileMediaRegistry {
         let mut media_readers = BTreeMap::new();
         let mut streaming_text_reader = None;
         for provider in &providers {
+            if provider
+                .observed_container_entries()
+                .is_some_and(|entries| {
+                    entries == 0 || entries > ceilings.observed_container_entries
+                })
+            {
+                return Err(FileMediaRegistryConstructionError::ContainerBounds);
+            }
             for reader in provider.readers() {
                 validate_reader(reader, ceilings)?;
                 let identity = reader.identity().clone();
@@ -175,23 +192,52 @@ impl FileMediaRegistry {
             });
         }
 
-        let mut candidates = Vec::new();
-        let mut malformed = Vec::new();
-        for reader in self.readers.values() {
-            let raw = processor
-                .probe(reader.identity(), source, cancellation)
-                .await?;
-            match sanitize_probe(reader, raw)? {
-                SanitizedProbe::NoMatch => {}
-                SanitizedProbe::Candidate(candidate) => candidates.push(candidate),
-                SanitizedProbe::Malformed {
-                    media_type,
-                    reason_code,
-                } => {
-                    malformed.push((media_type, reason_code));
+        let probes = async {
+            let mut candidates = Vec::new();
+            let mut malformed = Vec::new();
+            for reader in self.readers.values() {
+                let raw = processor
+                    .probe(reader.identity(), source, cancellation)
+                    .await?;
+                match sanitize_probe(reader, raw)? {
+                    SanitizedProbe::NoMatch => {}
+                    SanitizedProbe::Candidate(candidate) => {
+                        // A retained candidate must be re-examinable inside the
+                        // envelope `validate_candidate` will grant, and that envelope
+                        // is the clamped pair rather than the deployment ceiling
+                        // alone. For a reader whose declared validation envelope is
+                        // the smaller of the two, the ceiling by itself would keep
+                        // evidence validation can never cover.
+                        if candidate.evidence_bytes
+                            <= self
+                                .ceilings
+                                .validation_source_bytes
+                                .min(reader.validation().source_bytes())
+                        {
+                            candidates.push(candidate);
+                        }
+                    }
+                    SanitizedProbe::Malformed {
+                        media_type,
+                        reason_code,
+                    } => {
+                        malformed.push((media_type, reason_code));
+                    }
                 }
             }
-        }
+            Ok::<_, FileMediaFailure>((candidates, malformed))
+        };
+        let probes = Box::pin(probes);
+        let deadline = Box::pin(futures_timer::Delay::new(std::time::Duration::from_secs(
+            MAX_WORKER_WALL_SECONDS,
+        )));
+        let (candidates, mut malformed) = match futures_util::future::select(probes, deadline).await
+        {
+            futures_util::future::Either::Left((result, _)) => result?,
+            futures_util::future::Either::Right(((), _)) => {
+                return Err(FileMediaFailure::ProcessorTimedOut);
+            }
+        };
         if !malformed.is_empty() {
             malformed.sort();
             malformed.dedup();
@@ -239,39 +285,52 @@ impl FileMediaRegistry {
 
         let structural = candidates
             .iter()
-            .filter(|candidate| candidate.strength == ProbeStrength::StructuralCandidate)
+            .filter(|candidate| {
+                matches!(
+                    candidate.strength,
+                    ProbeStrength::ProvisionalStructuralCandidate
+                        | ProbeStrength::StructuralCandidate
+                )
+            })
             .cloned()
             .collect::<Vec<_>>();
         if !structural.is_empty() {
-            return self
+            let inspection = self
                 .resolve_candidates(
                     processor,
-                    request,
+                    request.clone(),
                     source,
                     cancellation,
                     structural,
                     ValidationEvidence::StructuralValidation,
                 )
-                .await;
+                .await?;
+            if !matches!(inspection, FileInspection::Unknown { .. }) {
+                return Ok(inspection);
+            }
         }
 
         if let Ok(declared) = request.source.declared_media_type().canonical_essence()
             && let Some(reader) = self.media_readers.get(&declared)
         {
-            return self
+            let inspection = self
                 .validate_candidate(
                     processor,
-                    request,
+                    request.clone(),
                     source,
                     cancellation,
                     Candidate {
                         reader: reader.clone(),
                         media_type: declared,
                         strength: ProbeStrength::DeclaredCandidate,
+                        evidence_bytes: 0,
                     },
                     ValidationEvidence::DeclaredCandidateStructurallyValidated,
                 )
-                .await;
+                .await?;
+            if !matches!(inspection, FileInspection::Unknown { .. }) {
+                return Ok(inspection);
+            }
         }
 
         if let Some(reader) = self.streaming_text_reader.as_ref() {
@@ -296,6 +355,7 @@ impl FileMediaRegistry {
                         reader: declaration.identity().clone(),
                         media_type: text_plain,
                         strength: ProbeStrength::DeclaredCandidate,
+                        evidence_bytes: 0,
                     },
                     ValidationEvidence::StreamingTextValidation,
                 )
@@ -328,6 +388,75 @@ impl FileMediaRegistry {
             .map(|candidate| candidate.reader.clone())
             .collect::<std::collections::BTreeSet<_>>();
         if media_types.len() != 1 || readers.len() != 1 {
+            if !collision_validation_allowed(evidence, candidates.len()) {
+                return Ok(FileInspection::Ambiguous {
+                    source: request.source,
+                    media_types,
+                });
+            }
+
+            let all_candidates_provisional = candidates.iter().all(|candidate| {
+                candidate.strength == ProbeStrength::ProvisionalStructuralCandidate
+            });
+            let validations = async {
+                let mut successful = Vec::new();
+                let mut malformed = Vec::new();
+                let mut encrypted = Vec::new();
+                for candidate in candidates {
+                    match self
+                        .validate_candidate(
+                            processor,
+                            request.clone(),
+                            source,
+                            cancellation,
+                            candidate,
+                            evidence,
+                        )
+                        .await?
+                    {
+                        inspection @ (FileInspection::Validated(_)
+                        | FileInspection::DeclaredMismatch { .. }) => successful.push(inspection),
+                        inspection @ FileInspection::Malformed { .. } => malformed.push(inspection),
+                        inspection @ FileInspection::EncryptedOrLocked { .. } => {
+                            encrypted.push(inspection);
+                        }
+                        FileInspection::Unknown { .. } => {}
+                        FileInspection::Ambiguous { .. } => {
+                            return Err(FileMediaFailure::ProcessorFailed);
+                        }
+                    }
+                }
+                Ok::<_, FileMediaFailure>((successful, malformed, encrypted))
+            };
+            let validations = Box::pin(validations);
+            let deadline = Box::pin(futures_timer::Delay::new(std::time::Duration::from_secs(
+                MAX_WORKER_WALL_SECONDS,
+            )));
+            let (mut successful, mut malformed, mut encrypted) =
+                match futures_util::future::select(validations, deadline).await {
+                    futures_util::future::Either::Left((result, _)) => result?,
+                    futures_util::future::Either::Right(((), _)) => {
+                        return Err(FileMediaFailure::ProcessorTimedOut);
+                    }
+                };
+            if successful.len() == 1 && encrypted.is_empty() {
+                return successful.pop().ok_or(FileMediaFailure::ProcessorFailed);
+            }
+            if successful.is_empty() && encrypted.is_empty() && malformed.len() == 1 {
+                return malformed.pop().ok_or(FileMediaFailure::ProcessorFailed);
+            }
+            if successful.is_empty() && malformed.is_empty() && encrypted.len() == 1 {
+                return encrypted.pop().ok_or(FileMediaFailure::ProcessorFailed);
+            }
+            if all_candidates_provisional
+                && successful.is_empty()
+                && malformed.is_empty()
+                && encrypted.is_empty()
+            {
+                return Ok(FileInspection::Unknown {
+                    source: request.source,
+                });
+            }
             return Ok(FileInspection::Ambiguous {
                 source: request.source,
                 media_types,
@@ -367,8 +496,16 @@ impl FileMediaRegistry {
                     source: request.source.clone(),
                     media_type: candidate.media_type.clone(),
                     evidence,
-                    maximum_source_bytes: self.ceilings.validation_source_bytes,
-                    maximum_ranges: self.ceilings.validation_ranges,
+                    maximum_source_bytes: self
+                        .ceilings
+                        .validation_source_bytes
+                        .min(reader.validation().source_bytes()),
+                    maximum_ranges: self
+                        .ceilings
+                        .validation_ranges
+                        .min(reader.validation().range_count()),
+                    maximum_image_axis: self.ceilings.image_axis,
+                    maximum_decoded_image_pixels: self.ceilings.decoded_image_pixels,
                 },
                 source,
                 cancellation,
@@ -418,7 +555,8 @@ impl FileMediaRegistry {
                 media_type: candidate.media_type,
             }),
             SanitizedValidation::NoMatch
-                if evidence == ValidationEvidence::DeclaredCandidateStructurallyValidated
+                if candidate.strength == ProbeStrength::ProvisionalStructuralCandidate
+                    || evidence == ValidationEvidence::DeclaredCandidateStructurallyValidated
                     || evidence == ValidationEvidence::StreamingTextValidation =>
             {
                 Ok(FileInspection::Unknown {
@@ -438,7 +576,7 @@ impl FileMediaRegistry {
         cancellation: &dyn crate::CancellationSignal,
     ) -> Result<FileReadResult, FileMediaFailure> {
         let initial_request = match &request.input {
-            crate::FileReadInput::Initial { options } if options.is_object() => true,
+            crate::FileReadInput::Initial { options } if read_options_fit(options) => true,
             crate::FileReadInput::Initial { .. } => {
                 return Err(FileMediaFailure::InvalidViewArguments);
             }
@@ -479,19 +617,133 @@ impl FileMediaRegistry {
             .readers
             .get(validated.reader())
             .ok_or(FileMediaFailure::ProcessorFailed)?;
+        let provider_container_entries = self
+            .providers
+            .iter()
+            .find(|provider| provider.provider() == validated.reader().provider())
+            .ok_or(FileMediaFailure::ProcessorFailed)?
+            .observed_container_entries();
         let raw = processor
             .read(
                 validated.reader(),
                 FileMediaProviderReadRequest {
-                    file: validated.clone(),
+                    source: validated.source().clone(),
+                    detected_media_type: validated.detected_media_type().clone(),
+                    validation: validated.validation(),
+                    metadata: validated.metadata().clone(),
+                    // The field names the prefix validation actually covered, so it
+                    // carries the same clamp `validate_candidate` applied. The
+                    // deployment ceiling alone would overstate that prefix for a
+                    // reader whose declared validation envelope is smaller, and an
+                    // adapter honoring it could interpret bytes validation never saw.
+                    maximum_source_bytes: self
+                        .ceilings
+                        .validation_source_bytes
+                        .min(reader.validation().source_bytes()),
                     view: request.view,
                     input: request.input,
+                    maximum_image_axis: self.ceilings.image_axis,
+                    maximum_decoded_image_pixels: self.ceilings.decoded_image_pixels,
+                    maximum_container_entries: self.ceilings.observed_container_entries,
                 },
                 source,
                 cancellation,
             )
             .await?;
-        sanitize_read(reader, view, self.ceilings, initial_request, raw)
+        sanitize_read(
+            reader,
+            view,
+            self.ceilings,
+            provider_container_entries,
+            initial_request,
+            raw,
+        )
+    }
+}
+
+/// Checks read options against their object, nesting, and encoded-byte bounds.
+pub fn read_options_fit(options: &serde_json::Value) -> bool {
+    // The outer file_read argument object consumes one contract container.
+    if !options.is_object() || !json_value_work_fits(options, MAX_READ_INPUT_CONTAINERS - 1) {
+        return false;
+    }
+    serde_json::to_writer(
+        LimitedWriter {
+            written: 0,
+            maximum: MAX_READ_OPTIONS_BYTES,
+        },
+        options,
+    )
+    .is_ok()
+}
+
+fn json_value_work_fits(value: &serde_json::Value, maximum_containers: u32) -> bool {
+    let mut pending = vec![(value, 0_u32)];
+    let mut visited = 0_usize;
+    while let Some((value, depth)) = pending.pop() {
+        visited += 1;
+        if visited > MAX_READ_OPTIONS_NODES {
+            return false;
+        }
+        let (children, next_depth): (usize, Option<u32>) = match value {
+            serde_json::Value::Array(values) => {
+                let Some(next) = depth
+                    .checked_add(1)
+                    .filter(|next| *next <= maximum_containers)
+                else {
+                    return false;
+                };
+                (values.len(), Some(next))
+            }
+            serde_json::Value::Object(values) => {
+                let Some(next) = depth
+                    .checked_add(1)
+                    .filter(|next| *next <= maximum_containers)
+                else {
+                    return false;
+                };
+                (values.len(), Some(next))
+            }
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => (0, None),
+        };
+        if children > MAX_READ_OPTIONS_NODES.saturating_sub(visited + pending.len()) {
+            return false;
+        }
+        if let Some(next) = next_depth {
+            match value {
+                serde_json::Value::Array(values) => {
+                    pending.extend(values.iter().map(|child| (child, next)));
+                }
+                serde_json::Value::Object(values) => {
+                    pending.extend(values.values().map(|child| (child, next)));
+                }
+                _ => {}
+            }
+        }
+    }
+    true
+}
+
+struct LimitedWriter {
+    written: usize,
+    maximum: usize,
+}
+
+impl std::io::Write for LimitedWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.written = self
+            .written
+            .checked_add(bytes.len())
+            .filter(|total| *total <= self.maximum)
+            .ok_or_else(|| std::io::Error::other("serialized value exceeds its byte ceiling"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -500,13 +752,21 @@ struct Candidate {
     reader: ReaderIdentity,
     media_type: CanonicalMediaType,
     strength: ProbeStrength,
+    evidence_bytes: u64,
 }
 
 fn recognized_probe_strength(strength: ProbeStrength) -> bool {
     matches!(
         strength,
-        ProbeStrength::Strong | ProbeStrength::StructuralCandidate
+        ProbeStrength::Strong
+            | ProbeStrength::ProvisionalStructuralCandidate
+            | ProbeStrength::StructuralCandidate
     )
+}
+
+fn collision_validation_allowed(evidence: ValidationEvidence, candidate_count: usize) -> bool {
+    evidence == ValidationEvidence::StructuralValidation
+        && candidate_count <= MAX_COLLISION_VALIDATION_CANDIDATES
 }
 
 fn streaming_text_terminal_becomes_unknown(evidence: ValidationEvidence) -> bool {
@@ -531,11 +791,14 @@ fn sanitize_probe(
         ProcessorProbeOutput::Candidate {
             media_type,
             strength,
+            evidence_bytes,
         } => {
             let media_type = CanonicalMediaType::from_str(&media_type)
                 .map_err(|_| FileMediaFailure::ProcessorFailed)?;
             if !reader.media_types().contains(&media_type)
                 || strength == ProbeStrength::DeclaredCandidate
+                || evidence_bytes == 0
+                || evidence_bytes > reader.probe().cumulative_bytes()
             {
                 return Err(FileMediaFailure::ProcessorFailed);
             }
@@ -543,6 +806,7 @@ fn sanitize_probe(
                 reader: reader.identity().clone(),
                 media_type,
                 strength,
+                evidence_bytes,
             }))
         }
         ProcessorProbeOutput::RecognizedMalformed {
@@ -620,6 +884,7 @@ fn sanitize_read(
     reader: &ReaderDeclaration,
     view: &crate::ReadViewDeclaration,
     ceilings: FileMediaCeilings,
+    provider_container_entries: Option<u64>,
     initial_request: bool,
     raw: ProcessorReadOutput,
 ) -> Result<FileReadResult, FileMediaFailure> {
@@ -665,10 +930,15 @@ fn sanitize_read(
             }
             let continuation = sanitize_continuation(truncated, cursor)?;
             let maximum_nodes = nodes.min(ceilings.structured_nodes);
+            let maximum_container_entries = provider_container_entries
+                .unwrap_or(ceilings.observed_container_entries)
+                .min(ceilings.observed_container_entries);
             let body = crate::value::parse_json_without_duplicate_members_bounded(
                 &body_json,
-                maximum_nodes,
-                ceilings.observed_container_entries,
+                crate::value::JsonParseLimits {
+                    maximum_nodes,
+                    maximum_container_entries,
+                },
             )
             .map_err(|_| FileMediaFailure::ProcessorFailed)?;
             let canonical_bytes = serde_json::to_string(&body)
@@ -683,7 +953,7 @@ fn sanitize_read(
                 || observed.depth > ceilings.structured_depth
                 || observed.nodes > nodes
                 || observed.nodes > ceilings.structured_nodes
-                || observed.max_container_entries > ceilings.observed_container_entries
+                || observed.max_container_entries > maximum_container_entries
                 || observed.string_bytes > string_bytes
             {
                 return Err(FileMediaFailure::ProcessorFailed);
@@ -831,6 +1101,14 @@ fn validate_reader(
     {
         return Err(FileMediaRegistryConstructionError::ProbeBounds);
     }
+    let validation = reader.validation();
+    if validation.source_bytes() == 0
+        || validation.source_bytes() > crate::MAX_VALIDATION_SOURCE_BYTES
+        || validation.range_count() == 0
+        || validation.range_count() > crate::MAX_VALIDATION_RANGES
+    {
+        return Err(FileMediaRegistryConstructionError::ViewBounds);
+    }
     for view in reader.views() {
         validate_view(view.access(), view.bounds(), ceilings)?;
     }
@@ -876,48 +1154,76 @@ const fn inspection_output_kind(kind: crate::ReadOutputKind) -> &'static str {
     }
 }
 
-fn validate_aggregate_inventory(
-    providers: &[FileMediaProviderDeclaration],
-) -> Result<(), FileMediaRegistryConstructionError> {
+/// Checks provider declarations against registry-compatible inventory bounds.
+pub fn provider_declaration_inventory_fits<'a>(
+    providers: impl IntoIterator<Item = &'a FileMediaProviderDeclaration>,
+) -> bool {
     let mut readers = 0_usize;
     let mut media_types = 0_usize;
     let mut views = 0_usize;
     let mut schema_bytes = 0_usize;
     let mut reason_codes = 0_usize;
     for provider in providers {
-        readers = readers
-            .checked_add(provider.readers().len())
-            .ok_or(FileMediaRegistryConstructionError::Inventory)?;
+        if provider.readers().len() > MAX_READERS_PER_PROVIDER {
+            return false;
+        }
+        let Some(next_readers) = readers.checked_add(provider.readers().len()) else {
+            return false;
+        };
+        readers = next_readers;
         if readers > MAX_REGISTRY_READERS {
-            return Err(FileMediaRegistryConstructionError::Inventory);
+            return false;
         }
         for reader in provider.readers() {
-            media_types = media_types
-                .checked_add(reader.media_types().len())
-                .ok_or(FileMediaRegistryConstructionError::Inventory)?;
-            views = views
-                .checked_add(reader.views().len())
-                .ok_or(FileMediaRegistryConstructionError::Inventory)?;
-            reason_codes = reason_codes
-                .checked_add(reader.reason_codes().len())
-                .ok_or(FileMediaRegistryConstructionError::Inventory)?;
+            if reader.media_types().len() > MAX_MEDIA_TYPES_PER_READER
+                || reader.views().len() > MAX_VIEWS_PER_READER
+                || reader.reason_codes().len() > MAX_REASON_CODES_PER_READER
+            {
+                return false;
+            }
+            let Some(next_media_types) = media_types.checked_add(reader.media_types().len()) else {
+                return false;
+            };
+            media_types = next_media_types;
+            let Some(next_views) = views.checked_add(reader.views().len()) else {
+                return false;
+            };
+            views = next_views;
+            let Some(next_reason_codes) = reason_codes.checked_add(reader.reason_codes().len())
+            else {
+                return false;
+            };
+            reason_codes = next_reason_codes;
             if media_types > MAX_REGISTRY_MEDIA_TYPES
                 || views > MAX_REGISTRY_VIEWS
                 || reason_codes > MAX_REGISTRY_REASON_CODES
             {
-                return Err(FileMediaRegistryConstructionError::Inventory);
+                return false;
             }
             for view in reader.views() {
-                schema_bytes = schema_bytes
-                    .checked_add(view.arguments_schema().as_str().len())
-                    .ok_or(FileMediaRegistryConstructionError::Inventory)?;
+                let Some(next_schema_bytes) =
+                    schema_bytes.checked_add(view.arguments_schema().as_str().len())
+                else {
+                    return false;
+                };
+                schema_bytes = next_schema_bytes;
                 if schema_bytes > MAX_REGISTRY_SCHEMA_BYTES {
-                    return Err(FileMediaRegistryConstructionError::Inventory);
+                    return false;
                 }
             }
         }
     }
-    Ok(())
+    true
+}
+
+fn validate_aggregate_inventory(
+    providers: &[FileMediaProviderDeclaration],
+) -> Result<(), FileMediaRegistryConstructionError> {
+    if provider_declaration_inventory_fits(providers) {
+        Ok(())
+    } else {
+        Err(FileMediaRegistryConstructionError::Inventory)
+    }
 }
 
 fn validate_aggregate_probe_budget(
@@ -1033,6 +1339,8 @@ pub enum FileMediaRegistryConstructionError {
     ProbeBounds,
     /// View bounds were absent, contradictory, or excessive.
     ViewBounds,
+    /// A provider container-entry bound was zero or excessive.
+    ContainerBounds,
     /// Text fallback registration was absent or ambiguous.
     TextFallback,
 }
@@ -1049,6 +1357,7 @@ impl fmt::Display for FileMediaRegistryConstructionError {
             Self::DuplicateReaderMember => "file media reader member is duplicated",
             Self::ProbeBounds => "file media probe bounds are invalid",
             Self::ViewBounds => "file media view bounds are invalid",
+            Self::ContainerBounds => "file media container bounds are invalid",
             Self::TextFallback => "file media text fallback is invalid",
         })
     }
@@ -1066,6 +1375,17 @@ mod tests {
         })
     }
 
+    fn binary_json_tree(null_leaves: usize) -> serde_json::Value {
+        let mut level = vec![serde_json::Value::Null; null_leaves];
+        while level.len() > 1 {
+            level = level
+                .chunks(2)
+                .map(|pair| serde_json::Value::Array(pair.to_vec()))
+                .collect();
+        }
+        level.pop().expect("the fixture has at least one leaf")
+    }
+
     #[test]
     fn malformed_ambiguity_includes_structural_and_strong_claims() {
         assert!(recognized_probe_strength(
@@ -1073,6 +1393,26 @@ mod tests {
         ));
         assert!(recognized_probe_strength(ProbeStrength::Strong));
         assert!(!recognized_probe_strength(ProbeStrength::DeclaredCandidate));
+    }
+
+    #[test]
+    fn strong_signature_collisions_remain_ambiguous_without_validation() {
+        assert!(!collision_validation_allowed(
+            ValidationEvidence::StrongSignature,
+            2
+        ));
+    }
+
+    #[test]
+    fn structural_collision_validation_has_a_two_candidate_ceiling() {
+        assert!(collision_validation_allowed(
+            ValidationEvidence::StructuralValidation,
+            MAX_COLLISION_VALIDATION_CANDIDATES
+        ));
+        assert!(!collision_validation_allowed(
+            ValidationEvidence::StructuralValidation,
+            MAX_COLLISION_VALIDATION_CANDIDATES + 1
+        ));
     }
 
     #[test]
@@ -1093,5 +1433,55 @@ mod tests {
         observe_json(&body, 0, &mut observed).expect("the bounded fixture is observable");
 
         assert_eq!(observed.depth, crate::MAX_STRUCTURED_DEPTH);
+    }
+
+    #[test]
+    fn read_option_serialization_stops_at_its_byte_ceiling() {
+        let options = serde_json::json!({ "value": "x".repeat(MAX_READ_OPTIONS_BYTES) });
+
+        assert!(!read_options_fit(&options));
+    }
+
+    #[test]
+    fn read_options_honor_the_input_container_boundary() {
+        let options = serde_json::json!({
+            "nested": nested_arrays(MAX_READ_INPUT_CONTAINERS - 2)
+        });
+        assert!(read_options_fit(&options));
+
+        let options = serde_json::json!({
+            "nested": nested_arrays(MAX_READ_INPUT_CONTAINERS - 1)
+        });
+        assert!(!read_options_fit(&options));
+    }
+
+    #[test]
+    fn read_options_reject_broad_work_before_growing_the_frontier() {
+        let options = serde_json::json!({
+            "values": vec![serde_json::Value::Null; MAX_READ_OPTIONS_NODES]
+        });
+
+        assert!(!json_value_work_fits(
+            &options,
+            MAX_READ_INPUT_CONTAINERS - 1
+        ));
+    }
+
+    #[test]
+    fn binary_json_tree_preserves_odd_leaf_groups() {
+        assert_eq!(
+            binary_json_tree(3),
+            serde_json::json!([[null, null], [null]])
+        );
+    }
+
+    #[test]
+    fn read_options_reject_balanced_work_with_a_small_frontier() {
+        let options = serde_json::json!({ "tree": binary_json_tree(32_769) });
+
+        assert!(!json_value_work_fits(
+            &options,
+            MAX_READ_INPUT_CONTAINERS - 1
+        ));
     }
 }

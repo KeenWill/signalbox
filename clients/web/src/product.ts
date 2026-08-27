@@ -1,9 +1,26 @@
 import {
   decodeWebApiErrorResponse,
   decodeWebAttentionSnapshot,
+  decodeWebAttentionStreamEvent,
+  decodeWebBlobDescriptor,
   decodeWebContractBootstrap,
+  decodeWebRepoWatchActivityPage,
+  decodeWebRepoWatchPullRequestPage,
+  decodeWebRepoWatchPullRequestSessionPage,
+  decodeWebRepoWatchRepositoryStatusPage,
+  decodeWebRepoWatchWorkPage,
+  decodeWebSessionCatalogSnapshot,
+  type WebApiErrorResponse,
   type WebAttentionSnapshot,
+  type WebAttentionStreamEvent,
+  type WebBlobDescriptor,
   type WebContractBootstrap,
+  type WebRepoWatchActivityPage,
+  type WebRepoWatchPullRequestPage,
+  type WebRepoWatchPullRequestSessionPage,
+  type WebRepoWatchRepositoryStatusPage,
+  type WebRepoWatchWorkPage,
+  type WebSessionCatalogSnapshot,
 } from './generated/web-contract.mjs'
 
 export const productRoutes = [
@@ -27,18 +44,23 @@ export interface ProductSessionState {
   afterSession?: string
   afterActivity?: string
   session?: string
+  workspace?: boolean
 }
 
-const MAX_UNSIGNED_64 = 18_446_744_073_709_551_615n
-const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-const CANONICAL_UNSIGNED_INTEGER = /^(0|[1-9]\d*)$/
+const CATALOG_SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const admittedSessionIdentity = (value: unknown) =>
-  typeof value === 'string' && CANONICAL_UUID.test(value) ? value : undefined
+  typeof value === 'string' && CATALOG_SESSION_ID_PATTERN.test(value) ? value : undefined
 
 const admittedActivityCursor = (value: unknown) => {
-  if (typeof value !== 'string' || !CANONICAL_UNSIGNED_INTEGER.test(value)) return undefined
-  return BigInt(value) <= MAX_UNSIGNED_64 ? value : undefined
+  if (
+    typeof value !== 'string' ||
+    !CANONICAL_NONNEGATIVE_INTEGER_PATTERN.test(value) ||
+    BigInt(value) > MAX_UNSIGNED_64
+  ) {
+    return undefined
+  }
+  return value
 }
 
 export const readProductSessionState = (value: Record<string, unknown>): ProductSessionState => {
@@ -56,6 +78,7 @@ export const readProductSessionState = (value: Record<string, unknown>): Product
     afterSession: validContinuation ? afterSession : undefined,
     afterActivity: validContinuation && sort !== 'identity' ? afterActivity : undefined,
     session: admittedSessionIdentity(value.session),
+    workspace: value.workspace === true ? true : undefined,
   }
 }
 
@@ -67,118 +90,357 @@ export interface ProductSessionRequest {
   afterActivity?: string
 }
 
+export type ProductSurfaceState =
+  | { kind: 'browser-local'; authority: 'browser preferences' }
+  | { kind: 'server-backed'; owningTrack: string; facts: readonly string[] }
+  | {
+      kind: 'committed-unimplemented'
+      owningTrack: string
+      facts: readonly string[]
+    }
+
+export const productSurfaceStates: Record<ProductRouteId, ProductSurfaceState> = {
+  attention: {
+    kind: 'server-backed',
+    owningTrack: '#992 attention projections',
+    facts: ['keyset attention snapshot pages', 'streamed attention projection updates'],
+  },
+  sessions: {
+    kind: 'server-backed',
+    owningTrack: '#991 session projections',
+    facts: ['bounded session descriptors', 'stable-address timeline windows'],
+  },
+  search: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#994 search and usage reads',
+    facts: ['cross-session search reads'],
+  },
+  activity: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#995 discovery reads',
+    facts: ['system activity reads'],
+  },
+  runners: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#995 discovery reads',
+    facts: ['runner discovery reads'],
+  },
+  reviews: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#995 discovery reads',
+    facts: ['review discovery reads'],
+  },
+  imports: {
+    kind: 'server-backed',
+    owningTrack: '#995 discovery reads',
+    facts: ['keyset import catalog pages', 'bounded imported-entry windows'],
+  },
+  usage: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#994 search and usage reads',
+    facts: ['usage aggregation reads'],
+  },
+  settings: { kind: 'browser-local', authority: 'browser preferences' },
+}
+
+export const productSurfaceCacheLabel = (surface: ProductRouteId): string | null => {
+  switch (productSurfaceStates[surface].kind) {
+    case 'browser-local':
+      return 'Local settings'
+    case 'server-backed':
+      return 'Bounded query'
+    case 'committed-unimplemented':
+      return null
+  }
+}
+
 export interface ProductTransport {
   readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap>
-  readSessions(request: ProductSessionRequest, signal?: AbortSignal): Promise<WebAttentionSnapshot>
+  readSessions(
+    request: ProductSessionRequest,
+    signal?: AbortSignal,
+  ): Promise<WebSessionCatalogSnapshot>
+  readBlobDescriptor(input: BlobDescriptorInput, signal?: AbortSignal): Promise<WebBlobDescriptor>
+  readAttention(afterSessionId?: string, signal?: AbortSignal): Promise<WebAttentionSnapshot>
+  followAttention(signal?: AbortSignal): AsyncIterable<WebAttentionStreamEvent>
 }
 
-export const MAX_SESSION_PAGE_ITEMS = 16
-export const MAX_PRODUCT_HTTP_RESPONSE_BYTES = 64 * 1024
-export const MAX_SESSION_SEARCH_BYTES = 1024
+export interface RepoWatchHeldCursor {
+  heldSinceUnixMicroseconds: string
+  dispatchId: string
+}
+
+export interface RepoWatchObligationCursor {
+  owedSinceUnixMicroseconds: string
+  obligationId: string
+}
+
+export interface RepoWatchSessionCursor {
+  commissionedAtUnixMicroseconds: string
+  sessionId: string
+}
+
+export interface RepoWatchEventCursor {
+  cursorGeneration: string
+  eventOrdinal: number
+}
+
+export interface RepoWatchActivityWindow {
+  eventBefore?: RepoWatchEventCursor
+  webhookBeforeReceiptSequence?: string
+  includeEvents: boolean
+  includeWebhooks: boolean
+}
+
+export interface BlobDescriptorInput {
+  digest: string
+  mediaType: string
+  displayFilename?: string
+}
+
+export interface RepoWatchProductTransport {
+  readRepoWatchRepositories(
+    afterRepository?: string,
+    signal?: AbortSignal,
+  ): Promise<WebRepoWatchRepositoryStatusPage>
+  readRepoWatchPullRequests(
+    repository: string,
+    afterPullRequest?: string,
+    signal?: AbortSignal,
+  ): Promise<WebRepoWatchPullRequestPage>
+  readRepoWatchWork(
+    repository: string,
+    heldAfter?: RepoWatchHeldCursor,
+    obligationAfter?: RepoWatchObligationCursor,
+    signal?: AbortSignal,
+  ): Promise<WebRepoWatchWorkPage>
+  readRepoWatchPullRequestSessions(
+    repository: string,
+    pullRequest: string,
+    before?: RepoWatchSessionCursor,
+    signal?: AbortSignal,
+  ): Promise<WebRepoWatchPullRequestSessionPage>
+  readRepoWatchActivity(
+    repository: string,
+    window?: RepoWatchActivityWindow,
+    signal?: AbortSignal,
+  ): Promise<WebRepoWatchActivityPage>
+}
+
+export class ProductRequestError extends Error {
+  readonly status: number
+  readonly response: WebApiErrorResponse
+
+  constructor(status: number, response: WebApiErrorResponse) {
+    super(response.error.message)
+    this.name = 'ProductRequestError'
+    this.status = status
+    this.response = response
+  }
+}
+
+export class ProductTransportError extends Error {
+  constructor(cause: unknown) {
+    super('The Signalbox daemon could not be reached.', { cause })
+    this.name = 'ProductTransportError'
+  }
+}
+
+export class ProductContractError extends Error {
+  constructor(cause: unknown) {
+    super('The bootstrap response did not match the generated web contract.', { cause })
+    this.name = 'ProductContractError'
+  }
+}
+
+export class ProductInputError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ProductInputError'
+  }
+}
+
+export const MAX_PRODUCT_JSON_BYTES = 65_536
+export const MAX_NDJSON_ITEM_BYTES = 65_536
+export const MAX_DECLARED_MEDIA_TYPE_BYTES = 255
+export const MAX_DISPLAY_FILENAME_BYTES = 1_024
+// The Attention projection contract pages at 32 summaries; the byte ceilings are the shared
+// product JSON and NDJSON item limits the bootstrap already pins.
+export const MAX_ATTENTION_SNAPSHOT_ITEMS = 32
+export const MAX_SESSION_PAGE_ITEMS = 32
+export const MAX_SESSION_SEARCH_BYTES = 1_024
 const MAX_SESSION_SUMMARY_SCALARS = 128
 
-const isCanonicalUnsigned64 = (value: string) =>
-  CANONICAL_UNSIGNED_INTEGER.test(value) && BigInt(value) <= MAX_UNSIGNED_64
-const isCanonicalPositiveUnsigned64 = (value: string) =>
-  /^[1-9]\d*$/.test(value) && BigInt(value) <= MAX_UNSIGNED_64
-
-const expectedActionByState: Record<
-  WebAttentionSnapshot['summaries'][number]['state'],
-  WebAttentionSnapshot['summaries'][number]['action']
-> = {
-  active: null,
-  queued: null,
-  blocked: 'provide_goal_need',
-  awaiting_approval: 'decide_approval',
-  ambiguous: 'reconcile_turn',
-  awaiting_reconciliation: 'reconcile_turn',
-  runner_lost: 'restore_runner',
-  idle: null,
-}
-
-const statesDerivedFromCurrentTurn = new Set<WebAttentionSnapshot['summaries'][number]['state']>([
-  'active',
-  'queued',
-  'awaiting_approval',
-  'ambiguous',
-  'awaiting_reconciliation',
-])
+const MAX_UNSIGNED_64 = 18_446_744_073_709_551_615n
+const SESSION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+const CANONICAL_NONNEGATIVE_INTEGER_PATTERN = /^(0|[1-9]\d*)$/
 
 export const admittedSessionSearch = (value: unknown) => {
-  if (typeof value === 'string' && value.indexOf(String.fromCharCode(0)) !== -1) {
-    return undefined
-  }
   if (typeof value !== 'string' || value.length === 0 || value.includes('\0')) return undefined
   return new TextEncoder().encode(value).byteLength <= MAX_SESSION_SEARCH_BYTES ? value : undefined
 }
 
-const readBoundedJson = async (response: Response): Promise<unknown> => {
-  const reader = response.body?.getReader()
-  if (!reader) throw new TypeError('product HTTP response has no body')
-  const chunks: Uint8Array[] = []
-  let byteCount = 0
-  while (true) {
-    const next = await reader.read()
-    if (next.done) break
-    byteCount += next.value.byteLength
-    if (byteCount > MAX_PRODUCT_HTTP_RESPONSE_BYTES) {
-      await reader.cancel()
-      throw new TypeError('product HTTP response exceeds its encoded byte ceiling')
-    }
-    chunks.push(next.value)
+const validateCursor = (cursor: string): void => {
+  if (!CANONICAL_NONNEGATIVE_INTEGER_PATTERN.test(cursor) || BigInt(cursor) > MAX_UNSIGNED_64) {
+    throw new TypeError('attention cursor must be a canonical unsigned 64-bit integer')
   }
-  const encoded = new Uint8Array(byteCount)
-  let offset = 0
-  for (const chunk of chunks) {
-    encoded.set(chunk, offset)
-    offset += chunk.byteLength
-  }
-  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(encoded)) as unknown
 }
 
-const validateSessionPage = (
-  page: WebAttentionSnapshot,
-  request: ProductSessionRequest,
-): WebAttentionSnapshot => {
-  const expectedSort =
-    request.sort === 'identity' ? 'session_identity_ascending' : 'last_activity_descending'
-  const expectedContinuation = request.sort === 'identity' ? 'session_identity' : 'last_activity'
-  if (page.sort !== expectedSort) {
-    throw new Error(`session catalog response sort ${page.sort} contradicts ${expectedSort}`)
+type AttentionSummary = WebAttentionSnapshot['summaries'][number]
+
+const validateAttentionSummary = (summary: AttentionSummary): void => {
+  if (!SESSION_ID_PATTERN.test(summary.session_id)) {
+    throw new TypeError('attention summary session identity must be a canonical UUID')
   }
-  if (page.continuation && page.continuation.kind !== expectedContinuation) {
-    throw new Error(
-      `session catalog continuation ${page.continuation.kind} contradicts ${expectedContinuation}`,
-    )
-  }
-  if (page.summaries.length > MAX_SESSION_PAGE_ITEMS) {
-    throw new Error(`session catalog response exceeds ${MAX_SESSION_PAGE_ITEMS} summaries`)
+  if (summary.current_turn_id != null && !SESSION_ID_PATTERN.test(summary.current_turn_id)) {
+    throw new TypeError('attention summary current-turn identity must be a canonical UUID')
   }
   if (
-    !isCanonicalUnsigned64(page.cursor) ||
-    !isCanonicalUnsigned64(page.total) ||
-    BigInt(page.total) < BigInt(page.summaries.length) ||
-    (page.summaries.length > 0 && BigInt(page.cursor) === 0n)
+    summary.current_turn_id == null &&
+    [
+      'active',
+      'queued',
+      'awaiting_approval',
+      'ambiguous',
+      'awaiting_tool_recovery',
+      'awaiting_reconciliation',
+    ].includes(summary.state)
   ) {
-    throw new Error('session catalog response contains a contradictory numeric page field')
+    throw new TypeError('turn-derived attention summary must include a current-turn identity')
   }
-  const sessionIdentities = new Set<string>()
-  for (const summary of page.summaries) {
-    if (!CANONICAL_UUID.test(summary.session_id)) {
-      throw new Error('session catalog response contains a non-canonical session identity')
+  if (!CANONICAL_NONNEGATIVE_INTEGER_PATTERN.test(summary.last_activity.unix_milliseconds)) {
+    throw new TypeError('attention activity timestamp must be a canonical nonnegative integer')
+  }
+  for (const count of [
+    summary.judge.actionable,
+    summary.judge.completed,
+    summary.judge.escalated,
+    summary.judge.failed,
+  ]) {
+    validateCursor(count)
+  }
+  const expectedAction = (() => {
+    switch (summary.state) {
+      case 'blocked':
+        return summary.goal_block?.reason === 'execution_failure' && summary.action == null
+          ? null
+          : 'provide_goal_need'
+      case 'awaiting_approval':
+        return summary.action === null || summary.action === undefined ? null : 'decide_approval'
+      case 'ambiguous':
+        return 'reconcile_turn'
+      case 'awaiting_reconciliation':
+      case 'runner_lost':
+      case 'awaiting_tool_recovery':
+        return null
+      case 'active':
+      case 'queued':
+      case 'idle':
+        return null
     }
-    if (summary.current_turn_id != null && !CANONICAL_UUID.test(summary.current_turn_id)) {
-      throw new Error('session catalog response contains a non-canonical current-turn identity')
+  })()
+  if ((summary.action ?? null) !== expectedAction) {
+    throw new TypeError('attention summary state and action are incoherent')
+  }
+  if (
+    summary.state === 'blocked' &&
+    (summary.goal_block === null || summary.goal_block === undefined)
+  ) {
+    throw new TypeError('blocked attention summary must include goal-block evidence')
+  }
+  if (summary.goal_block != null) {
+    validateCursor(summary.goal_block.generation)
+    if (summary.state !== 'blocked' && summary.state !== 'runner_lost') {
+      throw new TypeError('attention summary state and goal-block evidence are incoherent')
     }
-    if (statesDerivedFromCurrentTurn.has(summary.state) && summary.current_turn_id == null) {
-      throw new Error('session catalog turn-derived state is missing its current-turn identity')
+  }
+}
+
+const validateAttentionSnapshot = (
+  snapshot: WebAttentionSnapshot,
+  afterSessionId?: string,
+): WebAttentionSnapshot => {
+  validateCursor(snapshot.cursor)
+  if (snapshot.summaries.length > MAX_ATTENTION_SNAPSHOT_ITEMS) {
+    throw new TypeError('attention snapshot exceeds the contract item ceiling')
+  }
+  const sessionIds = new Set(snapshot.summaries.map((summary) => summary.session_id))
+  if (sessionIds.size !== snapshot.summaries.length) {
+    throw new TypeError('attention snapshot contains duplicate session identities')
+  }
+  for (const summary of snapshot.summaries) validateAttentionSummary(summary)
+  if (
+    afterSessionId !== undefined &&
+    snapshot.summaries.some((summary) => summary.session_id <= afterSessionId)
+  ) {
+    throw new TypeError('attention snapshot contains an identity at or before its keyset cursor')
+  }
+  for (let index = 1; index < snapshot.summaries.length; index += 1) {
+    const previous = snapshot.summaries[index - 1]
+    const current = snapshot.summaries[index]
+    if (!previous || !current) continue
+    if (previous.session_id >= current.session_id) {
+      throw new TypeError('attention snapshot summaries are not ordered by session identity')
     }
-    if (sessionIdentities.has(summary.session_id)) {
-      throw new Error('session catalog response contains a duplicate session identity')
+  }
+  const lastSessionId = snapshot.summaries.at(-1)?.session_id ?? null
+  const continuation = snapshot.continuation_after_session_id ?? null
+  if (continuation !== null && continuation !== lastSessionId) {
+    throw new TypeError('attention snapshot continuation does not match its last session identity')
+  }
+  if (continuation !== null && snapshot.summaries.length !== MAX_ATTENTION_SNAPSHOT_ITEMS) {
+    throw new TypeError('continued attention snapshot must contain a full contract page')
+  }
+  return snapshot
+}
+
+const catalogTurnDerivedStates = new Set<WebSessionCatalogSnapshot['summaries'][number]['state']>([
+  'active',
+  'queued',
+  'awaiting_approval',
+  'ambiguous',
+  'awaiting_tool_recovery',
+  'awaiting_reconciliation',
+])
+
+const validateSessionCatalogSnapshot = (
+  snapshot: WebSessionCatalogSnapshot,
+  request: ProductSessionRequest,
+): WebSessionCatalogSnapshot => {
+  validateCursor(snapshot.cursor)
+  validateCursor(snapshot.total)
+  if (snapshot.summaries.length > MAX_SESSION_PAGE_ITEMS) {
+    throw new TypeError('session catalog snapshot exceeds the contract item ceiling')
+  }
+  if (BigInt(snapshot.total) < BigInt(snapshot.summaries.length)) {
+    throw new TypeError('session catalog total is smaller than its returned page')
+  }
+  const expectedSort =
+    request.sort === 'identity' ? 'session_identity_ascending' : 'last_activity_descending'
+  if (snapshot.sort !== expectedSort) {
+    throw new TypeError('session catalog sort contradicts the request')
+  }
+  const identities = new Set<string>()
+  for (const summary of snapshot.summaries) {
+    if (!CATALOG_SESSION_ID_PATTERN.test(summary.session_id)) {
+      throw new TypeError('session catalog contains a non-canonical session identity')
     }
-    sessionIdentities.add(summary.session_id)
+    if (
+      summary.current_turn_id !== null &&
+      !CATALOG_SESSION_ID_PATTERN.test(summary.current_turn_id)
+    ) {
+      throw new TypeError('session catalog contains a non-canonical current-turn identity')
+    }
+    if (catalogTurnDerivedStates.has(summary.state) && summary.current_turn_id === null) {
+      throw new TypeError('turn-derived session catalog state lacks a current-turn identity')
+    }
+    if (identities.has(summary.session_id)) {
+      throw new TypeError('session catalog contains duplicate session identities')
+    }
+    identities.add(summary.session_id)
     if (!request.includeArchived && summary.archived) {
-      throw new Error('session catalog response contains an excluded archived session')
+      throw new TypeError('session catalog contains an excluded archived session')
     }
     if (
       request.search !== undefined &&
@@ -186,66 +448,42 @@ const validateSessionPage = (
       !summary.session_id.includes(request.search) &&
       !(summary.title_summary?.includes(request.search) ?? false)
     ) {
-      throw new Error('session catalog response contains a row that contradicts the active search')
+      throw new TypeError('session catalog row contradicts the active search')
     }
-    if (
-      !isCanonicalUnsigned64(summary.active_turn_count) ||
-      !isCanonicalUnsigned64(summary.queued_turn_count) ||
-      !isCanonicalUnsigned64(summary.judge.actionable) ||
-      !isCanonicalUnsigned64(summary.judge.completed) ||
-      !isCanonicalUnsigned64(summary.judge.escalated) ||
-      !isCanonicalUnsigned64(summary.judge.failed) ||
-      (summary.goal_block != null && !isCanonicalPositiveUnsigned64(summary.goal_block.generation))
-    ) {
-      throw new Error('session catalog response contains a non-canonical numeric field')
-    }
-    if (summary.action !== expectedActionByState[summary.state]) {
-      throw new Error('session catalog response contains a contradictory state and action')
-    }
-    if (summary.state === 'blocked' && summary.goal_block == null) {
-      throw new Error('session catalog blocked row is missing blocked-goal evidence')
-    }
-    if (summary.goal_block != null && summary.state !== 'blocked') {
-      throw new Error(
-        'session catalog response contains goal-block evidence for an unrelated state',
-      )
+    validateCursor(summary.active_turn_count)
+    validateCursor(summary.queued_turn_count)
+    validateCursor(summary.judge.actionable)
+    validateCursor(summary.judge.completed)
+    validateCursor(summary.judge.escalated)
+    validateCursor(summary.judge.failed)
+    validateCursor(summary.last_activity.unix_microseconds)
+    if (summary.goal_block !== null && summary.goal_block !== undefined) {
+      validateCursor(summary.goal_block.generation)
     }
     const titleScalars =
-      typeof summary.title_summary === 'string' ? Array.from(summary.title_summary).length : 0
-    if (
-      summary.title_truncated &&
-      (summary.title_summary == null || titleScalars !== MAX_SESSION_SUMMARY_SCALARS)
-    ) {
-      throw new Error('session catalog response contains a contradictory title truncation flag')
-    }
+      summary.title_summary === null ? 0 : Array.from(summary.title_summary).length
     if (
       titleScalars > MAX_SESSION_SUMMARY_SCALARS ||
+      (summary.title_truncated && titleScalars !== MAX_SESSION_SUMMARY_SCALARS) ||
       (summary.goal_block !== null &&
         summary.goal_block !== undefined &&
         Array.from(summary.goal_block.need_summary).length > MAX_SESSION_SUMMARY_SCALARS)
     ) {
-      throw new Error('session catalog response exceeds a summary scalar ceiling')
+      throw new TypeError('session catalog summary exceeds its scalar ceiling')
     }
-    const microseconds = summary.last_activity.unix_microseconds
-    if (!isCanonicalUnsigned64(microseconds)) {
-      throw new Error('session catalog activity timestamp is outside the JavaScript Date range')
-    }
-    const derivedMilliseconds = Number(BigInt(microseconds) / 1000n)
-    if (
-      !Number.isSafeInteger(derivedMilliseconds) ||
-      !Number.isFinite(new Date(derivedMilliseconds).getTime())
-    ) {
-      throw new Error('session catalog activity timestamp is outside the JavaScript Date range')
+    const milliseconds = Number(BigInt(summary.last_activity.unix_microseconds) / 1_000n)
+    if (!Number.isSafeInteger(milliseconds) || !Number.isFinite(new Date(milliseconds).getTime())) {
+      throw new TypeError('session catalog activity timestamp is outside the Date range')
     }
   }
-  const first = page.summaries[0]
+  const first = snapshot.summaries[0]
   if (
     request.sort === 'identity' &&
     request.afterSession !== undefined &&
     first !== undefined &&
     first.session_id <= request.afterSession
   ) {
-    throw new Error('session catalog response precedes its identity continuation')
+    throw new TypeError('session catalog response precedes its identity continuation')
   }
   if (
     request.sort === 'activity' &&
@@ -253,140 +491,728 @@ const validateSessionPage = (
     first !== undefined &&
     BigInt(first.last_activity.unix_microseconds) > BigInt(request.afterActivity)
   ) {
-    throw new Error('session catalog response precedes its activity continuation')
+    throw new TypeError('session catalog response precedes its activity continuation')
   }
   if (
     request.sort === 'activity' &&
     request.afterActivity !== undefined &&
     request.afterSession !== undefined &&
     first !== undefined &&
-    BigInt(first.last_activity.unix_microseconds) === BigInt(request.afterActivity) &&
+    first.last_activity.unix_microseconds === request.afterActivity &&
     first.session_id <= request.afterSession
   ) {
-    throw new Error('session catalog response repeats its exact activity continuation boundary')
+    throw new TypeError('session catalog response repeats its activity continuation boundary')
   }
   if (
     request.afterSession === undefined &&
-    page.continuation === null &&
-    BigInt(page.total) > BigInt(page.summaries.length)
+    snapshot.continuation === null &&
+    BigInt(snapshot.total) > BigInt(snapshot.summaries.length)
   ) {
-    throw new Error('session catalog response omits a required continuation')
+    throw new TypeError('session catalog response omits a required continuation')
   }
-  if (page.continuation) {
-    if (BigInt(page.total) <= BigInt(page.summaries.length)) {
-      throw new Error('session catalog continuation contradicts the declared total')
+  const continuation = snapshot.continuation
+  if (continuation !== null) {
+    const expectedKind = request.sort === 'identity' ? 'session_identity' : 'last_activity'
+    if (continuation.kind !== expectedKind) {
+      throw new TypeError('session catalog continuation contradicts the requested sort')
     }
-    if (page.summaries.length !== MAX_SESSION_PAGE_ITEMS) {
-      throw new Error('session catalog continuation accompanies a partial page')
+    if (snapshot.summaries.length !== MAX_SESSION_PAGE_ITEMS) {
+      throw new TypeError('continued session catalog snapshot is not a full page')
+    }
+    if (BigInt(snapshot.total) <= BigInt(snapshot.summaries.length)) {
+      throw new TypeError('session catalog continuation contradicts the declared total')
+    }
+  }
+  return snapshot
+}
+
+const decodeBoundedAttentionSnapshot = (
+  value: unknown,
+  afterSessionId?: string,
+): WebAttentionSnapshot =>
+  validateAttentionSnapshot(decodeWebAttentionSnapshot(value), afterSessionId)
+
+const decodeAttentionLines = async function* (
+  body: ReadableStream<Uint8Array>,
+  signal?: AbortSignal,
+): AsyncGenerator<WebAttentionStreamEvent> {
+  const reader = body.getReader()
+  const decoder = new TextDecoder('utf-8', { fatal: true })
+  let line: number[] = []
+  let completed = false
+  try {
+    while (true) {
+      let chunk: ReadableStreamReadResult<Uint8Array>
+      try {
+        chunk = await reader.read()
+      } catch (error) {
+        if (signal?.aborted) throw error
+        throw new ProductTransportError(error)
+      }
+      if (chunk.done) {
+        completed = true
+        break
+      }
+      for (const byte of chunk.value) {
+        if (byte === 10) {
+          if (line.length === 0) throw new TypeError('attention stream contains an empty item')
+          const value = JSON.parse(decoder.decode(Uint8Array.from(line)))
+          line = []
+          const event = decodeWebAttentionStreamEvent(value)
+          if (event.kind === 'snapshot') validateAttentionSnapshot(event.snapshot)
+          else {
+            validateCursor(event.cursor)
+            if (event.kind === 'update') {
+              if (event.summaries.length > MAX_ATTENTION_SNAPSHOT_ITEMS) {
+                throw new TypeError('attention update exceeds the contract item ceiling')
+              }
+              for (const summary of event.summaries) validateAttentionSummary(summary)
+            }
+          }
+          yield event
+        } else {
+          if (line.length === MAX_NDJSON_ITEM_BYTES) {
+            throw new TypeError('attention stream item exceeds the contract ceiling')
+          }
+          line.push(byte)
+        }
+      }
+    }
+    if (line.length !== 0) throw new TypeError('attention stream ended with an incomplete item')
+  } finally {
+    if (!completed) await reader.cancel().catch(() => undefined)
+    reader.releaseLock()
+  }
+}
+
+const utf8Length = (value: string): number => new TextEncoder().encode(value).byteLength
+
+const validateBlobDescriptorInput = (input: BlobDescriptorInput): void => {
+  if (utf8Length(input.mediaType) > MAX_DECLARED_MEDIA_TYPE_BYTES) {
+    throw new ProductInputError('Descriptor media type exceeded the 255-byte limit.')
+  }
+  if (
+    input.displayFilename !== undefined &&
+    utf8Length(input.displayFilename) > MAX_DISPLAY_FILENAME_BYTES
+  ) {
+    throw new ProductInputError('Descriptor display filename exceeded the 1024-byte limit.')
+  }
+}
+
+const readBoundedJson = async (response: Response): Promise<unknown> => {
+  const declaredLength = Number(response.headers.get('content-length'))
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_PRODUCT_JSON_BYTES) {
+    throw new Error('response exceeded the product JSON byte limit')
+  }
+
+  if (!response.body) return JSON.parse(await response.text())
+
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let received = 0
+  while (true) {
+    let result: ReadableStreamReadResult<Uint8Array>
+    try {
+      result = await reader.read()
+    } catch (error) {
+      throw new ProductTransportError(error)
+    }
+    if (result.done) break
+    received += result.value.byteLength
+    if (received > MAX_PRODUCT_JSON_BYTES) {
+      await reader.cancel()
+      throw new Error('response exceeded the product JSON byte limit')
+    }
+    chunks.push(result.value)
+  }
+
+  const bytes = new Uint8Array(received)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
+}
+
+const MAX_POSTGRES_BIGINT = 9_223_372_036_854_775_807n
+const MAX_UNSIGNED_BIGINT = 18_446_744_073_709_551_615n
+const MAX_POSTGRES_INTEGER = 2_147_483_647
+const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+const canonicalUuid = (value: string, field: string): string => {
+  if (!CANONICAL_UUID.test(value)) throw new TypeError(`${field} is not canonical`)
+  return value
+}
+
+const canonicalNonnegativeBigInt = (value: string, field: string): bigint => {
+  if (!/^(0|[1-9][0-9]*)$/.test(value)) throw new TypeError(`${field} is not canonical`)
+  return BigInt(value)
+}
+
+const compareCursorPair = (
+  leftTime: string,
+  leftId: string,
+  rightTime: string,
+  rightId: string,
+  field: string,
+): number => {
+  const left = canonicalNonnegativeBigInt(leftTime, `${field} timestamp`)
+  const right = canonicalNonnegativeBigInt(rightTime, `${field} timestamp`)
+  if (left < right) return -1
+  if (left > right) return 1
+  const canonicalLeftId = canonicalUuid(leftId, `${field} identity`)
+  const canonicalRightId = canonicalUuid(rightId, `${field} identity`)
+  return canonicalLeftId < canonicalRightId ? -1 : canonicalLeftId > canonicalRightId ? 1 : 0
+}
+
+const validateRepositoryPage = (
+  afterRepository: string | undefined,
+  page: WebRepoWatchRepositoryStatusPage,
+): WebRepoWatchRepositoryStatusPage => {
+  let previous = afterRepository
+  for (const status of page.repositories) {
+    if (previous !== undefined && status.repository <= previous) {
+      throw new TypeError('repository page does not advance beyond the requested cursor')
+    }
+    previous = status.repository
+  }
+  const continuation = page.continuation_after_repository
+  if (continuation != null && (page.repositories.length === 0 || continuation !== previous)) {
+    throw new TypeError('repository continuation does not equal the returned page boundary')
+  }
+  return page
+}
+
+const validateWorkPage = (
+  heldAfter: RepoWatchHeldCursor | undefined,
+  obligationAfter: RepoWatchObligationCursor | undefined,
+  page: WebRepoWatchWorkPage,
+): WebRepoWatchWorkPage => {
+  let previousHeldTime = heldAfter?.heldSinceUnixMicroseconds
+  let previousHeldId = heldAfter?.dispatchId
+  for (const slot of page.held_slots) {
+    if (previousHeldTime !== undefined && previousHeldId !== undefined) {
+      if (
+        compareCursorPair(
+          slot.held_since_unix_microseconds,
+          slot.dispatch_id,
+          previousHeldTime,
+          previousHeldId,
+          'held-work cursor',
+        ) <= 0
+      ) {
+        throw new TypeError('held-work page does not advance beyond the requested cursor')
+      }
+    }
+    previousHeldTime = slot.held_since_unix_microseconds
+    previousHeldId = slot.dispatch_id
+  }
+  const heldContinuation = page.held_continuation_after
+  if (
+    heldContinuation &&
+    (page.held_slots.length === 0 ||
+      compareCursorPair(
+        heldContinuation.held_since_unix_microseconds,
+        heldContinuation.dispatch_id,
+        previousHeldTime ?? '',
+        previousHeldId ?? '',
+        'held-work continuation',
+      ) !== 0)
+  ) {
+    throw new TypeError('held-work continuation does not equal the returned page boundary')
+  }
+
+  let previousObligationTime = obligationAfter?.owedSinceUnixMicroseconds
+  let previousObligationId = obligationAfter?.obligationId
+  for (const obligation of page.queued_obligations) {
+    if (previousObligationTime !== undefined && previousObligationId !== undefined) {
+      if (
+        compareCursorPair(
+          obligation.owed_since_unix_microseconds,
+          obligation.id,
+          previousObligationTime,
+          previousObligationId,
+          'queued-work cursor',
+        ) <= 0
+      ) {
+        throw new TypeError('queued-work page does not advance beyond the requested cursor')
+      }
+    }
+    previousObligationTime = obligation.owed_since_unix_microseconds
+    previousObligationId = obligation.id
+  }
+  const obligationContinuation = page.obligation_continuation_after
+  if (
+    obligationContinuation &&
+    (page.queued_obligations.length === 0 ||
+      compareCursorPair(
+        obligationContinuation.owed_since_unix_microseconds,
+        obligationContinuation.obligation_id,
+        previousObligationTime ?? '',
+        previousObligationId ?? '',
+        'queued-work continuation',
+      ) !== 0)
+  ) {
+    throw new TypeError('queued-work continuation does not equal the returned page boundary')
+  }
+  return page
+}
+
+const validateSessionPage = (
+  before: RepoWatchSessionCursor | undefined,
+  page: WebRepoWatchPullRequestSessionPage,
+): WebRepoWatchPullRequestSessionPage => {
+  let previousTime = before?.commissionedAtUnixMicroseconds
+  let previousId = before?.sessionId
+  for (const session of page.sessions) {
+    const sessionId = session.attention.session_id
+    canonicalNonnegativeBigInt(
+      session.commissioned_at_unix_microseconds,
+      'session cursor timestamp',
+    )
+    canonicalUuid(sessionId, 'session cursor identity')
+    if (
+      previousTime !== undefined &&
+      previousId !== undefined &&
+      compareCursorPair(
+        session.commissioned_at_unix_microseconds,
+        sessionId,
+        previousTime,
+        previousId,
+        'session cursor',
+      ) >= 0
+    ) {
+      throw new TypeError('session page does not advance to older history')
+    }
+    previousTime = session.commissioned_at_unix_microseconds
+    previousId = sessionId
+  }
+  const continuation = page.continuation_before
+  if (
+    continuation &&
+    (page.sessions.length === 0 ||
+      compareCursorPair(
+        continuation.commissioned_at_unix_microseconds,
+        continuation.session_id,
+        previousTime ?? '',
+        previousId ?? '',
+        'session continuation',
+      ) !== 0)
+  ) {
+    throw new TypeError('session continuation does not equal the returned page boundary')
+  }
+  return page
+}
+
+const canonicalPositiveBigInt = (value: string, field: string): bigint => {
+  if (!/^[1-9][0-9]*$/.test(value)) throw new TypeError(`${field} is not canonical`)
+  const parsed = BigInt(value)
+  if (parsed > MAX_POSTGRES_BIGINT) throw new TypeError(`${field} exceeds its database range`)
+  return parsed
+}
+
+const canonicalPositiveUnsignedBigInt = (value: string, field: string): bigint => {
+  if (!/^[1-9][0-9]*$/.test(value)) throw new TypeError(`${field} is not canonical`)
+  const parsed = BigInt(value)
+  if (parsed > MAX_UNSIGNED_BIGINT) throw new TypeError(`${field} exceeds the unsigned range`)
+  return parsed
+}
+
+const validateActivityContinuations = (
+  window: RepoWatchActivityWindow | undefined,
+  page: WebRepoWatchActivityPage,
+): WebRepoWatchActivityPage => {
+  const eventIdentities = new Set<string>()
+  for (const row of page.events) {
+    if (eventIdentities.has(row.id)) throw new TypeError('activity page repeats an event identity')
+    eventIdentities.add(row.id)
+  }
+  const webhookIdentities = new Set<string>()
+  for (const row of page.webhooks) {
+    if (webhookIdentities.has(row.receipt_sequence)) {
+      throw new TypeError('activity page repeats a webhook identity')
+    }
+    webhookIdentities.add(row.receipt_sequence)
+  }
+
+  const requestedEvent = window?.eventBefore
+  if (requestedEvent) {
+    let previousGeneration = canonicalPositiveBigInt(
+      requestedEvent.cursorGeneration,
+      'requested event generation',
+    )
+    let previousOrdinal = requestedEvent.eventOrdinal
+    for (const row of page.events) {
+      const generation = canonicalPositiveBigInt(row.cursor_generation, 'event row generation')
+      if (row.event_ordinal < 1 || row.event_ordinal > MAX_POSTGRES_INTEGER) {
+        throw new TypeError('event row ordinal exceeds its database range')
+      }
+      if (
+        generation > previousGeneration ||
+        (generation === previousGeneration && row.event_ordinal >= previousOrdinal)
+      ) {
+        throw new TypeError('event rows do not advance to older history')
+      }
+      previousGeneration = generation
+      previousOrdinal = row.event_ordinal
+    }
+  }
+
+  const requestedWebhook = window?.webhookBeforeReceiptSequence
+  if (requestedWebhook) {
+    let previous = canonicalPositiveBigInt(requestedWebhook, 'requested webhook cursor')
+    for (const row of page.webhooks) {
+      const sequence = canonicalPositiveBigInt(row.receipt_sequence, 'webhook row cursor')
+      if (sequence >= previous) throw new TypeError('webhook rows do not advance to older history')
+      previous = sequence
+    }
+  }
+
+  const event = page.event_continuation_before
+  if (event) {
+    const generation = canonicalPositiveBigInt(
+      event.cursor_generation,
+      'event continuation generation',
+    )
+    if (event.event_ordinal < 1 || event.event_ordinal > MAX_POSTGRES_INTEGER) {
+      throw new TypeError('event continuation ordinal exceeds its database range')
+    }
+    if (requestedEvent) {
+      const requestedGeneration = canonicalPositiveBigInt(
+        requestedEvent.cursorGeneration,
+        'requested event generation',
+      )
+      if (
+        generation > requestedGeneration ||
+        (generation === requestedGeneration && event.event_ordinal >= requestedEvent.eventOrdinal)
+      ) {
+        throw new TypeError('event continuation does not advance to older history')
+      }
+    }
+    const last = page.events.at(-1)
+    if (!last) throw new TypeError('event continuation has no returned page boundary')
+    const lastGeneration = canonicalPositiveBigInt(last.cursor_generation, 'last event generation')
+    if (generation !== lastGeneration || event.event_ordinal !== last.event_ordinal) {
+      throw new TypeError('event continuation does not equal the returned page boundary')
+    }
+  }
+
+  const webhook = page.webhook_continuation_before_receipt_sequence
+  if (webhook) {
+    const sequence = canonicalPositiveBigInt(webhook, 'webhook continuation')
+    if (
+      requestedWebhook &&
+      sequence >= canonicalPositiveBigInt(requestedWebhook, 'requested webhook cursor')
+    ) {
+      throw new TypeError('webhook continuation does not advance to older history')
+    }
+    const last = page.webhooks.at(-1)
+    if (!last) throw new TypeError('webhook continuation has no returned page boundary')
+    if (sequence !== canonicalPositiveBigInt(last.receipt_sequence, 'last webhook cursor')) {
+      throw new TypeError('webhook continuation does not equal the returned page boundary')
     }
   }
   return page
 }
 
-export class ProductRequestError extends Error {
-  constructor(
-    readonly code: string,
-    readonly kind: 'transport' | 'application',
-    message: string,
+const request = async (input: RequestInfo | URL, init: RequestInit): Promise<Response> => {
+  try {
+    return await fetch(input, init)
+  } catch (error) {
+    throw new ProductTransportError(error)
+  }
+}
+
+const validateCurrentBootstrap = (bootstrap: WebContractBootstrap): WebContractBootstrap => {
+  if (
+    bootstrap.contract.name !== 'signalbox.web-http' ||
+    bootstrap.contract.version !== '2' ||
+    bootstrap.limits.max_json_body_bytes !== MAX_PRODUCT_JSON_BYTES ||
+    bootstrap.limits.max_ndjson_item_bytes !== MAX_NDJSON_ITEM_BYTES ||
+    !bootstrap.capabilities.bounded_json ||
+    !bootstrap.capabilities.same_origin_json_mutations ||
+    !bootstrap.capabilities.ndjson_streaming ||
+    (bootstrap.capabilities.blob_derivations && !bootstrap.capabilities.immutable_blob_content) ||
+    (bootstrap.capabilities.image_derivatives && !bootstrap.capabilities.blob_derivations)
   ) {
-    super(message)
+    throw new Error('bootstrap contradicted the fixed signalbox.web-http v2 contract')
   }
+  return bootstrap
 }
 
-export class BootstrapContractError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options)
-    this.name = 'BootstrapContractError'
-  }
-}
-
-// The bootstrap contains only contract identity, capabilities, and limits. Keep a hard response
-// ceiling independent of the untrusted limits inside that response.
-export const MAX_BOOTSTRAP_RESPONSE_BYTES = 65_536
-
-const readBoundedBody = async (response: Response): Promise<string> => {
-  if (!response.body) return ''
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let body = ''
-  let received = 0
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    received += value.byteLength
-    if (received > MAX_BOOTSTRAP_RESPONSE_BYTES) {
-      await reader.cancel()
-      throw new BootstrapContractError('bootstrap response exceeds the byte limit')
-    }
-    body += decoder.decode(value, { stream: true })
-  }
-  return body + decoder.decode()
-}
-
-export class SameOriginProductTransport implements ProductTransport {
+export class SameOriginProductTransport implements ProductTransport, RepoWatchProductTransport {
   async readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap> {
-    const response = await fetch('/api/bootstrap', {
+    const response = await request('/api/bootstrap', {
       headers: { accept: 'application/json' },
       credentials: 'same-origin',
       signal,
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
-    const body = await readBoundedBody(response)
-    let bootstrap: WebContractBootstrap
     try {
-      bootstrap = decodeWebContractBootstrap(JSON.parse(body))
+      return validateCurrentBootstrap(decodeWebContractBootstrap(await readBoundedJson(response)))
     } catch (error) {
-      throw new BootstrapContractError('bootstrap response violates the web contract', {
-        cause: error,
-      })
+      if (error instanceof ProductTransportError) throw error
+      throw new ProductContractError(error)
     }
-    if (!bootstrap.capabilities.bounded_json) {
-      throw new BootstrapContractError('bootstrap does not provide bounded JSON responses')
-    }
-    if (bootstrap.limits.max_json_body_bytes !== MAX_PRODUCT_HTTP_RESPONSE_BYTES) {
-      throw new BootstrapContractError(
-        'bootstrap JSON response ceiling contradicts the browser contract',
-      )
-    }
-    return bootstrap
   }
 
   async readSessions(
-    request: ProductSessionRequest,
+    catalogRequest: ProductSessionRequest,
     signal?: AbortSignal,
-  ): Promise<WebAttentionSnapshot> {
-    if (request.search && admittedSessionSearch(request.search) === undefined) {
+  ): Promise<WebSessionCatalogSnapshot> {
+    if (
+      catalogRequest.search !== undefined &&
+      admittedSessionSearch(catalogRequest.search) === undefined
+    ) {
       throw new TypeError('session catalog search exceeds its contract bound')
     }
     const query = new URLSearchParams({
-      sort: request.sort === 'identity' ? 'session_identity_ascending' : 'last_activity_descending',
-      include_archived: String(request.includeArchived),
+      include_archived: String(catalogRequest.includeArchived),
+      sort:
+        catalogRequest.sort === 'identity'
+          ? 'session_identity_ascending'
+          : 'last_activity_descending',
     })
-    if (request.search) query.set('search', request.search)
-    if (request.afterSession) query.set('after_session_id', request.afterSession)
-    if (request.afterActivity) {
-      query.set('after_activity_unix_microseconds', request.afterActivity)
+    if (catalogRequest.search !== undefined) query.set('search', catalogRequest.search)
+    if (catalogRequest.afterSession !== undefined) {
+      query.set('after_session_id', catalogRequest.afterSession)
     }
-    let response: Response
-    try {
-      response = await fetch(`/api/sessions?${query}`, {
+    if (catalogRequest.afterActivity !== undefined) {
+      query.set('after_activity_unix_microseconds', catalogRequest.afterActivity)
+    }
+    const response = await request(`/api/sessions?${query}`, {
+      headers: { accept: 'application/json' },
+      credentials: 'same-origin',
+      signal,
+    })
+    const payload = await readBoundedJson(response)
+    if (!response.ok) {
+      throw new ProductRequestError(response.status, decodeWebApiErrorResponse(payload))
+    }
+    return validateSessionCatalogSnapshot(decodeWebSessionCatalogSnapshot(payload), catalogRequest)
+  }
+
+  async readBlobDescriptor(
+    input: BlobDescriptorInput,
+    signal?: AbortSignal,
+  ): Promise<WebBlobDescriptor> {
+    validateBlobDescriptorInput(input)
+    const query = new URLSearchParams({ media_type: input.mediaType })
+    if (input.displayFilename) query.set('display_filename', input.displayFilename)
+    const response = await request(
+      `/api/blobs/${encodeURIComponent(input.digest)}/descriptor?${query.toString()}`,
+      {
         headers: { accept: 'application/json' },
         credentials: 'same-origin',
         signal,
-      })
-    } catch (error) {
-      if (signal?.aborted) throw error
+      },
+    )
+    const payload = await readBoundedJson(response)
+    if (!response.ok) {
+      throw new ProductRequestError(response.status, decodeWebApiErrorResponse(payload))
+    }
+    const descriptor = decodeWebBlobDescriptor(payload)
+    if (descriptor.digest !== input.digest) {
+      throw new Error('descriptor digest did not match the requested blob identity')
+    }
+    if (descriptor.declared_media_type !== input.mediaType) {
+      throw new Error('descriptor media type did not match the requested blob use')
+    }
+    const expectedFilenames = input.displayFilename ? [input.displayFilename] : []
+    if (
+      descriptor.display_filename.length !== expectedFilenames.length ||
+      descriptor.display_filename.some((filename, index) => filename !== expectedFilenames[index])
+    ) {
+      throw new Error('descriptor filename did not match the requested blob use')
+    }
+    return descriptor
+  }
+
+  async readAttention(
+    afterSessionId?: string,
+    signal?: AbortSignal,
+  ): Promise<WebAttentionSnapshot> {
+    const query = new URLSearchParams()
+    if (afterSessionId) query.set('after_session_id', afterSessionId)
+    const path = query.size === 0 ? '/api/attention' : `/api/attention?${query}`
+    const response = await request(path, {
+      headers: { accept: 'application/json' },
+      credentials: 'same-origin',
+      signal,
+    })
+    const payload = await readBoundedJson(response)
+    if (!response.ok) {
+      throw new ProductRequestError(response.status, decodeWebApiErrorResponse(payload))
+    }
+    return decodeBoundedAttentionSnapshot(payload, afterSessionId)
+  }
+
+  async *followAttention(signal?: AbortSignal): AsyncGenerator<WebAttentionStreamEvent> {
+    const response = await request('/api/attention/follow', {
+      headers: { accept: 'application/x-ndjson' },
+      credentials: 'same-origin',
+      signal,
+    })
+    if (!response.ok) {
       throw new ProductRequestError(
-        'session_catalog_transport_unavailable',
-        'transport',
-        'The session catalog transport is unavailable.',
+        response.status,
+        decodeWebApiErrorResponse(await readBoundedJson(response)),
       )
     }
-    if (!response.ok) {
-      const failure = decodeWebApiErrorResponse(await readBoundedJson(response))
-      throw new ProductRequestError(failure.error.code, failure.error.kind, failure.error.message)
+    const mediaType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase()
+    if (mediaType !== 'application/x-ndjson') {
+      await response.body?.cancel().catch(() => undefined)
+      throw new TypeError('attention stream response must use application/x-ndjson')
     }
-    return validateSessionPage(decodeWebAttentionSnapshot(await readBoundedJson(response)), request)
+    if (!response.body) throw new TypeError('attention stream response has no body')
+    yield* decodeAttentionLines(response.body, signal)
+  }
+
+  async readRepoWatchRepositories(
+    afterRepository?: string,
+    signal?: AbortSignal,
+  ): Promise<WebRepoWatchRepositoryStatusPage> {
+    const query = new URLSearchParams()
+    if (afterRepository) query.set('after_repository', afterRepository)
+    const page = await this.readJson(
+      this.queryPath('/api/repository-watch/repositories', query),
+      decodeWebRepoWatchRepositoryStatusPage,
+      signal,
+    )
+    return validateRepositoryPage(afterRepository, page)
+  }
+
+  async readRepoWatchPullRequests(
+    repository: string,
+    afterPullRequest?: string,
+    signal?: AbortSignal,
+  ): Promise<WebRepoWatchPullRequestPage> {
+    const query = new URLSearchParams({ repository })
+    if (afterPullRequest) query.set('after_pull_request', afterPullRequest)
+    const page = await this.readJson(
+      this.queryPath('/api/repository-watch/pull-requests', query),
+      decodeWebRepoWatchPullRequestPage,
+      signal,
+    )
+    if (page.repository !== repository) {
+      throw new TypeError('pull-request page repository does not match the requested repository')
+    }
+    {
+      const requested = afterPullRequest
+        ? canonicalPositiveUnsignedBigInt(afterPullRequest, 'requested pull-request cursor')
+        : undefined
+      let previous = requested
+      for (const pullRequest of page.pull_requests) {
+        const number = canonicalPositiveUnsignedBigInt(
+          pullRequest.number,
+          'pull-request page number',
+        )
+        if (previous !== undefined && number <= previous) {
+          throw new TypeError('pull-request page does not advance beyond the requested cursor')
+        }
+        previous = number
+      }
+      const continuationCursor = page.continuation_after_pull_request
+      if (continuationCursor != null) {
+        const continuation = canonicalPositiveUnsignedBigInt(
+          continuationCursor,
+          'pull-request continuation',
+        )
+        if (page.pull_requests.length === 0 || continuation !== previous) {
+          throw new TypeError('pull-request continuation does not equal the returned page boundary')
+        }
+      }
+    }
+    return page
+  }
+
+  async readRepoWatchWork(
+    repository: string,
+    heldAfter?: RepoWatchHeldCursor,
+    obligationAfter?: RepoWatchObligationCursor,
+    signal?: AbortSignal,
+  ): Promise<WebRepoWatchWorkPage> {
+    const query = new URLSearchParams({ repository })
+    if (heldAfter) {
+      query.set('held_after_unix_microseconds', heldAfter.heldSinceUnixMicroseconds)
+      query.set('held_after_dispatch_id', heldAfter.dispatchId)
+    }
+    if (obligationAfter) {
+      query.set('obligation_after_unix_microseconds', obligationAfter.owedSinceUnixMicroseconds)
+      query.set('obligation_after_id', obligationAfter.obligationId)
+    }
+    const page = await this.readJson(
+      this.queryPath('/api/repository-watch/work', query),
+      decodeWebRepoWatchWorkPage,
+      signal,
+    )
+    return validateWorkPage(heldAfter, obligationAfter, page)
+  }
+
+  async readRepoWatchPullRequestSessions(
+    repository: string,
+    pullRequest: string,
+    before?: RepoWatchSessionCursor,
+    signal?: AbortSignal,
+  ): Promise<WebRepoWatchPullRequestSessionPage> {
+    const query = new URLSearchParams({ repository, pull_request: pullRequest })
+    if (before) {
+      query.set('before_unix_microseconds', before.commissionedAtUnixMicroseconds)
+      query.set('before_session_id', before.sessionId)
+    }
+    const page = await this.readJson(
+      this.queryPath('/api/repository-watch/sessions', query),
+      decodeWebRepoWatchPullRequestSessionPage,
+      signal,
+    )
+    return validateSessionPage(before, page)
+  }
+
+  async readRepoWatchActivity(
+    repository: string,
+    window?: RepoWatchActivityWindow,
+    signal?: AbortSignal,
+  ): Promise<WebRepoWatchActivityPage> {
+    const query = new URLSearchParams({ repository })
+    if (window) {
+      query.set('include_events', window.includeEvents.toString())
+      query.set('include_webhooks', window.includeWebhooks.toString())
+    }
+    if (window?.eventBefore) {
+      query.set('event_before_cursor_generation', window.eventBefore.cursorGeneration)
+      query.set('event_before_ordinal', window.eventBefore.eventOrdinal.toString())
+    }
+    if (window?.webhookBeforeReceiptSequence) {
+      query.set('webhook_before_receipt_sequence', window.webhookBeforeReceiptSequence)
+    }
+    const page = await this.readJson(
+      this.queryPath('/api/repository-watch/activity', query),
+      decodeWebRepoWatchActivityPage,
+      signal,
+    )
+    return validateActivityContinuations(window, page)
+  }
+
+  private queryPath(path: string, query: URLSearchParams): string {
+    return query.size === 0 ? path : `${path}?${query}`
+  }
+
+  private async readJson<T>(
+    path: string,
+    decode: (value: unknown) => T,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    const response = await request(path, {
+      headers: { accept: 'application/json' },
+      credentials: 'same-origin',
+      signal,
+    })
+    const payload = await readBoundedJson(response)
+    if (!response.ok) {
+      throw new ProductRequestError(response.status, decodeWebApiErrorResponse(payload))
+    }
+    return decode(payload)
   }
 }
 

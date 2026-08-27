@@ -1,0 +1,136 @@
+import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
+
+// Tunable effective ceilings: these keep initial rendering and later operator-requested work
+// predictable. They are presentation budgets, not security boundaries; the owning transport must
+// independently bound bytes received and decoded before content reaches these renderers.
+export const ARTIFACT_PREVIEW_CHARACTERS = 4_000
+export const ARTIFACT_PREVIEW_LINES = 32
+// The expanded projection is deliberately larger but still finite so one action cannot mount or
+// highlight an entire large artifact. These values can be tuned from measured interaction costs.
+export const ARTIFACT_EXPANDED_CHARACTERS = 16_000
+export const ARTIFACT_EXPANDED_LINES = 200
+
+interface ArtifactIdentity {
+  id: string
+  displayName: string
+}
+
+export interface TextArtifact extends ArtifactIdentity {
+  kind: 'text'
+  // The owning input boundary supplies at most the expanded projection and the full count.
+  content: string
+  characterCount: number
+  sourceComplete?: boolean
+}
+
+export interface CodeArtifact extends ArtifactIdentity {
+  kind: 'code'
+  // The owning input boundary supplies at most the expanded projection and the full count.
+  content: string
+  characterCount: number
+  language: string
+}
+
+export interface SignalboxImageArtifact extends ArtifactIdentity {
+  kind: 'image'
+  source: { kind: 'signalbox_blob'; descriptor: WebBlobDescriptor }
+}
+
+export interface RemoteImageArtifact extends ArtifactIdentity {
+  kind: 'image'
+  source: { kind: 'remote'; url: string; alt: string }
+}
+
+export interface DocumentArtifact extends ArtifactIdentity {
+  kind: 'document'
+  source: { kind: 'signalbox_blob'; descriptor: WebBlobDescriptor }
+  documentKind: 'pdf' | 'document'
+}
+
+export interface DerivativeArtifact extends ArtifactIdentity {
+  kind: 'derivative'
+  source: { kind: 'signalbox_blob'; descriptor: WebBlobDescriptor }
+  viewKind: 'preview' | 'thumbnail'
+  presentation: 'image'
+}
+
+export interface MediaPlaceholderArtifact extends ArtifactIdentity {
+  kind: 'media_placeholder'
+  mediaKind: 'audio' | 'video'
+  source: { kind: 'signalbox_blob'; descriptor: WebBlobDescriptor }
+}
+
+export interface GenericBlobArtifact extends ArtifactIdentity {
+  kind: 'blob'
+  descriptor: WebBlobDescriptor
+}
+
+export interface BlockedArtifact extends ArtifactIdentity {
+  kind: 'blocked'
+  attemptedKind: string
+  reason: string
+}
+
+export type RenderableArtifact =
+  | TextArtifact
+  | CodeArtifact
+  | SignalboxImageArtifact
+  | RemoteImageArtifact
+  | DocumentArtifact
+  | DerivativeArtifact
+  | MediaPlaceholderArtifact
+  | GenericBlobArtifact
+
+export type ArtifactItem = RenderableArtifact | BlockedArtifact
+
+export interface BoundedArtifactText {
+  content: string
+  omittedCharacters: number
+  omittedLines: boolean
+}
+
+export type ArtifactTextMode = 'preview' | 'expanded'
+
+export const boundArtifactText = (
+  content: string,
+  totalCharacters: number,
+  mode: ArtifactTextMode,
+): BoundedArtifactText => {
+  const expanded = mode === 'expanded'
+  const characterLimit = expanded ? ARTIFACT_EXPANDED_CHARACTERS : ARTIFACT_PREVIEW_CHARACTERS
+  const lineLimit = expanded ? ARTIFACT_EXPANDED_LINES : ARTIFACT_PREVIEW_LINES
+  let characterPrefix = ''
+  let prefixCharacters = 0
+  for (const character of content) {
+    if (prefixCharacters === characterLimit) break
+    characterPrefix += character
+    prefixCharacters += 1
+  }
+  let lineBreaks = 0
+  let sourceIndex = 0
+  let boundedSourceEnd = characterPrefix.length
+  while (sourceIndex < characterPrefix.length) {
+    const character = characterPrefix[sourceIndex]
+    if (character === '\r' || character === '\n') {
+      lineBreaks += 1
+      if (lineBreaks === lineLimit) {
+        boundedSourceEnd = sourceIndex
+        break
+      }
+      sourceIndex += character === '\r' && characterPrefix[sourceIndex + 1] === '\n' ? 2 : 1
+      continue
+    }
+    sourceIndex += 1
+  }
+  const omittedLines = boundedSourceEnd < characterPrefix.length
+  const boundedSource = characterPrefix.slice(0, boundedSourceEnd)
+  const bounded = boundedSource.replace(/\r\n?|\n/g, '\n')
+  let boundedCharacterCount = 0
+  for (const _character of boundedSource) boundedCharacterCount += 1
+
+  return {
+    content: bounded,
+    omittedCharacters: Math.max(totalCharacters - boundedCharacterCount, 0),
+    omittedLines,
+  }
+}

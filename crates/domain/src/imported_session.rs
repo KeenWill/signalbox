@@ -9,8 +9,8 @@ use std::collections::BTreeSet;
 use crate::{
     ContextFrontierId, CreateSessionFromImportedFrontier, ImportedConversation,
     ImportedConversationId, ImportedSessionRelationship, ImportedSessionSeed,
-    ImportedTranscriptEntryId, ImportedTranscriptPosition, InitialSession,
-    ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
+    ImportedTranscriptEntryId, ImportedTranscriptEntryInput, ImportedTranscriptPosition,
+    InitialSession, ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
     SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, Session, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
@@ -929,6 +929,171 @@ fn validate_imported_seed_projection(
     })
 }
 
+fn validate_normalized_imported_seed_projection(
+    session: SessionId,
+    provenance: SessionCreationProvenance,
+    imported_entries: &[ImportedTranscriptEntryInput],
+    seed_records: &[ImportedSessionSeedReconstitutionInput],
+    seed_snapshots: &[ResolvedContextFrontierReconstitutionInput],
+    semantic_inputs: &[SemanticTranscriptEntryReconstitutionInput],
+) -> Result<ValidatedImportedSeedProjection, ImportedSessionSeedReconstitutionFailure> {
+    let TranscriptAncestry::ImportedConversation {
+        source_frontier, ..
+    } = provenance.ancestry()
+    else {
+        return Err(ImportedSessionSeedReconstitutionFailure::AncestryNotImported);
+    };
+    let expected_count = usize::try_from(source_frontier.through_position().as_u64())
+        .map_err(|_| ImportedSessionSeedReconstitutionFailure::ImportedFrontierNotFound)?;
+    if imported_entries.len() != expected_count
+        || imported_entries
+            .last()
+            .map(ImportedTranscriptEntryInput::identity)
+            != Some(source_frontier.through_entry())
+    {
+        return Err(ImportedSessionSeedReconstitutionFailure::ImportedFrontierNotFound);
+    }
+    let mut expected_position = ImportedTranscriptPosition::first();
+    for (index, imported) in imported_entries.iter().enumerate() {
+        if imported.conversation() != source_frontier.conversation() {
+            return Err(ImportedSessionSeedReconstitutionFailure::ImportedConversationMismatch);
+        }
+        if imported.position() != expected_position {
+            return Err(ImportedSessionSeedReconstitutionFailure::ImportedFrontierNotFound);
+        }
+        if index + 1 < imported_entries.len() {
+            expected_position = expected_position
+                .checked_next()
+                .ok_or(ImportedSessionSeedReconstitutionFailure::ImportedFrontierNotFound)?;
+        }
+    }
+
+    validate_imported_seed_records(
+        session,
+        imported_entries,
+        seed_records,
+        seed_snapshots,
+        semantic_inputs,
+    )
+}
+
+fn validate_imported_seed_records(
+    session: SessionId,
+    imported_entries: &[ImportedTranscriptEntryInput],
+    seed_records: &[ImportedSessionSeedReconstitutionInput],
+    seed_snapshots: &[ResolvedContextFrontierReconstitutionInput],
+    semantic_inputs: &[SemanticTranscriptEntryReconstitutionInput],
+) -> Result<ValidatedImportedSeedProjection, ImportedSessionSeedReconstitutionFailure> {
+    let [seed_record] = seed_records else {
+        return Err(if seed_records.is_empty() {
+            ImportedSessionSeedReconstitutionFailure::MissingSeedRecord
+        } else {
+            ImportedSessionSeedReconstitutionFailure::DuplicateSeedRecord
+        });
+    };
+    if seed_record.session != session {
+        return Err(ImportedSessionSeedReconstitutionFailure::SeedSessionMismatch);
+    }
+    let [seed_snapshot] = seed_snapshots else {
+        return Err(if seed_snapshots.is_empty() {
+            ImportedSessionSeedReconstitutionFailure::MissingSeedSnapshot
+        } else {
+            ImportedSessionSeedReconstitutionFailure::DuplicateSeedSnapshot
+        });
+    };
+    if seed_snapshot.owning_session() != session {
+        return Err(ImportedSessionSeedReconstitutionFailure::SeedSnapshotSessionMismatch);
+    }
+    if seed_snapshot.snapshot() != seed_record.seed_frontier {
+        return Err(ImportedSessionSeedReconstitutionFailure::SeedSnapshotIdentityMismatch);
+    }
+    if semantic_inputs.len() != imported_entries.len() {
+        return Err(
+            ImportedSessionSeedReconstitutionFailure::SemanticEntryCountMismatch {
+                expected: imported_entries.len(),
+                actual: semantic_inputs.len(),
+            },
+        );
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut semantic_entries = Vec::with_capacity(imported_entries.len());
+    for (semantic, imported) in semantic_inputs.iter().zip(imported_entries) {
+        if semantic.source_session() != session {
+            return Err(
+                ImportedSessionSeedReconstitutionFailure::SemanticEntrySourceSessionMismatch {
+                    entry: semantic.identity(),
+                },
+            );
+        }
+        if !seen.insert(semantic.identity()) {
+            return Err(
+                ImportedSessionSeedReconstitutionFailure::DuplicateSemanticEntry {
+                    entry: semantic.identity(),
+                },
+            );
+        }
+        let SemanticTranscriptEntryPayload::Imported {
+            imported_entry,
+            source_speaker,
+            content,
+        } = semantic.payload()
+        else {
+            return Err(
+                ImportedSessionSeedReconstitutionFailure::SemanticEntryNotImported {
+                    entry: semantic.identity(),
+                },
+            );
+        };
+        if *imported_entry != imported.identity() {
+            return Err(
+                ImportedSessionSeedReconstitutionFailure::ImportedEntryIdentityMismatch {
+                    entry: semantic.identity(),
+                },
+            );
+        }
+        if source_speaker != imported.source_speaker() {
+            return Err(
+                ImportedSessionSeedReconstitutionFailure::ImportedSpeakerMismatch {
+                    entry: semantic.identity(),
+                },
+            );
+        }
+        if content != imported.content() {
+            return Err(
+                ImportedSessionSeedReconstitutionFailure::ImportedContentMismatch {
+                    entry: semantic.identity(),
+                },
+            );
+        }
+        semantic_entries.push(SemanticTranscriptEntry::from_validated_parts(
+            semantic.identity(),
+            semantic.source_session(),
+            semantic.payload().clone(),
+        ));
+    }
+
+    let snapshot = ResolvedContextFrontierSnapshot::try_from_candidate(
+        seed_snapshot.owning_session(),
+        seed_snapshot.snapshot(),
+        seed_snapshot.ordered_entries().to_vec(),
+    )
+    .map_err(|_| ImportedSessionSeedReconstitutionFailure::SeedSnapshotMalformed)?;
+    if semantic_entries
+        .iter()
+        .map(SemanticTranscriptEntry::reference)
+        .ne(snapshot.ordered_entries())
+    {
+        return Err(ImportedSessionSeedReconstitutionFailure::SeedSnapshotMembershipMismatch);
+    }
+
+    Ok(ValidatedImportedSeedProjection {
+        seed: ImportedSessionSeed::from_validated_parts(session, seed_record.seed_frontier),
+        snapshot,
+        semantic_entries: semantic_entries.into_boxed_slice(),
+    })
+}
+
 /// Complete stored facts for one purpose-specific imported semantic-context
 /// read.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1174,6 +1339,179 @@ pub enum ImportedSessionReconstitutionFailure {
     DelegatedAncestryMismatch,
     /// The imported seed projection is inconsistent.
     Seed(ImportedSessionSeedReconstitutionFailure),
+}
+
+/// Complete stored runtime facts for an imported session, using the normalized
+/// entry projection without loading audit-source bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImportedSessionNormalizedReconstitutionInput {
+    requested_session: SessionId,
+    stored_session: SessionId,
+    provenance: SessionCreationProvenance,
+    current_defaults_session: SessionId,
+    current_defaults_version: SessionConfigurationDefaultsVersion,
+    defaults_session: SessionId,
+    defaults_version: SessionConfigurationDefaultsVersion,
+    defaults: SessionConfigurationDefaults,
+    placement: SessionPlacementReconstitutionFacts,
+    imported_entries: Vec<ImportedTranscriptEntryInput>,
+    seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
+    seed_snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
+    semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
+}
+
+impl ImportedSessionNormalizedReconstitutionInput {
+    /// Supplies every independently stored runtime fact.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        requested_session: SessionId,
+        stored_session: SessionId,
+        provenance: SessionCreationProvenance,
+        current_defaults_session: SessionId,
+        current_defaults_version: SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        placement: SessionPlacementReconstitutionFacts,
+        imported_entries: Vec<ImportedTranscriptEntryInput>,
+        seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
+        seed_snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
+        semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
+    ) -> Self {
+        Self {
+            requested_session,
+            stored_session,
+            provenance,
+            current_defaults_session,
+            current_defaults_version,
+            defaults_session,
+            defaults_version,
+            defaults,
+            placement,
+            imported_entries,
+            seed_records,
+            seed_snapshots,
+            semantic_entries,
+        }
+    }
+
+    /// Reconstructs one complete imported runtime projection without audit bytes.
+    pub fn reconstitute(
+        self,
+    ) -> Result<ReconstitutedImportedSession, ImportedSessionNormalizedReconstitutionError> {
+        let fail = |input, failure| ImportedSessionNormalizedReconstitutionError {
+            input: Box::new(input),
+            failure,
+        };
+        if self.requested_session != self.stored_session {
+            return Err(fail(
+                self,
+                ImportedSessionReconstitutionFailure::RequestedSessionMismatch,
+            ));
+        }
+        if self.current_defaults_session != self.stored_session {
+            return Err(fail(
+                self,
+                ImportedSessionReconstitutionFailure::CurrentDefaultsSessionMismatch,
+            ));
+        }
+        if self.defaults_session != self.stored_session {
+            return Err(fail(
+                self,
+                ImportedSessionReconstitutionFailure::DefaultsSessionMismatch,
+            ));
+        }
+        if self.current_defaults_version != self.defaults_version {
+            return Err(fail(
+                self,
+                ImportedSessionReconstitutionFailure::CurrentDefaultsVersionMismatch,
+            ));
+        }
+        if self.placement.current_pointer_session != self.stored_session {
+            return Err(fail(
+                self,
+                ImportedSessionReconstitutionFailure::CurrentPlacementSessionMismatch,
+            ));
+        }
+        if self.placement.selected_event_session != self.stored_session {
+            return Err(fail(
+                self,
+                ImportedSessionReconstitutionFailure::PlacementSessionMismatch,
+            ));
+        }
+        if self.placement.current_pointer_version != self.placement.selected_event.version() {
+            return Err(fail(
+                self,
+                ImportedSessionReconstitutionFailure::CurrentPlacementVersionMismatch,
+            ));
+        }
+        if delegated_imported_session_mismatch(self.provenance) {
+            return Err(fail(
+                self,
+                ImportedSessionReconstitutionFailure::DelegatedAncestryMismatch,
+            ));
+        }
+        let projection = match validate_normalized_imported_seed_projection(
+            self.stored_session,
+            self.provenance,
+            &self.imported_entries,
+            &self.seed_records,
+            &self.seed_snapshots,
+            &self.semantic_entries,
+        ) {
+            Ok(projection) => projection,
+            Err(failure) => {
+                return Err(fail(
+                    self,
+                    ImportedSessionReconstitutionFailure::Seed(failure),
+                ));
+            }
+        };
+        let session = Session::from_validated_imported_reconstitution(
+            self.stored_session,
+            self.provenance,
+            VersionedSessionConfigurationDefaults::reconstitute(
+                self.defaults_version,
+                self.defaults,
+            ),
+            self.placement.selected_event,
+        );
+        Ok(ReconstitutedImportedSession {
+            session,
+            imported_seed: projection.seed,
+            seed_snapshot: projection.snapshot,
+            semantic_entries: projection.semantic_entries,
+        })
+    }
+}
+
+/// Failed normalized imported-session reconstitution retaining every input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImportedSessionNormalizedReconstitutionError {
+    input: Box<ImportedSessionNormalizedReconstitutionInput>,
+    failure: ImportedSessionReconstitutionFailure,
+}
+
+impl ImportedSessionNormalizedReconstitutionError {
+    /// Returns why reconstitution failed.
+    pub const fn failure(&self) -> ImportedSessionReconstitutionFailure {
+        self.failure
+    }
+
+    /// Borrows the complete unchanged input.
+    pub const fn input(&self) -> &ImportedSessionNormalizedReconstitutionInput {
+        &self.input
+    }
+
+    /// Returns the complete unchanged input and failure.
+    pub fn into_parts(
+        self,
+    ) -> (
+        ImportedSessionNormalizedReconstitutionInput,
+        ImportedSessionReconstitutionFailure,
+    ) {
+        (*self.input, self.failure)
+    }
 }
 
 /// Failed imported semantic-context reconstitution retaining every input.

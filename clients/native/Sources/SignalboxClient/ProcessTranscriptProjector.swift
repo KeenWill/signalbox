@@ -291,7 +291,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
               id: acceptedInputID,
               turnID: turn.turnID,
               acceptancePosition: turn.acceptancePosition,
-              content: content
+              content: content.displayText
             ))
         }
         if case .activeAwaitingToolApproval(let requestID) = turn.state {
@@ -332,6 +332,11 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
             unanchoredUsage.append(usageRecord)
           }
         }
+      case .userEntry(let message):
+        if let projected = try projectUser(message, selection: selection) {
+          store(projected, in: &projectedByID, order: &projectedOrder)
+          materializedAcceptedInputIDs.insert(message.acceptedInputID)
+        }
       case .textEntry(let message):
         textAssembly = TextAssembly(message: message)
       case .content(let content):
@@ -347,9 +352,6 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           )
           if let projected {
             store(projected, in: &projectedByID, order: &projectedOrder)
-            if case .user(let acceptedInputID, _) = assembly.message.entry {
-              materializedAcceptedInputIDs.insert(acceptedInputID)
-            }
           }
           textAssembly = nil
         } else {
@@ -448,6 +450,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     }
     for (index, record) in records.enumerated() {
       switch record {
+      case .userEntry:
+        textModelCall = nil
       case .textEntry(let message):
         guard message.sourceSessionID == nativeSourceSessionID else {
           textModelCall = nil
@@ -458,7 +462,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           textModelCall = (modelCallID.rawValue, message.entryIndex, turnID)
         case .contextSummary(let modelCallID, _, _, _, _):
           textModelCall = (modelCallID.rawValue, message.entryIndex, nil)
-        case .user, .imported, .unknown:
+        case .imported, .unknown:
           textModelCall = nil
         }
       case .content(let content):
@@ -535,12 +539,17 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     for record in records {
       let anchor: (turnID: SignalboxCanonicalUUID, entryIndex: SignalboxCanonicalUInt64)?
       switch record {
+      case .userEntry(let message):
+        guard message.sourceSessionID == nativeSourceSessionID else {
+          continue
+        }
+        anchor = (message.turnID, message.entryIndex)
       case .textEntry(let message):
         guard message.sourceSessionID == nativeSourceSessionID else {
           continue
         }
         switch message.entry {
-        case .user(_, let turnID), .assistant(let turnID, _):
+        case .assistant(let turnID, _):
           anchor = (turnID, message.entryIndex)
         case .contextSummary, .imported, .unknown:
           anchor = nil
@@ -649,7 +658,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     var modelCallIDs: Set<String> = []
     for case .turn(let turn) in records {
       switch turn.state {
-      case .activeAwaitingModelCallRecovery(_, let modelCallID),
+      case .activeAwaitingModelCallRecovery(_, let modelCallID, _, _),
         .refused(_, _, let modelCallID),
         .reconciliationRequired(_, _, let modelCallID):
         modelCallIDs.insert(modelCallID.rawValue)
@@ -663,6 +672,26 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     return modelCallIDs
   }
 
+  private mutating func projectUser(
+    _ message: SignalboxTranscriptUserEntryMessage,
+    selection: Selection
+  ) throws -> SignalboxStoredEvent? {
+    guard case .all = selection else {
+      return nil
+    }
+    let identity = PresentationIdentity.semantic(
+      sourceSessionID: message.sourceSessionID.rawValue,
+      entryID: message.entryID.rawValue
+    )
+    return SignalboxStoredEvent(
+      eventID: try claimSemanticEventID(identity),
+      presentationOrder: try semanticPresentationOrder(message.entryIndex),
+      event: .processMessage(
+        SignalboxProcessMessageEvent(role: .user, text: message.content.displayText)
+      )
+    )
+  }
+
   private mutating func projectText(
     _ message: SignalboxTranscriptTextEntryMessage,
     content: String,
@@ -673,8 +702,6 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     }
     let event: SignalboxConversationEvent
     switch message.entry {
-    case .user:
-      event = .processMessage(SignalboxProcessMessageEvent(role: .user, text: content))
     case .assistant:
       event = .processMessage(SignalboxProcessMessageEvent(role: .assistant, text: content))
     case .contextSummary:
@@ -1223,8 +1250,6 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return false
       }
       switch message.entry {
-      case .user:
-        return false
       case .assistant(let turnID, let modelCallID):
         let producingCall: (turnID: SignalboxCanonicalUUID, modelCallID: SignalboxCanonicalUUID)?
         switch trigger {
@@ -1607,6 +1632,11 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           sourceSessionID: message.sourceSessionID.rawValue,
           entryID: message.entryID.rawValue
         )
+      case .userEntry(let message):
+        return .semantic(
+          sourceSessionID: message.sourceSessionID.rawValue,
+          entryID: message.entryID.rawValue
+        )
       case .textEntry(let message):
         return .semantic(
           sourceSessionID: message.sourceSessionID.rawValue,
@@ -1939,6 +1969,12 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     switch cause {
     case .credentialRejected:
       return "provider rejected credential"
+    case .attachmentTooLarge:
+      return "attachment verification budget exceeded"
+    case .attachmentMissing:
+      return "required attachment is missing"
+    case .attachmentCorrupt:
+      return "required attachment is corrupt"
     case .permissionDenied:
       return "credential lacks permission"
     case .invalidRequest:

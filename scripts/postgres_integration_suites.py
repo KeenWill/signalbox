@@ -711,7 +711,11 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
     # subcommand are all already resolved.
     for tokens, variables in executed:
         arguments = cargo_test_arguments(tokens)
-        if arguments is not None and runs_ignored_tests(arguments):
+        if (
+            arguments is not None
+            and runs_ignored_tests(arguments)
+            and not runs_file_media_isolation_tests(arguments)
+        ):
             failures.append(
                 f"{WORKFLOW} runs ignored tests through `cargo test` outside "
                 f"{MANIFEST}: {' '.join(tokens)}"
@@ -1026,6 +1030,27 @@ def runs_ignored_tests(arguments: list[str]) -> bool:
         return False
     harness = arguments[arguments.index("--") + 1 :]
     return "--ignored" in harness or "--include-ignored" in harness
+
+
+def runs_file_media_isolation_tests(arguments: list[str]) -> bool:
+    """Recognize the ignored isolation suite enforced outside the PostgreSQL manifest.
+
+    This exception is intentionally exact: changing the package, feature, test
+    target, or harness selection remains an unmanifested ignored-test run. Both
+    this module's workflow gate and `check_docs_consistency.py` use this single
+    predicate so ignored-test credit cannot disagree with workflow admission.
+    """
+    return arguments == [
+        "--no-fail-fast",
+        "-p",
+        "signalbox-file-media-processor-runtime",
+        "--features",
+        "test-worker",
+        "--test",
+        "isolation",
+        "--",
+        "--ignored",
+    ]
 
 
 def documented_ignored_commands(

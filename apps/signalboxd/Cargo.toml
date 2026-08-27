@@ -10,6 +10,8 @@ publish.workspace = true
 [features]
 test-support = [
     "signalbox-blob-store-filesystem/test-support",
+    "signalbox-blob-store-s3/test-support",
+    "signalbox-persistence/postgres-integration",
     "signalbox-persistence/test-support",
 ]
 
@@ -20,8 +22,16 @@ axum = { version = "0.8.9", default-features = false, features = [
     "query",
     "tokio",
 ] }
+base64 = "0.23.0"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 hmac = { version = "0.13.0", default-features = false }
+image = { version = "0.25.8", default-features = false, features = [
+    "gif",
+    "jpeg",
+    "png",
+    "webp",
+] }
+mime = "0.3.17"
 # Classifies the error `axum::body::to_bytes` returns: only its
 # `LengthLimitError` is an oversized body; anything else is transport failure.
 # Already present transitively under axum.
@@ -66,6 +76,7 @@ sha2 = "0.11.0"
 signalbox-application = { path = "../../crates/application" }
 signalbox-blob-store = { path = "../../crates/blob-store" }
 signalbox-blob-store-filesystem = { path = "../../crates/blob-store-filesystem" }
+signalbox-blob-store-s3 = { path = "../../crates/blob-store-s3" }
 signalbox-conversation-import-claude-code = { path = "../../crates/conversation-import-claude-code" }
 signalbox-conversation-import-codex = { path = "../../crates/conversation-import-codex" }
 signalbox-domain = { path = "../../crates/domain" }
@@ -88,6 +99,8 @@ signalbox-tools-plan = { path = "../../crates/tools-plan" }
 signalbox-tools-sessions = { path = "../../crates/tools-sessions" }
 signalbox-tools-web = { path = "../../crates/tools-web" }
 signalbox-tools-workspace = { path = "../../crates/tools-workspace" }
+signalbox-tool-contract = { path = "../../crates/tool-contract" }
+signalbox-tool-schema-derive = { path = "../../crates/tool-schema-derive" }
 signalbox-web-contract = { path = "../../crates/web-contract" }
 rustix = { version = "1.1.4", default-features = false, features = [
     "fs",
