@@ -74,6 +74,7 @@ pub const DISABLED_CLAUDE_CLI_BUILTIN_TOOLS: &[&str] = &[
     "RemoteTrigger",
     "ReportFindings",
     "ScheduleWakeup",
+    "SendFeedback",
     "SendMessage",
     "TaskCreate",
     "TaskGet",
