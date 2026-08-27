@@ -428,6 +428,48 @@ async fn named_tool_choice_rejects_an_extra_declared_proposal() {
     assert_eq!(result.spawns, 1);
 }
 
+/// The credential boundary withholds a proposal's arguments, never its tool
+/// identity, so a suppressed foreign proposal still violates a named choice.
+#[tokio::test]
+async fn named_tool_choice_rejects_a_suppressed_extra_declared_proposal() {
+    let result = execute_scenario(
+        "named_choice_suppressed_extra_tool",
+        OperationShape::NamedTool,
+    )
+    .await;
+    let loss = boundary_loss(&result.evidence);
+    let proposed: Vec<&str> = result
+        .observations
+        .iter()
+        .filter_map(|observation| match &observation.fact {
+            signalbox_model_runtime::ObservationFact::ToolCallProposed(proposal) => {
+                Some(proposal.name.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    let argument_deltas = result
+        .observations
+        .iter()
+        .filter(|observation| {
+            matches!(
+                observation.fact,
+                signalbox_model_runtime::ObservationFact::ToolArgumentsDelta { .. }
+            )
+        })
+        .count();
+
+    // Named-tool validation rejects an admitted foreign proposal and a
+    // suppressed one alike, so only the emitted proposals prove which form the
+    // credential boundary produced before validation saw it: the required tool
+    // proposes and streams its arguments, the suppressed one does neither.
+    assert_eq!(proposed, vec![fixtures::TOOL_NAME]);
+    assert_eq!(argument_deltas, 1);
+    assert!(response_unintelligible(&loss.cause).contains(fixtures::TOOL_NAME));
+    assert_eq!(loss.finish_reported, Some(FinishReason::ToolUse));
+    assert_eq!(result.spawns, 1);
+}
+
 #[tokio::test]
 async fn refusal_requires_the_typed_refusal_stop_reason() {
     let result = execute_scenario("refusal", OperationShape::Text).await;

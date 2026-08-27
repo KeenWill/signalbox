@@ -155,13 +155,14 @@ impl WorkspaceFileSystem for PinnedWorkspaceFileSystem {
             .read_directory(root, path, max_entries, max_inspections, max_path_bytes)
     }
 
-    fn read_file_prefix(
+    fn read_file_range(
         &self,
         root: &WorkspaceRoot,
         path: &Path,
+        offset: u64,
         max_bytes: usize,
     ) -> Result<WorkspaceFileBytes, WorkspaceResolveError> {
-        self.local.read_file_prefix(root, path, max_bytes)
+        self.local.read_file_range(root, path, offset, max_bytes)
     }
 }
 

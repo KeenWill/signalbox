@@ -839,12 +839,23 @@ impl<C: Clone> EventDecoder<C> {
     fn validate_tool_requirement(&self) -> Result<(), String> {
         match &self.tool_requirement {
             ToolRequirement::Optional => Ok(()),
-            ToolRequirement::Any if self.proposal_indexes.is_empty() => Err("Claude did not satisfy the required any-tool choice".to_string()),
+            ToolRequirement::Any if self.proposal_indexes.is_empty() => {
+                Err("Claude did not satisfy the required any-tool choice".to_string())
+            }
             ToolRequirement::Any => Ok(()),
+            // Suppression withholds a proposal's arguments, never its admitted
+            // tool name, so a suppressed foreign proposal violates the choice
+            // exactly as an admitted one does.
             ToolRequirement::Named(name)
                 if self.proposal_indexes.is_empty()
-                    || self.content.iter().any(|part| {
-                        matches!(part, AssistantPart::ToolCall(call) if call.name.as_str() != name)
+                    || self.content.iter().any(|part| match part {
+                        AssistantPart::ToolCall(call) => call.name.as_str() != name,
+                        AssistantPart::SuppressedToolCall(suppressed) => {
+                            suppressed.as_str() != name
+                        }
+                        AssistantPart::Text(_)
+                        | AssistantPart::Thinking { .. }
+                        | AssistantPart::RedactedThinking { .. } => false,
                     }) =>
             {
                 Err(format!("Claude tool choice permits only `{name}`"))

@@ -3087,7 +3087,9 @@ async fn s10_composed_workspace_read_executes_offline() -> Result<(), Box<dyn Er
         serde_json::json!({
             "path": relative_path,
             "content": fixture_content,
+            "offset": 0,
             "bytes_read": fixture_content.len(),
+            "next_offset": fixture_content.len(),
             "total_bytes": fixture_content.len(),
             "truncated": false
         })
