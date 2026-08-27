@@ -35,13 +35,21 @@ async fn insert_deep_frontier_fixture(
         "INSERT INTO semantic_transcript_entry
             (source_session_id, semantic_entry_id, payload_kind,
              assistant_text_value, producing_model_call_id,
-             assistant_response_part_ordinal)
+             assistant_response_part_ordinal,
+             assistant_response_text_start_bytes)
          SELECT $1,
                 md5('entry-' || member_position)::uuid,
                 'assistant_text',
                 'fixture member ' || member_position,
                 md5('frontier-validation-producing-call')::uuid,
-                member_position - 1
+                member_position - 1,
+                COALESCE(
+                    sum(octet_length('fixture member ' || member_position)) OVER (
+                        ORDER BY member_position
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                    ),
+                    0
+                )::numeric
            FROM generate_series(1, $2) AS member(member_position)",
     )
     .bind(session)
@@ -79,14 +87,19 @@ async fn insert_deep_frontier_fixture(
         "INSERT INTO semantic_transcript_entry
             (source_session_id, semantic_entry_id, payload_kind,
              assistant_text_value, producing_model_call_id,
-             assistant_response_part_ordinal)
+             assistant_response_part_ordinal,
+             assistant_response_text_start_bytes)
          VALUES (
             $1,
             md5('divergent-entry')::uuid,
             'assistant_text',
             'divergent fixture member',
             md5('frontier-validation-producing-call')::uuid,
-            $2
+            $2,
+            (
+                SELECT sum(octet_length('fixture member ' || member_position))::numeric
+                  FROM generate_series(1, $2) AS member(member_position)
+            )
          )",
     )
     .bind(session)
