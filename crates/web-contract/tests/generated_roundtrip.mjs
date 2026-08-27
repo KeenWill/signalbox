@@ -1768,8 +1768,14 @@ test("generated detail decoder accepts a cause-less known failure", () => {
     disposition: "known_failed",
   };
   const decoded = decodeWebSessionTimelineDetailPage(page);
-  assert.equal(decoded.items[0].body.state.disposition, "known_failed");
-  assert.equal(decoded.items[0].body.provider_failure_cause, null);
+  assert.equal(
+    decoded.items[0].body.state.disposition,
+    page.items[0].body.state.disposition,
+  );
+  assert.equal(
+    decoded.items[0].body.provider_failure_cause,
+    page.items[0].body.provider_failure_cause,
+  );
 });
 
 test("generated detail decoder rejects a failure cause on another disposition", () => {
