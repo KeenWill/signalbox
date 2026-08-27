@@ -43,6 +43,19 @@
       "platformAutomerge": true,
     },
     {
+      // deno_error is not an independent dependency: its sole use is naming
+      // deno_core's error type (use deno_error::JsErrorBox in
+      // crates/program-runtime), and every deno_core release since 0.388.0
+      // pins deno_error exactly (=0.7.1 today). It can only ever move when
+      // deno_core moves, so Renovate must not propose it on its own — that
+      // produced the unresolvable PR #921 chasing 0.7.3, a misnumbered
+      // release (published 1.4s before 0.7.2) the deno ecosystem never
+      // adopted.
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["deno_error"],
+      "enabled": false,
+    },
+    {
       // Baseline for every npm manifest: exact pins, human-reviewed merges.
       // For the two CLI-pin manifests this is deliberately the whole policy —
       // no minimum-release-age gate, unlike the cargo policy above. The
@@ -66,9 +79,13 @@
       // cooldown as cargo: a newly cut release waits out the window in which
       // a compromised or broken version is typically caught and yanked before
       // Renovate proposes it here.
+      // "pin" is included because pin refreshes adopt whatever version is
+      // newest at refresh time: without it, Renovate advanced the Node.js
+      // engine pin to 26.8.1 the day it was released (PR #1014), bypassing
+      // the aging window this rule exists to enforce.
       "matchManagers": ["npm"],
       "matchFileNames": ["clients/web/**"],
-      "matchUpdateTypes": ["patch", "minor"],
+      "matchUpdateTypes": ["patch", "minor", "pin"],
       "minimumReleaseAge": "7 days",
       "minimumReleaseAgeBehaviour": "timestamp-required",
     },
