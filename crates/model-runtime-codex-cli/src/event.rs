@@ -36,6 +36,8 @@
 //! local to it.
 
 use std::collections::HashSet;
+use std::io::Read;
+use std::path::PathBuf;
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -45,8 +47,9 @@ use signalbox_model_runtime::{
     ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, Observation, ObservationFact,
     ObservationSink, ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId,
     ProviderRequestId, REDACTED, RedactingSink, RefusalEvidence, TerminalEvidence, TokenUsage,
-    ToolCallId, ToolCallProposal, ToolCallsAtLoss, ToolName, provider_json_has_duplicate_members,
-    redact_text, trailing_credential_context, validate_provider_json_nesting,
+    ToolArgumentRedaction, ToolCallId, ToolCallProposal, ToolCallsAtLoss, ToolName,
+    provider_json_has_duplicate_members, redact_text, trailing_credential_context,
+    validate_provider_json_nesting,
 };
 
 use crate::status::{classify_error, retry_after};
@@ -77,6 +80,8 @@ pub(crate) struct EventDecoder<C> {
     exchange: ExchangeFacts,
     message_id: Option<String>,
     agent_message: Option<String>,
+    output_last_message: PathBuf,
+    terminal_message_limit: usize,
     next_part_index: u32,
     usage: TokenUsage,
     terminal: Option<CliTerminal>,
@@ -101,6 +106,8 @@ impl<C: Clone> EventDecoder<C> {
         correlation: C,
         delivery: DeliveryMode,
         translated: &TranslatedOperation,
+        output_last_message: PathBuf,
+        terminal_message_limit: usize,
     ) -> Self {
         Self {
             correlation,
@@ -111,6 +118,8 @@ impl<C: Clone> EventDecoder<C> {
             exchange: ExchangeFacts::default(),
             message_id: None,
             agent_message: None,
+            output_last_message,
+            terminal_message_limit,
             next_part_index: 0,
             usage: TokenUsage::unreported(),
             terminal: None,
@@ -437,16 +446,32 @@ impl<C: Clone> EventDecoder<C> {
     }
 
     fn completed(mut self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence {
-        let Some(agent_message) = self.agent_message.take() else {
-            return boundary_loss_before_envelope(
-                self.exchange,
-                self.usage,
-                LossCause::ResponseUnintelligible {
-                    detail: "turn.completed carried no response envelope".to_string(),
-                },
-            );
+        let agent_message = match self.agent_message.take() {
+            Some(agent_message) => agent_message,
+            None => match self.read_output_last_message() {
+                Ok(Some(agent_message)) => agent_message,
+                Ok(None) => {
+                    report_response_envelope_rejection("missing");
+                    return boundary_loss_before_envelope(
+                        self.exchange,
+                        self.usage,
+                        LossCause::ResponseUnintelligible {
+                            detail: "turn.completed carried no response envelope".to_string(),
+                        },
+                    );
+                }
+                Err(detail) => {
+                    report_response_envelope_rejection("retained_message_unavailable");
+                    return boundary_loss_before_envelope(
+                        self.exchange,
+                        self.usage,
+                        LossCause::ResponseUnintelligible { detail },
+                    );
+                }
+            },
         };
         if let Err(error) = validate_provider_json_nesting(agent_message.as_bytes()) {
+            report_response_envelope_rejection("nesting_bound");
             return boundary_loss_before_envelope(
                 self.exchange,
                 self.usage,
@@ -470,6 +495,7 @@ impl<C: Clone> EventDecoder<C> {
         let envelope: ModelEnvelope = match serde_json::from_str(&agent_message) {
             Ok(envelope) => envelope,
             Err(_) => {
+                report_response_envelope_rejection("shape");
                 return boundary_loss_before_envelope(
                     self.exchange,
                     self.usage,
@@ -491,13 +517,16 @@ impl<C: Clone> EventDecoder<C> {
         };
         let mut content = match self.decode_content(&envelope, &mut *sink) {
             Ok(content) => content,
-            Err(detail) => {
+            Err(failure) => {
+                report_response_envelope_rejection(failure.stage);
                 return boundary_loss_after_envelope(
                     self.exchange,
                     self.usage,
                     Some(reported_finish.clone()),
                     &envelope,
-                    LossCause::ResponseUnintelligible { detail },
+                    LossCause::ResponseUnintelligible {
+                        detail: failure.detail,
+                    },
                 );
             }
         };
@@ -532,6 +561,7 @@ impl<C: Clone> EventDecoder<C> {
             &envelope.text,
             reported_finish.clone(),
         ) {
+            report_response_envelope_rejection("observation_projection");
             return boundary_loss_after_envelope(
                 self.exchange,
                 self.usage,
@@ -575,6 +605,7 @@ impl<C: Clone> EventDecoder<C> {
                 && self.output_contract_name.is_none()
                 && envelope.outcome != EnvelopeOutcome::Refused
             {
+                report_response_envelope_rejection("streamed_completion_empty");
                 return boundary_loss_after_envelope(
                     self.exchange,
                     self.usage,
@@ -614,13 +645,42 @@ impl<C: Clone> EventDecoder<C> {
         }
     }
 
+    /// Reads the pinned CLI's independently retained final message only when
+    /// JSONL did not deliver an agent-message item. The process has exited
+    /// before `finish` runs, and the same event-size ceiling bounds this
+    /// secondary representation before allocation or UTF-8 decoding.
+    fn read_output_last_message(&self) -> Result<Option<String>, String> {
+        let file = std::fs::File::open(&self.output_last_message).map_err(|_| {
+            "Codex output-last-message file could not be opened after completion".to_string()
+        })?;
+        let read_limit = u64::try_from(self.terminal_message_limit)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        let mut bytes = Vec::new();
+        file.take(read_limit).read_to_end(&mut bytes).map_err(|_| {
+            "Codex output-last-message file could not be read after completion".to_string()
+        })?;
+        if bytes.len() > self.terminal_message_limit {
+            return Err("Codex output-last-message exceeded the event-size bound".to_string());
+        }
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|_| "Codex output-last-message was not UTF-8".to_string())
+    }
+
     fn decode_content(
         &self,
         envelope: &ModelEnvelope,
         sink: &mut RedactingSink<'_, C>,
-    ) -> Result<Vec<AssistantPart>, String> {
+    ) -> Result<Vec<AssistantPart>, ResponseEnvelopeFailure> {
         if envelope.outcome == EnvelopeOutcome::Refused && !envelope.tool_calls.is_empty() {
-            return Err("a refusal envelope also proposed tools".to_string());
+            return Err(ResponseEnvelopeFailure::new(
+                "refusal_with_tools",
+                "a refusal envelope also proposed tools",
+            ));
         }
         let mut content = Vec::new();
         // Consults the held lookbehind (including the emitted thread-id and
@@ -654,7 +714,10 @@ impl<C: Clone> EventDecoder<C> {
         let mut clean_ids = HashSet::new();
         for call in &envelope.tool_calls {
             if call.id.is_empty() || !raw_ids.insert(call.id.as_str()) {
-                return Err("tool call ids must be nonempty and distinct".to_string());
+                return Err(ResponseEnvelopeFailure::new(
+                    "tool_call_id",
+                    "tool call ids must be nonempty and distinct",
+                ));
             }
             // An id is clean only if neither the stateless scan nor the held
             // cross-fragment lookbehind (including the same-envelope final
@@ -670,17 +733,27 @@ impl<C: Clone> EventDecoder<C> {
             let allowed = self.declared_tools.contains(&call.name)
                 || self.output_contract_name.as_deref() == Some(call.name.as_str());
             if !allowed {
-                return Err(format!(
-                    "response proposed undeclared tool `{}`",
-                    sink.redact_provider_id(final_text_context, &call.name)
+                return Err(ResponseEnvelopeFailure::new(
+                    "undeclared_tool",
+                    format!(
+                        "response proposed undeclared tool `{}`",
+                        sink.redact_provider_id(final_text_context, &call.name)
+                    ),
                 ));
             }
-            // The envelope carries the argument object as JSON text inside a
-            // string, because strict structured output forbids a free-form
-            // object (see `wire::EnvelopeToolCall`). Parsing here restores
-            // the trait contract: the contained JSON object reaches the
-            // caller byte-verbatim when it is credential-shape clean.
-            validate_tool_arguments(&call.arguments, &call.name)?;
+            // The envelope carries the provider's argument text inside a
+            // string because strict structured output forbids a free-form
+            // object (see `wire::EnvelopeToolCall`). Preserve that text even
+            // when it is malformed or not an object: `ToolCallProposal`
+            // deliberately owns raw provider text, and the provider-independent
+            // typed decoders report a typed decode failure the caller acts on,
+            // which the tool loop projects as its `invalid_arguments` result
+            // for the next model round. The shared nesting bound still applies
+            // to the contained text, as it does in the sibling adapters that
+            // receive string-carried arguments: string content is invisible to
+            // the line-level and agent-message-level checks, and the shared
+            // typed decoders admit only serde_json's recursion boundary.
+            validate_tool_argument_nesting(&call.arguments, &call.name)?;
             // The id consults the same held lookbehind the arguments do —
             // including the same-envelope final text — so an id extending a
             // credential marker gets a safe surrogate instead of leaking.
@@ -690,16 +763,24 @@ impl<C: Clone> EventDecoder<C> {
             } else {
                 next_redacted_call_id(&mut redacted_id_cursor, &clean_ids)
             };
-            content.push(AssistantPart::ToolCall(ToolCallProposal {
-                id: ToolCallId::new(id),
-                name: ToolName::new(call.name.clone()),
-                // The arguments consult the held cross-fragment lookbehind
-                // before the stateless JSON-aware redaction, and this same
-                // sanitized value feeds the streamed argument delta and the
-                // terminal proposal, so a credential whose marker arrived in
-                // an earlier fragment cannot escape through tool arguments.
-                arguments_json: sink.redact_tool_arguments(final_text_context, &call.arguments),
-            }));
+            // The arguments consult the held cross-fragment lookbehind before
+            // stateless JSON-aware redaction. A whole-object suppression is
+            // typed separately so no executable sentinel request can cross
+            // the adapter boundary and churn through tool rounds.
+            match sink.redact_tool_arguments(final_text_context, &call.arguments) {
+                ToolArgumentRedaction::Admitted(arguments_json) => {
+                    content.push(AssistantPart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new(id),
+                        name: ToolName::new(call.name.clone()),
+                        arguments_json,
+                    }));
+                }
+                ToolArgumentRedaction::Suppressed => {
+                    content.push(AssistantPart::SuppressedToolCall(ToolName::new(
+                        call.name.clone(),
+                    )));
+                }
+            }
         }
         if let Some(contract_name) = &self.output_contract_name {
             if !envelope
@@ -707,27 +788,37 @@ impl<C: Clone> EventDecoder<C> {
                 .iter()
                 .all(|call| &call.name == contract_name)
             {
-                return Err(format!(
-                    "structured output permits only `{contract_name}` proposals"
+                return Err(ResponseEnvelopeFailure::new(
+                    "structured_output_tool",
+                    format!("structured output permits only `{contract_name}` proposals"),
                 ));
             }
         } else {
             match &self.tool_requirement {
                 ToolRequirement::Optional => {}
                 ToolRequirement::Any if envelope.tool_calls.is_empty() => {
-                    return Err("tool choice requires a proposal".to_string());
+                    return Err(ResponseEnvelopeFailure::new(
+                        "required_tool_missing",
+                        "tool choice requires a proposal",
+                    ));
                 }
                 ToolRequirement::Named(name)
                     if envelope.tool_calls.is_empty()
                         || !envelope.tool_calls.iter().all(|call| &call.name == name) =>
                 {
-                    return Err(format!("tool choice permits only `{name}`"));
+                    return Err(ResponseEnvelopeFailure::new(
+                        "named_tool_mismatch",
+                        format!("tool choice permits only `{name}`"),
+                    ));
                 }
                 ToolRequirement::Any | ToolRequirement::Named(_) => {}
             }
         }
         if content.is_empty() && self.output_contract_name.is_none() {
-            return Err("response envelope carries no completion material".to_string());
+            return Err(ResponseEnvelopeFailure::new(
+                "completion_empty",
+                "response envelope carries no completion material",
+            ));
         }
         Ok(content)
     }
@@ -764,7 +855,9 @@ impl<C: Clone> EventDecoder<C> {
                             fragment: call.arguments_json.clone(),
                         },
                     }),
-                    AssistantPart::Thinking { .. } | AssistantPart::RedactedThinking { .. } => {}
+                    AssistantPart::Thinking { .. }
+                    | AssistantPart::RedactedThinking { .. }
+                    | AssistantPart::SuppressedToolCall(_) => {}
                 }
             }
             self.next_part_index += content_len;
@@ -796,6 +889,28 @@ impl<C: Clone> EventDecoder<C> {
             .ok_or_else(|| DecodeFailure::new("response has too many ordered parts"))?;
         Ok(index)
     }
+}
+
+struct ResponseEnvelopeFailure {
+    stage: &'static str,
+    detail: String,
+}
+
+impl ResponseEnvelopeFailure {
+    fn new(stage: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            stage,
+            detail: detail.into(),
+        }
+    }
+}
+
+fn report_response_envelope_rejection(stage: &'static str) {
+    tracing::warn!(
+        cause_code = "codex_response_envelope_rejected",
+        stage,
+        "Codex completed-turn response envelope was rejected"
+    );
 }
 
 fn validate_item_identity(item: &ItemIdentity) -> Result<(), DecodeFailure> {
@@ -937,28 +1052,25 @@ fn fold_dropped_units<'a, C: Clone>(
     }
 }
 
-/// Requires a string-carried tool-argument payload to hold one JSON object
-/// within the provider nesting bound.
+/// Requires a string-carried tool-argument payload to stay within the
+/// provider nesting bound, whatever its syntax.
 ///
 /// The argument text arrives inside a JSON string, so the line-level nesting
-/// validation in `push` never saw its structure. Failure detail names only
-/// the redacted tool name, never the argument text itself.
-fn validate_tool_arguments(arguments: &str, tool_name: &str) -> Result<(), String> {
-    validate_provider_json_nesting(arguments.as_bytes())
-        .map_err(|error| format!("tool `{}` arguments: {error}", redact_text(tool_name)))?;
-    let parsed: Value = serde_json::from_str(arguments).map_err(|_| {
-        format!(
-            "tool `{}` arguments are not valid JSON",
-            redact_text(tool_name)
+/// validation in `push` never saw its structure, and the shared typed decoders
+/// that consume the preserved text admit only serde_json's recursion boundary.
+/// Syntax and shape are deliberately not judged here: malformed and non-object
+/// text is authoritative proposal material the typed decoders classify. Failure
+/// detail names only the redacted tool name, never the argument text itself.
+fn validate_tool_argument_nesting(
+    arguments: &str,
+    tool_name: &str,
+) -> Result<(), ResponseEnvelopeFailure> {
+    validate_provider_json_nesting(arguments.as_bytes()).map_err(|error| {
+        ResponseEnvelopeFailure::new(
+            "tool_arguments_nesting",
+            format!("tool `{}` arguments: {error}", redact_text(tool_name)),
         )
-    })?;
-    if !parsed.is_object() {
-        return Err(format!(
-            "tool `{}` arguments are not a JSON object",
-            redact_text(tool_name)
-        ));
-    }
-    Ok(())
+    })
 }
 
 /// Allocates the next distinct redacted-call surrogate from a monotonic

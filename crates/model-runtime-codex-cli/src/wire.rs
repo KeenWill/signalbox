@@ -92,15 +92,18 @@ pub(crate) enum EnvelopeOutcome {
 pub(crate) struct EnvelopeToolCall {
     pub(crate) id: String,
     pub(crate) name: String,
-    /// The tool's argument object as JSON **text**, not as inline JSON.
+    /// The provider's tool-argument text, carried as JSON **text** rather than
+    /// as inline JSON.
     ///
     /// Strict structured output rejects a free-form object — every object in
     /// the schema must supply `additionalProperties: false` and require all
     /// its properties — so unconstrained tool arguments are not expressible
-    /// as an object member. The envelope therefore carries the argument JSON
-    /// inside a string; the adapter parses and validates it and hands the
-    /// contained text onward, so the caller still receives the argument JSON
-    /// byte-verbatim when it is credential-shape clean.
+    /// as an object member. The envelope therefore carries the arguments
+    /// inside a string. The schema requests an argument object, but the
+    /// adapter does not hold the text to that shape: it checks only the shared
+    /// JSON nesting bound and hands the text onward byte-verbatim when it is
+    /// credential-shape clean, so malformed and non-object text reaches the
+    /// caller as proposal material for the shared typed decoders to classify.
     pub(crate) arguments: String,
 }
 

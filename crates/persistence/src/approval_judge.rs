@@ -730,17 +730,6 @@ impl PostgresApprovalJudgeRepository {
 /// is the whole of what an operator is promised.
 const HEADLESS_ESCALATION_GOAL_NEED: &str = "A delegated tool approval escalated with no attending user, so this goal turn was failed. Repository watch redispatches the work under a fresh dispatch once its batch ends, unless its rule has been deactivated, the pull request has closed or merged since, or this attempt spent the lineage's retry budget and parked it for an operator or new pull-request activity; no automatic resumption is scheduled for this block either way. Resume this goal only to continue this session by hand: a further escalation on work you resumed waits for you instead of failing the turn again.";
 
-/// Need text for the execution-failure block a commissioned-dispatch
-/// escalation appends.
-///
-/// A commissioned dispatch has no rule, batch, or obligation behind it, so
-/// unlike the repository-watch text above it promises no redispatch at all:
-/// whoever commissioned the session decides whether the work is dispatched
-/// again. It promises no automatic resumption either, for the same reason that
-/// block is exempt — resuming would re-run the escalating turn against a
-/// request no user is attending.
-const COMMISSIONED_ESCALATION_GOAL_NEED: &str = "A delegated tool approval escalated with no attending user, so this goal turn was failed. This session was commissioned directly rather than dispatched by repository watch, so nothing redispatches the work: whoever commissioned it decides whether to dispatch it again, and no automatic resumption is scheduled for this block. Resume this goal only to continue this session by hand: a further escalation on work you resumed waits for you instead of failing the turn again.";
-
 /// The generation a repository-watch dispatch commissions in the session it
 /// creates, which is the only generation its authority describes.
 ///
@@ -765,14 +754,13 @@ const DISPATCH_COMMISSIONED_GENERATION: GoalGeneration = GoalGeneration::new(Non
 /// reclassifying the steer into a queued successor would start fresh work in a
 /// session whose dispatch is being released for redispatch.
 ///
-/// Work this session has already escalated once is the third. An unattended
-/// escalation fails its turn and blocks the goal, and [`goal mode`] exempts
-/// that block from automatic resumption, so nothing but a person puts such a
-/// session back into flight: a second escalation in a session that already has
-/// an escalation row is therefore work an operator resumed, and it waits for
-/// them. That holds whether or not the batch has released — a sibling action
-/// still pursuing keeps the release row absent while the resumption is just as
-/// attended — which is why the release row decides nothing here.
+/// Work a repository-watch session has already escalated once is the third.
+/// Its exceptional block is never resumed automatically, so a later turn in
+/// that session is work an operator resumed and waits for them. An
+/// operator-commissioned session is attended by the commissioning operator:
+/// its completed delegate escalation is the bounded automatic decision's
+/// exhaustion point and parks the exact request for that operator instead of
+/// spending a goal retry on the same undecided action.
 ///
 /// Standing authority is the last word on it. Withdrawn authority means the
 /// goal ended while this judge was in flight, so nobody is behind the work
@@ -787,9 +775,9 @@ async fn unattended_escalation_applies(
     prepared: &PreparedApprovalJudge,
     authority_stands: bool,
 ) -> Result<bool, ApprovalJudgeRepositoryError> {
-    if prepared.session_context.dispatch().is_none() {
+    let Some(dispatch) = prepared.session_context.dispatch() else {
         return Ok(false);
-    }
+    };
     if turn_awaits_pending_steering(
         connection,
         prepared.request.session(),
@@ -799,19 +787,22 @@ async fn unattended_escalation_applies(
     {
         return Ok(false);
     }
-    let escalated_before: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
-            SELECT 1 FROM repo_watch_headless_approval_escalation WHERE session_id = $1
-        ) OR EXISTS (
-            SELECT 1
-              FROM commissioned_dispatch_headless_approval_escalation
-             WHERE session_id = $1
-        )",
-    )
-    .bind(session_id_to_uuid(prepared.request.session()))
-    .fetch_one(&mut *connection)
-    .await?;
-    Ok(!(escalated_before && authority_stands))
+    match dispatch.dispatch() {
+        ApprovalJudgeDispatchProvenance::Commissioned(_) => Ok(!authority_stands),
+        ApprovalJudgeDispatchProvenance::RepoWatch(_) => {
+            let escalated_before: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_headless_approval_escalation
+                     WHERE session_id = $1
+                )",
+            )
+            .bind(session_id_to_uuid(prepared.request.session()))
+            .fetch_one(&mut *connection)
+            .await?;
+            Ok(!(escalated_before && authority_stands))
+        }
+    }
 }
 
 /// Whether a `pending_steering` accepted input still names this turn.
@@ -1077,11 +1068,11 @@ async fn persist_headless_escalation(
     };
     require_single(audited, "headless escalation audit")?;
 
-    if authority_stands {
+    if authority_stands && matches!(dispatch, ApprovalJudgeDispatchProvenance::RepoWatch(_)) {
         // Deliberately not routed through `PostgresGoalPassDisposition`, which
         // owns the bounded automatic resumption every other execution-failure
         // block receives (`docs/spec/goal-mode.md`). Two reasons, both stated
-        // by that page's exception for this block. It must commit inside this
+        // by that page's repository-watch exception. It must commit inside this
         // transaction, atomically with the terminalization, the audit row, and
         // the release attempt below; and the retry this failure is owed already
         // exists and is a different one — repository watch redispatches the
@@ -1091,13 +1082,11 @@ async fn persist_headless_escalation(
         // redispatch is withheld, because the rule was deactivated or the pull
         // request closed, the work is not wanted at all and resuming it is
         // worse still. The need text above therefore names the repair itself
-        // rather than promising resumption. A commissioned dispatch has no
-        // redispatch to name, so its text promises none.
-        let need_text = match dispatch {
-            ApprovalJudgeDispatchProvenance::RepoWatch(_) => HEADLESS_ESCALATION_GOAL_NEED,
-            ApprovalJudgeDispatchProvenance::Commissioned(_) => COMMISSIONED_ESCALATION_GOAL_NEED,
-        };
-        let need = GoalNeed::try_new(String::from(need_text))
+        // rather than promising resumption. A commissioned dispatch owns no
+        // redispatch, so its terminal turn is left pursuing for the ordinary
+        // goal disposition adapter and durable eligibility sweep to reconcile
+        // into a bounded execution-failure resumption.
+        let need = GoalNeed::try_new(String::from(HEADLESS_ESCALATION_GOAL_NEED))
             .map_err(|_| ApprovalJudgeCorruption::Inconsistent("headless escalation goal need"))?;
         let outcome = goal::block_execution_failure_locked(
             connection,
@@ -1879,6 +1868,18 @@ async fn headless_escalation_identities(
     )))
 }
 
+/// Reports whether this completion was the round's final one, so an ambiguous
+/// replay must check the persisted continuation identity rather than accept a
+/// newly supplied one.
+///
+/// A later request in the same batch that is still undecided, or decided by
+/// anything other than a proposal-time source, is evidence that this completion
+/// was not the last: those decisions land after the batch is proposed. The
+/// proposal-time sources are the ones the proposing transaction itself records —
+/// `policy_auto`, `session_blanket`, and `user_override`, whose one-shot
+/// pre-approval is consumed at proposal time from the producing call's frozen
+/// inventory. Omitting one of them would make a terminal replay accept any
+/// supplied continuation identity and mask an identity mismatch.
 async fn exact_completion_continuation(
     connection: &mut PgConnection,
     prepared: &PreparedApprovalJudge,
@@ -1893,7 +1894,8 @@ async fn exact_completion_continuation(
              AND later.request_ordinal > $2
              AND (
                  decision.request_id IS NULL
-                 OR decision.decision_source NOT IN ('policy_auto', 'session_blanket')
+                 OR decision.decision_source
+                     NOT IN ('policy_auto', 'session_blanket', 'user_override')
              )
         )",
     )

@@ -65,7 +65,7 @@ use signalbox_model_runtime::{
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiPreparedRequest, OpenAiRuntime};
 use signalbox_persistence::{
     ModelCredentialFamilyCatalog, SessionCredentialPin, SessionModelCredential,
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository,
     process_read::{
@@ -707,7 +707,7 @@ async fn run_case(
     let (session, turn, activated) = database.start_turn(&prompt).await?;
     let tracker = OperationTracker::default();
     let runtime = EvalOpenAiRuntime::new(forced_tool, tracker.clone())?;
-    let provider = RuntimeModelCallProvider::new(runtime, database.runtime_models.clone());
+    let provider = RuntimeModelCallProvider::new(runtime, database.runtime_models.clone(), None);
     let execution = PostgresProviderModelExecution::new(
         PostgresModelCallRepository::new(
             database.pool.clone(),
@@ -717,12 +717,18 @@ async fn run_case(
         .with_session_credentials(database.credential_families.clone()),
         InProcessAttemptDispatchGate::default(),
         provider,
+        None,
     )
     .with_tool_loop(
         InProcessToolDispatchGate::default(),
         suite.catalog.clone(),
         suite.executor.clone(),
-    );
+    )
+    .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+        database.pool.clone(),
+        None,
+        Vec::new(),
+    ));
     timeout(TURN_TIMEOUT, execution.execute(Box::new(activated)))
         .await
         .map_err(|_| io::Error::other("the daemon tool eval turn exceeded its timeout"))??;
@@ -3319,7 +3325,9 @@ fn workspace_forced_case_passed(
         READ_FILE_NAME => &[
             "path",
             "content",
+            "offset",
             "bytes_read",
+            "next_offset",
             "total_bytes",
             "truncated",
             EVAL_RECEIPT_FIELD,
@@ -3407,7 +3415,9 @@ fn workspace_forced_case_passed(
             result["path"] == path
                 && max_bytes == WORKSPACE_FORCED_READ_MAX_BYTES
                 && result["content"] == expected
+                && result["offset"] == 0
                 && result["bytes_read"] == expected.len()
+                && result["next_offset"] == expected.len()
                 && result["total_bytes"] == WORKSPACE_SEED.len()
                 && result["truncated"] == true
                 && fs::read(root.join(path))? == WORKSPACE_SEED.as_bytes()
@@ -6969,8 +6979,8 @@ impl ForcedToolSequence {
 
 impl EvalOpenAiRuntime {
     fn new(forced_tool: Option<&str>, tracker: OperationTracker) -> EvalResult<Self> {
-        let mut config = OpenAiConfig::new();
-        config.exchange_timeout = EXCHANGE_TIMEOUT;
+        let mut config = OpenAiConfig::new(None);
+        config.exchange_timeout = Some(EXCHANGE_TIMEOUT);
         Ok(Self {
             inner: OpenAiRuntime::new(config, EnvironmentCredential)?,
             forced: ForcedToolSequence::new(forced_tool),
@@ -10437,7 +10447,7 @@ impl EvalDatabase {
             .with_user(DATABASE_USER)
             .with_password(DATABASE_PASSWORD)
             .with_cmd(disposable_postgres_server_args())
-            .with_mount(disposable_postgres_state_tmpfs())
+            .with_mount(disposable_postgres_state_tmpfs_from_example()?)
             .with_tag(POSTGRES_IMAGE_TAG)
             .with_labels(disposable_test_container_labels())
             .start()
@@ -11021,14 +11031,18 @@ fn workspace_natural_read_result_passed(
         &[
             "path",
             "content",
+            "offset",
             "bytes_read",
+            "next_offset",
             "total_bytes",
             "truncated",
             EVAL_RECEIPT_FIELD,
         ],
     ) && result["path"] == WORKSPACE_SEED_PATH
         && result["content"] == WORKSPACE_SEED
+        && result["offset"] == 0
         && result["bytes_read"] == WORKSPACE_SEED.len()
+        && result["next_offset"] == WORKSPACE_SEED.len()
         && result["total_bytes"] == WORKSPACE_SEED.len()
         && result["truncated"] == false
 }
@@ -11853,6 +11867,8 @@ fn turn_snapshot_reports_ambiguous_model_recovery_as_infrastructure() {
     let state = ProcessTurnState::ActiveAwaitingModelCallRecovery {
         ended_attempt: TurnAttemptId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_TURN_ATTEMPT_ID)),
         recovery_call: ModelCallId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID)),
+        automatic_reconciliation_attempts: 0,
+        operator_action_required: false,
     };
 
     assert_eq!(
@@ -16909,7 +16925,9 @@ fn forced_workspace_read_verifier_rejects_an_unbounded_result() -> EvalResult {
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
         "content": WORKSPACE_SEED,
+        "offset": 0,
         "bytes_read": WORKSPACE_SEED.len(),
+        "next_offset": WORKSPACE_SEED.len(),
         "total_bytes": WORKSPACE_SEED.len(),
         "truncated": false,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
@@ -16933,7 +16951,9 @@ fn forced_workspace_read_verifier_rejects_an_unknown_result_field() -> EvalResul
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
         "content": prefix,
+        "offset": 0,
         "bytes_read": prefix.len(),
+        "next_offset": prefix.len(),
         "total_bytes": WORKSPACE_SEED.len(),
         "truncated": true,
         "error": "synthetic contradictory field",
@@ -16962,7 +16982,9 @@ fn forced_workspace_read_verifier_rejects_a_mutated_fixture() -> EvalResult {
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
         "content": prefix,
+        "offset": 0,
         "bytes_read": prefix.len(),
+        "next_offset": prefix.len(),
         "total_bytes": WORKSPACE_DRIFTED_SEED.len(),
         "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
@@ -16990,7 +17012,9 @@ fn forced_workspace_read_verifier_rejects_collateral_mutation() -> EvalResult {
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
         "content": prefix,
+        "offset": 0,
         "bytes_read": prefix.len(),
+        "next_offset": prefix.len(),
         "total_bytes": WORKSPACE_SEED.len(),
         "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
@@ -17016,7 +17040,9 @@ fn forced_workspace_read_verifier_rejects_collateral_mtime_drift() -> EvalResult
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
         "content": prefix,
+        "offset": 0,
         "bytes_read": prefix.len(),
+        "next_offset": prefix.len(),
         "total_bytes": WORKSPACE_SEED.len(),
         "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
@@ -17052,7 +17078,9 @@ fn forced_workspace_read_verifier_rejects_restored_mode_ctime_drift() -> EvalRes
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
         "content": prefix,
+        "offset": 0,
         "bytes_read": prefix.len(),
+        "next_offset": prefix.len(),
         "total_bytes": WORKSPACE_SEED.len(),
         "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
@@ -17105,7 +17133,9 @@ fn forced_workspace_read_verifier_rejects_byte_identical_file_replacement() -> E
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
         "content": prefix,
+        "offset": 0,
         "bytes_read": prefix.len(),
+        "next_offset": prefix.len(),
         "total_bytes": WORKSPACE_SEED.len(),
         "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
@@ -17170,7 +17200,9 @@ fn forced_workspace_read_verifier_rejects_byte_identical_directory_replacement()
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
         "content": prefix,
+        "offset": 0,
         "bytes_read": prefix.len(),
+        "next_offset": prefix.len(),
         "total_bytes": WORKSPACE_SEED.len(),
         "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
@@ -17227,7 +17259,9 @@ fn forced_workspace_read_verifier_rejects_directory_mode_drift() -> EvalResult {
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
         "content": prefix,
+        "offset": 0,
         "bytes_read": prefix.len(),
+        "next_offset": prefix.len(),
         "total_bytes": WORKSPACE_SEED.len(),
         "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
@@ -17255,7 +17289,9 @@ fn forced_workspace_read_verifier_rejects_root_mode_drift() -> EvalResult {
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
         "content": prefix,
+        "offset": 0,
         "bytes_read": prefix.len(),
+        "next_offset": prefix.len(),
         "total_bytes": WORKSPACE_SEED.len(),
         "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
@@ -19161,7 +19197,9 @@ fn record_workspace_read_result(tracker: &OperationTracker, content: &str, trunc
         &serde_json::json!({
             "path": WORKSPACE_SEED_PATH,
             "content": content,
+            "offset": 0,
             "bytes_read": content.len(),
+            "next_offset": content.len(),
             "total_bytes": WORKSPACE_SEED.len(),
             "truncated": truncated,
             EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
@@ -19559,7 +19597,9 @@ fn workspace_natural_execution_rejects_an_unknown_read_result_field() {
         &serde_json::json!({
             "path": WORKSPACE_SEED_PATH,
             "content": WORKSPACE_SEED,
+            "offset": 0,
             "bytes_read": WORKSPACE_SEED.len(),
+            "next_offset": WORKSPACE_SEED.len(),
             "total_bytes": WORKSPACE_SEED.len(),
             "truncated": false,
             "error": "synthetic contradictory field",

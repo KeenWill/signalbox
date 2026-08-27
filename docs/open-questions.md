@@ -44,6 +44,56 @@ specification diff. Accepted cross-component and wire contracts live in the
 
 ## Model-input projection
 
+### Graded approval judging
+
+Whether execution-approval judging should replace its direct recommendation with
+separate risk and brief-alignment grades remains undecided. Any such change must
+define the grade contract, trusted outcome derivation, remaining input evidence,
+durable audit shape, graded wire and projection data, evaluation method, and
+shadow-to-live promotion path in an owner-accepted specification and
+implementing stack. Safety ceilings remain owned by
+[Additional high-risk guardrails](#tool-safety), while parent-supplied task and
+authority evidence remains owned by
+[Turn-origin instructions in the approval-judge request](#tool-safety). The
+interactive prompting and later client-form choices remain owned by
+[Client approval presentation](#client-scope). The following related questions
+also require owner rulings:
+
+- **Corpus governance.** Approval corpora follow the identity, admitted storage
+  forms, digest, and cross-storage reproducibility contract owned by
+  [evaluation system](spec/eval-system.md#corpus-and-expectations). Which
+  admitted storage form this corpus uses remains undecided, together with
+  access, redaction, retention, and deletion rules.
+
+- **Promotion bounds.** The maximum false-allow rate, minimum acceptable
+  improvement, minimum labeled case count, required slices, and statistical
+  treatment for promotion from shadow to live graded authority remain open. A
+  promotion comparison must define each metric's denominator and its treatment
+  of parks, failed calls, and repeated trials.
+
+- **Label semantics.** Whether an ordinary user allow or deny is the final
+  quality label, or evaluation needs a separate “judge correct” ruling and an
+  approval rationale, remains open. Execution rulings are observations rather
+  than correctness labels until this is decided.
+
+- **Unparked sampling.** Whether and how operators may provide post-hoc labels
+  for automatically allowed or denied requests remains open. Without it, the
+  recorded corpus is selected toward parked requests and cannot support
+  whole-population promotion claims.
+
+- **Shadow budget.** The graded shadow sampling fraction for production shadow
+  traffic remains open. Provider-cost ceilings and concurrency remain owned by
+  [First-release resource limits](#identity-credentials-and-resource-governance).
+  Retention and deletion of observations admitted to the approval corpus remain
+  owned by Corpus governance above.
+
+- **Configuration actor audit.** If trusted outcome derivation introduces
+  mutable threshold configuration, whether source-control and deployment audit
+  are sufficient provenance for changes to it, or Signalbox needs an
+  authenticated configuration-change command, remains open.
+
+### Further projection and summarization
+
 - **Projection and summarization beyond the implemented role mappings.**
   [Model-call execution](spec/model-call-execution.md) owns the implemented
   model-input projections; [conversation-import](spec/conversation-import.md)
@@ -54,6 +104,37 @@ specification diff. Accepted cross-component and wire contracts live in the
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) and
   [sessions-and-transcript](spec/sessions-and-transcript.md). Blocks those
   extensions. (S02, S17, S28)
+
+### Workspace instructions and skills
+
+The accepted baseline in
+[workspace instructions and skills](spec/workspace-instructions.md) owns greedy
+candidate discovery, typed registration, session/template eligibility,
+deliberate admission, projection rather than transcript append, and exact
+per-turn provenance. The following extensions remain undecided:
+
+- **Discovery invalidation and expansion.** Whether the daemon watches or
+  explicitly rescans roots, which ignore language or depth bound applies,
+  whether and how symbolic links may be followed, and which additional vendor
+  instruction formats become candidates. See the owning
+  [discovery contract](spec/workspace-instructions.md#discovery).
+- **Runner-workspace discovery.** The accepted daemon-local refusal needs a
+  placement-revision-correlated runner operation for greedy discovery, typed
+  findings, and exact source reads before runner-provisioned workspaces can
+  contribute candidates. Blocks workspace discovery for runner-backed sessions;
+  configured daemon roots remain available.
+- **Retrieval and automatic activation.** Search or deterministic ranking over
+  eligible metadata, path-triggered admission, and any template-eager tier need
+  exact recorded trigger and budget contracts. The baseline remains deliberate
+  identity-addressed admission.
+- **Skill resources and rendered-byte externalization.** Addressing and hashing
+  files below a skill bundle, export policy for retained rendered plaintext, and
+  whether a later migration moves version-one admission-row wrapper bytes to
+  content-addressed blob storage remain open.
+- **Whole-bundle unload.** Projection reserves removal at a later turn boundary,
+  but unload authority, tombstone rendering, admitted-set history, and the
+  model-facing operation remain foundation work. See the owning
+  [projection contract](spec/workspace-instructions.md#projection-rather-than-transcript-append).
 
 ## Conversation import
 
@@ -95,31 +176,21 @@ specification diff. Accepted cross-component and wire contracts live in the
   own proof and disposition rules. Later scope. (S07)
 - **Ambiguous provider-call recovery.** A restart-recovered unstopped in-flight
   call parks its turn in the awaiting-recovery wait
-  ([model-call-execution](spec/model-call-execution.md)). A user decision now
-  releases the slot by terminalizing the turn over that exact ambiguity
-  ([process-protocol](spec/process-protocol.md)), but nothing resolves what the
-  provider actually did. The retired design analysis identified adopting a
-  provider request-status API — with its polling posture and evidence classes —
-  as the resolution path; the full analysis is in git history. Later scope.
-  (S02)
-- **Operator control of scheduling and liveness cadence.** The scheduler's sweep
-  interval, per-session scan gating, fairness between contending sessions, and
-  the turn-liveness staleness bound and scan interval are all compiled constants
-  today
-  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)), and
-  almost none of them has anywhere to validate a supplied value. Only the
-  turn-liveness staleness bound has a lowering constructor that enforces its
-  compiled ceiling; the sweep interval's constructor refuses a zero or
-  unrepresentable duration and no more, so it fixes no maximum; and the scan
-  interval, per-session scan gating, and fairness expose no constructor at all.
-  The enforcement points for a configuration surface would therefore have to be
-  built rather than merely called. Undecided with them: whether signalboxd
-  should carry such settings at all; whether they arrive as one operational
-  surface or one constant at a time; and, for each, whether its compiled value
-  is a ceiling that may only be lowered or an ordinary default that may move
-  either way — settled so far only for the staleness bound. Leaning: one
-  surface, introduced when a deployment needs a value the compiled one cannot
-  serve, rather than pre-emptively. Later scope. (S01, S02)
+  ([model-call-execution](spec/model-call-execution.md)). The daemon now spends
+  a bounded durable reconciliation budget and automatically releases the slot by
+  terminalizing over that exact ambiguity; an operator decision may win the same
+  race and becomes required only when the budget exhausts
+  ([process-protocol](spec/process-protocol.md)). Neither treatment resolves
+  what the provider actually did. Whether a provider request-status API can
+  replace the conservative ambiguous outcome with trustworthy evidence,
+  including its polling posture and evidence classes, remains undecided. Later
+  scope. (S02)
+- **Per-session scheduler scan gating and fairness.** Deployment configuration
+  now owns the scheduler sweep and turn-liveness cadences
+  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)). What
+  remains undecided is whether one session may tune its own scan gate and how
+  contending sessions share a deployment-wide pass budget. Later scope. (S01,
+  S02)
 - **Terminalizing a turn that holds pending steering.** Every steering row bound
   to a turn must be closed before that turn terminalizes, and the interrupt and
   model-call terminal paths satisfy that by reclassifying the steering into a
@@ -152,48 +223,6 @@ specification diff. Accepted cross-component and wire contracts live in the
   whether an interrupt-only path may bypass `StopRequested` remains undecided.
   Later scope. (S07)
 
-### Automatic context compaction
-
-This is a blocking condition rather than an open design question. Automatic
-context compaction ships with a known defect on its primary path, accepted on
-the grounds that the code sits unused until something depends on it. That ground
-disappears the moment anything relies on it, so the condition is recorded here
-rather than only in the review thread that raised it.
-
-**The defect.** The compaction request wraps accumulated plain-text history in
-JSON with provenance metadata and reserves the same `max_output_tokens` as the
-ordinary call, and is never counted against `context_window_tokens`. It can
-therefore be *larger* than the input that already overflowed the window. The
-provider may reject the summary call for context overflow; that call is then
-terminalized, and the per-turn automatic marker prevents a second attempt.
-
-**The consequence.** A session that crosses its context window has its queued
-turn stalled with its single automatic attempt consumed and no path forward
-inside the running daemon — which is the exact situation automatic compaction
-exists to rescue. Nothing durable is corrupted, no summary boundary is written
-wrong, and no transcript entries are lost: the failed call is recorded as
-legitimate terminal non-Completed evidence. The session is stalled, not damaged.
-
-**The trigger is the common case, not an edge of it.** Compaction is invoked
-precisely when history is large. History large enough that wrapping it in JSON
-with metadata overflows the window is the middle of that condition rather than
-its boundary.
-
-**The condition.** Automatic context compaction must not be relied on until the
-summary call is guaranteed to fit. Anything built on top of it, and any workflow
-that assumes a long-running session will rescue itself, is blocked on that fix
-rather than merely improved by it. Explicit compaction is unaffected by this
-particular defect.
-
-**Shape of the fix.** Count the summary request against `context_window_tokens`
-before triggering it, or select a compaction strategy guaranteed to fit — for
-example bounding the history actually wrapped rather than reserving the full
-`max_output_tokens` on top of unbounded input. Scheduled as a follow-up pull
-request against a quiet `main` rather than inside the compaction stack.
-
-Raised as a review finding and dispositioned with this condition attached:
-https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
-
 ## Session organization, visibility, and retention
 
 - **Creation-attributed default visibility.** The implemented visibility and
@@ -225,11 +254,15 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
 
 - **Additional effective-configuration categories.** Prompt composition,
   sampling and output-shape parameters beyond the implemented model/session
-  settings contract, instructions, tool enablement/configuration, placement
-  constraints, per-turn resources, and interpreting-policy selections remain
-  unavailable; a future subsystem decision must extend the request,
-  session-default, override, and effective-value algebras together
+  settings contract, tool enablement/configuration, placement constraints,
+  per-turn resources, and interpreting-policy selections remain unavailable; a
+  future subsystem decision must extend the request, session-default, override,
+  and effective-value algebras together
   ([configuration-and-credentials](spec/configuration-and-credentials.md)).
+  Workspace-instruction eligibility is the separate typed selector and
+  allow-list algebra owned by
+  [workspace instructions and skills](spec/workspace-instructions.md#eligibility),
+  so it neither waits on nor satisfies this general configuration question.
   Reasoning level, fast mode, and provider-tagged service tier are owned by
   [model and session settings](spec/model-session-settings.md). Compaction
   threshold, target size, and never-compact/full-context controls remain
@@ -428,15 +461,6 @@ Statement lineage, transition authority, scheduler continuation, and the bounded
 automatic resumption of an execution-failure block are specified in
 [goal mode](spec/goal-mode.md). The questions below remain open.
 
-- **Re-arming automatic resumption across a daemon restart.** A pending
-  automatic resumption lives only in the daemon process that armed it. The goal
-  event history records how many attempts a run has spent but not when any of
-  them was recorded, so a restart during a backoff loses the pending attempt and
-  the goal stays blocked until an operator resumes it; a goal blocked before
-  that behavior shipped is in the same position. Deciding this needs a durable
-  record of when a failure was appended, which no present goal table carries,
-  and a reader that re-arms from it at startup. Blocks unattended recovery of a
-  goal whose backoff spanned a restart.
 - **Separating consecutive execution failures from distant ones.** The run an
   attempt budget is derived from ends only at a goal event, so consecutive
   execution failures separated by successful turns count together: a pursuit

@@ -1,10 +1,10 @@
 //! Atomic PostgreSQL recovery of prior-process active attempts.
 
-use std::{collections::BTreeSet, error::Error, fmt};
+use std::{collections::BTreeSet, error::Error, fmt, time::Duration};
 
 use signalbox_application::{
-    ClassifyOperatorFailure, OperatorFailureClass, StartupScanIdGenerator, StartupScanRepository,
-    StartupScanSessionOutcome, ToolCrashClosureIdentities,
+    ClassifyOperatorFailure, OperatorFailureClass, StaleTurnCandidate, StartupScanIdGenerator,
+    StartupScanRepository, StartupScanSessionOutcome, ToolCrashClosureIdentities,
 };
 use signalbox_domain::{
     AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, AttemptEnd,
@@ -203,7 +203,7 @@ impl StartupScanRepositoryError {
     }
 }
 
-enum TransactionDecision {
+pub(crate) enum TransactionDecision {
     Commit(StartupScanSessionOutcome),
     Rollback(StartupScanSessionOutcome),
 }
@@ -343,6 +343,158 @@ where
         ));
     }
 
+    let decision = recover_locked_session(
+        connection,
+        requested_session,
+        identities,
+        session_exists,
+        scheduler_session,
+        active_turn,
+        ids,
+    )
+    .await
+    .map_err(|error| error.with_corruption_turn(active_turn.map(turn_id_from_uuid)))?;
+
+    if let (Some(turn), TransactionDecision::Commit(outcome)) = (active_turn, &decision)
+        && startup_recovery_created_ambiguous_wait(outcome)
+    {
+        sqlx::query(
+            "INSERT INTO turn_restart_recovery_origin
+                (turn_id, session_id, recorded_at)
+             VALUES ($1, $2, transaction_timestamp())
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(turn)
+        .bind(session_uuid)
+        .execute(&mut *connection)
+        .await?;
+    }
+
+    Ok(decision)
+}
+
+fn startup_recovery_created_ambiguous_wait(outcome: &StartupScanSessionOutcome) -> bool {
+    match outcome {
+        StartupScanSessionOutcome::RecoveredModelCall(outcome) => matches!(
+            outcome.as_ref(),
+            ModelCallTerminalOutcome::AwaitingRecovery(_)
+        ),
+        StartupScanSessionOutcome::RecoveredToolAttempt(outcome) => {
+            matches!(outcome.as_ref(), ToolAttemptCrashOutcome::Ambiguous(_))
+        }
+        StartupScanSessionOutcome::Recovered(_)
+        | StartupScanSessionOutcome::RecoveredContextCompaction { .. }
+        | StartupScanSessionOutcome::ResumableToolBatch { .. }
+        | StartupScanSessionOutcome::ResumablePreparedModelCall { .. }
+        | StartupScanSessionOutcome::AwaitingRecoveryDecision { .. }
+        | StartupScanSessionOutcome::NoActiveTurn => false,
+    }
+}
+
+/// Recovers only the compaction an expired pre-activation pass abandoned.
+///
+/// [`recover_in_transaction`] falls through to whichever turn is active when a
+/// session holds no unterminalized compaction, which is correct for a startup
+/// scan: nothing else is running yet. The expiry handoff has no such
+/// guarantee. It runs detached, its pass released the admission slot the moment
+/// the bound expired, and it waits between attempts, so a later eligibility
+/// sweep can activate a healthy successor turn before this transaction opens.
+/// Falling through would then terminalize that successor. Reporting `None`
+/// instead keeps recovery correlated with the evidence that justifies it — a
+/// compaction still holding the session boundary — and leaves every other
+/// shape to the watchdog that owns it.
+///
+/// `abandoned_call` is that evidence stated exactly. The session alone is not
+/// enough to name it: expiry inside the read-only preflight leaves no durable
+/// call at all, and by the time a delayed attempt opens this transaction a
+/// later admitted pass can be running a different compaction for the same
+/// session, which selecting on the session would terminalize. Only the call the
+/// expired window itself made durable is recovered here.
+pub(crate) async fn recover_abandoned_compaction_in_transaction(
+    connection: &mut PgConnection,
+    requested_session: SessionId,
+    abandoned_call: ModelCallId,
+    write_lock_wait: Option<Duration>,
+) -> Result<Option<StartupScanSessionOutcome>, StartupScanRepositoryError> {
+    let (session_exists, scheduler_session, active_turn) =
+        sqlx::query_as::<_, (bool, Option<Uuid>, Option<Uuid>)>(
+            crate::lock_inventory::STARTUP_RECOVERY,
+        )
+        .bind(session_id_to_uuid(requested_session))
+        .fetch_one(&mut *connection)
+        .await?;
+    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(crate::turn_liveness::postgres_lock_timeout(write_lock_wait))
+        .execute(&mut *connection)
+        .await?;
+    if scheduler_session.is_none() {
+        if session_exists {
+            return Err(StartupScanCorruption::Missing("session scheduler row").into());
+        }
+        return Ok(None);
+    }
+    recover_context_compaction(
+        connection,
+        requested_session,
+        Some(abandoned_call),
+        active_turn,
+    )
+    .await
+}
+
+pub(crate) async fn recover_observed_slot_held_in_transaction<Generator>(
+    connection: &mut PgConnection,
+    candidate: StaleTurnCandidate,
+    identities: AcceptedInputTurnFailureIdentities,
+    write_lock_wait: Option<Duration>,
+    ids: &mut Generator,
+) -> Result<Option<TransactionDecision>, StartupScanRepositoryError>
+where
+    Generator: StartupScanIdGenerator + Send,
+{
+    let requested_session = candidate.session();
+    let session_uuid = session_id_to_uuid(requested_session);
+    let observed_active_turn: Option<Uuid> = sqlx::query_scalar(
+        "SELECT turn_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND state_kind = 'active'
+            AND NOT delegation_runtime_terminal",
+    )
+    .bind(session_uuid)
+    .fetch_optional(&mut *connection)
+    .await?;
+    if observed_active_turn != Some(turn_id_to_uuid(candidate.turn())) {
+        return Ok(None);
+    }
+    lock_delegated_turn_terminal_frontier(connection, requested_session, candidate.turn())
+        .await
+        .map_err(map_model_call_error)?;
+    let (session_exists, scheduler_session, active_turn) =
+        sqlx::query_as::<_, (bool, Option<Uuid>, Option<Uuid>)>(
+            crate::lock_inventory::STARTUP_RECOVERY,
+        )
+        .bind(session_uuid)
+        .fetch_one(&mut *connection)
+        .await?;
+    // The acquisition budget has done its work: the scheduler row is held. The
+    // write phase takes over with a budget of its own, exactly as the sibling
+    // terminalization does — wide enough that the outbox's shared sequence row,
+    // which every writer holds until it commits, is not mistaken for a stall.
+    // Recovery reaches that same row, so without this switch its post-lock
+    // statements are refused on ordinary busy-daemon traffic.
+    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(crate::turn_liveness::postgres_lock_timeout(write_lock_wait))
+        .execute(&mut *connection)
+        .await?;
+    if active_turn != Some(turn_id_to_uuid(candidate.turn())) {
+        return Ok(None);
+    }
+    let locked =
+        crate::turn_liveness::read_exact_slot_held_candidate(connection, requested_session).await?;
+    if locked != Some(candidate) {
+        return Ok(None);
+    }
     recover_locked_session(
         connection,
         requested_session,
@@ -353,6 +505,7 @@ where
         ids,
     )
     .await
+    .map(Some)
     .map_err(|error| error.with_corruption_turn(active_turn.map(turn_id_from_uuid)))
 }
 
@@ -378,7 +531,7 @@ where
     }
 
     if let Some(recovered) =
-        recover_context_compaction(connection, requested_session, active_turn).await?
+        recover_context_compaction(connection, requested_session, None, active_turn).await?
     {
         return Ok(TransactionDecision::Commit(recovered));
     }
@@ -465,12 +618,8 @@ where
         Some(signalbox_domain::ActiveTurnPhase::Running { .. }) => {}
         // A prior process already ended this turn's physical tenure and
         // recorded the exact ambiguity set, so there is no lost live end for
-        // the scan to classify. Reporting it separately keeps the wait visible
-        // to the operator instead of indistinguishable from a healed session.
-        //
-        // The domain phase also carries a tool-attempt ambiguity wait, which
-        // has no operator surface to point at; that wait stays classified as
-        // it was, so the report never promises a decision nothing can make.
+        // the scan to classify. The independent automatic-reconciliation
+        // watchdog owns both model-call and tool-attempt waits.
         Some(signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision {
             ambiguous_operations,
             ..
@@ -593,14 +742,18 @@ where
         .await
         .map_err(map_model_call_error)?;
     if let Some(call_state) = model_execution.current_call().map(|call| call.state()) {
+        if call_state == CurrentModelCallState::Prepared {
+            return Ok(TransactionDecision::Rollback(
+                StartupScanSessionOutcome::ResumablePreparedModelCall {
+                    turn: model_execution.turn(),
+                },
+            ));
+        }
         let mut failure_identities = FailedModelCallTurnIdentities::new(
             identities.failure_entry(),
             identities.terminal_frontier(),
         );
-        if matches!(
-            call_state,
-            CurrentModelCallState::Prepared | CurrentModelCallState::CancellationRequested
-        ) {
+        if call_state == CurrentModelCallState::CancellationRequested {
             let mut proposed_turns = BTreeSet::new();
             let mut reclassifications = Vec::new();
             for pending in model_execution.active_turn().pending_steering() {
@@ -826,9 +979,15 @@ pub(crate) async fn insert_prepared_failure(
     Ok(failed)
 }
 
+/// `only_call`, when given, restricts recovery to that exact compaction call.
+/// A startup scan passes `None`: it runs before anything else can be inside the
+/// session, so whatever nonterminal compaction it finds is by construction the
+/// one the prior process abandoned. The expiry handoff cannot assume that and
+/// names its call.
 async fn recover_context_compaction(
     connection: &mut PgConnection,
     session: SessionId,
+    only_call: Option<ModelCallId>,
     active_turn: Option<Uuid>,
 ) -> Result<Option<StartupScanSessionOutcome>, StartupScanRepositoryError> {
     let rows = sqlx::query(
@@ -840,11 +999,16 @@ async fn recover_context_compaction(
             AND command.model_call_id = call.model_call_id
           WHERE COALESCE(call.session_id, command.session_id) = $1
             AND (
+                $2::uuid IS NULL
+                OR COALESCE(call.model_call_id, command.model_call_id) = $2
+            )
+            AND (
                 call.state_kind <> 'terminal'
                 OR command.result_kind = 'pending'
             )",
     )
     .bind(session_id_to_uuid(session))
+    .bind(only_call.map(ModelCallId::into_uuid))
     .fetch_all(&mut *connection)
     .await?;
     if rows.is_empty() {

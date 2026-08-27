@@ -13,15 +13,151 @@
 # after completion. It is an operator budget, not a declaration of the model's
 # capability: the working default below is well under each model's hard cap,
 # which is recorded beside the entry. Raise it per selection as the deployment
-# requires, up to but never above the model's cap.
+# requires, up to but never above the model's cap. The daemon also reserves this
+# complete budget before a Codex continuation. Keep it aligned with the reply
+# budget the deployment actually needs: an inflated advisory value cannot make
+# the CLI emit more, but it can force otherwise-unnecessary early compaction.
 version = 1
 
-# Omit this table for the fixed baseline of 16 concurrent per-session scheduler
-# passes. A smaller deployment override keeps provider and tool work bounded
-# when many durable sessions become eligible together. Zero keeps ingestion
-# and process services live while pausing authoritative session execution.
-# [scheduler]
-# max_in_flight_passes = 4
+[numeric_bounds]
+# Reconciliation work performed before observing another repository wake.
+repository_reconciliation_quantum = 16
+# Time a progressing webhook drain works before yielding and rearming itself.
+webhook_drain_work_budget = "45s"
+# Physical database sessions established before daemon work begins.
+fenced_pool_min_connections = 48
+# Delay between checks that restore retired fenced pool sessions.
+fenced_pool_floor_reconciliation_interval = "5s"
+# Time allowed for one fenced pool floor restoration attempt.
+fenced_pool_floor_reconciliation_attempt_bound = "30s"
+# Concurrent process-protocol snapshot readers.
+max_concurrent_snapshot_readers = 8
+# Replicas retained for one immutable blob.
+max_blob_replica_count = 32
+# Exact tags retained in one session metadata value.
+max_session_metadata_tags = 256
+# Attributes retained in one session metadata value.
+max_session_metadata_attributes = 256
+# Required tags admitted in one metadata filter.
+max_session_metadata_required_tags = 256
+# UTF-8 bytes admitted in one session system prompt.
+max_system_prompt_utf8_bytes = 1048576
+# UTF-8 bytes retained in one imported-text preview.
+max_imported_text_preview_utf8_bytes = 256
+# Concerns retained in one review-orchestration attempt.
+max_review_orchestration_concerns = 32
+# Unicode scalars retained in one imported-conversation display title.
+max_imported_conversation_display_title_scalars = 256
+# Time allowed for runtime cleanup after scheduler work drains.
+graceful_shutdown_cleanup_window = "30s"
+# Time allowed for one complete model-provider exchange.
+model_exchange_timeout = "600s"
+# Time allowed for the startup probe that binds Codex CLI to its exact pin.
+codex_cli_version_probe_bound = "10s"
+# Detached recovery attempts made for one expired scheduler pass.
+expired_pass_recovery_attempts = 4
+# Time allowed for one expired-pass recovery database operation.
+expired_pass_recovery_attempt_bound = "3s"
+# Delay after an expired-pass recovery lock refusal.
+expired_pass_recovery_lock_retry_delay = "6s"
+# Delay after an ambiguous expired-pass recovery failure.
+expired_pass_recovery_conservative_retry_delay = "120s"
+# Time allowed for one convergence census provider request.
+convergence_sweep_request_timeout = "30s"
+# GraphQL connection pages read for one convergence census.
+max_convergence_sweep_connection_pages = 100
+# Convergence census targets queried concurrently.
+max_concurrent_convergence_sweep_targets = 8
+# Transport attempts made for one convergence census request.
+max_convergence_sweep_request_attempts = 3
+# Delay between convergence census request attempts.
+convergence_sweep_request_retry_delay = "250ms"
+# Initial retry delay after a convergence census failure.
+convergence_sweep_retry_backoff_base = "60s"
+# Longest retry delay after repeated convergence census failures.
+convergence_sweep_retry_backoff_cap = "900s"
+# Stale turns terminalized during one liveness scan.
+terminalizations_per_liveness_scan = 64
+# Time allowed for one slot-held liveness recovery transaction.
+turn_liveness_recovery_attempt_bound = "10s"
+# Automatic reconciliation transactions performed in one liveness scan.
+automatic_reconciliations_per_liveness_scan = 64
+# Time allowed for one automatic reconciliation transaction.
+automatic_reconciliation_attempt_bound = "60s"
+# Credentialed targets retained by one convergence sweep.
+max_convergence_sweep_targets = 256
+# Longest configured convergence census interval.
+max_convergence_sweep_interval = "300s"
+# Longest configured delay after a convergence dispatch.
+max_convergence_sweep_cool_off = "1800s"
+# Initial delay before automatically resuming a failed goal turn.
+automatic_resume_base_backoff = "120s"
+# Longest delay between automatic goal resumption attempts.
+automatic_resume_backoff_cap = "1800s"
+# Automatic resumption attempts spent by one failed goal turn.
+automatic_resume_attempt_budget = 20
+# Automatic resumption attempts one blocked goal may ever make, spent or exempt.
+automatic_resume_attempt_ceiling = 100
+# Delay between startup automatic-resumption inventory retries.
+automatic_resume_startup_retry_delay = "1s"
+# Time allowed to reap a killed model-provider child.
+post_kill_reap_bound = "5s"
+# Time without durable progress before an active turn is stale.
+stale_active_turn_bound = "1800s"
+# Time between turn-liveness scans.
+turn_liveness_scan_interval = "60s"
+# Initial delay before ambiguous-operation reconciliation.
+automatic_reconciliation_base_backoff = "120s"
+# Longest delay between ambiguous-operation reconciliation attempts.
+automatic_reconciliation_backoff_cap = "1800s"
+# Automatic reconciliation attempts spent by one ambiguous operation.
+automatic_reconciliation_attempt_budget = 5
+# Buffered terminal input messages.
+terminal_input_channel_capacity = 1
+# UTF-8 bytes admitted in one user message.
+max_message_utf8_bytes = 1048576
+# Smallest session-metadata page accepted from a client.
+min_metadata_page_size = 1
+# Largest session-metadata page accepted from a client.
+max_metadata_page_size = 100
+# Findings retained from one review run.
+max_review_findings_per_run = 32
+# Automatic model tool rounds spent in one turn.
+max_automatic_tool_rounds_per_turn = 32
+# Required tags admitted by one metadata query.
+max_required_tags = 256
+# Time between scheduler reconciliation sweeps.
+reconciliation_sweep_interval = "1s"
+# Buffered scheduler nudges.
+nudge_buffer_capacity = 1024
+# Authoritative scheduler passes admitted concurrently.
+scheduler_pass_admission_cap = 16
+# Time one authoritative scheduler pass may occupy admission.
+scheduler_pass_occupancy_bound = "3600s"
+# Provider diagnostic bytes retained in one native message.
+max_native_message_bytes = 2048
+# Time a terminalization waits for the scheduler row.
+terminalization_lock_wait = "250ms"
+# Time a terminalization waits for a pooled connection.
+terminalization_acquire_wait = "250ms"
+# Time a terminalization write waits for a contended row.
+terminalization_write_lock_wait = "1s"
+# Bytes retained in one disposable PostgreSQL test database.
+disposable_postgres_state_ceiling_bytes = 536870912
+# Provider model-identity bytes retained in diagnostics.
+diagnostic_model_identity_limit = 128
+# Time allowed for one ordinary code-host request.
+code_host_request_timeout = "30s"
+# CI job-log bytes retained in one code-host result.
+max_job_log_bytes = 65536
+# Stack comparisons performed concurrently at the code host.
+max_stack_comparisons_in_flight = 8
+# Text bytes retained in one code-host result.
+max_code_host_result_text_bytes = 65536
+# Items retained in one paginated code-host result.
+max_code_host_result_items = 100
+# Repository-file bytes retained in one code-host result.
+max_repository_file_content_bytes = 65536
 
 # Blob bytes live outside PostgreSQL. Each deployment generates and then keeps
 # one namespace UUID per physical store. Both directories must already exist,
@@ -319,16 +455,31 @@ allowed_origins = [
 # version = 1
 # signal_reviewers = ["signal-reviewer", "review-bot[bot]"]
 #
+# The sweep remains disabled unless this policy and at least one repository's
+# explicit pull-request list are both present. Deployments may lower, never
+# raise, the five-minute census and thirty-minute cool-off ceilings.
+# [repository_watch.convergence_sweep]
+# template = "review-response"
+# interval_seconds = 300
+# cool_off_seconds = 1800
+#
 # [repository_watch.webhook]
 # bind_address = "127.0.0.1:3333"
 # path = "/"
 #
+# A repository whose webhook intake is primary may hold the complete sweep to an
+# hourly cadence: the delivery stream carries the mapped set and the poll is the
+# reconciliation backstop. Omitting webhook_mode selects "shadow", where the
+# poll stays the freshness path and the interval stays short. A present value
+# that is not "shadow" or "primary", of any TOML type, fails startup.
 # [[repository_watch.repositories]]
 # repository = "namespace/project"
-# poll_interval_seconds = 60
+# poll_interval_seconds = 3600
 # credential_file = "/run/credentials/repository-watch-namespace-project"
+# convergence_pull_requests = [892]
 # webhook_hook_id = 123456789
 # webhook_secret_file = "/etc/signalbox/github-webhook-secret"
+# webhook_mode = "primary"
 #
 # [[repository_watch.rules]]
 # id = "merge-forward-on-base-advance"
@@ -382,6 +533,9 @@ adapter = "application"
 # execution tools. The daemon never guesses this path from its own executable.
 [daemon_tools]
 exec_supervisor_executable = "/usr/local/bin/signalbox-exec-supervisor"
+# Optional pre-populated Cargo registry mounted read-only at the sandbox's
+# dedicated CARGO_HOME. The sandbox keeps its writable lock state in tmpfs.
+# cargo_registry_cache = "/var/cache/signalbox/cargo/registry"
 
 # The complete mapped composition uses this explicit identity for both author
 # and committer fields. It never consults ambient Git configuration.
@@ -709,8 +863,10 @@ service_tiers = ["auto", "standard_only"]
 # fetches from its provider (`codex debug models`, client 0.146) and from the
 # provider's published CLI documentation. The CLI's set is not the API's: it
 # publishes no dated snapshots, it serves a model the API does not, and the
-# models it shares with the API carry a 272000 window where Chat Completions
-# advertises 1050000 for the same spelling. The CLI validates neither a model
+# models it shares with the API carry a 272000 raw window where Chat Completions
+# advertises 1050000 for the same spelling. The CLI reserves 5% of the raw
+# window internally, so each configured context ceiling below is the 95% usable
+# window that the CLI actually admits. The CLI validates neither a model
 # spelling nor an effort at startup — a wrong value fails at the provider — so
 # these spellings are the only guard a deployment gets.
 #
@@ -727,27 +883,28 @@ service_tiers = ["auto", "standard_only"]
 # "priority" request value behind the CLI's fast speed tier.
 
 # [[models]]
-# # The CLI's own default model. Advertised window: 272000.
+# # The CLI's own default model. Raw window: 272000; usable window: 258400.
 # selection_id = "ff15fc0a-bac0-45df-9d59-ab3b79282a95"
 # target_id = "4d4a9f4c-ce89-4c75-ae2e-695cda3ae4bc"
 # model_family = "codex"
 # provider_model = "gpt-5.6-sol"
 # max_output_tokens = 8192
-# context_window_tokens = 272000
+# context_window_tokens = 258400
 # reasoning_levels = ["low", "medium", "high", "xhigh", "max", "ultra"]
 # fast_mode = "request_control"
 # service_tiers = ["priority"]
 
 # [[models]]
 # # Served only through this surface: the provider's API does not offer it.
-# # Advertised window: 128000. Its catalog entry advertises no speed tier, so
+# # Raw window: 128000; usable window: 121600. Its catalog entry advertises no
+# # speed tier, so
 # # the row declares neither a tier nor request-controlled fast mode.
 # selection_id = "bacd74df-e96b-4fcd-85be-749ec7b73123"
 # target_id = "ce659f71-9a81-433a-b94d-5c33db7cd493"
 # model_family = "codex"
 # provider_model = "gpt-5.3-codex-spark"
 # max_output_tokens = 8192
-# context_window_tokens = 128000
+# context_window_tokens = 121600
 # reasoning_levels = ["low", "medium", "high", "xhigh"]
 
 # Claude Code catalog, extracted on 2026-08-06 from the model catalog embedded

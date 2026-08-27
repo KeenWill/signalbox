@@ -4,13 +4,14 @@
 //! catalog policy, mints every durable identity candidate, keeps executor work
 //! outside transactions, and submits only correlated evidence to persistence.
 
-use std::{collections::BTreeMap, error::Error, fmt, future::Future, sync::Arc};
+use std::{collections::BTreeMap, error::Error, fmt, future::Future, num::NonZeroU64, sync::Arc};
 
 use crate::{
     ClassifyOperatorFailure, DecideToolRequestTransaction, InProcessToolDispatchGate,
-    InProcessToolDispatchPermit, OperatorFailureClass, PrepareToolContinuationOutcome,
-    RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
-    ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
+    InProcessToolDispatchPermit, OperatorFailureClass, OverrideDeniedToolRequestTransaction,
+    PrepareToolContinuationOutcome, RetainedToolAttemptObservationStatus,
+    ToolAttemptAuthorizationOutcome, ToolAttemptAuthorizationStatus, ToolContinuationIdentities,
+    ToolCrashClosureIdentities, ToolExecutionTransaction,
 };
 #[cfg(test)]
 use signalbox_domain::AcceptedInputId;
@@ -18,12 +19,13 @@ use signalbox_domain::{
     ChildWait, CorrelatedToolAttemptObservation, CurrentToolAttemptState,
     DangerousToolAutoApproval, DecideToolRequest, DelegationWait, EndedToolAttempt,
     FailedModelCallTurn, FailedModelCallTurnIdentities, InitialToolApproval, IssuedExecutorFence,
-    ModelCallId, NormalizedToolArguments, PreparedDecideToolRequest, SemanticTranscriptEntryId,
-    SessionId, ToolApprovalPosture, ToolArgumentsKind, ToolAttemptCrashOutcome,
-    ToolAttemptDispatchCorrelation, ToolAttemptId, ToolAttemptObservation, ToolBatch,
-    ToolBatchPhase, ToolDispatchAuthority, ToolEffectClass, ToolExecutionError,
-    ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequest,
-    ToolRequestId, ToolResultContent, ToolResultText, ToolResultTextFailure, TurnAttemptId, TurnId,
+    ModelCallId, NormalizedToolArguments, OverrideDeniedToolRequest, PreparedDecideToolRequest,
+    PreparedOverrideDeniedToolRequest, SemanticTranscriptEntryId, SessionId, ToolApprovalPosture,
+    ToolArgumentsKind, ToolAttemptCrashOutcome, ToolAttemptDispatchCorrelation, ToolAttemptId,
+    ToolAttemptObservation, ToolBatch, ToolBatchPhase, ToolDispatchAuthority, ToolEffectClass,
+    ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName,
+    ToolPermissionDefault, ToolRequest, ToolRequestId, ToolResultContent, ToolResultText,
+    ToolResultTextFailure, TurnAttemptId, TurnId,
 };
 
 /// Canonical JSON object used as a model-facing argument schema.
@@ -168,6 +170,14 @@ pub trait ToolArgumentValidator: Send + Sync {
     /// Checks exact normalized JSON against the declaration's argument type.
     fn validate(&self, arguments: &NormalizedToolArguments)
     -> Result<(), ToolExecutionErrorDetail>;
+
+    /// Derives any durable resource charge required before dispatch authority.
+    fn preauthorization(
+        &self,
+        _arguments: &NormalizedToolArguments,
+    ) -> Result<ToolPreauthorization, ToolExecutionErrorDetail> {
+        Ok(ToolPreauthorization::Unmetered)
+    }
 }
 
 impl<Validate> ToolArgumentValidator for Validate
@@ -180,6 +190,25 @@ where
     ) -> Result<(), ToolExecutionErrorDetail> {
         self(arguments)
     }
+}
+
+/// Pure catalog-derived resource admission supplied to durable authorization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolPreauthorization {
+    /// No additional durable resource charge applies.
+    Unmetered,
+    /// One metadata request must prove the digest was visible in the frontier.
+    BlobMetadata {
+        /// Exact digest requested by the logical tool request.
+        digest: signalbox_domain::BlobDigest,
+    },
+    /// One generic blob read charges its decoded byte length once by request.
+    BlobRead {
+        /// Exact digest requested by the logical tool request.
+        digest: signalbox_domain::BlobDigest,
+        /// Positive decoded bytes requested by the exact logical tool request.
+        decoded_bytes: NonZeroU64,
+    },
 }
 
 /// One compiled declaration plus its non-effecting argument validator.
@@ -269,6 +298,15 @@ pub trait ToolCatalog: Send + Sync {
         name: &ToolName,
         arguments: &NormalizedToolArguments,
     ) -> Result<(), ToolCatalogValidationFailure>;
+
+    /// Derives a typed durable admission charge after argument validation.
+    fn preauthorization(
+        &self,
+        _name: &ToolName,
+        _arguments: &NormalizedToolArguments,
+    ) -> Result<ToolPreauthorization, ToolCatalogValidationFailure> {
+        Ok(ToolPreauthorization::Unmetered)
+    }
 }
 
 impl ToolCatalog for CompiledToolCatalog {
@@ -300,6 +338,22 @@ impl ToolCatalog for CompiledToolCatalog {
                 detail: Some(detail),
             }
         })
+    }
+
+    fn preauthorization(
+        &self,
+        name: &ToolName,
+        arguments: &NormalizedToolArguments,
+    ) -> Result<ToolPreauthorization, ToolCatalogValidationFailure> {
+        let tool = self
+            .tools
+            .get(name)
+            .ok_or(ToolCatalogValidationFailure::UnknownTool)?;
+        tool.validator
+            .preauthorization(arguments)
+            .map_err(|detail| ToolCatalogValidationFailure::InvalidArguments {
+                detail: Some(detail),
+            })
     }
 }
 
@@ -624,6 +678,37 @@ where
     }
 }
 
+/// Application service for one durable delegate-denial override command.
+pub struct OverrideDeniedToolRequestService<Transaction> {
+    transaction: Transaction,
+}
+
+impl<Transaction> OverrideDeniedToolRequestService<Transaction> {
+    /// Wraps the authoritative transaction.
+    pub const fn new(transaction: Transaction) -> Self {
+        Self { transaction }
+    }
+
+    /// Returns the owned transaction role.
+    pub fn into_transaction(self) -> Transaction {
+        self.transaction
+    }
+}
+
+impl<Transaction> OverrideDeniedToolRequestService<Transaction>
+where
+    Transaction: OverrideDeniedToolRequestTransaction,
+{
+    /// Applies one override command; the transaction mints no fresh
+    /// identities, so no collision retry exists to run.
+    pub async fn execute(
+        &mut self,
+        command: OverrideDeniedToolRequest,
+    ) -> Result<PreparedOverrideDeniedToolRequest, Transaction::Error> {
+        self.transaction.override_denied(command).await
+    }
+}
+
 /// Opaque same-incarnation executor evidence retained across a failed commit.
 pub struct RetainedToolExecutionState {
     state: RetainedToolExecutionStateKind,
@@ -751,6 +836,10 @@ pub enum ToolExecutionServiceOutcome {
     ContinuationTargetUnavailable(Box<FailedModelCallTurn>),
     /// Continuation credential-pool exhaustion closed the turn atomically.
     ContinuationPoolExhausted(Box<signalbox_domain::CredentialPoolExhaustedModelCallTurn>),
+    /// Reported usage closed the turn before an oversized continuation.
+    ContinuationContextCompactionRequired(
+        Box<signalbox_domain::ContextHeadroomExhaustedModelCallTurn>,
+    ),
 }
 
 const fn is_fatal_executor_failure_class(failure: OperatorFailureClass) -> bool {
@@ -1462,13 +1551,60 @@ where
                 ended,
             )));
         }
+        let preauthorization = match self
+            .catalog
+            .preauthorization(request.name(), request.arguments())
+        {
+            Ok(preauthorization) => preauthorization,
+            Err(ToolCatalogValidationFailure::UnknownTool) => {
+                return Err(ToolExecutionServiceError::CatalogDrift);
+            }
+            Err(ToolCatalogValidationFailure::InvalidArguments { detail }) => {
+                let ended = self
+                    .transaction
+                    .commit_preflight_error(
+                        prepared.session(),
+                        prepared.turn(),
+                        prepared.attempt(),
+                        ToolExecutionError::new(ToolExecutionErrorKind::InvalidArguments, detail),
+                    )
+                    .await
+                    .map_err(ToolExecutionServiceError::PreflightCommit)?;
+                return Ok(ToolExecutionServiceOutcome::PreflightFailed(Box::new(
+                    ended,
+                )));
+            }
+        };
         let definition = definition.ok_or(ToolExecutionServiceError::CatalogDrift)?;
         let authorized = match self
             .transaction
-            .authorize_attempt(prepared.session(), prepared.turn(), prepared.attempt())
+            .authorize_attempt(
+                prepared.session(),
+                prepared.turn(),
+                prepared.attempt(),
+                preauthorization,
+            )
             .await
         {
-            Ok(authorized) => authorized,
+            Ok(ToolAttemptAuthorizationOutcome::Authorized(authorized)) => *authorized,
+            Ok(ToolAttemptAuthorizationOutcome::PreauthorizationRejected { detail }) => {
+                let ended = self
+                    .transaction
+                    .commit_preflight_error(
+                        prepared.session(),
+                        prepared.turn(),
+                        prepared.attempt(),
+                        ToolExecutionError::new(
+                            ToolExecutionErrorKind::PreauthorizationRejected,
+                            Some(detail),
+                        ),
+                    )
+                    .await
+                    .map_err(ToolExecutionServiceError::PreflightCommit)?;
+                return Ok(ToolExecutionServiceOutcome::PreflightFailed(Box::new(
+                    ended,
+                )));
+            }
             Err(error)
                 if matches!(
                     error.operator_failure_class(),
@@ -1874,6 +2010,17 @@ where
                         exhausted,
                     ));
                 }
+                Ok(PrepareToolContinuationOutcome::ContextCompactionRequired(required)) => {
+                    report_tool_turn_terminalization(
+                        required.failed(),
+                        "continuation_context_compaction_required",
+                    );
+                    return Ok(
+                        ToolExecutionServiceOutcome::ContinuationContextCompactionRequired(
+                            required,
+                        ),
+                    );
+                }
                 Err(error) => return Err(ToolExecutionServiceError::Continuation(error)),
             }
         }
@@ -2057,7 +2204,7 @@ mod tests {
     use super::*;
     use signalbox_domain::{
         ChildRelationshipPolicy, DelegatedSpawnRequest, DelegationAwaitRequest, DelegationEvent,
-        DelegationEventOrdinal, DelegationProvenance, DelegationWaitMode,
+        DelegationEventOrdinal, DelegationProvenance, DelegationWaitMode, DurableCommandId,
         ResolvedContextFrontierReconstitutionInput, SessionDelegationReconstitutionInput,
         ToolApprovalResolutionReconstitutionInput, ToolAttemptReconstitutionInput,
         ToolAttemptReconstitutionState, ToolBatchPhaseReconstitutionInput,
@@ -2318,6 +2465,45 @@ mod tests {
         }
     }
 
+    struct FailingOverrideTransaction {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl OverrideDeniedToolRequestTransaction for FailingOverrideTransaction {
+        type Error = FakeError;
+
+        async fn override_denied(
+            &mut self,
+            _command: OverrideDeniedToolRequest,
+        ) -> Result<PreparedOverrideDeniedToolRequest, Self::Error> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(FakeError::Ordinary)
+        }
+    }
+
+    #[tokio::test]
+    async fn override_service_returns_transaction_failure_without_retry() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let transaction = FailingOverrideTransaction {
+            calls: Arc::clone(&calls),
+        };
+        let mut service = OverrideDeniedToolRequestService::new(transaction);
+        let command = OverrideDeniedToolRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(1)),
+            SessionId::from_uuid(Uuid::from_u128(2)),
+            ToolRequestId::from_uuid(Uuid::from_u128(3)),
+        )
+        .expect("fixture command identity is admitted");
+
+        let error = service
+            .execute(command)
+            .await
+            .expect_err("the transaction failure is returned");
+
+        assert_eq!(error, FakeError::Ordinary);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
     struct FakeTransaction {
         batch: ToolBatch,
         prepared: signalbox_domain::CurrentToolAttempt,
@@ -2368,7 +2554,8 @@ mod tests {
             _session: SessionId,
             _turn: TurnId,
             attempt: ToolAttemptId,
-        ) -> Result<ToolDispatchAuthority, Self::Error> {
+            _preauthorization: ToolPreauthorization,
+        ) -> Result<ToolAttemptAuthorizationOutcome, Self::Error> {
             self.events.lock().expect("event lock").push("authorize");
             if self.ambiguous_authorization {
                 self.authorization_committed = true;
@@ -2376,6 +2563,8 @@ mod tests {
             }
             self.batch
                 .authorize_dispatch(attempt)
+                .map(Box::new)
+                .map(ToolAttemptAuthorizationOutcome::Authorized)
                 .map_err(|_| FakeError::Ordinary)
         }
 

@@ -1,5 +1,15 @@
 # Sessions and the transcript
 
+The bounded browser session descriptor and historical timeline foundation are
+verified against this PR (`agent/web-session-timeline`). The bounded
+lexical-search projection and query boundary are verified against this PR
+(`agent/web-product-surface-search`), which carries the `agent/web-search-usage`
+boundary it extends. The bounded browser session catalog is verified against
+this PR (`agent/web-session-catalog-follow`).
+
+Dedicated-compaction usage as the next queued-turn headroom baseline is verified
+against this PR (`agent/fix-headroom-accounting`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
@@ -26,9 +36,11 @@ become verified only with its implementing child pull requests. The append-only
 context-compaction record and projection were verified through PR #312
 (`agent/context-compaction-core`); the command path and canonical visible-range
 selection were verified through PR #314 (`agent/context-compaction-protocol`).
-The runner placement-entry paragraphs are the foundation proposal at the bottom
-of their implementing stack and become verified only with those child pull
-requests. The imported-conversation record and converter are owned by
+The bounded automatic range and durable reported-usage trigger are verified
+against this PR (`agent/daemon-live-reported-usage-compaction`). The runner
+placement-entry paragraphs are the foundation proposal at the bottom of their
+implementing stack and become verified only with those child pull requests. The
+imported-conversation record and converter are owned by
 [conversation-import](conversation-import.md). Where a law is cited as
 `INV-NNN`, the generated [invariant test index](../invariants.md) resolves it;
 where mechanics owned by another contract are summarized, the owning sibling
@@ -40,7 +52,14 @@ current-head authentication is additionally verified against the parent slice
 (`agent/scoped-visibility`). The read-scope enforcement and process surface are
 verified against this PR (`agent/scoped-visibility-wiring`).
 Defaults-replacement settings admission and its locked expected-epoch handoff
-are verified against this PR (`agent/model-settings-execution`).
+are verified against this PR (`agent/model-settings-execution`). The
+automatic-reconciliation child outcome — the failed result carrying the
+`ChildResultUnavailable` reason and the exact reconciled child turn that the
+daemon's durable attempt seals for a parent whose delegated call the provider
+can never settle — is verified against this PR
+(`agent/turn-lifecycle-hardening`). Deployment-owned system-prompt and
+metadata-count admission is verified against this PR
+(`agent/bounds-required-config-protocol`).
 
 ## Session identity and creation provenance
 
@@ -339,18 +358,41 @@ boundary. The predecessor's prepared or in-flight call retains its existing
 pins, so credential affinity and provider prompt-cache prefixes do not move
 mid-call (INV-046).
 
+**Committed unimplemented functionality — instruction-aware replacement.** Once
+workspace-instruction admission exists, a replacement for a session with a
+nonempty admitted set rejects its proposed model selection unless every target
+the current configuration can select from that direct selection or alias has a
+typed system-instruction transport and capacity for the complete retained
+workspace-instruction region. The replacement checks this before committing the
+successor defaults epoch. What this page requires is the atomicity, not a lock
+recipe: the replacement must resolve every possible target and validate the
+complete retained region under the same serialization it commits the successor
+epoch under, so an admission or activation occurs wholly before or after it and
+cannot invalidate the evidence it checked. Which rows that serialization takes,
+in what order, and in which mode belong to the
+[persistence lock protocol](persistence-protocol.md#lock-protocol), which owns
+that inventory for every transaction and is the only place it is stated.
+Rejection is typed and leaves the current defaults and admitted set unchanged.
+No present replacement path performs this check because no present surface
+admits a bundle. The owning
+[model-selection validation](configuration-and-credentials.md#model-selection-validation)
+also performs the same retained-region check when each later origin is accepted,
+after resolving its alias against the then-current catalog. Replacement-time
+validation therefore does not stand in for acceptance-time validation after an
+alias retarget or daemon restart.
+
 ### Session system prompt
 
 A present session system prompt (`SessionSystemPrompt`) is nonempty exact
-Unicode text that rejects U+0000 and carries at most
-`SessionSystemPrompt::MAX_UTF8_BYTES` = 1,048,576 UTF-8 bytes, mirroring the
-accepted-input content bound below; construction rejects excess without
-truncating or rewriting, and equality is the exact ordered scalar sequence.
-Absence is typed `None`, never empty text. `CreateSession` and
-`CreateSessionFromImportedFrontier` carry the optional prompt inside their
-complete unversioned initial defaults, and `ReplaceSessionDefaults` replaces it
-only as part of the complete successor epoch — there is no prompt-only mutation.
-This section owns the capacity and epoch-placement contract. Matching
+Unicode text that rejects U+0000. Domain construction does not impose a byte
+policy; the daemon configuration applies its required optional byte limit at
+each ingress. Construction never truncates or rewrites, and equality is the
+exact ordered scalar sequence. Absence is typed `None`, never empty text.
+`CreateSession` and `CreateSessionFromImportedFrontier` carry the optional
+prompt inside their complete unversioned initial defaults, and
+`ReplaceSessionDefaults` replaces it only as part of the complete successor
+epoch — there is no prompt-only mutation. This section owns the capacity and
+epoch-placement contract. Matching
 `octet_length(convert_to(system_prompt, 'UTF8'))` CHECK constraints protect the
 durable epoch and command columns (migration
 `202607280303_session_system_prompt.sql`), and command/defaults schema agreement
@@ -476,11 +518,12 @@ caller order; duplicate tags or attribute keys fail construction rather than
 silently selecting a winner. Tags are human-facing organization and attributes
 are machine-facing provenance; neither shape substitutes for the other.
 
-A snapshot carries at most 256 tags, at most 256 attributes, and at most 262,144
-total UTF-8 bytes across its present title, tags, attribute keys, and attribute
-values. Each tag and attribute key carries at most 1,024 UTF-8 bytes so its
-composite PostgreSQL index entry remains representable. Construction rejects any
-excess before command handling; this section owns the capacity contract.
+A snapshot carries at most 262,144 total UTF-8 bytes across its present title,
+tags, attribute keys, and attribute values. Each tag and attribute key carries
+at most 1,024 UTF-8 bytes so its composite PostgreSQL index entry remains
+representable. The daemon applies deployment-owned optional tag and attribute
+count policies before command handling; domain reconstitution has no count
+policy.
 
 The root `session_metadata` row and normalized
 `session_metadata_tag`/`session_metadata_attribute` rows (migration
@@ -538,11 +581,12 @@ remain available through the single-session metadata read, and the current
 epoch's optional system prompt is deliberately absent from list rows — the
 process boundary's single-session defaults read
 ([process-protocol](process-protocol.md)) returns it exactly. A query has an
-exact tag set of at most 256 members, optional exact case-sensitive title
-substring, `include_archived`, a page size from 1 through 100, and an exclusive
-`after_session_id` cursor. Required tags use the metadata tag rules, a present
-title substring is nonempty and rejects U+0000, and all filter strings together
-carry at most 262,144 UTF-8 bytes:
+exact tag set admitted by the deployment policy, optional exact case-sensitive
+title substring, `include_archived`, a page size admitted by the deployment's
+minimum and maximum policies, and an exclusive `after_session_id` cursor.
+Required tags use the metadata tag rules, a present title substring is nonempty
+and rejects U+0000, and all filter strings together carry at most 262,144 UTF-8
+bytes:
 
 - every requested tag must exist (AND-match); an empty set matches all;
 - a title query matches only a present title containing that exact scalar
@@ -635,6 +679,148 @@ partial session.
 
 Why (fail closed): a fabricated or partial session would mask corruption and
 launder invalid durable state into valid-looking domain values.
+
+## Bounded browser session catalog
+
+`GET /api/sessions` is the one fleet-wide session chooser and attention read
+model. It returns at most 32 rows from one read-only repeatable-read snapshot,
+the exact filtered total, and the durable attention-journal cursor. The total
+counts filtered session and metadata rows; it never scans transcript or timeline
+records. Each row carries session identity, a title summary of at most 128
+Unicode scalar values with an explicit truncation bit, archive posture, current
+turn, active and queued turn counts, the closed current attention state, exact
+operator action when one is owed, bounded blocked-goal and approval-judge facts,
+and the last explicitly timestamped durable activity. No timestamp is inferred
+from UUID identity bits.
+
+The sequence-backed attention journal is authoritative for activity kind and
+timestamp. A per-session last-activity timestamp maintained from that journal is
+only the indexed keyset substrate; missing substrate fails the catalog read
+closed rather than hiding a session. Session metadata changes publish a session
+fact through the same journal and therefore invalidate a hot follow snapshot.
+
+The default order is descending last activity with ascending session identity as
+the total tie-breaker. The alternate order is ascending session identity. Both
+use exclusive typed keyset continuations; a continuation for one order is
+invalid under the other. Search is an exact case-sensitive substring of title or
+canonical session UUID. A query may additionally require at most eight exact
+tags, whose combined UTF-8 bytes together with search text are at most 1,024,
+and may include archived sessions. Sort and filter state are client-local inputs
+to these bounded reads, not durable session state.
+
+This extends the fleet attention projection rather than maintaining a second
+session-state classifier. Runner loss, tool recovery, recovery ambiguity,
+reconciliation, approval wait, blocked goal, active, queued, and idle remain
+distinct. Page and change reads derive them from the same durable facts and fail
+closed on unknown states or inconsistent shapes.
+
+## Bounded browser session timeline
+
+The browser historical plane addresses every durable session event by the pair
+`(session_id, event_sequence)`. On the wire the session UUID is carried by the
+endpoint or result and `WebTimelineAddress.event_sequence` is the positive
+decimal string of the global durable outbox sequence. The sequence is allocated
+once across ordinary and delegation outbox events. It is append-only, totally
+ordered, independent of table offsets and query plans, and never renumbered.
+Another session's events may create gaps. A search or other navigator therefore
+carries both fields and can open an unloaded region with an `around` read;
+arithmetic adjacency is never required.
+
+`GET /api/sessions/{session_id}` returns the exact first and latest addresses,
+durable event count, current global observation cursor, active and queued turn
+counts, and explicit projected-size facts. Projected text bytes are the UTF-8
+bytes currently stored inline for accepted input, assistant text, and context
+summaries. Projected structured bytes sum a fixed 64-byte header envelope plus
+the UTF-8 event-kind spelling for every durable event. These values are loading
+policy estimates, not encoded-response promises. Referenced blob count and byte
+length are separate facts and are zero until a durable timeline-to-blob relation
+exists; a future nonzero byte length will still describe a reference, not
+materialized bytes.
+
+`GET /api/sessions/{session_id}/timeline` accepts `first`, `latest`, `before`,
+`after`, and `around` anchors. Addressed anchors require one positive decimal
+`address`. Every request supplies `max_items` from 1 through 256 and `max_bytes`
+from 256 through 65,536. Persistence reads at repeatable-read isolation, fetches
+at most 257 lightweight headers, enforces both requested limits, and returns
+items in address order. `continuation_before` is the first returned address only
+when earlier items exist; `continuation_after` is the last returned address only
+when later items exist. Thus truncation is explicit, and continuing repeats only
+the boundary address in the request, never an item in the next strict keyset
+window. The `around` query forms bounded candidates independently from the
+indexed prefix and suffix before choosing the nearest headers; it does not sort
+the session's lifetime event set.
+
+Each header retains one of the closed ordinary, goal, model, tool, runner, or
+delegation event categories. An unknown durable category is corruption rather
+than generic prose. This foundation intentionally exposes header facts rather
+than storage records or process frames. Browser DTOs are generated from the Rust
+web-contract schema; application values, persistence rows, browser DTOs, and
+presentation items remain distinct.
+
+The browser session-history adapter validates the generated DTOs, treats every
+64-bit value as a decimal string and `bigint`, clamps each request to the server
+ceilings, and retains at most 768 event headers. Every newly inspected window is
+retained preferentially, so moving among the first, latest, and an arbitrary
+million-event address never makes lifetime history a client-memory precondition.
+Transcript `full`, `condensed`, and `results` remain local presentation choices
+and do not alter any server query.
+
+## Bounded browser lexical search
+
+Version-one browser search is lexical. `GET /api/search` accepts natural product
+text, an optional exact session, a page size, and an opaque continuation made
+from a stable timeline address plus projection identity. It accepts only the
+`lexical` strategy and passes text to PostgreSQL `plainto_tsquery`; PostgreSQL
+operators and query syntax are not product semantics. The application strategy
+boundary remains explicit so a future semantic or hybrid strategy does not
+change the lexical request into a database query language.
+
+The dedicated PostgreSQL full-text projection indexes canonical accepted user
+text, final assistant transcript text, model-visible tool arguments and results,
+current session title/tags/searchable attributes, explicitly published
+attachment filenames and media metadata, and durable derived text. The
+implemented producers are durable transitions that project their own text as
+they commit: input acceptance, steering acceptance, a terminal model call, a
+tool batch transition, context compaction, and session-metadata installation.
+Context summaries are the implemented transcript-owned derived-text producer.
+Attachment filenames, attachment media metadata, and explicitly derived text
+artifacts are classes the schema admits and a read returns, and no producer in
+the daemon publishes them. The projection performs no implicit attachment
+reading, OCR, text extraction, or model pass.
+
+Publication through the typed projection-writer port is committed unimplemented
+functionality: no present producer calls it. The compatibility constraint is
+that a producer adopting the port publishes only text its durable contract
+explicitly supplies, and only after its own source exists.
+
+Every result carries its session, stable timeline address, positive projection
+identity, typed owning session/input/turn transcript entry/tool request/tool
+attempt/attachment/derived artifact identity, closed content class, and a
+plain-text snippet with UTF-8 byte highlight ranges. The address is directly
+usable with the timeline `around` read even when the matching region is not
+loaded. Each returned source is correlated with both its canonical record and
+the exact durable event that supplies its reveal address — an input's acceptance
+event, an assistant entry's terminal call transition, a summary's compaction
+event, a tool item's batch transition, the session's creation event — and a
+transcript-entry source must carry the payload kind its content class asserts.
+An unknown stored source or content class, malformed identity, invalid address,
+mismatched reveal event, or contradictory source shape fails closed, including
+when the offending row is only the unreturned lookahead item fetched to decide a
+continuation.
+
+Requests accept 1 through 100 results and at most 512 UTF-8 query bytes. Each
+returned snippet is at most 512 UTF-8 bytes and carries at most 64 ordered,
+non-overlapping highlight ranges on UTF-8 boundaries. Results have a stable
+strict newest-address-first keyset order by `(event_sequence, projection_id)`;
+the adapter fetches at most one item beyond the requested page to decide whether
+to return a continuation. A bounded per-term GIN probe runs first: a query
+containing a term with no match returns an empty page immediately, a query whose
+rarest term stays under a fixed candidate cap is served from that term's
+index-driven candidate set, and only queries in which every term is common use
+the newest-first keyset traversal, whose page then fills within a bounded
+ordered prefix. Snippets and validity checks are computed for returned rows
+only, never per examined candidate. Search never materializes or scans a session
+transcript in the browser.
 
 ## Semantic transcript entries
 
@@ -738,7 +924,8 @@ The transcript therefore remains complete and addressable after compaction. No
 entry or frontier is deleted, replaced, reordered, or rewritten. The
 compaction-call record separately retains the session's current direct model
 selection, resolved provider target, source frontier, physical lifecycle and
-disposition, non-secret credential reference, and each independently optional
+disposition, non-secret credential reference, whether provider-reported input
+tokens include separately reported cache axes, and each independently optional
 provider-reported usage field. Summary production is its own model call; it is
 not assistant output attributed to an accepted-input turn.
 
@@ -768,11 +955,14 @@ order. This rule deliberately separates the frontier a call durably records from
 the ordered subset the selected model sees.
 
 Explicit compaction chooses an optional through position, defaulting to the
-latest safe boundary. The daemon also compacts before an ordinary model send
-when that call's rendered input plus its full configured output-token
-reservation would exceed the current selection's declared context window. Both
-paths use the required deployment-configured compaction prompt and the session's
-current direct selection. Trigger and configuration mechanics are owned by
+latest safe boundary. The daemon also compacts before activating queued work
+when the newest durable provider-reported usage from either an ordinary call or
+the latest completed dedicated compaction call proves that the next configured
+output-token reservation cannot fit in the current selection's declared context
+window. Automatic compaction selects a bounded safe prefix so its own summary
+request does not repeat the complete oversized input. Both paths use the
+required deployment-configured compaction prompt and the session's current
+direct selection. Trigger and configuration mechanics are owned by
 [model-call-execution](model-call-execution.md).
 
 ### When entries come to exist
@@ -939,8 +1129,8 @@ INV-007, INV-036).
 
 ### Bounds
 
-The multipart value and application admission apply the exact structural,
-text-byte, and attachment-metadata bounds owned by
+The multipart value applies the exact structural, text-byte, and
+attachment-metadata bounds owned by
 [blob storage](blob-storage.md#multipart-user-content) before typed command
 construction, so no command identifier is claimed for a structurally invalid
 value. Typed construction and the registry claim precede the current-state
@@ -1097,7 +1287,13 @@ carry the exact terminal child turn. Returned content is derived only from the
 proof-bearing completed call; independently supplied text cannot authorize a
 result. A completed turn with empty or oversized returned text records the
 distinct `ChildResultUnavailable` reason. Reconciliation-required work is not
-terminal delegation evidence and produces no outcome. **Committed unimplemented
+terminal delegation evidence on its own and produces no outcome while its
+ambiguity stands. Automatic reconciliation is the exception: the daemon's
+durable attempt seals the child as a failed result carrying that same
+`ChildResultUnavailable` reason and the exact reconciled child turn, in the
+transaction that commits the terminal transition, so a parent waiting on a call
+whose provider outcome can never be established is woken by evidence rather than
+left waiting on a turn that has already ended. **Committed unimplemented
 functionality.** Durable terminal-result reconstitution is not exposed by this
 foundation slice; the persistence slice must consume a sealed reconstituted
 ended-call/turn projection rather than accepting parallel raw identities or

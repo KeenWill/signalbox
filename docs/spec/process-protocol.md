@@ -1,5 +1,18 @@
 # Process protocol
 
+Deployment-owned process limits and the `read_deployment_limits` projection are
+verified against this PR (`agent/bounds-required-config-protocol`). The ordered
+user-content part-array vocabulary is verified against this PR
+(`agent/blob-storage-multipart-algebra`).
+
+The bounded automatic model-call recovery status projected on active turns is
+verified against this PR (`agent/turn-lifecycle-hardening`). Its tool-attempt
+counterpart is verified against this PR
+(`agent/daemon-live-tool-recovery-reconcile`); the terminal client's following
+of an unexhausted tool recovery wait, and the native client's decoding of both
+recovery turn states, are verified against this PR
+(`agent/fix-client-tools-judge`).
+
 The typed runner-state session event, daemon outbox projection, authoritative
 session-summary and transcript-snapshot runner projections, and the runner
 request/projection implementation boundary were verified against this PR
@@ -23,6 +36,9 @@ The goal-mode process and terminal surface was re-verified through PR #384
 
 The commissioned-session request and receipt surface is verified against this PR
 (`agent/commissioned-dispatch-fence`).
+
+The repository-watch operator-status process and terminal surface was verified
+against PR #861 (`agent/operator-status-command`).
 
 The descendant-termination command scope was re-verified through this PR
 (`agent/delegation-command-scope`).
@@ -301,6 +317,7 @@ that variant.
 | `create_session_from_template`          | `command_id` (canonical UUID string), `template_name` (template-name string), optional `placement` (session-placement object; omission means pathless), `runner_placement` (proposed; runner-placement object or null)                                                                                                                                          | Resolve one daemon-held template and copy its complete bundle into a user-initiated session's defaults version one.                                                                                                                                                                                                                                                             |
 | `commission_session`                    | `command_id` (canonical UUID string), `template_name` (template-name string), `fence` (closed authority-fence object: `target` of `pull_request` with `repository`, positive `pull_request`, `head_sha`, `head_repository`, `head_branch`, and `base_branch`, or `target` of `branch` with `repository` and `branch`), `statement` (string), `content` (string) | Atomically create a template session under a recorded immutable authority fence, attach the statement as its commissioned goal, and submit the content as its first input through the start-when-idle path.                                                                                                                                                                     |
 | `list_sessions`                         | none                                                                                                                                                                                                                                                                                                                                                            | Read all current sessions as basic summaries, ordered by session identity.                                                                                                                                                                                                                                                                                                      |
+| `read_operator_status`                  | none                                                                                                                                                                                                                                                                                                                                                            | Read one coherent repository-watch operator-status snapshot.                                                                                                                                                                                                                                                                                                                    |
 | `update_session_placement`              | `command_id` and `session_id` (canonical UUID strings), `expected_placement_version` (positive canonical decimal string), `replacement` (session-placement object)                                                                                                                                                                                              | Append one immutable placement event conditional on the exact current placement version.                                                                                                                                                                                                                                                                                        |
 | `list_templates`                        | none                                                                                                                                                                                                                                                                                                                                                            | Read every available template's name and version in name order.                                                                                                                                                                                                                                                                                                                 |
 | `attach_goal`                           | `command_id` and `session_id` (canonical UUID strings), `statement` (string)                                                                                                                                                                                                                                                                                    | Attach the first immutable commissioned statement and begin pursuing it.                                                                                                                                                                                                                                                                                                        |
@@ -333,6 +350,7 @@ that variant.
 | `reconcile_turn`                        | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (ordered content-part array), `expected_defaults_version` (canonical decimal string), `model_settings` (settings overlay)                                                                                                                                         | Supply the user reconciliation decision for the named turn parked on an ambiguous model call, accepting `content` as its immediate successor origin.                                                                                                                                                                                                                            |
 | `stop_turn`                             | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (ordered content-part array), `expected_defaults_version` (canonical decimal string), `model_settings` (settings overlay), `descendant_scope` (`parent_alone` or `parent_and_descendants`)                                                                        | Apply the accepted interrupt treatment to the named active turn, accepting `content` as its immediate-successor origin and explicitly selecting delegated-child scope.                                                                                                                                                                                                          |
 | `decide_tool_request`                   | `command_id`, `session_id`, and `tool_request_id` (canonical UUID strings), `decision` (a decision object below)                                                                                                                                                                                                                                                | Supply the user decision for one pending tool request through the canonical decision command.                                                                                                                                                                                                                                                                                   |
+| `override_denied_tool_request`          | `command_id`, `session_id`, and `tool_request_id` (canonical UUID strings)                                                                                                                                                                                                                                                                                      | Record one one-shot user override of the named delegate-denied tool request through the canonical override command.                                                                                                                                                                                                                                                             |
 | `read_session_defaults`                 | `session_id` (canonical UUID string), `defaults_version` (canonical decimal string or null)                                                                                                                                                                                                                                                                     | Read one complete immutable defaults epoch: the current one for null, otherwise exactly the named one.                                                                                                                                                                                                                                                                          |
 | `list_conversations`                    | `title_contains` (string or null), `origin` (`native`, `imported`, or `all`), `include_archived` (boolean), `page_size` (canonical decimal string), `after` (cursor object or null)                                                                                                                                                                             | Read one filtered unified conversation-summary page across native sessions and imported conversations in unified keyset order.                                                                                                                                                                                                                                                  |
 | `read_imported_conversation`            | `imported_conversation_id` (canonical UUID string)                                                                                                                                                                                                                                                                                                              | Read one immutable imported conversation's complete entry inventory, including the positions `create_session_from_imported_frontier` consumes.                                                                                                                                                                                                                                  |
@@ -390,7 +408,7 @@ where `D` is a canonical blob digest, `K` is `image`, `document`, or `file`, and
 text bytes and attachment member bounds are owned by
 [blob storage](blob-storage.md#multipart-user-content); the wire applies them
 before application construction. A one-part text array is the sole spelling of
-legacy text content.
+text-only content.
 
 The `content` member on transcript `queued` states and `input_accepted` session
 events is that same closed ordered parts array. Together with
@@ -779,12 +797,9 @@ The `system_prompt` member is required on `create_session` and
 `replace_session_defaults`: JSON null states explicitly that the complete
 defaults carry no prompt, and a string carries the exact prompt. An absent
 member is a `malformed_frame`. A present prompt is nonempty exact Unicode text
-that rejects U+0000 and carries at most 1,048,576 UTF-8 bytes — the
-accepted-input content bound, restated by the wire constant
-`MAX_SYSTEM_PROMPT_UTF8_BYTES` — leaving response-envelope and worst-case
-JSON-escaping headroom below the 8 MiB frame limit when the same prompt is
-echoed by a receipt or defaults read. Bound, placement, and capacity reasoning
-are part of this contract.
+that rejects U+0000. The daemon applies
+`numeric_bounds.max_system_prompt_utf8_bytes` before domain construction;
+`"none"` removes that policy while the frame-size guard remains structural.
 
 A metadata object has exactly `title` (string or null), `tags` (string array),
 `attributes` (an object whose values are strings), and `archived` (boolean).
@@ -793,50 +808,48 @@ rejects U+0000. Attribute values may be empty. Duplicate tags produce
 `malformed_frame`. Repeating a decoded attribute member name also produces
 `malformed_frame` under the frame-wide duplicate-object-member rule above. Tag
 order and attribute member order do not affect durable command equality. Wire
-validation enforces the domain capacity contract: at most 262,144 total UTF-8
-bytes across the object, at most 256 tags, at most 256 attributes, and at most
-1,024 UTF-8 bytes in each tag or attribute key. Those bounds leave
-response-envelope and worst-case JSON-escaping headroom below the 8 MiB frame
-limit while bounding normalized satellite work when a complete accepted object
-is echoed by a read or replacement receipt. The exact capacity choice is owned
-by this contract.
+validation enforces the structural capacity contract: at most 262,144 total
+UTF-8 bytes across the object and at most 1,024 UTF-8 bytes in each tag or
+attribute key. The daemon separately applies the deployment-owned tag and
+attribute count policies before domain construction; either may be `"none"`.
 
-`list_session_metadata` admits one through 100 results. `required_tags` is an
-exact AND-filter, a present `title_contains` is nonempty and applies an exact
-case-sensitive substring filter, `include_archived = false` selects the default
-all-non-archived view, and `after_session_id` is an exclusive keyset cursor. An
-empty tag array, null title query, false archive switch, page size 50, and null
-cursor form the ordinary default request; the wire carries every field
-explicitly. At most 256 required tags are admitted. They are nonempty, reject
-U+0000, and carry at most 1,024 UTF-8 bytes each; a title query rejects U+0000;
-and all required tags plus the title query carry at most 262,144 UTF-8 bytes.
-Every metadata-object and metadata-filter string, shape, cardinality, and byte
-rule in these two paragraphs is client-frame field or size validation. A
-violation returns `malformed_frame` before application construction.
-`invalid_request` is reserved for the fail-closed case where an admitted wire
-value cannot construct the corresponding application input; no currently valid
-metadata frame is intended to reach that mapping error.
+`list_session_metadata` admits the configured metadata page-size range.
+`required_tags` is an exact AND-filter, a present `title_contains` is nonempty
+and applies an exact case-sensitive substring filter, `include_archived = false`
+selects the default all-non-archived view, and `after_session_id` is an
+exclusive keyset cursor. An empty tag array, null title query, false archive
+switch, page size 50, and null cursor form the ordinary default request; the
+wire carries every field explicitly. The daemon applies the configured
+required-tag count policy. Tags are nonempty, reject U+0000, and carry at most
+1,024 UTF-8 bytes each; a title query rejects U+0000; and all required tags plus
+the title query carry at most 262,144 UTF-8 bytes. Every metadata-object and
+metadata-filter string, shape, cardinality, and byte rule in these two
+paragraphs is client-frame field or size validation. A violation returns
+`malformed_frame` before application construction. `invalid_request` is reserved
+for the fail-closed case where an admitted wire value cannot construct the
+corresponding application input; no currently valid metadata frame is intended
+to reach that mapping error.
 
 `list_conversations` is the unified read surface over both conversation record
 classes and mirrors the metadata list's pagination discipline exactly: one
-bounded page per request, admitting one through 100 results, with no silent
-truncation. It is a plain keyset read over the authoritative session,
-current-defaults, metadata, and imported-conversation tables in one
-repeatable-read, read-only transaction — no materialized view, cache, or
-analytical artifact stands between the caller and committed state, so every
-listed row is transactionally fresh. If measured read cost requires a different
-physical shape, the first upgrade is write-time-maintained projection tables
-updated atomically with the authoritative writes, not a materialized,
-periodically refreshed, cached, or otherwise lagging product read. The unified
-order is by conversation identity UUID value, with a native session ordered
-before an imported conversation carrying a theoretical equal identity value. A
-cursor object has exactly `origin` (`native_session` or `imported_conversation`)
-and `conversation_id` (canonical UUID string); `after` is the exclusive keyset
-cursor at that total position, so no row can be skipped at a page boundary. A
-present `title_contains` is nonempty, rejects U+0000, carries at most 262,144
-UTF-8 bytes, and applies the same exact case-sensitive substring filter to a
-present native metadata title or imported display title; an absent title matches
-no title query, and a transitional pending imported title survives every title
+configured page per request, with no silent truncation. It is a plain keyset
+read over the authoritative session, current-defaults, metadata, and
+imported-conversation tables in one repeatable-read, read-only transaction — no
+materialized view, cache, or analytical artifact stands between the caller and
+committed state, so every listed row is transactionally fresh. If measured read
+cost requires a different physical shape, the first upgrade is
+write-time-maintained projection tables updated atomically with the
+authoritative writes, not a materialized, periodically refreshed, cached, or
+otherwise lagging product read. The unified order is by conversation identity
+UUID value, with a native session ordered before an imported conversation
+carrying a theoretical equal identity value. A cursor object has exactly
+`origin` (`native_session` or `imported_conversation`) and `conversation_id`
+(canonical UUID string); `after` is the exclusive keyset cursor at that total
+position, so no row can be skipped at a page boundary. A present
+`title_contains` is nonempty, rejects U+0000, carries at most 262,144 UTF-8
+bytes, and applies the same exact case-sensitive substring filter to a present
+native metadata title or imported display title; an absent title matches no
+title query, and a transitional pending imported title survives every title
 filter so the read fails closed on it
 ([conversation-import](conversation-import.md#derived-display-titles)) rather
 than silently omitting an unresolved row. `origin` selects native rows, imported
@@ -915,6 +928,20 @@ receipt, an already-resolved request records `tool_request_already_resolved`,
 and a decision naming a later request while an earlier one is undecided records
 `tool_request_not_earliest_undecided` naming the exact request owed a decision
 first.
+
+`override_denied_tool_request` carries the canonical user override command for
+one delegate-denied tool request; its behavior is owned by
+[tool-loop](tool-loop.md#approval-policy-and-decision-sources). A claimed
+command identity reaches the durable replay boundary unconditionally (INV-012).
+Unlike `decide_tool_request`, the named session is part of the canonical payload
+— the recorded override is a session-scoped standing fact consumed by a later
+proposal — so an other-session request is the transaction's recorded
+`tool_request_not_in_session` rejection, not a pre-command refusal. Every
+outcome is the recorded result of the canonical command: an applied override
+returns the `tool_denial_overridden` receipt; the recorded rejections are
+`tool_request_not_found`, `tool_request_not_in_session`,
+`tool_request_not_delegate_denied`, `tool_request_not_terminally_denied`, and
+`tool_denial_already_overridden`.
 
 Every implemented request in the tables above belongs to the single admitted
 vocabulary. The closed-enum decoder rejects any unknown request, response,
@@ -1029,6 +1056,8 @@ request, or blob-upload transport request — `create_session`,
   `decision` object; the receipt mirrors the recorded applied result and
   intentionally echoes no session, because the session is not part of the
   canonical decision payload;
+- `tool_denial_overridden` with the overridden `tool_request_id`; the receipt
+  mirrors the recorded applied override result;
 - `session_metadata_replaced` with `session_id`, the complete `metadata`
   snapshot installed by that recorded handling, and its non-null `last_writer`;
 - `session_defaults_replaced` with `session_id`, the newly installed
@@ -1272,6 +1301,80 @@ row at a time before client output. A slow client therefore retains temporary
 disk rather than the complete session catalog in request heap or an open
 database transaction. The sequence becomes authoritative only after the end
 message and count validate. This avoids an aggregate frame-size limit.
+
+A successful `read_operator_status` response consists of `operator_status`
+messages: `kind=start`, zero or more rows from each section in this fixed order,
+then `kind=end` with one count per section. The row kinds are `held_slot`,
+`queued_obligation`, `pull_request_convergence`, and
+`pending_stale_review_clearance`. The daemon reads the four repository-watch
+views bearing those respective concepts in one read-only repeatable-read
+transaction. It streams their rows through server-side cursors into a
+temporary-file spool before writing the first response frame, so a database or
+encoding failure produces no partial successful snapshot and the request retains
+neither an unbounded row inventory nor a database transaction while the client
+reads.
+
+A held-slot row carries dispatch, repository, dispatch origin, rule, singleton,
+ordered session, whole-second held duration, and the independently failing
+release clauses. The origin is a tagged choice rather than a number that may be
+absent: a rule matching branch workflow-run completion holds its slot from a
+branch fact, which names a branch, and every other admitted origin names a pull
+request. A branch fact carries no pull request for a singleton to be keyed by,
+so a branch origin accompanies only the rule and repository scopes; the
+pull-request and stack scopes accompany only a pull-request origin. A singleton
+that carries a repository names the row's own repository, and a pull-request
+singleton names the very pull request its origin names, because the projection
+keys both from the one event the dispatch was admitted from. A stack singleton
+instead names the root of the open component that pull request belongs to, which
+is a different pull request whenever the origin is not itself that root, so the
+stack axis carries no such equality. A queued-obligation row carries obligation,
+rule, singleton, first and latest event, collapsed match count, whole-second
+wait duration, occupying dispatch and sessions, positive remaining cooldown when
+any, and the view's ready decision. The count and the two events move together:
+an obligation opens naming one evaluated event as both endpoints with a count of
+one, and each later coalesced evaluation replaces the latest event with a
+distinct one and increments the count, so the count stands at one exactly while
+the two endpoints name the same event. The occupying dispatch is optional
+independently of the sessions it would name: a watch dispatch names its identity
+and its whole admitted session inventory, while an obligation blocked by an
+independently commissioned live session lists exactly that one session and no
+dispatch, because the obligation retains a single external blocker. Readiness is
+the view's whole decision — excluding a dispatch or external session holding the
+target, a parked obligation, and a spent attempt budget — narrowed only so that
+a cooldown expiring mid-read cannot report readiness alongside a positive
+remaining cooldown. An infinite eligibility timestamp is represented as a
+never-eligible cooldown rather than a numeric duration. A convergence row
+carries repository and pull request, head and base revisions, base branch,
+mergeable state, review decision, unresolved-thread and gating-check counts,
+sorted non-green check names, verdict, optional durable seal, and whole-second
+assessment age. The verdict agrees with the evidence carried beside it: an
+assessment settles unconverged exactly when the pull request carries any
+blocker, so a converged verdict — internally converged or merge ready — carries
+no unresolved thread, no non-green check, a mergeable provider state, a positive
+gating-check count, and no requested change. Exactly one durable blocker, an
+unsettled provider snapshot, is not carried on the wire, so an unconverged
+verdict remains admissible beside wholly clean carried evidence. The base branch
+is what separates the two converged verdicts: a merge-ready verdict is settled
+only against `main`, an internally-converged verdict only against another
+branch, and an unconverged verdict against either. The seal takes no such
+pairing, because it is retained from the assessment that earned it and outlives
+later ones, so a pull request retargeted after sealing carries it beside a base
+branch that verdict could not have been settled against. Each non-green check
+name is canonical padded base64 of its exact UTF-8 bytes on the wire, keeping
+the complete admitted 10,000-name inventory below the frame cap even under
+worst-case JSON escaping. A pending-clearance row carries repository and pull
+request, current and reviewed heads, review identity, reviewer, and whole-second
+pending duration. The structured identifiers these rows carry are admitted by
+grammar rather than by width alone, each mirroring the domain constructor and
+durable check that produced it: a repository is a canonical lowercase
+`namespace/name` slug whose segments are neither empty nor a bare dot or double
+dot, a rule identity is ASCII letters, digits, hyphens, underscores, and dots, a
+branch name follows git's ref-name rules, and a reviewer is a lowercase login
+with an optional App-bot suffix. A check name and a review node identity remain
+unstructured text, which is all their durable counterparts require. Every
+duration is clamped nonnegative and sampled against the database transaction
+timestamp, not a client clock.
+
 Identifiers are canonical UUID strings. Request identities, ordinal versions,
 indices, counts, and outbox cursors are canonical decimal strings, preserving
 their full unsigned 64-bit range without JSON-number precision loss.
@@ -1279,8 +1382,8 @@ their full unsigned 64-bit range without JSON-number precision loss.
 The metadata list is a bounded sequence:
 
 1. `session_metadata_page_start`;
-2. zero through 100 `session_metadata_summary` messages in strictly increasing
-   session-identity order; and
+2. zero through the requested page size of `session_metadata_summary` messages
+   in strictly increasing session-identity order; and
 3. `session_metadata_page_end { session_count, next_after_session_id }`.
 
 Each summary carries `session_id`, current `defaults_version`,
@@ -1288,19 +1391,20 @@ Each summary carries `session_id`, current `defaults_version`,
 `archived`, and `last_writer`; the runner proposal also requires the exact
 `runner_projection`. `dangerous_tool_auto_approval` is a JSON boolean: `false`
 encodes domain `Disabled` and `true` encodes domain `ApproveAll`. Tags are
-strictly increasing by lexicographic UTF-8 byte sequence. Each summary admits at
-most 256 tags and applies the metadata object's 262,144-byte aggregate UTF-8
-bound across its title and tags, not merely to each member independently.
-Attributes are intentionally absent from the list projection. The end cursor is
-null when no later match existed in the page snapshot; otherwise it equals the
-last emitted session identity. The page sequence is spooled before output and
-becomes authoritative only after its count, ordering, and cursor validate.
+strictly increasing by lexicographic UTF-8 byte sequence. Each summary applies
+the deployment's tag-count policy and the metadata object's 262,144-byte
+aggregate UTF-8 bound across its title and tags, not merely to each member
+independently. Attributes are intentionally absent from the list projection. The
+end cursor is null when no later match existed in the page snapshot; otherwise
+it equals the last emitted session identity. The page sequence is spooled before
+output and becomes authoritative only after its count, ordering, and cursor
+validate.
 
 The unified conversation list is the same bounded sequence shape:
 
 1. `conversation_page_start`;
-2. zero through 100 `conversation_summary` messages in strictly increasing
-   unified cursor order; and
+2. zero through the requested page size of `conversation_summary` messages in
+   strictly increasing unified cursor order; and
 3. `conversation_page_end { conversation_count, next_after }`.
 
 Each summary carries one closed `conversation` object tagged by `origin`. A
@@ -1468,8 +1572,13 @@ A `decide_tool_request` rejection admits
 `tool_request_not_found { tool_request_id }`,
 `tool_request_already_resolved { tool_request_id }`,
 `tool_request_not_earliest_undecided { tool_request_id, earliest_tool_request_id }`,
-and `tool_request_not_in_session { session_id, tool_request_id }`. A delegation
-request admits `session_not_found`, `tool_request_not_found`, and
+and `tool_request_not_in_session { session_id, tool_request_id }`. An
+`override_denied_tool_request` rejection admits `tool_request_not_found` and
+`tool_request_not_in_session` with those same shapes, plus
+`tool_request_not_delegate_denied { tool_request_id }`,
+`tool_request_not_terminally_denied { tool_request_id }`, and
+`tool_denial_already_overridden { tool_request_id }`. A delegation request
+admits `session_not_found`, `tool_request_not_found`, and
 `tool_request_not_in_session` with those same shapes, plus
 `delegation_request_not_in_turn { session_id, turn_id, tool_request_id }` when
 the named request belongs to another turn, and
@@ -1641,23 +1750,32 @@ The protocol error-code set is:
 | `commit_ambiguous`      | Infrastructure obscured whether the requested mutation committed.                                                                      |
 | `internal`              | Fail-closed corruption or a daemon defect stopped the request.                                                                         |
 
+A `commission_session` request, and a pursuit-starting `attach_goal`,
+`resume_goal`, or `supersede_goal` request for a pull-request-commissioned
+session, additionally admits the transient rejection
+`commission_target_busy { session_id }` when another live commissioned session
+already owns the same target. `session_id` identifies that authoritative session
+so callers can wait and retry the exact same command identity and payload after
+the competing session becomes terminal.
+
 For `create_session`, `create_session_from_template`, `commission_session`,
 `create_session_from_imported_frontier`, `submit_input`, `compact_session`,
 `reconcile_turn`, `stop_turn`, `decide_tool_request`,
-`replace_session_metadata`, `replace_session_defaults`, `replace_lost_runner`,
-`abandon_lost_runner`, `promote_pending_runner`, and every review mutation, a
-lost commit response maps to `commit_ambiguous`; the client retries the exact
-command identity and payload to discover the recorded outcome. A
-`reconcile_turn`, `decide_tool_request`, `replace_lost_runner`,
-`abandon_lost_runner`, or `promote_pending_runner` retry reaches that recorded
-outcome or resumes its exact claimed pending effect unconditionally, because a
-claimed command identity bypasses the precondition the first handling already
-satisfied. Replacement recovery reuses only its recorded workspace authorization
-and manifest receipt; it never starts another clone under the same claim. Once a
-review aggregate effect has been applied or recovered, any database failure
-during post-effect verification, typed-receipt insertion, or claim commit is
-likewise `commit_ambiguous`. A definitely pre-commit infrastructure failure maps
-to `unavailable`.
+`override_denied_tool_request`, `replace_session_metadata`,
+`replace_session_defaults`, `replace_lost_runner`, `abandon_lost_runner`,
+`promote_pending_runner`, and every review mutation, a lost commit response maps
+to `commit_ambiguous`; the client retries the exact command identity and payload
+to discover the recorded outcome. A `reconcile_turn`, `decide_tool_request`,
+`override_denied_tool_request`, `replace_lost_runner`, `abandon_lost_runner`, or
+`promote_pending_runner` retry reaches that recorded outcome or resumes its
+exact claimed pending effect unconditionally, because a claimed command identity
+bypasses the precondition the first handling already satisfied. Replacement
+recovery reuses only its recorded workspace authorization and manifest receipt;
+it never starts another clone under the same claim. Once a review aggregate
+effect has been applied or recovered, any database failure during post-effect
+verification, typed-receipt insertion, or claim commit is likewise
+`commit_ambiguous`. A definitely pre-commit infrastructure failure maps to
+`unavailable`.
 
 Conversation import carries no durable command identity because exact
 format-and-source replay already resolves through the import digest. Both the
@@ -1792,7 +1910,11 @@ Each `transcript_turn` has `turn_id` and one of these closed `state` objects:
 - `active_running { current_attempt_id, current_model_call }`, where
   `current_model_call` is null before preparation or `{ model_call_id, state }`
   with state exactly `prepared`, `in_flight`, or `cancellation_requested`;
-- `active_awaiting_model_call_recovery { ended_attempt_id, recovery_model_call_id }`;
+- `active_awaiting_model_call_recovery { ended_attempt_id, recovery_model_call_id, automatic_reconciliation_attempts, operator_action_required }`,
+  where the canonical nonnegative attempt count is the durable number already
+  claimed and `operator_action_required` is false while automatic work is
+  scheduled or attempting and true only after its five-attempt budget is
+  exhausted;
 - `active_awaiting_child { await_request_id, spawning_request_id, child_session_id }`,
   which names the exact foreground wait and delegated relationship retaining the
   parent turn's progressing slot;
@@ -1816,8 +1938,9 @@ Each `transcript_turn` has `turn_id` and one of these closed `state` objects:
 
 The tool-bearing vocabulary adds
 `active_awaiting_tool_approval { tool_request_id }`,
-`active_awaiting_tool_recovery { ended_attempt_id, recovery_tool_attempt_id }`,
-and
+`active_awaiting_tool_recovery { ended_attempt_id, recovery_tool_attempt_id, automatic_reconciliation_attempts, operator_action_required }`,
+where the attempt count and operator flag have the same durable five-attempt
+meaning as the model-call recovery variant, and
 `tool_reconciliation_required { terminal_frontier_id, terminal_attempt_id, terminal_tool_attempt_id }`.
 The distinct tool variant avoids changing the older `reconciliation_required`
 object. The runner-bearing vocabulary additionally admits
@@ -2207,8 +2330,9 @@ and ignore the replacement activation.
 
 The `tool_approval_decided` decision is exactly `approve {}` or
 `deny { reason }`, where `reason` is required-nullable: a user denial may
-decline to give one. Its decider is exactly `user { command_id }` or
-`delegate { model_selection_id, model_call_id }`; `rationale` is
+decline to give one. Its decider is exactly `user { command_id }`,
+`delegate { model_selection_id, model_call_id }`, or
+`user_override { command_id, overridden_tool_request_id }`; `rationale` is
 required-nullable and present only for a delegate decision. A delegate rationale
 is 1 through 4,096 UTF-8 bytes and contains no U+0000; a delegate denial's
 `reason` is derived deterministically from that rationale (control characters
@@ -2216,7 +2340,9 @@ become spaces, forbidden edge spaces are trimmed, the text is cut to 1,024 bytes
 on a character boundary) and is null exactly when the rationale sanitizes to
 nothing. Every present denial reason — user-authored or derived — is nonempty,
 at most 1,024 UTF-8 bytes, contains no Unicode control scalar, and has no
-surrounding POSIX whitespace.
+surrounding POSIX whitespace. A `user_override` decider is approve-only with a
+null `rationale`: it records the consumption of one recorded override, naming
+the override command and the overridden delegate-denied request.
 
 The protocol additionally admits
 `context_compacted { context_compaction_id, model_call_id, through_position, summary_entry_id, result_frontier_id }`.
@@ -2313,24 +2439,32 @@ The terminal `send` command follows the submitted turn, accepts terminal state
 from the initial snapshot or waits for its durable terminal event, rereads the
 authoritative transcript, and prints the committed assistant text. Its terminal
 waiter accepts and ignores provider-text deltas for the selected session and
-rejects a cross-wired delta. The client exits with a typed nonzero
-recovery-required diagnostic after observing
-`active_awaiting_model_call_recovery` or a live terminal `ambiguous` model-call
-transition followed by that authoritative state.
+rejects a cross-wired delta. The client keeps following while an authoritative
+`active_awaiting_model_call_recovery` state has
+`operator_action_required = false`; a bounded cancellation-safe reread makes an
+exhaustion-only projection change visible even when no session event is emitted.
+It exits with a typed nonzero recovery-required diagnostic only after the
+authoritative state has `operator_action_required = true`. A live terminal
+`ambiguous` model-call transition triggers an immediate authoritative reread but
+does not by itself require operator action.
 
 The client applies the same behavior to `active_awaiting_tool_recovery` and to
 `tool_batch_transition { recovery_required }` followed by that state. An
 `active_awaiting_runner_recovery` turn likewise ends the follow with its typed
 lost-runner diagnostic naming replacement or `stop_turn` before abandonment. A
-model-call recovery wait has one process-protocol writer that completes it —
-`reconcile_turn`, which the diagnostic's operator runs next. A runner recovery
+model-call recovery wait is completed by bounded daemon reconciliation using the
+same terminal transition as `reconcile_turn`; the operator verb remains
+available to win that race and becomes required only when the projected
+`operator_action_required` field is true. A tool recovery wait uses the same
+durable budget and terminalizes through its proposal-ordered tool-reconciliation
+boundary; it becomes an operator park only after exhaustion. A runner recovery
 wait has `stop_turn`, which terminalizes the parked turn as cancelled or
-reconciliation-required while preserving any tool ambiguity; the tool recovery
-wait still has no writer. An `active_awaiting_tool_approval` turn remains an
-ordinary nonterminal wait that `send` keeps waiting through;
-`decide_tool_request` is its resolving writer, issued from a second connection
-while the waiting client's transcript names the pending request and its
-proposing tool. A client disconnect never cancels model or tool work.
+reconciliation-required while preserving any tool ambiguity. An
+`active_awaiting_tool_approval` turn remains an ordinary nonterminal wait that
+`send` keeps waiting through; `decide_tool_request` is its resolving writer,
+issued from a second connection while the waiting client's transcript names the
+pending request and its proposing tool. A client disconnect never cancels model
+or tool work.
 
 An `active_awaiting_child` turn is likewise a nonterminal wait. Its three
 identifiers are required together, and clients keep waiting until the delivered
@@ -2518,6 +2652,25 @@ that the turn remains queued; active-only `:stop` and `:steer` remain
 unavailable until activation. Once the followed turn terminalizes, the client
 presents its exact durable terminal material and accepts another ordinary input
 line.
+
+`status` sends exactly one `read_operator_status` request through the configured
+owner-only daemon socket; it never opens the database itself. It validates the
+fixed section order and all four terminal counts before printing anything. The
+first output line names those counts, followed by one human-scannable line per
+row with `held`, `queued`, `convergence`, or `stale_review_clearance` as its
+kind. A held line prints its dispatch origin as `origin=pull_request#<number>`
+or `origin=branch:<branch>`, naming the fact the slot was taken from under one
+field whichever shape it has. A queued line prints an occupant blocked by an
+independently commissioned live session as `occupying=external:<sessions>`,
+distinguishing it from a watch dispatch, which prints its identity ahead of its
+sessions. A convergence line prints `non_green_count` beside the comma-joined
+`non_green` field, so an empty inventory cannot collide with a check literally
+named `none`. Durations use compact day, hour, minute, and second units.
+Process-derived text uses terminal-safe field escaping unless `--raw-output` is
+selected. The final `model_usage=omitted` line states that no cheap status
+aggregate is available: model usage crosses this protocol only inside each
+complete session transcript, and `status` does not issue one transcript read per
+session.
 
 `list` remains the complete unfiltered summary sequence. `search` is the
 separate verb for `list_session_metadata`, whose filters, bounded page, and
@@ -3011,3 +3164,6 @@ later client-form choices are cataloged under
 [Client scope](../open-questions.md#client-scope). Richer metadata query
 language and creation-derived visibility are cataloged under
 [Session organization, visibility, and retention](../open-questions.md#session-organization-visibility-and-retention).
+Wire and projection data for future graded approval judgments require acceptance
+through the foundation-decision process tracked under
+[Graded approval judging](../open-questions.md#graded-approval-judging).

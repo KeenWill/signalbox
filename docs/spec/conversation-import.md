@@ -3,27 +3,27 @@
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
-The raw-source blob convergence below is the foundation proposal from PR #553
-(`agent/blob-storage-foundation`) and becomes verified with its implementing
-child stack.
+The raw-source blob convergence below is verified against this implementing
+change (`agent/blob-storage-import-convergence`), atop the foundation proposal
+from PR #553 (`agent/blob-storage-foundation`).
 
 This page specifies immutable imported conversation snapshots, raw source-record
 preservation, source-neutral normalization, addressable imported frontiers, the
 format-versioned converter seam, Claude Code session and Codex rollout JSONL
 converters, the append-only Postgres import store, evidence-derived display
-titles and their startup backfill, the user-operated one-file and directory-scan
-import surfaces, and the imported-conversation inspection read. The one-file
-surface was verified against the implementing stack through PR #252
-(`agent/import-surfaces`); the directory scan through PR #284
-(`agent/import-directory-scan`); the derived display title and its startup
-backfill through PR #304 (`agent/unified-conversation-listing`); and the
+titles, the user-operated one-file and directory-scan import surfaces, and the
+imported-conversation inspection read. The one-file surface was verified against
+the implementing stack through PR #252 (`agent/import-surfaces`); the directory
+scan through PR #284 (`agent/import-directory-scan`); the derived display title
+through PR #304 (`agent/unified-conversation-listing`); and the
 imported-conversation inspection read through PR #303
 (`agent/imported-conversation-inspection`); and the chunked transport, total
 bound, and typed rejection evidence against PR #401
-(`agent/import-chunks-protocol`) and PR #402 (`agent/import-chunks`). Later
-session creation from one imported frontier is owned by
-[sessions-and-transcript](sessions-and-transcript.md); native turn activation
-and model-call rendering are owned by
+(`agent/import-chunks-protocol`) and PR #402 (`agent/import-chunks`). Bounded
+browser discovery, inspection, and continuation are verified against this PR
+(`agent/web-discovery-reads`). Session creation from one imported frontier is
+owned by [sessions-and-transcript](sessions-and-transcript.md); native turn
+activation and model-call rendering are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) and
 [model-call-execution](model-call-execution.md).
 
@@ -381,8 +381,8 @@ closed class and ordinal inventory in the
 Errors and logs contain classes and ordinals only, never source content,
 source-derived identifiers, paths, or parser excerpts. Database failure remains
 conservatively `commit_ambiguous`, so the operator may retry the exact format
-and source bytes. Assembly allocation exhaustion is `unavailable`; integrity
-failure remains `internal`.
+and source bytes. Assembly allocation exhaustion or blob-store unavailability is
+`unavailable`; blob integrity failure remains `internal`.
 
 A new exact snapshot returns
 `conversation_import_inserted { imported_conversation_id }`; exact reingestion
@@ -410,11 +410,11 @@ complete message sequence and its bounds are owned by the
 The read exposes no imported content a transcript snapshot does not already
 carry: it bounds exactly the attested text that snapshot carries in full and
 adds nothing for source events, tools, results, thinking, media, absence detail,
-or raw records. The immutable aggregate remains the sole authority for complete
-normalized content and verbatim raw source. The read creates nothing, seeds no
-session, and performs no durable write; it loads the same completely checked
-aggregate the continuation command loads, so it inherits that path's integrity
-verification rather than reading members selectively.
+or raw records. It reads the normalized relational projection and never fetches
+verbatim raw-source blobs. The read creates nothing, seeds no session, and
+performs no durable write; stored entry positions, identities, typed content,
+speaker attestations, and source metadata are decoded fail-closed before
+presentation.
 
 `signalbox continue` consumes those positions. Its `--through-position` is
 required, and it accepts either a positive decimal or the exact sentinel
@@ -425,6 +425,62 @@ is stable and an exact replay names the same boundary. An out-of-range position
 on an existing imported conversation is a rejection naming the selectable range,
 not an absent-identity `not_found`; both classifications are owned by the
 [process protocol](process-protocol.md#server-messages).
+
+### Bounded browser discovery and continuation
+
+The browser HTTP contract exposes the same immutable imports as a selective read
+model rather than adapting the complete inspection spool. `GET /api/imports/`
+returns at most 100 summaries in ascending `ImportedConversationId` order. An
+optional `after` identity is an exclusive keyset cursor; the response includes a
+next cursor only when a bounded lookahead finds another row. Exact
+format/converter filters compose with that cursor. Exact attested source-session
+filters use the bounded raw `text/plain` body of `POST /api/imports/searches`.
+The body is the exact UTF-8 identifier, preserving empty text and edge
+whitespace, while avoiding URL expansion. A client-selected correlation UUID and
+SHA-256 of the complete exact value are echoed so truncated evidence remains
+unambiguous. Catalog and descriptor responses project at most 512 UTF-8 bytes of
+source-session evidence with explicit complete/truncated classification. The
+response deliberately has no total count and never reconstructs a complete
+imported aggregate.
+
+`GET /api/imports/{imported-conversation-id}` returns the immutable identity,
+evidence-derived display title, raw-record and normalized-entry counts, exact
+source format and converter version, source digest, optional consistent source
+session evidence, and first and latest continuation frontiers. Its three size
+facts are sums of raw source-record occurrence bytes, normalized source-record
+encoding bytes, and normalized entry plus source-metadata encoding bytes. They
+are descriptors only: this route returns no raw blob, normalized record, host
+path, or source repository location.
+
+`GET /api/imports/{imported-conversation-id}/entries` selects a window around
+`first`, `latest`, or one exact positive `position`. The requested neighbors
+plus the anchor may total at most 101 entries. PostgreSQL reads and checked
+decoding cover only that contiguous immutable range; neither this route nor its
+browser scenario calls the complete aggregate loader. Every returned entry names
+its imported entry identity, global position, raw-record and within-record
+positions, source-speaker attestation, normalized content kind, and continuation
+frontier. Attested text includes at most 512 UTF-8 bytes at a scalar boundary
+plus an explicit complete/truncated classification; other normalized content
+remains a typed descriptor for the blob and rendering surfaces owned elsewhere.
+First/latest bounds and every entry in a selected window are the available
+continuation positions. A supplied position outside an existing immutable
+timeline is a typed bad request rather than storage corruption.
+
+The browser labels all these rows as imported source evidence. A source role,
+tool-shaped record, result, or other normalized kind does not become native
+Signalbox acceptance, turn, call, tool, or result evidence through projection.
+
+`POST /api/imports/{imported-conversation-id}/continuations` creates a native
+session from one selected frontier, whose durable semantics are owned by
+[sessions-and-transcript](sessions-and-transcript.md), with `resume` or `fork`,
+one exact direct model-selection or model-alias identity, and provider defaults.
+The client mints and retains the durable command identity before I/O. Exact
+replay returns the recorded session, conflicting reuse is rejected, and an
+ambiguous commit instructs the client to retry the same command and payload. The
+server verifies that the immutable entry identity and position still agree
+before applying the existing imported-frontier session-creation command. The
+response returns the new session identity and selected frontier; session
+timeline navigation is the separate browser timeline address contract.
 
 ## Claude Code session JSONL versions 1 and 2
 
@@ -737,20 +793,12 @@ CHECK constraints seal the derived shape — nonempty single-line text of at mos
 256 scalars without edge ASCII whitespace, present exactly in the `derived`
 state.
 
-Insertion always resolves the title, so the transitional `pending` state names
-only rows inserted before the column existed. The daemon resolves every pending
-row once at startup — after migration, generic recovery, and blob namespace
-initialization, and before serving — by loading each complete aggregate through
-the checked reconstitution seam, re-deriving, and applying the one guarded
-update the header's append-only trigger admits: a `pending` row resolving to
-`derived` or `underivable` with every other column unchanged. The backfill is a
-pure derivation from durably stored raw bytes; it fails closed rather than
-guessing, and a serving unified-listing read that observes a pending row fails
-closed as corruption because startup owns that transition. Checked complete
-loads re-derive and reject a resolved title that disagrees with the records;
-exact reingestion continues to resolve through the digest and
-conversion-equivalence check unchanged, since the deterministic derivation adds
-no new degree of freedom.
+Insertion always resolves the title. The final schema's closed state
+discriminator admits only `derived` and `underivable`; runtime reads and writes
+only that shape. Checked complete loads re-derive and reject a resolved title
+that disagrees with the records; exact reingestion continues to resolve through
+the digest and conversion-equivalence check unchanged, since the deterministic
+derivation adds no new degree of freedom.
 
 ## Test data and local validation
 
