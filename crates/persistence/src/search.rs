@@ -7,7 +7,7 @@ use signalbox_application::{
     SearchArtifactId, SearchArtifactProjection, SearchArtifactProjectionClass, SearchContentClass,
     SearchCursor, SearchHighlight, SearchPage, SearchProjectionWriter, SearchQuery, SearchReader,
     SearchResult, SearchResultSource, SearchScope, SearchStrategy, TimelineAddress,
-    max_search_snippet_bytes,
+    max_search_highlights_per_result, max_search_snippet_bytes,
 };
 use signalbox_domain::{
     AcceptedInputId, SemanticTranscriptEntryId, SessionId, ToolAttemptId, ToolRequestId, TurnId,
@@ -877,13 +877,19 @@ fn decode_headline(
 
     let (window_start, window_end) = snippet_window(&plain, marked_ranges.first().copied());
     let snippet = plain[window_start..window_end].to_owned();
-    let highlights = marked_ranges
+    let clipped_ranges = marked_ranges
         .into_iter()
         .filter_map(|(start, end)| {
             let clipped_start = start.max(window_start);
             let clipped_end = end.min(window_end);
             (clipped_start < clipped_end).then_some((clipped_start, clipped_end))
         })
+        .collect::<Vec<_>>();
+    if clipped_ranges.len() > max_search_highlights_per_result() {
+        return Err(SearchProjectionCorruption::Invalid("highlight count"));
+    }
+    let highlights = clipped_ranges
+        .into_iter()
         .map(|(start, end)| {
             Ok(SearchHighlight {
                 start_byte: u16::try_from(start - window_start)

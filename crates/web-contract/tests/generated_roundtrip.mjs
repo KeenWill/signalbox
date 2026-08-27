@@ -2056,6 +2056,20 @@ test("generated search decoder rejects more than one bounded page", () => {
   );
 });
 
+test("generated search decoder rejects too many highlight ranges", () => {
+  const page = searchPage();
+  page.results[0].snippet = "x".repeat(130);
+  page.results[0].highlights = Array.from({ length: 65 }, (_, index) => ({
+    start_byte: index * 2,
+    end_byte: index * 2 + 1,
+  }));
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /highlights must be at most 64 items/,
+  );
+});
+
 test("generated search decoder rejects an oversized UTF-8 snippet", () => {
   const page = searchPage();
   page.results[0].snippet = "é".repeat(257);
@@ -2090,26 +2104,12 @@ test("generated search decoder rejects overlapping highlight ranges", () => {
   );
 });
 
-test("generated search decoder rejects too many highlight ranges", () => {
-  const page = searchPage();
-  page.results[0].snippet = "x".repeat(512);
-  page.results[0].highlights = Array.from({ length: 513 }, () => ({
-    start_byte: 0,
-    end_byte: 1,
-  }));
-
-  assert.throws(
-    () => decodeWebSearchPage(page),
-    /highlights must be at most 512 items/,
-  );
-});
-
 test("generated search decoder rejects continuation on an empty page", () => {
   const empty = searchPage();
   empty.results = [];
   assert.throws(
     () => decodeWebSearchPage(empty),
-    /cursor anchored to the final search result/,
+    /continuation must be the last result ordering key/,
   );
 });
 
@@ -2118,7 +2118,7 @@ test("generated search decoder rejects a continuation address mismatch", () => {
   mismatched.continuation.address.event_sequence = "2";
   assert.throws(
     () => decodeWebSearchPage(mismatched),
-    /cursor anchored to the final search result/,
+    /continuation must be the last result ordering key/,
   );
 });
 
@@ -2127,8 +2127,23 @@ test("generated search decoder rejects a continuation projection mismatch", () =
   mismatchedProjection.continuation.projection_id = "2";
   assert.throws(
     () => decodeWebSearchPage(mismatchedProjection),
-    /cursor anchored to the final search result/,
+    /continuation must be the last result ordering key/,
   );
+});
+
+test("generated search decoder requires the continuation key", () => {
+  const page = searchPage();
+  delete page.continuation;
+
+  assert.throws(() => decodeWebSearchPage(page), /continuation must be present/);
+});
+
+test("generated search decoder accepts an explicit null continuation", () => {
+  const page = searchPage();
+  page.results = [];
+  page.continuation = null;
+
+  assert.deepEqual(decodeWebSearchPage(page), page);
 });
 
 test("generated search decoder rejects out-of-order result addresses", () => {

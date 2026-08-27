@@ -47,10 +47,10 @@ const sessionFoundationFixture = {
 } as const
 
 const streamingFixture = {
+  timelineHeading: 'Bounded timeline',
   firstLoadedItemId: 'event-0',
   secondLoadedItemId: 'event-1',
   lastLoadedItemId: 'event-239',
-  timelineHeading: 'Bounded timeline',
 } as const
 
 const cachedScenarioFixture = {

@@ -3460,7 +3460,7 @@ const schemas = {
             "items": {
               "$ref": "#/$defs/WebSearchHighlight"
             },
-            "maxItems": 512,
+            "maxItems": 64,
             "type": "array"
           },
           "projection_id": {
@@ -5585,19 +5585,6 @@ function validSearchSourceCorrelation(result) {
 
 export function decodeWebSearchPage(value) {
   assertSchema(schemas.WebSearchPage, schemas.WebSearchPage, value, "search_page");
-  if (value.continuation !== null) {
-    const lastResult = value.results.at(-1);
-    if (
-      lastResult === undefined ||
-      value.continuation.address.event_sequence !== lastResult.address.event_sequence ||
-      value.continuation.projection_id !== lastResult.projection_id
-    ) {
-      fail(
-        "search_page.continuation",
-        "a cursor anchored to the final search result",
-      );
-    }
-  }
   const encoder = new TextEncoder();
   let previousKey = null;
   value.results.forEach((result, resultIndex) => {
@@ -5646,6 +5633,16 @@ export function decodeWebSearchPage(value) {
       previousEnd = highlight.end_byte;
     });
   });
+  if (value.continuation != null) {
+    const last = value.results.at(-1);
+    if (
+      last === undefined ||
+      value.continuation.address.event_sequence !== last.address.event_sequence ||
+      value.continuation.projection_id !== last.projection_id
+    ) {
+      fail("search_page.continuation", "the last result ordering key");
+    }
+  }
   return value;
 }
 

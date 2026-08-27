@@ -10,9 +10,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Value, json};
 use signalbox_application::{
-    max_search_page_items, max_search_query_bytes, max_search_snippet_bytes,
-    max_timeline_window_bytes, max_timeline_window_items, max_usage_aggregate_calls,
-    max_usage_aggregate_groups, max_usage_call_page_items,
+    MAX_SEARCH_HIGHLIGHTS_PER_RESULT, max_search_page_items, max_search_query_bytes,
+    max_search_snippet_bytes, max_timeline_window_bytes, max_timeline_window_items,
+    max_usage_aggregate_calls, max_usage_aggregate_groups, max_usage_call_page_items,
 };
 
 /// Exact browser HTTP contract version served by this daemon build.
@@ -975,7 +975,7 @@ pub struct WebSearchResult {
     pub content_class: WebSearchContentClass,
     #[schemars(length(max = 512))]
     pub snippet: String,
-    #[schemars(length(max = 512))]
+    #[schemars(length(max = MAX_SEARCH_HIGHLIGHTS_PER_RESULT))]
     pub highlights: Vec<WebSearchHighlight>,
 }
 
@@ -3032,19 +3032,6 @@ function validSearchSourceCorrelation(result) {{
 
 export function decodeWebSearchPage(value) {{
   assertSchema(schemas.WebSearchPage, schemas.WebSearchPage, value, "search_page");
-  if (value.continuation !== null) {{
-    const lastResult = value.results.at(-1);
-    if (
-      lastResult === undefined ||
-      value.continuation.address.event_sequence !== lastResult.address.event_sequence ||
-      value.continuation.projection_id !== lastResult.projection_id
-    ) {{
-      fail(
-        "search_page.continuation",
-        "a cursor anchored to the final search result",
-      );
-    }}
-  }}
   const encoder = new TextEncoder();
   let previousKey = null;
   value.results.forEach((result, resultIndex) => {{
@@ -3093,6 +3080,16 @@ export function decodeWebSearchPage(value) {{
       previousEnd = highlight.end_byte;
     }});
   }});
+  if (value.continuation != null) {{
+    const last = value.results.at(-1);
+    if (
+      last === undefined ||
+      value.continuation.address.event_sequence !== last.address.event_sequence ||
+      value.continuation.projection_id !== last.projection_id
+    ) {{
+      fail("search_page.continuation", "the last result ordering key");
+    }}
+  }}
   return value;
 }}
 
