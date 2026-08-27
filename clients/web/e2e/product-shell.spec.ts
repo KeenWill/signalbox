@@ -28,6 +28,13 @@ const emptyAttentionFixture = {
   cursor: '0',
   summaries: [],
 } as const
+const emptySessionCatalogFixture = {
+  continuation: null,
+  cursor: '0',
+  sort: 'last_activity_descending',
+  summaries: [],
+  total: '0',
+} as const
 
 const useDeterministicAttention = async (page: Page) => {
   await page.route('**/api/attention/follow', (route) =>
@@ -41,6 +48,9 @@ const useDeterministicAttention = async (page: Page) => {
 
 const useDeterministicBootstrap = async (page: Page) => {
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/sessions?**', (route) =>
+    route.fulfill({ json: emptySessionCatalogFixture }),
+  )
   await useDeterministicAttention(page)
 }
 
@@ -257,7 +267,7 @@ test('gates Sessions on the validated bootstrap capability', async ({ page }) =>
       },
     }),
   )
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   await expect(page.getByText('Timeline reads unavailable')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Open workspace' })).toBeDisabled()
@@ -274,7 +284,7 @@ test('gates Sessions on valid timeline limits', async ({ page }) => {
       },
     }),
   )
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   await expect(page.getByText('Timeline reads unavailable')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Open workspace' })).toBeDisabled()
@@ -297,7 +307,7 @@ test('leaves focus in place when Escape has no surface to unwind', async ({ page
 test('retries a failed product bootstrap after the daemon recovers', async ({ page }) => {
   const problems = watchBrowser(page)
   const scenario = await useRecoveringBootstrap(page)
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
   scenario.recover()
@@ -439,7 +449,7 @@ test('opens and inspects a bounded production session without a mouse', async ({
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
@@ -505,7 +515,7 @@ test('gives Full and Condensed distinct Session presentations', async ({ page })
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
@@ -516,6 +526,7 @@ test('gives Full and Condensed distinct Session presentations', async ({ page })
   await page.getByRole('link', { name: /Settings/ }).click()
   await page.getByRole('radio', { name: 'Full' }).check()
   await page.getByRole('link', { name: /Sessions/ }).click()
+  await page.getByRole('button', { name: 'Open workspace by ID' }).click()
   const reopenedSessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await reopenedSessionId.fill(sessionWorkspaceFixture.id)
   await reopenedSessionId.press('Enter')
@@ -528,7 +539,7 @@ test('keeps palette selection commands focused on the Session timeline', async (
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
@@ -552,7 +563,7 @@ test('preserves the saved row when reopening the current Session fails', async (
   let failTimeline = false
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page, () => failTimeline)
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
@@ -590,7 +601,7 @@ test('preserves the saved row when revisiting a cached Session fails', async ({ 
     page,
     (sessionId) => failRevisitedSession && sessionId === sessionWorkspaceFixture.id,
   )
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
@@ -629,7 +640,7 @@ test('clears cached Session projections after a refetch error', async ({ page })
   let failTimeline = false
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page, () => failTimeline)
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
@@ -662,7 +673,7 @@ test('rejects conflicting retained Session evidence after a boundary refetch', a
     (_sessionId, address) =>
       contradictRetainedEvent && address === '43' ? 'turn_cancelled' : undefined,
   )
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)

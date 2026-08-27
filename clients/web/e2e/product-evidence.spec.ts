@@ -151,7 +151,7 @@ const captureSessionEvidence = async (page: Page) => {
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
   await page.setViewportSize({ width: 1440, height: 900 })
-  await page.goto(sessionsEvidence.path)
+  await page.goto(`${sessionsEvidence.path}?workspace=true`)
   await page.getByRole('textbox', { name: 'Exact session ID' }).fill(sessionEvidenceFixture.id)
   await page.getByRole('button', { name: 'Open workspace' }).click()
   await expect(page.getByRole('heading', { name: sessionEvidenceFixture.id })).toBeVisible()

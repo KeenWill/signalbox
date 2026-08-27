@@ -5,8 +5,9 @@ verified against this PR (`agent/web-session-timeline`). The bounded
 lexical-search projection and query boundary are verified against this PR
 (`agent/web-product-surface-search`), which carries the `agent/web-search-usage`
 boundary it extends. The bounded browser session catalog is verified against
-this PR (`agent/web-session-catalog-follow`). The bounded live snapshot and
-follow projection are verified against this PR
+this PR (`agent/web-session-catalog-follow`). The first typed detail slice is
+verified against this PR (`agent/web-timeline-detail`). The bounded live
+snapshot and follow projection are verified against this PR
 (`agent/web-session-catalog-follow-live`).
 
 Dedicated-compaction usage as the next queued-turn headroom baseline is verified
@@ -800,6 +801,47 @@ retained preferentially, so moving among the first, latest, and an arbitrary
 million-event address never makes lifetime history a client-memory precondition.
 Transcript `full`, `condensed`, and `results` remain local presentation choices
 and do not alter any server query.
+
+### Bounded typed timeline detail
+
+Three historical reads share one application-owned detail page and one generated
+browser DTO: `GET /api/sessions/{session_id}/timeline/{address}/detail` selects
+one item, `GET /api/sessions/{session_id}/turns/{turn_id}/timeline-detail`
+selects the events associated with one exact turn, and
+`GET /api/sessions/{session_id}/timeline-detail` selects an inclusive region
+from its required `first` address through its required `through` address. Every
+request supplies `max_items` from 1 through 128 and `max_bytes` from 256 through
+65,536. Turn and region reads select at most 129 addresses and return at most
+128 detail records; item reads retain the same explicit item ceiling for typed
+bodies with repeated members added by later slices. All selected rows are
+decoded through the same fail-closed typed outbox projection as durable
+dispatch, under one repeatable-read transaction.
+
+The response reports `projected_body_bytes` and never silently truncates. A
+continuation is either `more_at`, naming the exact stable address at which the
+next item read starts, or `more_body`, naming the same stable address, one
+closed body field, a repeated-member index, and the next UTF-8 byte offset.
+Requests resume with `cursor_address` and, for body continuation,
+`cursor_field`, `cursor_member`, and `cursor_offset`. Offsets must be UTF-8
+boundaries. The byte accounting charges a fixed 128-byte body envelope and the
+exact UTF-8 excerpt bytes, so a response cannot exceed the selected
+projected-body budget. An oversized text is a typed bounded excerpt carrying its
+total byte length and exact continuation; it is never flattened into a summary
+that appears complete.
+
+The first detail slice projects accepted input with reference-only attachment
+facts; model-call request context count, selected model identity, response text,
+reported token usage, terminal disposition, and provider failure cause code; and
+activated or terminalized turn lifecycle with a cause code. Known valid
+categories awaiting their richer typed body in the next stack slice remain a
+closed `event_fact` carrying their existing event category. An unknown durable
+event or state is corruption, never a generic body or guessed prose.
+
+Browser DTOs remain distinct from the application projection, persistence rows,
+and process messages. Text already masked before durable storage remains masked:
+the read path neither consults credentials nor reconstructs provider-native
+material. Blob facts are references with identity, length, and optional media
+type only; detail reads do not fetch blob bytes.
 
 ## Bounded browser lexical search
 

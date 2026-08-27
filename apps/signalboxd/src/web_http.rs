@@ -43,23 +43,28 @@ use signalbox_application::{
     SearchQuery, SearchResultSource, SearchScope, SearchStrategy, SearchText,
     SessionLiveActiveState, SessionLiveReconciliation, SessionLiveRunnerConnectionHealth,
     SessionLiveRunnerState, SessionLiveSnapshot, SessionTimelineDescriptor,
-    SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress, TimelineContinuation,
-    TimelineWindowAnchor, TimelineWindowLimits, UsageAggregateCompleteness, UsageAggregateGroup,
-    UsageAggregateTokenAxes, UsageCacheNormalization, UsageCallCursor, UsageCallEvidence,
-    UsageCallKind, UsageCallOrder, UsageCallPageLimit, UsageCallQuery, UsageInputTokenSemantics,
-    UsageProvenance, UsageQuery, UsageSelection, UsageTimeFromInclusive, UsageTimeRange,
-    UsageTimeToExclusive, UsageTimestampMicros, UsageTokenAxes, UsageTokenPresence,
-    max_attention_filter_tags, max_attention_filter_utf8_bytes,
-    max_attention_goal_summary_characters, max_attention_title_characters,
+    SessionTimelineDetailBody, SessionTimelineDetailPage, SessionTimelineEventKind,
+    SessionTimelineWindow, TimelineAddress, TimelineBodyContinuation, TimelineBodyField,
+    TimelineContinuation, TimelineDetailContinuation, TimelineDetailCursor, TimelineDetailLimits,
+    TimelineModelCallDisposition, TimelineModelCallState, TimelineTextExcerpt,
+    TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
+    UsageAggregateCompleteness, UsageAggregateGroup, UsageAggregateTokenAxes,
+    UsageCacheNormalization, UsageCallCursor, UsageCallEvidence, UsageCallKind, UsageCallOrder,
+    UsageCallPageLimit, UsageCallQuery, UsageInputTokenSemantics, UsageProvenance, UsageQuery,
+    UsageSelection, UsageTimeFromInclusive, UsageTimeRange, UsageTimeToExclusive,
+    UsageTimestampMicros, UsageTokenAxes, UsageTokenPresence, max_attention_filter_tags,
+    max_attention_filter_utf8_bytes, max_attention_goal_summary_characters,
+    max_attention_title_characters,
 };
 use signalbox_blob_store::MAX_BLOB_RANGE_BYTES;
 use signalbox_domain::{
-    BlobDerivation, BlobDerivationProducer, BlobDigest, ModelCallId, ProviderModelIdentity,
-    ResolvedProviderTarget, SessionId, TurnId,
+    BlobDerivation, BlobDerivationProducer, BlobDigest, ModelCallId, ProviderModelCallFailureCause,
+    ProviderModelIdentity, ResolvedProviderTarget, SessionId, TurnId,
 };
 use signalbox_persistence::attention::{
     AttentionPage, AttentionRepository, AttentionRepositoryError, AutomaticResumeAttemptBounds,
 };
+use signalbox_persistence::outbox::OutboxDispatchError;
 use signalbox_persistence::process_read::ProcessModelCallInputTokenSemantics;
 use signalbox_persistence::search::{SearchRepository, SearchRepositoryError};
 use signalbox_persistence::session_live::{SessionLiveRepository, SessionLiveRepositoryError};
@@ -75,18 +80,23 @@ use signalbox_web_contract::{
     WebAttentionActivityKind, WebAttentionBlockedReason, WebAttentionGoalBlock,
     WebAttentionJudgeFacts, WebAttentionSnapshot, WebAttentionState, WebAttentionStreamEvent,
     WebAttentionSummary, WebBlobAvailableView, WebBlobDerivation, WebBlobDerivationProducer,
-    WebBlobDescriptor, WebBlobViewKind, WebContractBootstrap, WebContractExample, WebDollarAmount,
-    WebLiveResourceId, WebNullableU64, WebNullableU128, WebPositiveU64, WebSearchContentClass,
-    WebSearchCursor, WebSearchHighlight, WebSearchPage, WebSearchProjectionId, WebSearchResult,
-    WebSearchResultSource, WebSessionCatalogActivity, WebSessionCatalogContinuation,
-    WebSessionCatalogSnapshot, WebSessionCatalogSort, WebSessionCatalogSummary, WebSessionId,
-    WebSessionLiveActiveState, WebSessionLiveActiveTurn, WebSessionLiveReconciliation,
-    WebSessionLiveRunner, WebSessionLiveRunnerConnectionHealth, WebSessionLiveSnapshot,
-    WebSessionLiveStreamEvent, WebSessionTimelineDescriptor, WebSessionTimelineEventKind,
-    WebSessionTimelineItem, WebSessionTimelineSizeFacts, WebSessionTimelineWindow,
-    WebSessionWorkFacts, WebTimelineAddress, WebTimelineEventSequence, WebTurnId, WebU64,
-    WebUsageAggregateGroup, WebUsageAggregateTokenAxes, WebUsageCall, WebUsageCallCount,
-    WebUsageCallCursor, WebUsageCallKind, WebUsageCallPage, WebUsageCost, WebUsageCostLabel,
+    WebBlobDescriptor, WebBlobId, WebBlobViewKind, WebContractBootstrap, WebContractExample,
+    WebDollarAmount, WebLiveResourceId, WebNullableU64, WebNullableU128, WebPositiveU64,
+    WebProviderModelCallFailureCause, WebSearchContentClass, WebSearchCursor, WebSearchHighlight,
+    WebSearchPage, WebSearchProjectionId, WebSearchResult, WebSearchResultSource,
+    WebSessionCatalogActivity, WebSessionCatalogContinuation, WebSessionCatalogSnapshot,
+    WebSessionCatalogSort, WebSessionCatalogSummary, WebSessionId, WebSessionLiveActiveState,
+    WebSessionLiveActiveTurn, WebSessionLiveReconciliation, WebSessionLiveRunner,
+    WebSessionLiveRunnerConnectionHealth, WebSessionLiveSnapshot, WebSessionLiveStreamEvent,
+    WebSessionTimelineDescriptor, WebSessionTimelineDetail, WebSessionTimelineDetailBody,
+    WebSessionTimelineDetailPage, WebSessionTimelineEventKind, WebSessionTimelineItem,
+    WebSessionTimelineSizeFacts, WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
+    WebTimelineBlobReference, WebTimelineBodyContinuation, WebTimelineBodyField,
+    WebTimelineDetailContinuation, WebTimelineEventSequence, WebTimelineModelCallDisposition,
+    WebTimelineModelCallState, WebTimelineModelUsage, WebTimelineTextExcerpt,
+    WebTimelineTurnLifecycleKind, WebTurnId, WebU64, WebUsageAggregateGroup,
+    WebUsageAggregateTokenAxes, WebUsageCall, WebUsageCallCount, WebUsageCallCursor,
+    WebUsageCallKind, WebUsageCallPage, WebUsageCost, WebUsageCostLabel,
     WebUsageCostUnavailableReason, WebUsageInputSemantics, WebUsageProvenance, WebUsageRateVersion,
     WebUsageSummary, WebUsageTimestampMicros, WebUsageTokenAxes, WebUsageTokenCoverage, WebUuid,
 };
@@ -929,6 +939,18 @@ fn production_router_with_budget(
         .route("/usage/calls", get(usage_calls))
         .route("/attention", get(attention_snapshot))
         .route("/attention/follow", get(attention_follow))
+        .route(
+            "/sessions/{session_id}/timeline/{address}/detail",
+            get(session_timeline_item_detail),
+        )
+        .route(
+            "/sessions/{session_id}/turns/{turn_id}/timeline-detail",
+            get(session_timeline_turn_detail),
+        )
+        .route(
+            "/sessions/{session_id}/timeline-detail",
+            get(session_timeline_region_detail),
+        )
         .route_layer(middleware::from_fn(validate_loopback_host))
         .with_state(state);
     // Repository-watch operator projections carry session identities, dispatch
@@ -1762,6 +1784,30 @@ struct TimelineWindowQuery {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct TimelineDetailQuery {
+    max_items: Option<String>,
+    max_bytes: Option<String>,
+    cursor_address: Option<String>,
+    cursor_field: Option<String>,
+    cursor_member: Option<String>,
+    cursor_offset: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TimelineRegionDetailQuery {
+    first: Option<String>,
+    through: Option<String>,
+    max_items: Option<String>,
+    max_bytes: Option<String>,
+    cursor_address: Option<String>,
+    cursor_field: Option<String>,
+    cursor_member: Option<String>,
+    cursor_offset: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchHttpQuery {
     strategy: String,
     q: String,
@@ -2488,6 +2534,7 @@ enum SessionTimelineRequestError {
     InvalidAddress,
     InvalidAnchor,
     MissingBounds,
+    InvalidProjectedSessionId,
 }
 
 impl SessionTimelineRequestError {
@@ -2517,6 +2564,17 @@ impl SessionTimelineRequestError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "session_projection_failed",
                     "an existing session has no durable timeline bound",
+                )
+            }
+            Self::InvalidProjectedSessionId => {
+                tracing::error!(
+                    failure_class = "fail_closed_corruption",
+                    "session timeline projection has an invalid session identity"
+                );
+                application_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "session_projection_failed",
+                    "an existing session has an invalid durable identity",
                 )
             }
         }
@@ -2591,7 +2649,10 @@ async fn session_timeline_window(
         Err(error) => return error.into_response(),
     };
     match repository.read_window(session, anchor, limits).await {
-        Ok(Some(window)) => Json(window_dto(window)).into_response(),
+        Ok(Some(window)) => match window_dto(window) {
+            Ok(window) => Json(window).into_response(),
+            Err(error) => error.into_response(),
+        },
         Ok(None) => application_error(
             StatusCode::NOT_FOUND,
             "session_not_found",
@@ -2599,6 +2660,199 @@ async fn session_timeline_window(
         ),
         Err(error) => repository_projection_error(error),
     }
+}
+
+async fn session_timeline_item_detail(
+    State(state): State<WebApiState>,
+    Path((session_id, address)): Path<(String, String)>,
+    query: Result<Query<TimelineDetailQuery>, QueryRejection>,
+) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => return invalid_timeline_detail_query(),
+    };
+    let session = match parse_session_id(&session_id) {
+        Ok(session) => session,
+        Err(error) => return error.into_response(),
+    };
+    let address = match parse_timeline_address(&address) {
+        Ok(address) => address,
+        Err(error) => return error.into_response(),
+    };
+    let (limits, cursor) = match parse_detail_query(&query) {
+        Some(parsed) => parsed,
+        None => return invalid_timeline_detail_query(),
+    };
+    let Some(repository) = state.timeline else {
+        return session_projection_unavailable();
+    };
+    match repository
+        .read_item_details(session, address, cursor, limits)
+        .await
+    {
+        Ok(Some(page)) => match detail_page_dto(page) {
+            Ok(page) => Json(page).into_response(),
+            Err(error) => error.into_response(),
+        },
+        Ok(None) => timeline_detail_not_found(),
+        Err(error) => repository_projection_error(error),
+    }
+}
+
+async fn session_timeline_turn_detail(
+    State(state): State<WebApiState>,
+    Path((session_id, turn_id)): Path<(String, String)>,
+    query: Result<Query<TimelineDetailQuery>, QueryRejection>,
+) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => return invalid_timeline_detail_query(),
+    };
+    let session = match parse_session_id(&session_id) {
+        Ok(session) => session,
+        Err(error) => return error.into_response(),
+    };
+    let turn = match uuid::Uuid::parse_str(&turn_id) {
+        Ok(turn) => TurnId::from_uuid(turn),
+        Err(_) => {
+            return application_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_turn_id",
+                "turn id is not a UUID",
+            );
+        }
+    };
+    let (limits, cursor) = match parse_detail_query(&query) {
+        Some(parsed) => parsed,
+        None => return invalid_timeline_detail_query(),
+    };
+    let Some(repository) = state.timeline else {
+        return session_projection_unavailable();
+    };
+    match repository
+        .read_turn_details(session, turn, cursor, limits)
+        .await
+    {
+        Ok(Some(page)) => match detail_page_dto(page) {
+            Ok(page) => Json(page).into_response(),
+            Err(error) => error.into_response(),
+        },
+        Ok(None) => timeline_detail_not_found(),
+        Err(error) => repository_projection_error(error),
+    }
+}
+
+async fn session_timeline_region_detail(
+    State(state): State<WebApiState>,
+    Path(session_id): Path<String>,
+    query: Result<Query<TimelineRegionDetailQuery>, QueryRejection>,
+) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => return invalid_timeline_detail_query(),
+    };
+    let session = match parse_session_id(&session_id) {
+        Ok(session) => session,
+        Err(error) => return error.into_response(),
+    };
+    let (Some(first), Some(through)) = (query.first.as_deref(), query.through.as_deref()) else {
+        return invalid_timeline_detail_query();
+    };
+    let first = match parse_timeline_address(first) {
+        Ok(address) => address,
+        Err(error) => return error.into_response(),
+    };
+    let through = match parse_timeline_address(through) {
+        Ok(address) => address,
+        Err(error) => return error.into_response(),
+    };
+    let detail_query = TimelineDetailQuery {
+        max_items: query.max_items,
+        max_bytes: query.max_bytes,
+        cursor_address: query.cursor_address,
+        cursor_field: query.cursor_field,
+        cursor_member: query.cursor_member,
+        cursor_offset: query.cursor_offset,
+    };
+    let Some((limits, cursor)) = parse_detail_query(&detail_query) else {
+        return invalid_timeline_detail_query();
+    };
+    let Some(repository) = state.timeline else {
+        return session_projection_unavailable();
+    };
+    match repository
+        .read_region_details(session, first, through, cursor, limits)
+        .await
+    {
+        Ok(Some(page)) => match detail_page_dto(page) {
+            Ok(page) => Json(page).into_response(),
+            Err(error) => error.into_response(),
+        },
+        Ok(None) => timeline_detail_not_found(),
+        Err(error) => repository_projection_error(error),
+    }
+}
+
+fn parse_detail_query(
+    query: &TimelineDetailQuery,
+) -> Option<(TimelineDetailLimits, Option<TimelineDetailCursor>)> {
+    let max_items = query.max_items.as_deref()?.parse::<u16>().ok()?;
+    let max_bytes = query.max_bytes.as_deref()?.parse::<u32>().ok()?;
+    let limits = TimelineDetailLimits::new(max_items, max_bytes).ok()?;
+    let cursor = match (
+        query.cursor_address.as_deref(),
+        query.cursor_field.as_deref(),
+        query.cursor_member.as_deref(),
+        query.cursor_offset.as_deref(),
+    ) {
+        (None, None, None, None) => None,
+        (Some(address), None, None, None) => Some(TimelineDetailCursor {
+            address: parse_timeline_address(address).ok()?,
+            field: None,
+            member_index: 0,
+            offset_bytes: 0,
+        }),
+        (Some(address), Some(field), Some(member), Some(offset)) => Some(TimelineDetailCursor {
+            address: parse_timeline_address(address).ok()?,
+            field: Some(parse_body_field(field).ok()?),
+            member_index: member.parse().ok()?,
+            offset_bytes: offset.parse().ok()?,
+        }),
+        _ => return None,
+    };
+    Some((limits, cursor))
+}
+
+fn parse_body_field(value: &str) -> Result<TimelineBodyField, ()> {
+    match value {
+        "input_text" => Ok(TimelineBodyField::InputText),
+        "model_response" => Ok(TimelineBodyField::ModelResponse),
+        _ => Err(()),
+    }
+}
+
+fn invalid_timeline_detail_query() -> Response {
+    application_error(
+        StatusCode::BAD_REQUEST,
+        "invalid_timeline_detail_limits",
+        "timeline detail parameters are malformed or outside the contract bounds",
+    )
+}
+
+fn timeline_detail_not_found() -> Response {
+    application_error(
+        StatusCode::NOT_FOUND,
+        "timeline_detail_not_found",
+        "the requested session timeline detail does not exist",
+    )
+}
+
+fn session_projection_unavailable() -> Response {
+    application_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "session_projection_unavailable",
+        "session projection is not configured",
+    )
 }
 
 fn invalid_timeline_query() -> Response {
@@ -2611,8 +2865,18 @@ fn invalid_timeline_query() -> Response {
 
 fn repository_projection_error(error: SessionTimelineRepositoryError) -> Response {
     let failure_class = match &error {
+        SessionTimelineRepositoryError::InvalidDetailQuery => {
+            return invalid_timeline_detail_query();
+        }
         SessionTimelineRepositoryError::Database(_) => "infrastructure",
-        SessionTimelineRepositoryError::Corruption(_) => "fail_closed_corruption",
+        SessionTimelineRepositoryError::InvalidStoredUtf8
+        | SessionTimelineRepositoryError::Corruption(_) => "fail_closed_corruption",
+        SessionTimelineRepositoryError::Outbox(OutboxDispatchError::Database(_)) => {
+            "infrastructure"
+        }
+        SessionTimelineRepositoryError::Outbox(OutboxDispatchError::Corruption(_)) => {
+            "fail_closed_corruption"
+        }
     };
     tracing::error!(
         failure_class,
@@ -2632,21 +2896,29 @@ fn parse_session_id(value: &str) -> Result<SessionId, SessionTimelineRequestErro
         .map_err(|_| SessionTimelineRequestError::InvalidSessionId)
 }
 
+fn parse_timeline_address(value: &str) -> Result<TimelineAddress, SessionTimelineRequestError> {
+    if value.is_empty()
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+        || value.starts_with('0')
+    {
+        return Err(SessionTimelineRequestError::InvalidAddress);
+    }
+    value
+        .parse::<u64>()
+        .ok()
+        .and_then(std::num::NonZeroU64::new)
+        .map(TimelineAddress::new)
+        .ok_or(SessionTimelineRequestError::InvalidAddress)
+}
+
 fn parse_window_anchor(
     anchor: &str,
     address: Option<&str>,
 ) -> Result<TimelineWindowAnchor, SessionTimelineRequestError> {
     let parsed_address = || {
         address
-            .filter(|value| {
-                !value.is_empty()
-                    && value.bytes().all(|byte| byte.is_ascii_digit())
-                    && !value.starts_with('0')
-            })
-            .and_then(|value| value.parse::<u64>().ok())
-            .and_then(std::num::NonZeroU64::new)
-            .map(TimelineAddress::new)
             .ok_or(SessionTimelineRequestError::InvalidAddress)
+            .and_then(parse_timeline_address)
     };
     match (anchor, address) {
         ("first", None) => Ok(TimelineWindowAnchor::First),
@@ -2694,7 +2966,9 @@ fn descriptor_dto(
     })
 }
 
-fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
+fn window_dto(
+    window: SessionTimelineWindow,
+) -> Result<WebSessionTimelineWindow, SessionTimelineRequestError> {
     let continuation_before = match window.continuation_before {
         TimelineContinuation::Exhausted => None,
         TimelineContinuation::MoreAt(address) => Some(address_dto(address)),
@@ -2703,7 +2977,7 @@ fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
         TimelineContinuation::Exhausted => None,
         TimelineContinuation::MoreAt(address) => Some(address_dto(address)),
     };
-    WebSessionTimelineWindow {
+    Ok(WebSessionTimelineWindow {
         session_id: WebSessionId::from_uuid_bytes(*window.session.into_uuid().as_bytes()),
         items: window
             .items
@@ -2717,6 +2991,192 @@ fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
         projected_structured_bytes: window.projected_structured_bytes,
         continuation_before,
         continuation_after,
+    })
+}
+
+fn detail_page_dto(
+    page: SessionTimelineDetailPage,
+) -> Result<WebSessionTimelineDetailPage, SessionTimelineRequestError> {
+    Ok(WebSessionTimelineDetailPage {
+        session_id: WebSessionId::from_uuid_bytes(*page.session.into_uuid().as_bytes()),
+        items: page
+            .items
+            .into_iter()
+            .map(|item| {
+                Ok(WebSessionTimelineDetail {
+                    address: address_dto(item.address),
+                    kind: event_kind_dto(item.kind),
+                    body: detail_body_dto(item.body)?,
+                    projected_body_bytes: item.projected_body_bytes,
+                })
+            })
+            .collect::<Result<Vec<_>, SessionTimelineRequestError>>()?,
+        projected_body_bytes: page.projected_body_bytes,
+        continuation: page.continuation.map(|continuation| match continuation {
+            TimelineDetailContinuation::MoreAt(address) => WebTimelineDetailContinuation::MoreAt {
+                address: address_dto(address),
+            },
+            TimelineDetailContinuation::MoreBody(body) => WebTimelineDetailContinuation::MoreBody {
+                body: body_continuation_dto(body),
+            },
+        }),
+    })
+}
+
+fn detail_body_dto(
+    body: SessionTimelineDetailBody,
+) -> Result<WebSessionTimelineDetailBody, SessionTimelineRequestError> {
+    Ok(match body {
+        SessionTimelineDetailBody::UserInput {
+            turn_id,
+            text,
+            attachments,
+        } => WebSessionTimelineDetailBody::UserInput {
+            turn_id: WebSessionId::from_canonical(turn_id.into_uuid().to_string())
+                .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
+            text: text_excerpt_dto(text),
+            attachments: attachments
+                .into_iter()
+                .map(|reference| {
+                    Ok(WebTimelineBlobReference {
+                        blob_id: WebBlobId::from_canonical(reference.blob_id.to_string())
+                            .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
+                        length_bytes: WebU64::from_u64(reference.length_bytes),
+                        media_type: reference.media_type,
+                    })
+                })
+                .collect::<Result<Vec<_>, SessionTimelineRequestError>>()?,
+        },
+        SessionTimelineDetailBody::ModelCall {
+            turn_id,
+            model_call_id,
+            state,
+            model_identity_id,
+            request_context_items,
+            response,
+            usage,
+            provider_failure_cause,
+        } => WebSessionTimelineDetailBody::ModelCall {
+            turn_id: WebSessionId::from_canonical(turn_id.into_uuid().to_string())
+                .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
+            model_call_id: WebSessionId::from_canonical(model_call_id.into_uuid().to_string())
+                .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
+            state: model_call_state_dto(state),
+            model_identity_id: WebSessionId::from_canonical(
+                model_identity_id.into_uuid().to_string(),
+            )
+            .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
+            request_context_items: WebU64::from_u64(request_context_items),
+            response: response.map(text_excerpt_dto),
+            usage: WebTimelineModelUsage {
+                input_tokens: usage.input_tokens.map(WebU64::from_u64),
+                output_tokens: usage.output_tokens.map(WebU64::from_u64),
+                cache_creation_input_tokens: usage
+                    .cache_creation_input_tokens
+                    .map(WebU64::from_u64),
+                cache_read_input_tokens: usage.cache_read_input_tokens.map(WebU64::from_u64),
+            },
+            provider_failure_cause: provider_failure_cause.map(provider_failure_cause_dto),
+        },
+        SessionTimelineDetailBody::TurnLifecycle {
+            turn_id,
+            lifecycle,
+            cause_code,
+        } => WebSessionTimelineDetailBody::TurnLifecycle {
+            turn_id: WebSessionId::from_canonical(turn_id.into_uuid().to_string())
+                .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
+            lifecycle: match lifecycle {
+                TimelineTurnLifecycleKind::Activated => WebTimelineTurnLifecycleKind::Activated,
+                TimelineTurnLifecycleKind::Terminalized => {
+                    WebTimelineTurnLifecycleKind::Terminalized
+                }
+            },
+            cause_code,
+        },
+        SessionTimelineDetailBody::EventFact { kind } => WebSessionTimelineDetailBody::EventFact {
+            kind: event_kind_dto(kind),
+        },
+    })
+}
+
+fn model_call_state_dto(state: TimelineModelCallState) -> WebTimelineModelCallState {
+    match state {
+        TimelineModelCallState::Prepared => WebTimelineModelCallState::Prepared {},
+        TimelineModelCallState::InFlight => WebTimelineModelCallState::InFlight {},
+        TimelineModelCallState::CancellationRequested => {
+            WebTimelineModelCallState::CancellationRequested {}
+        }
+        TimelineModelCallState::Terminal(disposition) => WebTimelineModelCallState::Terminal {
+            disposition: match disposition {
+                TimelineModelCallDisposition::Completed => {
+                    WebTimelineModelCallDisposition::Completed
+                }
+                TimelineModelCallDisposition::KnownFailed => {
+                    WebTimelineModelCallDisposition::KnownFailed
+                }
+                TimelineModelCallDisposition::Refused => WebTimelineModelCallDisposition::Refused,
+                TimelineModelCallDisposition::Cancelled => {
+                    WebTimelineModelCallDisposition::Cancelled
+                }
+                TimelineModelCallDisposition::Ambiguous => {
+                    WebTimelineModelCallDisposition::Ambiguous
+                }
+            },
+        },
+    }
+}
+
+fn provider_failure_cause_dto(
+    cause: ProviderModelCallFailureCause,
+) -> WebProviderModelCallFailureCause {
+    match cause {
+        ProviderModelCallFailureCause::CredentialRejected => {
+            WebProviderModelCallFailureCause::CredentialRejected
+        }
+        ProviderModelCallFailureCause::PermissionDenied => {
+            WebProviderModelCallFailureCause::PermissionDenied
+        }
+        ProviderModelCallFailureCause::InvalidRequest => {
+            WebProviderModelCallFailureCause::InvalidRequest
+        }
+        ProviderModelCallFailureCause::TargetNotFound => {
+            WebProviderModelCallFailureCause::TargetNotFound
+        }
+        ProviderModelCallFailureCause::RequestTooLarge => {
+            WebProviderModelCallFailureCause::RequestTooLarge
+        }
+        ProviderModelCallFailureCause::RateLimited => WebProviderModelCallFailureCause::RateLimited,
+        ProviderModelCallFailureCause::QuotaExhausted => {
+            WebProviderModelCallFailureCause::QuotaExhausted
+        }
+        ProviderModelCallFailureCause::Overloaded => WebProviderModelCallFailureCause::Overloaded,
+        ProviderModelCallFailureCause::ProviderInternal => {
+            WebProviderModelCallFailureCause::ProviderInternal
+        }
+        ProviderModelCallFailureCause::Unrecognized => {
+            WebProviderModelCallFailureCause::Unrecognized
+        }
+    }
+}
+
+fn text_excerpt_dto(excerpt: TimelineTextExcerpt) -> WebTimelineTextExcerpt {
+    WebTimelineTextExcerpt {
+        text: excerpt.text,
+        offset_bytes: WebU64::from_u64(excerpt.offset_bytes),
+        total_bytes: WebU64::from_u64(excerpt.total_bytes),
+        continuation: excerpt.continuation.map(body_continuation_dto),
+    }
+}
+
+fn body_continuation_dto(continuation: TimelineBodyContinuation) -> WebTimelineBodyContinuation {
+    WebTimelineBodyContinuation {
+        address: address_dto(continuation.address),
+        field: match continuation.field {
+            TimelineBodyField::InputText => WebTimelineBodyField::InputText,
+            TimelineBodyField::ModelResponse => WebTimelineBodyField::ModelResponse,
+        },
+        member_index: continuation.member_index,
+        offset_bytes: WebU64::from_u64(continuation.offset_bytes),
     }
 }
 
@@ -4335,12 +4795,12 @@ mod tests {
     use signalbox_application::{
         AttentionAction, AttentionActivity, AttentionActivityKind, AttentionBlockedReason,
         AttentionContinuation, AttentionCursor, AttentionGoalBlock, AttentionJudgeFacts,
-        AttentionSort, AttentionState, AttentionSummary, UsageAggregateGroup, UsageAggregateKey,
-        UsageAggregateTokenAxes, UsageCacheNormalization, UsageCallKind,
-        UsageCredentialProfileLabel, UsageInputTokenSemantics, UsageProvenance, UsageTokenAxes,
-        UsageTokenCoverage, UsageTokenPresence, max_attention_change_items,
-        max_attention_goal_summary_characters, max_attention_snapshot_items,
-        max_attention_title_characters,
+        AttentionSort, AttentionState, AttentionSummary, TimelineAddress, TimelineBodyField,
+        TimelineDetailCursor, UsageAggregateGroup, UsageAggregateKey, UsageAggregateTokenAxes,
+        UsageCacheNormalization, UsageCallKind, UsageCredentialProfileLabel,
+        UsageInputTokenSemantics, UsageProvenance, UsageTokenAxes, UsageTokenCoverage,
+        UsageTokenPresence, max_attention_change_items, max_attention_goal_summary_characters,
+        max_attention_snapshot_items, max_attention_title_characters,
     };
     use signalbox_domain::{ProviderModelIdentity, ResolvedProviderTarget, SessionId, TurnId};
     use signalbox_persistence::attention::AttentionPage;
@@ -4354,12 +4814,12 @@ mod tests {
     use url::Url;
 
     use super::{
-        DEFAULT_WEB_BIND_ADDRESS, MAX_CONCURRENT_WEB_BLOB_READS, WebHttpConfiguration,
-        WebHttpConfigurationError, WebHttpRuntime, WebHttpRuntimeError, attention_snapshot_dto,
-        blob_descriptor_head, content_disposition, deterministic_test_router, if_none_match,
-        ndjson_response, parse_byte_range, production_router, reader_body_until,
-        single_range_header, try_acquire_web_blob_read_permit, usage_aggregate_cost_dto,
-        usage_cost_dto,
+        DEFAULT_WEB_BIND_ADDRESS, MAX_CONCURRENT_WEB_BLOB_READS, TimelineDetailQuery,
+        WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime, WebHttpRuntimeError,
+        attention_snapshot_dto, blob_descriptor_head, content_disposition,
+        deterministic_test_router, if_none_match, ndjson_response, parse_byte_range,
+        parse_detail_query, production_router, reader_body_until, single_range_header,
+        try_acquire_web_blob_read_permit, usage_aggregate_cost_dto, usage_cost_dto,
     };
     use crate::{HubModelConfiguration, ProcessMonitor};
 
@@ -5566,6 +6026,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_detail_ceiling_uses_the_structured_error_envelope() {
+        let request = Request::get(
+            "/api/sessions/00000000-0000-0000-0000-000000000991/timeline/1/detail?max_items=1",
+        )
+        .header(header::HOST, "localhost")
+        .body(Body::empty())
+        .expect("the request is valid");
+        let response = production_router(None, None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the rejection is structured JSON");
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["kind"], "application");
+        assert_eq!(body["error"]["code"], "invalid_timeline_detail_limits");
+    }
+
+    #[tokio::test]
     async fn search_rejects_a_non_product_strategy() {
         let unsupported = Request::get("/api/search?strategy=postgres&q=term&max_items=10")
             .header(header::HOST, "localhost")
@@ -6168,6 +6649,70 @@ mod tests {
                 "`{path}` is a loopback authority and must reach the handler",
             );
         }
+    }
+
+    #[test]
+    fn detail_cursors_require_closed_fields_and_canonical_addresses() {
+        let query = TimelineDetailQuery {
+            max_items: Some(String::from("1")),
+            max_bytes: Some(String::from("256")),
+            cursor_address: Some(String::from("7")),
+            cursor_field: Some(String::from("model_response")),
+            cursor_member: Some(String::from("0")),
+            cursor_offset: Some(String::from("31")),
+        };
+        let parsed = parse_detail_query(&query).expect("the closed cursor is valid");
+
+        assert_eq!(
+            parsed.1,
+            Some(TimelineDetailCursor {
+                address: TimelineAddress::new(
+                    std::num::NonZeroU64::new(7).expect("fixture address is positive")
+                ),
+                field: Some(TimelineBodyField::ModelResponse),
+                member_index: 0,
+                offset_bytes: 31,
+            })
+        );
+    }
+
+    #[test]
+    fn detail_cursors_accept_address_only_item_continuations() {
+        let query = TimelineDetailQuery {
+            max_items: Some(String::from("1")),
+            max_bytes: Some(String::from("256")),
+            cursor_address: Some(String::from("7")),
+            cursor_field: None,
+            cursor_member: None,
+            cursor_offset: None,
+        };
+        let parsed = parse_detail_query(&query).expect("the item cursor is valid");
+
+        assert_eq!(
+            parsed.1,
+            Some(TimelineDetailCursor {
+                address: TimelineAddress::new(
+                    std::num::NonZeroU64::new(7).expect("fixture address is positive")
+                ),
+                field: None,
+                member_index: 0,
+                offset_bytes: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn detail_cursors_reject_incomplete_body_continuations() {
+        let query = TimelineDetailQuery {
+            max_items: Some(String::from("1")),
+            max_bytes: Some(String::from("256")),
+            cursor_address: Some(String::from("7")),
+            cursor_field: Some(String::from("model_response")),
+            cursor_member: None,
+            cursor_offset: Some(String::from("31")),
+        };
+
+        assert!(parse_detail_query(&query).is_none());
     }
 
     #[test]

@@ -27,7 +27,7 @@ import { ImportsWorkspace } from './imports/ImportsWorkspace'
 import { ScenarioImportApi } from './imports/scenario'
 import { ProductApp } from './ProductApp'
 import { applyPresentationPreferences } from './preferences'
-import { type ProductRouteId, productRoutes, readProductSearchState } from './product'
+import { type ProductRouteId, productRoutes, readProductRouteState } from './product'
 import { defaultSearchUsageRouteState, type SearchUsageRouteState } from './SearchUsage'
 import { selectApp, store } from './state'
 import './app.css'
@@ -141,7 +141,7 @@ const indexRoute = createRoute({
 const productRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/$surface',
-  validateSearch: readProductSearchState,
+  validateSearch: readProductRouteState,
   component: () => {
     const candidate = productRoute.useParams().surface
     const search = productRoute.useSearch()

@@ -7768,6 +7768,10 @@ impl<Reader: UsageReader> UsageService<Reader> {
 pub const fn max_timeline_window_items() -> u16;
 pub const fn max_timeline_window_bytes() -> u32;
 pub const fn min_timeline_window_bytes() -> u32;
+pub const fn max_timeline_detail_items() -> u16;
+pub const fn max_timeline_detail_bytes() -> u32;
+pub const fn min_timeline_detail_bytes() -> u32;
+pub const fn timeline_detail_envelope_bytes() -> u32;
 
 pub struct TimelineAddress(/* private NonZeroU64 */);
 impl TimelineAddress {
@@ -7853,6 +7857,101 @@ pub struct SessionTimelineWindow {
     pub continuation_after: TimelineContinuation,
 }
 
+pub enum TimelineDetailLimitError { Items, Bytes }
+pub struct TimelineDetailLimits { /* private */ }
+impl TimelineDetailLimits {
+    pub const fn new(max_items: u16, max_projected_bytes: u32)
+        -> Result<Self, TimelineDetailLimitError>;
+    pub const fn max_items(self) -> u16;
+    pub const fn max_projected_bytes(self) -> u32;
+}
+pub enum TimelineBodyField {
+    InputText,
+    ModelResponse,
+}
+pub struct TimelineBodyContinuation {
+    pub address: TimelineAddress,
+    pub field: TimelineBodyField,
+    pub member_index: u32,
+    pub offset_bytes: u64,
+}
+pub struct TimelineDetailCursor {
+    pub address: TimelineAddress,
+    pub field: Option<TimelineBodyField>,
+    pub member_index: u32,
+    pub offset_bytes: u64,
+}
+pub enum TimelineDetailContinuation {
+    MoreAt(TimelineAddress),
+    MoreBody(TimelineBodyContinuation),
+}
+pub struct TimelineTextExcerpt {
+    pub text: String,
+    pub offset_bytes: u64,
+    pub total_bytes: u64,
+    pub continuation: Option<TimelineBodyContinuation>,
+}
+pub struct TimelineBlobReference {
+    pub blob_id: BlobDigest,
+    pub length_bytes: u64,
+    pub media_type: Option<String>,
+}
+pub enum TimelineModelCallState {
+    Prepared,
+    InFlight,
+    CancellationRequested,
+    Terminal(TimelineModelCallDisposition),
+}
+pub enum TimelineModelCallDisposition {
+    Completed,
+    KnownFailed,
+    Refused,
+    Cancelled,
+    Ambiguous,
+}
+pub struct TimelineModelUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_creation_input_tokens: Option<u64>,
+    pub cache_read_input_tokens: Option<u64>,
+}
+pub enum TimelineTurnLifecycleKind { Activated, Terminalized }
+pub enum SessionTimelineDetailBody {
+    UserInput {
+        turn_id: TurnId,
+        text: TimelineTextExcerpt,
+        attachments: Vec<TimelineBlobReference>,
+    },
+    ModelCall {
+        turn_id: TurnId,
+        model_call_id: ModelCallId,
+        state: TimelineModelCallState,
+        model_identity_id: ProviderModelIdentity,
+        request_context_items: u64,
+        response: Option<TimelineTextExcerpt>,
+        usage: TimelineModelUsage,
+        provider_failure_cause: Option<ProviderModelCallFailureCause>,
+    },
+    TurnLifecycle {
+        turn_id: TurnId,
+        lifecycle: TimelineTurnLifecycleKind,
+        cause_code: String,
+    },
+    EventFact { kind: SessionTimelineEventKind },
+}
+pub struct SessionTimelineDetail {
+    pub address: TimelineAddress,
+    pub kind: SessionTimelineEventKind,
+    pub body: SessionTimelineDetailBody,
+    pub projected_body_bytes: u32,
+}
+pub struct SessionTimelineDetailPage {
+    pub session: SessionId,
+    pub items: Vec<SessionTimelineDetail>,
+    pub projected_body_bytes: u32,
+    pub continuation: Option<TimelineDetailContinuation>,
+}
+
 pub trait SessionTimelineReader {
     type Error;
     fn read_descriptor(&self, session: SessionId)
@@ -7863,6 +7962,28 @@ pub trait SessionTimelineReader {
         anchor: TimelineWindowAnchor,
         limits: TimelineWindowLimits,
     ) -> impl Future<Output = Result<Option<SessionTimelineWindow>, Self::Error>> + Send;
+    fn read_item_details(
+        &self,
+        session: SessionId,
+        address: TimelineAddress,
+        cursor: Option<TimelineDetailCursor>,
+        limits: TimelineDetailLimits,
+    ) -> impl Future<Output = Result<Option<SessionTimelineDetailPage>, Self::Error>> + Send;
+    fn read_turn_details(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+        cursor: Option<TimelineDetailCursor>,
+        limits: TimelineDetailLimits,
+    ) -> impl Future<Output = Result<Option<SessionTimelineDetailPage>, Self::Error>> + Send;
+    fn read_region_details(
+        &self,
+        session: SessionId,
+        first: TimelineAddress,
+        through: TimelineAddress,
+        cursor: Option<TimelineDetailCursor>,
+        limits: TimelineDetailLimits,
+    ) -> impl Future<Output = Result<Option<SessionTimelineDetailPage>, Self::Error>> + Send;
 }
 
 pub struct ReadSessionTimelineService<Reader> { /* private */ }
@@ -7878,6 +7999,28 @@ impl<Reader: SessionTimelineReader> ReadSessionTimelineService<Reader> {
         anchor: TimelineWindowAnchor,
         limits: TimelineWindowLimits,
     ) -> Result<Option<SessionTimelineWindow>, Reader::Error>;
+    pub async fn item_details(
+        &self,
+        session: SessionId,
+        address: TimelineAddress,
+        cursor: Option<TimelineDetailCursor>,
+        limits: TimelineDetailLimits,
+    ) -> Result<Option<SessionTimelineDetailPage>, Reader::Error>;
+    pub async fn turn_details(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+        cursor: Option<TimelineDetailCursor>,
+        limits: TimelineDetailLimits,
+    ) -> Result<Option<SessionTimelineDetailPage>, Reader::Error>;
+    pub async fn region_details(
+        &self,
+        session: SessionId,
+        first: TimelineAddress,
+        through: TimelineAddress,
+        cursor: Option<TimelineDetailCursor>,
+        limits: TimelineDetailLimits,
+    ) -> Result<Option<SessionTimelineDetailPage>, Reader::Error>;
 }
 ```
 
@@ -13096,7 +13239,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: load_session                          | 2 (incl. 1 trait)                |
 | application: search                                | 22 (+5 free fn) (incl. 2 traits) |
 | application: usage                                 | 37 (+4 free fn) (incl. 1 trait)  |
-| application: session_timeline                      | 14 (+3 free fn) (incl. 1 trait)  |
+| application: session_timeline                      | 29 (+7 free fn) (incl. 1 trait)  |
 | application: session_live                          | 9 (+1 free fn) (incl. 1 trait)   |
 | application: model_execution                       | 41 (incl. 8 traits)              |
 | application: tool_loop                             | 28 (incl. 5 traits)              |
@@ -13118,4 +13261,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop_ports                       | 10 (incl. 3 traits)              |
 | application: turn_liveness                         | 14                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **479 (+30 free fn)**            |
+| **signalbox-application total**                    | **494 (+34 free fn)**            |
