@@ -198,7 +198,7 @@ use testcontainers_modules::{
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
 
-use support::blocked_backends_reached;
+use support::{blocked_backends_reached, blocked_backends_reached_on};
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_integration";
