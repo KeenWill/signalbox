@@ -475,6 +475,7 @@ const DETAIL_ENVELOPE_BYTES: u32 = timeline_detail_envelope_bytes();
 /// that headroom a page can charge the envelope, select an empty excerpt, and
 /// hand back a body continuation at the offset the caller already asked for —
 /// a cursor that never advances.
+// numeric-bound: not-a-bound - UTF-8 encodes each Unicode scalar in at most four bytes
 const MAX_UTF8_SCALAR_BYTES: u32 = 4;
 
 /// The smallest page budget that can seat one text-bearing detail item and
