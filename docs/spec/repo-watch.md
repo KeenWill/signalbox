@@ -78,11 +78,13 @@ blocking-review dismissal is verified against this PR
 (`agent/dispatch-autonomy-review-clearance`). The bounded repository-watch
 operator projections are verified against this PR
 (`agent/web-repo-watch-projection`). The durable record of the last completed
-sweep and the restart scheduling measured from it, the rejection classification
-that separates a provider throttle from a resource-scoped permission rejection,
-the bound on consecutive webhook preemptions of a still-due complete poll, and
-the attempt-deadline cancellation fence with its post-terminal dispatch
-classification are verified against this PR
+sweep and the restart scheduling measured from it, the classification that
+decides which failures stop a drain page — a provider throttle against a
+resource-scoped permission rejection, a GraphQL error envelope read from either
+carrier the provider spells its classification in, and an exhausted attempt
+resource budget — the bound on consecutive webhook preemptions of a still-due
+complete poll, and the attempt-deadline cancellation fence with its
+post-terminal dispatch classification are verified against this PR
 (`agent/fix-repo-watch-drain-classifiers`), which supersedes the warm-restart
 poll scheduling previously verified against
 `agent/daemon-live-warm-start-poll-cadence`.
@@ -1440,11 +1442,16 @@ persistently unprocessable receipt cannot pin the head of the queue and starve
 every later one; the attempt still reports the first such failure. Credential,
 transport, provider-throttle, and provider-outage failures stop the current page
 instead: they prove later targeted requests cannot make independent progress, so
-issuing one for every loaded peer would amplify the same outage. Those receipts
-remain durably pending for the bounded retry backoff. What separates the two
-classes is the provider's own answer, not the transport it arrives on. A `403`
-carries both meanings, and it is read as a throttle only when the provider says
-so through one of the three signals it documents: a `Retry-After` for a
+issuing one for every loaded peer would amplify the same outage. An exhausted
+attempt resource budget stops it for a reason of its own: the request count and
+the wire bytes are the whole attempt's, and a drain page runs inside one
+attempt, so once either is spent every later hydration on that page is refused
+before it can help. The single-response size ceiling beside them stays
+target-specific, because a peer's response can still fit under it. Those
+receipts remain durably pending for the bounded retry backoff. What separates
+the two classes is the provider's own answer, not the transport it arrives on. A
+`403` carries both meanings, and it is read as a throttle only when the provider
+says so through one of the three signals it documents: a `Retry-After` for a
 secondary limit, an exhausted `X-RateLimit-Remaining` for a primary one, or —
 for the secondary limit that carries neither header — a rejection message naming
 that limit. Only that last case is read before it is classified, under the same
@@ -1458,34 +1465,37 @@ rather than being recorded as the permission rejection an empty body would name.
 Anything else is a resource-scoped permission rejection, so a credential that
 lacks one endpoint's scope defers its own receipt rather than stalling the drain
 at that same receipt on every retry. A GraphQL response reports throttling and
-outage in an error envelope under `HTTP 200`; the envelope's error type is what
-classifies it, with the repository-wide types stopping the page and every other
-type — a query-scoped failure or a missing node — deferring only its own
-receipt. A signature-valid delivery whose event or action is outside the mapped
-set, including a broadly subscribed `workflow_job`, is still acknowledged
-successfully and is cheaply logged and recorded as ignored rather than treated
-as an intake failure. A targeted projection records its terminal disposition and
-exact projections as the durable recovery handoff before its cursor write. If
-that cursor write conflicts with an intervening full poll, the delivery remains
-terminal and the in-memory shadow is handed over to the competing durable cursor
-before later pending receipts are projected. A webhook-enabled shadow wake may
-also preempt the read-only provider sweep of an in-flight complete poll, without
-resetting that poll's deadline, so the durable delivery drains before bounded
-reconciliation resumes. After the delivery's bounded page drains, the still-due
-poll returns through the same interruptible scheduler path rather than entering
-an uninterruptible resumed sweep, until that poll has been preempted the bounded
-number of consecutive times above and runs uninterruptibly.
+outage in an error envelope under `HTTP 200`; the envelope's own classification
+is what classifies the failure, read from either carrier the provider spells it
+in — the error's `type` or its `extensions.code`, which of the two depending on
+the layer that rejected the query — with the repository-wide classifications
+stopping the page and every other one, a query-scoped failure or a missing node,
+deferring only its own receipt. A signature-valid delivery whose event or action
+is outside the mapped set, including a broadly subscribed `workflow_job`, is
+still acknowledged successfully and is cheaply logged and recorded as ignored
+rather than treated as an intake failure. A targeted projection records its
+terminal disposition and exact projections as the durable recovery handoff
+before its cursor write. If that cursor write conflicts with an intervening full
+poll, the delivery remains terminal and the in-memory shadow is handed over to
+the competing durable cursor before later pending receipts are projected. A
+webhook-enabled shadow wake may also preempt the read-only provider sweep of an
+in-flight complete poll, without resetting that poll's deadline, so the durable
+delivery drains before bounded reconciliation resumes. After the delivery's
+bounded page drains, the still-due poll returns through the same interruptible
+scheduler path rather than entering an uninterruptible resumed sweep, until that
+poll has been preempted the bounded number of consecutive times above and runs
+uninterruptibly.
 
 **Implemented behavior.** A drain page attempts every loaded delivery after a
 target-specific or persistence failure, but stops at the first repository-wide
-provider failure. Each failure is logged at warning level with the delivery
-identity and a closed cause, and the drain itself emits an error-level record
-carrying the first such cause, whichever attempt performed it — a startup drain,
-a wake, a retry, or a full poll. A delivery that fails before its terminal
-disposition is recorded remains pending, and its successful page peers still
-reach terminal state when the failure is isolatable: a targeted refresh the
-provider will not serve is one such failure, because that query runs before
-anything is recorded. Once a targeted refresh's exact projections and
+provider failure or exhausted attempt budget. Each failure is logged at warning
+level with the delivery identity and a closed cause, and the drain itself emits
+an error-level record carrying the first such cause, whichever attempt performed
+it — a startup drain, a wake, a retry, or a full poll. A delivery that fails
+before its terminal disposition is recorded remains pending, and its successful
+page peers still reach terminal state when the failure is isolatable: a targeted
+refresh the provider will not serve is one such failure, because that query runs
+before anything is recorded. Once a targeted refresh's exact projections and
 disposition are durable, a later cursor-write failure does not reopen the
 delivery; the durable cursor becomes the next shadow baseline. A delivery whose
 disposition is already durable when a later step fails — the dispatch work that

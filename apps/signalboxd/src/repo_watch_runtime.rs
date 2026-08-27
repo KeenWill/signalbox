@@ -635,6 +635,23 @@ impl WebhookPollInterrupt {
     }
 }
 
+/// Whether projection backoff is in force for the drain retry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DrainRetryBackoff {
+    InForce,
+    Clear,
+}
+
+impl DrainRetryBackoff {
+    fn of(retry: &WebhookDrainRetry) -> Self {
+        if retry.is_backing_off() {
+            Self::InForce
+        } else {
+            Self::Clear
+        }
+    }
+}
+
 /// Whether a still-due complete poll may yield to webhook admission again.
 ///
 /// A drain retry in backoff already suppresses admission preemption so the
@@ -645,10 +662,12 @@ impl WebhookPollInterrupt {
 /// discard the wake — it is latched, and the scheduler admits it as ordinary
 /// webhook work as soon as the sweep commits.
 const fn poll_webhook_interrupt(
-    backing_off: bool,
+    backoff: DrainRetryBackoff,
     consecutive_preemptions: u32,
 ) -> WebhookPollInterrupt {
-    if backing_off || consecutive_preemptions >= MAX_CONSECUTIVE_POLL_PREEMPTIONS {
+    if matches!(backoff, DrainRetryBackoff::InForce)
+        || consecutive_preemptions >= MAX_CONSECUTIVE_POLL_PREEMPTIONS
+    {
         WebhookPollInterrupt::Suppressed
     } else {
         WebhookPollInterrupt::Enabled
@@ -1593,7 +1612,7 @@ impl RepositoryWatchTask {
                     let mut drained = None;
                     let mut trailing_failure = None;
                     let webhook_interrupt = poll_webhook_interrupt(
-                        webhook_retry.is_backing_off(),
+                        DrainRetryBackoff::of(&webhook_retry),
                         consecutive_poll_preemptions,
                     );
                     let outcome = self
@@ -4772,10 +4791,22 @@ impl RepositoryWatchAttemptError {
     /// a poisoned receipt must not starve a healthy peer. Credential, transport,
     /// throttling, and provider-outage failures are repository-wide, so issuing
     /// the same doomed hydration for every peer only amplifies the outage.
+    ///
+    /// An exhausted resource budget joins them for a reason of its own: the
+    /// budgets it reports — the request count and the wire bytes — are the
+    /// attempt's, and a drain page runs inside one attempt. Once either is
+    /// spent every later hydration on the page is refused, so continuing only
+    /// spends transfer the ledger can no longer account for to learn the same
+    /// failure once per receipt. A per-target pagination ceiling reports the
+    /// same variant; stopping there is the conservative reading, and the
+    /// receipts it leaves undrained are durable and re-attempted.
+    ///
+    /// `ResponseTooLarge` stays target-specific beside it: that ceiling is one
+    /// response's, and a peer's response can still fit under it.
     const fn stops_webhook_page(self) -> bool {
         matches!(
             self,
-            Self::Credential | Self::Request | Self::ProviderUnavailable
+            Self::Credential | Self::Request | Self::ProviderUnavailable | Self::ResourceLimit
         )
     }
 }
@@ -7661,19 +7692,40 @@ struct GraphQlError {
     // rejected without one, which is target-specific by construction.
     #[serde(rename = "type", default)]
     error_type: Option<String>,
+    // The same taxonomy's second carrier. The provider spells a classification
+    // in `type` or in `extensions.code` depending on which layer rejected the
+    // query, and `RATE_LIMITED` in particular is carried here on the envelopes
+    // the API's own documentation shows. `crates/tools-github` reads both for
+    // the same reason.
+    #[serde(default)]
+    extensions: Option<GraphQlErrorExtensions>,
+}
+
+#[derive(Clone, Deserialize)]
+struct GraphQlErrorExtensions {
+    #[serde(default)]
+    code: Option<String>,
 }
 
 impl GraphQlError {
-    /// The error types that describe the repository's provider rather than the
-    /// query, so no later request on the page can succeed either.
-    const REPOSITORY_WIDE_TYPES: [&'static str; 2] = ["RATE_LIMITED", "SERVICE_UNAVAILABLE"];
+    /// The classifications that describe the repository's provider rather than
+    /// the query, so no later request on the page can succeed either.
+    const REPOSITORY_WIDE_CODES: [&'static str; 2] = ["RATE_LIMITED", "SERVICE_UNAVAILABLE"];
 
     fn is_repository_wide(&self) -> bool {
-        self.error_type.as_deref().is_some_and(|error_type| {
-            Self::REPOSITORY_WIDE_TYPES
+        self.classifications().any(|classification| {
+            Self::REPOSITORY_WIDE_CODES
                 .iter()
-                .any(|wide| wide.eq_ignore_ascii_case(error_type))
+                .any(|wide| wide.eq_ignore_ascii_case(classification))
         })
+    }
+
+    fn classifications(&self) -> impl Iterator<Item = &str> {
+        self.error_type.as_deref().into_iter().chain(
+            self.extensions
+                .as_ref()
+                .and_then(|extensions| extensions.code.as_deref()),
+        )
     }
 }
 
@@ -8005,18 +8057,18 @@ mod tests {
     };
 
     use super::{
-        CheckConclusion, ChecksOutcome, ConvergenceCheck, EntityTag, FileCredentialAccess,
-        GitHubRepositoryPoller, GraphQlError, HeaderMap, HeaderValue, ListedPullRequest,
-        MAX_CACHED_WIRE_BYTES, MAX_CHECK_SUITES_PER_COMMIT_CHECK_RUN_SEARCH,
-        MAX_CONCURRENT_PULL_REQUEST_FETCHES, MAX_CONSECUTIVE_POLL_PREEMPTIONS,
-        MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS, MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE,
-        PollAttemptWait, PollCache, PreparedTargetedRefresh, PullRequestSettlement, PullResponse,
-        RETRY_AFTER, ReactionContent, RepoWatchAuthorLogin, RepoWatchBranchHead,
-        RepoWatchConvergenceAssessment, RepoWatchConvergenceAssessmentInput,
-        RepoWatchCursorGeneration, RepoWatchEventKindNameV1, RepoWatchObservation,
-        RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
-        RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
-        RepoWatchReviewDecision, RepoWatchReviewObservation,
+        CheckConclusion, ChecksOutcome, ConvergenceCheck, DrainRetryBackoff, EntityTag,
+        FileCredentialAccess, GitHubRepositoryPoller, GraphQlEnvelope, GraphQlError,
+        GraphQlErrorExtensions, HeaderMap, HeaderValue, ListedPullRequest, MAX_CACHED_WIRE_BYTES,
+        MAX_CHECK_SUITES_PER_COMMIT_CHECK_RUN_SEARCH, MAX_CONCURRENT_PULL_REQUEST_FETCHES,
+        MAX_CONSECUTIVE_POLL_PREEMPTIONS, MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS,
+        MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE, PollAttemptWait, PollCache,
+        PreparedTargetedRefresh, PullRequestSettlement, PullResponse, RETRY_AFTER, ReactionContent,
+        RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchConvergenceAssessment,
+        RepoWatchConvergenceAssessmentInput, RepoWatchCursorGeneration, RepoWatchEventKindNameV1,
+        RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
+        RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
+        RepoWatchRepositoryStateInput, RepoWatchReviewDecision, RepoWatchReviewObservation,
         RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadState, RepoWatchWorkflowRunAttempt,
         RepoWatchWorkflowRunObservation, RepositorySlug, RepositoryWatchAttemptError,
         RepositoryWatchChildExit, RepositoryWatchRuntimeConstructionError,
@@ -13186,19 +13238,25 @@ mod tests {
     #[test]
     fn consecutive_webhook_preemptions_stop_starving_the_complete_poll() {
         assert_eq!(
-            poll_webhook_interrupt(false, 0),
+            poll_webhook_interrupt(DrainRetryBackoff::Clear, 0),
             WebhookPollInterrupt::Enabled
         );
         assert_eq!(
-            poll_webhook_interrupt(false, MAX_CONSECUTIVE_POLL_PREEMPTIONS - 1),
+            poll_webhook_interrupt(
+                DrainRetryBackoff::Clear,
+                MAX_CONSECUTIVE_POLL_PREEMPTIONS - 1
+            ),
             WebhookPollInterrupt::Enabled
         );
         assert_eq!(
-            poll_webhook_interrupt(false, MAX_CONSECUTIVE_POLL_PREEMPTIONS),
+            poll_webhook_interrupt(DrainRetryBackoff::Clear, MAX_CONSECUTIVE_POLL_PREEMPTIONS),
             WebhookPollInterrupt::Suppressed
         );
         assert_eq!(
-            poll_webhook_interrupt(false, MAX_CONSECUTIVE_POLL_PREEMPTIONS + 1),
+            poll_webhook_interrupt(
+                DrainRetryBackoff::Clear,
+                MAX_CONSECUTIVE_POLL_PREEMPTIONS + 1
+            ),
             WebhookPollInterrupt::Suppressed
         );
     }
@@ -13208,8 +13266,27 @@ mod tests {
     #[test]
     fn a_backing_off_drain_retry_still_suppresses_admission_preemption() {
         assert_eq!(
-            poll_webhook_interrupt(true, 0),
+            poll_webhook_interrupt(DrainRetryBackoff::InForce, 0),
             WebhookPollInterrupt::Suppressed
+        );
+    }
+
+    /// The labelled axis is only worth its label if it reads the retry
+    /// faithfully — including the case the axis exists to separate, a
+    /// follow-up deadline, which is owed but is not backoff.
+    #[tokio::test(start_paused = true)]
+    async fn the_backoff_axis_reads_the_retry_it_is_taken_from() {
+        let mut retry = WebhookDrainRetry::default();
+        assert_eq!(DrainRetryBackoff::of(&retry), DrainRetryBackoff::Clear);
+
+        retry.update_after(&drain_failure());
+        assert_eq!(DrainRetryBackoff::of(&retry), DrainRetryBackoff::InForce);
+
+        let mut following_up = WebhookDrainRetry::default();
+        following_up.arm_follow_up(Instant::now());
+        assert_eq!(
+            DrainRetryBackoff::of(&following_up),
+            DrainRetryBackoff::Clear
         );
     }
 
@@ -13441,6 +13518,22 @@ mod tests {
         assert!(!error.stops_webhook_page());
     }
 
+    /// The request count and the wire budget are the attempt's, and the drain
+    /// page runs inside one attempt, so a spent budget refuses every later
+    /// hydration on the page. Continuing spends transfer the ledger can no
+    /// longer account for to learn the same failure once per receipt.
+    #[test]
+    fn an_exhausted_attempt_budget_stops_the_whole_page() {
+        assert!(RepositoryWatchAttemptError::ResourceLimit.stops_webhook_page());
+    }
+
+    /// The size ceiling beside it is one response's, not the attempt's: a peer's
+    /// hydration can still fit under it, so page isolation holds.
+    #[test]
+    fn an_oversized_response_defers_only_its_own_receipt() {
+        assert!(!RepositoryWatchAttemptError::ResponseTooLarge.stops_webhook_page());
+    }
+
     /// Throttling and provider outage arrive as an `HTTP 200` GraphQL error
     /// envelope. Classified as a target-specific rejection, thread hydration
     /// re-issues the identical doomed request for every later delivery on the
@@ -13457,6 +13550,37 @@ mod tests {
         );
         assert_eq!(
             graphql_envelope_error(&[graphql_error("NOT_FOUND"), graphql_error("RATE_LIMITED")]),
+            RepositoryWatchAttemptError::ProviderUnavailable
+        );
+    }
+
+    /// The provider spells one taxonomy across two carriers, choosing by which
+    /// layer rejected the query: reading only `type` leaves an `extensions.code`
+    /// throttle classified as target-specific, and thread hydration re-issues it
+    /// for every later delivery on the page.
+    #[test]
+    fn a_repository_wide_graphql_error_is_read_from_either_carrier() {
+        let error = graphql_envelope_error(&[graphql_error_extension("RATE_LIMITED")]);
+
+        assert_eq!(error, RepositoryWatchAttemptError::ProviderUnavailable);
+        assert!(error.stops_webhook_page());
+        assert_eq!(
+            graphql_envelope_error(&[graphql_error_extension("undefinedField")]),
+            RepositoryWatchAttemptError::Rejected
+        );
+    }
+
+    /// The classifier reads the provider's envelope, not a hand-built value, so
+    /// the carrier has to survive deserialization to be read at all.
+    #[test]
+    fn the_extension_carrier_survives_the_wire() {
+        const THROTTLED_ENVELOPE: &str = r#"{"data":null,"errors":[{"message":"API rate limit exceeded","extensions":{"code":"RATE_LIMITED"}}]}"#;
+
+        let envelope: GraphQlEnvelope<serde_json::Value> =
+            serde_json::from_str(THROTTLED_ENVELOPE).expect("the throttled envelope parses");
+
+        assert_eq!(
+            graphql_envelope_error(&envelope.errors),
             RepositoryWatchAttemptError::ProviderUnavailable
         );
     }
@@ -13482,11 +13606,24 @@ mod tests {
     fn graphql_error(error_type: &str) -> GraphQlError {
         GraphQlError {
             error_type: Some(error_type.to_owned()),
+            extensions: None,
+        }
+    }
+
+    fn graphql_error_extension(code: &str) -> GraphQlError {
+        GraphQlError {
+            error_type: None,
+            extensions: Some(GraphQlErrorExtensions {
+                code: Some(code.to_owned()),
+            }),
         }
     }
 
     fn untyped_graphql_error() -> GraphQlError {
-        GraphQlError { error_type: None }
+        GraphQlError {
+            error_type: None,
+            extensions: None,
+        }
     }
 
     #[tokio::test]

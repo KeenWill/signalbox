@@ -1149,6 +1149,40 @@ async fn recorded_complete_poll(pool: &PgPool) -> Result<Option<String>, Box<dyn
     .await?)
 }
 
+/// Waits until a backend other than this test's is queued behind an advisory
+/// lock in this database.
+///
+/// The observation has to be positive for the caller to be a classifier at all:
+/// a fixed delay before marking the clock passes against a transaction-start
+/// stamp whenever the spawned sweep is slower to reach the lock than the delay,
+/// which is exactly what a loaded runner produces. Waiting on the contention
+/// itself makes the marker provably later than the sweep's transaction start.
+async fn await_repository_lock_contention(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+    const PROBE_INTERVAL: Duration = Duration::from_millis(10);
+    // Only reached when the sweep never queues at all, and failing is then the
+    // correct outcome, so this buys patience rather than encoding a latency.
+    const PROBE_ATTEMPTS: u32 = 3_000;
+
+    for _ in 0..PROBE_ATTEMPTS {
+        let contended: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1
+                  FROM pg_locks
+                 WHERE locktype = 'advisory'
+                   AND NOT granted
+                   AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+             )",
+        )
+        .fetch_one(pool)
+        .await?;
+        if contended {
+            return Ok(());
+        }
+        tokio::time::sleep(PROBE_INTERVAL).await;
+    }
+    Err("no backend ever queued behind the repository's advisory lock".into())
+}
+
 /// The cadence stamp measures when the sweep committed, not when its
 /// transaction opened. Those differ by the wait for the per-repository advisory
 /// lock — a sweep can queue behind a targeted webhook commit — and a stamp taken
@@ -1181,10 +1215,7 @@ async fn the_cadence_stamp_excludes_the_wait_for_the_repository_lock() -> Result
                 .await
         }
     });
-    // Long enough that a stamp taken from the transaction's start is
-    // unambiguously earlier than the marker below, short enough to stay a
-    // fixture rather than a delay.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    await_repository_lock_contention(&pool).await?;
     let held_until: String = sqlx::query_scalar("SELECT clock_timestamp()::text")
         .fetch_one(&mut *blocker)
         .await?;
