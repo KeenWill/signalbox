@@ -2015,6 +2015,9 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
     let example_json = serde_json::to_string_pretty(&example)
         .map_err(|_| GenerateWebContractError::Serialization)?
         + "\n";
+    let bootstrap_json = serde_json::to_string_pretty(&WebContractBootstrap::current())
+        .map_err(|_| GenerateWebContractError::Serialization)?
+        + "\n";
 
     Ok(vec![
         GeneratedArtifact {
@@ -2028,6 +2031,10 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
         GeneratedArtifact {
             path: "crates/web-contract/tests/fixtures/example.json",
             contents: example_json,
+        },
+        GeneratedArtifact {
+            path: "clients/web/src/generated/web-contract-bootstrap.json",
+            contents: bootstrap_json,
         },
     ])
 }
@@ -3481,6 +3488,11 @@ mod tests {
     #[test]
     fn checked_in_round_trip_fixture_matches_rust_authority() {
         assert_generated_artifact_current("crates/web-contract/tests/fixtures/example.json");
+    }
+
+    #[test]
+    fn checked_in_bootstrap_fixture_matches_rust_authority() {
+        assert_generated_artifact_current("clients/web/src/generated/web-contract-bootstrap.json");
     }
 
     #[test]

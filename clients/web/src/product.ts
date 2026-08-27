@@ -10,6 +10,7 @@ import {
   decodeWebRepoWatchRepositoryStatusPage,
   decodeWebRepoWatchWorkPage,
   decodeWebSearchPage,
+  decodeWebSessionCatalogSnapshot,
   type WebApiErrorResponse,
   type WebAttentionSnapshot,
   type WebAttentionStreamEvent,
@@ -21,6 +22,7 @@ import {
   type WebRepoWatchRepositoryStatusPage,
   type WebRepoWatchWorkPage,
   type WebSearchPage,
+  type WebSessionCatalogSnapshot,
 } from './generated/web-contract.mjs'
 
 export const productRoutes = [
@@ -103,6 +105,10 @@ export const productSurfaceCacheLabel = (surface: ProductRouteId): string | null
 
 export interface ProductTransport {
   readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap>
+  readSessions(
+    request: ProductSessionRequest,
+    signal?: AbortSignal,
+  ): Promise<WebSessionCatalogSnapshot>
   readBlobDescriptor(input: BlobDescriptorInput, signal?: AbortSignal): Promise<WebBlobDescriptor>
   readAttention(afterSessionId?: string, signal?: AbortSignal): Promise<WebAttentionSnapshot>
   followAttention(signal?: AbortSignal): AsyncIterable<WebAttentionStreamEvent>
@@ -117,6 +123,26 @@ export interface ProductSearchState {
   afterProjection?: string
   cursorParametersAreValid?: false
   around?: string
+}
+
+export interface ProductSessionState {
+  q?: string
+  sort?: 'activity' | 'identity'
+  archived?: boolean
+  afterSession?: string
+  afterActivity?: string
+  session?: string
+  workspace?: boolean
+}
+
+export type ProductRouteState = ProductSearchState & Omit<ProductSessionState, 'q' | 'session'>
+
+export interface ProductSessionRequest {
+  search?: string
+  sort: 'activity' | 'identity'
+  includeArchived: boolean
+  afterSession?: string
+  afterActivity?: string
 }
 
 export interface ProductSearchRequest {
@@ -229,6 +255,9 @@ export const MAX_DISPLAY_FILENAME_BYTES = 1_024
 // The Attention projection contract pages at 32 summaries; the byte ceilings are the shared
 // product JSON and NDJSON item limits the bootstrap already pins.
 export const MAX_ATTENTION_SNAPSHOT_ITEMS = 32
+export const MAX_SESSION_PAGE_ITEMS = 32
+export const MAX_SESSION_SEARCH_BYTES = 1_024
+const MAX_SESSION_SUMMARY_SCALARS = 128
 // Hard safety ceiling: bounds search-response allocation and parse work in the browser. Search
 // pages carry snippets for a full page of results, so they need a wider ceiling than the shared
 // product JSON limit that bounds identity-sized responses.
@@ -249,10 +278,57 @@ const SESSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 const CANONICAL_NONNEGATIVE_INTEGER_PATTERN = /^(0|[1-9]\d*)$/
 
+const CATALOG_SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+const admittedSessionIdentity = (value: unknown) =>
+  typeof value === 'string' && CATALOG_SESSION_ID_PATTERN.test(value) ? value : undefined
+
+const admittedActivityCursor = (value: unknown) => {
+  const cursor =
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? String(value) : value
+  if (
+    typeof cursor !== 'string' ||
+    !CANONICAL_NONNEGATIVE_INTEGER_PATTERN.test(cursor) ||
+    BigInt(cursor) > MAX_UNSIGNED_64
+  ) {
+    return undefined
+  }
+  return cursor
+}
+
+export const admittedSessionSearch = (value: unknown) => {
+  if (typeof value !== 'string' || value.length === 0 || value.includes('\0')) return undefined
+  return new TextEncoder().encode(value).byteLength <= MAX_SESSION_SEARCH_BYTES ? value : undefined
+}
+
+export const readProductSessionState = (value: Record<string, unknown>): ProductSessionState => {
+  const sort = value.sort === 'identity' ? 'identity' : undefined
+  const afterSession = admittedSessionIdentity(value.afterSession)
+  const afterActivity = admittedActivityCursor(value.afterActivity)
+  const validContinuation =
+    sort === 'identity'
+      ? afterSession !== undefined && value.afterActivity === undefined
+      : afterSession !== undefined && afterActivity !== undefined
+  return {
+    q: admittedSessionSearch(value.q),
+    sort,
+    archived: value.archived === true ? true : undefined,
+    afterSession: validContinuation ? afterSession : undefined,
+    afterActivity: validContinuation && sort !== 'identity' ? afterActivity : undefined,
+    session: admittedSessionIdentity(value.session),
+    workspace: value.workspace === true ? true : undefined,
+  }
+}
+
 const validateCursor = (cursor: string): void => {
   if (!CANONICAL_NONNEGATIVE_INTEGER_PATTERN.test(cursor) || BigInt(cursor) > MAX_UNSIGNED_64) {
     throw new TypeError('attention cursor must be a canonical unsigned 64-bit integer')
   }
+}
+
+const validatePositiveU64 = (value: string, label: string): void => {
+  validateCursor(value)
+  if (value === '0') throw new TypeError(`${label} must be positive`)
 }
 
 type AttentionSummary = WebAttentionSnapshot['summaries'][number]
@@ -359,6 +435,140 @@ const validateAttentionSnapshot = (
   }
   if (continuation !== null && snapshot.summaries.length !== MAX_ATTENTION_SNAPSHOT_ITEMS) {
     throw new TypeError('continued attention snapshot must contain a full contract page')
+  }
+  return snapshot
+}
+
+const catalogTurnDerivedStates = new Set<WebSessionCatalogSnapshot['summaries'][number]['state']>([
+  'active',
+  'queued',
+  'awaiting_approval',
+  'ambiguous',
+  'awaiting_tool_recovery',
+  'awaiting_reconciliation',
+])
+
+const validateSessionCatalogSnapshot = (
+  snapshot: WebSessionCatalogSnapshot,
+  request: ProductSessionRequest,
+): WebSessionCatalogSnapshot => {
+  validateCursor(snapshot.cursor)
+  validateCursor(snapshot.total)
+  if (snapshot.summaries.length > 0 && snapshot.cursor === '0') {
+    throw new TypeError('nonempty session catalog snapshot carries the empty cursor')
+  }
+  if (snapshot.summaries.length > MAX_SESSION_PAGE_ITEMS) {
+    throw new TypeError('session catalog snapshot exceeds the contract item ceiling')
+  }
+  if (BigInt(snapshot.total) < BigInt(snapshot.summaries.length)) {
+    throw new TypeError('session catalog total is smaller than its returned page')
+  }
+  const expectedSort =
+    request.sort === 'identity' ? 'session_identity_ascending' : 'last_activity_descending'
+  if (snapshot.sort !== expectedSort) {
+    throw new TypeError('session catalog sort contradicts the request')
+  }
+  const identities = new Set<string>()
+  for (const summary of snapshot.summaries) {
+    if (!CATALOG_SESSION_ID_PATTERN.test(summary.session_id)) {
+      throw new TypeError('session catalog contains a non-canonical session identity')
+    }
+    if (
+      summary.current_turn_id !== null &&
+      !CATALOG_SESSION_ID_PATTERN.test(summary.current_turn_id)
+    ) {
+      throw new TypeError('session catalog contains a non-canonical current-turn identity')
+    }
+    if (catalogTurnDerivedStates.has(summary.state) && summary.current_turn_id === null) {
+      throw new TypeError('turn-derived session catalog state lacks a current-turn identity')
+    }
+    if (identities.has(summary.session_id)) {
+      throw new TypeError('session catalog contains duplicate session identities')
+    }
+    identities.add(summary.session_id)
+    if (!request.includeArchived && summary.archived) {
+      throw new TypeError('session catalog contains an excluded archived session')
+    }
+    if (
+      request.search !== undefined &&
+      !summary.title_truncated &&
+      !summary.session_id.includes(request.search) &&
+      !(summary.title_summary?.includes(request.search) ?? false)
+    ) {
+      throw new TypeError('session catalog row contradicts the active search')
+    }
+    validateCursor(summary.active_turn_count)
+    validateCursor(summary.queued_turn_count)
+    validateCursor(summary.judge.actionable)
+    validateCursor(summary.judge.completed)
+    validateCursor(summary.judge.escalated)
+    validateCursor(summary.judge.failed)
+    validateCursor(summary.last_activity.unix_microseconds)
+    if (summary.goal_block !== null && summary.goal_block !== undefined) {
+      validatePositiveU64(summary.goal_block.generation, 'session catalog goal generation')
+    }
+    const titleScalars =
+      summary.title_summary === null ? 0 : Array.from(summary.title_summary).length
+    if (
+      titleScalars > MAX_SESSION_SUMMARY_SCALARS ||
+      (summary.title_truncated && titleScalars !== MAX_SESSION_SUMMARY_SCALARS) ||
+      (summary.goal_block !== null &&
+        summary.goal_block !== undefined &&
+        Array.from(summary.goal_block.need_summary).length > MAX_SESSION_SUMMARY_SCALARS)
+    ) {
+      throw new TypeError('session catalog summary exceeds its scalar ceiling')
+    }
+    const milliseconds = Number(BigInt(summary.last_activity.unix_microseconds) / 1_000n)
+    if (!Number.isSafeInteger(milliseconds) || !Number.isFinite(new Date(milliseconds).getTime())) {
+      throw new TypeError('session catalog activity timestamp is outside the Date range')
+    }
+  }
+  const first = snapshot.summaries[0]
+  if (
+    request.sort === 'identity' &&
+    request.afterSession !== undefined &&
+    first !== undefined &&
+    first.session_id <= request.afterSession
+  ) {
+    throw new TypeError('session catalog response precedes its identity continuation')
+  }
+  if (
+    request.sort === 'activity' &&
+    request.afterActivity !== undefined &&
+    first !== undefined &&
+    BigInt(first.last_activity.unix_microseconds) > BigInt(request.afterActivity)
+  ) {
+    throw new TypeError('session catalog response precedes its activity continuation')
+  }
+  if (
+    request.sort === 'activity' &&
+    request.afterActivity !== undefined &&
+    request.afterSession !== undefined &&
+    first !== undefined &&
+    first.last_activity.unix_microseconds === request.afterActivity &&
+    first.session_id <= request.afterSession
+  ) {
+    throw new TypeError('session catalog response repeats its activity continuation boundary')
+  }
+  if (
+    request.afterSession === undefined &&
+    snapshot.continuation === null &&
+    BigInt(snapshot.total) > BigInt(snapshot.summaries.length)
+  ) {
+    throw new TypeError('session catalog response omits a required continuation')
+  }
+  const continuation = snapshot.continuation
+  if (continuation !== null) {
+    const expectedKind = request.sort === 'identity' ? 'session_identity' : 'last_activity'
+    if (continuation.kind !== expectedKind) {
+      throw new TypeError('session catalog continuation contradicts the requested sort')
+    }
+    if (snapshot.summaries.length !== MAX_SESSION_PAGE_ITEMS) {
+      throw new TypeError('continued session catalog snapshot is not a full page')
+    }
+    if (BigInt(snapshot.total) <= BigInt(snapshot.summaries.length)) {
+      throw new TypeError('session catalog continuation contradicts the declared total')
+    }
   }
   return snapshot
 }
@@ -927,6 +1137,14 @@ export const readProductSearchState = (value: Record<string, unknown>): ProductS
   }
 }
 
+export const readProductRouteState = (value: Record<string, unknown>): ProductRouteState => {
+  const catalog = readProductSessionState(value)
+  return {
+    ...catalog,
+    ...readProductSearchState(value),
+  }
+}
+
 const validateBootstrapSearchLimits = (bootstrap: WebContractBootstrap): WebContractBootstrap => {
   const { limits } = bootstrap
   if (limits.max_search_query_bytes < 1 || limits.max_search_query_bytes > MAX_SEARCH_QUERY_BYTES) {
@@ -977,6 +1195,42 @@ export class SameOriginProductTransport implements ProductTransport, RepoWatchPr
       if (error instanceof ProductTransportError) throw error
       throw new ProductContractError(error)
     }
+  }
+
+  async readSessions(
+    catalogRequest: ProductSessionRequest,
+    signal?: AbortSignal,
+  ): Promise<WebSessionCatalogSnapshot> {
+    if (
+      catalogRequest.search !== undefined &&
+      admittedSessionSearch(catalogRequest.search) === undefined
+    ) {
+      throw new TypeError('session catalog search exceeds its contract bound')
+    }
+    const query = new URLSearchParams({
+      include_archived: String(catalogRequest.includeArchived),
+      sort:
+        catalogRequest.sort === 'identity'
+          ? 'session_identity_ascending'
+          : 'last_activity_descending',
+    })
+    if (catalogRequest.search !== undefined) query.set('search', catalogRequest.search)
+    if (catalogRequest.afterSession !== undefined) {
+      query.set('after_session_id', catalogRequest.afterSession)
+    }
+    if (catalogRequest.afterActivity !== undefined) {
+      query.set('after_activity_unix_microseconds', catalogRequest.afterActivity)
+    }
+    const response = await request(`/api/sessions?${query}`, {
+      headers: { accept: 'application/json' },
+      credentials: 'same-origin',
+      signal,
+    })
+    const payload = await readBoundedJson(response)
+    if (!response.ok) {
+      throw new ProductRequestError(response.status, decodeWebApiErrorResponse(payload))
+    }
+    return validateSessionCatalogSnapshot(decodeWebSessionCatalogSnapshot(payload), catalogRequest)
   }
 
   async readBlobDescriptor(

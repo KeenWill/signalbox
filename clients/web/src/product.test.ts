@@ -12,6 +12,7 @@ import {
   productRoutes,
   productSurfaceCacheLabel,
   productSurfaceStates,
+  readProductRouteState,
   readProductSearchState,
   SameOriginProductTransport,
 } from './product'
@@ -2032,6 +2033,20 @@ describe('readProductSearchState', () => {
       afterProjection: undefined,
       cursorParametersAreValid: false,
       around: undefined,
+    })
+  })
+})
+
+describe('readProductRouteState', () => {
+  it('retains catalog continuation fields beside search route state', () => {
+    expect(
+      readProductRouteState({
+        afterSession: previousSessionId,
+        afterActivity: 1_724_194_799_998_971,
+      }),
+    ).toMatchObject({
+      afterSession: previousSessionId,
+      afterActivity: '1724194799998971',
     })
   })
 })

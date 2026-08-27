@@ -39,6 +39,9 @@ const streamTransport = (
     readBlobDescriptor: async () => {
       throw new Error('unused blob descriptor read')
     },
+    readSessions: async () => {
+      throw new Error('unused session catalog read')
+    },
     readAttention: async () => {
       throw new Error('unused attention read')
     },
