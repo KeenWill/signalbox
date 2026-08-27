@@ -773,6 +773,9 @@ SELECT event.turn_id,
    AND command.result_session_id = event.session_id
    AND command.result_kind = 'applied'
    AND command.result_accepted_input_id = event.accepted_input_id
+   AND accepted_input_parts_match_command(
+       accepted.accepted_input_id
+   )
   LEFT JOIN goal_turn AS goal
     ON goal.session_id = event.session_id
    AND goal.accepted_input_id = event.accepted_input_id
@@ -1318,6 +1321,20 @@ fn bounded_text_excerpt(
     field: TimelineBodyField,
     remaining: &mut u32,
 ) -> Result<TimelineTextExcerpt, SessionTimelineRepositoryError> {
+    // A cursor that lands inside a multi-byte scalar makes the slice begin on a
+    // UTF-8 continuation byte. Stored text is validated UTF-8, so at a nonzero
+    // offset that shape proves a malformed client offset rather than corrupt
+    // stored text, and the detail contract requires offsets to be scalar
+    // boundaries. Classifying it as a query defect keeps the corruption arm
+    // reserved for genuinely unreadable stored bytes.
+    if response.offset_bytes > 0
+        && response
+            .bytes
+            .first()
+            .is_some_and(|byte| byte & 0b1100_0000 == 0b1000_0000)
+    {
+        return Err(SessionTimelineRepositoryError::InvalidDetailQuery);
+    }
     let valid_bytes = match std::str::from_utf8(&response.bytes) {
         Ok(_) => response.bytes.len(),
         Err(error) if error.error_len().is_none() => error.valid_up_to(),
@@ -1878,5 +1895,44 @@ mod tests {
             response_excerpt(response, address, &mut budget),
             Err(SessionTimelineRepositoryError::InvalidStoredUtf8)
         ));
+    }
+
+    #[test]
+    fn a_mid_scalar_cursor_is_a_query_defect_rather_than_corruption() {
+        let address =
+            TimelineAddress::new(NonZeroU64::new(11).expect("fixture address is positive"));
+        // "€" encodes as E2 82 AC; a cursor one byte into it slices from the
+        // continuation byte 0x82, which the production read must classify as a
+        // malformed offset rather than unreadable stored text.
+        let response = ModelResponseSlice {
+            bytes: vec![0x82, 0xac],
+            offset_bytes: 1,
+            total_bytes: 3,
+        };
+        let mut budget = 8;
+
+        assert!(matches!(
+            response_excerpt(response, address, &mut budget),
+            Err(SessionTimelineRepositoryError::InvalidDetailQuery)
+        ));
+    }
+
+    #[test]
+    fn a_scalar_boundary_cursor_still_reads_its_excerpt() {
+        let address =
+            TimelineAddress::new(NonZeroU64::new(12).expect("fixture address is positive"));
+        // The same response read from the boundary after "a" returns the whole
+        // remaining scalar, proving the new classification only rejects offsets
+        // that genuinely land inside one.
+        let response = ModelResponseSlice {
+            bytes: "€".as_bytes().to_vec(),
+            offset_bytes: 1,
+            total_bytes: 4,
+        };
+        let mut budget = 8;
+
+        let excerpt =
+            response_excerpt(response, address, &mut budget).expect("boundary cursor is readable");
+        assert_eq!(excerpt.text, "€");
     }
 }
