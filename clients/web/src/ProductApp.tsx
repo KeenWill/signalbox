@@ -34,12 +34,15 @@ import { ImportsWorkspace } from './imports/ImportsWorkspace'
 import {
   ProductContractError,
   type ProductRouteId,
+  type ProductRouteState,
+  type ProductSearchState,
   type ProductSessionState,
   ProductTransportError,
   productRoutes,
   productSurfaceCacheLabel,
   productSurfaceStates,
   productTransport,
+  readProductSessionState,
 } from './product'
 import {
   invokeProductCommand,
@@ -49,6 +52,7 @@ import {
   productHotkeyBindings,
   productHotkeySequenceBindings,
 } from './productCommands'
+import { SearchSurface } from './SearchSurface'
 import { SessionCatalogSurface } from './SessionCatalogSurface'
 import { type SessionSelectionEvidence, SessionWorkspaceSurface } from './SessionWorkspaceSurface'
 import { SettingsSurface } from './SettingsSurface'
@@ -101,6 +105,17 @@ const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; ques
     title: 'Settings',
     question: 'How should this workstation present information?',
   },
+}
+
+// A keystroke aimed at an editing control belongs to that control, never to a global binding.
+const isEditableTarget = (target: EventTarget | null) => {
+  if (!(target instanceof HTMLElement)) return false
+  return (
+    target.isContentEditable ||
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement
+  )
 }
 
 const productNavigationCommandIds: Record<ProductRouteId, CommandId> = {
@@ -187,7 +202,13 @@ export function ProductNavigation({
   )
 }
 
-function CommandPalette({ context }: { context: ProductCommandContext }) {
+function CommandPalette({
+  context,
+  openerRef,
+}: {
+  context: ProductCommandContext
+  openerRef: RefObject<HTMLElement | null>
+}) {
   const open = useAppSelector((state) => state.app.overlay === 'palette')
   const focusTimelineAfterClose = useRef(false)
   return (
@@ -204,10 +225,18 @@ function CommandPalette({ context }: { context: ProductCommandContext }) {
           aria-describedby="product-palette-description"
           onEscapeKeyDown={(event) => event.stopPropagation()}
           onCloseAutoFocus={(event) => {
-            if (!focusTimelineAfterClose.current) return
+            if (focusTimelineAfterClose.current) {
+              event.preventDefault()
+              focusTimelineAfterClose.current = false
+              context.focusTimeline()
+              return
+            }
+            // Hand the palette's keystroke back to the control it was invoked from, unless another
+            // overlay has already taken over the surface.
+            const opener = openerRef.current
+            if (context.getState().app.overlay !== null || !opener?.isConnected) return
             event.preventDefault()
-            focusTimelineAfterClose.current = false
-            context.focusTimeline()
+            opener.focus()
           }}
         >
           <div className="dialog-heading">
@@ -523,7 +552,7 @@ export function ProductApp({
   search,
 }: {
   surface: ProductRouteId
-  search: ProductSessionState
+  search: ProductRouteState
 }) {
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
@@ -535,8 +564,9 @@ export function ProductApp({
   const artifactButtonRef = useRef<HTMLButtonElement>(null)
   const artifactDigestRef = useRef<HTMLInputElement>(null)
   const bootstrapStatusRef = useRef<HTMLSpanElement>(null)
+  const sessionState = useMemo(() => readProductSessionState({ ...search }), [search])
   const catalogSessionOpenedHere = useRef(false)
-  const currentCatalogSession = useRef(search.session)
+  const currentCatalogSession = useRef(sessionState.session)
   const artifactSideWasOpen = useRef(false)
   const inspectorWasInSheet = useRef(false)
   const surfaceEscapeRef = useRef<(() => boolean) | null>(null)
@@ -628,14 +658,24 @@ export function ProductApp({
       artifactOriginalIds: [],
       timelineWindowAvailable: surface === 'sessions' && timelineWindowAvailable,
       configuresTranscriptDetail: surface === 'settings',
-      focusTimeline: surfaceContext?.focusTimeline ?? (() => timelineRef.current?.focus()),
+      focusTimeline:
+        surfaceContext?.focusTimeline ??
+        (() => {
+          if (timelineRef.current !== null) {
+            timelineRef.current.focus()
+            return
+          }
+          // A surface with no timeline still has to release an editing control on unwind, but
+          // Escape with nothing to unwind must leave focus exactly where it is.
+          if (isEditableTarget(document.activeElement)) mainRef.current?.focus()
+        }),
       unwindSurface: () => {
-        if (surface === 'sessions' && search.workspace) {
-          updateSessionSearch({ ...search, workspace: undefined }, 'close')
+        if (surface === 'sessions' && sessionState.workspace) {
+          updateSessionSearch({ ...sessionState, workspace: undefined }, 'close')
           return true
         }
-        if (surface === 'sessions' && search.session) {
-          updateSessionSearch({ ...search, session: undefined }, 'close')
+        if (surface === 'sessions' && sessionState.session) {
+          updateSessionSearch({ ...sessionState, session: undefined }, 'close')
           return true
         }
         return surfaceEscapeRef.current?.() ?? false
@@ -672,7 +712,7 @@ export function ProductApp({
     importsCommandContext,
     navigate,
     navigationDisabled,
-    search,
+    sessionState,
     surface,
     timelineIds,
     timelineWindowAvailable,
@@ -682,15 +722,14 @@ export function ProductApp({
   useHotkeys(
     productHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
+      // Product surfaces own text fields, so the palette binding must never steal a keystroke the
+      // field is editing.
+      options: binding.commandId === 'palette.open' ? { ignoreInputs: true } : undefined,
       callback: (event) => {
         if (artifactSheetOwnsFocus) return
-        const target = event.target
         if (
-          binding.commandId === 'surface.escape' &&
-          (target instanceof HTMLInputElement ||
-            target instanceof HTMLTextAreaElement ||
-            target instanceof HTMLSelectElement ||
-            (target instanceof HTMLElement && target.isContentEditable))
+          (binding.commandId === 'palette.open' || binding.commandId === 'surface.escape') &&
+          isEditableTarget(event.target)
         ) {
           return
         }
@@ -705,6 +744,10 @@ export function ProductApp({
           ) {
             context.focusTimeline()
           }
+          if (binding.commandId === 'layout.toggle' && app.layout === 'workbench') {
+            // Focus leaves the navigation pane before the focus layout hides it.
+            mainRef.current?.focus()
+          }
           invokeProductCommand(binding.commandId, context)
         }
       },
@@ -713,8 +756,9 @@ export function ProductApp({
   useHotkeySequences(
     productHotkeySequenceBindings.map((binding) => ({
       sequence: binding.sequence,
-      callback: () => {
+      callback: (event) => {
         if (artifactSheetOwnsFocus) return
+        if (isEditableTarget(event.target)) return
         if (store.getState().app.overlay === null) {
           if (
             binding.commandId.startsWith('selection.') &&
@@ -798,6 +842,9 @@ export function ProductApp({
     }
   }, [copy.title])
 
+  const updateSearch = (next: ProductSearchState) =>
+    void navigate({ to: '/$surface', params: { surface }, search: next })
+
   const content =
     surface === 'attention' && bootstrap.isSuccess ? (
       <AttentionSurface registerEscapeHandler={registerSurfaceEscape} />
@@ -857,9 +904,9 @@ export function ProductApp({
           </div>
         </section>
       </div>
-    ) : surface === 'sessions' && bootstrap.isSuccess && search.workspace ? (
+    ) : surface === 'sessions' && bootstrap.isSuccess && sessionState.workspace ? (
       <SessionWorkspaceSurface
-        initialSessionId={search.session}
+        initialSessionId={sessionState.session}
         onSelectionEvidence={updateSelectionEvidence}
         onTimelineIds={updateTimelineIds}
         onTimelineWindowAvailable={setTimelineWindowAvailable}
@@ -869,7 +916,7 @@ export function ProductApp({
         windowRequest={windowRequest}
       />
     ) : surface === 'sessions' && bootstrap.isSuccess ? (
-      <SessionCatalogSurface state={search} onStateChange={updateSessionSearch} />
+      <SessionCatalogSurface state={sessionState} onStateChange={updateSessionSearch} />
     ) : surface === 'sessions' ? (
       <div className="catalog-notice">
         <p>Sessions are unavailable until the browser contract handshake succeeds.</p>
@@ -887,6 +934,44 @@ export function ProductApp({
           </button>
         )}
       </div>
+    ) : surface === 'search' && bootstrap.isError ? (
+      <div className="surface-body">
+        <section className="surface-empty" role="alert">
+          <AlertTriangle aria-hidden="true" />
+          <div>
+            <h2>Search availability could not be checked</h2>
+            <p>
+              {bootstrap.error instanceof ProductContractError
+                ? 'The daemon response is incompatible with the generated web contract.'
+                : 'Signalbox could not be reached. Retry the contract check when transport is available.'}
+            </p>
+          </div>
+        </section>
+      </div>
+    ) : surface === 'search' && bootstrap.data === undefined ? (
+      <div className="surface-body">
+        <p className="search-notice">Checking whether bounded search is available…</p>
+      </div>
+    ) : surface === 'search' &&
+      (bootstrap.data?.capabilities.bounded_json === false ||
+        bootstrap.data?.capabilities.bounded_lexical_search === false) ? (
+      <div className="surface-body">
+        <section className="surface-empty" aria-labelledby="search-unavailable-heading">
+          <AlertTriangle aria-hidden="true" />
+          <div>
+            <span className="availability-tag">Committed · unavailable</span>
+            <h2 id="search-unavailable-heading">
+              This daemon contract does not advertise bounded lexical search
+            </h2>
+            <p>
+              The search surface is ready, but the connected daemon does not expose the bounded
+              search capability. Signalbox will not infer or fabricate results.
+            </p>
+          </div>
+        </section>
+      </div>
+    ) : surface === 'search' ? (
+      <SearchSurface bootstrap={bootstrap.data} state={search} onStateChange={updateSearch} />
     ) : surface === 'settings' ? (
       <SettingsSurface context={context} />
     ) : surface === 'imports' && bootstrap.isSuccess && productImportApi !== null ? (
@@ -1006,7 +1091,7 @@ export function ProductApp({
           )}
         </aside>
       )}
-      <CommandPalette context={context} />
+      <CommandPalette context={context} openerRef={paletteOpenerRef} />
       <KeyboardHelp context={context} />
       <Dialog.Root
         open={app.overlay === 'navigation'}

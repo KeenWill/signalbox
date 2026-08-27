@@ -183,6 +183,7 @@ test('filters and inspects a session without a mouse, then restores focus', asyn
   await page.getByRole('textbox', { name: 'Search titles' }).fill('Release')
   await page.getByRole('textbox', { name: 'Search titles' }).press('Enter')
   await expect(page).toHaveURL(/q=Release/)
+  await expect(page.getByRole('heading', { name: `${filteredPage.total} sessions` })).toBeVisible()
   const session = page.getByRole('button', { name: firstPage.summaries[0].title_summary })
   await session.focus()
   await page.keyboard.press('Enter')

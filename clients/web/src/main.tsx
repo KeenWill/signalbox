@@ -7,7 +7,9 @@ import {
   createRouter,
   Navigate,
   Outlet,
+  parseSearchWith,
   RouterProvider,
+  stringifySearchWith,
 } from '@tanstack/react-router'
 import {
   Component,
@@ -25,7 +27,7 @@ import { ImportsWorkspace } from './imports/ImportsWorkspace'
 import { ScenarioImportApi } from './imports/scenario'
 import { ProductApp } from './ProductApp'
 import { applyPresentationPreferences } from './preferences'
-import { type ProductRouteId, productRoutes, readProductSessionState } from './product'
+import { type ProductRouteId, productRoutes, readProductRouteState } from './product'
 import { defaultSearchUsageRouteState, type SearchUsageRouteState } from './SearchUsage'
 import { selectApp, store } from './state'
 import './app.css'
@@ -139,7 +141,7 @@ const indexRoute = createRoute({
 const productRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/$surface',
-  validateSearch: readProductSessionState,
+  validateSearch: readProductRouteState,
   component: () => {
     const candidate = productRoute.useParams().surface
     const search = productRoute.useSearch()
@@ -157,6 +159,8 @@ const scenarioRoute = createRoute({
 })
 const router = createRouter({
   routeTree: rootRoute.addChildren([indexRoute, productRoute, scenarioRoute]),
+  parseSearch: parseSearchWith((value) => value),
+  stringifySearch: stringifySearchWith(String),
 })
 // Tunable effective ceiling: retain recently visited scenario projections without growing the
 // development cache for the lifetime of the page.

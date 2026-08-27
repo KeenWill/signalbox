@@ -45,6 +45,9 @@ const streamTransport = (
     readAttention: async () => {
       throw new Error('unused attention read')
     },
+    search: async () => {
+      throw new Error('unused search read')
+    },
     followAttention: async function* () {
       const batch = batches[nextBatch] ?? []
       nextBatch += 1

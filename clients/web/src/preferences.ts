@@ -172,3 +172,9 @@ export const applyPresentationPreferences = (
   root.dataset.theme = preferences.theme
   root.dataset.density = preferences.density
 }
+
+// Applied from a render-blocking module so the stored theme and density paint on the first frame
+// instead of flashing the defaults until React mounts.
+export const applyStoredVisualPreferences = (): void => {
+  applyPresentationPreferences(loadBrowserPreferences())
+}

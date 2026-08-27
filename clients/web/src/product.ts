@@ -9,6 +9,7 @@ import {
   decodeWebRepoWatchPullRequestSessionPage,
   decodeWebRepoWatchRepositoryStatusPage,
   decodeWebRepoWatchWorkPage,
+  decodeWebSearchPage,
   decodeWebSessionCatalogSnapshot,
   type WebApiErrorResponse,
   type WebAttentionSnapshot,
@@ -20,6 +21,7 @@ import {
   type WebRepoWatchPullRequestSessionPage,
   type WebRepoWatchRepositoryStatusPage,
   type WebRepoWatchWorkPage,
+  type WebSearchPage,
   type WebSessionCatalogSnapshot,
 } from './generated/web-contract.mjs'
 
@@ -36,59 +38,6 @@ export const productRoutes = [
 ] as const
 
 export type ProductRouteId = (typeof productRoutes)[number]['id']
-
-export interface ProductSessionState {
-  q?: string
-  sort?: 'activity' | 'identity'
-  archived?: boolean
-  afterSession?: string
-  afterActivity?: string
-  session?: string
-  workspace?: boolean
-}
-
-const CATALOG_SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-
-const admittedSessionIdentity = (value: unknown) =>
-  typeof value === 'string' && CATALOG_SESSION_ID_PATTERN.test(value) ? value : undefined
-
-const admittedActivityCursor = (value: unknown) => {
-  if (
-    typeof value !== 'string' ||
-    !CANONICAL_NONNEGATIVE_INTEGER_PATTERN.test(value) ||
-    BigInt(value) > MAX_UNSIGNED_64
-  ) {
-    return undefined
-  }
-  return value
-}
-
-export const readProductSessionState = (value: Record<string, unknown>): ProductSessionState => {
-  const sort = value.sort === 'identity' ? 'identity' : undefined
-  const afterSession = admittedSessionIdentity(value.afterSession)
-  const afterActivity = admittedActivityCursor(value.afterActivity)
-  const validContinuation =
-    sort === 'identity'
-      ? afterSession !== undefined && value.afterActivity === undefined
-      : afterSession !== undefined && afterActivity !== undefined
-  return {
-    q: admittedSessionSearch(value.q),
-    sort,
-    archived: value.archived === true ? true : undefined,
-    afterSession: validContinuation ? afterSession : undefined,
-    afterActivity: validContinuation && sort !== 'identity' ? afterActivity : undefined,
-    session: admittedSessionIdentity(value.session),
-    workspace: value.workspace === true ? true : undefined,
-  }
-}
-
-export interface ProductSessionRequest {
-  search?: string
-  sort: 'activity' | 'identity'
-  includeArchived: boolean
-  afterSession?: string
-  afterActivity?: string
-}
 
 export type ProductSurfaceState =
   | { kind: 'browser-local'; authority: 'browser preferences' }
@@ -163,6 +112,45 @@ export interface ProductTransport {
   readBlobDescriptor(input: BlobDescriptorInput, signal?: AbortSignal): Promise<WebBlobDescriptor>
   readAttention(afterSessionId?: string, signal?: AbortSignal): Promise<WebAttentionSnapshot>
   followAttention(signal?: AbortSignal): AsyncIterable<WebAttentionStreamEvent>
+  search(request: ProductSearchRequest, signal?: AbortSignal): Promise<WebSearchPage>
+}
+
+export interface ProductSearchState {
+  q?: string
+  session?: string
+  sessionParameterIsValid?: false
+  afterAddress?: string
+  afterProjection?: string
+  cursorParametersAreValid?: false
+  around?: string
+}
+
+export interface ProductSessionState {
+  q?: string
+  sort?: 'activity' | 'identity'
+  archived?: boolean
+  afterSession?: string
+  afterActivity?: string
+  session?: string
+  workspace?: boolean
+}
+
+export type ProductRouteState = ProductSearchState & Omit<ProductSessionState, 'q' | 'session'>
+
+export interface ProductSessionRequest {
+  search?: string
+  sort: 'activity' | 'identity'
+  includeArchived: boolean
+  afterSession?: string
+  afterActivity?: string
+}
+
+export interface ProductSearchRequest {
+  query: string
+  sessionId?: string
+  maxItems: number
+  maxSnippetBytes: number
+  after?: { address: string; projectionId: string }
 }
 
 export interface RepoWatchHeldCursor {
@@ -270,15 +258,66 @@ export const MAX_ATTENTION_SNAPSHOT_ITEMS = 32
 export const MAX_SESSION_PAGE_ITEMS = 32
 export const MAX_SESSION_SEARCH_BYTES = 1_024
 const MAX_SESSION_SUMMARY_SCALARS = 128
+// Hard safety ceiling: bounds search-response allocation and parse work in the browser. Search
+// pages carry snippets for a full page of results, so they need a wider ceiling than the shared
+// product JSON limit that bounds identity-sized responses.
+const MAX_SEARCH_RESPONSE_BYTES = 1_048_576
+// Hard safety ceiling: rejects advertised query limits above the browser's bounded input budget.
+const MAX_SEARCH_QUERY_BYTES = 512
+// Hard safety ceiling: rejects advertised page sizes above the browser's bounded render budget.
+const MAX_SEARCH_PAGE_ITEMS = 100
+// Hard safety ceiling: rejects advertised snippets above the browser's bounded render budget.
+const MAX_SEARCH_SNIPPET_BYTES = 512
+// Representation fact: projection identities are positive signed 64-bit database integers.
+const MAX_I64 = 9_223_372_036_854_775_807n
+const isUtf8ContinuationByte = (byte: number | undefined) =>
+  byte !== undefined && (byte & 0xc0) === 0x80
 
 const MAX_UNSIGNED_64 = 18_446_744_073_709_551_615n
 const SESSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 const CANONICAL_NONNEGATIVE_INTEGER_PATTERN = /^(0|[1-9]\d*)$/
 
+const CATALOG_SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+const admittedSessionIdentity = (value: unknown) =>
+  typeof value === 'string' && CATALOG_SESSION_ID_PATTERN.test(value) ? value : undefined
+
+const admittedActivityCursor = (value: unknown) => {
+  const cursor =
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? String(value) : value
+  if (
+    typeof cursor !== 'string' ||
+    !CANONICAL_NONNEGATIVE_INTEGER_PATTERN.test(cursor) ||
+    BigInt(cursor) > MAX_UNSIGNED_64
+  ) {
+    return undefined
+  }
+  return cursor
+}
+
 export const admittedSessionSearch = (value: unknown) => {
   if (typeof value !== 'string' || value.length === 0 || value.includes('\0')) return undefined
   return new TextEncoder().encode(value).byteLength <= MAX_SESSION_SEARCH_BYTES ? value : undefined
+}
+
+export const readProductSessionState = (value: Record<string, unknown>): ProductSessionState => {
+  const sort = value.sort === 'identity' ? 'identity' : undefined
+  const afterSession = admittedSessionIdentity(value.afterSession)
+  const afterActivity = admittedActivityCursor(value.afterActivity)
+  const validContinuation =
+    sort === 'identity'
+      ? afterSession !== undefined && value.afterActivity === undefined
+      : afterSession !== undefined && afterActivity !== undefined
+  return {
+    q: admittedSessionSearch(value.q),
+    sort,
+    archived: value.archived === true ? true : undefined,
+    afterSession: validContinuation ? afterSession : undefined,
+    afterActivity: validContinuation && sort !== 'identity' ? afterActivity : undefined,
+    session: admittedSessionIdentity(value.session),
+    workspace: value.workspace === true ? true : undefined,
+  }
 }
 
 const validateCursor = (cursor: string): void => {
@@ -599,13 +638,22 @@ const validateBlobDescriptorInput = (input: BlobDescriptorInput): void => {
   }
 }
 
-const readBoundedJson = async (response: Response): Promise<unknown> => {
+const readBoundedJson = async (
+  response: Response,
+  maximumBytes: number = MAX_PRODUCT_JSON_BYTES,
+): Promise<unknown> => {
   const declaredLength = Number(response.headers.get('content-length'))
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_PRODUCT_JSON_BYTES) {
+  if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
     throw new Error('response exceeded the product JSON byte limit')
   }
 
-  if (!response.body) return JSON.parse(await response.text())
+  if (!response.body) {
+    const text = await response.text()
+    if (new TextEncoder().encode(text).byteLength > maximumBytes) {
+      throw new Error('response exceeded the product JSON byte limit')
+    }
+    return JSON.parse(text)
+  }
 
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
@@ -619,7 +667,7 @@ const readBoundedJson = async (response: Response): Promise<unknown> => {
     }
     if (result.done) break
     received += result.value.byteLength
-    if (received > MAX_PRODUCT_JSON_BYTES) {
+    if (received > maximumBytes) {
       await reader.cancel()
       throw new Error('response exceeded the product JSON byte limit')
     }
@@ -924,6 +972,188 @@ const request = async (input: RequestInfo | URL, init: RequestInit): Promise<Res
   }
 }
 
+const canonicalizedSearchUuid = (value: string): string | undefined => {
+  const compact = value
+    .toLowerCase()
+    .replace(/^urn:uuid:/, '')
+    .replace(/^\{(.*)\}$/, '$1')
+    .replaceAll('-', '')
+  if (!/^[0-9a-f]{32}$/.test(compact)) return undefined
+  return `${compact.slice(0, 8)}-${compact.slice(8, 12)}-${compact.slice(12, 16)}-${compact.slice(16, 20)}-${compact.slice(20)}`
+}
+
+const sourceUuids = (source: WebSearchPage['results'][number]['source']): string[] => {
+  switch (source.kind) {
+    case 'session':
+      return [source.session_id]
+    case 'accepted_input':
+      return [source.accepted_input_id, source.turn_id]
+    case 'steering_input':
+      return [source.accepted_input_id, source.source_turn_id]
+    case 'turn_transcript_entry':
+      return [source.semantic_entry_id, source.turn_id]
+    case 'session_transcript_entry':
+      return [source.semantic_entry_id]
+    case 'tool_request':
+      return [source.tool_request_id, source.turn_id]
+    case 'tool_attempt':
+      return [source.tool_attempt_id, source.turn_id]
+    case 'attachment':
+      return [source.attachment_id]
+    case 'derived_artifact':
+      return [source.artifact_id]
+  }
+}
+
+const validateSearchPageBounds = (
+  page: WebSearchPage,
+  searchRequest: ProductSearchRequest,
+): WebSearchPage => {
+  if (page.results.length > searchRequest.maxItems)
+    throw new TypeError('search page exceeds item limit')
+  const encoder = new TextEncoder()
+  const requestedSession =
+    searchRequest.sessionId === undefined
+      ? undefined
+      : canonicalizedSearchUuid(searchRequest.sessionId)
+  let previousAddress =
+    searchRequest.after === undefined ? undefined : BigInt(searchRequest.after.address)
+  let previousProjectionId =
+    searchRequest.after === undefined ? undefined : BigInt(searchRequest.after.projectionId)
+  let firstResult = true
+  for (const result of page.results) {
+    const resultSession = canonicalizedSearchUuid(result.session_id)
+    if (
+      resultSession === undefined ||
+      sourceUuids(result.source).some((identity) => canonicalizedSearchUuid(identity) === undefined)
+    ) {
+      throw new TypeError('search result carries an invalid UUID identity')
+    }
+    if (
+      searchRequest.sessionId !== undefined &&
+      (requestedSession === undefined || resultSession !== requestedSession)
+    ) {
+      throw new TypeError('search result falls outside the requested session')
+    }
+    if (
+      result.source.kind === 'session' &&
+      canonicalizedSearchUuid(result.source.session_id) !== resultSession
+    ) {
+      throw new TypeError('search result source contradicts its session')
+    }
+    const address = BigInt(result.address.event_sequence)
+    const projectionId = BigInt(result.projection_id)
+    if (
+      previousAddress !== undefined &&
+      (address > previousAddress ||
+        (address === previousAddress &&
+          previousProjectionId !== undefined &&
+          projectionId >= previousProjectionId))
+    ) {
+      throw new TypeError(
+        firstResult && searchRequest.after !== undefined
+          ? 'search page does not advance past the request cursor'
+          : 'search page is not ordered newest first',
+      )
+    }
+    firstResult = false
+    previousAddress = address
+    previousProjectionId = projectionId
+    const snippetBytes = encoder.encode(result.snippet)
+    const snippetLength = snippetBytes.byteLength
+    if (snippetLength > searchRequest.maxSnippetBytes) {
+      throw new TypeError('search result exceeds snippet limit')
+    }
+    let previousEnd = 0
+    for (const highlight of result.highlights) {
+      if (
+        highlight.start_byte < previousEnd ||
+        highlight.end_byte < highlight.start_byte ||
+        highlight.end_byte > snippetLength ||
+        (highlight.start_byte > 0 &&
+          highlight.start_byte < snippetLength &&
+          isUtf8ContinuationByte(snippetBytes[highlight.start_byte])) ||
+        (highlight.end_byte > 0 &&
+          highlight.end_byte < snippetLength &&
+          isUtf8ContinuationByte(snippetBytes[highlight.end_byte]))
+      ) {
+        throw new TypeError('search result carries an invalid highlight range')
+      }
+      previousEnd = highlight.end_byte
+    }
+  }
+  const continuation = page.continuation
+  if (continuation != null) {
+    const lastResult = page.results.at(-1)
+    const projectionId = continuation.projection_id
+    if (
+      lastResult === undefined ||
+      continuation.address.event_sequence !== lastResult.address.event_sequence ||
+      continuation.projection_id !== lastResult.projection_id ||
+      !/^[1-9][0-9]*$/.test(projectionId) ||
+      BigInt(projectionId) > MAX_I64
+    ) {
+      throw new TypeError('search page carries an invalid continuation')
+    }
+  }
+  return page
+}
+
+export const readProductSearchState = (value: Record<string, unknown>): ProductSearchState => {
+  const text = (key: keyof ProductSearchState) =>
+    typeof value[key] === 'string' && value[key].length > 0 ? value[key] : undefined
+  const cursorText = (key: 'afterAddress' | 'afterProjection') => {
+    const field = value[key]
+    if (typeof field === 'string') return field.length > 0 ? field : undefined
+    return typeof field === 'number' && Number.isFinite(field) ? String(field) : undefined
+  }
+  const query = value.q
+  const q =
+    typeof query === 'string'
+      ? query || undefined
+      : typeof query === 'number' || typeof query === 'boolean' || query === null
+        ? String(query)
+        : undefined
+  return {
+    q,
+    session: text('session'),
+    ...(value.session !== undefined && typeof value.session !== 'string'
+      ? { sessionParameterIsValid: false as const }
+      : {}),
+    afterAddress: cursorText('afterAddress'),
+    afterProjection: cursorText('afterProjection'),
+    ...(Array.isArray(value.afterAddress) || Array.isArray(value.afterProjection)
+      ? { cursorParametersAreValid: false as const }
+      : {}),
+    around: text('around'),
+  }
+}
+
+export const readProductRouteState = (value: Record<string, unknown>): ProductRouteState => {
+  const catalog = readProductSessionState(value)
+  return {
+    ...catalog,
+    ...readProductSearchState(value),
+  }
+}
+
+const validateBootstrapSearchLimits = (bootstrap: WebContractBootstrap): WebContractBootstrap => {
+  const { limits } = bootstrap
+  if (limits.max_search_query_bytes < 1 || limits.max_search_query_bytes > MAX_SEARCH_QUERY_BYTES) {
+    throw new TypeError('bootstrap carries an invalid search query limit')
+  }
+  if (limits.max_search_page_items < 1 || limits.max_search_page_items > MAX_SEARCH_PAGE_ITEMS) {
+    throw new TypeError('bootstrap carries an invalid search page limit')
+  }
+  if (
+    limits.max_search_snippet_bytes < 1 ||
+    limits.max_search_snippet_bytes > MAX_SEARCH_SNIPPET_BYTES
+  ) {
+    throw new TypeError('bootstrap carries an invalid search snippet limit')
+  }
+  return bootstrap
+}
+
 const validateCurrentBootstrap = (bootstrap: WebContractBootstrap): WebContractBootstrap => {
   if (
     bootstrap.contract.name !== 'signalbox.web-http' ||
@@ -950,7 +1180,9 @@ export class SameOriginProductTransport implements ProductTransport, RepoWatchPr
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
     try {
-      return validateCurrentBootstrap(decodeWebContractBootstrap(await readBoundedJson(response)))
+      return validateBootstrapSearchLimits(
+        validateCurrentBootstrap(decodeWebContractBootstrap(await readBoundedJson(response))),
+      )
     } catch (error) {
       if (error instanceof ProductTransportError) throw error
       throw new ProductContractError(error)
@@ -1067,6 +1299,32 @@ export class SameOriginProductTransport implements ProductTransport, RepoWatchPr
     }
     if (!response.body) throw new TypeError('attention stream response has no body')
     yield* decodeAttentionLines(response.body, signal)
+  }
+
+  async search(searchRequest: ProductSearchRequest, signal?: AbortSignal): Promise<WebSearchPage> {
+    const query = new URLSearchParams({
+      strategy: 'lexical',
+      q: searchRequest.query,
+      max_items: String(searchRequest.maxItems),
+    })
+    if (searchRequest.sessionId) query.set('session_id', searchRequest.sessionId)
+    if (searchRequest.after) {
+      query.set('after_address', searchRequest.after.address)
+      query.set('after_projection', searchRequest.after.projectionId)
+    }
+    const response = await request(`/api/search?${query}`, {
+      headers: { accept: 'application/json' },
+      credentials: 'same-origin',
+      signal,
+    })
+    if (!response.ok) {
+      throw new ProductRequestError(
+        response.status,
+        decodeWebApiErrorResponse(await readBoundedJson(response)),
+      )
+    }
+    const page = decodeWebSearchPage(await readBoundedJson(response, MAX_SEARCH_RESPONSE_BYTES))
+    return validateSearchPageBounds(page, searchRequest)
   }
 
   async readRepoWatchRepositories(
