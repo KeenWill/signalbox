@@ -2815,6 +2815,9 @@ fn start_fleet_scheduler(
             .integer("automatic_reconciliations_per_liveness_scan")
             .flatten()
             .and_then(|value| usize::try_from(value).ok()),
+        bounds
+            .duration("automatic_reconciliation_attempt_bound")
+            .flatten(),
         turn_liveness_persistence_bounds,
     );
     let stale_active_turn_bound = bounds
@@ -9001,7 +9004,7 @@ async fn s01_s03_inv014_inv015_reported_usage_rechecks_compaction_headroom()
 
     let failed_turn = reported_usage_still_exceeded_turn(
         compaction
-            .compact_if_needed(SessionId::from_uuid(session_id.into_uuid()))
+            .compact_if_needed(SessionId::from_uuid(session_id.into_uuid()), None)
             .await,
     );
 

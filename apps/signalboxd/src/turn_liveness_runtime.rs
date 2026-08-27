@@ -104,21 +104,33 @@ pub struct TurnLivenessNumericBounds {
     terminalizations_per_scan: Option<usize>,
     recovery_attempt_bound: Option<Duration>,
     automatic_reconciliations_per_scan: Option<usize>,
+    automatic_reconciliation_attempt_bound: Option<Duration>,
     persistence: TurnLivenessPersistenceBounds,
 }
 
 impl TurnLivenessNumericBounds {
     /// Binds every scan limit to the validated daemon configuration.
+    ///
+    /// The two attempt bounds are separate because their consumers are. A
+    /// slot-held recovery transaction is applied once per candidate across the
+    /// fair window, so its bound multiplies into how long a stalled database
+    /// delays the next watchdog wake and has to stay well inside the
+    /// scheduler-pass ceiling this watchdog backstops. An automatic
+    /// reconciliation transaction crosses the shared outbox and
+    /// deferred-validation convoy instead, which is ordinary traffic that a
+    /// ten-second deadline would refuse.
     pub const fn new(
         terminalizations_per_scan: Option<usize>,
         recovery_attempt_bound: Option<Duration>,
         automatic_reconciliations_per_scan: Option<usize>,
+        automatic_reconciliation_attempt_bound: Option<Duration>,
         persistence: TurnLivenessPersistenceBounds,
     ) -> Self {
         Self {
             terminalizations_per_scan,
             recovery_attempt_bound,
             automatic_reconciliations_per_scan,
+            automatic_reconciliation_attempt_bound,
             persistence,
         }
     }
@@ -473,6 +485,7 @@ async fn run_ambiguous_operation_watchdog(
                     &repository,
                     automatic_reconciliation_attempt_budget,
                     numeric_bounds,
+                    &mut shutdown,
                 )
                 .await;
             }
@@ -605,25 +618,46 @@ fn report_slot_held_recovery_failure(
     );
 }
 
+/// Reports whether the batch may commission another reconciliation.
+///
+/// A requested stop ends the batch here rather than at its per-scan ceiling: a
+/// scan may commission as many transactions as that ceiling allows, each with
+/// its own wall-clock deadline, so waiting behind the remaining population is
+/// how a drain outlives its grace window.
+fn batch_admits_another_reconciliation(
+    shutdown: &watch::Receiver<bool>,
+    reconciliations: usize,
+    ceiling: Option<usize>,
+) -> bool {
+    !*shutdown.borrow() && ceiling.is_none_or(|limit| reconciliations < limit)
+}
+
 /// Claims and applies one bounded window of durable ambiguous-call work.
+///
+/// Every stage observes shutdown ahead of its own deadline, exactly as the
+/// slot-held watchdog's sequential recovery transactions do. A stage abandoned
+/// that way queues an ordinary rollback while its database-side budget — which
+/// expires first by construction — releases the backend, and the claimed
+/// attempt's own recorded deadline stays the recovery authority.
 async fn reconcile_ambiguous_operations(
     repository: &PostgresAutomaticReconciliationRepository,
     automatic_reconciliation_attempt_budget: Option<u32>,
     numeric_bounds: TurnLivenessNumericBounds,
+    shutdown: &mut watch::Receiver<bool>,
 ) {
     let mut reconciliations = 0usize;
-    while numeric_bounds
-        .automatic_reconciliations_per_scan
-        .is_none_or(|limit| reconciliations < limit)
-    {
+    while batch_admits_another_reconciliation(
+        shutdown,
+        reconciliations,
+        numeric_bounds.automatic_reconciliations_per_scan,
+    ) {
         let claim = timeout(
-            reconciliation_deadline(numeric_bounds.recovery_attempt_bound),
+            reconciliation_deadline(numeric_bounds.automatic_reconciliation_attempt_bound),
             repository.claim_due(),
         );
-        // Once PostgreSQL has begun a bounded transaction, shutdown lets that
-        // transaction reach its server-enforced outcome instead of dropping
-        // its client driver and leaving the backend running during the drain.
-        let claim_outcome = claim.await;
+        let Some(claim_outcome) = complete_before_shutdown(shutdown, claim).await else {
+            return;
+        };
         let batch = match claim_outcome {
             Ok(Ok(batch)) => batch,
             Ok(Err(error)) => {
@@ -634,7 +668,7 @@ async fn reconcile_ambiguous_operations(
                 report_automatic_reconciliation_timeout(
                     "inventory",
                     None,
-                    numeric_bounds.recovery_attempt_bound,
+                    numeric_bounds.automatic_reconciliation_attempt_bound,
                 );
                 return;
             }
@@ -656,10 +690,12 @@ async fn reconcile_ambiguous_operations(
         };
         let (operation_kind, operation_id) = operation_log_fields(claimed.operation());
         let attempt = timeout(
-            reconciliation_deadline(numeric_bounds.recovery_attempt_bound),
+            reconciliation_deadline(numeric_bounds.automatic_reconciliation_attempt_bound),
             repository.reconcile(claimed),
         );
-        let attempt_outcome = attempt.await;
+        let Some(attempt_outcome) = complete_before_shutdown(shutdown, attempt).await else {
+            return;
+        };
         match attempt_outcome {
             Ok(Ok(AutomaticReconciliationOutcome::Reconciled)) => tracing::warn!(
                 cause_code = "model_call_automatically_reconciled",
@@ -688,10 +724,16 @@ async fn reconcile_ambiguous_operations(
                     }
                 ) {
                     let record_failure = timeout(
-                        reconciliation_deadline(numeric_bounds.recovery_attempt_bound),
+                        reconciliation_deadline(
+                            numeric_bounds.automatic_reconciliation_attempt_bound,
+                        ),
                         repository.record_failure(claimed, error.failure_kind()),
                     );
-                    let record_outcome = record_failure.await;
+                    let Some(record_outcome) =
+                        complete_before_shutdown(shutdown, record_failure).await
+                    else {
+                        return;
+                    };
                     match record_outcome {
                         Ok(Ok(())) => {}
                         Ok(Err(record_error)) => report_automatic_reconciliation_failure(
@@ -702,7 +744,7 @@ async fn reconcile_ambiguous_operations(
                         Err(_) => report_automatic_reconciliation_timeout(
                             "failure_record",
                             Some(claimed),
-                            numeric_bounds.recovery_attempt_bound,
+                            numeric_bounds.automatic_reconciliation_attempt_bound,
                         ),
                     }
                 }
@@ -710,10 +752,19 @@ async fn reconcile_ambiguous_operations(
             Err(_) => report_automatic_reconciliation_timeout(
                 "attempt",
                 Some(claimed),
-                numeric_bounds.recovery_attempt_bound,
+                numeric_bounds.automatic_reconciliation_attempt_bound,
             ),
         }
         reconciliations = reconciliations.saturating_add(1);
+    }
+    if *shutdown.borrow() {
+        tracing::info!(
+            cause_code = "automatic_reconciliation_batch_preempted",
+            reconciliations,
+            attempt_ceiling = ?numeric_bounds.automatic_reconciliations_per_scan,
+            "shutdown ended the automatic reconciliation batch; due work remains discoverable"
+        );
+        return;
     }
     tracing::info!(
         cause_code = "automatic_reconciliation_scan_ceiling_reached",
@@ -1111,8 +1162,9 @@ mod tests {
         STALE_TURN_LOCK_UNAVAILABLE_CAUSE, STALE_TURN_STEERING_BLOCKED_CAUSE,
         STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE, StaleTurnTerminalizer,
         TERMINALIZATION_DEFERRED_CAUSE, TerminalizationWindow, TurnLivenessNumericBounds,
-        TurnLivenessWake, complete_before_shutdown, drain_quiescent_rotation,
-        next_turn_liveness_wake, reconcile_turn_liveness, reconciliation_deadline,
+        TurnLivenessWake, batch_admits_another_reconciliation, complete_before_shutdown,
+        drain_quiescent_rotation, next_turn_liveness_wake, reconcile_turn_liveness,
+        reconciliation_deadline,
     };
     use signalbox_application::{
         StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence,
@@ -1149,6 +1201,9 @@ mod tests {
                 .integer("automatic_reconciliations_per_liveness_scan")
                 .flatten()
                 .and_then(|value| usize::try_from(value).ok()),
+            bounds
+                .duration("automatic_reconciliation_attempt_bound")
+                .flatten(),
             TurnLivenessPersistenceBounds::new(
                 bounds.duration("terminalization_lock_wait").flatten(),
                 bounds.duration("terminalization_acquire_wait").flatten(),
@@ -1693,6 +1748,37 @@ mod tests {
         );
     }
 
+    /// The slot-held recovery ceiling and the reconciliation ceiling are
+    /// configured apart, and the slot-held one multiplied across its fair
+    /// window still lands inside the scheduler-pass ceiling this watchdog
+    /// backstops. Sharing one value between the two consumers is exactly what
+    /// carried that product past the ceiling.
+    #[test]
+    fn the_slot_held_fair_window_stays_inside_the_scheduler_pass_ceiling() {
+        let bounds = example_numeric_bounds();
+        let recovery = bounds
+            .recovery_attempt_bound
+            .expect("the example bounds slot-held recovery");
+        let reconciliation = bounds
+            .automatic_reconciliation_attempt_bound
+            .expect("the example bounds automatic reconciliation");
+        let window = u32::try_from(
+            bounds
+                .terminalizations_per_scan
+                .expect("the example bounds the fair window"),
+        )
+        .expect("the example fair window fits a scan multiplier");
+        let occupancy_ceiling = crate::configuration::checked_in_example_configuration()
+            .expect("checked-in example parses")
+            .numeric_bounds()
+            .duration("scheduler_pass_occupancy_bound")
+            .flatten()
+            .expect("the example bounds scheduler pass occupancy");
+
+        assert!(recovery < reconciliation);
+        assert!(recovery.saturating_mul(window) < occupancy_ceiling);
+    }
+
     #[test]
     fn one_scan_uses_the_configured_reconciliation_limit() {
         assert!(
@@ -1700,6 +1786,51 @@ mod tests {
                 .automatic_reconciliations_per_scan
                 .is_some()
         );
+    }
+
+    /// A requested stop ends the batch where it stands rather than waiting
+    /// behind the population the per-scan ceiling still admits.
+    #[test]
+    fn a_requested_shutdown_ends_the_batch_before_its_remaining_population() {
+        let (sender, shutdown) = tokio::sync::watch::channel(false);
+        sender
+            .send(true)
+            .expect("the shutdown receiver remains live");
+
+        assert!(!batch_admits_another_reconciliation(
+            &shutdown,
+            0,
+            example_numeric_bounds().automatic_reconciliations_per_scan
+        ));
+    }
+
+    /// A ceiling small enough to read the gate's arithmetic off directly. It
+    /// is this test's own number, deliberately not the configured one.
+    const FIXTURE_RECONCILIATION_CEILING: usize = 2;
+
+    /// The same gate still admits work while no stop has been requested, so
+    /// the preemption narrows nothing an ordinary scan does.
+    #[test]
+    fn a_clear_shutdown_admits_the_next_reconciliation_within_the_ceiling() {
+        let (_sender, shutdown) = tokio::sync::watch::channel(false);
+
+        assert!(batch_admits_another_reconciliation(
+            &shutdown,
+            FIXTURE_RECONCILIATION_CEILING - 1,
+            Some(FIXTURE_RECONCILIATION_CEILING)
+        ));
+    }
+
+    /// The ceiling still ends the batch on its own once no stop is pending.
+    #[test]
+    fn the_per_scan_ceiling_still_ends_a_batch_no_shutdown_preempts() {
+        let (_sender, shutdown) = tokio::sync::watch::channel(false);
+
+        assert!(!batch_admits_another_reconciliation(
+            &shutdown,
+            FIXTURE_RECONCILIATION_CEILING,
+            Some(FIXTURE_RECONCILIATION_CEILING)
+        ));
     }
 
     #[tokio::test]

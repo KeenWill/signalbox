@@ -2626,6 +2626,61 @@ async fn s04_exhausted_automatic_reconciliation_is_visible_to_the_operator()
     Ok(())
 }
 
+/// S04: first-time recovery discovery contends with an accepting operator
+/// interrupt on the turn row instead of racing past its uncommitted
+/// terminalization.
+///
+/// Both sides used to read and write that row without a lock either could see,
+/// so discovery's `READ COMMITTED` snapshot could enrol a fresh `scheduled`
+/// recovery for a turn the interrupt was terminalizing, and the interrupt's own
+/// supersession could not see that uncommitted insert. The committed pair is
+/// the shape `process_read` rejects as corruption until a later supersession
+/// lap reaches it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s04_recovery_discovery_waits_on_the_interrupted_turn_row() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xD1A0;
+    let parked = park_restart_ambiguity(&pool, seed).await?;
+    // The exact row lock an accepting interrupt's terminalizing `UPDATE`
+    // takes, held open so discovery meets it before that interrupt commits.
+    let mut interrupt_lock = pool.begin().await?;
+    let locked_turn: Uuid = sqlx::query_scalar(
+        "SELECT turn_id
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2
+          FOR NO KEY UPDATE",
+    )
+    .bind(parked.session.into_uuid())
+    .bind(parked.turn.into_uuid())
+    .fetch_one(&mut *interrupt_lock)
+    .await?;
+    let discovery_pool = pool.clone();
+    let discovery = tokio::spawn(async move {
+        PostgresAutomaticReconciliationRepository::new(discovery_pool)
+            .claim_due()
+            .await
+    });
+
+    assert_eq!(locked_turn, parked.turn.into_uuid());
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "discovery waits on the turn row the accepting interrupt terminalizes"
+    );
+
+    interrupt_lock.rollback().await?;
+    let batch = discovery.await??;
+
+    assert_eq!(batch.exhausted(), &[]);
+    assert_eq!(batch.claimed().len(), 1);
+    assert_eq!(batch.claimed()[0].session(), parked.session);
+    assert_eq!(batch.claimed()[0].turn(), parked.turn);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S03 / INV-014: a prepared model call remains discoverable for ordinary
 /// active-turn resumption even when no tool round is active.
 #[tokio::test(flavor = "multi_thread")]
