@@ -2642,6 +2642,24 @@ async fn s04_recovery_discovery_waits_on_the_interrupted_turn_row() -> Result<()
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xD1A0;
     let parked = park_restart_ambiguity(&pool, seed).await?;
+    // Unlike the waits the other `blocked_backends_reached` sites observe, this
+    // one ends on the database's own budgets rather than on this test:
+    // `claim_due` reaches its pooled connection within
+    // `RECONCILIATION_ACQUIRE_WAIT` or gives up, and then waits for the row only
+    // until `lock_timeout` raises `55P03`. Both are short enough that a
+    // connection established *inside* that window consumes it — and connecting
+    // is what this test would otherwise do twice over, because the pool holds
+    // one idle connection here: the interrupt takes it, discovery opens a
+    // second, and the observer's first sample opens a third. On a loaded host
+    // those cold connects outlast the wait they exist to sample, and the test
+    // then reports that discovery never waited when in fact it waited and was
+    // timed out. Establishing all three up front leaves the window itself the
+    // only thing the poll measures. Holding them at once is what forces the pool
+    // to open one per holder; only the observer's is kept, and the other two go
+    // back to the pool already established.
+    let mut observer = pool.acquire().await?;
+    let established = [pool.acquire().await?, pool.acquire().await?];
+    drop(established);
     // The exact row lock an accepting interrupt's terminalizing `UPDATE`
     // takes, held open so discovery meets it before that interrupt commits.
     let mut interrupt_lock = pool.begin().await?;
@@ -2655,6 +2673,8 @@ async fn s04_recovery_discovery_waits_on_the_interrupted_turn_row() -> Result<()
     .bind(parked.turn.into_uuid())
     .fetch_one(&mut *interrupt_lock)
     .await?;
+    assert_eq!(locked_turn, parked.turn.into_uuid());
+    // Nothing may stand between opening the window and sampling it.
     let discovery_pool = pool.clone();
     let discovery = tokio::spawn(async move {
         PostgresAutomaticReconciliationRepository::new(discovery_pool)
@@ -2662,12 +2682,12 @@ async fn s04_recovery_discovery_waits_on_the_interrupted_turn_row() -> Result<()
             .await
     });
 
-    assert_eq!(locked_turn, parked.turn.into_uuid());
     assert!(
-        blocked_backends_reached(&pool, 1).await?,
+        blocked_backends_reached_on(&mut observer, 1).await?,
         "discovery waits on the turn row the accepting interrupt terminalizes"
     );
 
+    drop(observer);
     interrupt_lock.rollback().await?;
     let batch = discovery.await??;
 
