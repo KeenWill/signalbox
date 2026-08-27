@@ -864,12 +864,17 @@ impl WebHttpRuntime {
 }
 
 /// Builds the production router: `/api/` remains API-only and assets share its origin.
+///
+/// `shutdown` must be driven before an enclosing Axum graceful shutdown waits
+/// for requests, so live snapshot and follow reads can release their database
+/// and reader-budget waits.
 pub fn production_router(
     asset_root: Option<PathBuf>,
     pool: Option<PgPool>,
     blobs: Option<WebBlobRuntime>,
     model_configuration: Option<HubModelConfiguration>,
     blob_store_registry: Option<Arc<BlobStoreRegistry>>,
+    shutdown: Option<watch::Receiver<bool>>,
 ) -> Router {
     let snapshot_reader_budget = pool.as_ref().and_then(|pool| {
         super::process_runtime::shared_snapshot_reader_budget(
@@ -885,7 +890,7 @@ pub fn production_router(
         blob_store_registry,
         ProductionReadRuntime {
             snapshot_reader_budget,
-            shutdown: None,
+            shutdown,
             monitor: None,
         },
     )
@@ -4816,7 +4821,7 @@ mod tests {
         MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebAttentionStreamEvent, WebContractBootstrap,
         WebContractExample, WebUsageCost, WebUsageCostUnavailableReason,
     };
-    use sqlx::types::Uuid;
+    use sqlx::{PgPool, types::Uuid};
     use tokio::sync::{Semaphore, mpsc, watch};
     use tower::ServiceExt as _;
     use url::Url;
@@ -4826,10 +4831,11 @@ mod tests {
         WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime, WebHttpRuntimeError,
         attention_snapshot_dto, blob_descriptor_head, content_disposition,
         deterministic_test_router, if_none_match, ndjson_response, parse_byte_range,
-        parse_detail_query, production_router, reader_body_until, single_range_header,
-        try_acquire_web_blob_read_permit, usage_aggregate_cost_dto, usage_cost_dto,
+        parse_detail_query, production_router as production_router_with_shutdown,
+        reader_body_until, single_range_header, try_acquire_web_blob_read_permit,
+        usage_aggregate_cost_dto, usage_cost_dto,
     };
-    use crate::{HubModelConfiguration, ProcessMonitor};
+    use crate::{BlobStoreRegistry, HubModelConfiguration, ProcessMonitor, WebBlobRuntime};
 
     /// A descriptor method rejection must name the method clients can use.
     #[tokio::test]
@@ -4852,6 +4858,23 @@ mod tests {
         "127.0.0.1:0"
             .parse()
             .expect("the test listener address is valid")
+    }
+
+    fn production_router(
+        asset_root: Option<PathBuf>,
+        pool: Option<PgPool>,
+        blobs: Option<WebBlobRuntime>,
+        model_configuration: Option<HubModelConfiguration>,
+        blob_store_registry: Option<Arc<BlobStoreRegistry>>,
+    ) -> Router {
+        production_router_with_shutdown(
+            asset_root,
+            pool,
+            blobs,
+            model_configuration,
+            blob_store_registry,
+            None,
+        )
     }
 
     fn router_with_closed_snapshot_reader_budget(monitor: Option<ProcessMonitor>) -> Router {
