@@ -241,13 +241,14 @@ async fn seed_poll_parity_events(pool: &PgPool) -> Result<(), Box<dyn Error>> {
     sqlx::query(
         "INSERT INTO repo_watch_cursor (
             repository, generation, storage_version, cursor_payload
-         ) VALUES ($1, 1, 3, $2)",
+         ) VALUES ($1, 1, 4, $2)",
     )
     .bind(REPOSITORY)
     .bind(sqlx::types::Json(serde_json::json!({
-        "storage_version": 3,
+        "storage_version": 4,
         "signal_reviewers": [],
         "event_identity_frontier": [],
+        "merged_pull_request_baselines": [],
         "state": {
             "pull_requests": [],
             "workflow_runs": [],
@@ -313,13 +314,14 @@ async fn seed_promotion_boundary_events(
     sqlx::query(
         "INSERT INTO repo_watch_cursor (
             repository, generation, storage_version, cursor_payload
-         ) VALUES ($1, 1, 3, $2)",
+         ) VALUES ($1, 1, 4, $2)",
     )
     .bind(REPOSITORY)
     .bind(sqlx::types::Json(serde_json::json!({
-        "storage_version": 3,
+        "storage_version": 4,
         "signal_reviewers": [],
         "event_identity_frontier": [],
+        "merged_pull_request_baselines": [],
         "state": {
             "pull_requests": [],
             "workflow_runs": [],
@@ -436,13 +438,14 @@ async fn seed_poll_only_family_event(pool: &PgPool) -> Result<(), Box<dyn Error>
     sqlx::query(
         "INSERT INTO repo_watch_cursor (
             repository, generation, storage_version, cursor_payload
-         ) VALUES ($1, 1, 3, $2)",
+         ) VALUES ($1, 1, 4, $2)",
     )
     .bind(REPOSITORY)
     .bind(sqlx::types::Json(serde_json::json!({
-        "storage_version": 3,
+        "storage_version": 4,
         "signal_reviewers": [],
         "event_identity_frontier": [],
+        "merged_pull_request_baselines": [],
         "state": {
             "pull_requests": [],
             "workflow_runs": [],
