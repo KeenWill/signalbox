@@ -2463,7 +2463,7 @@ fn set_string_max_length(
 /// Stamps an array bound onto a generated schema from the value's owning crate.
 ///
 /// Restating the ceiling as a `schemars` literal lets the generated client and
-/// the advertised bootstrap limit drift apart the moment the owner changes, so
+/// the advertised bootstrap limit drift apart when the owning crate changes, so
 /// the bound is written here from the same function bootstrap reports.
 fn set_array_max_items(
     schema: &mut Value,
