@@ -1461,6 +1461,7 @@ struct RepositoryWatchTask {
     webhook_dispatch_in_flight: bool,
     webhook_targeted_completion: Option<RetainedTargetedWebhookCompletion>,
     webhook_terminal_ambiguous: Option<RepoWatchWebhookDeliveryKey>,
+    webhook_refresh_coalescing: WebhookRefreshCoalescingScope,
     webhook_drain_first_failure: Option<RepositoryWatchAttemptError>,
     webhook_drain_projection_failure: Option<RepositoryWatchAttemptError>,
     webhook_drain_timed_out: bool,
@@ -1470,6 +1471,47 @@ struct RepositoryWatchTask {
     startup_webhook_retry: Option<WebhookDrainRetry>,
     reconciliation_quantum: Option<usize>,
     webhook_drain_work_budget: Option<Duration>,
+}
+
+/// Exact provider refreshes already landed for one loaded pending page.
+///
+/// A work-budget yield ends one drain attempt but does not change which
+/// deliveries were admitted before the page's first refresh. Retaining the
+/// coalescer through that receipt frontier lets the next bounded attempt finish
+/// the same page without repeating the query. The first later receipt resets
+/// the scope before it can rely on evidence fetched before that receipt was
+/// admitted.
+struct WebhookRefreshCoalescingScope {
+    through_receipt: Option<NonZeroU64>,
+    coalescer: RepoWatchTargetedRefreshCoalescerV1,
+}
+
+impl WebhookRefreshCoalescingScope {
+    fn empty() -> Self {
+        Self {
+            through_receipt: None,
+            coalescer: RepoWatchTargetedRefreshCoalescerV1::for_delivery_page(),
+        }
+    }
+
+    fn for_delivery(
+        &mut self,
+        receipt: NonZeroU64,
+        loaded_through: NonZeroU64,
+    ) -> &mut RepoWatchTargetedRefreshCoalescerV1 {
+        if self
+            .through_receipt
+            .is_none_or(|through_receipt| receipt > through_receipt)
+        {
+            self.through_receipt = Some(loaded_through);
+            self.coalescer = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+        }
+        &mut self.coalescer
+    }
+
+    fn clear(&mut self) {
+        *self = Self::empty();
+    }
 }
 
 /// One process-wide schedule for the expired-payload purge.
@@ -1587,6 +1629,7 @@ impl RepositoryWatchTask {
             webhook_dispatch_in_flight: false,
             webhook_targeted_completion: None,
             webhook_terminal_ambiguous: None,
+            webhook_refresh_coalescing: WebhookRefreshCoalescingScope::empty(),
             webhook_drain_first_failure: None,
             webhook_drain_projection_failure: None,
             webhook_drain_timed_out: false,
@@ -2449,6 +2492,26 @@ impl RepositoryWatchTask {
         &mut self,
         work_budget: Option<Duration>,
     ) -> WebhookDrainOutcome {
+        // The scope lives on the task between attempts. If this future is
+        // cancelled by a deadline, dropping its local copy merely forgets an
+        // optimization and makes the next attempt refetch; it cannot suppress
+        // work that did not land.
+        let mut coalescing = std::mem::replace(
+            &mut self.webhook_refresh_coalescing,
+            WebhookRefreshCoalescingScope::empty(),
+        );
+        let outcome = self
+            .process_webhook_deliveries_with_budget_and_scope(work_budget, &mut coalescing)
+            .await;
+        self.webhook_refresh_coalescing = coalescing;
+        outcome
+    }
+
+    async fn process_webhook_deliveries_with_budget_and_scope(
+        &mut self,
+        work_budget: Option<Duration>,
+        coalescing: &mut WebhookRefreshCoalescingScope,
+    ) -> WebhookDrainOutcome {
         self.webhook_drain_first_failure = None;
         self.webhook_drain_projection_failure = None;
         if let Some(Err(error)) = self.settle_webhook_targeted_completion().await {
@@ -2515,17 +2578,24 @@ impl RepositoryWatchTask {
                     // in place hands it over now. There is no await between the
                     // observation and the replacement.
                     self.replace_superseded_webhook_shadow();
+                    coalescing.clear();
                 }
                 break;
             }
-            let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+            let Some(page_through) = deliveries
+                .last()
+                .map(|delivery| delivery.receipt().sequence())
+            else {
+                continue;
+            };
             for delivery in &deliveries {
                 after_receipt = Some(delivery.receipt().sequence());
                 if deferred.contains(&delivery.key()) {
                     continue;
                 }
+                let page = coalescing.for_delivery(delivery.receipt().sequence(), page_through);
                 let terminalized = match self
-                    .process_webhook_delivery(delivery, &mut page, &mut dispatch_failure)
+                    .process_webhook_delivery(delivery, page, &mut dispatch_failure)
                     .await
                 {
                     Ok(()) => {
@@ -8748,16 +8818,17 @@ mod tests {
         WEBHOOK_DRAIN_TIMEOUT_PER_PAYLOAD_QUANTUM, WEBHOOK_PENDING_PAGE_SIZE,
         WebhookAttemptDeadlines, WebhookAttemptOutcome, WebhookAttemptPhase, WebhookDrain,
         WebhookDrainOutcome, WebhookDrainProgress, WebhookDrainRetry, WebhookPayloadPurgeSchedule,
-        WebhookPollInterrupt, WebhookShadowBaseline, WorkflowName, WorkflowResponse,
-        await_poll_or_interrupt, commit_check_run_search_is_complete, compact_cursor_observation,
-        dispatch_context_json, graphql_envelope_error, initial_poll_deadline,
-        inspect_webhook_drain, merge_targeted_refresh_into_webhook_shadow, next_cadence_deadline,
-        next_repository_wake, normalize_checks_outcome, normalize_pull_request_context, object_id,
-        observe_webhook_work_before_drain, owed_dispatch_context_json_parts,
-        poll_webhook_interrupt, record_dispatch_start_nudge_outcome, rejected_response_error,
-        rejection_needs_its_message, repository_reconciliation_should_yield,
-        restore_targeted_merged_baselines, rule_activation_error, run_until_shutdown,
-        supervise_repository_tasks, targeted_pull_requests,
+        WebhookPollInterrupt, WebhookRefreshCoalescingScope, WebhookShadowBaseline, WorkflowName,
+        WorkflowResponse, await_poll_or_interrupt, commit_check_run_search_is_complete,
+        compact_cursor_observation, dispatch_context_json, graphql_envelope_error,
+        initial_poll_deadline, inspect_webhook_drain, merge_targeted_refresh_into_webhook_shadow,
+        next_cadence_deadline, next_repository_wake, normalize_checks_outcome,
+        normalize_pull_request_context, object_id, observe_webhook_work_before_drain,
+        owed_dispatch_context_json_parts, poll_webhook_interrupt,
+        record_dispatch_start_nudge_outcome, rejected_response_error, rejection_needs_its_message,
+        repository_reconciliation_should_yield, restore_targeted_merged_baselines,
+        rule_activation_error, run_until_shutdown, supervise_repository_tasks,
+        targeted_pull_requests,
     };
     use signalbox_application::{
         EligibilityNudgeOutcome, InProcessEligibilityWorkSource,
@@ -8938,6 +9009,44 @@ mod tests {
     const THIRD_WEBHOOK_DELIVERY: u128 = 0x7a03;
     const FIRST_WEBHOOK_REVIEW: u64 = 9_001;
     const SECOND_WEBHOOK_REVIEW: u64 = 9_002;
+
+    #[test]
+    fn a_work_budget_yield_retains_the_loaded_pages_exact_refresh() {
+        let refresh = RepoWatchTargetedRefreshV1::CheckRollupForCommit {
+            head: CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture SHA is valid"),
+        };
+        let first_receipt = NonZeroU64::new(10).expect("fixture receipt is positive");
+        let next_receipt = NonZeroU64::new(11).expect("fixture receipt is positive");
+        let original_page_tail = NonZeroU64::new(34).expect("fixture receipt is positive");
+        let refilled_page_tail = NonZeroU64::new(50).expect("fixture receipt is positive");
+        let mut scope = WebhookRefreshCoalescingScope::empty();
+        let first_page = scope.for_delivery(first_receipt, original_page_tail);
+        first_page.record_issued(std::slice::from_ref(&refresh));
+
+        let resumed_page = scope.for_delivery(next_receipt, refilled_page_tail);
+        let unissued = resumed_page.unissued(std::slice::from_ref(&refresh));
+
+        assert!(unissued.is_empty());
+    }
+
+    #[test]
+    fn a_receipt_beyond_the_loaded_page_resets_exact_refreshes() {
+        let refresh = RepoWatchTargetedRefreshV1::CheckRollupForCommit {
+            head: CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture SHA is valid"),
+        };
+        let first_receipt = NonZeroU64::new(10).expect("fixture receipt is positive");
+        let original_page_tail = NonZeroU64::new(34).expect("fixture receipt is positive");
+        let later_receipt = NonZeroU64::new(35).expect("fixture receipt is positive");
+        let later_page_tail = NonZeroU64::new(59).expect("fixture receipt is positive");
+        let mut scope = WebhookRefreshCoalescingScope::empty();
+        let first_page = scope.for_delivery(first_receipt, original_page_tail);
+        first_page.record_issued(std::slice::from_ref(&refresh));
+
+        let later_page = scope.for_delivery(later_receipt, later_page_tail);
+        let unissued = later_page.unissued(std::slice::from_ref(&refresh));
+
+        assert_eq!(unissued, vec![refresh]);
+    }
     const WEBHOOK_BODY_DIGEST_FILL: u8 = 0x71;
     const WEBHOOK_HOOK_ID: NonZeroU64 =
         NonZeroU64::new(7_001).expect("fixture webhook hook ID is positive");
@@ -9114,6 +9223,7 @@ mod tests {
                 webhook_dispatch_in_flight: false,
                 webhook_targeted_completion: None,
                 webhook_terminal_ambiguous: None,
+                webhook_refresh_coalescing: WebhookRefreshCoalescingScope::empty(),
                 webhook_drain_first_failure: None,
                 webhook_drain_projection_failure: None,
                 webhook_drain_timed_out: false,

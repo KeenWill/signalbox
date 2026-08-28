@@ -1770,29 +1770,33 @@ already observes every delivery on it. Repeating hydration would re-read pull
 request detail, check suites, check runs, reviews, threads, and one request per
 comment for its reactions; repeating an exact check-rollup would re-read the
 same commit's checks. Coalescing is scoped to the page and never to a whole
-drain, because a later page may carry deliveries admitted after the earlier
-refresh ran. Only a refresh that reached the provider and landed in the cursor
-suppresses a later one. A refresh that fails before its fetch or before its
-commit leaves its delivery pending rather than terminal, so the page's remaining
-deliveries reissue it; and a hydration requested beside a head-guarded query is
-never recorded, because the merged request carries that guard and a superseded
-head discards the fetched hydration state while the query still reports success.
-A refresh whose cursor commit loses its generation race is likewise never
-recorded: its delivery stays terminal, because its disposition and exact
-projections are already durable, but the fetch never became cursor state, so the
-page's remaining deliveries still owe that refresh. The same lost race clears
-the fetch's process-local freshness, which no later generation may then vouch
-for. A delivery whose refresh the page already issued records no targeted-query
-projection of its own, on the same rule that only a query the poller actually
-made is recorded. Coalescing therefore bounds bursts and not pacing: a delivery
-admitted after a refresh reports state that refresh could not have observed, so
-it is refreshed however slowly such deliveries arrive. Bounding a paced stream
-would require a minimum interval between a pull request's refreshes, trading
-both freshness and the fidelity of the parity measurement shadow mode exists to
-produce; that trade is not taken while poll frequency is unchanged and the
-complete sweep remains authoritative. Full polling continues unchanged as the
-slow complete reconciliation sweep and remains authoritative for missed
-deliveries, reactions, and every provider fact outside the mapped set.
+drain. A work-budget yield retains the loaded page's coalescing scope through
+that page's final receipt sequence, so a later bounded attempt can finish those
+already-admitted deliveries without refetching. The first receipt beyond that
+frontier resets the scope, because a later page may carry deliveries admitted
+after the earlier refresh ran. Only a refresh that reached the provider and
+landed in the cursor suppresses a later one. A refresh that fails before its
+fetch or before its commit leaves its delivery pending rather than terminal, so
+the page's remaining deliveries reissue it; and a hydration requested beside a
+head-guarded query is never recorded, because the merged request carries that
+guard and a superseded head discards the fetched hydration state while the query
+still reports success. A refresh whose cursor commit loses its generation race
+is likewise never recorded: its delivery stays terminal, because its disposition
+and exact projections are already durable, but the fetch never became cursor
+state, so the page's remaining deliveries still owe that refresh. The same lost
+race clears the fetch's process-local freshness, which no later generation may
+then vouch for. A delivery whose refresh the page already issued records no
+targeted-query projection of its own, on the same rule that only a query the
+poller actually made is recorded. Coalescing therefore bounds bursts and not
+pacing: a delivery admitted after a refresh reports state that refresh could not
+have observed, so it is refreshed however slowly such deliveries arrive.
+Bounding a paced stream would require a minimum interval between a pull
+request's refreshes, trading both freshness and the fidelity of the parity
+measurement shadow mode exists to produce; that trade is not taken while poll
+frequency is unchanged and the complete sweep remains authoritative. Full
+polling continues unchanged as the slow complete reconciliation sweep and
+remains authoritative for missed deliveries, reactions, and every provider fact
+outside the mapped set.
 
 **Implemented behavior.** A repository in primary mode applies a mapped delivery
 to its durable cursor. The baseline is that cursor rather than an accumulated
