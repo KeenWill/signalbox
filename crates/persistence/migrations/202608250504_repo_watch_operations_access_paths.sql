@@ -99,6 +99,11 @@ UPDATE repo_watch_dispatch_action AS action
   FROM repo_watch_dispatch_batch AS batch
  WHERE batch.dispatch_id = action.dispatch_id;
 
+-- The update queues this table's initially-deferred batch-completion trigger.
+-- Flush those events before the following ALTER TABLE, which PostgreSQL rejects
+-- while trigger events for the relation remain pending.
+SET CONSTRAINTS repo_watch_dispatch_action_completes_batch IMMEDIATE;
+
 ALTER TABLE repo_watch_dispatch_action
     ALTER COLUMN repository SET NOT NULL,
     ADD CONSTRAINT repo_watch_dispatch_action_repository_check
