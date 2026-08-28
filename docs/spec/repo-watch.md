@@ -46,11 +46,13 @@ view and causes, and targeted refresh behavior are verified against this PR
 pull-request issue-comment behavior, per-page hydration coalescing, and
 workflow-run branch symmetry below are verified against PR #891
 (`agent/webhook-event-mapping`). Per-page exact check-rollup coalescing is
-verified against PR #1440 (`agent/repo-watch-page-check-rollup-coalescing`).
-Webhook drain liveness and stall reporting are verified against PR #896
-(`agent/webhook-projection-drain`); the drain attempt deadline is verified
-against this PR (`agent/daemon-live-webhook-drain-deadline`), and the enclosing
-webhook-attempt deadline is verified against this PR
+verified against PR #1440 (`agent/repo-watch-page-check-rollup-coalescing`), and
+retention of that page scope across work-budget yields is verified against PR
+#1441 (`agent/repo-watch-yielded-page-coalescing`). Webhook drain liveness and
+stall reporting are verified against PR #896 (`agent/webhook-projection-drain`);
+the drain attempt deadline is verified against this PR
+(`agent/daemon-live-webhook-drain-deadline`), and the enclosing webhook-attempt
+deadline is verified against this PR
 (`agent/daemon-live-webhook-attempt-deadline`). The provider-wide page backoff
 is verified against this PR (`agent/daemon-live-webhook-provider-backoff`).
 Webhook preemption of slow complete reconciliation is verified against PR #926
