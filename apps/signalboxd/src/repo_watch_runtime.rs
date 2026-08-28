@@ -28,18 +28,20 @@ use signalbox_application::{
     RepoWatchConvergenceAssessmentInput, RepoWatchDifferFailureKind, RepoWatchDispatchService,
     RepoWatchDispatchTransaction, RepoWatchEventIdentityFrontierEntryV1,
     RepoWatchEventIdentityFrontierV1, RepoWatchEventOccurrenceV1,
-    RepoWatchMergedPullRequestBaselineV1, RepoWatchObservation, RepoWatchObservationApplyV1,
-    RepoWatchObservationPatchV1, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
-    RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
-    RepoWatchRepositoryStateInput, RepoWatchReviewDecision, RepoWatchReviewObservation,
-    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
-    RepoWatchStaleReviewClearanceCandidate, RepoWatchTargetedRefreshCoalescerV1,
-    RepoWatchTargetedRefreshV1, RepoWatchThreadObservation, RepoWatchThreadState,
-    RepoWatchWebhookDeliveryV1, RepoWatchWebhookDeliveryV1Input, RepoWatchWebhookIgnoredReasonV1,
-    RepoWatchWebhookMappedNoChangeV1, RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1,
-    RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
-    UuidV7RepoWatchEventIdGenerator, apply_repo_watch_observation_patch_v1,
-    derive_repo_watch_events_with_merged_baselines, map_repo_watch_webhook_delivery_v1,
+    RepoWatchMergedCheckRunBaselineV1, RepoWatchMergedCheckSuiteBaselineV1,
+    RepoWatchMergedPullRequestBaselineInputV1, RepoWatchMergedPullRequestBaselineV1,
+    RepoWatchObservation, RepoWatchObservationApplyV1, RepoWatchObservationPatchV1,
+    RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
+    RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
+    RepoWatchReviewDecision, RepoWatchReviewObservation, RepoWatchRuleEvaluation,
+    RepoWatchRuleEvaluationOutcome, RepoWatchStaleReviewClearanceCandidate,
+    RepoWatchTargetedRefreshCoalescerV1, RepoWatchTargetedRefreshV1, RepoWatchThreadObservation,
+    RepoWatchThreadState, RepoWatchWebhookDeliveryV1, RepoWatchWebhookDeliveryV1Input,
+    RepoWatchWebhookIgnoredReasonV1, RepoWatchWebhookMappedNoChangeV1,
+    RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1, RepoWatchWorkflowRunObservation,
+    UuidV7RepoWatchDispatchIdGenerator, UuidV7RepoWatchEventIdGenerator,
+    apply_repo_watch_observation_patch_v1, derive_repo_watch_events_with_merged_baselines,
+    map_repo_watch_webhook_delivery_v1,
 };
 use signalbox_domain::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, DurableCommandId,
@@ -3068,38 +3070,51 @@ impl RepositoryWatchTask {
         // fetch failure leaves this delivery pending and retryable rather than
         // terminal against state the poller never observed.
         let unissued = page.unissued(&refreshes);
-        let (observation, issued) = match self
-            .prepare_primary_webhook_refresh(
-                &observation,
-                &baseline.merged_pull_request_baselines,
-                &unissued,
-            )
-            .await?
-        {
-            PreparedPrimaryRefreshOutcome::SupersededTarget => {
-                // The provider proved a targeted head stale before anything was
-                // recorded, so the delivery describes state the repository has
-                // already left and the cursor stays exactly as it was.
-                return self
-                    .record_webhook_terminal(
-                        pending,
-                        Vec::new(),
-                        RepoWatchWebhookDisposition::Superseded,
-                        None,
-                    )
-                    .await;
-            }
-            PreparedPrimaryRefreshOutcome::Refreshed {
-                observation,
-                queried,
-            } => (observation, queried),
-        };
+        let (observation, merged_pull_request_baselines, compact_baseline_targets, issued) =
+            match self
+                .prepare_primary_webhook_refresh(
+                    &observation,
+                    &baseline.merged_pull_request_baselines,
+                    &unissued,
+                )
+                .await?
+            {
+                PreparedPrimaryRefreshOutcome::SupersededTarget => {
+                    // The provider proved a targeted head stale before anything was
+                    // recorded, so the delivery describes state the repository has
+                    // already left and the cursor stays exactly as it was.
+                    return self
+                        .record_webhook_terminal(
+                            pending,
+                            Vec::new(),
+                            RepoWatchWebhookDisposition::Superseded,
+                            None,
+                        )
+                        .await;
+                }
+                PreparedPrimaryRefreshOutcome::Refreshed {
+                    observation,
+                    merged_pull_request_baselines,
+                    compact_baseline_targets,
+                    queried,
+                } => (
+                    observation,
+                    merged_pull_request_baselines,
+                    compact_baseline_targets,
+                    queried,
+                ),
+            };
         let (events, identity_frontier) =
             primary_committed_occurrences(&self.repository, &baseline, &observation)?;
         let compacted = compact_cursor_observation(
             &observation,
             Some(&baseline.observation),
-            &baseline.merged_pull_request_baselines,
+            &merged_pull_request_baselines,
+        )?;
+        let compacted = restore_targeted_merged_baselines(
+            compacted,
+            &merged_pull_request_baselines,
+            &compact_baseline_targets,
         )?;
         // A primary delivery records no event projection. Parity compares
         // projections against poll-produced rows, and this delivery's own commit
@@ -3175,6 +3190,8 @@ impl RepositoryWatchTask {
         if refreshes.is_empty() {
             return Ok(PreparedPrimaryRefreshOutcome::Refreshed {
                 observation: patched.clone(),
+                merged_pull_request_baselines: merged_pull_request_baselines.to_vec(),
+                compact_baseline_targets: Vec::new(),
                 queried: Vec::new(),
             });
         }
@@ -3182,18 +3199,36 @@ impl RepositoryWatchTask {
         if targets.is_empty() {
             return Ok(PreparedPrimaryRefreshOutcome::Refreshed {
                 observation: patched.clone(),
+                merged_pull_request_baselines: merged_pull_request_baselines.to_vec(),
+                compact_baseline_targets: Vec::new(),
                 queried: Vec::new(),
             });
         }
-        let (observation, superseded_targets) = match self
+        let (
+            observation,
+            merged_pull_request_baselines,
+            compact_baseline_targets,
+            superseded_targets,
+        ) = match self
             .poller
-            .poll_targeted_pull_requests_against_cursor(patched, &targets)
+            .poll_targeted_pull_requests_against_cursor(
+                patched,
+                merged_pull_request_baselines,
+                &targets,
+            )
             .await?
         {
             TargetedPollOutcome::Observation {
                 observation,
+                merged_pull_request_baselines,
+                compact_baseline_targets,
                 superseded_targets,
-            } => (observation, superseded_targets),
+            } => (
+                observation,
+                merged_pull_request_baselines,
+                compact_baseline_targets,
+                superseded_targets,
+            ),
             TargetedPollOutcome::SupersededTarget => {
                 return Ok(PreparedPrimaryRefreshOutcome::SupersededTarget);
             }
@@ -3210,6 +3245,8 @@ impl RepositoryWatchTask {
             .collect::<Vec<_>>();
         Ok(PreparedPrimaryRefreshOutcome::Refreshed {
             observation,
+            merged_pull_request_baselines,
+            compact_baseline_targets,
             queried,
         })
     }
@@ -3321,15 +3358,31 @@ impl RepositoryWatchTask {
             return Ok(PreparedTargetedRefreshOutcome::NoTargets);
         }
         let mut event_identity_frontier = cursor.candidate().event_identity_frontier().clone();
-        let (observation, superseded_targets) = match self
+        let (
+            observation,
+            merged_pull_request_baselines,
+            compact_baseline_targets,
+            superseded_targets,
+        ) = match self
             .poller
-            .poll_targeted_pull_requests_against_cursor(cursor.candidate().observation(), &targets)
+            .poll_targeted_pull_requests_against_cursor(
+                cursor.candidate().observation(),
+                cursor.candidate().merged_pull_request_baselines(),
+                &targets,
+            )
             .await?
         {
             TargetedPollOutcome::Observation {
                 observation,
+                merged_pull_request_baselines,
+                compact_baseline_targets,
                 superseded_targets,
-            } => (observation, superseded_targets),
+            } => (
+                observation,
+                merged_pull_request_baselines,
+                compact_baseline_targets,
+                superseded_targets,
+            ),
             TargetedPollOutcome::SupersededTarget => {
                 return Ok(PreparedTargetedRefreshOutcome::SupersededTarget);
             }
@@ -3363,7 +3416,12 @@ impl RepositoryWatchTask {
         let compacted = compact_cursor_observation(
             &observation,
             Some(cursor.candidate().observation()),
-            cursor.candidate().merged_pull_request_baselines(),
+            &merged_pull_request_baselines,
+        )?;
+        let compacted = restore_targeted_merged_baselines(
+            compacted,
+            &merged_pull_request_baselines,
+            &compact_baseline_targets,
         )?;
         Ok(PreparedTargetedRefreshOutcome::Prepared(
             PreparedTargetedRefresh {
@@ -4197,6 +4255,8 @@ enum TargetedPullRequestScope {
 enum TargetedPollOutcome {
     Observation {
         observation: RepoWatchObservation,
+        merged_pull_request_baselines: Vec<RepoWatchMergedPullRequestBaselineV1>,
+        compact_baseline_targets: Vec<PullRequestNumber>,
         superseded_targets: Vec<PullRequestNumber>,
     },
     SupersededTarget,
@@ -4209,6 +4269,8 @@ enum PreparedPrimaryRefreshOutcome {
     /// The observation to commit, and the refreshes a request was issued for.
     Refreshed {
         observation: RepoWatchObservation,
+        merged_pull_request_baselines: Vec<RepoWatchMergedPullRequestBaselineV1>,
+        compact_baseline_targets: Vec<PullRequestNumber>,
         queried: Vec<RepoWatchTargetedRefreshV1>,
     },
 }
@@ -5314,6 +5376,12 @@ struct FetchedPullRequest {
     convergence_evidence: FetchedConvergenceEvidence,
 }
 
+#[derive(Clone)]
+struct FetchedCheckRollup {
+    completed_check_suites: Vec<RepoWatchCheckSuiteObservation>,
+    completed_check_runs: Vec<RepoWatchCheckRunObservation>,
+}
+
 struct FetchedConvergenceEvidence {
     base_revision: CommitSha,
     gating_checks_settled: bool,
@@ -5474,6 +5542,7 @@ impl GitHubRepositoryPoller {
     async fn poll_targeted_pull_requests_against_cursor(
         &self,
         previous: &RepoWatchObservation,
+        merged_pull_request_baselines: &[RepoWatchMergedPullRequestBaselineV1],
         targets: &[TargetedPullRequest],
     ) -> Result<TargetedPollOutcome, RepositoryWatchAttemptError> {
         // A cancelled complete poll can leave child fetches in the shared set.
@@ -5493,6 +5562,13 @@ impl GitHubRepositoryPoller {
             workflow_runs: previous.state().workflow_runs().to_vec(),
             branch_heads: previous.state().branch_heads().to_vec(),
         };
+        let mut merged_pull_request_baselines = merged_pull_request_baselines
+            .iter()
+            .cloned()
+            .map(|baseline| (baseline.number(), baseline))
+            .collect::<BTreeMap<_, _>>();
+        let mut check_rollups = BTreeMap::new();
+        let mut compact_baseline_targets = Vec::new();
         let mut superseded_targets = Vec::new();
         for target in targets {
             let retained_index = state
@@ -5501,32 +5577,64 @@ impl GitHubRepositoryPoller {
                 .position(|pull_request| pull_request.context().number() == target.number);
             let retained = retained_index.map(|index| state.pull_requests[index].clone());
             self.forget_pull_request(target.number.get());
-            let fetched = match (target.scope, retained.as_ref()) {
-                (TargetedPullRequestScope::CheckRollup, Some(retained)) => {
-                    let expected_head = target
-                        .expected_head
-                        .as_ref()
-                        .ok_or(RepositoryWatchAttemptError::Normalization)?;
-                    let Some(fetched) = self
-                        .fetch_pull_request_check_rollup(
-                            target.number.get(),
-                            expected_head,
-                            retained,
-                        )
-                        .await?
-                    else {
-                        superseded_targets.push(target.number);
-                        continue;
-                    };
-                    fetched
+            if target.scope == TargetedPullRequestScope::CheckRollup {
+                let expected_head = target
+                    .expected_head
+                    .as_ref()
+                    .ok_or(RepositoryWatchAttemptError::Normalization)?;
+                if retained.is_none() && !merged_pull_request_baselines.contains_key(&target.number)
+                {
+                    return Err(RepositoryWatchAttemptError::Normalization);
                 }
-                (TargetedPullRequestScope::Full, _)
-                | (TargetedPullRequestScope::CheckRollup, None) => {
-                    self.fetch_pull_request(target.number.get(), retained.as_ref())
-                        .await?
-                        .state
+                let Some(provider_context) = self
+                    .fetch_pull_request_check_context(
+                        target.number.get(),
+                        expected_head,
+                        retained.as_ref().map(RepoWatchPullRequestState::context),
+                    )
+                    .await?
+                else {
+                    superseded_targets.push(target.number);
+                    continue;
+                };
+                if !check_rollups.contains_key(expected_head) {
+                    check_rollups.insert(
+                        expected_head.clone(),
+                        self.fetch_check_rollup(expected_head).await?,
+                    );
                 }
-            };
+                let check_rollup = check_rollups
+                    .get(expected_head)
+                    .ok_or(RepositoryWatchAttemptError::Normalization)?;
+                match (retained_index, retained.as_ref()) {
+                    (Some(index), Some(retained)) => {
+                        state.pull_requests[index] =
+                            refresh_pull_request_check_rollup(retained, check_rollup)?;
+                    }
+                    (None, None) => {
+                        let baseline = merged_pull_request_baselines
+                            .get(&target.number)
+                            .ok_or(RepositoryWatchAttemptError::Normalization)?;
+                        let refreshed =
+                            refresh_merged_pull_request_check_rollup(baseline, check_rollup)?;
+                        state.pull_requests.push(merged_check_rollup_observation(
+                            provider_context,
+                            &refreshed,
+                            check_rollup,
+                        )?);
+                        merged_pull_request_baselines.insert(target.number, refreshed);
+                        compact_baseline_targets.push(target.number);
+                    }
+                    (Some(_), None) | (None, Some(_)) => {
+                        return Err(RepositoryWatchAttemptError::Normalization);
+                    }
+                }
+                continue;
+            }
+            let fetched = self
+                .fetch_pull_request(target.number.get(), retained.as_ref())
+                .await?
+                .state;
             if target
                 .expected_head
                 .as_ref()
@@ -5558,6 +5666,8 @@ impl GitHubRepositoryPoller {
             .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
         Ok(TargetedPollOutcome::Observation {
             observation: RepoWatchObservation::new(self.signal_reviewers.clone(), state),
+            merged_pull_request_baselines: merged_pull_request_baselines.into_values().collect(),
+            compact_baseline_targets,
             superseded_targets,
         })
     }
@@ -6028,20 +6138,13 @@ impl GitHubRepositoryPoller {
         })
     }
 
-    /// Refreshes the only canonical facts a check delivery cannot carry.
-    ///
-    /// A full pull-request hydration also reads every review, thread, comment,
-    /// and reaction. Those resources are unrelated to a commit's check rollup,
-    /// and old pull requests can make that read larger than the entire webhook
-    /// drain deadline. The detail request retains the provider head guard while
-    /// the committed observation preserves every non-check fact it already
-    /// owns.
-    async fn fetch_pull_request_check_rollup(
+    /// Confirms a commit-targeted refresh and returns its event context.
+    async fn fetch_pull_request_check_context(
         &self,
         number: u64,
         expected_head: &CommitSha,
-        previous_pull_request: &RepoWatchPullRequestState,
-    ) -> Result<Option<RepoWatchPullRequestState>, RepositoryWatchAttemptError> {
+        previous_context: Option<&PullRequestEventContext>,
+    ) -> Result<Option<PullRequestEventContext>, RepositoryWatchAttemptError> {
         let number_text = number.to_string();
         let detail: PullResponse = self
             .conditional_json(
@@ -6054,28 +6157,28 @@ impl GitHubRepositoryPoller {
         if detail.number != number {
             return Err(RepositoryWatchAttemptError::InvalidResponse);
         }
-        let provider_head = CommitSha::try_new(detail.head.sha)
+        let provider_head = CommitSha::try_new(detail.head.sha.clone())
             .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
         if &provider_head != expected_head {
             return Ok(None);
         }
+        normalize_pull_request_context(&detail, provider_head, previous_context).map(Some)
+    }
+
+    /// Fetches one commit's check facts once for every pull request retaining it.
+    async fn fetch_check_rollup(
+        &self,
+        expected_head: &CommitSha,
+    ) -> Result<FetchedCheckRollup, RepositoryWatchAttemptError> {
         let (completed_check_suites, check_suite_ids) =
             self.fetch_check_suites(expected_head).await?;
         let (completed_check_runs, _) = self
             .fetch_check_runs(expected_head, &check_suite_ids)
             .await?;
-        RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
-            context: previous_pull_request.context().clone(),
-            lifecycle: previous_pull_request.lifecycle(),
-            mergeable_state: previous_pull_request.mergeable_state(),
+        Ok(FetchedCheckRollup {
             completed_check_suites,
             completed_check_runs,
-            reviews: previous_pull_request.reviews().to_vec(),
-            threads: previous_pull_request.threads().to_vec(),
-            reactions: previous_pull_request.reactions().to_vec(),
         })
-        .map(Some)
-        .map_err(|_| RepositoryWatchAttemptError::Normalization)
     }
 
     async fn fetch_check_suites(
@@ -7721,6 +7824,41 @@ fn compact_cursor_observation(
     })
 }
 
+/// Restores compact baselines that a scoped check refresh rebuilt directly.
+///
+/// The temporary merged states exist only so the differ can derive check
+/// occurrences with provider event context. Ordinary compaction would replace
+/// their complete retained review identity set with that temporary state's
+/// deliberately empty review list.
+fn restore_targeted_merged_baselines(
+    compacted: CompactedCursorObservation,
+    refreshed_baselines: &[RepoWatchMergedPullRequestBaselineV1],
+    targets: &[PullRequestNumber],
+) -> Result<CompactedCursorObservation, RepositoryWatchAttemptError> {
+    if targets.is_empty() {
+        return Ok(compacted);
+    }
+    let targets = targets.iter().copied().collect::<BTreeSet<_>>();
+    let mut baselines = compacted
+        .merged_pull_request_baselines
+        .into_iter()
+        .filter(|baseline| !targets.contains(&baseline.number()))
+        .map(|baseline| (baseline.number(), baseline))
+        .collect::<BTreeMap<_, _>>();
+    for baseline in refreshed_baselines {
+        if targets.contains(&baseline.number()) {
+            baselines.insert(baseline.number(), baseline.clone());
+        }
+    }
+    if !targets.iter().all(|target| baselines.contains_key(target)) {
+        return Err(RepositoryWatchAttemptError::Normalization);
+    }
+    Ok(CompactedCursorObservation {
+        observation: compacted.observation,
+        merged_pull_request_baselines: baselines.into_values().collect(),
+    })
+}
+
 fn pull_request_base_revision<'a>(
     observation: &'a RepoWatchObservation,
     pull_request: &RepoWatchPullRequestState,
@@ -7760,6 +7898,95 @@ fn reuse_pull_request(
         reviews,
         threads,
         reactions,
+    })
+    .map_err(|_| RepositoryWatchAttemptError::Normalization)
+}
+
+/// Replaces only the commit-check facts a targeted rollup read owns.
+fn refresh_pull_request_check_rollup(
+    previous: &RepoWatchPullRequestState,
+    check_rollup: &FetchedCheckRollup,
+) -> Result<RepoWatchPullRequestState, RepositoryWatchAttemptError> {
+    RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
+        context: previous.context().clone(),
+        lifecycle: previous.lifecycle(),
+        mergeable_state: previous.mergeable_state(),
+        completed_check_suites: check_rollup.completed_check_suites.clone(),
+        completed_check_runs: check_rollup.completed_check_runs.clone(),
+        reviews: previous.reviews().to_vec(),
+        threads: previous.threads().to_vec(),
+        reactions: previous.reactions().to_vec(),
+    })
+    .map_err(|_| RepositoryWatchAttemptError::Normalization)
+}
+
+/// Replaces a compact merged baseline's check facts without rehydrating the
+/// terminal discussion state that compaction deliberately evicted.
+fn refresh_merged_pull_request_check_rollup(
+    previous: &RepoWatchMergedPullRequestBaselineV1,
+    check_rollup: &FetchedCheckRollup,
+) -> Result<RepoWatchMergedPullRequestBaselineV1, RepositoryWatchAttemptError> {
+    RepoWatchMergedPullRequestBaselineV1::try_new(RepoWatchMergedPullRequestBaselineInputV1 {
+        number: previous.number(),
+        head_sha: previous.head_sha().clone(),
+        signal_reviewers: previous.signal_reviewers().to_vec(),
+        labels: previous.labels().to_vec(),
+        mergeable_state: previous.mergeable_state(),
+        completed_check_suites: check_rollup
+            .completed_check_suites
+            .iter()
+            .map(|suite| {
+                RepoWatchMergedCheckSuiteBaselineV1::new(
+                    suite.id(),
+                    suite.completion_generation().clone(),
+                )
+            })
+            .collect(),
+        completed_check_runs: check_rollup
+            .completed_check_runs
+            .iter()
+            .map(|run| {
+                RepoWatchMergedCheckRunBaselineV1::new(
+                    run.id(),
+                    run.completion_generation().clone(),
+                    run.conclusion(),
+                )
+            })
+            .collect(),
+        review_ids: previous.review_ids().to_vec(),
+        threads: previous.threads().to_vec(),
+        reactions: previous.reactions().to_vec(),
+    })
+    .map_err(|_| RepositoryWatchAttemptError::Normalization)
+}
+
+/// Reconstitutes only enough merged state for the differ to emit check facts.
+fn merged_check_rollup_observation(
+    provider_context: PullRequestEventContext,
+    baseline: &RepoWatchMergedPullRequestBaselineV1,
+    check_rollup: &FetchedCheckRollup,
+) -> Result<RepoWatchPullRequestState, RepositoryWatchAttemptError> {
+    let context = PullRequestEventContext::new(PullRequestEventContextInput {
+        number: provider_context.number(),
+        head_sha: provider_context.head_sha().clone(),
+        head_repository: provider_context.head_repository().clone(),
+        base_branch: provider_context.base_branch().clone(),
+        head_branch: provider_context.head_branch().clone(),
+        title: provider_context.title().clone(),
+        body: provider_context.body().clone(),
+        labels: baseline.labels().to_vec(),
+        draft: provider_context.draft(),
+        author: provider_context.author().cloned(),
+    });
+    RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
+        context,
+        lifecycle: RepoWatchPullRequestLifecycle::Merged,
+        mergeable_state: baseline.mergeable_state(),
+        completed_check_suites: check_rollup.completed_check_suites.clone(),
+        completed_check_runs: check_rollup.completed_check_runs.clone(),
+        reviews: Vec::new(),
+        threads: baseline.threads().to_vec(),
+        reactions: baseline.reactions().to_vec(),
     })
     .map_err(|_| RepositoryWatchAttemptError::Normalization)
 }
@@ -8523,8 +8750,9 @@ mod tests {
         next_repository_wake, normalize_checks_outcome, normalize_pull_request_context, object_id,
         observe_webhook_work_before_drain, owed_dispatch_context_json_parts,
         poll_webhook_interrupt, record_dispatch_start_nudge_outcome, rejected_response_error,
-        rejection_needs_its_message, repository_reconciliation_should_yield, rule_activation_error,
-        run_until_shutdown, supervise_repository_tasks, targeted_pull_requests,
+        rejection_needs_its_message, repository_reconciliation_should_yield,
+        restore_targeted_merged_baselines, rule_activation_error, run_until_shutdown,
+        supervise_repository_tasks, targeted_pull_requests,
     };
     use signalbox_application::{
         EligibilityNudgeOutcome, InProcessEligibilityWorkSource,
@@ -10328,6 +10556,20 @@ mod tests {
             .collect()
     }
 
+    fn shared_check_rollup_responses(second_pull_request: u64) -> Vec<ScriptedResponse> {
+        let mut responses = check_rollup_responses();
+        let mut detail: serde_json::Value =
+            serde_json::from_str(&pull_detail()).expect("fixture pull detail is JSON");
+        detail["number"] = serde_json::json!(second_pull_request);
+        responses.push(ScriptedResponse::ok(
+            RequestTarget(format!(
+                "/repos/namespace/project/pulls/{second_pull_request}"
+            )),
+            ResponseBody(detail.to_string()),
+        ));
+        responses
+    }
+
     /// Descends as the pull number ascends, so an implementation that
     /// accidentally orders fetched pull requests by head identity or head
     /// branch reverses the expected number order instead of matching it.
@@ -10818,7 +11060,7 @@ mod tests {
 
         let refreshed = fixture
             .poller
-            .poll_targeted_pull_requests_against_cursor(&previous, &[target])
+            .poll_targeted_pull_requests_against_cursor(&previous, &[], &[target])
             .await
             .expect("targeted refresh succeeds");
 
@@ -10838,6 +11080,8 @@ mod tests {
             refreshed,
             TargetedPollOutcome::Observation {
                 observation: previous,
+                merged_pull_request_baselines: Vec::new(),
+                compact_baseline_targets: Vec::new(),
                 superseded_targets: Vec::new(),
             }
         );
@@ -10867,7 +11111,7 @@ mod tests {
 
         fixture
             .poller
-            .poll_targeted_pull_requests_against_cursor(&previous, &[target])
+            .poll_targeted_pull_requests_against_cursor(&previous, &[], &[target])
             .await
             .expect("targeted refresh succeeds");
 
@@ -10898,7 +11142,7 @@ mod tests {
 
         let refreshed = fixture
             .poller
-            .poll_targeted_pull_requests_against_cursor(&previous, &[target])
+            .poll_targeted_pull_requests_against_cursor(&previous, &[], &[target])
             .await
             .expect("targeted check refresh succeeds");
 
@@ -10907,9 +11151,123 @@ mod tests {
             refreshed,
             TargetedPollOutcome::Observation {
                 observation: previous,
+                merged_pull_request_baselines: Vec::new(),
+                compact_baseline_targets: Vec::new(),
                 superseded_targets: Vec::new(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn targeted_check_rollup_rebuilds_a_compact_merged_baseline_without_discussion_reads() {
+        let merged = observation_with_pull_lifecycle(RepoWatchPullRequestLifecycle::Merged).await;
+        let compacted = compact_cursor_observation(&merged, None, &[])
+            .expect("fixture merged observation compacts");
+        let baseline = compacted.merged_pull_request_baselines[0].clone();
+        let target = TargetedPullRequest {
+            number: baseline.number(),
+            expected_head: Some(baseline.head_sha().clone()),
+            scope: TargetedPullRequestScope::CheckRollup,
+        };
+        let server = ScriptedServer::start(check_rollup_responses()).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let refreshed = fixture
+            .poller
+            .poll_targeted_pull_requests_against_cursor(
+                &compacted.observation,
+                &compacted.merged_pull_request_baselines,
+                &[target],
+            )
+            .await
+            .expect("compact check refresh succeeds");
+
+        server.finish().await;
+        let TargetedPollOutcome::Observation {
+            observation,
+            merged_pull_request_baselines,
+            compact_baseline_targets,
+            superseded_targets,
+        } = refreshed
+        else {
+            panic!("compact check target remains current")
+        };
+        assert_eq!(observation.state().pull_requests().len(), 1);
+        assert_eq!(compact_baseline_targets, [baseline.number()]);
+        assert!(superseded_targets.is_empty());
+        assert_eq!(
+            merged_pull_request_baselines[0].review_ids(),
+            baseline.review_ids()
+        );
+        let cursor_compacted = compact_cursor_observation(
+            &observation,
+            Some(&compacted.observation),
+            &merged_pull_request_baselines,
+        )
+        .expect("temporary merged state compacts");
+        let restored = restore_targeted_merged_baselines(
+            cursor_compacted,
+            &merged_pull_request_baselines,
+            &compact_baseline_targets,
+        )
+        .expect("directly refreshed baseline wins over temporary state");
+        assert_eq!(
+            restored.merged_pull_request_baselines,
+            merged_pull_request_baselines
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_targets_sharing_a_head_fetch_its_check_rollup_once() {
+        let merged = observation_with_pull_lifecycle(RepoWatchPullRequestLifecycle::Merged).await;
+        let compacted = compact_cursor_observation(&merged, None, &[])
+            .expect("fixture merged observation compacts");
+        let first_baseline = compacted.merged_pull_request_baselines[0].clone();
+        let second_number = PullRequestNumber::new(
+            NonZeroU64::new(PULL_NUMBER + 1).expect("fixture pull-request number is positive"),
+        );
+        let second_baseline = merged_baseline_for_number(
+            &merged.state().pull_requests()[0],
+            second_number,
+            merged.signal_reviewers(),
+        );
+        let baselines = [first_baseline.clone(), second_baseline];
+        let refreshes = [RepoWatchTargetedRefreshV1::CheckRollupForCommit {
+            head: first_baseline.head_sha().clone(),
+        }];
+        let targets = targeted_pull_requests(&compacted.observation, &baselines, &refreshes)
+            .expect("both compact subjects are targeted");
+        let server =
+            ScriptedServer::start(shared_check_rollup_responses(second_number.get())).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let refreshed = fixture
+            .poller
+            .poll_targeted_pull_requests_against_cursor(
+                &compacted.observation,
+                &baselines,
+                &targets,
+            )
+            .await
+            .expect("shared commit refresh succeeds");
+
+        server.finish().await;
+        let TargetedPollOutcome::Observation {
+            observation,
+            merged_pull_request_baselines,
+            compact_baseline_targets,
+            superseded_targets,
+        } = refreshed
+        else {
+            panic!("both compact check targets remain current")
+        };
+        assert_eq!(observation.state().pull_requests().len(), 2);
+        assert_eq!(merged_pull_request_baselines.len(), baselines.len());
+        assert_eq!(
+            compact_baseline_targets,
+            [first_baseline.number(), second_number]
+        );
+        assert!(superseded_targets.is_empty());
     }
 
     #[tokio::test]
@@ -11057,7 +11415,7 @@ mod tests {
 
         let refreshed = fixture
             .poller
-            .poll_targeted_pull_requests_against_cursor(&previous, &[target])
+            .poll_targeted_pull_requests_against_cursor(&previous, &[], &[target])
             .await
             .expect("targeted refresh succeeds");
 
