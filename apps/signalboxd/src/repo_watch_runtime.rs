@@ -5763,12 +5763,17 @@ impl GitHubRepositoryPoller {
         let mut convergence = Vec::with_capacity(pull_requests.len());
         let mut stale_review_clearances = Vec::new();
         for pull_request in pull_requests {
-            let base_revision = branch_heads
-                .iter()
-                .find(|branch_head| {
-                    branch_head.branch() == pull_request.state.context().base_branch()
-                })
-                .map(|branch_head| branch_head.head().clone())
+            let base_revision =
+                if pull_request.state.lifecycle() == RepoWatchPullRequestLifecycle::Open {
+                    branch_heads
+                        .iter()
+                        .find(|branch_head| {
+                            branch_head.branch() == pull_request.state.context().base_branch()
+                        })
+                        .map(|branch_head| branch_head.head().clone())
+                } else {
+                    Some(pull_request.convergence_evidence.base_revision.clone())
+                }
                 .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
             let assessment = pull_request
                 .convergence_evidence
@@ -9825,6 +9830,14 @@ mod tests {
         )
     }
 
+    fn advanced_base_branch_head() -> RepoWatchBranchHead {
+        RepoWatchBranchHead::new(
+            BranchName::try_new(String::from(BASE_BRANCH)).expect("fixture branch is valid"),
+            CommitSha::try_new(String::from(CHANGED_LISTED_HEAD_SHA))
+                .expect("fixture advanced commit is valid"),
+        )
+    }
+
     fn merged_baseline_for_number(
         source: &RepoWatchPullRequestState,
         number: PullRequestNumber,
@@ -10544,6 +10557,19 @@ mod tests {
             .skip(2)
             .take(11)
             .collect()
+    }
+
+    fn terminal_pull_request_responses() -> Vec<ScriptedResponse> {
+        let mut responses = complete_pull_request_responses();
+        let mut detail: serde_json::Value =
+            serde_json::from_str(&pull_detail()).expect("fixture pull detail is JSON");
+        detail["state"] = serde_json::json!("closed");
+        detail["merged_at"] = serde_json::json!(PULL_UPDATED_AT);
+        responses[0] = ScriptedResponse::ok(
+            RequestTarget(PULL_DETAIL_TARGET.to_owned()),
+            ResponseBody(detail.to_string()),
+        );
+        responses
     }
 
     fn check_rollup_responses() -> Vec<ScriptedResponse> {
@@ -14908,6 +14934,34 @@ mod tests {
         server.finish().await;
 
         assert_eq!(second, first);
+    }
+
+    #[tokio::test]
+    async fn terminal_pull_request_uses_historical_base_revision_after_branch_moves() {
+        let previous = complete_typed_observation().await;
+        let server = ConcurrentScriptedServer::start(terminal_pull_request_responses()).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let fetched = fixture
+            .poller
+            .fetch_pull_requests(
+                BTreeSet::from([PULL_NUMBER]),
+                &BTreeMap::new(),
+                Some(&previous),
+                Some(RepoWatchCursorGeneration::INITIAL),
+                &[advanced_base_branch_head()],
+            )
+            .await
+            .expect("terminal pull request is reconciled after its base branch moves");
+        server.finish().await;
+
+        assert_eq!(fetched.states.len(), PULL_NUMBERS.len());
+        assert_eq!(
+            fetched.states[0].lifecycle(),
+            RepoWatchPullRequestLifecycle::Merged
+        );
+        assert_eq!(fetched.convergence.len(), PULL_NUMBERS.len());
+        assert_eq!(fetched.convergence[0].base_revision().as_str(), BASE_SHA);
     }
 
     #[tokio::test]
