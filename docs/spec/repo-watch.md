@@ -43,10 +43,12 @@ verified against PR #870 (`agent/repo-watch-content-identity`). The
 authenticated webhook intake, its ingress ceilings, shadow projection, parity
 view and causes, and targeted refresh behavior are verified against this PR
 (`agent/repo-watch-webhook-receiver`). The projection coverage enumeration,
-pull-request issue-comment behavior, per-page refresh coalescing, and
+pull-request issue-comment behavior, per-page hydration coalescing, and
 workflow-run branch symmetry below are verified against PR #891
-(`agent/webhook-event-mapping`). Webhook drain liveness and stall reporting are
-verified against PR #896 (`agent/webhook-projection-drain`); the drain attempt
+(`agent/webhook-event-mapping`). Per-page exact check-rollup coalescing is
+verified against PR #1440 (`agent/repo-watch-page-check-rollup-coalescing`).
+Webhook drain liveness and stall reporting are verified against PR #896
+(`agent/webhook-projection-drain`); the drain attempt
 deadline is verified against this PR
 (`agent/daemon-live-webhook-drain-deadline`), and the enclosing webhook-attempt
 deadline is verified against this PR
