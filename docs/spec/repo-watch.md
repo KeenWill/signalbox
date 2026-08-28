@@ -48,10 +48,9 @@ workflow-run branch symmetry below are verified against PR #891
 (`agent/webhook-event-mapping`). Per-page exact check-rollup coalescing is
 verified against PR #1440 (`agent/repo-watch-page-check-rollup-coalescing`).
 Webhook drain liveness and stall reporting are verified against PR #896
-(`agent/webhook-projection-drain`); the drain attempt
-deadline is verified against this PR
-(`agent/daemon-live-webhook-drain-deadline`), and the enclosing webhook-attempt
-deadline is verified against this PR
+(`agent/webhook-projection-drain`); the drain attempt deadline is verified
+against this PR (`agent/daemon-live-webhook-drain-deadline`), and the enclosing
+webhook-attempt deadline is verified against this PR
 (`agent/daemon-live-webhook-attempt-deadline`). The provider-wide page backoff
 is verified against this PR (`agent/daemon-live-webhook-provider-backoff`).
 Webhook preemption of slow complete reconciliation is verified against PR #926
@@ -1787,14 +1786,13 @@ for. A delivery whose refresh the page already issued records no targeted-query
 projection of its own, on the same rule that only a query the poller actually
 made is recorded. Coalescing therefore bounds bursts and not pacing: a delivery
 admitted after a refresh reports state that refresh could not have observed, so
-it is refreshed however slowly such deliveries arrive.
-Bounding a paced stream would require a minimum interval between a pull
-request's refreshes, trading both freshness and the fidelity of the parity
-measurement shadow mode exists to produce; that trade is not taken while poll
-frequency is unchanged and the complete sweep remains authoritative. Full
-polling continues unchanged as the slow complete reconciliation sweep and
-remains authoritative for missed deliveries, reactions, and every provider fact
-outside the mapped set.
+it is refreshed however slowly such deliveries arrive. Bounding a paced stream
+would require a minimum interval between a pull request's refreshes, trading
+both freshness and the fidelity of the parity measurement shadow mode exists to
+produce; that trade is not taken while poll frequency is unchanged and the
+complete sweep remains authoritative. Full polling continues unchanged as the
+slow complete reconciliation sweep and remains authoritative for missed
+deliveries, reactions, and every provider fact outside the mapped set.
 
 **Implemented behavior.** A repository in primary mode applies a mapped delivery
 to its durable cursor. The baseline is that cursor rather than an accumulated
