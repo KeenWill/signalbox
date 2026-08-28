@@ -10,6 +10,19 @@ ALTER TABLE semantic_transcript_entry
 DROP TRIGGER semantic_transcript_entry_is_append_only
     ON semantic_transcript_entry;
 
+-- These constraint triggers observe updates but own lifecycle and tool-result
+-- invariants that the two position-only backfills cannot affect. Disable them
+-- while historical rows are enriched so unrelated retained state is not
+-- revalidated as though the transcript payload itself had changed.
+ALTER TABLE semantic_transcript_entry
+    DISABLE TRIGGER context_summary_requires_exact_compaction;
+ALTER TABLE semantic_transcript_entry
+    DISABLE TRIGGER semantic_entry_one_logical_tool_result;
+ALTER TABLE semantic_transcript_entry
+    DISABLE TRIGGER semantic_entry_requires_steering_final_state;
+ALTER TABLE semantic_transcript_entry
+    DISABLE TRIGGER semantic_entry_update_requires_matching_turn_state;
+
 -- Completed responses historically did not need part ordinals. Their semantic
 -- entries already have durable transcript order through frontier membership;
 -- tool-round response entries already carry exact ordinals.
@@ -55,6 +68,21 @@ UPDATE semantic_transcript_entry AS entry
   FROM positioned
  WHERE entry.source_session_id = positioned.source_session_id
    AND entry.semantic_entry_id = positioned.semantic_entry_id;
+
+-- Foreign-key and unique-constraint triggers observe every update even though
+-- neither backfill changes their key columns. Flush those queued checks before
+-- the next ALTER TABLE; the unrelated lifecycle observers were disabled above
+-- and therefore have no events in this transaction.
+SET CONSTRAINTS ALL IMMEDIATE;
+
+ALTER TABLE semantic_transcript_entry
+    ENABLE TRIGGER context_summary_requires_exact_compaction;
+ALTER TABLE semantic_transcript_entry
+    ENABLE TRIGGER semantic_entry_one_logical_tool_result;
+ALTER TABLE semantic_transcript_entry
+    ENABLE TRIGGER semantic_entry_requires_steering_final_state;
+ALTER TABLE semantic_transcript_entry
+    ENABLE TRIGGER semantic_entry_update_requires_matching_turn_state;
 
 CREATE TRIGGER semantic_transcript_entry_is_append_only
 BEFORE UPDATE OR DELETE ON semantic_transcript_entry
