@@ -689,8 +689,29 @@ impl PostgresRepoWatchDispatchStore {
     {
         let mut transaction = self.pool.begin().await?;
         lock_text(&mut transaction, repository.as_str()).await?;
+        // The current pull-request projection and its cursor generation are
+        // replaced in the same cursor commit. Use that relational key for
+        // pull-request membership and expand branch heads once: expanding the
+        // full cursor once per historical assessment multiplies decoded JSON
+        // and can spill an otherwise empty inventory read to temporary disk.
         let candidate = sqlx::query(
-            "SELECT convergence.assessment_id, current.identity_id,
+            "WITH current_branch_head AS MATERIALIZED (
+                SELECT current.cursor_generation,
+                       branch_head.value ->> 'branch' AS branch,
+                       branch_head.value ->> 'head' AS head
+                  FROM (
+                        SELECT max(cursor_generation) AS cursor_generation
+                          FROM repo_watch_current_pull_request
+                         WHERE repository = $1
+                  ) AS current
+                  JOIN repo_watch_cursor AS cursor
+                    ON cursor.repository = $1
+                   AND cursor.generation = current.cursor_generation
+                 CROSS JOIN LATERAL jsonb_array_elements(
+                       cursor.cursor_payload -> 'state' -> 'branch_heads'
+                 ) AS branch_head(value)
+             )
+             SELECT convergence.assessment_id, current.identity_id,
                     current.assessment_id AS identity_assessment_id,
                     current.cursor_generation, convergence.pull_request_number
                FROM repo_watch_pull_request_convergence AS convergence
@@ -708,25 +729,15 @@ impl PostgresRepoWatchDispatchStore {
                      LIMIT 1
                ) AS current ON current.head_sha = convergence.head_sha
                            AND current.base_revision = convergence.base_revision
-              JOIN LATERAL (
-                    SELECT cursor_payload
-                      FROM repo_watch_cursor
-                     WHERE repository = convergence.repository
-                     ORDER BY generation DESC
-                     LIMIT 1
-               ) AS cursor ON true
-              JOIN LATERAL jsonb_array_elements(
-                    cursor.cursor_payload -> 'state' -> 'pull_requests'
-               ) AS pull_request ON
-                    (pull_request ->> 'number')::numeric =
-                        convergence.pull_request_number
-              JOIN LATERAL jsonb_array_elements(
-                    cursor.cursor_payload -> 'state' -> 'branch_heads'
-               ) AS base_head ON
-                    base_head ->> 'branch' = pull_request ->> 'base_branch'
+               JOIN repo_watch_current_pull_request AS pull_request
+                 ON pull_request.repository = convergence.repository
+                AND pull_request.pull_request_number = convergence.pull_request_number
+                AND pull_request.state_payload ->> 'head_sha' = current.head_sha
+               JOIN current_branch_head AS base_head
+                 ON base_head.branch = pull_request.base_branch
+                AND base_head.head = current.base_revision
+                AND base_head.cursor_generation = pull_request.cursor_generation
               WHERE convergence.repository = $1
-                AND pull_request ->> 'head_sha' = current.head_sha
-                AND base_head ->> 'head' = current.base_revision
                 AND NOT EXISTS (
                     SELECT 1
                       FROM repo_watch_convergence_cutoff AS cutoff
@@ -1038,8 +1049,28 @@ impl PostgresRepoWatchDispatchStore {
         NextCommandId: FnMut() -> DurableCommandId,
     {
         loop {
+            // This is the cross-repository form of the same current-projection
+            // inventory used by `process_next_convergence_cutoff`. Materialize
+            // branch heads once per current cursor, not once per assessment.
             let repository: Option<String> = sqlx::query_scalar(
-                "SELECT convergence.repository
+                "WITH current_branch_head AS MATERIALIZED (
+                    SELECT current.repository,
+                           current.cursor_generation,
+                           branch_head.value ->> 'branch' AS branch,
+                           branch_head.value ->> 'head' AS head
+                      FROM (
+                            SELECT repository, max(cursor_generation) AS cursor_generation
+                              FROM repo_watch_current_pull_request
+                             GROUP BY repository
+                      ) AS current
+                      JOIN repo_watch_cursor AS cursor
+                        ON cursor.repository = current.repository
+                       AND cursor.generation = current.cursor_generation
+                     CROSS JOIN LATERAL jsonb_array_elements(
+                           cursor.cursor_payload -> 'state' -> 'branch_heads'
+                     ) AS branch_head(value)
+                 )
+                 SELECT convergence.repository
                    FROM repo_watch_pull_request_convergence AS convergence
                    JOIN LATERAL (
                         SELECT identity.identity_id, identity.cursor_generation,
@@ -1054,30 +1085,21 @@ impl PostgresRepoWatchDispatchStore {
                          LIMIT 1
                    ) AS current ON current.head_sha = convergence.head_sha
                                AND current.base_revision = convergence.base_revision
-                  JOIN LATERAL (
-                        SELECT cursor_payload
-                          FROM repo_watch_cursor
-                         WHERE repository = convergence.repository
-                         ORDER BY generation DESC
-                         LIMIT 1
-                   ) AS cursor ON true
-                  JOIN LATERAL jsonb_array_elements(
-                        cursor.cursor_payload -> 'state' -> 'pull_requests'
-                   ) AS pull_request ON
-                        (pull_request ->> 'number')::numeric =
-                            convergence.pull_request_number
-                  JOIN LATERAL jsonb_array_elements(
-                        cursor.cursor_payload -> 'state' -> 'branch_heads'
-                   ) AS base_head ON
-                        base_head ->> 'branch' = pull_request ->> 'base_branch'
+                   JOIN repo_watch_current_pull_request AS pull_request
+                     ON pull_request.repository = convergence.repository
+                    AND pull_request.pull_request_number = convergence.pull_request_number
+                    AND pull_request.state_payload ->> 'head_sha' = current.head_sha
+                   JOIN current_branch_head AS base_head
+                     ON base_head.repository = convergence.repository
+                    AND base_head.branch = pull_request.base_branch
+                    AND base_head.head = current.base_revision
+                    AND base_head.cursor_generation = pull_request.cursor_generation
                   WHERE NOT EXISTS (
                         SELECT 1
                           FROM repo_watch_convergence_cutoff AS cutoff
                          WHERE cutoff.assessment_id = convergence.assessment_id
                            AND cutoff.identity_id = current.identity_id
                   )
-                    AND pull_request ->> 'head_sha' = current.head_sha
-                    AND base_head ->> 'head' = current.base_revision
                   ORDER BY convergence.repository, convergence.converged_at,
                            convergence.assessment_id
                   LIMIT 1",
