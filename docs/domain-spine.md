@@ -9573,6 +9573,12 @@ pub fn apply_repo_watch_observation_patch_v1(
     patch: &RepoWatchObservationPatchV1,
 ) -> Result<RepoWatchObservationApplyV1, RepoWatchWebhookApplyError>;
 
+pub fn apply_repo_watch_observation_patch_with_merged_baselines_v1(
+    previous: &RepoWatchObservation,
+    merged_pull_request_baselines: &[RepoWatchMergedPullRequestBaselineV1],
+    patch: &RepoWatchObservationPatchV1,
+) -> Result<RepoWatchObservationApplyV1, RepoWatchWebhookApplyError>;
+
 pub fn map_repo_watch_webhook_delivery_v1(
     delivery: &RepoWatchWebhookDeliveryV1,
     exact_body: &[u8],
@@ -13188,7 +13194,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: replace_session_defaults              | 5 (incl. 1 trait)                |
 | application: convergence_reconciliation            | 6 (+1 free fn)                   |
 | application: repo_watch                            | 49 (+3 free fn) (incl. 4 traits) |
-| application: repo_watch_webhook                    | 18 (+2 free fn)                  |
+| application: repo_watch_webhook                    | 18 (+3 free fn)                  |
 | application: review_orchestration                  | 37 (incl. 2 traits)              |
 | application: review_workflow                       | 9 (incl. 2 traits)               |
 | application: session_metadata                      | 12 (incl. 4 traits)              |
@@ -13201,4 +13207,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop_ports                       | 10 (incl. 3 traits)              |
 | application: turn_liveness                         | 14                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **485 (+33 free fn)**            |
+| **signalbox-application total**                    | **485 (+34 free fn)**            |

@@ -13,10 +13,10 @@ use uuid::Uuid;
 
 use crate::{
     RepoWatchBranchHead, RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
-    RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
-    RepoWatchPullRequestStateInput, RepoWatchRepositoryState, RepoWatchRepositoryStateError,
-    RepoWatchRepositoryStateInput, RepoWatchReviewObservation, RepoWatchThreadObservation,
-    RepoWatchThreadState, RepoWatchWorkflowRunObservation,
+    RepoWatchMergedPullRequestBaselineV1, RepoWatchObservation, RepoWatchPullRequestLifecycle,
+    RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchRepositoryState,
+    RepoWatchRepositoryStateError, RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
+    RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunObservation,
 };
 
 /// Durable coordinates for the exact admitted body consumed by the mapper.
@@ -488,6 +488,15 @@ pub fn apply_repo_watch_observation_patch_v1(
     previous: &RepoWatchObservation,
     patch: &RepoWatchObservationPatchV1,
 ) -> Result<RepoWatchObservationApplyV1, RepoWatchWebhookApplyError> {
+    apply_repo_watch_observation_patch_with_merged_baselines_v1(previous, &[], patch)
+}
+
+/// Applies a mapped delivery against both ordinary and compact merged state.
+pub fn apply_repo_watch_observation_patch_with_merged_baselines_v1(
+    previous: &RepoWatchObservation,
+    merged_pull_request_baselines: &[RepoWatchMergedPullRequestBaselineV1],
+    patch: &RepoWatchObservationPatchV1,
+) -> Result<RepoWatchObservationApplyV1, RepoWatchWebhookApplyError> {
     let mut state = RepoWatchRepositoryStateInput {
         pull_requests: previous.state().pull_requests().to_vec(),
         workflow_runs: previous.state().workflow_runs().to_vec(),
@@ -496,7 +505,7 @@ pub fn apply_repo_watch_observation_patch_v1(
     let mut changed = false;
     let mut refreshes = patch.targeted_refreshes().to_vec();
     for change in patch.changes() {
-        match apply_observation_change(&mut state, change)? {
+        match apply_observation_change(&mut state, merged_pull_request_baselines, change)? {
             ChangeApplyDispositionV1::Applied => changed = true,
             ChangeApplyDispositionV1::Duplicate => {}
             ChangeApplyDispositionV1::Superseded => {
@@ -531,6 +540,7 @@ pub fn apply_repo_watch_observation_patch_v1(
 
 fn apply_observation_change(
     state: &mut RepoWatchRepositoryStateInput,
+    merged_pull_request_baselines: &[RepoWatchMergedPullRequestBaselineV1],
     change: &RepoWatchObservationChangeV1,
 ) -> Result<ChangeApplyDispositionV1, RepoWatchWebhookApplyError> {
     match change {
@@ -539,7 +549,14 @@ fn apply_observation_change(
             lifecycle,
             head_guard,
             missing,
-        } => apply_pull_request_context(state, context, *lifecycle, head_guard, *missing),
+        } => apply_pull_request_context(
+            state,
+            merged_pull_request_baselines,
+            context,
+            *lifecycle,
+            head_guard,
+            *missing,
+        ),
         RepoWatchObservationChangeV1::ReviewUnion {
             pull_request,
             expected_head,
@@ -568,13 +585,20 @@ fn apply_observation_change(
 
 fn apply_pull_request_context(
     state: &mut RepoWatchRepositoryStateInput,
+    merged_pull_request_baselines: &[RepoWatchMergedPullRequestBaselineV1],
     context: &RepoWatchWebhookPullRequestContextV1,
     lifecycle: Option<RepoWatchPullRequestLifecycle>,
     head_guard: &RepoWatchPullRequestHeadGuardV1,
     missing: RepoWatchPullRequestMissingPolicyV1,
 ) -> Result<ChangeApplyDispositionV1, RepoWatchWebhookApplyError> {
     let Some(index) = pull_request_index(state, context.number()) else {
-        return apply_missing_pull_request_context(state, context, lifecycle, missing);
+        return apply_missing_pull_request_context(
+            state,
+            merged_pull_request_baselines,
+            context,
+            lifecycle,
+            missing,
+        );
     };
     let previous = &state.pull_requests[index];
     // GitHub represents `pull_request.head.repo` as null once a tracked fork is
@@ -615,10 +639,29 @@ fn apply_pull_request_context(
 /// refresh-only.
 fn apply_missing_pull_request_context(
     state: &mut RepoWatchRepositoryStateInput,
+    merged_pull_request_baselines: &[RepoWatchMergedPullRequestBaselineV1],
     context: &RepoWatchWebhookPullRequestContextV1,
     lifecycle: Option<RepoWatchPullRequestLifecycle>,
     missing: RepoWatchPullRequestMissingPolicyV1,
 ) -> Result<ChangeApplyDispositionV1, RepoWatchWebhookApplyError> {
+    if let Some(baseline) = merged_pull_request_baselines
+        .iter()
+        .find(|baseline| baseline.number() == context.number())
+    {
+        return Ok(match lifecycle {
+            Some(RepoWatchPullRequestLifecycle::Merged)
+                if baseline.head_sha() == context.head_sha() =>
+            {
+                ChangeApplyDispositionV1::Duplicate
+            }
+            Some(RepoWatchPullRequestLifecycle::Merged | RepoWatchPullRequestLifecycle::Closed) => {
+                ChangeApplyDispositionV1::Superseded
+            }
+            None | Some(RepoWatchPullRequestLifecycle::Open) => {
+                missing_pull_request_refresh(context.number())
+            }
+        });
+    }
     let (
         RepoWatchPullRequestMissingPolicyV1::HydrateBeforeApplying,
         Some(lifecycle),
@@ -1879,6 +1922,28 @@ mod tests {
         )
     }
 
+    fn compact_merged_baseline() -> RepoWatchMergedPullRequestBaselineV1 {
+        let observation = canonical_observation(CURRENT_HEAD);
+        let current = &observation.state().pull_requests()[0];
+        let merged = RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
+            context: current.context().clone(),
+            lifecycle: RepoWatchPullRequestLifecycle::Merged,
+            mergeable_state: current.mergeable_state(),
+            completed_check_suites: current.completed_check_suites().to_vec(),
+            completed_check_runs: current.completed_check_runs().to_vec(),
+            reviews: current.reviews().to_vec(),
+            threads: current.threads().to_vec(),
+            reactions: current.reactions().to_vec(),
+        })
+        .expect("merged fixture state is canonical");
+        RepoWatchMergedPullRequestBaselineV1::from_merged_state(
+            &merged,
+            observation.signal_reviewers(),
+        )
+        .expect("merged fixture compacts")
+        .expect("merged fixture produces a baseline")
+    }
+
     #[test]
     fn opened_pr_requests_hydration_without_inventing_mergeability() {
         let payload = pull_request_payload("opened", "");
@@ -2768,6 +2833,52 @@ mod tests {
                 )
             }]
         );
+    }
+
+    #[test]
+    fn compacted_merged_pull_request_terminal_replay_is_duplicate_without_hydration() {
+        let previous = RepoWatchObservation::new(
+            Vec::new(),
+            RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput::default())
+                .expect("empty repository state is canonical"),
+        );
+        let payload =
+            pull_request_payload("closed", "").replace(r#""merged":false"#, r#""merged":true"#);
+        let patch = mapped_patch("pull_request", Some("closed"), &payload);
+        let baseline = compact_merged_baseline();
+
+        let outcome = apply_repo_watch_observation_patch_with_merged_baselines_v1(
+            &previous,
+            std::slice::from_ref(&baseline),
+            &patch,
+        )
+        .expect("equal compacted terminal replay is valid");
+
+        assert_eq!(outcome, RepoWatchObservationApplyV1::DuplicateState);
+    }
+
+    #[test]
+    fn compacted_merge_supersedes_an_older_unmerged_close() {
+        let previous = RepoWatchObservation::new(
+            Vec::new(),
+            RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput::default())
+                .expect("empty repository state is canonical"),
+        );
+        let patch = mapped_patch(
+            "pull_request",
+            Some("closed"),
+            &pull_request_payload("closed", ""),
+        );
+        let baseline = compact_merged_baseline();
+
+        let outcome = apply_repo_watch_observation_patch_with_merged_baselines_v1(
+            &previous,
+            std::slice::from_ref(&baseline),
+            &patch,
+        )
+        .expect("older close is a supersession disposition");
+
+        assert_eq!(outcome, RepoWatchObservationApplyV1::Superseded);
     }
 
     #[test]
