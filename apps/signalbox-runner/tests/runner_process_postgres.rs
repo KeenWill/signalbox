@@ -30,6 +30,7 @@ use signalbox_persistence::{
     session_credentials::{SessionCredentialPin, SessionModelCredential},
 };
 use signalbox_runner_wire::{Advertise, CanonicalUuid, Enroll, PositiveU64, Registered, Resume};
+use signalbox_test_bin::test_bin_path;
 use signalboxd::{
     LocalProcessListener,
     runner_protocol_runtime::{
@@ -142,7 +143,7 @@ async fn s30_inv042_spawned_runner_enrolls_against_durable_daemon() -> Result<()
     let socket = directory.path().join("runner.sock");
     let runner_root = directory.path().join("runner-state");
     let configuration_path = directory.path().join("runner.toml");
-    let runner_binary = env!("CARGO_BIN_EXE_signalbox-runner");
+    let runner_binary = test_bin_path!("signalbox-runner");
     let configuration = format!(
         r#"version = 1
 daemon_socket_path = "{}"
@@ -214,7 +215,7 @@ async fn s32_inv042_inv044_spawned_runner_loss_reaches_its_placed_session()
     let runner_root = directory.path().join("runner-state");
     let working_directory = directory.path().join("session-workspace");
     let configuration_path = directory.path().join("runner.toml");
-    let runner_binary = env!("CARGO_BIN_EXE_signalbox-runner");
+    let runner_binary = test_bin_path!("signalbox-runner");
     let configuration = format!(
         r#"version = 1
 daemon_socket_path = "{}"
