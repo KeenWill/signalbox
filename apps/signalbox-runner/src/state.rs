@@ -722,7 +722,13 @@ impl RunnerStateRoot {
         next_phase: ReleasePhase,
     ) -> Result<(), RunnerStateError> {
         self.validate_current_release_correlation(&correlation)?;
-        if self.inventory.operation_failure.is_some() {
+        if matches!(
+            self.inventory
+                .operation_failure
+                .as_ref()
+                .map(|failure| &failure.correlation),
+            Some(OperationCorrelation::Release(_))
+        ) {
             return Err(RunnerStateError::InvalidTransition);
         }
         let next = WorkspaceOperation::Release {
@@ -1809,8 +1815,8 @@ mod tests {
         );
     }
 
-    /// INV-011 / INV-024: recording a completed release atomically frees its
-    /// workspace-operation slot.
+    /// INV-011 / INV-024: acknowledging a completed release atomically frees
+    /// its workspace-operation slot.
     #[test]
     fn inv011_inv024_workspace_release_acknowledgement_survives_reopen() {
         let parent = TempDir::new().expect("a temporary parent is available");
@@ -1854,8 +1860,8 @@ mod tests {
         );
     }
 
-    /// INV-011 / INV-024: recording a cleanup refusal atomically retires both
-    /// the failure and its accepted release across restart.
+    /// INV-011 / INV-024: acknowledging a cleanup refusal atomically retires
+    /// both the failure and its accepted release across restart.
     #[test]
     fn inv011_inv024_workspace_release_failure_acknowledgement_survives_reopen() {
         let parent = TempDir::new().expect("a temporary parent is available");
@@ -1908,6 +1914,27 @@ mod tests {
         assert_eq!(
             root.reconnect_inventory(),
             &inventory_with_release(ReleasePhase::ReleaseAccepted)
+        );
+    }
+
+    #[test]
+    fn workspace_release_can_follow_an_independent_lease_offer_failure() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut root = enrolled_root(&parent);
+        let failure = lease_offer_failure();
+        root.record_lease_offer_failure(failure.clone())
+            .expect("the lease-offer failure is durable");
+
+        root.record_workspace_release_phase(release_correlation(), ReleasePhase::ReleaseAccepted)
+            .expect("the independent release is durable");
+
+        assert_eq!(
+            root.reconnect_inventory(),
+            &ReconnectInventory {
+                workspace_operation: Some(release_operation(ReleasePhase::ReleaseAccepted)),
+                operation_failure: Some(failure),
+                ..ReconnectInventory::default()
+            }
         );
     }
 

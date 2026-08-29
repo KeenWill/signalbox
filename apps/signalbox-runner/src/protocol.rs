@@ -16,9 +16,10 @@ use signalbox_runner_wire::{
     FrameError, Heartbeat, HeartbeatAck, HeartbeatWorkspacePhase, LeaseClaim, LeaseClaimed,
     LeaseCorrelation, LeaseOffer, LeasePhase, LeasePhaseKind, MAX_FRAME_BYTES, Message,
     OperationCorrelation, OperationFailed, OperationFailure, PositiveU64, ReconnectDirectives,
-    ReconnectInventory, Registered, Rejected, RejectionCode, ResultFrame, Resume, SandboxProfile,
-    Shutdown, ShutdownReason, TerminalResult, ValueError, WorkspaceFailureCorrelation,
-    WorkspaceOperation, advertisement_digest, decode_line, encode_line,
+    ReconnectInventory, Registered, Rejected, RejectionCode, ReleasePhase, ResultFrame, Resume,
+    SandboxProfile, Shutdown, ShutdownReason, TerminalResult, ValueError,
+    WorkspaceFailureCorrelation, WorkspaceOperation, advertisement_digest, decode_line,
+    encode_line,
 };
 use tokio::{
     io::{
@@ -1232,16 +1233,12 @@ fn heartbeat_workspace_phase(inventory: &ReconnectInventory) -> Option<Heartbeat
     }
     match inventory.workspace_operation.as_ref() {
         Some(WorkspaceOperation::Release { correlation, phase }) => Some(match phase {
-            signalbox_runner_wire::ReleasePhase::ReleaseAccepted => {
-                HeartbeatWorkspacePhase::ReleaseAccepted {
-                    correlation: correlation.clone(),
-                }
-            }
-            signalbox_runner_wire::ReleasePhase::ReleaseCompleted => {
-                HeartbeatWorkspacePhase::ReleaseCompleted {
-                    correlation: correlation.clone(),
-                }
-            }
+            ReleasePhase::ReleaseAccepted => HeartbeatWorkspacePhase::ReleaseAccepted {
+                correlation: correlation.clone(),
+            },
+            ReleasePhase::ReleaseCompleted => HeartbeatWorkspacePhase::ReleaseCompleted {
+                correlation: correlation.clone(),
+            },
         }),
         Some(WorkspaceOperation::Provision { .. }) | None => None,
     }
@@ -1568,9 +1565,9 @@ mod tests {
     use signalbox_runner_wire::{
         DetailName, EffectClass, Enrolled, FailureCategory, FailureDetail, LeaseCorrelation,
         LeaseOffer, LeasePhase, LeasePhaseKind, OperationFailureRecorded, ReconnectDirectives,
-        ReleaseCorrelation, ReleasePhase, ResultBounds, ResultRecorded, Resumed, RetainedResult,
-        SandboxProfile, Shutdown, TerminalResult, WireToolName, WorkingDirectory,
-        WorkspaceProvision, WorkspaceReleaseRecorded,
+        ReleaseCorrelation, ResultBounds, ResultRecorded, Resumed, RetainedResult, SandboxProfile,
+        Shutdown, TerminalResult, WireToolName, WorkingDirectory, WorkspaceProvision,
+        WorkspaceReleaseRecorded,
     };
 
     use super::*;
