@@ -691,8 +691,9 @@ async fn s31_inv043_active_batch_reload_restores_consumed_runner_issuance()
             (lease_id, generation, attempt_id, session_id, runner_id,
              tool_name, effect_class, placement_event_ordinal,
              registration_enrollment_id, registration_revision,
+             offer_registration_revision,
              predecessor_generation)
-         VALUES ($1, 1, $2, $3, $4, $5, 'pure', 1, $6, 1, NULL)",
+         VALUES ($1, 1, $2, $3, $4, $5, 'pure', 1, $6, 1, 1, NULL)",
     )
     .bind(Uuid::from_u128(seed + 0xe2))
     .bind(attempt.into_uuid())
@@ -788,8 +789,9 @@ async fn s31_inv004_inv043_batch_reload_preserves_lost_claimed_source_attempt()
             (lease_id, generation, attempt_id, session_id, runner_id,
              tool_name, effect_class, placement_event_ordinal,
              registration_enrollment_id, registration_revision,
+             offer_registration_revision,
              predecessor_generation)
-         VALUES ($1, 1, $2, $3, $4, $5, 'pure', 1, $6, 1, NULL)",
+         VALUES ($1, 1, $2, $3, $4, $5, 'pure', 1, $6, 1, 1, NULL)",
     )
     .bind(Uuid::from_u128(seed + 0xe2))
     .bind(source.into_uuid())
@@ -934,8 +936,9 @@ async fn s31_inv004_inv043_batch_reload_restores_retired_attempt_identities()
             (lease_id, generation, attempt_id, session_id, runner_id,
              tool_name, effect_class, placement_event_ordinal,
              registration_enrollment_id, registration_revision,
+             offer_registration_revision,
              predecessor_generation)
-         VALUES ($1, 1, $2, $3, $4, $5, 'pure', 1, $6, 1, NULL)",
+         VALUES ($1, 1, $2, $3, $4, $5, 'pure', 1, $6, 1, 1, NULL)",
     )
     .bind(Uuid::from_u128(seed + 0xe2))
     .bind(retired.into_uuid())
