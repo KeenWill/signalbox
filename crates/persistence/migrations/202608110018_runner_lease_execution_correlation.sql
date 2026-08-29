@@ -6,7 +6,7 @@ ALTER TABLE runner_lease_generation
     DISABLE TRIGGER runner_lease_generation_is_append_only;
 
 ALTER TABLE runner_lease_generation
-    ADD COLUMN offer_registration_revision numeric(20, 0);
+    ADD COLUMN IF NOT EXISTS offer_registration_revision numeric(20, 0);
 
 UPDATE runner_lease_generation
    SET offer_registration_revision = registration_revision;

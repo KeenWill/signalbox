@@ -2969,13 +2969,13 @@ async fn insert_lease_generation_direct(
             (lease_id, generation, attempt_id, session_id, runner_id,
              tool_name, effect_class, placement_event_ordinal,
              registration_enrollment_id, registration_revision,
-             credential_profile_name,
+             offer_registration_revision, credential_profile_name,
              credential_grant_lineage_origin_ordinal,
              credential_grant_revision, credential_approval_kind,
              predecessor_generation)
          SELECT $1, $2, $3, record.session_id, $4,
                 $5, registered.effect_class, record.event_ordinal,
-                record.registration_enrollment_id, record.registration_revision,
+                record.registration_enrollment_id, record.registration_revision, $7,
                 record.pinned_credential_profile_name,
                 record.credential_grant_lineage_origin_ordinal,
                 record.credential_grant_revision, approval.approval_kind, NULL
@@ -3002,6 +3002,7 @@ async fn insert_lease_generation_direct(
     .bind(correlation.runner.into_uuid())
     .bind(correlation.tool.as_str())
     .bind(correlation.dispatch.session().into_uuid())
+    .bind(Decimal::from(correlation.registration_revision.get()))
     .execute(pool)
     .await?;
     Ok(())
@@ -7393,6 +7394,12 @@ async fn s31_inv043_inv044_placement_loss_fence_migration_rejects_legacy_history
     MIGRATOR
         .run_to(PRE_PLACEMENT_LOSS_FENCE_MIGRATION, &pool)
         .await?;
+    sqlx::query(
+        "ALTER TABLE runner_lease_generation
+         ADD COLUMN offer_registration_revision numeric(20, 0)",
+    )
+    .execute(&pool)
+    .await?;
     let (store, expected_enrollment, _, _) = stored_pin_fixture(&pool).await?;
     let connection = store
         .open_connection(expected_enrollment.enrollment())
@@ -8797,6 +8804,12 @@ async fn s31_inv043_inv044_runner_loss_epoch_migration_rejects_ambiguous_offer()
         .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, &pool)
         .await?;
     install_pre_loss_fence_compatibility_tables(&pool).await?;
+    sqlx::query(
+        "ALTER TABLE runner_lease_generation
+         ADD COLUMN offer_registration_revision numeric(20, 0)",
+    )
+    .execute(&pool)
+    .await?;
     let (store, _, registration, pin) = prepared_pin_fixture_with_authorization(
         &pool,
         authorized,
@@ -20154,7 +20167,7 @@ async fn s31_inv043_later_lease_event_rejects_cross_wired_dispatch_fence()
         .expect("the exact lease fence claims");
     let cross_wired = lease_with_cross_wired_dispatch(&claimed, registration.registration());
     let rejected = store
-        .store_lease(&cross_wired)
+        .store_claimed_lease_projection_for_test(&cross_wired)
         .await
         .expect_err("a later event must match every canonical dispatch-fence field");
 
@@ -25249,14 +25262,14 @@ async fn s31_inv043_first_generation_requires_null_predecessor() -> Result<(), B
             (lease_id, generation, attempt_id, session_id, runner_id,
              tool_name, effect_class, placement_event_ordinal,
              registration_enrollment_id, registration_revision,
-             credential_profile_name,
+             offer_registration_revision, credential_profile_name,
              credential_grant_lineage_origin_ordinal,
              credential_grant_revision, credential_approval_kind,
              predecessor_generation)
          SELECT $2, 1, attempt_id, session_id, runner_id,
                 tool_name, effect_class, placement_event_ordinal,
                 registration_enrollment_id, registration_revision,
-                credential_profile_name,
+                offer_registration_revision, credential_profile_name,
                 credential_grant_lineage_origin_ordinal,
                 credential_grant_revision, credential_approval_kind, 0
            FROM runner_lease_generation
