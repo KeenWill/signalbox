@@ -624,8 +624,9 @@ Representation rules, all enforced in the schema:
   either this nonterminal authorization or an exact durable refusal atomically.
   Equal replay returns the first authorization or refusal; unequal reuse returns
   a command conflict. A workspace-free or pre-pin placement rolls the claim back
-  and returns `NotApplicable`, leaving its terminal replacement transaction as
-  the only command owner. No transaction remains open across runner I/O.
+  and returns `NotApplicable`, leaving only its terminal replacement transaction
+  authorized to finish the command. No transaction remains open across runner
+  I/O.
 - Migration `202608110018` separates the registration revision retained by an
   immutable pinned placement from the then-current registration revision that
   authorizes each lease offer. Existing lease generations preserve their
