@@ -362,7 +362,7 @@ jobs:
   workspace-tests:
     needs: rust-change-scope
     if: needs.rust-change-scope.outputs.skip_rust != 'true'
-    runs-on: signalbox
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - name: Check out repository

@@ -184,7 +184,7 @@ jobs:
           - family: web
             runner: signalbox-docker
           - family: exec
-            runner: signalbox-docker
+            runner: ubuntu-latest
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
