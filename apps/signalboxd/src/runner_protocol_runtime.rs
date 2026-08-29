@@ -2056,6 +2056,7 @@ where
                 let context = ConnectionContext {
                     enrollment: response.enrollment_id(),
                     runner: response.runner_id(),
+                    registration_revision: response.registration_revision(),
                     epoch: response.connection_epoch(),
                 };
                 let attachment = broker
@@ -2085,6 +2086,7 @@ where
                     let context = ConnectionContext {
                         enrollment,
                         runner,
+                        registration_revision: accepted.registration_revision(),
                         epoch: accepted.connection_epoch(),
                     };
                     let attachment = broker
@@ -2148,7 +2150,7 @@ where
         }
     };
 
-    let (context, mut attachment) = context;
+    let (mut context, mut attachment) = context;
 
     let outcome = async {
         let mut heartbeat = interval(HEARTBEAT_INTERVAL);
@@ -2220,6 +2222,7 @@ where
                             .await
                         {
                             Ok(response) => {
+                                context.registration_revision = response.registration_revision;
                                 write_message(&mut writer, Message::Registered(response)).await?;
                             }
                             Err(failure) => {
@@ -2671,12 +2674,14 @@ fn lease_correlation_matches_connection(
 
 fn workspace_ready_matches_connection(ready: &WorkspaceReady, context: ConnectionContext) -> bool {
     ready.correlation.runner_id == context.runner
+        && ready.correlation.registration_revision == context.registration_revision
 }
 
 #[derive(Clone, Copy)]
 struct ConnectionContext {
     enrollment: CanonicalUuid,
     runner: CanonicalUuid,
+    registration_revision: PositiveU64,
     epoch: PositiveU64,
 }
 
@@ -3912,21 +3917,39 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv044_workspace_ready_frames_are_bound_to_the_established_runner_identity() {
+    fn s32_inv044_workspace_ready_frames_require_exact_connection_authority() {
         let ready = repository_workspace_ready();
         let matching_context = ConnectionContext {
             enrollment: identity(2),
             runner: identity(ARBITRARY_PROVISION_RUNNER_ID_SEED),
+            registration_revision: ready.correlation.registration_revision,
             epoch: PositiveU64::try_new(1).expect("the fixture epoch is positive"),
         };
-        let foreign_context = ConnectionContext {
+        let foreign_runner_context = ConnectionContext {
             enrollment: identity(2),
             runner: identity(3),
+            registration_revision: ready.correlation.registration_revision,
+            epoch: PositiveU64::try_new(1).expect("the fixture epoch is positive"),
+        };
+        let foreign_revision_context = ConnectionContext {
+            enrollment: identity(2),
+            runner: identity(ARBITRARY_PROVISION_RUNNER_ID_SEED),
+            registration_revision: PositiveU64::try_new(
+                ready.correlation.registration_revision.get() + 1,
+            )
+            .expect("the foreign fixture registration revision is positive"),
             epoch: PositiveU64::try_new(1).expect("the fixture epoch is positive"),
         };
 
         assert!(workspace_ready_matches_connection(&ready, matching_context));
-        assert!(!workspace_ready_matches_connection(&ready, foreign_context));
+        assert!(!workspace_ready_matches_connection(
+            &ready,
+            foreign_runner_context
+        ));
+        assert!(!workspace_ready_matches_connection(
+            &ready,
+            foreign_revision_context
+        ));
     }
 
     #[test]
@@ -4057,11 +4080,15 @@ mod tests {
         let matching_context = ConnectionContext {
             enrollment: identity(2),
             runner: identity(1),
+            registration_revision: PositiveU64::try_new(1)
+                .expect("the fixture registration revision is positive"),
             epoch: PositiveU64::try_new(1).expect("the fixture epoch is positive"),
         };
         let foreign_context = ConnectionContext {
             enrollment: identity(2),
             runner: identity(3),
+            registration_revision: PositiveU64::try_new(1)
+                .expect("the fixture registration revision is positive"),
             epoch: PositiveU64::try_new(1).expect("the fixture epoch is positive"),
         };
         let correlation = canonical_lease_correlation();
@@ -4570,6 +4597,7 @@ mod tests {
         let context = ConnectionContext {
             enrollment: response.enrollment_id,
             runner: response.runner_id,
+            registration_revision: response.registration_revision,
             epoch: response.connection_epoch,
         };
         let service = EnrollmentService { response };
@@ -5720,6 +5748,96 @@ mod tests {
         assert_eq!(registered.registration_revision.get(), 2);
         assert_eq!(state, "completed");
         assert_eq!(pending, []);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn workspace_ready_uses_the_registration_revision_returned_by_advertise() {
+        let (_container, database_url, _empty_store) = postgres_store().await;
+        let store = RunnerProtocolStore::new(fresh_pool(&database_url).await, configured_catalog());
+        let service = PostgresRunnerRegistrationService::new(store, []);
+        let workspace_ready = RecordingWorkspaceReadyOperationService::default();
+        let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
+        let (_shutdown_sender, shutdown) = watch::channel(false);
+        let server = serve_connection_with_operations_and_broker(
+            server,
+            service,
+            UnavailableRunnerLeaseOperationService,
+            workspace_ready,
+            RunnerConnectionBroker::new(),
+            shutdown,
+        );
+        let client = async {
+            let (reader, mut writer) = client.into_split();
+            let mut reader = BufReader::new(reader);
+            write_message(
+                &mut writer,
+                Message::Enroll(Enroll {
+                    request_id: identity(1),
+                    digest_version: DIGEST_VERSION,
+                    advertisement: configured_advertisement(),
+                }),
+            )
+            .await
+            .expect("the configured runner enrolls");
+            let Message::Enrolled(enrolled) = read_frame(&mut reader)
+                .await
+                .expect("the enrollment response is received")
+                .message
+            else {
+                panic!("the runner receives its enrollment receipt");
+            };
+            write_message(
+                &mut writer,
+                Message::Advertise(Advertise {
+                    enrollment_id: enrolled.enrollment_id,
+                    runner_id: enrolled.runner_id,
+                    authentication_id: enrolled.authentication_id,
+                    registration_revision: enrolled.registration_revision,
+                    advertisement: empty_advertisement(),
+                }),
+            )
+            .await
+            .expect("the changed advertisement is sent");
+            let Message::Registered(registered) = read_frame(&mut reader)
+                .await
+                .expect("the changed advertisement is acknowledged")
+                .message
+            else {
+                panic!("the runner receives its updated registration receipt");
+            };
+            let mut ready = repository_workspace_ready();
+            ready.correlation.runner_id = enrolled.runner_id;
+            ready.correlation.registration_revision = registered.registration_revision;
+            ready.ready.manifest.runner = enrolled.runner_id;
+            ready.ready.manifest_digest =
+                signalbox_runner_wire::workspace_manifest_digest(&ready.ready.manifest)
+                    .expect("the updated fixture manifest has a canonical digest");
+            write_message(&mut writer, Message::WorkspaceReady(ready.clone()))
+                .await
+                .expect("workspace-ready is sent under the updated registration");
+            let acknowledgement = read_frame(&mut reader)
+                .await
+                .expect("workspace-ready is acknowledged")
+                .message;
+            (enrolled, registered, ready, acknowledgement)
+        };
+
+        let (served, (enrolled, registered, ready, acknowledgement)) = tokio::join!(server, client);
+
+        served.expect("the established connection closes cleanly");
+        assert_ne!(
+            registered.registration_revision,
+            enrolled.registration_revision
+        );
+        assert_eq!(
+            acknowledgement,
+            Message::WorkspaceRecorded(WorkspaceRecorded {
+                correlation: ready.correlation,
+                manifest_id: ready.ready.manifest.manifest_id,
+                manifest_digest: ready.ready.manifest_digest,
+            })
+        );
     }
 
     #[tokio::test]
