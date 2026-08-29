@@ -1374,8 +1374,9 @@ Locks per transaction, in acquisition order:
   Why: both frames that can retire a release require the holding runner to
   acknowledge deletion or report cleanup failure, so a release addressed to an
   unreachable identity is a durable record redelivered after every restart with
-  no transition able to clear it. Release acknowledgement uses the same
-  scheduler-then-placement order and never mutates turn lifecycle. The
+  no transition able to clear it. Release acknowledgement uses the scheduler →
+  release enrollment → current placement head → pending release order and never
+  mutates turn lifecycle. The
   implemented release acknowledgement retains immutable completion evidence and
   removes that correlation from pending delivery. **Committed unimplemented
   functionality.** Two other transitions will retire the durable release record

@@ -2074,7 +2074,10 @@ absence is not a fifth lifecycle token.
 
 The top-level runner process connects an accepted-release handoff to the
 private-root cleanup adapter on a blocking thread. The connection continues
-serving heartbeats while that filesystem work runs.
+serving heartbeats while that filesystem work runs. A canceled frame read keeps
+its consumed prefix for the next serving iteration. If transport is lost after
+release acceptance, the runner waits for cleanup, journals its exact completed
+or failed outcome, and resends that outcome after authenticated resume.
 
 **Committed unimplemented functionality.** Durable `workspace_recorded`
 admission will advance the protected manifest to `active`. No repository cleanup
