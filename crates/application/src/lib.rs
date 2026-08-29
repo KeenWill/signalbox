@@ -149,8 +149,9 @@ pub use runner_lease_result::{
 };
 pub use runner_operation_failure::{
     RunnerOperationFailureDetail, RunnerOperationFailureDetailError,
-    RunnerOperationFailureDetailFailure, RunnerWorkspaceCleanupFailure,
-    RunnerWorkspaceCleanupFailureService, RunnerWorkspaceCleanupFailureTransaction,
+    RunnerOperationFailureDetailFailure, RunnerOperationFailureDetailInput,
+    RunnerWorkspaceCleanupFailure, RunnerWorkspaceCleanupFailureService,
+    RunnerWorkspaceCleanupFailureTransaction,
 };
 pub use runner_replacement_provisioning::{
     RunnerReplacementProvisioningIdGenerator, RunnerReplacementProvisioningOutcome,
