@@ -492,7 +492,7 @@ impl RunnerStateRoot {
                 });
             }
         };
-        validate_operation_journal_owner(&state, &inventory)?;
+        validate_operation_journal_correlation(&state, &inventory)?;
         Ok(Self {
             directory,
             state,
@@ -647,17 +647,17 @@ impl RunnerStateRoot {
     }
 }
 
-fn validate_operation_journal_owner(
+fn validate_operation_journal_correlation(
     state: &RunnerState,
     inventory: &ReconnectInventory,
 ) -> Result<(), RunnerStateError> {
     let receipt = state.receipt();
-    let lease_owned = match (receipt, inventory.lease.as_ref()) {
+    let lease_matches_runner = match (receipt, inventory.lease.as_ref()) {
         (_, None) => true,
         (Some(receipt), Some(lease)) => lease.correlation.runner_id == receipt.runner_id(),
         (None, Some(_)) => false,
     };
-    let result_owned = match (receipt, inventory.result.as_ref()) {
+    let result_matches_runner = match (receipt, inventory.result.as_ref()) {
         (_, None) => true,
         (Some(receipt), Some(result)) => result.correlation.runner_id == receipt.runner_id(),
         (None, Some(_)) => false,
@@ -670,7 +670,7 @@ fn validate_operation_journal_owner(
         }
         (None, Some(_)) => false,
     };
-    if lease_owned && result_owned && result_matches_lease {
+    if lease_matches_runner && result_matches_runner && result_matches_lease {
         Ok(())
     } else {
         Err(RunnerStateError::CorruptOperationJournal)
