@@ -688,6 +688,75 @@ async fn pending_receipt_frontier_names_the_newest_admitted_delivery() -> Result
     Ok(())
 }
 
+/// Receipt allocation is serialized through commit per repository, so a
+/// frontier can never include a later receipt while an earlier one is still
+/// invisible in an open admission transaction.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn concurrent_admissions_commit_in_receipt_sequence_order() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    sqlx::query("INSERT INTO repo_watch_repository_key (repository) VALUES ($1)")
+        .bind(REPOSITORY)
+        .execute(&pool)
+        .await?;
+    let mut first = pool.begin().await?;
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(
+             hashtextextended('repo-watch-webhook-admission:' || $1, 0)
+         )",
+    )
+    .bind(REPOSITORY)
+    .execute(&mut *first)
+    .await?;
+    let first_key = delivery_key(0x213);
+    let first_sequence = sqlx::query_scalar::<_, i64>(
+        "INSERT INTO repo_watch_webhook_delivery (
+             hook_id, delivery_id, repository, event_name, action_name, body_digest
+         ) VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING receipt_sequence",
+    )
+    .bind(Decimal::from(first_key.hook_id().get()))
+    .bind(first_key.delivery_id())
+    .bind(REPOSITORY)
+    .bind(EVENT_NAME)
+    .bind(ACTION_NAME)
+    .bind(DIGEST.as_slice())
+    .fetch_one(&mut *first)
+    .await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_webhook_payload (hook_id, delivery_id, body)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(Decimal::from(first_key.hook_id().get()))
+    .bind(first_key.delivery_id())
+    .bind(BODY)
+    .execute(&mut *first)
+    .await?;
+
+    let store = PostgresRepoWatchWebhookStore::new(pool);
+    let second_request = admission(
+        delivery_key(0x214),
+        repository()?,
+        EVENT_NAME,
+        Some(ACTION_NAME),
+        OTHER_DIGEST,
+        OTHER_BODY,
+    )?;
+    let mut second = tokio::spawn(async move { store.admit(&second_request).await });
+    let blocked = tokio::time::timeout(std::time::Duration::from_secs(1), &mut second).await;
+
+    assert!(
+        blocked.is_err(),
+        "later admission must wait for the earlier commit"
+    );
+
+    first.commit().await?;
+    let second_receipt = admitted_receipt(second.await??);
+
+    assert!(u64::try_from(first_sequence)? < second_receipt.sequence().get());
+    Ok(())
+}
+
 /// The drain monitor reads the oldest pending delivery on a fixed cadence for
 /// every webhook repository, so it must not transfer the admitted bodies that a
 /// pending page carries. Taking the payload table out of reach proves the

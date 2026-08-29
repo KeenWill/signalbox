@@ -78,6 +78,10 @@ pub(crate) const REPO_WATCH_WEBHOOK_DELIVERY: &str = "SELECT receipt_sequence
       WHERE hook_id = $1 AND delivery_id = $2
       FOR UPDATE";
 
+pub(crate) const REPO_WATCH_WEBHOOK_ADMISSION: &str = "SELECT pg_advisory_xact_lock(
+        hashtextextended('repo-watch-webhook-admission:' || $1, 0)
+    )";
+
 pub(crate) const START_ELIGIBLE_TURN: &str = "SELECT
             EXISTS (
                 SELECT 1

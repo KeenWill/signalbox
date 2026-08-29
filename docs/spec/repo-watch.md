@@ -47,9 +47,11 @@ pull-request issue-comment behavior, per-page hydration coalescing, and
 workflow-run branch symmetry below are verified against PR #891
 (`agent/webhook-event-mapping`). Per-page exact check-rollup coalescing and
 retention through an admitted backlog snapshot are verified against this PR
-(`agent/repo-watch-snapshot-refresh-coalescing`). Webhook drain liveness and
-stall reporting are verified against PR #896 (`agent/webhook-projection-drain`);
-the drain attempt deadline is verified against this PR
+(`agent/repo-watch-snapshot-refresh-coalescing`). Commit-ordered webhook
+admission at that snapshot frontier is verified against this PR
+(`agent/repo-watch-commit-ordered-frontier`). Webhook drain liveness and stall
+reporting are verified against PR #896 (`agent/webhook-projection-drain`); the
+drain attempt deadline is verified against this PR
 (`agent/daemon-live-webhook-drain-deadline`), and the enclosing webhook-attempt
 deadline is verified against this PR
 (`agent/daemon-live-webhook-attempt-deadline`). The provider-wide page backoff
@@ -1766,8 +1768,9 @@ check-rollup queries also coalesce within that snapshot only when their query
 form and guarded identity match: a pull-request query names both its pull
 request and head, while a commit query names its head. Mergeability does not
 coalesce, and a check-rollup never coalesces against a hydration or the other
-query form. The whole snapshot is durably admitted before its frontier is
-captured, so the first matching refresh runs after every delivery in it was
+query form. Webhook admission serializes sequence allocation and commit per
+repository, so the whole snapshot is durably admitted before its frontier is
+captured and the first matching refresh runs after every delivery in it was
 admitted. Repeating hydration would re-read pull request detail, check suites,
 check runs, reviews, threads, and one request per comment for its reactions;
 repeating an exact check-rollup would re-read the same commit's checks.
@@ -1820,7 +1823,8 @@ against the loaded cursor in one differ pass, and those occurrences are the
 event batch the commit writes. A delivery that names pull requests still runs
 the same targeted provider refresh, against the patched observation rather than
 the stored one, so a fact the payload supplied for an untargeted subject
-survives the reconciliation, and per-page hydration coalescing is unchanged.
+survives the reconciliation, and admitted-snapshot hydration coalescing is
+unchanged.
 
 A primary delivery records no event projection. Parity compares projections
 against poll-produced rows, and a primary delivery's own commit is the durable
