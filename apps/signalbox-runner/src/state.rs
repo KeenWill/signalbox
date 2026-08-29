@@ -492,7 +492,7 @@ impl RunnerStateRoot {
                 });
             }
         };
-        validate_operation_journal_owner(&state, &inventory)?;
+        validate_operation_journal_runner(&state, &inventory)?;
         Ok(Self {
             directory,
             state,
@@ -694,7 +694,7 @@ impl RunnerStateRoot {
     }
 }
 
-fn validate_operation_journal_owner(
+fn validate_operation_journal_runner(
     state: &RunnerState,
     inventory: &ReconnectInventory,
 ) -> Result<(), RunnerStateError> {
