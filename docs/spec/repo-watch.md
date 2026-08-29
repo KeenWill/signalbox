@@ -46,8 +46,8 @@ view and causes, and targeted refresh behavior are verified against this PR
 pull-request issue-comment behavior, per-page hydration coalescing, and
 workflow-run branch symmetry below are verified against PR #891
 (`agent/webhook-event-mapping`). Per-page exact check-rollup coalescing and
-retention of that page scope across work-budget yields are verified against this
-PR (`agent/repo-watch-yielded-page-coalescing`). Webhook drain liveness and
+retention through an admitted backlog snapshot are verified against this PR
+(`agent/repo-watch-snapshot-refresh-coalescing`). Webhook drain liveness and
 stall reporting are verified against PR #896 (`agent/webhook-projection-drain`);
 the drain attempt deadline is verified against this PR
 (`agent/daemon-live-webhook-drain-deadline`), and the enclosing webhook-attempt
@@ -1761,41 +1761,41 @@ targeted-query projection and immediately reuses the repository poller's
 credential, client, conditional cache, normalization, and request bounds to
 fetch only the affected pull requests. Those observations commit through the
 ordinary poll producer and dispatch path. Whole-pull-request hydrations coalesce
-per pull request across one drained page of pending deliveries. Exact
-check-rollup queries also coalesce within that page only when their query form
-and guarded identity match: a pull-request query names both its pull request and
-head, while a commit query names its head. Mergeability does not coalesce, and a
-check-rollup never coalesces against a hydration or the other query form. The
-whole page is durably admitted before it is read, so the first matching refresh
-already observes every delivery on it. Repeating hydration would re-read pull
-request detail, check suites, check runs, reviews, threads, and one request per
-comment for its reactions; repeating an exact check-rollup would re-read the
-same commit's checks. Coalescing is scoped to the page and never to a whole
-drain. A work-budget yield retains the loaded page's coalescing scope through
-that page's final receipt sequence, so a later bounded attempt can finish those
-already-admitted deliveries without refetching. The first receipt beyond that
-frontier resets the scope, because a later page may carry deliveries admitted
-after the earlier refresh ran. Only a refresh that reached the provider and
-landed in the cursor suppresses a later one. A refresh that fails before its
-fetch or before its commit leaves its delivery pending rather than terminal, so
-the page's remaining deliveries reissue it; and a hydration requested beside a
-head-guarded query is never recorded, because the merged request carries that
-guard and a superseded head discards the fetched hydration state while the query
-still reports success. A refresh whose cursor commit loses its generation race
-is likewise never recorded: its delivery stays terminal, because its disposition
-and exact projections are already durable, but the fetch never became cursor
-state, so the page's remaining deliveries still owe that refresh. The same lost
-race clears the fetch's process-local freshness, which no later generation may
-then vouch for. A delivery whose refresh the page already issued records no
-targeted-query projection of its own, on the same rule that only a query the
-poller actually made is recorded. Coalescing therefore bounds bursts and not
-pacing: a delivery admitted after a refresh reports state that refresh could not
-have observed, so it is refreshed however slowly such deliveries arrive.
-Bounding a paced stream would require a minimum interval between a pull
-request's refreshes, trading both freshness and the fidelity of the parity
-measurement shadow mode exists to produce; that trade is not taken while poll
-frequency is unchanged and the complete sweep remains authoritative. Full
-polling continues unchanged as the slow complete reconciliation sweep and
+per pull request across one admitted snapshot of pending deliveries. Exact
+check-rollup queries also coalesce within that snapshot only when their query
+form and guarded identity match: a pull-request query names both its pull
+request and head, while a commit query names its head. Mergeability does not
+coalesce, and a check-rollup never coalesces against a hydration or the other
+query form. The whole snapshot is durably admitted before its frontier is
+captured, so the first matching refresh runs after every delivery in it was
+admitted. Repeating hydration would re-read pull request detail, check suites,
+check runs, reviews, threads, and one request per comment for its reactions;
+repeating an exact check-rollup would re-read the same commit's checks.
+Coalescing is scoped to the captured receipt frontier rather than a storage page
+or drain attempt. Work-budget yields and storage-page boundaries retain that
+scope, so later bounded attempts can finish the already-admitted backlog without
+refetching. The first receipt beyond the frontier captures a new newest pending
+receipt and resets the scope before it can use earlier evidence. Only a refresh
+that reached the provider and landed in the cursor suppresses a later one. A
+refresh that fails before its fetch or before its commit leaves its delivery
+pending rather than terminal, so the scope's remaining deliveries reissue it;
+and a hydration requested beside a head-guarded query is never recorded, because
+the merged request carries that guard and a superseded head discards the fetched
+hydration state while the query still reports success. A refresh whose cursor
+commit loses its generation race is likewise never recorded: its delivery stays
+terminal, because its disposition and exact projections are already durable, but
+the fetch never became cursor state, so the scope's remaining deliveries still
+owe that refresh. The same lost race clears the fetch's process-local freshness,
+which no later generation may then vouch for. A delivery whose refresh the scope
+already issued records no targeted-query projection of its own, on the same rule
+that only a query the poller actually made is recorded. Coalescing therefore
+bounds bursts and not pacing: a delivery admitted after a refresh reports state
+that refresh could not have observed, so it is refreshed however slowly such
+deliveries arrive. Bounding a paced stream would require a minimum interval
+between a pull request's refreshes, trading both freshness and the fidelity of
+the parity measurement shadow mode exists to produce; that trade is not taken
+while poll frequency is unchanged and the complete sweep remains authoritative.
+Full polling continues unchanged as the slow complete reconciliation sweep and
 remains authoritative for missed deliveries, reactions, and every provider fact
 outside the mapped set.
 

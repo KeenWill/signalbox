@@ -685,6 +685,36 @@ impl PostgresRepoWatchWebhookStore {
         Ok(deliveries)
     }
 
+    /// The newest receipt currently in one repository's pending inventory.
+    ///
+    /// A drain captures this frontier before issuing a targeted provider
+    /// refresh. Exact refresh evidence may then be reused only through that
+    /// receipt: anything admitted later has a greater sequence and opens a new
+    /// scope before it can rely on the earlier provider observation.
+    pub async fn load_pending_receipt_frontier(
+        &self,
+        repository: &RepositorySlug,
+    ) -> Result<Option<NonZeroU64>, RepoWatchWebhookStoreError> {
+        let sequence = sqlx::query_scalar::<_, i64>(
+            "SELECT receipt_sequence
+               FROM repo_watch_webhook_pending
+              WHERE repository = $1
+              ORDER BY receipt_sequence DESC
+              LIMIT 1",
+        )
+        .bind(repository.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        sequence
+            .map(|sequence| {
+                u64::try_from(sequence)
+                    .ok()
+                    .and_then(NonZeroU64::new)
+                    .ok_or_else(|| RepoWatchWebhookStorageCorruption::InvalidReceiptSequence.into())
+            })
+            .transpose()
+    }
+
     /// The oldest pending delivery's identity and receipt, without its payload.
     ///
     /// The drain monitor runs on a fixed cadence for every webhook repository

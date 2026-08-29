@@ -270,11 +270,11 @@ pub enum RepoWatchTargetedRefreshV1 {
     },
 }
 
-/// Provider refreshes one drained delivery page has already issued.
+/// Provider refreshes one caller-bounded admitted-delivery scope has issued.
 ///
-/// Every delivery on a page is durably admitted before the page is read, so the
-/// provider state each one reports is already in place when the page issues its
-/// first refresh, and one hydration observes all of them. Repeating that
+/// Every delivery through the caller's receipt frontier is durably admitted
+/// before the scope's first refresh, so one hydration observes their provider
+/// state. Repeating that
 /// hydration per delivery re-reads the same state on the shared polling
 /// credential: pull-request detail, check suites, check runs, reviews, threads,
 /// and one request per comment for that comment's reactions. Pull-request
@@ -286,10 +286,10 @@ pub enum RepoWatchTargetedRefreshV1 {
 /// Whole-pull-request hydrations coalesce by pull request. Exact check-rollup
 /// refreshes coalesce only when both their query form and guarded identity are
 /// equal: pull-request-scoped queries use the pull request and head, while
-/// commit-scoped queries use the head. Mergeability never coalesces. The scope
-/// is one page and never a whole drain: a later page may hold deliveries
-/// admitted after this page's refresh ran, reporting state that refresh cannot
-/// have observed.
+/// commit-scoped queries use the head. Mergeability never coalesces. The caller
+/// owns the admitted-receipt boundary: a later delivery that was not admitted
+/// before this scope's refresh ran reports state that refresh cannot have
+/// observed and must use a new coalescer.
 ///
 /// Asking and recording are separate because only a refresh that reached the
 /// provider and landed in the cursor makes a later one redundant. A refresh
@@ -310,7 +310,7 @@ pub struct RepoWatchTargetedRefreshCoalescerV1 {
 }
 
 impl RepoWatchTargetedRefreshCoalescerV1 {
-    /// Opens the coalescing scope that one drained delivery page owns.
+    /// Opens one caller-bounded admitted-delivery coalescing scope.
     pub fn for_delivery_page() -> Self {
         Self {
             hydrated: BTreeSet::new(),
@@ -319,7 +319,7 @@ impl RepoWatchTargetedRefreshCoalescerV1 {
         }
     }
 
-    /// Retains the refreshes this page has not already issued.
+    /// Retains the refreshes this scope has not already issued.
     pub fn unissued(
         &self,
         refreshes: &[RepoWatchTargetedRefreshV1],
