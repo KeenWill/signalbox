@@ -32,7 +32,7 @@ use sqlx::PgPool;
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
     net::{UnixStream, unix::OwnedReadHalf, unix::OwnedWriteHalf},
-    sync::{Mutex, watch},
+    sync::{Mutex, OwnedMutexGuard, watch},
     task::{JoinError, JoinSet},
     time::{MissedTickBehavior, interval, timeout},
 };
@@ -49,6 +49,7 @@ use crate::{
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const HEARTBEAT_MISSES_BEFORE_LOSS: u8 = 3;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const CLAIMED_REPLAY_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const MAXIMUM_CONCURRENT_CONNECTIONS: usize = 64;
 const REGISTRATION_ONLY_CREDENTIAL_PROFILE: &str = "github-runner";
@@ -218,6 +219,31 @@ pub trait RunnerRegistrationService: Clone + Send + Sync + 'static {
         epoch: PositiveU64,
         transition: RunnerConnectionTransition,
     ) -> RunnerRegistrationFuture<'_, RunnerConnectionTransitionOutcome>;
+
+    /// Serializes replay writes with successor connection admission.
+    fn claimed_replay_admission(&self) -> RunnerReplayAdmissionFuture<'_>;
+}
+
+/// Boxed future returning the guard that fences claimed-lease replay writes.
+pub type RunnerReplayAdmissionFuture<'a> =
+    Pin<Box<dyn Future<Output = RunnerReplayAdmission> + Send + 'a>>;
+
+/// Admission retained while a claimed-lease replay validates and writes.
+pub struct RunnerReplayAdmission {
+    _guard: Option<OwnedMutexGuard<()>>,
+}
+
+impl RunnerReplayAdmission {
+    fn guarded(guard: OwnedMutexGuard<()>) -> Self {
+        Self {
+            _guard: Some(guard),
+        }
+    }
+
+    #[cfg(test)]
+    const fn unguarded() -> Self {
+        Self { _guard: None }
+    }
 }
 
 /// Durable resume receipt plus any canonical claimed lease to replay.
@@ -540,7 +566,7 @@ impl PostgresRunnerRegistrationService {
             RunnerId::from_uuid(request.runner_id.into_uuid()),
             RunnerAuthenticationId::from_uuid(request.authentication_id.into_uuid()),
         );
-        let (directives, claimed_correlation) = match resume_operation {
+        let (mut directives, mut claimed_correlation) = match resume_operation {
             ResumeOperation::RetainedResult(result) => {
                 let result = RunnerDispatchWireAdapter::result_request(result).map_err(|_| {
                     RunnerRegistrationFailure::new(
@@ -660,6 +686,17 @@ impl PostgresRunnerRegistrationService {
             .map_err(|error| {
                 store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
             })?;
+        if claimed_correlation.is_some() && receipt.registration().revision() != prior {
+            directives = claimed_lease_directives(&request.inventory, DirectiveAction::FailStale)
+                .map_err(|code| {
+                RunnerRegistrationFailure::new(
+                    RunnerInboundFrameKind::Resume,
+                    correlation.clone(),
+                    code,
+                )
+            })?;
+            claimed_correlation = None;
+        }
         self.propagate_pending_registration_reconciliations()
             .await
             .map_err(|error| {
@@ -971,6 +1008,11 @@ impl RunnerRegistrationService for PostgresRunnerRegistrationService {
         transition: RunnerConnectionTransition,
     ) -> RunnerRegistrationFuture<'_, RunnerConnectionTransitionOutcome> {
         Box::pin(self.transition_connection_durably(enrollment, epoch, transition))
+    }
+
+    fn claimed_replay_admission(&self) -> RunnerReplayAdmissionFuture<'_> {
+        let admission = Arc::clone(&self.registration_admission);
+        Box::pin(async move { RunnerReplayAdmission::guarded(admission.lock_owned().await) })
     }
 }
 
@@ -1911,6 +1953,7 @@ where
                     if let Some(claimed_lease) = claimed_lease {
                         let [claim_acknowledgement, dispatch] =
                             claimed_resume_messages(&claimed_lease)?;
+                        let _replay_admission = service.claimed_replay_admission().await;
                         if !transition_is_current(
                             &service,
                             context,
@@ -1920,7 +1963,17 @@ where
                         {
                             return Ok(());
                         }
-                        write_message(&mut writer, claim_acknowledgement).await?;
+                        if let Err(error) =
+                            write_claimed_replay_message(&mut writer, claim_acknowledgement).await
+                        {
+                            transition_is_current(
+                                &service,
+                                context,
+                                RunnerConnectionTransition::TransportClosed,
+                            )
+                            .await?;
+                            return Err(error);
+                        }
                         if !transition_is_current(
                             &service,
                             context,
@@ -1930,7 +1983,17 @@ where
                         {
                             return Ok(());
                         }
-                        write_message(&mut writer, dispatch).await?;
+                        if let Err(error) =
+                            write_claimed_replay_message(&mut writer, dispatch).await
+                        {
+                            transition_is_current(
+                                &service,
+                                context,
+                                RunnerConnectionTransition::TransportClosed,
+                            )
+                            .await?;
+                            return Err(error);
+                        }
                     }
                     (context, attachment)
                 }
@@ -2383,6 +2446,7 @@ const fn connection_failure_transition(
     match error {
         RunnerProtocolRuntimeError::Read(_)
         | RunnerProtocolRuntimeError::Write(_)
+        | RunnerProtocolRuntimeError::ClaimedReplayWriteTimeout
         | RunnerProtocolRuntimeError::Closed => Some(RunnerConnectionTransition::TransportClosed),
         RunnerProtocolRuntimeError::Decode(_)
         | RunnerProtocolRuntimeError::Encode(_)
@@ -2718,6 +2782,15 @@ async fn write_message(
         .map_err(RunnerProtocolRuntimeError::Write)
 }
 
+async fn write_claimed_replay_message(
+    writer: &mut OwnedWriteHalf,
+    message: Message,
+) -> Result<(), RunnerProtocolRuntimeError> {
+    timeout(CLAIMED_REPLAY_WRITE_TIMEOUT, write_message(writer, message))
+        .await
+        .map_err(|_| RunnerProtocolRuntimeError::ClaimedReplayWriteTimeout)?
+}
+
 fn available_correlation(message: &Message) -> AvailableCorrelation {
     match message {
         Message::Enroll(value) => AvailableCorrelation::Enrollment(value.request_id),
@@ -2850,6 +2923,7 @@ pub enum RunnerProtocolRuntimeError {
     OwnershipUnavailable,
     Broker(RunnerConnectionBrokerError),
     DispatchWire(RunnerDispatchWireError),
+    ClaimedReplayWriteTimeout,
     HeartbeatSequenceExhausted,
     ConnectionTask(JoinError),
     ConnectionDrainTimeout {
@@ -2875,6 +2949,9 @@ impl fmt::Display for RunnerProtocolRuntimeError {
             }
             Self::Broker(_) => formatter.write_str("runner connection broker failed"),
             Self::DispatchWire(_) => formatter.write_str("runner lease wire projection failed"),
+            Self::ClaimedReplayWriteTimeout => {
+                formatter.write_str("runner claimed-lease replay write timed out")
+            }
             Self::HeartbeatSequenceExhausted => {
                 formatter.write_str("runner heartbeat sequence exhausted")
             }
@@ -2904,6 +2981,7 @@ impl Error for RunnerProtocolRuntimeError {
             Self::Closed
             | Self::HandshakeTimeout
             | Self::OwnershipUnavailable
+            | Self::ClaimedReplayWriteTimeout
             | Self::HeartbeatSequenceExhausted
             | Self::ConnectionDrainTimeout {
                 initiating: None, ..
@@ -3016,6 +3094,10 @@ mod tests {
                     current: epoch,
                 },
             )))
+        }
+
+        fn claimed_replay_admission(&self) -> RunnerReplayAdmissionFuture<'_> {
+            Box::pin(std::future::ready(RunnerReplayAdmission::unguarded()))
         }
     }
 
@@ -3966,6 +4048,14 @@ mod tests {
         assert_eq!(
             rejection_terminal_transition(RunnerRegistrationFailureCause::Database),
             RunnerConnectionTransition::TransportClosed,
+        );
+    }
+
+    #[test]
+    fn claimed_replay_write_timeout_terminalizes_the_transport() {
+        assert_eq!(
+            connection_failure_transition(&RunnerProtocolRuntimeError::ClaimedReplayWriteTimeout),
+            Some(RunnerConnectionTransition::TransportClosed),
         );
     }
 

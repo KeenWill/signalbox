@@ -44,7 +44,7 @@ the durable transactions before acknowledgement is re-verified through this PR
 best-effort `lease_offer` projection and handoff is re-verified through this PR
 (`agent/runner-lease-offer-dispatcher`). The corrected reconstitution mismatch
 contract was re-verified through PR #322 (`agent/docs-discipline`; pinned and
-pinned-loss request mismatches). Owner-private storage of the one retained lease
+pinned-loss request mismatches). User-private storage of the one retained lease
 and its monotonic fsynced phases is re-verified through this PR
 (`agent/runner-operation-journal`). Matching terminal-result retention and
 atomic acknowledgement clearing are re-verified through this PR
@@ -731,12 +731,15 @@ registration and advertisement, and the complete durable lease correlation under
 the owning session lock. It returns only the canonical `Claimed` lease as
 repeatable-read reconstitution evidence. The read does not authorize later
 projection by itself. For a lease-only inventory at `waiting_dispatch` or
-`dispatch_received`, the daemon validates this evidence before resume, returns
-an exact `await` directive, opens the successor connection, then repeats the
-complete checked readback before projecting anything. It writes `resumed`,
-rechecks the new connection epoch, writes the canonical `lease_claimed`,
-rechecks the epoch again, and writes the canonical immutable `dispatch`. An
-exact inventory whose claimed lease is already stale instead receives
+`dispatch_received`, the daemon validates this evidence before resume. If resume
+advances the registration, it returns `fail_stale`; otherwise it returns an
+exact `await` directive, opens the successor connection, then repeats the
+complete checked readback before projecting anything. After writing `resumed`,
+it holds successor-connection admission while rechecking the new connection
+epoch and writing the canonical `lease_claimed`, then rechecking the epoch and
+writing the canonical immutable `dispatch`. A failed replay write durably closes
+that epoch as transport loss. An exact inventory whose claimed lease is already
+stale instead receives
 `fail_stale` and no replayed operation frame. An `execution_may_have_started`
 lease without a result remains unavailable until the loss-classification slice
 consumes it. The runner consumes the exact lease-only `await` directive for
@@ -858,7 +861,7 @@ selected runner authority, and placement in the runner lock order, authenticates
 either a distinct live successor or the registration-loss-only same-runner
 exception, and returns the original durable stage on equal replay. A
 workspace-free placement returns `NotApplicable` without claiming the command,
-so its later terminal transaction remains the sole owner. The runner provisions
+so only its later terminal transaction may finish the command. The runner provisions
 and spools `workspace_ready` under that limited authority. Only a later
 transaction can activate the pending enrollment: it rechecks the lost
 predecessor and connected candidate, consumes the exact workspace receipt,
