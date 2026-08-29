@@ -2101,10 +2101,11 @@ mod tests {
         let parent = TempDir::new().expect("a temporary parent is available");
         let path = root_path(&parent);
         let mut root = enrolled_root(&parent);
-        root.record_workspace_ready(workspace_ready())
+        let ready = workspace_ready();
+        root.record_workspace_ready(ready.clone())
             .expect("the complete ready payload is durable");
 
-        root.fail_stale_workspace_ready(&provision_correlation())
+        root.fail_stale_workspace_ready(&ready.correlation)
             .expect("the exact stale item frees its ready payload");
         drop(root);
         let reopened = RunnerStateRoot::open(&path).expect("the private state root reopens");
