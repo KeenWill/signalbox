@@ -2592,7 +2592,37 @@ impl RepositoryWatchTask {
                         .await
                     {
                         Ok(Some(frontier)) if frontier >= delivery.receipt().sequence() => frontier,
-                        Ok(Some(_) | None) | Err(_) => {
+                        Ok(Some(frontier)) => {
+                            tracing::error!(
+                                repository = %self.repository.as_str(),
+                                delivery_receipt_sequence = delivery.receipt().sequence().get(),
+                                frontier_receipt_sequence = frontier.get(),
+                                cause_code = RepositoryWatchAttemptError::Persistence.cause_code(),
+                                "repository-watch webhook refresh frontier precedes the pending delivery"
+                            );
+                            return WebhookDrainOutcome::ProjectionFailed(
+                                RepositoryWatchAttemptError::Persistence,
+                            );
+                        }
+                        Ok(None) => {
+                            tracing::error!(
+                                repository = %self.repository.as_str(),
+                                delivery_receipt_sequence = delivery.receipt().sequence().get(),
+                                cause_code = RepositoryWatchAttemptError::Persistence.cause_code(),
+                                "repository-watch webhook refresh frontier is absent for a pending delivery"
+                            );
+                            return WebhookDrainOutcome::ProjectionFailed(
+                                RepositoryWatchAttemptError::Persistence,
+                            );
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                repository = %self.repository.as_str(),
+                                delivery_receipt_sequence = delivery.receipt().sequence().get(),
+                                cause_code = RepositoryWatchAttemptError::Persistence.cause_code(),
+                                cause = %error,
+                                "repository-watch webhook drain could not load its refresh frontier"
+                            );
                             return WebhookDrainOutcome::ProjectionFailed(
                                 RepositoryWatchAttemptError::Persistence,
                             );

@@ -556,6 +556,10 @@ impl PostgresRepoWatchWebhookStore {
         request: &RepoWatchWebhookAdmission,
     ) -> Result<RepoWatchWebhookAdmissionOutcome, RepoWatchWebhookStoreError> {
         let mut transaction = self.pool.begin().await?;
+        sqlx::query(crate::lock_inventory::REPO_WATCH_WEBHOOK_ADMISSION)
+            .bind(request.repository.as_str())
+            .execute(&mut *transaction)
+            .await?;
         let inserted = sqlx::query_as::<_, ReceiptRow>(
             "INSERT INTO repo_watch_webhook_delivery (
                 hook_id, delivery_id, repository, event_name, action_name, body_digest
@@ -687,10 +691,11 @@ impl PostgresRepoWatchWebhookStore {
 
     /// The newest receipt currently in one repository's pending inventory.
     ///
-    /// A drain captures this frontier before issuing a targeted provider
-    /// refresh. Exact refresh evidence may then be reused only through that
-    /// receipt: anything admitted later has a greater sequence and opens a new
-    /// scope before it can rely on the earlier provider observation.
+    /// Admission serializes sequence allocation and commit per repository. A
+    /// drain can therefore capture this frontier before issuing a targeted
+    /// provider refresh and reuse exact refresh evidence only through that
+    /// receipt: anything that commits later has a greater sequence and opens a
+    /// new scope before it can rely on the earlier provider observation.
     pub async fn load_pending_receipt_frontier(
         &self,
         repository: &RepositorySlug,
