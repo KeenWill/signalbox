@@ -33,15 +33,15 @@ use signalbox_domain::{
     ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
     ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
     ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal,
-    ToolRequestReconstitutionInput, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
-    ValidatedRunnerRegistration, WorkingDirectorySelection, WorkspaceCapability,
-    WorkspaceManifestId, WorkspaceRecovery, WorkspaceRelativePath, WorkspaceRepositoryKey,
-    WorkspaceRequirement, WorkspaceRevision,
+    ToolRequestReconstitutionInput, TranscriptAncestry, TurnAttemptId, TurnId,
+    TurnInstructionManifest, TurnInstructionManifestId, UserContent, ValidatedRunnerRegistration,
+    WorkingDirectorySelection, WorkspaceCapability, WorkspaceManifestId, WorkspaceRecovery,
+    WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRequirement, WorkspaceRevision,
 };
 use signalbox_persistence::{
     MIGRATOR,
     create_session::CreateSessionRepository,
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
     outbox::{
         DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedRunnerState, OutboxCorruption,
@@ -61,7 +61,7 @@ use signalbox_persistence::{
     start_eligible_turn::StartEligibleTurnRepository,
     submit_input::SubmitInputRepository,
 };
-use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
+use sqlx::{PgConnection, PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
@@ -158,7 +158,7 @@ async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box
         .with_password(DATABASE_PASSWORD)
         .with_db_name(DATABASE_NAME)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -185,6 +185,47 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
 
 fn uuid(value: u128) -> Uuid {
     Uuid::from_u128(value)
+}
+
+async fn insert_empty_instruction_manifest(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<TurnInstructionManifestId, sqlx::Error> {
+    let manifest_id = TurnInstructionManifestId::from_uuid(turn.into_uuid());
+    let manifest = TurnInstructionManifest::empty_turn_start(manifest_id, session, turn);
+    sqlx::query(
+        "INSERT INTO instruction_discovery
+            (instruction_discovery_id, session_id, turn_id,
+             limit_set_version, classified_entry_count, finding_count,
+             candidate_source_byte_count, elapsed_millis, scan_complete)
+         VALUES ($1, $2, $3, 1, 0, 0, 0, 0, true)",
+    )
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_instruction_manifest
+            (turn_instruction_manifest_id, session_id, turn_id,
+             instruction_discovery_id, boundary_kind,
+             eligibility_hash_algorithm, eligibility_hash,
+             admitted_set_hash_algorithm, admitted_set_hash,
+             manifest_hash_algorithm, manifest_hash)
+         VALUES ($1, $2, $3, $4, 'turn_start',
+                 'sha256_v1', $5, 'sha256_v1', $6, 'sha256_v1', $7)",
+    )
+    .bind(manifest_id.into_uuid())
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(manifest.eligibility_hash().as_bytes().as_slice())
+    .bind(manifest.admitted_set_hash().as_bytes().as_slice())
+    .bind(manifest.manifest_hash().as_bytes().as_slice())
+    .execute(&mut *connection)
+    .await?;
+    Ok(manifest_id)
 }
 
 fn class() -> RunnerCapabilityClass {
@@ -1926,6 +1967,29 @@ async fn replace_approval_with_user_command(
     transaction.commit().await
 }
 
+async fn insert_user_override_approval(
+    pool: &PgPool,
+    facts: PhysicalAttemptFacts,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("ALTER TABLE tool_approval_decision DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source,
+             override_denied_request_id)
+         VALUES ($1, 'approve', 'user_override', $2)",
+    )
+    .bind(uuid(facts.request))
+    .bind(uuid(facts.request + (RELATED_IDENTITY_OFFSET * 5)))
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_approval_decision ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 async fn insert_external_physical_attempt(
     pool: &PgPool,
     facts: PhysicalAttemptFacts,
@@ -2522,14 +2586,17 @@ async fn insert_runner_recovery_turn_with_interrupted_loss_boundary(
     .bind(facts.session.into_uuid())
     .execute(&mut *transaction)
     .await?;
+    let instruction_manifest =
+        insert_empty_instruction_manifest(&mut transaction, facts.session, facts.turn).await?;
     sqlx::query(
         "INSERT INTO model_call
             (model_call_id, turn_id, session_id, turn_attempt_id,
              selection_kind, direct_model_selection_id,
              resolved_provider_model_identity_id, context_frontier_id,
-             credential_reference, state_kind, terminal_disposition_kind)
+             credential_reference, state_kind, terminal_disposition_kind,
+             turn_instruction_manifest_id)
          VALUES ($1, $2, $3, $4, 'direct', $5, $6, $7,
-                 'synthetic-runner-recovery-test', 'terminal', 'completed')",
+                 'synthetic-runner-recovery-test', 'terminal', 'completed', $8)",
     )
     .bind(facts.active_tool_round_call.into_uuid())
     .bind(facts.turn.into_uuid())
@@ -2538,6 +2605,7 @@ async fn insert_runner_recovery_turn_with_interrupted_loss_boundary(
     .bind(uuid(0xa101))
     .bind(uuid(0xa159))
     .bind(starting_frontier.into_uuid())
+    .bind(instruction_manifest.into_uuid())
     .execute(&mut *transaction)
     .await?;
     sqlx::query(
@@ -2681,14 +2749,18 @@ async fn attach_continuing_tool_round_projection(
     .bind(turn.into_uuid())
     .execute(pool)
     .await?;
+    let mut connection = pool.acquire().await?;
+    let instruction_manifest =
+        insert_empty_instruction_manifest(&mut connection, session, turn).await?;
     sqlx::query(
         "INSERT INTO model_call
             (model_call_id, turn_id, session_id, turn_attempt_id,
              selection_kind, direct_model_selection_id,
              resolved_provider_model_identity_id, context_frontier_id,
-             credential_reference, state_kind, terminal_disposition_kind)
+             credential_reference, state_kind, terminal_disposition_kind,
+             turn_instruction_manifest_id)
          VALUES ($1, $2, $3, $4, 'direct', $5, $6, $7,
-                 'synthetic-runner-recovery-test', 'terminal', 'completed')",
+                 'synthetic-runner-recovery-test', 'terminal', 'completed', $8)",
     )
     .bind(producing_call.into_uuid())
     .bind(turn.into_uuid())
@@ -2697,8 +2769,10 @@ async fn attach_continuing_tool_round_projection(
     .bind(uuid(0xa101))
     .bind(provider)
     .bind(starting_frontier)
-    .execute(pool)
+    .bind(instruction_manifest.into_uuid())
+    .execute(&mut *connection)
     .await?;
+    drop(connection);
     sqlx::query(
         "INSERT INTO context_frontier
             (owning_session_id, context_frontier_id,
@@ -7304,6 +7378,64 @@ async fn s31_inv035_inv045_session_policy_lease_requires_confirmed_provenance()
 
     assert_store_check_violation(unconfirmed);
     assert_store_check_violation(blanket);
+    assert_eq!(admitted, Decimal::from(1u64));
+    drop(pool);
+    Ok(())
+}
+
+/// S31 / INV-035 / INV-045: a one-shot user override is the user confirming
+/// one exact command in advance, so its provenance admits a session-policy
+/// lease exactly as an applied user command does.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv035_inv045_session_policy_lease_admits_user_override_provenance()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: Some(replacement_profile()),
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: permission_overrides(RunnerToolPermissionOverride::Confirm),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                .expect("the fixture working directory is valid"),
+            None,
+            confirmed_authorized_with_effect(INITIAL_PHYSICAL_ATTEMPT, ToolEffectClass::EffectFree),
+            offer_request(),
+        )
+        .expect("the session-policy profile pins the placement");
+    insert_user_override_approval(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    store.store_pin(&pin, &registration).await?;
+    let admitted: Decimal = sqlx::query_scalar(
+        "SELECT generation
+           FROM runner_lease_generation
+          WHERE lease_id = $1",
+    )
+    .bind(uuid(LEASE))
+    .fetch_one(&pool)
+    .await?;
+
     assert_eq!(admitted, Decimal::from(1u64));
     drop(pool);
     Ok(())

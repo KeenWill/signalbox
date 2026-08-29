@@ -1,10 +1,10 @@
 # Pull-request convergence reconciliation
 
 This page is verified against PR #1056
-(`agent/daemon-live-commissioned-escalation-resume`; via PR #1062
-`agent/daemon-live-graceful-shutdown-drain`). The daemon-native convergence
-sweep, predicate, fenced commission, durable retry and park records, and
-explicit configuration throttle are its implementation scope.
+(`agent/daemon-live-commissioned-escalation-resume`; via PR #1194
+`agent/daemon-live-codex-tool-arg-stage`). The daemon-native convergence sweep,
+predicate, fenced commission, durable retry and park records, and explicit
+configuration throttle are its implementation scope.
 
 ## Authority and target selection
 
@@ -39,6 +39,18 @@ endpoint, disabled redirects, proxy discovery, and transport retries, a
 30-second request timeout, a 4 MiB response ceiling, and a 64 KiB credential
 ceiling. A malformed, closed, missing, partial, oversized, or provider-refused
 census is a facts-fetch failure rather than evidence of convergence.
+
+A census that paginated either connection proves its assembled snapshot in a
+fixed order: the pull request's own facts are reread first, and only then is
+every page of each paginated connection traversed a second time and compared
+with the assembled buffer. The details reread proves the refs, mergeable state,
+draft flag, head repository, initial pages, and page information still hold; the
+re-traversals that follow it prove every later page still holds. Revalidating a
+connection before that reread would leave a window in which a thread or check on
+a second or later page changes after its own reread but before it, invisibly,
+because the initial pages and page information can be identical across such a
+change. Any drift found by either step is a facts-fetch failure, so no snapshot
+is assembled across a provider state the census has already disproved.
 
 A snapshot is converged exactly when no review thread is unresolved, the status
 rollup belongs to the current head, every gating check is green, and

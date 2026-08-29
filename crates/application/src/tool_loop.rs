@@ -8,9 +8,10 @@ use std::{collections::BTreeMap, error::Error, fmt, future::Future, sync::Arc};
 
 use crate::{
     ClassifyOperatorFailure, DecideToolRequestTransaction, InProcessToolDispatchGate,
-    InProcessToolDispatchPermit, OperatorFailureClass, PrepareToolContinuationOutcome,
-    RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
-    ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
+    InProcessToolDispatchPermit, OperatorFailureClass, OverrideDeniedToolRequestTransaction,
+    PrepareToolContinuationOutcome, RetainedToolAttemptObservationStatus,
+    ToolAttemptAuthorizationStatus, ToolContinuationIdentities, ToolCrashClosureIdentities,
+    ToolExecutionTransaction,
 };
 #[cfg(test)]
 use signalbox_domain::AcceptedInputId;
@@ -18,12 +19,13 @@ use signalbox_domain::{
     ChildWait, CorrelatedToolAttemptObservation, CurrentToolAttemptState,
     DangerousToolAutoApproval, DecideToolRequest, DelegationWait, EndedToolAttempt,
     FailedModelCallTurn, FailedModelCallTurnIdentities, InitialToolApproval, IssuedExecutorFence,
-    ModelCallId, NormalizedToolArguments, PreparedDecideToolRequest, SemanticTranscriptEntryId,
-    SessionId, ToolApprovalPosture, ToolArgumentsKind, ToolAttemptCrashOutcome,
-    ToolAttemptDispatchCorrelation, ToolAttemptId, ToolAttemptObservation, ToolBatch,
-    ToolBatchPhase, ToolDispatchAuthority, ToolEffectClass, ToolExecutionError,
-    ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequest,
-    ToolRequestId, ToolResultContent, ToolResultText, ToolResultTextFailure, TurnAttemptId, TurnId,
+    ModelCallId, NormalizedToolArguments, OverrideDeniedToolRequest, PreparedDecideToolRequest,
+    PreparedOverrideDeniedToolRequest, SemanticTranscriptEntryId, SessionId, ToolApprovalPosture,
+    ToolArgumentsKind, ToolAttemptCrashOutcome, ToolAttemptDispatchCorrelation, ToolAttemptId,
+    ToolAttemptObservation, ToolBatch, ToolBatchPhase, ToolDispatchAuthority, ToolEffectClass,
+    ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName,
+    ToolPermissionDefault, ToolRequest, ToolRequestId, ToolResultContent, ToolResultText,
+    ToolResultTextFailure, TurnAttemptId, TurnId,
 };
 
 /// Canonical JSON object used as a model-facing argument schema.
@@ -624,6 +626,37 @@ where
     }
 }
 
+/// Application service for one durable delegate-denial override command.
+pub struct OverrideDeniedToolRequestService<Transaction> {
+    transaction: Transaction,
+}
+
+impl<Transaction> OverrideDeniedToolRequestService<Transaction> {
+    /// Wraps the authoritative transaction.
+    pub const fn new(transaction: Transaction) -> Self {
+        Self { transaction }
+    }
+
+    /// Returns the owned transaction role.
+    pub fn into_transaction(self) -> Transaction {
+        self.transaction
+    }
+}
+
+impl<Transaction> OverrideDeniedToolRequestService<Transaction>
+where
+    Transaction: OverrideDeniedToolRequestTransaction,
+{
+    /// Applies one override command; the transaction mints no fresh
+    /// identities, so no collision retry exists to run.
+    pub async fn execute(
+        &mut self,
+        command: OverrideDeniedToolRequest,
+    ) -> Result<PreparedOverrideDeniedToolRequest, Transaction::Error> {
+        self.transaction.override_denied(command).await
+    }
+}
+
 /// Opaque same-incarnation executor evidence retained across a failed commit.
 pub struct RetainedToolExecutionState {
     state: RetainedToolExecutionStateKind,
@@ -751,6 +784,10 @@ pub enum ToolExecutionServiceOutcome {
     ContinuationTargetUnavailable(Box<FailedModelCallTurn>),
     /// Continuation credential-pool exhaustion closed the turn atomically.
     ContinuationPoolExhausted(Box<signalbox_domain::CredentialPoolExhaustedModelCallTurn>),
+    /// Reported usage closed the turn before an oversized continuation.
+    ContinuationContextCompactionRequired(
+        Box<signalbox_domain::ContextHeadroomExhaustedModelCallTurn>,
+    ),
 }
 
 const fn is_fatal_executor_failure_class(failure: OperatorFailureClass) -> bool {
@@ -1874,6 +1911,17 @@ where
                         exhausted,
                     ));
                 }
+                Ok(PrepareToolContinuationOutcome::ContextCompactionRequired(required)) => {
+                    report_tool_turn_terminalization(
+                        required.failed(),
+                        "continuation_context_compaction_required",
+                    );
+                    return Ok(
+                        ToolExecutionServiceOutcome::ContinuationContextCompactionRequired(
+                            required,
+                        ),
+                    );
+                }
                 Err(error) => return Err(ToolExecutionServiceError::Continuation(error)),
             }
         }
@@ -2057,7 +2105,7 @@ mod tests {
     use super::*;
     use signalbox_domain::{
         ChildRelationshipPolicy, DelegatedSpawnRequest, DelegationAwaitRequest, DelegationEvent,
-        DelegationEventOrdinal, DelegationProvenance, DelegationWaitMode,
+        DelegationEventOrdinal, DelegationProvenance, DelegationWaitMode, DurableCommandId,
         ResolvedContextFrontierReconstitutionInput, SessionDelegationReconstitutionInput,
         ToolApprovalResolutionReconstitutionInput, ToolAttemptReconstitutionInput,
         ToolAttemptReconstitutionState, ToolBatchPhaseReconstitutionInput,
@@ -2316,6 +2364,45 @@ mod tests {
                 },
             }
         }
+    }
+
+    struct FailingOverrideTransaction {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl OverrideDeniedToolRequestTransaction for FailingOverrideTransaction {
+        type Error = FakeError;
+
+        async fn override_denied(
+            &mut self,
+            _command: OverrideDeniedToolRequest,
+        ) -> Result<PreparedOverrideDeniedToolRequest, Self::Error> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(FakeError::Ordinary)
+        }
+    }
+
+    #[tokio::test]
+    async fn override_service_returns_transaction_failure_without_retry() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let transaction = FailingOverrideTransaction {
+            calls: Arc::clone(&calls),
+        };
+        let mut service = OverrideDeniedToolRequestService::new(transaction);
+        let command = OverrideDeniedToolRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(1)),
+            SessionId::from_uuid(Uuid::from_u128(2)),
+            ToolRequestId::from_uuid(Uuid::from_u128(3)),
+        )
+        .expect("fixture command identity is admitted");
+
+        let error = service
+            .execute(command)
+            .await
+            .expect_err("the transaction failure is returned");
+
+        assert_eq!(error, FakeError::Ordinary);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     struct FakeTransaction {

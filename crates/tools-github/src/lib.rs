@@ -2218,7 +2218,7 @@ impl GitHubApiTransport {
         let mut authentication = HeaderValue::from_bytes(&authentication)
             .map_err(|_| GitHubTransportFailure::InvalidCredential)?;
         authentication.set_sensitive(true);
-        let client = public_destination_client(&url, timeout)
+        let client = public_destination_client(&url, Some(timeout))
             .await
             .map_err(classify_destination_failure)?;
         let mut request = client

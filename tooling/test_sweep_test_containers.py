@@ -184,7 +184,7 @@ CHAIN_LINE_LIMIT = 40
 
 # Re-verified against the head; a scan that silently matched nothing would
 # otherwise satisfy the marking test with no evidence at all.
-CONTAINER_START_SITES = 38
+CONTAINER_START_SITES = 42
 
 
 def container_start_sites() -> tuple[list[str], list[str]]:

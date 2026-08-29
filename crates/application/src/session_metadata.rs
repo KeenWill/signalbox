@@ -230,17 +230,13 @@ pub struct SessionMetadataListQuery {
 }
 
 impl SessionMetadataListQuery {
-    /// Maximum exact required tags in one list filter.
-    // numeric-bound: ceiling - protects filter memory and matching work
-    pub const MAX_REQUIRED_TAGS: usize = 256;
-
     /// Constructs the ordinary first page of the default interactive view.
-    pub fn default_page() -> Self {
+    pub fn default_page(page_size: u64) -> Self {
         Self {
             required_tags: BTreeSet::new(),
             title_contains: None,
             include_archived: false,
-            page_size: 50,
+            page_size,
             after_session: None,
         }
     }
@@ -253,7 +249,50 @@ impl SessionMetadataListQuery {
         page_size: u64,
         after_session: Option<SessionId>,
     ) -> Result<Self, SessionMetadataListQueryError> {
-        if required_tags.len() > Self::MAX_REQUIRED_TAGS {
+        Self::try_new_with_required_tag_limit(
+            required_tags,
+            title_contains,
+            include_archived,
+            page_size,
+            after_session,
+            None,
+        )
+    }
+
+    /// Validates exact filters and the deployment's optional count policies.
+    pub fn try_new_with_required_tag_limit(
+        required_tags: Vec<String>,
+        title_contains: Option<String>,
+        include_archived: bool,
+        page_size: u64,
+        after_session: Option<SessionId>,
+        max_required_tags: Option<usize>,
+    ) -> Result<Self, SessionMetadataListQueryError> {
+        Self::try_new_with_limits(
+            required_tags,
+            title_contains,
+            include_archived,
+            page_size,
+            after_session,
+            max_required_tags,
+            None,
+            None,
+        )
+    }
+
+    /// Validates exact filters and all deployment list policies.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_with_limits(
+        required_tags: Vec<String>,
+        title_contains: Option<String>,
+        include_archived: bool,
+        page_size: u64,
+        after_session: Option<SessionId>,
+        max_required_tags: Option<usize>,
+        min_page_size: Option<u64>,
+        max_page_size: Option<u64>,
+    ) -> Result<Self, SessionMetadataListQueryError> {
+        if max_required_tags.is_some_and(|limit| required_tags.len() > limit) {
             return Err(SessionMetadataListQueryError::TooManyRequiredTags);
         }
 
@@ -289,7 +328,9 @@ impl SessionMetadataListQuery {
                 return Err(SessionMetadataListQueryError::TotalUtf8BytesExceeded);
             }
         }
-        if !(1..=100).contains(&page_size) {
+        if min_page_size.is_some_and(|minimum| page_size < minimum)
+            || max_page_size.is_some_and(|maximum| page_size > maximum)
+        {
             return Err(SessionMetadataListQueryError::PageSizeOutOfRange);
         }
 
@@ -752,7 +793,7 @@ mod tests {
 
     #[test]
     fn default_list_query_selects_first_non_archived_page() {
-        let query = SessionMetadataListQuery::default_page();
+        let query = SessionMetadataListQuery::default_page(5);
 
         assert_eq!(
             query.required_tags().collect::<Vec<_>>(),
@@ -760,34 +801,55 @@ mod tests {
         );
         assert_eq!(query.title_contains(), None);
         assert!(!query.include_archived());
-        assert_eq!(query.page_size(), 50);
+        assert_eq!(query.page_size(), 5);
         assert_eq!(query.after_session(), None);
     }
 
     #[test]
     fn list_query_canonicalizes_required_tag_order() {
-        let query = SessionMetadataListQuery::try_new(
+        let query = SessionMetadataListQuery::try_new_with_limits(
             vec![String::from("z"), String::from("a")],
             Some(String::from("Plan")),
             true,
-            100,
+            7,
             Some(session_id(9)),
+            None,
+            Some(2),
+            Some(7),
         )
         .expect("valid filters and upper-bound page size are admitted");
 
         assert_eq!(query.required_tags().collect::<Vec<_>>(), ["a", "z"]);
         assert_eq!(query.title_contains(), Some("Plan"));
         assert!(query.include_archived());
-        assert_eq!(query.page_size(), 100);
+        assert_eq!(query.page_size(), 7);
         assert_eq!(query.after_session(), Some(session_id(9)));
     }
 
     #[test]
     fn list_query_rejects_out_of_range_page_size() {
-        let zero = SessionMetadataListQuery::try_new(Vec::new(), None, false, 0, None)
-            .expect_err("zero cannot bound a page");
-        let too_large = SessionMetadataListQuery::try_new(Vec::new(), None, false, 101, None)
-            .expect_err("the page cap is inclusive at one hundred");
+        let zero = SessionMetadataListQuery::try_new_with_limits(
+            Vec::new(),
+            None,
+            false,
+            1,
+            None,
+            None,
+            Some(2),
+            Some(7),
+        )
+        .expect_err("zero cannot bound a page");
+        let too_large = SessionMetadataListQuery::try_new_with_limits(
+            Vec::new(),
+            None,
+            false,
+            8,
+            None,
+            None,
+            Some(2),
+            Some(7),
+        )
+        .expect_err("the page cap is inclusive at one hundred");
 
         assert_eq!(zero, SessionMetadataListQueryError::PageSizeOutOfRange);
         assert_eq!(too_large, SessionMetadataListQueryError::PageSizeOutOfRange);
@@ -795,12 +857,14 @@ mod tests {
 
     #[test]
     fn list_query_rejects_required_tag_cardinality_over_bound() {
-        let error = SessionMetadataListQuery::try_new(
-            vec![String::from("tag"); SessionMetadataListQuery::MAX_REQUIRED_TAGS + 1],
+        const CONFIGURED_MAX_REQUIRED_TAGS: usize = 2;
+        let error = SessionMetadataListQuery::try_new_with_required_tag_limit(
+            vec![String::from("tag"); CONFIGURED_MAX_REQUIRED_TAGS + 1],
             None,
             false,
             50,
             None,
+            Some(CONFIGURED_MAX_REQUIRED_TAGS),
         )
         .expect_err("one required tag above the cardinality bound is rejected");
 
@@ -909,7 +973,7 @@ mod tests {
 
     #[test]
     fn list_service_opens_exact_query_once() {
-        let query = SessionMetadataListQuery::default_page();
+        let query = SessionMetadataListQuery::default_page(5);
         let service = ListSessionMetadataService::new(FakeLister {
             observed: Mutex::new(Vec::new()),
             fail: false,
@@ -934,7 +998,7 @@ mod tests {
             fail: true,
         });
 
-        let error = run_ready(service.execute(SessionMetadataListQuery::default_page()))
+        let error = run_ready(service.execute(SessionMetadataListQuery::default_page(5)))
             .expect_err("open failure remains visible");
 
         assert_eq!(error, FakeError::Unavailable);

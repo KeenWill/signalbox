@@ -8,9 +8,12 @@
 use std::{
     collections::BTreeMap,
     error::Error,
-    fmt, fs, io,
+    fmt, fs,
+    future::Future,
+    io,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::Arc,
 };
 
@@ -233,6 +236,61 @@ pub struct SessionWorkspaceRoots {
     configured: PathBuf,
     derived_parent: PathBuf,
 }
+
+type WorkspaceInstructionRootFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<PathBuf, WorkspaceInstructionRootResolutionError>> + Send + 'a>,
+>;
+
+trait WorkspaceInstructionRootAuthority: Send + Sync {
+    fn resolve(&self, session: SessionId) -> WorkspaceInstructionRootFuture<'_>;
+}
+
+/// Cloneable access to the workspace-binding authority used by daemon tools.
+///
+/// Instruction discovery uses this handle so it cannot independently choose a
+/// different configured-versus-derived root for a session whose binding is
+/// already sticky.
+#[derive(Clone)]
+pub struct WorkspaceInstructionRootResolver {
+    authority: Arc<dyn WorkspaceInstructionRootAuthority>,
+}
+
+impl fmt::Debug for WorkspaceInstructionRootResolver {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkspaceInstructionRootResolver")
+            .finish_non_exhaustive()
+    }
+}
+
+impl WorkspaceInstructionRootResolver {
+    fn new<FileSystem, ExecRunner>(
+        executors: SessionWorkspaceExecutors<FileSystem, ExecRunner>,
+    ) -> Self
+    where
+        FileSystem: WorkspaceFileSystem
+            + WorkspaceMutationFileSystem
+            + PinFurtherWorkspaceRoot
+            + Send
+            + Sync
+            + 'static,
+        ExecRunner: ProcessRunner + Send + Sync + 'static,
+    {
+        Self {
+            authority: Arc::new(executors),
+        }
+    }
+
+    pub(crate) async fn resolve(
+        &self,
+        session: SessionId,
+    ) -> Result<PathBuf, WorkspaceInstructionRootResolutionError> {
+        self.authority.resolve(session).await
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WorkspaceInstructionRootResolutionError;
 
 impl SessionWorkspaceRoots {
     /// Fixes the derivation against one configured workspace root.
@@ -1260,6 +1318,18 @@ where
         })
     }
 
+    /// Shares the workspace-binding authority used by workspace-bound tools.
+    pub fn workspace_instruction_root_resolver(&self) -> Option<WorkspaceInstructionRootResolver>
+    where
+        FileSystem: Send + Sync + 'static,
+        ExecRunner: Send + Sync + 'static,
+    {
+        self.executor
+            .workspace_bound
+            .clone()
+            .map(WorkspaceInstructionRootResolver::new)
+    }
+
     /// Returns the catalog and executor as separate composition roles.
     #[allow(clippy::type_complexity)]
     pub fn into_parts(
@@ -1857,6 +1927,26 @@ where
         })
     }
 
+    async fn resolve_workspace_instruction_root(
+        &mut self,
+        session: SessionId,
+    ) -> Result<PathBuf, SessionWorkspaceFailure> {
+        let executors = self.resolve(session).await?;
+        let path = match self.state.lock().await.bindings.get(&session) {
+            Some(RecordedSessionBinding::ConfiguredRoot) => Ok(self.roots.configured().to_owned()),
+            Some(RecordedSessionBinding::DerivedRoot { .. }) => {
+                Ok(self.roots.derived_path(session))
+            }
+            None => Err(SessionWorkspaceFailure::UnresolvableRoot),
+        }?;
+        let standing = ComposedWorkspaceIdentity::capture(&path)
+            .map_err(|_| SessionWorkspaceFailure::ReplacedRootIdentity)?;
+        if standing != executors.workspace_identity {
+            return Err(SessionWorkspaceFailure::ReplacedRootIdentity);
+        }
+        Ok(path)
+    }
+
     async fn resolve(
         &mut self,
         session: SessionId,
@@ -2156,6 +2246,28 @@ where
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
             _ => Err(DaemonToolExecutorError::unknown_tool()),
         }
+    }
+}
+
+impl<FileSystem, ExecRunner> WorkspaceInstructionRootAuthority
+    for SessionWorkspaceExecutors<FileSystem, ExecRunner>
+where
+    FileSystem: WorkspaceFileSystem
+        + WorkspaceMutationFileSystem
+        + PinFurtherWorkspaceRoot
+        + Send
+        + Sync
+        + 'static,
+    ExecRunner: ProcessRunner + Send + Sync + 'static,
+{
+    fn resolve(&self, session: SessionId) -> WorkspaceInstructionRootFuture<'_> {
+        let mut executors = self.clone();
+        Box::pin(async move {
+            executors
+                .resolve_workspace_instruction_root(session)
+                .await
+                .map_err(|_| WorkspaceInstructionRootResolutionError)
+        })
     }
 }
 
@@ -2537,6 +2649,10 @@ mod tests {
     struct OfflineCodeHostTransport;
 
     impl CodeHostTransport for OfflineCodeHostTransport {
+        fn numeric_bounds(&self) -> crate::CodeHostNumericBounds {
+            crate::CodeHostNumericBounds::new(None, None, None, None, None, None)
+        }
+
         async fn execute(
             &mut self,
             _operation: crate::CodeHostOperation,
@@ -2728,7 +2844,10 @@ mod tests {
                     CredentialReference::new(SYNTHETIC_GITHUB_CREDENTIAL_REFERENCE),
                 ),
             },
-            GitHubCodeHostTransport::try_new().expect("offline code-host transport constructs"),
+            GitHubCodeHostTransport::try_new(crate::CodeHostNumericBounds::new(
+                None, None, None, None, None, None,
+            ))
+            .expect("offline code-host transport constructs"),
             GitHubEgressPolicy::github_api_only(),
             workspace.path(),
             git_identity(),
@@ -2801,9 +2920,15 @@ mod tests {
         )
         .expect("expected catalog bridge path is written");
         let credential = CredentialReference::new(SYNTHETIC_CLAUDE_CREDENTIAL_REFERENCE);
-        let mut config =
-            ClaudeCliConfig::new(&executable, bridge, workspace.path(), credential.clone());
-        config.exchange_timeout = BRIDGE_RESPONSE_TIMEOUT;
+        let mut config = ClaudeCliConfig::new(
+            &executable,
+            bridge,
+            workspace.path(),
+            credential.clone(),
+            None,
+            None,
+        );
+        config.exchange_timeout = Some(BRIDGE_RESPONSE_TIMEOUT);
         let runtime = ClaudeCliRuntime::new(config)
             .expect("offline Claude catalog capture runtime constructs");
         let mut operation = ModelOperation::new(
@@ -6867,6 +6992,39 @@ finally:
         .into_parts()
     }
 
+    fn offline_workspace_instruction_root_resolver(
+        workspace: &Path,
+    ) -> WorkspaceInstructionRootResolver {
+        let tools = DaemonTools::try_new(
+            || SystemTime::UNIX_EPOCH,
+            OfflineTransport,
+            MappedDaemonCredentialInputs {
+                web_search: OfflineCredentials,
+                code_host: OfflineCredentials,
+                github: OfflineCredentials,
+            },
+            OfflineSearchTransport,
+            OfflineWriter,
+            OfflineCodeHostTransport,
+            OfflineGitHubTransport,
+            GitHubEgressPolicy::github_api_only(),
+            LocalWorkspaceFileSystem,
+            workspace,
+            git_identity(),
+            TokioProcessRunner::try_new(
+                std::env::current_exe().expect("test executable path is available"),
+            )
+            .expect("test executable can stand in for the unused supervisor"),
+            OfflineConversationPort,
+            OfflineConversationPort,
+            WebFetchEgressPolicy::deny_all(),
+        )
+        .expect("static daemon tools compile");
+        tools
+            .workspace_instruction_root_resolver()
+            .expect("offline tools include a workspace binding authority")
+    }
+
     /// The merged process-lifetime catalog exposes every daemon declaration in
     /// deterministic name order.
     #[test]
@@ -7943,6 +8101,78 @@ finally:
             panic!("a provisioned session resolves to its derived root");
         };
         assert_eq!(path, expected);
+    }
+
+    /// Instruction discovery consults the same sticky binding as workspace
+    /// tools, so provisioning a derived directory after the first resolution
+    /// cannot move an existing session away from the configured root.
+    #[tokio::test]
+    async fn instruction_discovery_keeps_an_existing_configured_binding() {
+        let parent = tempfile::tempdir().expect("fixture parent exists");
+        let configured = configured_workspace(parent.path());
+        let first = session(FIRST_SESSION_IDENTITY);
+        let resolver = offline_workspace_instruction_root_resolver(&configured);
+
+        let initially_bound = resolver
+            .resolve(first)
+            .await
+            .expect("the configured root binds");
+        provisioned_session_workspace(&configured, first, FIRST_SESSION_MARKER);
+        let after_provisioning = resolver
+            .resolve(first)
+            .await
+            .expect("the recorded configured binding remains usable");
+
+        assert_eq!(initially_bound, configured);
+        assert_eq!(after_provisioning, configured);
+    }
+
+    /// A derived binding that disappears fails closed for instruction
+    /// discovery instead of falling back to the configured workspace.
+    #[tokio::test]
+    async fn instruction_discovery_refuses_a_lost_derived_binding() {
+        let parent = tempfile::tempdir().expect("fixture parent exists");
+        let configured = configured_workspace(parent.path());
+        let first = session(FIRST_SESSION_IDENTITY);
+        provisioned_session_workspace(&configured, first, FIRST_SESSION_MARKER);
+        let derived = derivation(&configured).derived_path(first);
+        let resolver = offline_workspace_instruction_root_resolver(&configured);
+
+        let initially_bound = resolver
+            .resolve(first)
+            .await
+            .expect("the derived root binds");
+        fs::remove_dir_all(&derived).expect("the bound derived root is removed");
+        let after_removal = resolver.resolve(first).await;
+
+        assert_eq!(initially_bound, derived);
+        assert_eq!(after_removal, Err(WorkspaceInstructionRootResolutionError));
+    }
+
+    /// Instruction discovery revalidates the pathname against the pinned tool
+    /// composition, so a replacement configured directory cannot be scanned
+    /// while tools continue to use the displaced directory descriptors.
+    #[tokio::test]
+    async fn instruction_discovery_refuses_a_replaced_configured_binding() {
+        let parent = tempfile::tempdir().expect("fixture parent exists");
+        let configured = configured_workspace(parent.path());
+        let displaced = parent.path().join("displaced-workspace");
+        let first = session(FIRST_SESSION_IDENTITY);
+        let resolver = offline_workspace_instruction_root_resolver(&configured);
+        let initially_bound = resolver
+            .resolve(first)
+            .await
+            .expect("the configured root binds");
+        fs::rename(&configured, &displaced).expect("the bound root is displaced");
+        fs::create_dir(&configured).expect("a replacement directory takes its pathname");
+
+        let after_replacement = resolver.resolve(first).await;
+
+        assert_eq!(initially_bound, configured);
+        assert_eq!(
+            after_replacement,
+            Err(WorkspaceInstructionRootResolutionError)
+        );
     }
 
     /// One composition serves two concurrent sessions from two roots: each

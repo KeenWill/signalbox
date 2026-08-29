@@ -25,7 +25,8 @@ use crate::{
     AcceptedInputQueueOrderError, AcceptedInputQueuePriority, AcceptedInputQueueWork,
     AcceptedInputStartingLineage, AcceptedInputTurnStart, ActiveTurnPhase,
     AppliedInterruptCommandResult, AttemptEnd, CancellationStopDisposition, ChildWait,
-    ContextFrontierId, CurrentTurnAttempt, DelegationContent, DelegationWaitMode, DeliveryRequest,
+    ContextFrontierId, ContextFrontierProjection, ContextFrontierProjectionFailure,
+    CurrentTurnAttempt, DelegationContent, DelegationWaitMode, DeliveryRequest,
     DirectModelSelection, EndedTurnAttempt, InitialSemanticTranscriptEntryPayload,
     ModelCallDisposition, NonEmptyIssuedOperationRefs, OriginConfiguration,
     ReconstitutedImportedSession, ReconstitutedModelCall,
@@ -559,6 +560,41 @@ enum StoredActiveTurnPhase {
         placement_revision: crate::RunnerGeneration,
         interrupted_tool_attempt: Option<crate::ToolAttemptId>,
     },
+}
+
+/// Complete independently stored evidence for one delegated model-call
+/// recovery wait. The delegated activation aggregate validates every field
+/// before exposing canonical recovery history.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegatedModelCallRecoveryReconstitutionInput {
+    phase: ActiveTurnSchedulingReconstitutionInput,
+    pinned_target: crate::PinnedProviderTargetReconstitutionInput,
+    call: crate::ModelCallReconstitutionInput,
+    source_snapshot: ResolvedContextFrontierReconstitutionInput,
+    pending_steering: Vec<PendingSteeringInput>,
+    consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
+}
+
+impl DelegatedModelCallRecoveryReconstitutionInput {
+    /// Supplies the stored phase, pinned target, exact ambiguous call, and the
+    /// resolved snapshot named by that call.
+    pub const fn new(
+        phase: ActiveTurnSchedulingReconstitutionInput,
+        pinned_target: crate::PinnedProviderTargetReconstitutionInput,
+        call: crate::ModelCallReconstitutionInput,
+        source_snapshot: ResolvedContextFrontierReconstitutionInput,
+        pending_steering: Vec<PendingSteeringInput>,
+        consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
+    ) -> Self {
+        Self {
+            phase,
+            pinned_target,
+            call,
+            source_snapshot,
+            pending_steering,
+            consumed_steering,
+        }
+    }
 }
 
 impl ActiveTurnSchedulingReconstitutionInput {
@@ -2394,6 +2430,96 @@ impl AcceptedInputSchedulingProjection {
             .find(|turn| turn.status() == AcceptedInputTurnSchedulingStatus::Queued)
     }
 
+    /// Returns accepted-input origins retained by the exact base from which
+    /// the earliest queued turn would be rendered.
+    ///
+    /// The base is reported as the model would see it: when it carries a
+    /// context summary, the entries that summary hides are not retained
+    /// origins, exactly as the live-execution path projects its own frontier
+    /// before collecting origins. Counting hidden origins here would sum
+    /// attachments no render ever clones, and a submission whose visible
+    /// frontier fits the byte bound would be durably rejected because a
+    /// summarized-away one did not.
+    ///
+    /// The outer absence means a turn is active or no queued turn exists. The
+    /// inner failure means the base's own summary range is unprojectable, a
+    /// durable corruption the caller must surface rather than read as an empty
+    /// base. It excludes the queued turn's own origin; callers can append
+    /// queued origins in [`Self::turns`] order to project each eventual
+    /// frontier.
+    pub fn earliest_queued_rendered_base_origins(
+        &self,
+    ) -> Option<Result<Vec<AcceptedInputId>, ContextFrontierProjectionFailure>> {
+        if self.active_turn().is_some() {
+            return None;
+        }
+        let index = self
+            .turns
+            .iter()
+            .position(|turn| turn.status() == AcceptedInputTurnSchedulingStatus::Queued)?;
+        let queued = &self.turns[index];
+        let preceding_non_accepted_terminal = self
+            .preceding_non_accepted_successors
+            .get(&queued.turn())
+            .and_then(|predecessor| self.preceding_non_accepted_terminals.get(predecessor))
+            .map(|(snapshot, _)| snapshot);
+        let base = if index == 0 && preceding_non_accepted_terminal.is_none() {
+            let seed = self
+                .initial_seed_frontier
+                .and_then(|frontier| self.snapshots.get(&frontier));
+            self.latest_compaction_result
+                .and_then(|frontier| self.snapshots.get(&frontier))
+                .filter(|latest| seed.is_some_and(|seed| seed.is_semantic_prefix_of(latest)))
+                .or(seed)
+        } else {
+            let terminal = preceding_non_accepted_terminal.or_else(|| {
+                index
+                    .checked_sub(1)
+                    .and_then(|predecessor| self.turns[predecessor].terminal_frontier())
+            })?;
+            self.latest_compaction_result
+                .and_then(|frontier| self.snapshots.get(&frontier))
+                .filter(|latest| terminal.is_semantic_prefix_of(latest))
+                .or(Some(terminal))
+        };
+        let mut complete_entries = Vec::new();
+        for reference in base.into_iter().flat_map(|base| base.ordered_entries()) {
+            complete_entries.push(self.semantic_entries.get(&reference)?.clone());
+        }
+        let projection = match ContextFrontierProjection::from_complete_entries(&complete_entries) {
+            Ok(projection) => projection,
+            Err(failure) => return Some(Err(failure)),
+        };
+        let mut origins = Vec::new();
+        let mut distinct = BTreeSet::new();
+        for reference in projection.ordered_entries() {
+            let accepted_input = match self.semantic_entries.get(&reference)?.payload() {
+                SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
+                | SemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                    accepted_input, ..
+                } => Some(*accepted_input),
+                SemanticTranscriptEntryPayload::TurnFailed { .. }
+                | SemanticTranscriptEntryPayload::DelegatedTask { .. }
+                | SemanticTranscriptEntryPayload::DelegationMessage { .. }
+                | SemanticTranscriptEntryPayload::DelegationResult { .. }
+                | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+                | SemanticTranscriptEntryPayload::ContextSummary { .. }
+                | SemanticTranscriptEntryPayload::TurnCancelled { .. }
+                | SemanticTranscriptEntryPayload::AssistantText { .. }
+                | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+                | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+                | SemanticTranscriptEntryPayload::ToolDenied { .. }
+                | SemanticTranscriptEntryPayload::ToolClosed { .. }
+                | SemanticTranscriptEntryPayload::TurnCompleted { .. }
+                | SemanticTranscriptEntryPayload::Imported { .. } => None,
+            };
+            if let Some(accepted_input) = accepted_input.filter(|value| distinct.insert(*value)) {
+                origins.push(accepted_input);
+            }
+        }
+        Some(Ok(origins))
+    }
+
     /// Borrows one complete resolved snapshot from this checked projection.
     pub fn resolved_snapshot(
         &self,
@@ -3190,6 +3316,26 @@ impl ActivatedTurn {
         }
     }
 
+    /// Applies one daemon-owned reconciliation attempt to a checked
+    /// origin-agnostic model-call recovery wait.
+    pub fn apply_automatic_model_call_reconciliation(
+        self,
+        call: crate::EndedModelCall,
+        attempt: EndedTurnAttempt,
+        source_snapshot: ResolvedContextFrontierSnapshot,
+        recovery_attempt: std::num::NonZeroU32,
+        identities: crate::AmbiguousModelCallTurnIdentities,
+    ) -> Result<crate::ReconciliationRequiredModelCallTurn, crate::ModelCallClosureError> {
+        crate::model_execution::apply_automatic_reconciliation(
+            self,
+            call,
+            attempt,
+            source_snapshot,
+            recovery_attempt,
+            identities,
+        )
+    }
+
     /// Cancels this turn while it is parked on exact runner-loss evidence.
     pub fn apply_interrupt_to_runner_recovery(
         self,
@@ -3517,6 +3663,103 @@ impl PreparedDelegatedTurnActivation {
         }
         self.turn.phase = phase.canonical_evidence_free_phase()?;
         Some((self.turn, self.starting_entries, self.starting_snapshot))
+    }
+
+    /// Reconstitutes a delegated ambiguous model-call wait from its complete
+    /// stored evidence. The returned call, attempt, and snapshots are checked
+    /// against the delegated origin and its pinned configuration.
+    pub fn with_reconstituted_model_call_recovery(
+        mut self,
+        input: DelegatedModelCallRecoveryReconstitutionInput,
+    ) -> Option<(
+        ActivatedTurn,
+        crate::EndedModelCall,
+        EndedTurnAttempt,
+        ResolvedContextFrontierSnapshot,
+        ResolvedContextFrontierSnapshot,
+    )> {
+        let ActiveTurnSchedulingReconstitutionInput {
+            owning_turn,
+            current_attempt: Some(current_attempt),
+            state:
+                StoredActiveTurnPhase::AwaitingModelCallRecovery {
+                    call: recovery_call,
+                    attempt_end,
+                },
+            executing_tool_batch: None,
+        } = input.phase
+        else {
+            return None;
+        };
+        if owning_turn != self.turn.turn
+            || input.call.id() != recovery_call
+            || input.call.turn() != owning_turn
+            || input.call.attempt() != current_attempt
+            || input.call.selection() != *self.turn.configuration.effective().model()
+            || input.call.state()
+                != crate::ModelCallReconstitutionState::Terminal(ModelCallDisposition::Ambiguous)
+        {
+            return None;
+        }
+        let pinned = input.pinned_target.reconstitute_for_turn(owning_turn)?;
+        let source_snapshot = input.source_snapshot.reconstitute()?;
+        if !self
+            .starting_snapshot
+            .is_semantic_prefix_of(&source_snapshot)
+        {
+            return None;
+        }
+        let crate::ReconstitutedModelCall::Ended(call) =
+            input.call.reconstitute(&source_snapshot, pinned).ok()?
+        else {
+            return None;
+        };
+        let running_attempt = CurrentTurnAttempt::prepared(current_attempt)
+            .begin_running()
+            .ok()?;
+        let attempt = match attempt_end.end() {
+            AttemptEnd::WithoutStop {
+                disposition:
+                    disposition @ (UnstoppedAttemptDisposition::Ambiguous
+                    | UnstoppedAttemptDisposition::Lost),
+            } => running_attempt.end_without_stop(*disposition).ok()?,
+            AttemptEnd::AfterCancellation {
+                cause,
+                disposition:
+                    disposition @ (CancellationStopDisposition::Ambiguous
+                    | CancellationStopDisposition::Lost),
+            } => {
+                let interrupt = attempt_end.interrupt()?;
+                if interrupt.session() != self.turn.session
+                    || interrupt.proof() != *cause
+                    || cause.predecessor() != owning_turn
+                {
+                    return None;
+                }
+                running_attempt
+                    .request_cancellation(*cause)
+                    .and_then(|attempt| attempt.end_after_cancellation(*cause, *disposition))
+                    .ok()?
+            }
+            _ => return None,
+        };
+        self.turn.phase = ActiveTurnPhase::AwaitingRecoveryDecision {
+            ambiguous_operations: NonEmptyIssuedOperationRefs::singleton(
+                crate::IssuedOperationRef::ModelCall(recovery_call),
+            ),
+            applied_interrupt: attempt_end.interrupt().map(|interrupt| interrupt.proof()),
+        };
+        self.turn = self
+            .turn
+            .with_pending_steering(input.pending_steering)?
+            .with_consumed_steering(input.consumed_steering)?;
+        Some((
+            self.turn.into(),
+            call,
+            attempt,
+            source_snapshot,
+            self.starting_snapshot,
+        ))
     }
 }
 

@@ -9,10 +9,10 @@ use std::future::Future;
 use signalbox_domain::{
     AcceptedInputId, CorrelatedToolAttemptObservation, CurrentToolAttempt, DecideToolRequest,
     EndedToolAttempt, FailedModelCallTurn, FailedModelCallTurnIdentities, ModelCallId,
-    PreparedDecideToolRequest, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId,
-    ToolApprovalResolution, ToolAttemptCrashOutcome, ToolAttemptDispatchCorrelation, ToolAttemptId,
-    ToolBatch, ToolDispatchAuthority, ToolEffectClass, ToolExecutionError, ToolRequest,
-    TurnAttemptId, TurnId,
+    OverrideDeniedToolRequest, PreparedDecideToolRequest, PreparedOverrideDeniedToolRequest,
+    SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId, ToolApprovalResolution,
+    ToolAttemptCrashOutcome, ToolAttemptDispatchCorrelation, ToolAttemptId, ToolBatch,
+    ToolDispatchAuthority, ToolEffectClass, ToolExecutionError, ToolRequest, TurnAttemptId, TurnId,
 };
 
 use crate::{ClassifyOperatorFailure, CorrelatedDurableChildWait};
@@ -96,6 +96,19 @@ pub trait DecideToolRequestTransaction {
     ) -> impl Future<Output = Result<PreparedDecideToolRequest, Self::Error>> + Send
     where
         NextAttempt: FnMut() -> TurnAttemptId + Send;
+}
+
+/// Transaction recording one replay-safe user override of a delegate denial.
+pub trait OverrideDeniedToolRequestTransaction {
+    /// Adapter-specific classified failure.
+    type Error: ClassifyOperatorFailure;
+
+    /// Applies a replay-safe override command against durable denial
+    /// evidence.
+    fn override_denied(
+        &mut self,
+        command: OverrideDeniedToolRequest,
+    ) -> impl Future<Output = Result<PreparedOverrideDeniedToolRequest, Self::Error>> + Send;
 }
 
 /// Fresh identities for one all-resolved continuation transaction.
@@ -201,6 +214,8 @@ pub enum PrepareToolContinuationOutcome {
     TargetUnavailable(Box<FailedModelCallTurn>),
     /// Every member was unavailable before the continuation could issue a call.
     PoolExhausted(Box<signalbox_domain::CredentialPoolExhaustedModelCallTurn>),
+    /// Reported usage requires compaction before another same-turn call.
+    ContextCompactionRequired(Box<signalbox_domain::ContextHeadroomExhaustedModelCallTurn>),
 }
 
 /// Authoritative status of one unchanged in-memory executor observation.

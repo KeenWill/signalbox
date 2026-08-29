@@ -43,6 +43,32 @@ use crate::{
 
 const STORAGE_VERSION: i16 = 1;
 
+/// Closed durable cause for an execution failure that requires an operator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GoalExecutionFailureRecoveryCause {
+    /// No safe context-compaction boundary fits the configured model window.
+    ContextCompactionInputDoesNotFit,
+}
+
+impl GoalExecutionFailureRecoveryCause {
+    /// Returns the closed durable spelling used by storage and telemetry.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::ContextCompactionInputDoesNotFit => "context_compaction_input_does_not_fit",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, GoalCorruption> {
+        match value {
+            "context_compaction_input_does_not_fit" => Ok(Self::ContextCompactionInputDoesNotFit),
+            value => Err(GoalCorruption::Unsupported {
+                field: "goal_execution_failure_recovery cause_kind",
+                value: value.to_owned(),
+            }),
+        }
+    }
+}
+
 /// Result of handling a user-global goal command identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GoalCommandHandlingOutcome {
@@ -56,6 +82,11 @@ pub enum GoalCommandHandlingOutcome {
     /// The expected lineage head no longer held under the session lock, so
     /// nothing was applied and the identity remains unspent.
     LineageMoved,
+    /// Another live commissioned session owns the same pull-request target.
+    TargetBusy {
+        /// The competing live session.
+        session: SessionId,
+    },
 }
 
 /// Result of a scheduler- or model-provenance transition.
@@ -225,6 +256,29 @@ impl GoalRepository {
         Self { pool }
     }
 
+    /// Loads the durable operator-required cause for one failed goal turn.
+    pub async fn execution_failure_recovery_cause(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+    ) -> Result<Option<GoalExecutionFailureRecoveryCause>, GoalRepositoryError> {
+        let cause = sqlx::query_scalar::<_, String>(
+            "SELECT cause_kind
+               FROM goal_execution_failure_recovery
+              WHERE session_id = $1
+                AND turn_id = $2",
+        )
+        .bind(session_id_to_uuid(session))
+        .bind(turn_id_to_uuid(turn))
+        .fetch_optional(&self.pool)
+        .await?;
+        cause
+            .as_deref()
+            .map(GoalExecutionFailureRecoveryCause::parse)
+            .transpose()
+            .map_err(GoalRepositoryError::Corruption)
+    }
+
     /// Claims and handles an unseen user command, atomically scheduling a turn
     /// for each applied pursuing transition, or resolves its durable meaning.
     pub async fn handle_user_command<SelectDefinition>(
@@ -280,6 +334,17 @@ impl GoalRepository {
             let outcome = existing_or_conflicting(&mut transaction, &command, kind).await?;
             transaction.rollback().await?;
             return Ok(outcome);
+        }
+        if command.action().starts_pursuit()
+            && let Some(session) =
+                crate::commissioned_dispatch::lock_competing_pull_request_session(
+                    &mut transaction,
+                    command.session(),
+                )
+                .await?
+        {
+            transaction.rollback().await?;
+            return Ok(GoalCommandHandlingOutcome::TargetBusy { session });
         }
 
         let claimed = sqlx::query(
@@ -485,6 +550,7 @@ impl GoalRepository {
                 | CommandKind::ReplaceSessionMetadata
                 | CommandKind::SubmitInput
                 | CommandKind::DecideToolRequest
+                | CommandKind::OverrideDeniedToolRequest
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
@@ -522,8 +588,9 @@ impl GoalRepository {
     /// Reconciled ambiguity is infrastructure work whether it originated at
     /// startup or from the live watchdog. A definitive provider response is
     /// likewise external only for transient rate limiting, overload, or an
-    /// internal provider failure. Session-actionable provider failures remain
-    /// chargeable.
+    /// internal provider failure. A continuation closed for configured context
+    /// headroom is also daemon-owned. Session-actionable provider failures
+    /// remain chargeable.
     pub async fn unchargeable_automatic_resume_turns(
         &self,
         session: SessionId,
@@ -546,9 +613,14 @@ impl GoalRepository {
                  ON terminal_call.model_call_id = lifecycle.terminal_model_call_id
                 AND terminal_call.turn_id = lifecycle.turn_id
                 AND terminal_call.session_id = lifecycle.session_id
+               LEFT JOIN tool_continuation_context_headroom AS headroom
+                 ON headroom.terminal_attempt_id = lifecycle.terminal_attempt_id
+                AND headroom.turn_id = lifecycle.turn_id
+                AND headroom.session_id = lifecycle.session_id
               WHERE lifecycle.session_id = $1
                 AND lifecycle.turn_id = ANY($2::uuid[])
                 AND (recovery.state_kind = 'reconciled'
+                     OR headroom.terminal_attempt_id IS NOT NULL
                      OR terminal_call.terminal_provider_failure_cause IN
                         ('rate_limited', 'overloaded', 'provider_internal'))
               ORDER BY lifecycle.turn_id",
@@ -852,6 +924,27 @@ pub(crate) async fn block_execution_failure_locked(
     let event = latest_event(&transitioned)?;
     insert_event(connection, session, &event).await?;
     Ok(GoalTransitionOutcome::Applied(event))
+}
+
+/// Records an operator-required recovery cause inside the transaction that
+/// terminalizes the exact failed turn.
+pub(crate) async fn record_execution_failure_recovery_cause(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    cause: GoalExecutionFailureRecoveryCause,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO goal_execution_failure_recovery
+            (turn_id, session_id, cause_kind)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(turn_id_to_uuid(turn))
+    .bind(session_id_to_uuid(session))
+    .bind(cause.code())
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
 }
 
 fn recorded_scheduler_failure(goal: &Goal, turn: TurnId) -> Option<&GoalEvent> {
@@ -1324,7 +1417,7 @@ pub(crate) async fn lock_session(
     )
 }
 
-async fn lock_scheduler(
+pub(crate) async fn lock_scheduler(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<(), GoalRepositoryError> {
@@ -1365,6 +1458,7 @@ async fn existing_or_conflicting(
         | CommandKind::ReplaceSessionMetadata
         | CommandKind::SubmitInput
         | CommandKind::DecideToolRequest
+        | CommandKind::OverrideDeniedToolRequest
         | CommandKind::ReviewWorkflow
         | CommandKind::ReviewOrchestration
         | CommandKind::CompactSession
