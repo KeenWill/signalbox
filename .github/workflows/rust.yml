@@ -40,7 +40,7 @@ jobs:
   # triggers on exactly that path set.
   rust-change-scope:
     name: Rust change scope
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     outputs:
       docs_only: ${{ steps.paths.outputs.docs_only }}
       web_only: ${{ steps.paths.outputs.web_only }}
@@ -106,7 +106,7 @@ jobs:
           echo "skip_rust=$skip_rust" >> "$GITHUB_OUTPUT"
 
   contract-checks:
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     timeout-minutes: 10
     steps:
       # Full history also fetches `refs/remotes/origin/*`, which the docs
@@ -166,7 +166,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
   checker-and-format-tests:
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     timeout-minutes: 10
     steps:
       - name: Check out repository
@@ -337,7 +337,7 @@ jobs:
     if: ${{ always() }}
     needs:
       [rust-change-scope, contract-checks, checker-and-format-tests, rust-checks]
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     timeout-minutes: 1
     steps:
       - name: Confirm every implementation check passed
@@ -362,7 +362,7 @@ jobs:
   workspace-tests:
     needs: rust-change-scope
     if: needs.rust-change-scope.outputs.skip_rust != 'true'
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     timeout-minutes: 20
     steps:
       - name: Check out repository
@@ -370,10 +370,12 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Bubblewrap
+        if: ${{ runner.environment == 'github-hosted' }}
         run: |
           sudo apt-get update
           sudo apt-get install --yes bubblewrap
       - name: Enable unprivileged user namespaces for Bubblewrap
+        if: ${{ runner.environment == 'github-hosted' }}
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Delegate the file-media task controller
         run: |
@@ -442,7 +444,7 @@ jobs:
     name: validate
     if: ${{ always() }}
     needs: [rust-change-scope, validate-checks, workspace-tests]
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     timeout-minutes: 1
     steps:
       - name: Confirm the checks and the workspace tests passed
@@ -816,7 +818,7 @@ jobs:
     if: ${{ always() }}
     needs:
       [rust-change-scope, postgres-integration-build, postgres-integration-run]
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     timeout-minutes: 1
     steps:
       - name: Confirm every PostgreSQL integration partition passed

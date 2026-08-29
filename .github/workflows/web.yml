@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   web:
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     defaults:
       run:
         working-directory: clients/web
