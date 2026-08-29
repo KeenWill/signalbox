@@ -15,8 +15,8 @@ use std::{
 
 use rustix::{
     fs::{
-        AtFlags, Dir, FileType, Mode, OFlags, RenameFlags, fchmod, mkdirat, openat, renameat,
-        renameat_with, statat, unlinkat,
+        AtFlags, Dir, FileType, Mode, OFlags, RenameFlags, chmodat, fchmod, mkdirat, openat,
+        renameat, renameat_with, statat, unlinkat,
     },
     process::geteuid,
 };
@@ -300,6 +300,8 @@ impl RunnerWorkspaceStore {
             .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         let placement_name = request.placement_revision().get().to_string();
         let execution_path = self.canonical_root.join(request.relative_path());
+        validate_execution_directory_representation(&execution_path)
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         match open_directory(&session, &placement_name) {
             Ok(placement) => {
                 return read_ready_repository_workspace(&placement, request, &execution_path)
@@ -315,6 +317,10 @@ impl RunnerWorkspaceStore {
 
         let manifest_id = CanonicalUuid::from_uuid(Uuid::now_v7());
         let staging_name = format!(".{placement_name}-{manifest_id}.staging");
+        let cleanup_parent = session
+            .try_clone()
+            .map_err(RunnerWorkspaceError::Io)
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         mkdirat(
             &session,
             staging_name.as_str(),
@@ -322,10 +328,28 @@ impl RunnerWorkspaceStore {
         )
         .map_err(rustix_io)
         .map_err(PrepareRepositoryWorkspaceError::Storage)?;
-        let staging = open_created_directory(&session, &staging_name)
-            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
-        let repository = open_or_create_directory(&staging, REPOSITORY_WORKSPACE_DIRECTORY)
-            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        let staging = match open_created_directory(&session, &staging_name) {
+            Ok(staging) => staging,
+            Err(open_error) => {
+                unlinkat(&session, staging_name.as_str(), AtFlags::REMOVEDIR)
+                    .map_err(rustix_io)
+                    .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+                session
+                    .sync_all()
+                    .map_err(RunnerWorkspaceError::CommitAmbiguous)
+                    .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+                return Err(PrepareRepositoryWorkspaceError::Storage(open_error));
+            }
+        };
+        let mut staging =
+            UnpublishedDirectory::new(cleanup_parent, OsString::from(&staging_name), staging);
+        let repository = open_or_create_directory(
+            staging
+                .directory()
+                .map_err(PrepareRepositoryWorkspaceError::Storage)?,
+            REPOSITORY_WORKSPACE_DIRECTORY,
+        )
+        .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         let staging_execution_path = self
             .canonical_root
             .join(SESSIONS_DIRECTORY)
@@ -334,45 +358,93 @@ impl RunnerWorkspaceStore {
             .join(REPOSITORY_WORKSPACE_DIRECTORY);
         let target_path = checked_execution_directory(&staging_execution_path, &repository)
             .map_err(PrepareRepositoryWorkspaceError::Storage)?;
-        let recovery = prepare(RepositoryWorkspaceTarget {
+        let recovery = match prepare(RepositoryWorkspaceTarget {
             path: PathBuf::from(target_path.as_str()),
         })
         .await
-        .map_err(PrepareRepositoryWorkspaceError::Preparation)?;
+        {
+            Ok(recovery) => recovery,
+            Err(error) => {
+                staging
+                    .cleanup()
+                    .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+                return Err(PrepareRepositoryWorkspaceError::Preparation(error));
+            }
+        };
         checked_execution_directory(&staging_execution_path, &repository)
             .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         let mut manifest =
             repository_manifest(ManifestLifecycle::Staging, manifest_id, request, recovery);
-        write_manifest(&staging, &manifest).map_err(PrepareRepositoryWorkspaceError::Storage)?;
-        repository
-            .sync_all()
-            .map_err(RunnerWorkspaceError::Io)
-            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        write_manifest(
+            staging
+                .directory()
+                .map_err(PrepareRepositoryWorkspaceError::Storage)?,
+            &manifest,
+        )
+        .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        sync_directory_tree(&repository).map_err(PrepareRepositoryWorkspaceError::Storage)?;
         manifest.lifecycle = ManifestLifecycle::Ready;
-        write_manifest(&staging, &manifest).map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        write_manifest(
+            staging
+                .directory()
+                .map_err(PrepareRepositoryWorkspaceError::Storage)?,
+            &manifest,
+        )
+        .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         staging
+            .directory()
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?
             .sync_all()
             .map_err(RunnerWorkspaceError::Io)
             .map_err(PrepareRepositoryWorkspaceError::Storage)?;
-        let repository_is_retained =
-            path_names_directory(&staging, REPOSITORY_WORKSPACE_DIRECTORY, &repository)
-                .map_err(PrepareRepositoryWorkspaceError::Storage)?;
-        let staging_is_retained = path_names_directory(&session, &staging_name, &staging)
+        validate_directory(
+            staging
+                .directory()
+                .map_err(PrepareRepositoryWorkspaceError::Storage)?,
+            REPOSITORY_WORKSPACE_DIRECTORY,
+            &repository,
+        )
+        .map_err(RunnerWorkspaceError::Io)
+        .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        validate_directory(
+            &session,
+            &staging_name,
+            staging
+                .directory()
+                .map_err(PrepareRepositoryWorkspaceError::Storage)?,
+        )
+        .map_err(RunnerWorkspaceError::Io)
+        .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        validate_root_directory(&self.canonical_root, &self.root)
+            .map_err(RunnerWorkspaceError::Io)
             .map_err(PrepareRepositoryWorkspaceError::Storage)?;
-        if !repository_is_retained || !staging_is_retained {
-            return Err(PrepareRepositoryWorkspaceError::Storage(
-                RunnerWorkspaceError::ManifestConflict,
-            ));
-        }
-        renameat_with(
+        validate_directory(&self.root, SESSIONS_DIRECTORY, &sessions)
+            .map_err(RunnerWorkspaceError::Io)
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        validate_directory(&sessions, &session_name, &session)
+            .map_err(RunnerWorkspaceError::Io)
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        let publication = renameat_with(
             &session,
             staging_name.as_str(),
             &session,
             placement_name.as_str(),
             RenameFlags::NOREPLACE,
-        )
-        .map_err(rustix_io)
-        .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        );
+        if let Err(error) = publication {
+            if error != rustix::io::Errno::EXIST {
+                return Err(PrepareRepositoryWorkspaceError::Storage(rustix_io(error)));
+            }
+            staging
+                .cleanup()
+                .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+            let placement = open_directory(&session, &placement_name)
+                .map_err(RunnerWorkspaceError::Io)
+                .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+            return read_ready_repository_workspace(&placement, request, &execution_path)
+                .map_err(PrepareRepositoryWorkspaceError::Storage);
+        }
+        staging.disarm();
         session
             .sync_all()
             .map_err(RunnerWorkspaceError::CommitAmbiguous)
@@ -575,6 +647,30 @@ fn checked_execution_directory(
     WorkingDirectory::try_new(text.to_owned()).map_err(|_| RunnerWorkspaceError::CorruptManifest)
 }
 
+fn validate_execution_directory_representation(path: &Path) -> Result<(), RunnerWorkspaceError> {
+    let text = path.to_str().ok_or(RunnerWorkspaceError::CorruptManifest)?;
+    WorkingDirectory::try_new(text.to_owned())
+        .map(|_| ())
+        .map_err(|_| RunnerWorkspaceError::CorruptManifest)
+}
+
+fn validate_root_directory(path: &Path, directory: &File) -> Result<(), io::Error> {
+    let metadata = directory.metadata()?;
+    let path_metadata = std::fs::metadata(path)?;
+    if !metadata.is_dir()
+        || metadata.uid() != geteuid().as_raw()
+        || metadata.permissions().mode() & PERMISSION_MASK != DIRECTORY_MODE
+        || metadata.dev() != path_metadata.dev()
+        || metadata.ino() != path_metadata.ino()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "workspace root identity is invalid",
+        ));
+    }
+    Ok(())
+}
+
 fn open_private_placement(
     root: &File,
     correlation: &signalbox_runner_wire::ReleaseCorrelation,
@@ -670,13 +766,22 @@ fn open_or_create_directory(parent: &File, name: &str) -> Result<File, RunnerWor
     match open_directory(parent, name) {
         Ok(directory) => Ok(directory),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            mkdirat(parent, name, Mode::RUSR | Mode::WUSR | Mode::XUSR).map_err(rustix_io)?;
-            let directory = open_created_directory(parent, name)?;
-            parent.sync_all().map_err(RunnerWorkspaceError::Io)?;
-            Ok(directory)
+            create_or_open_directory(parent, name)
         }
         Err(error) => Err(RunnerWorkspaceError::Io(error)),
     }
+}
+
+fn create_or_open_directory(parent: &File, name: &str) -> Result<File, RunnerWorkspaceError> {
+    let directory = match mkdirat(parent, name, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
+        Ok(()) => open_created_directory(parent, name)?,
+        Err(error) if error == rustix::io::Errno::EXIST => {
+            open_directory(parent, name).map_err(RunnerWorkspaceError::Io)?
+        }
+        Err(error) => return Err(rustix_io(error)),
+    };
+    parent.sync_all().map_err(RunnerWorkspaceError::Io)?;
+    Ok(directory)
 }
 
 fn open_optional_directory(
@@ -751,6 +856,56 @@ struct DirectoryIdentity {
     inode: u64,
 }
 
+struct UnpublishedDirectory {
+    parent: File,
+    name: OsString,
+    directory: Option<File>,
+}
+
+impl UnpublishedDirectory {
+    fn new(parent: File, name: OsString, directory: File) -> Self {
+        Self {
+            parent,
+            name,
+            directory: Some(directory),
+        }
+    }
+
+    fn directory(&self) -> Result<&File, RunnerWorkspaceError> {
+        self.directory
+            .as_ref()
+            .ok_or(RunnerWorkspaceError::ManifestConflict)
+    }
+
+    fn cleanup(mut self) -> Result<(), RunnerWorkspaceError> {
+        self.remove()?;
+        self.parent
+            .sync_all()
+            .map_err(RunnerWorkspaceError::CommitAmbiguous)
+    }
+
+    fn disarm(&mut self) {
+        self.directory = None;
+    }
+
+    fn remove(&mut self) -> Result<(), RunnerWorkspaceError> {
+        let directory = self
+            .directory
+            .take()
+            .ok_or(RunnerWorkspaceError::ManifestConflict)?;
+        remove_open_directory_tree(&self.parent, &self.name, directory)
+    }
+}
+
+impl Drop for UnpublishedDirectory {
+    fn drop(&mut self) {
+        if self.directory.is_some() {
+            let _ = self.remove();
+            let _ = self.parent.sync_all();
+        }
+    }
+}
+
 impl DirectoryIdentity {
     fn from_file(directory: &File) -> Result<Self, RunnerWorkspaceError> {
         let metadata = directory.metadata().map_err(RunnerWorkspaceError::Io)?;
@@ -764,6 +919,83 @@ impl DirectoryIdentity {
         let status = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(rustix_io)?;
         Ok(self.device == status.st_dev && self.inode == status.st_ino)
     }
+}
+
+enum DurabilityStep {
+    Inspect { parent: Rc<File>, name: OsString },
+    SyncDirectory(Rc<File>),
+}
+
+fn sync_directory_tree(directory: &File) -> Result<(), RunnerWorkspaceError> {
+    let root = Rc::new(directory.try_clone().map_err(RunnerWorkspaceError::Io)?);
+    let mut steps = vec![DurabilityStep::SyncDirectory(Rc::clone(&root))];
+    push_durability_entries(&mut steps, root)?;
+    while let Some(step) = steps.pop() {
+        match step {
+            DurabilityStep::Inspect { parent, name } => {
+                let status =
+                    statat(parent.as_ref(), &name, AtFlags::SYMLINK_NOFOLLOW).map_err(rustix_io)?;
+                let file_type = FileType::from_raw_mode(status.st_mode);
+                if file_type == FileType::Directory {
+                    let descriptor = openat(
+                        parent.as_ref(),
+                        &name,
+                        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                        Mode::empty(),
+                    )
+                    .map_err(rustix_io)?;
+                    let child = Rc::new(File::from(descriptor));
+                    if !DirectoryIdentity::from_file(&child)?.names(parent.as_ref(), &name)? {
+                        return Err(RunnerWorkspaceError::ManifestConflict);
+                    }
+                    steps.push(DurabilityStep::SyncDirectory(Rc::clone(&child)));
+                    push_durability_entries(&mut steps, child)?;
+                } else if file_type == FileType::RegularFile {
+                    let descriptor = openat(
+                        parent.as_ref(),
+                        &name,
+                        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                        Mode::empty(),
+                    )
+                    .map_err(rustix_io)?;
+                    let file = File::from(descriptor);
+                    let metadata = file.metadata().map_err(RunnerWorkspaceError::Io)?;
+                    if metadata.dev() != status.st_dev || metadata.ino() != status.st_ino {
+                        return Err(RunnerWorkspaceError::ManifestConflict);
+                    }
+                    file.sync_all().map_err(RunnerWorkspaceError::Io)?;
+                } else if file_type != FileType::Symlink {
+                    return Err(RunnerWorkspaceError::Io(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "prepared repository contains an unsupported file type",
+                    )));
+                }
+            }
+            DurabilityStep::SyncDirectory(directory) => {
+                directory.sync_all().map_err(RunnerWorkspaceError::Io)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn push_durability_entries(
+    steps: &mut Vec<DurabilityStep>,
+    directory: Rc<File>,
+) -> Result<(), RunnerWorkspaceError> {
+    let mut entries = Dir::read_from(directory.as_ref()).map_err(rustix_io)?;
+    while let Some(entry) = entries.read() {
+        let entry = entry.map_err(rustix_io)?;
+        let name = OsStr::from_bytes(entry.file_name().to_bytes());
+        if name == OsStr::new(".") || name == OsStr::new("..") {
+            continue;
+        }
+        steps.push(DurabilityStep::Inspect {
+            parent: Rc::clone(&directory),
+            name: OsString::from_vec(name.as_bytes().to_vec()),
+        });
+    }
+    Ok(())
 }
 
 enum RemovalStep {
@@ -798,6 +1030,13 @@ fn remove_open_directory_tree(
                 let status =
                     statat(parent.as_ref(), &name, AtFlags::SYMLINK_NOFOLLOW).map_err(rustix_io)?;
                 if FileType::from_raw_mode(status.st_mode) == FileType::Directory {
+                    chmodat(
+                        parent.as_ref(),
+                        &name,
+                        Mode::RUSR | Mode::WUSR | Mode::XUSR,
+                        AtFlags::SYMLINK_NOFOLLOW,
+                    )
+                    .map_err(rustix_io)?;
                     let descriptor = openat(
                         parent.as_ref(),
                         &name,
@@ -938,7 +1177,12 @@ fn rustix_io(error: rustix::io::Errno) -> RunnerWorkspaceError {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::PermissionsExt as _};
+    use std::{
+        ffi::OsString,
+        fs, future,
+        os::unix::{ffi::OsStringExt as _, fs::PermissionsExt as _},
+        sync::Arc,
+    };
 
     use signalbox_runner_wire::{
         Advertisement, CanonicalUuid, ManifestLifecycle, PositiveU64, ProfileName, Recovery,
@@ -964,9 +1208,8 @@ mod tests {
     const AUTHENTICATION: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00e5;
     const OPEN_DIRECTORY_MODE: u32 = 0o750;
     const EXPECTED_RELATIVE_PATH: &str = "sessions/018f6f10-0000-7000-8000-0000000000e1/3/work";
-    const EXPECTED_REPOSITORY_RELATIVE_PATH: &str =
-        "sessions/018f6f10-0000-7000-8000-0000000000e1/3/repo";
     const CLONE_URL: &str = "https://github.com/KeenWill/signalbox.git";
+    const PREPARED_REPOSITORY_BYTES: &[u8] = b"repository\n";
 
     fn fixture_root() -> (TempDir, RunnerStateRoot) {
         let parent = tempfile::tempdir().expect("the workspace fixture parent exists");
@@ -1043,7 +1286,7 @@ mod tests {
             .workspace_store()
             .expect("the locked root forms a workspace store")
             .prepare_repository_workspace(request, |target| async move {
-                fs::write(target.path().join("prepared"), b"repository\n")?;
+                fs::write(target.path().join("prepared"), PREPARED_REPOSITORY_BYTES)?;
                 Ok::<Recovery, std::io::Error>(recovery)
             })
             .await
@@ -1087,10 +1330,7 @@ mod tests {
         assert_eq!(prepared.manifest.session, expected.session());
         assert_eq!(prepared.manifest.runner, expected.runner());
         assert_eq!(prepared.manifest.lifecycle, ManifestLifecycle::Ready);
-        assert_eq!(
-            prepared.manifest.relative_path,
-            EXPECTED_REPOSITORY_RELATIVE_PATH
-        );
+        assert_eq!(prepared.manifest.relative_path, expected.relative_path());
         assert_eq!(
             prepared.execution_directory.as_str(),
             expected_execution_directory
@@ -1119,7 +1359,7 @@ mod tests {
         assert_eq!(
             fs::read(placement.join("repo").join("prepared"))
                 .expect("the prepared repository file is readable"),
-            b"repository\n"
+            PREPARED_REPOSITORY_BYTES
         );
     }
 
@@ -1169,7 +1409,8 @@ mod tests {
         let failure = state
             .workspace_store()
             .expect("the locked root forms a workspace store")
-            .prepare_repository_workspace(&expected, |_| async {
+            .prepare_repository_workspace(&expected, |target| async move {
+                fs::write(target.path().join("partial"), b"partial repository\n")?;
                 Err::<Recovery, std::io::Error>(std::io::Error::other(
                     "the fixture preparation fails",
                 ))
@@ -1182,12 +1423,81 @@ mod tests {
             .join("sessions")
             .join(expected.session().to_string())
             .join(expected.placement_revision().get().to_string());
+        let session = placement
+            .parent()
+            .expect("the placement fixture has a session parent");
 
         assert!(matches!(
             failure,
             PrepareRepositoryWorkspaceError::Preparation(_)
         ));
         assert!(!placement.exists());
+        assert_eq!(
+            fs::read_dir(session)
+                .expect("the session remains readable after failed preparation")
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_workspace_cancellation_removes_unpublished_staging() {
+        let (parent, state) = fixture_root();
+        let expected = repository_request();
+        let session = parent
+            .path()
+            .join("runner-state")
+            .join("sessions")
+            .join(expected.session().to_string());
+        let (started, preparation_started) = tokio::sync::oneshot::channel();
+        let preparation = tokio::spawn(async move {
+            state
+                .workspace_store()
+                .expect("the locked root forms a workspace store")
+                .prepare_repository_workspace(&expected, |target| async move {
+                    fs::write(target.path().join("partial"), b"partial repository\n")?;
+                    fs::set_permissions(target.path(), fs::Permissions::from_mode(0o000))?;
+                    let _ = started.send(());
+                    future::pending::<Result<Recovery, std::io::Error>>().await
+                })
+                .await
+        });
+        preparation_started
+            .await
+            .expect("repository preparation reaches its pending operation");
+
+        preparation.abort();
+        let cancellation = preparation
+            .await
+            .expect_err("the repository preparation task is cancelled");
+
+        assert!(cancellation.is_cancelled());
+        assert_eq!(
+            fs::read_dir(session)
+                .expect("the session remains readable after cancellation")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn directory_creation_reopens_a_concurrent_winner() {
+        let parent = tempfile::tempdir().expect("the directory race fixture parent exists");
+        let winner_name = "winner";
+        let winner = parent.path().join(winner_name);
+        fs::create_dir(&winner).expect("the concurrent winner creates the directory");
+        fs::set_permissions(&winner, fs::Permissions::from_mode(0o700))
+            .expect("the concurrent winner directory is owner-private");
+        let parent_descriptor =
+            fs::File::open(parent.path()).expect("the directory race fixture parent opens");
+
+        let reopened = super::create_or_open_directory(&parent_descriptor, winner_name)
+            .expect("the concurrent winner is reopened and validated");
+
+        assert!(
+            super::path_names_directory(&parent_descriptor, winner_name, &reopened)
+                .expect("the reopened winner retains its exact directory identity")
+        );
     }
 
     #[tokio::test]
@@ -1210,12 +1520,21 @@ mod tests {
             .join("sessions")
             .join(expected.session().to_string())
             .join(expected.placement_revision().get().to_string());
+        let session = placement
+            .parent()
+            .expect("the placement fixture has a session parent");
 
         assert!(matches!(
             failure,
             PrepareRepositoryWorkspaceError::Storage(RunnerWorkspaceError::CorruptManifest)
         ));
         assert!(!placement.exists());
+        assert_eq!(
+            fs::read_dir(session)
+                .expect("the session remains readable after rejected recovery")
+                .count(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -1272,6 +1591,203 @@ mod tests {
             failure,
             PrepareRepositoryWorkspaceError::Storage(RunnerWorkspaceError::ManifestConflict)
         ));
+    }
+
+    #[tokio::test]
+    async fn repository_workspace_rechecks_permissions_before_publish() {
+        let (_parent, state) = fixture_root();
+        let failure = state
+            .workspace_store()
+            .expect("the locked root forms a workspace store")
+            .prepare_repository_workspace(&repository_request(), |target| async move {
+                let staging = target
+                    .path()
+                    .parent()
+                    .expect("the repository fixture has a staging parent");
+                fs::set_permissions(staging, fs::Permissions::from_mode(OPEN_DIRECTORY_MODE))?;
+                Ok::<Recovery, std::io::Error>(Recovery::Commit {
+                    revision: "e".repeat(40),
+                })
+            })
+            .await
+            .expect_err("an open staging directory cannot be published");
+
+        assert!(matches!(
+            failure,
+            PrepareRepositoryWorkspaceError::Storage(RunnerWorkspaceError::Io(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn repository_workspace_rechecks_session_permissions_before_publish() {
+        let (_parent, state) = fixture_root();
+        let failure = state
+            .workspace_store()
+            .expect("the locked root forms a workspace store")
+            .prepare_repository_workspace(&repository_request(), |target| async move {
+                let session = target
+                    .path()
+                    .parent()
+                    .and_then(std::path::Path::parent)
+                    .expect("the repository fixture has a session ancestor");
+                fs::set_permissions(session, fs::Permissions::from_mode(OPEN_DIRECTORY_MODE))?;
+                Ok::<Recovery, std::io::Error>(Recovery::Commit {
+                    revision: "1".repeat(40),
+                })
+            })
+            .await
+            .expect_err("an open session directory cannot publish a repository");
+
+        assert!(matches!(
+            failure,
+            PrepareRepositoryWorkspaceError::Storage(RunnerWorkspaceError::Io(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn repository_workspace_rechecks_sessions_permissions_before_publish() {
+        let (_parent, state) = fixture_root();
+        let failure = state
+            .workspace_store()
+            .expect("the locked root forms a workspace store")
+            .prepare_repository_workspace(&repository_request(), |target| async move {
+                let sessions = target
+                    .path()
+                    .parent()
+                    .and_then(std::path::Path::parent)
+                    .and_then(std::path::Path::parent)
+                    .expect("the repository fixture has a sessions ancestor");
+                fs::set_permissions(sessions, fs::Permissions::from_mode(OPEN_DIRECTORY_MODE))?;
+                Ok::<Recovery, std::io::Error>(Recovery::Commit {
+                    revision: "2".repeat(40),
+                })
+            })
+            .await
+            .expect_err("an open sessions directory cannot publish a repository");
+
+        assert!(matches!(
+            failure,
+            PrepareRepositoryWorkspaceError::Storage(RunnerWorkspaceError::Io(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn repository_workspace_rechecks_runner_root_permissions_before_publish() {
+        let (_parent, state) = fixture_root();
+        let failure = state
+            .workspace_store()
+            .expect("the locked root forms a workspace store")
+            .prepare_repository_workspace(&repository_request(), |target| async move {
+                let root = target
+                    .path()
+                    .parent()
+                    .and_then(std::path::Path::parent)
+                    .and_then(std::path::Path::parent)
+                    .and_then(std::path::Path::parent)
+                    .expect("the repository fixture has a runner-root ancestor");
+                fs::set_permissions(root, fs::Permissions::from_mode(OPEN_DIRECTORY_MODE))?;
+                Ok::<Recovery, std::io::Error>(Recovery::Commit {
+                    revision: "3".repeat(40),
+                })
+            })
+            .await
+            .expect_err("an open runner root cannot publish a repository");
+
+        assert!(matches!(
+            failure,
+            PrepareRepositoryWorkspaceError::Storage(RunnerWorkspaceError::Io(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn repository_workspace_rejects_a_non_utf8_root_before_preparation() {
+        let parent = tempfile::tempdir().expect("the non-UTF-8 fixture parent exists");
+        let non_utf8_parent = parent
+            .path()
+            .join(OsString::from_vec(b"non-utf8-\xff".to_vec()));
+        fs::create_dir(&non_utf8_parent).expect("the non-UTF-8 fixture directory exists");
+        let alias = parent.path().join("alias");
+        std::os::unix::fs::symlink(&non_utf8_parent, &alias)
+            .expect("the UTF-8 fixture alias exists");
+        let state = RunnerStateRoot::open(&alias.join("runner-state"))
+            .expect("the aliased owner-private runner root opens");
+        let failure = state
+            .workspace_store()
+            .expect("the locked root forms a workspace store")
+            .prepare_repository_workspace(&repository_request(), |_| async {
+                Err::<Recovery, std::io::Error>(std::io::Error::other(
+                    "preparation must not run for a non-UTF-8 execution path",
+                ))
+            })
+            .await
+            .expect_err("a non-UTF-8 execution path cannot publish a repository");
+
+        assert!(matches!(
+            failure,
+            PrepareRepositoryWorkspaceError::Storage(RunnerWorkspaceError::CorruptManifest)
+        ));
+    }
+
+    #[test]
+    fn prepared_repository_durability_walks_nested_files_and_symlinks() {
+        let repository = tempfile::tempdir().expect("the repository fixture exists");
+        let nested = repository.path().join("objects").join("pack");
+        fs::create_dir_all(&nested).expect("the nested repository fixture exists");
+        fs::write(nested.join("pack"), b"prepared repository\n")
+            .expect("the nested repository file exists");
+        std::os::unix::fs::symlink("objects/pack/pack", repository.path().join("HEAD"))
+            .expect("the repository symlink fixture exists");
+        let descriptor =
+            fs::File::open(repository.path()).expect("the repository fixture descriptor opens");
+
+        super::sync_directory_tree(&descriptor)
+            .expect("every prepared repository level becomes durable");
+    }
+
+    #[tokio::test]
+    async fn repository_workspace_concurrent_publication_replays_the_winner() {
+        let (parent, state) = fixture_root();
+        let expected = repository_request();
+        let first_store = state
+            .workspace_store()
+            .expect("the locked root forms the first workspace store");
+        let second_store = state
+            .workspace_store()
+            .expect("the locked root forms the second workspace store");
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let first_barrier = Arc::clone(&barrier);
+        let second_barrier = Arc::clone(&barrier);
+        let first = first_store.prepare_repository_workspace(&expected, move |target| async move {
+            fs::write(target.path().join("prepared"), b"first\n")?;
+            first_barrier.wait().await;
+            Ok::<Recovery, std::io::Error>(Recovery::Commit {
+                revision: "f".repeat(40),
+            })
+        });
+        let second =
+            second_store.prepare_repository_workspace(&expected, move |target| async move {
+                fs::write(target.path().join("prepared"), b"second\n")?;
+                second_barrier.wait().await;
+                Ok::<Recovery, std::io::Error>(Recovery::Commit {
+                    revision: "0".repeat(40),
+                })
+            });
+        let (first, second) = tokio::join!(first, second);
+        let first = first.expect("the first publication reaches the ready workspace");
+        let second = second.expect("the concurrent publication replays the ready workspace");
+        let session = parent
+            .path()
+            .join("runner-state")
+            .join("sessions")
+            .join(expected.session().to_string());
+
+        assert_eq!(second, first);
+        assert_eq!(
+            fs::read_dir(session)
+                .expect("the session directory remains readable")
+                .count(),
+            1
+        );
     }
 
     #[test]

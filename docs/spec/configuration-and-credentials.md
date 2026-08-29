@@ -443,8 +443,9 @@ exact owner/repository path with an optional terminal `.git`. Its named
 credential profile, when present, must exist. Absence means that the entry
 admits anonymous HTTPS access only; it never asks the runner or daemon to select
 a credential. Any repository requires `github.com` in the effective network
-list. Environment names use `[A-Z_][A-Z0-9_]*`, cannot name runner control,
-model-provider, or dynamic-loader variables, and are unique. Absolute paths are
+list. Environment names use `[A-Z_][A-Z0-9_]*`, are at most 4,096 UTF-8 bytes,
+cannot name runner control, model-provider, or dynamic-loader variables, and are
+unique. Absolute paths are
 canonicalized without following a final credential symlink; duplicate, nested,
 writable/read-only-overlapping, or runner-root-overlapping allowlist paths fail
 closed. Configuration may narrow network entries but cannot add a hostname.
@@ -2812,7 +2813,7 @@ checked profile. Each call reopens that profile's configured path without
 following symlinks, requires a regular file owned by the effective user with
 exact `0600` mode, reads at most 65,536 bytes, and drops trailing `\n` and `\r`
 bytes while retaining all others. Empty, NUL-containing, unreadable, oversized,
-wrong-owner, wrong-mode, non-UTF-8, or nonregular values are one sanitized
+wrong-user-ID, wrong-mode, non-UTF-8, or nonregular values are one sanitized
 unavailable failure. The resolved carrier is non-cloneable and debug-redacted.
 It projects the value only into the reusable restricted environment channel and
 scrubs the exact value and its JSON-string-escaped form from complete captured
