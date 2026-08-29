@@ -32,6 +32,7 @@ use signalbox_persistence::{
 use signalbox_runner_wire::{
     Advertise, CanonicalUuid, Enroll, PositiveU64, Registered, Resume, Resumed,
 };
+use signalbox_test_bin::test_bin_path;
 use signalboxd::{
     LocalProcessListener,
     runner_protocol_runtime::{
@@ -144,12 +145,12 @@ async fn s30_inv042_spawned_runner_enrolls_against_durable_daemon() -> Result<()
     let socket = directory.path().join("runner.sock");
     let runner_root = directory.path().join("runner-state");
     let configuration_path = directory.path().join("runner.toml");
-    let runner_binary = env!("CARGO_BIN_EXE_signalbox-runner");
+    let runner_binary = test_bin_path!("signalbox-runner");
     let configuration = format!(
         r#"version = 1
 daemon_socket_path = "{}"
 runner_root = "{}"
-bubblewrap_path = "{runner_binary}"
+bubblewrap_path = "{}"
 read_only_paths = ["/usr"]
 allowed_network_hosts = []
 git_author_name = "Signalbox Test Runner"
@@ -159,6 +160,7 @@ repositories = {{}}
 "#,
         socket.display(),
         runner_root.display(),
+        runner_binary.display(),
     );
     fs::write(&configuration_path, configuration)?;
 
