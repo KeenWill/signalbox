@@ -52,7 +52,6 @@ mod linux {
     const DISPATCH_MODE: &str = "--dispatch";
     const DISPATCH_HTTPS_PROXY_MODE: &str = "--dispatch-with-https-proxy";
     const HTTPS_PROXY_PORT: u16 = 18_080;
-    const HTTPS_BROKER_SOCKET: &str = "/run/signalbox/https-broker.sock";
     const CARGO_TEST_RUNNER_MODE: &str = "--cargo-test-runner";
     const LAUNCH_MODE: &str = "--launch";
     const OUTER_MODE: &str = "--outer";

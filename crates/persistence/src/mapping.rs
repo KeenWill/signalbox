@@ -20,7 +20,7 @@ use signalbox_domain::{
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId, SessionInputPosition,
     SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture, ToolAttemptId,
     ToolPermissionDefault, ToolRequestId, TurnId, UpdateSessionPlacementRejectionKind,
-    ValidatedModelSettings, WorkspaceOrigin,
+    ValidatedModelSettings, WorkspaceOrigin, WorkspaceRecovery,
 };
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
@@ -1527,6 +1527,33 @@ pub(crate) fn runner_sandbox_from_str(value: &str) -> Option<RunnerSandboxProfil
     match value {
         "ambient" => Some(RunnerSandboxProfile::Ambient),
         "workspace_restricted" => Some(RunnerSandboxProfile::WorkspaceRestricted),
+        _ => None,
+    }
+}
+
+/// Closed workspace-recovery discriminators stored by PostgreSQL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WorkspaceRecoveryStorageKind {
+    Commit,
+    Branch,
+    UnbornBranch,
+}
+
+/// Encodes one workspace-recovery arm as its durable spelling.
+pub(crate) const fn workspace_recovery_to_str(value: &WorkspaceRecovery) -> &'static str {
+    match value {
+        WorkspaceRecovery::Commit { .. } => "commit",
+        WorkspaceRecovery::Branch { .. } => "branch",
+        WorkspaceRecovery::UnbornBranch { .. } => "unborn_branch",
+    }
+}
+
+/// Decodes one durable workspace-recovery discriminator.
+pub(crate) fn workspace_recovery_from_str(value: &str) -> Option<WorkspaceRecoveryStorageKind> {
+    match value {
+        "commit" => Some(WorkspaceRecoveryStorageKind::Commit),
+        "branch" => Some(WorkspaceRecoveryStorageKind::Branch),
+        "unborn_branch" => Some(WorkspaceRecoveryStorageKind::UnbornBranch),
         _ => None,
     }
 }
