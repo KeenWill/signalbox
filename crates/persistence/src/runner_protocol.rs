@@ -3197,8 +3197,10 @@ impl RunnerProtocolStore {
         Ok(outcome)
     }
 
-    /// Finalizes every pending exact-directory replacement after one durable
-    /// model observation has established the prefix it must extend.
+    /// Finalizes eligible distinct-runner exact-directory replacements after
+    /// one durable non-tool-round model observation has established the prefix
+    /// each relocation must extend. Pending-enrollment and same-runner stages
+    /// remain staged for their dedicated completion paths.
     pub(crate) async fn finalize_workspace_free_replacements_after_model_observation(
         &self,
         transaction: &mut Transaction<'_, Postgres>,
@@ -3231,10 +3233,17 @@ impl RunnerProtocolStore {
                JOIN replace_lost_runner_command AS command
                  ON command.command_id = stage.command_id
                 AND command.session_id = stage.session_id
+              JOIN runner_session_placement_record AS lost
+                ON lost.session_id = stage.session_id
+               AND lost.event_ordinal = stage.lost_placement_event_ordinal
+               AND lost.placement_revision = stage.lost_placement_revision
                LEFT JOIN replace_lost_runner_result AS result
                  ON result.command_id = stage.command_id
                 AND result.session_id = stage.session_id
-              WHERE stage.session_id = $1 AND result.command_id IS NULL
+              WHERE stage.session_id = $1
+                AND result.command_id IS NULL
+                AND command.target_kind = 'runner'
+                AND command.target_runner_id <> lost.lost_runner_id
               ORDER BY command.command_id",
         )
         .bind(session.into_uuid())
