@@ -863,15 +863,14 @@ where
                 Ok(None)
             }
             Message::OperationFailureRecorded(recorded) => {
-                let OperationCorrelation::LeaseOffer(correlation) = &recorded.correlation else {
-                    return Err(RunnerConnectionError::Violation(
-                        ProtocolViolation::FailureAcknowledgementMismatch,
-                    ));
-                };
-                self.validate_connection_correlation(
-                    correlation.runner_id,
-                    correlation.registration_revision,
-                )?;
+                match &recorded.correlation {
+                    OperationCorrelation::LeaseOffer(_) => {}
+                    OperationCorrelation::Provision(_) | OperationCorrelation::Release(_) => {
+                        return Err(RunnerConnectionError::Violation(
+                            ProtocolViolation::FailureAcknowledgementMismatch,
+                        ));
+                    }
+                }
                 state
                     .acknowledge_lease_offer_failure(&recorded.correlation)
                     .map_err(|error| match error {
@@ -2269,6 +2268,64 @@ mod tests {
 
         assert_eq!(outcome, None);
         assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
+    }
+
+    /// INV-011 / INV-024: an acknowledgement for resent refusal evidence uses
+    /// the retained registration revision even when resume advances the head.
+    #[tokio::test]
+    async fn s31_inv011_inv024_resent_failure_acknowledgement_accepts_retained_revision() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        let failure = retained_lease_offer_failure();
+        let correlation = failure.correlation.clone();
+        state
+            .record_lease_offer_failure(failure.clone())
+            .expect("the lease-offer failure is durable");
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume resends the retained failure");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect("the retained-revision acknowledgement is consumed")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            let resumed = Resumed {
+                registration_revision: positive(NEXT_REGISTRATION_REVISION),
+                connection_epoch: positive(CONNECTION_EPOCH),
+                directives: retained_failure_directives(&failure, DirectiveAction::Resend),
+            };
+            let resumed_registration_revision = resumed.registration_revision;
+            send_hub_message(&mut hub_io, Message::Resumed(Box::new(resumed))).await;
+            assert_eq!(
+                receive_hub_message(&mut hub_io).await,
+                Message::OperationFailed(OperationFailed { failure })
+            );
+            send_hub_message(
+                &mut hub_io,
+                Message::OperationFailureRecorded(OperationFailureRecorded { correlation }),
+            )
+            .await;
+            resumed_registration_revision
+        };
+        let (outcome, resumed_registration_revision) = tokio::join!(runner, hub);
+
+        assert_eq!(outcome, None);
+        assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
+        assert_eq!(
+            state
+                .state()
+                .receipt()
+                .expect("the advanced registration remains durable")
+                .registration_revision(),
+            resumed_registration_revision
+        );
     }
 
     #[tokio::test]
