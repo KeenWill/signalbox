@@ -1799,6 +1799,15 @@ Full polling continues unchanged as the slow complete reconciliation sweep and
 remains authoritative for missed deliveries, reactions, and every provider fact
 outside the mapped set.
 
+A `pull_request: closed` delivery whose pull request is absent from the ordinary
+observation first consults the compact merged baseline. An equal merged head is
+already terminal state and records a duplicate disposition without hydrating the
+discarded detail; an older unmerged close is superseded by that durable merge.
+Other missing pull-request changes still request hydration, because the compact
+baseline does not retain the complete canonical context they may change. This
+compacted terminal replay behavior is verified against this PR
+(`agent/repo-watch-compacted-terminal-replay`).
+
 **Implemented behavior.** A repository in primary mode applies a mapped delivery
 to its durable cursor. The baseline is that cursor rather than an accumulated
 shadow, reloaded for each delivery: every applied delivery commits, so the next

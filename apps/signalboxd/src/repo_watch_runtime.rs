@@ -40,8 +40,8 @@ use signalbox_application::{
     RepoWatchWebhookIgnoredReasonV1, RepoWatchWebhookMappedNoChangeV1,
     RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1, RepoWatchWorkflowRunObservation,
     UuidV7RepoWatchDispatchIdGenerator, UuidV7RepoWatchEventIdGenerator,
-    apply_repo_watch_observation_patch_v1, derive_repo_watch_events_with_merged_baselines,
-    map_repo_watch_webhook_delivery_v1,
+    apply_repo_watch_observation_patch_with_merged_baselines_v1,
+    derive_repo_watch_events_with_merged_baselines, map_repo_watch_webhook_delivery_v1,
 };
 use signalbox_domain::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, DurableCommandId,
@@ -2877,20 +2877,23 @@ impl RepositoryWatchTask {
                 let Some(shadow) = self.webhook_shadow.clone() else {
                     return Err(RepositoryWatchAttemptError::Persistence);
                 };
-                let applied =
-                    match apply_repo_watch_observation_patch_v1(&shadow.observation, &patch) {
-                        Ok(applied) => applied,
-                        Err(_) => {
-                            self.record_webhook_terminal(
-                                pending,
-                                Vec::new(),
-                                RepoWatchWebhookDisposition::Quarantined,
-                                Some("patch_incoherent"),
-                            )
-                            .await?;
-                            return Ok(());
-                        }
-                    };
+                let applied = match apply_repo_watch_observation_patch_with_merged_baselines_v1(
+                    &shadow.observation,
+                    &shadow.merged_pull_request_baselines,
+                    &patch,
+                ) {
+                    Ok(applied) => applied,
+                    Err(_) => {
+                        self.record_webhook_terminal(
+                            pending,
+                            Vec::new(),
+                            RepoWatchWebhookDisposition::Quarantined,
+                            Some("patch_incoherent"),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                };
                 match applied {
                     RepoWatchObservationApplyV1::DuplicateState => {
                         self.record_webhook_terminal(
@@ -3090,7 +3093,11 @@ impl RepositoryWatchTask {
             .map_err(|_| RepositoryWatchAttemptError::Persistence)?
             .ok_or(RepositoryWatchAttemptError::Persistence)?;
         let baseline = WebhookShadowBaseline::from_cursor(&cursor);
-        let applied = match apply_repo_watch_observation_patch_v1(&baseline.observation, &patch) {
+        let applied = match apply_repo_watch_observation_patch_with_merged_baselines_v1(
+            &baseline.observation,
+            &baseline.merged_pull_request_baselines,
+            &patch,
+        ) {
             Ok(applied) => applied,
             Err(_) => {
                 return self
