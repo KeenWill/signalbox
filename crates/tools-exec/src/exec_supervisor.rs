@@ -23,7 +23,7 @@ mod linux {
         io::{Read, Write},
         net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream},
         os::unix::net::UnixStream,
-        os::unix::process::CommandExt,
+        os::unix::{ffi::OsStringExt, process::CommandExt},
         path::{Path, PathBuf},
         process::{Command, ExitCode, ExitStatus, Stdio},
         sync::{
@@ -49,6 +49,10 @@ mod linux {
     const REAP_DEADLINE: Duration = Duration::from_secs(1);
     const DISPATCH_MODE: &str = "--dispatch";
     const DISPATCH_HTTPS_PROXY_MODE: &str = "--dispatch-with-https-proxy";
+    const DISPATCH_ENVIRONMENT_MODE: &str = "--dispatch-with-environment";
+    const DISPATCH_HTTPS_PROXY_ENVIRONMENT_MODE: &str =
+        "--dispatch-with-https-proxy-and-environment";
+    const RESTRICTED_ENVIRONMENT_FILE: &str = "/run/signalbox/restricted-environment";
     const HTTPS_PROXY_PORT: u16 = 18_080;
     const HTTPS_BROKER_SOCKET: &str = "/run/signalbox/https-broker.sock";
     const MAX_HTTPS_PROXY_TUNNELS: usize = 8;
@@ -105,6 +109,12 @@ mod linux {
         }
         if mode_or_timeout == DISPATCH_HTTPS_PROXY_MODE {
             return dispatch_with_https_proxy(arguments.collect());
+        }
+        if mode_or_timeout == DISPATCH_ENVIRONMENT_MODE {
+            return dispatch_with_environment(arguments.collect());
+        }
+        if mode_or_timeout == DISPATCH_HTTPS_PROXY_ENVIRONMENT_MODE {
+            return dispatch_with_https_proxy_and_environment(arguments.collect());
         }
         if mode_or_timeout == CARGO_TEST_RUNNER_MODE {
             return cargo_test_runner(arguments.collect());
@@ -275,6 +285,13 @@ mod linux {
     }
 
     fn dispatch(arguments: Vec<OsString>) -> ExitCode {
+        dispatch_target(arguments, None)
+    }
+
+    fn dispatch_target(
+        arguments: Vec<OsString>,
+        environment: Option<(OsString, OsString)>,
+    ) -> ExitCode {
         if arguments.is_empty() {
             return ExitCode::FAILURE;
         }
@@ -295,7 +312,21 @@ mod linux {
         // `stderr_copy.join()` -- but only once the target actually writes a
         // byte to stderr, which is why silent targets appear to work.
         drop(stderr);
-        emit_target_status(arguments)
+        emit_target_status(arguments, environment)
+    }
+
+    fn dispatch_with_environment(mut arguments: Vec<OsString>) -> ExitCode {
+        if arguments.is_empty() {
+            return ExitCode::FAILURE;
+        }
+        let name = arguments.remove(0);
+        let Ok(value) = std::fs::read(RESTRICTED_ENVIRONMENT_FILE) else {
+            return ExitCode::FAILURE;
+        };
+        if std::fs::remove_file(RESTRICTED_ENVIRONMENT_FILE).is_err() {
+            return ExitCode::FAILURE;
+        }
+        dispatch_target(arguments, Some((name, OsString::from_vec(value))))
     }
 
     fn dispatch_with_https_proxy(arguments: Vec<OsString>) -> ExitCode {
@@ -306,6 +337,16 @@ mod linux {
             return ExitCode::FAILURE;
         };
         dispatch(arguments)
+    }
+
+    fn dispatch_with_https_proxy_and_environment(arguments: Vec<OsString>) -> ExitCode {
+        let Ok(_proxy) = NamespaceHttpsProxy::start(
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, HTTPS_PROXY_PORT)),
+            PathBuf::from(HTTPS_BROKER_SOCKET),
+        ) else {
+            return ExitCode::FAILURE;
+        };
+        dispatch_with_environment(arguments)
     }
 
     struct NamespaceHttpsProxy {
@@ -737,11 +778,14 @@ mod linux {
         if read_control_byte().is_err() {
             return ExitCode::FAILURE;
         }
-        emit_target_status(arguments)
+        emit_target_status(arguments, None)
     }
 
-    fn emit_target_status(arguments: Vec<OsString>) -> ExitCode {
-        let status = match run_target(arguments) {
+    fn emit_target_status(
+        arguments: Vec<OsString>,
+        environment: Option<(OsString, OsString)>,
+    ) -> ExitCode {
+        let status = match run_target(arguments, environment) {
             Ok(target) => LauncherStatus::Exited {
                 code: target.status.code(),
                 stdout: target.stdout,
@@ -767,12 +811,18 @@ mod linux {
         }
     }
 
-    fn run_target(mut arguments: Vec<OsString>) -> Result<TargetExit, TargetFailure> {
+    fn run_target(
+        mut arguments: Vec<OsString>,
+        environment: Option<(OsString, OsString)>,
+    ) -> Result<TargetExit, TargetFailure> {
         if arguments.is_empty() {
             return Err(TargetFailure::Supervision);
         }
         let program = arguments.remove(0);
         let mut command = Command::new(program);
+        if let Some((name, value)) = environment {
+            command.env(name, value);
+        }
         command
             .args(arguments)
             .stdin(Stdio::null())

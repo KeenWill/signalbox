@@ -13,6 +13,7 @@ use serde::Deserialize;
 use signalbox_runner_wire::{Advertisement, ProfileName, RepositoryKey, ValueError};
 #[cfg(feature = "runner-execution-proof")]
 use signalbox_runner_wire::{SandboxProfile, WireToolName};
+use signalbox_tools_exec::MAX_SANDBOX_ENVIRONMENT_NAME_BYTES;
 use url::Url;
 
 const CONFIGURATION_VERSION: u64 = 1;
@@ -453,9 +454,10 @@ fn reserved_environment_name(value: &str) -> bool {
 
 fn valid_environment_name(value: &str) -> bool {
     let mut bytes = value.bytes();
-    bytes
-        .next()
-        .is_some_and(|byte| byte.is_ascii_uppercase() || byte == b'_')
+    value.len() <= MAX_SANDBOX_ENVIRONMENT_NAME_BYTES
+        && bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_uppercase() || byte == b'_')
         && bytes.all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
@@ -882,6 +884,22 @@ injection_env = "{CONFIGURED_INJECTION_ENV}""#,
 
         let error = RunnerConfiguration::parse(&document)
             .expect_err("a dynamic-loader environment must fail closed");
+
+        assert_eq!(
+            error.to_string(),
+            "runner credential configuration is invalid"
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_oversized_credential_environment() {
+        let oversized_environment = "A".repeat(MAX_SANDBOX_ENVIRONMENT_NAME_BYTES + 1);
+        let document = configured_fixture()
+            .document
+            .replace(CONFIGURED_INJECTION_ENV, &oversized_environment);
+
+        let error = RunnerConfiguration::parse(&document)
+            .expect_err("an oversized injection environment must fail closed");
 
         assert_eq!(
             error.to_string(),
