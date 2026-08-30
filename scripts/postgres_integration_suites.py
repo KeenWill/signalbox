@@ -813,18 +813,30 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
         BUILD_JOB: BUILD_RUNNER,
         RUN_JOB: RUN_RUNNER,
     }
+    raw_selections = {}
     for job, expected_target in expected_targets.items():
         job_text = "\n".join(job_lines(text, job))
-        targets = {
-            _resolved_runs_on(match.group("target"))
-            for match in RUNS_ON.finditer(job_text)
-        }
+        raw = {match.group("target") for match in RUNS_ON.finditer(job_text)}
+        raw_selections[job] = raw
+        targets = {_resolved_runs_on(value) for value in raw}
         if targets != {expected_target}:
             listing = ", ".join(sorted(targets)) or "none"
             failures.append(
                 f"{WORKFLOW} job `{job}` must run on `{expected_target}`, "
                 f"found: {listing}"
             )
+    # The arms must agree in full, not merely resolve to the same fleet: a
+    # divergent hosted arm would build the archive in one environment and run
+    # it in another on routed (fork or bot) pull requests.
+    if raw_selections[BUILD_JOB] != raw_selections[RUN_JOB]:
+        failures.append(
+            f"{WORKFLOW} jobs `{BUILD_JOB}` and `{RUN_JOB}` must share one "
+            "complete runner selection, found: "
+            + " vs ".join(
+                ", ".join(sorted(raw_selections[job])) or "none"
+                for job in (BUILD_JOB, RUN_JOB)
+            )
+        )
 
     return failures
 
