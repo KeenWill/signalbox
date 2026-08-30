@@ -40,7 +40,7 @@ jobs:
   # triggers on exactly that path set.
   rust-change-scope:
     name: Rust change scope
-    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.actor)) && 'ubuntu-latest' || 'signalbox' }}
+    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
     outputs:
       docs_only: ${{ steps.paths.outputs.docs_only }}
       web_only: ${{ steps.paths.outputs.web_only }}
@@ -106,7 +106,7 @@ jobs:
           echo "skip_rust=$skip_rust" >> "$GITHUB_OUTPUT"
 
   contract-checks:
-    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.actor)) && 'ubuntu-latest' || 'signalbox' }}
+    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
     timeout-minutes: 10
     steps:
       # Full history also fetches `refs/remotes/origin/*`, which the docs
@@ -166,7 +166,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
   checker-and-format-tests:
-    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.actor)) && 'ubuntu-latest' || 'signalbox' }}
+    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
     timeout-minutes: 10
     steps:
       - name: Check out repository
@@ -247,7 +247,7 @@ jobs:
   rust-checks:
     needs: rust-change-scope
     if: needs.rust-change-scope.outputs.skip_rust != 'true'
-    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.actor)) && 'ubuntu-latest' || 'signalbox' }}
+    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
     # The self-hosted pool starts with cold caches; give the workspace check
     # headroom until they warm.
     timeout-minutes: 30
@@ -337,7 +337,7 @@ jobs:
     if: ${{ always() }}
     needs:
       [rust-change-scope, contract-checks, checker-and-format-tests, rust-checks]
-    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.actor)) && 'ubuntu-latest' || 'signalbox' }}
+    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
     timeout-minutes: 1
     steps:
       - name: Confirm every implementation check passed
@@ -444,7 +444,7 @@ jobs:
     name: validate
     if: ${{ always() }}
     needs: [rust-change-scope, validate-checks, workspace-tests]
-    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.actor)) && 'ubuntu-latest' || 'signalbox' }}
+    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
     timeout-minutes: 1
     steps:
       - name: Confirm the checks and the workspace tests passed
@@ -467,7 +467,7 @@ jobs:
     continue-on-error: true
     needs: rust-change-scope
     if: needs.rust-change-scope.outputs.skip_rust != 'true'
-    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.actor)) && 'ubuntu-latest' || 'signalbox' }}
+    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
     timeout-minutes: 20
     steps:
       - name: Check out repository
@@ -570,7 +570,7 @@ jobs:
     name: postgres-integration (build)
     needs: rust-change-scope
     if: needs.rust-change-scope.outputs.skip_rust != 'true'
-    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.actor)) && 'ubuntu-latest' || 'signalbox-docker' }}
+    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-docker' }}
     # Generous by design: this job now absorbs all six suites' compilation,
     # which a cold cache serializes into one runner instead of spreading it
     # across three.
@@ -744,7 +744,7 @@ jobs:
       postgres-integration
       (${{ matrix.suite }} ${{ matrix.partition }}/${{ matrix.partitions }})
     needs: postgres-integration-build
-    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.actor)) && 'ubuntu-latest' || 'signalbox-docker' }}
+    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-docker' }}
     # Keep security-sensitive sockets and filesystem fixtures off the NFS
     # workspace: their permission and atomicity contracts require local /tmp.
     env:
@@ -818,7 +818,7 @@ jobs:
     if: ${{ always() }}
     needs:
       [rust-change-scope, postgres-integration-build, postgres-integration-run]
-    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.actor)) && 'ubuntu-latest' || 'signalbox' }}
+    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
     timeout-minutes: 1
     steps:
       - name: Confirm every PostgreSQL integration partition passed

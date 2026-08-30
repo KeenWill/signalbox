@@ -93,7 +93,7 @@ RUNS_ON = re.compile(r"^[ ]*runs-on:[ ]*(?P<target>[^#\n]+?)[ ]*$", re.MULTILINE
 DYNAMIC_RUNS_ON = re.compile(
     r"^\$\{\{ github\.event_name == 'pull_request' && "
     r"\(github\.event\.pull_request\.head\.repo\.full_name != github\.repository "
-    r"\|\| contains\(fromJSON\('\[\"dependabot\[bot\]\",\"renovate\[bot\]\"\]'\), github\.actor\)\) && 'ubuntu-latest' \|\| "
+    r"\|\| contains\(fromJSON\('\[\"dependabot\[bot\]\",\"renovate\[bot\]\"\]'\), github\.event\.pull_request\.user\.login\)\) && 'ubuntu-latest' \|\| "
     r"'(?P<pool>[^']+)' \}\}$"
 )
 
@@ -814,12 +814,14 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
         RUN_JOB: RUN_RUNNER,
     }
     raw_selections = {}
+    shards_resolve_clean = True
     for job, expected_target in expected_targets.items():
         job_text = "\n".join(job_lines(text, job))
         raw = {match.group("target") for match in RUNS_ON.finditer(job_text)}
         raw_selections[job] = raw
         targets = {_resolved_runs_on(value) for value in raw}
         if targets != {expected_target}:
+            shards_resolve_clean = False
             listing = ", ".join(sorted(targets)) or "none"
             failures.append(
                 f"{WORKFLOW} job `{job}` must run on `{expected_target}`, "
@@ -827,8 +829,9 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
             )
     # The arms must agree in full, not merely resolve to the same fleet: a
     # divergent hosted arm would build the archive in one environment and run
-    # it in another on routed (fork or bot) pull requests.
-    if raw_selections[BUILD_JOB] != raw_selections[RUN_JOB]:
+    # it in another on routed (fork or bot) pull requests. Reported only when
+    # both shards resolve clean, so single-shard drift keeps one diagnostic.
+    if shards_resolve_clean and raw_selections[BUILD_JOB] != raw_selections[RUN_JOB]:
         failures.append(
             f"{WORKFLOW} jobs `{BUILD_JOB}` and `{RUN_JOB}` must share one "
             "complete runner selection, found: "
