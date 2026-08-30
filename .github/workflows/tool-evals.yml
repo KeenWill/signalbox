@@ -194,7 +194,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Install Bubblewrap for the exec family
-        if: ${{ matrix.family == 'exec' && runner.environment == 'github-hosted' }}
+        if: ${{ matrix.family == 'exec' }}
         run: |
           sudo apt-get update
           sudo apt-get install --yes bubblewrap
@@ -208,7 +208,7 @@ jobs:
           /usr/local/lib/signalbox-eval-bin/cargo -vV \
             | grep --fixed-strings 'host: x86_64-unknown-linux-gnu'
       - name: Enable unprivileged user namespaces for the exec family
-        if: ${{ matrix.family == 'exec' && runner.environment == 'github-hosted' }}
+        if: ${{ matrix.family == 'exec' }}
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
