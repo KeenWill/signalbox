@@ -57,6 +57,7 @@ jobs:
   rust-coverage:
     name: Rust coverage (report only)
     continue-on-error: true
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: signalbox-docker
     # The instrumented build compiles the workspace once more and then runs
     # both the workspace suite and the three dockerized PostgreSQL suites in
