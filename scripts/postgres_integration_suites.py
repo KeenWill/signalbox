@@ -93,7 +93,7 @@ RUNS_ON = re.compile(r"^[ ]*runs-on:[ ]*(?P<target>[^#\n]+?)[ ]*$", re.MULTILINE
 DYNAMIC_RUNS_ON = re.compile(
     r"^\$\{\{ github\.event_name == 'pull_request' && "
     r"\(github\.event\.pull_request\.head\.repo\.full_name != github\.repository "
-    r"\|\| github\.actor == 'dependabot\[bot\]'\) && 'ubuntu-latest' \|\| "
+    r"\|\| contains\(fromJSON\('\[\"dependabot\[bot\]\",\"renovate\[bot\]\"\]'\), github\.actor\)\) && 'ubuntu-latest' \|\| "
     r"'(?P<pool>[^']+)' \}\}$"
 )
 

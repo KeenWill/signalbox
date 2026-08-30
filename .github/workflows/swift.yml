@@ -37,7 +37,7 @@ permissions:
 jobs:
   swift-change-scope:
     name: Swift native change scope
-    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.actor == 'dependabot[bot]') && 'ubuntu-latest' || 'signalbox' }}
+    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.actor)) && 'ubuntu-latest' || 'signalbox' }}
     outputs:
       native: ${{ steps.paths.outputs.native }}
     steps:
