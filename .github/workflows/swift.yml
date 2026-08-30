@@ -373,7 +373,7 @@ jobs:
       && github.event_name == 'pull_request'
       && github.event.pull_request.head.repo.full_name == github.repository
     continue-on-error: true
-    runs-on: signalbox
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       # `actions: read` lets the download step read this run's artifact; a
