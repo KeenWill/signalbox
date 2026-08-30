@@ -87,7 +87,20 @@ ARCHIVE_ARTIFACT = re.compile(
     r"(?P<suite>postgres-integration-archive-[A-Za-z0-9][A-Za-z0-9-]*)[ ]*$"
 )
 SUITE_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
-RUNS_ON = re.compile(r"^[ ]*runs-on:[ ]*(?P<target>[^ #\n]+)", re.MULTILINE)
+RUNS_ON = re.compile(r"^[ ]*runs-on:[ ]*(?P<target>[^#\n]+?)[ ]*$", re.MULTILINE)
+# Untrusted (fork or Dependabot) pull requests route to a hosted runner; the
+# self-hosted arm of that expression is the target this manifest pins.
+DYNAMIC_RUNS_ON = re.compile(
+    r"^\$\{\{ github\.event_name == 'pull_request' && "
+    r"\(github\.event\.pull_request\.head\.repo\.full_name != github\.repository "
+    r"\|\| github\.actor == 'dependabot\[bot\]'\) && 'ubuntu-latest' \|\| "
+    r"'(?P<pool>[^']+)' \}\}$"
+)
+
+
+def _resolved_runs_on(value: str) -> str:
+    match = DYNAMIC_RUNS_ON.match(value)
+    return match.group("pool") if match else value
 SHELL_SCALAR = re.compile(r"^(?P<indent>[ ]*)(?:-[ ]+)?(?:run|command):(?P<inline>.*)$")
 # A block header carries its chomping and indentation indicators in either
 # order: `|2-` and `|-2` are the same scalar.
@@ -802,7 +815,10 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
     }
     for job, expected_target in expected_targets.items():
         job_text = "\n".join(job_lines(text, job))
-        targets = {match.group("target") for match in RUNS_ON.finditer(job_text)}
+        targets = {
+            _resolved_runs_on(match.group("target"))
+            for match in RUNS_ON.finditer(job_text)
+        }
         if targets != {expected_target}:
             listing = ", ".join(sorted(targets)) or "none"
             failures.append(
