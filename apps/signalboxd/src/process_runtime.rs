@@ -7286,6 +7286,11 @@ fn transcript_entry_reference(
             entry,
             ..
         }
+        | ProcessTranscriptEntry::RunnerPlacementChanged {
+            source_session,
+            entry,
+            ..
+        }
         | ProcessTranscriptEntry::ContextSummary {
             source_session,
             entry,
@@ -7443,6 +7448,26 @@ fn context_compaction_entry_value(entry: &ProcessTranscriptEntry) -> serde_json:
             "turn_id": turn.into_uuid().hyphenated().to_string(),
             "defaults_version": defaults_version,
             "selected_model_id": selected.into_uuid().hyphenated().to_string(),
+        }),
+        ProcessTranscriptEntry::RunnerPlacementChanged {
+            entry_index,
+            prior_runner,
+            new_runner,
+            placement_revision,
+            sandbox,
+            ..
+        } => serde_json::json!({
+            "position": entry_index + 1,
+            "source_session_id": source_session_id,
+            "entry_id": entry_id,
+            "type": "runner_placement_changed",
+            "prior_runner_id": prior_runner.into_uuid().hyphenated().to_string(),
+            "new_runner_id": new_runner.into_uuid().hyphenated().to_string(),
+            "placement_revision": placement_revision.get(),
+            "sandbox_profile": match sandbox {
+                DomainRunnerSandboxProfile::Ambient => "ambient",
+                DomainRunnerSandboxProfile::WorkspaceRestricted => "workspace-restricted",
+            },
         }),
         ProcessTranscriptEntry::ContextSummary {
             entry_index,
@@ -11865,6 +11890,43 @@ where
                         turn_id: wire_uuid(turn.into_uuid()),
                         defaults_version: CanonicalU64::new(*defaults_version),
                         selected_model_id: wire_uuid(selected.into_uuid()),
+                    },
+                },
+            )
+            .await
+        }
+        ProcessTranscriptEntry::RunnerPlacementChanged {
+            entry_index,
+            source_session,
+            entry,
+            prior_runner,
+            new_runner,
+            placement_revision,
+            sandbox,
+        } => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(*entry_index),
+                    source_session_id: wire_uuid(source_session.into_uuid()),
+                    entry_id: wire_uuid(entry.into_uuid()),
+                    entry: TranscriptEntry::RunnerPlacementChanged {
+                        prior_runner_id: wire_uuid(prior_runner.into_uuid()),
+                        new_runner_id: wire_uuid(new_runner.into_uuid()),
+                        placement_revision: WireRunnerPlacementRevision::try_new(
+                            placement_revision.get(),
+                        )
+                        .ok_or(ProcessConnectionError::EncodeInvariant)?,
+                        sandbox_profile: match sandbox {
+                            DomainRunnerSandboxProfile::Ambient => {
+                                WireRunnerSandboxProfile::Ambient
+                            }
+                            DomainRunnerSandboxProfile::WorkspaceRestricted => {
+                                WireRunnerSandboxProfile::WorkspaceRestricted
+                            }
+                        },
                     },
                 },
             )

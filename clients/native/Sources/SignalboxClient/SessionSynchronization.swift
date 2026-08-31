@@ -1910,7 +1910,8 @@ extension SignalboxTranscriptEntry {
       return UInt(kind.utf8.count)
         .saturatedAdding(payload.encodedUTF8Bytes)
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
-    case .modelIdentityChanged, .turnCompleted, .turnFailed, .turnCancelled:
+    case .modelIdentityChanged, .runnerPlacementChanged, .turnCompleted, .turnFailed,
+      .turnCancelled:
       return 0
     }
   }

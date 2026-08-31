@@ -906,6 +906,23 @@ pub enum ProcessTranscriptEntry {
         /// Exact direct model identity frozen for that turn.
         selected: DirectModelSelection,
     },
+    /// Reference-only boundary installing one checked successor runner placement.
+    RunnerPlacementChanged {
+        /// Zero-based position in the projected frontier.
+        entry_index: u64,
+        /// Session that owns the immutable semantic entry.
+        source_session: SessionId,
+        /// Semantic entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Exact runner retired by this successor placement.
+        prior_runner: RunnerId,
+        /// Exact runner installed by this successor placement.
+        new_runner: RunnerId,
+        /// Positive successor placement revision.
+        placement_revision: RunnerGeneration,
+        /// Exact sandbox profile selected by the successor.
+        sandbox: RunnerSandboxProfile,
+    },
     /// Model-produced summary of one exact earlier semantic range.
     ContextSummary {
         /// Zero-based position in the complete frontier.
@@ -1333,6 +1350,12 @@ impl ProcessTranscriptReader {
                 current_frontier,
             )
             .await?;
+            let latest_frontier = advance_through_latest_runner_placement(
+                self.transaction_mut()?,
+                session,
+                latest_frontier,
+            )
+            .await?;
             self.latest_frontier = latest_frontier;
             self.entry_count = Some(match latest_frontier {
                 Some(frontier) => {
@@ -1453,6 +1476,66 @@ async fn advance_through_latest_compaction(
         _ => {
             Err(ProcessReadCorruption::Inconsistent("turn and compaction frontier lineage").into())
         }
+    }
+}
+
+async fn advance_through_latest_runner_placement(
+    transaction: &mut Transaction<'static, Postgres>,
+    session: SessionId,
+    current: Option<ContextFrontierId>,
+) -> Result<Option<ContextFrontierId>, ProcessReadError> {
+    let latest: Option<Uuid> = sqlx::query_scalar(
+        "SELECT context_frontier_id
+           FROM session_runner_placement_frontier
+          WHERE session_id = $1
+          ORDER BY placement_revision DESC
+          LIMIT 1",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(latest) = latest.map(ContextFrontierId::from_uuid) else {
+        return Ok(current);
+    };
+    let Some(current) = current else {
+        return Ok(Some(latest));
+    };
+    if current == latest {
+        return Ok(Some(current));
+    }
+    let lineage: (bool, bool) = sqlx::query_as(
+        "SELECT NOT EXISTS (
+                SELECT 1
+                  FROM resolve_context_frontier_members($1, $2) AS earlier
+                  LEFT JOIN resolve_context_frontier_members($1, $3) AS later
+                    ON later.member_position = earlier.member_position
+                   AND later.source_session_id = earlier.source_session_id
+                   AND later.semantic_entry_id = earlier.semantic_entry_id
+                 WHERE later.member_position IS NULL
+            ),
+            NOT EXISTS (
+                SELECT 1
+                  FROM resolve_context_frontier_members($1, $3) AS earlier
+                  LEFT JOIN resolve_context_frontier_members($1, $2) AS later
+                    ON later.member_position = earlier.member_position
+                   AND later.source_session_id = earlier.source_session_id
+                   AND later.semantic_entry_id = earlier.semantic_entry_id
+                 WHERE later.member_position IS NULL
+            )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(current.into_uuid())
+    .bind(latest.into_uuid())
+    .fetch_one(&mut **transaction)
+    .await?;
+    match lineage {
+        (true, false) => Ok(Some(latest)),
+        (false, true) => Ok(Some(current)),
+        (true, true) => Ok(Some(current)),
+        _ => Err(
+            ProcessReadCorruption::Inconsistent("turn and runner placement frontier lineage")
+                .into(),
+        ),
     }
 }
 
@@ -1810,6 +1893,18 @@ impl ProcessReadRepository {
                 entry.delegation_message_id,
                 entry.delegation_result_awaiting_tool_request_id,
                 entry.delegation_result_spawning_tool_request_id,
+                entry.runner_placement_revision,
+                entry.runner_placement_event_ordinal,
+                successor_placement.event_kind AS runner_placement_event_kind,
+                successor_placement.state_kind AS runner_placement_state_kind,
+                successor_placement.pinned_runner_id AS runner_placement_new_runner_id,
+                successor_placement.requested_sandbox_profile AS runner_placement_sandbox_profile,
+                CASE successor_placement.event_kind
+                    WHEN 'runner_replaced' THEN prior_placement.lost_runner_id
+                    ELSE prior_placement.pinned_runner_id
+                END AS runner_placement_prior_runner_id,
+                runner_placement_pointer.context_frontier_id AS runner_placement_context_frontier_id,
+                runner_placement_final.semantic_entry_id AS runner_placement_final_entry_id,
                 delegated_task.task_content AS delegated_task_content,
                 task_relation.parent_session_id AS delegated_task_parent_session_id,
                 task_relation.parent_turn_id AS delegated_task_parent_turn_id,
@@ -1923,6 +2018,34 @@ impl ProcessReadRepository {
                         delegated_result.spawning_tool_request_id
                 AND result_event.event_ordinal = delegated_result.event_ordinal
                 AND result_event.event_kind = delegated_result.event_kind
+               LEFT JOIN runner_session_placement_record AS successor_placement
+                 ON successor_placement.session_id = entry.source_session_id
+                AND successor_placement.event_ordinal =
+                        entry.runner_placement_event_ordinal
+                AND successor_placement.placement_revision =
+                        entry.runner_placement_revision
+                AND entry.payload_kind = 'runner_placement_changed'
+               LEFT JOIN runner_session_placement_record AS prior_placement
+                 ON prior_placement.session_id = successor_placement.session_id
+                AND prior_placement.event_ordinal + 1 =
+                        successor_placement.event_ordinal
+               LEFT JOIN session_runner_placement_frontier AS runner_placement_pointer
+                 ON runner_placement_pointer.session_id = entry.source_session_id
+                AND runner_placement_pointer.placement_revision =
+                        entry.runner_placement_revision
+                AND runner_placement_pointer.semantic_entry_id = entry.semantic_entry_id
+               LEFT JOIN context_frontier AS runner_placement_frontier
+                 ON runner_placement_frontier.owning_session_id =
+                        runner_placement_pointer.session_id
+                AND runner_placement_frontier.context_frontier_id =
+                        runner_placement_pointer.context_frontier_id
+               LEFT JOIN context_frontier_member AS runner_placement_final
+                 ON runner_placement_final.owning_session_id =
+                        runner_placement_frontier.owning_session_id
+                AND runner_placement_final.context_frontier_id =
+                        runner_placement_frontier.context_frontier_id
+                AND runner_placement_final.member_position =
+                        runner_placement_frontier.member_count
               ORDER BY selected.selected_ordinal",
         )
         .bind(&stored_positions)
@@ -4141,6 +4264,18 @@ async fn open_transcript_entry_cursor(
             entry.delegation_message_id,
             entry.delegation_result_awaiting_tool_request_id,
             entry.delegation_result_spawning_tool_request_id,
+            entry.runner_placement_revision,
+            entry.runner_placement_event_ordinal,
+            successor_placement.event_kind AS runner_placement_event_kind,
+            successor_placement.state_kind AS runner_placement_state_kind,
+            successor_placement.pinned_runner_id AS runner_placement_new_runner_id,
+            successor_placement.requested_sandbox_profile AS runner_placement_sandbox_profile,
+            CASE successor_placement.event_kind
+                WHEN 'runner_replaced' THEN prior_placement.lost_runner_id
+                ELSE prior_placement.pinned_runner_id
+            END AS runner_placement_prior_runner_id,
+            runner_placement_pointer.context_frontier_id AS runner_placement_context_frontier_id,
+            runner_placement_final.semantic_entry_id AS runner_placement_final_entry_id,
             delegated_task.task_content AS delegated_task_content,
             task_relation.parent_session_id AS delegated_task_parent_session_id,
             task_relation.parent_turn_id AS delegated_task_parent_turn_id,
@@ -4253,6 +4388,34 @@ async fn open_transcript_entry_cursor(
                     delegated_result.spawning_tool_request_id
             AND result_event.event_ordinal = delegated_result.event_ordinal
             AND result_event.event_kind = delegated_result.event_kind
+           LEFT JOIN runner_session_placement_record AS successor_placement
+             ON successor_placement.session_id = entry.source_session_id
+            AND successor_placement.event_ordinal =
+                    entry.runner_placement_event_ordinal
+            AND successor_placement.placement_revision =
+                    entry.runner_placement_revision
+            AND entry.payload_kind = 'runner_placement_changed'
+           LEFT JOIN runner_session_placement_record AS prior_placement
+             ON prior_placement.session_id = successor_placement.session_id
+            AND prior_placement.event_ordinal + 1 =
+                    successor_placement.event_ordinal
+           LEFT JOIN session_runner_placement_frontier AS runner_placement_pointer
+             ON runner_placement_pointer.session_id = entry.source_session_id
+            AND runner_placement_pointer.placement_revision =
+                    entry.runner_placement_revision
+            AND runner_placement_pointer.semantic_entry_id = entry.semantic_entry_id
+           LEFT JOIN context_frontier AS runner_placement_frontier
+             ON runner_placement_frontier.owning_session_id =
+                    runner_placement_pointer.session_id
+            AND runner_placement_frontier.context_frontier_id =
+                    runner_placement_pointer.context_frontier_id
+           LEFT JOIN context_frontier_member AS runner_placement_final
+             ON runner_placement_final.owning_session_id =
+                    runner_placement_frontier.owning_session_id
+            AND runner_placement_final.context_frontier_id =
+                    runner_placement_frontier.context_frontier_id
+            AND runner_placement_final.member_position =
+                    runner_placement_frontier.member_count
           ORDER BY member.member_position",
     )
     .bind(session_id_to_uuid(session))
@@ -4378,6 +4541,21 @@ fn decode_transcript_entry(
         row.try_get("delegation_result_outcome_kind")?;
     let delegation_result_content: Option<String> = row.try_get("delegation_result_content")?;
     let delegation_result_reason: Option<String> = row.try_get("delegation_result_reason_kind")?;
+    let runner_placement_revision: Option<Decimal> = row.try_get("runner_placement_revision")?;
+    let runner_placement_event_ordinal: Option<Decimal> =
+        row.try_get("runner_placement_event_ordinal")?;
+    let runner_placement_event_kind: Option<String> = row.try_get("runner_placement_event_kind")?;
+    let runner_placement_state_kind: Option<String> = row.try_get("runner_placement_state_kind")?;
+    let runner_placement_prior_runner: Option<Uuid> =
+        row.try_get("runner_placement_prior_runner_id")?;
+    let runner_placement_new_runner: Option<Uuid> =
+        row.try_get("runner_placement_new_runner_id")?;
+    let runner_placement_sandbox: Option<String> =
+        row.try_get("runner_placement_sandbox_profile")?;
+    let runner_placement_context_frontier: Option<Uuid> =
+        row.try_get("runner_placement_context_frontier_id")?;
+    let runner_placement_final_entry: Option<Uuid> =
+        row.try_get("runner_placement_final_entry_id")?;
 
     let legacy_payload_present = origin.is_some()
         || steering_source_turn.is_some()
@@ -4546,6 +4724,75 @@ fn decode_transcript_entry(
     {
         return Err(
             ProcessReadCorruption::Inconsistent("non-delegation semantic entry fields").into(),
+        );
+    }
+
+    if payload_kind == "runner_placement_changed" {
+        let (
+            Some(revision),
+            Some(_event_ordinal),
+            Some(event_kind @ ("runner_replaced" | "profile_replaced")),
+            Some("pinned"),
+            Some(prior_runner),
+            Some(new_runner),
+            Some(sandbox),
+            Some(_context_frontier),
+            Some(final_entry),
+        ) = (
+            runner_placement_revision,
+            runner_placement_event_ordinal,
+            runner_placement_event_kind.as_deref(),
+            runner_placement_state_kind.as_deref(),
+            runner_placement_prior_runner,
+            runner_placement_new_runner,
+            runner_placement_sandbox.as_deref(),
+            runner_placement_context_frontier,
+            runner_placement_final_entry,
+        )
+        else {
+            return Err(ProcessReadCorruption::Inconsistent("runner placement entry shape").into());
+        };
+        if legacy_payload_present
+            || tool_result_request.is_some()
+            || !matches!(event_kind, "runner_replaced" | "profile_replaced")
+            || final_entry != entry.into_uuid()
+        {
+            return Err(ProcessReadCorruption::Inconsistent("runner placement entry shape").into());
+        }
+        let placement_revision = RunnerGeneration::try_from_u64(decode_positive(
+            revision,
+            "runner placement semantic revision",
+        )?)
+        .ok_or(ProcessReadCorruption::InvalidOrdinal(
+            "runner placement semantic revision",
+        ))?;
+        let sandbox =
+            runner_sandbox_from_str(sandbox).ok_or_else(|| ProcessReadCorruption::Unsupported {
+                field: "runner placement semantic sandbox",
+                value: sandbox.to_owned(),
+            })?;
+        return Ok(ProcessTranscriptEntry::RunnerPlacementChanged {
+            entry_index,
+            source_session,
+            entry,
+            prior_runner: RunnerId::from_uuid(prior_runner),
+            new_runner: RunnerId::from_uuid(new_runner),
+            placement_revision,
+            sandbox,
+        });
+    }
+    if runner_placement_revision.is_some()
+        || runner_placement_event_ordinal.is_some()
+        || runner_placement_event_kind.is_some()
+        || runner_placement_state_kind.is_some()
+        || runner_placement_prior_runner.is_some()
+        || runner_placement_new_runner.is_some()
+        || runner_placement_sandbox.is_some()
+        || runner_placement_context_frontier.is_some()
+        || runner_placement_final_entry.is_some()
+    {
+        return Err(
+            ProcessReadCorruption::Inconsistent("non-runner-placement semantic fields").into(),
         );
     }
 

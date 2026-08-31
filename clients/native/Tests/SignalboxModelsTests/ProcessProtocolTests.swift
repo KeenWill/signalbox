@@ -1461,6 +1461,29 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertTrue(diagnostic.message.contains(ProcessProtocolFixture.defaultsVersionField))
   }
 
+  func testRunnerPlacementChangedEntryDecodesExactPlacementEvidence() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.runnerPlacementChangedFrame(sessionID: sessionID)
+    )
+    let entry = try ProcessProtocolFixture.transcriptEntry(in: frame.message)
+
+    XCTAssertEqual(
+      entry.entry,
+      .runnerPlacementChanged(
+        priorRunnerID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.priorRunnerID
+        ),
+        newRunnerID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.newRunnerID
+        ),
+        placementRevision: SignalboxCanonicalUInt64(
+          rawValue: ProcessProtocolFixture.runnerPlacementRevision
+        ),
+        sandboxProfile: .workspaceRestricted
+      )
+    )
+  }
+
   func testDelegatedTaskEntryDecodesExactProvenanceAndContent() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.delegatedTaskEntryFrame(sessionID: sessionID)
@@ -2268,6 +2291,9 @@ private enum ProcessProtocolFixture {
   static let modelIdentityDefaultsVersion: UInt64 = 7
   static let defaultsVersionField = "defaults_version"
   static let selectedModelID = "88888888-8888-4888-8888-888888888888"
+  static let priorRunnerID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+  static let newRunnerID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+  static let runnerPlacementRevision: UInt64 = 2
   static let spawningRequestID = "33333333-3333-4333-8333-333333333333"
   static let parentSessionID = "44444444-4444-4444-8444-444444444444"
   static let parentTurnID = "12121212-1212-4212-8212-121212121212"
@@ -2357,6 +2383,30 @@ private enum ProcessProtocolFixture {
             "turn_id":"\(turnID)",
             "defaults_version":"\(defaultsVersion)",
             "selected_model_id":"\(selectedModelID)"
+          }
+        }
+      }
+      """.utf8
+    )
+  }
+
+  static func runnerPlacementChangedFrame(sessionID: String) -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"\(requestID)",
+        "message":{
+          "type":"transcript_entry",
+          "entry_index":"\(firstEntryIndex)",
+          "source_session_id":"\(sessionID)",
+          "entry_id":"33333333-3333-4333-8333-333333333334",
+          "entry":{
+            "type":"runner_placement_changed",
+            "prior_runner_id":"\(priorRunnerID)",
+            "new_runner_id":"\(newRunnerID)",
+            "placement_revision":"\(runnerPlacementRevision)",
+            "sandbox_profile":"workspace-restricted"
           }
         }
       }

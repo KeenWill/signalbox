@@ -3464,7 +3464,7 @@ pub(crate) async fn load_scheduling_projection(
                                     starting_frontier: ContextFrontierId::from_uuid(starting_frontier),
                                     reconciling_attempt: stored_attempt_id,
                                     reconciling_attempt_end,
-                                    tool_batch: batch,
+                                    tool_batch: Box::new(batch),
                                     interrupt,
                                     terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
                                 }
@@ -4221,6 +4221,23 @@ pub(crate) async fn load_scheduling_projection(
         return Err(SubmitInputCorruption::Missing("delegated turn scheduling fact").into());
     }
 
+    let runner_placement_frontiers = sqlx::query_scalar::<_, Uuid>(
+        "SELECT pointer.context_frontier_id
+           FROM runner_current_session_placement AS head
+           JOIN runner_session_placement_record AS placement
+             ON placement.session_id = head.session_id
+            AND placement.event_ordinal = head.event_ordinal
+           JOIN session_runner_placement_frontier AS pointer
+             ON pointer.session_id = placement.session_id
+            AND pointer.placement_revision <= placement.placement_revision
+          WHERE head.session_id = $1
+          ORDER BY pointer.placement_revision",
+    )
+    .bind(session_id_to_uuid(session_id))
+    .fetch_all(&mut *connection)
+    .await?;
+    required_frontiers.extend(runner_placement_frontiers.iter().copied());
+
     let required_frontier_ids = required_frontiers.iter().copied().collect::<Vec<_>>();
     let frontier_rows = sqlx::query(
         "WITH RECURSIVE frontier_ids (context_frontier_id) AS (
@@ -4340,6 +4357,13 @@ pub(crate) async fn load_scheduling_projection(
             entry.delegation_message_id,
             entry.delegation_result_awaiting_tool_request_id,
             entry.delegation_result_spawning_tool_request_id,
+            entry.runner_placement_revision,
+            entry.runner_placement_event_ordinal,
+            runner_placement.event_kind AS runner_placement_event_kind,
+            runner_placement.state_kind AS runner_placement_state_kind,
+            runner_placement.requested_sandbox_profile AS runner_placement_sandbox_profile,
+            runner_placement_pointer.context_frontier_id AS runner_placement_context_frontier_id,
+            runner_placement_final.semantic_entry_id AS runner_placement_final_entry_id,
             delegated_task.task_content AS delegated_task_content,
             task_relation.parent_session_id AS delegated_task_parent_session_id,
             task_relation.parent_turn_id AS delegated_task_parent_turn_id,
@@ -4410,6 +4434,28 @@ pub(crate) async fn load_scheduling_projection(
           AND entry.payload_kind = 'delegation_result'
           AND result_event.event_ordinal = delegated_result.event_ordinal
           AND result_event.event_kind = delegated_result.event_kind
+         LEFT JOIN runner_session_placement_record AS runner_placement
+           ON runner_placement.session_id = entry.source_session_id
+          AND runner_placement.event_ordinal = entry.runner_placement_event_ordinal
+          AND runner_placement.placement_revision = entry.runner_placement_revision
+          AND entry.payload_kind = 'runner_placement_changed'
+         LEFT JOIN session_runner_placement_frontier AS runner_placement_pointer
+           ON runner_placement_pointer.session_id = entry.source_session_id
+          AND runner_placement_pointer.placement_revision =
+                  entry.runner_placement_revision
+          AND runner_placement_pointer.semantic_entry_id = entry.semantic_entry_id
+         LEFT JOIN context_frontier AS runner_placement_frontier
+           ON runner_placement_frontier.owning_session_id =
+                  runner_placement_pointer.session_id
+          AND runner_placement_frontier.context_frontier_id =
+                  runner_placement_pointer.context_frontier_id
+         LEFT JOIN context_frontier_member AS runner_placement_final
+           ON runner_placement_final.owning_session_id =
+                  runner_placement_frontier.owning_session_id
+          AND runner_placement_final.context_frontier_id =
+                  runner_placement_frontier.context_frontier_id
+          AND runner_placement_final.member_position =
+                  runner_placement_frontier.member_count
         WHERE entry.payload_kind <> 'imported_entry'
           AND (
             entry.source_session_id = $3
@@ -4519,6 +4565,20 @@ pub(crate) async fn load_scheduling_projection(
             row.try_get("delegation_result_provenance_goal_generation")?;
         let delegation_result_provenance_command: Option<Uuid> =
             row.try_get("delegation_result_provenance_command_id")?;
+        let runner_placement_revision: Option<Decimal> =
+            row.try_get("runner_placement_revision")?;
+        let runner_placement_event_ordinal: Option<Decimal> =
+            row.try_get("runner_placement_event_ordinal")?;
+        let runner_placement_event_kind: Option<String> =
+            row.try_get("runner_placement_event_kind")?;
+        let runner_placement_state_kind: Option<String> =
+            row.try_get("runner_placement_state_kind")?;
+        let runner_placement_sandbox_profile: Option<String> =
+            row.try_get("runner_placement_sandbox_profile")?;
+        let runner_placement_context_frontier: Option<Uuid> =
+            row.try_get("runner_placement_context_frontier_id")?;
+        let runner_placement_final_entry: Option<Uuid> =
+            row.try_get("runner_placement_final_entry_id")?;
         let legacy_payload_present = origin.is_some()
             || steering_source_turn.is_some()
             || failed_turn.is_some()
@@ -4707,6 +4767,80 @@ pub(crate) async fn load_scheduling_projection(
             || delegation_result_spawning_request.is_some()
         {
             return Err(SubmitInputCorruption::Inconsistent("semantic entry payload").into());
+        }
+        if payload_kind == "runner_placement_changed" {
+            let (
+                Some(revision),
+                Some(_event_ordinal),
+                Some(event_kind @ ("runner_replaced" | "profile_replaced")),
+                Some("pinned"),
+                Some(sandbox @ ("ambient" | "workspace_restricted")),
+                Some(_context_frontier),
+                Some(final_entry),
+            ) = (
+                runner_placement_revision,
+                runner_placement_event_ordinal,
+                runner_placement_event_kind.as_deref(),
+                runner_placement_state_kind.as_deref(),
+                runner_placement_sandbox_profile.as_deref(),
+                runner_placement_context_frontier,
+                runner_placement_final_entry,
+            )
+            else {
+                return Err(
+                    SubmitInputCorruption::Inconsistent("runner placement semantic entry").into(),
+                );
+            };
+            if legacy_payload_present
+                || tool_result_request.is_some()
+                || summary_value.is_some()
+                || summary_call.is_some()
+                || summary_first_session.is_some()
+                || summary_first_entry.is_some()
+                || summary_through_session.is_some()
+                || summary_through_entry.is_some()
+                || model_identity_turn.is_some()
+                || model_identity_defaults_version.is_some()
+                || model_identity_direct_selection.is_some()
+                || !matches!(event_kind, "runner_replaced" | "profile_replaced")
+                || final_entry != entry_uuid
+            {
+                return Err(
+                    SubmitInputCorruption::Inconsistent("runner placement semantic entry").into(),
+                );
+            }
+            let revision = positive_u64_from_numeric(revision)
+                .ok()
+                .and_then(RunnerGeneration::try_from_u64)
+                .ok_or(SubmitInputCorruption::Inconsistent(
+                    "runner placement semantic revision",
+                ))?;
+            if !matches!(sandbox, "ambient" | "workspace_restricted") {
+                return Err(SubmitInputCorruption::Inconsistent(
+                    "runner placement semantic sandbox",
+                )
+                .into());
+            }
+            semantic_entries.push(SemanticTranscriptEntryReconstitutionInput::new(
+                entry,
+                source_session,
+                InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                    placement_revision: revision,
+                },
+            ));
+            continue;
+        }
+        if runner_placement_revision.is_some()
+            || runner_placement_event_ordinal.is_some()
+            || runner_placement_event_kind.is_some()
+            || runner_placement_state_kind.is_some()
+            || runner_placement_sandbox_profile.is_some()
+            || runner_placement_context_frontier.is_some()
+            || runner_placement_final_entry.is_some()
+        {
+            return Err(
+                SubmitInputCorruption::Inconsistent("non-runner-placement semantic entry").into(),
+            );
         }
         if payload_kind == "context_summary" {
             if origin.is_some()
@@ -5142,6 +5276,14 @@ pub(crate) async fn load_scheduling_projection(
     );
     if let Some(imported_session) = imported_session {
         input = input.with_imported_session(imported_session);
+    }
+    if !runner_placement_frontiers.is_empty() {
+        input = input.with_runner_placement_frontiers(
+            runner_placement_frontiers
+                .into_iter()
+                .map(ContextFrontierId::from_uuid)
+                .collect(),
+        );
     }
     for preceding in preceding_non_accepted_terminals {
         input = input.with_preceding_non_accepted_terminal(

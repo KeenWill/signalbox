@@ -3231,6 +3231,14 @@ impl AcceptedInputSchedulingReconstitutionInput {
         pinned_targets: Vec<PinnedProviderTargetReconstitutionInput>,
         model_calls: Vec<ModelCallReconstitutionInput>,
     ) -> Self;
+    pub fn with_runner_placement_frontier(
+        self,
+        frontier: ContextFrontierId,
+    ) -> Self;
+    pub fn with_runner_placement_frontiers(
+        self,
+        frontiers: Vec<ContextFrontierId>,
+    ) -> Self;
     pub fn with_context_compaction_facts(
         self,
         calls: Vec<ContextCompactionModelCallReconstitutionInput>,
@@ -3372,6 +3380,9 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
         snapshot: ContextFrontierId,
         entry: SemanticTranscriptEntryRef,
     },
+    RunnerPlacementSnapshotMissing { snapshot: ContextFrontierId },
+    RunnerPlacementSnapshotMismatch { snapshot: ContextFrontierId },
+    RunnerPlacementEntryMismatch { entry: SemanticTranscriptEntryId },
     StartingSnapshotMissing { turn: TurnId },
     TerminalSnapshotMissing { turn: TurnId },
     InvalidLifecycleOrder { turn: TurnId },
@@ -3571,6 +3582,7 @@ pub struct DelegatedTurnActivationInput {
     pub spawning_request: ToolRequestId,
     pub task: DelegationContent,
     pub task_entry: SemanticTranscriptEntryReconstitutionInput,
+    pub runner_placement_snapshot: Option<ResolvedContextFrontierSnapshot>,
     pub configuration: OriginConfiguration,
     pub starting_frontier: ContextFrontierId,
     pub initial_attempt: TurnAttemptId,
@@ -3584,6 +3596,7 @@ pub struct DelegatedWakeTurnActivationInput {
     pub deliveries: Vec<SemanticTranscriptEntryReconstitutionInput>,
     pub predecessor: TurnId,
     pub predecessor_snapshot: ResolvedContextFrontierSnapshot,
+    pub runner_placement_snapshot: Option<ResolvedContextFrontierSnapshot>,
     pub configuration: OriginConfiguration,
     pub starting_frontier: ContextFrontierId,
     pub initial_attempt: TurnAttemptId,
@@ -4641,6 +4654,7 @@ pub enum SemanticTranscriptEntryPayload {
         summarized: ContextCompactionRange,
         value: AssistantText,
     },
+    RunnerPlacementChanged { placement_revision: RunnerGeneration },
     TurnFailed { turn: TurnId },
     AssistantText { producing_call: ModelCallId, value: AssistantText },
     AssistantToolUse { producing_call: ModelCallId, request: ToolRequestId },
@@ -5146,6 +5160,10 @@ impl ToolBatchReconstitutionInput {
         self,
         runner_authorized_attempts: Vec<ToolAttemptId>,
     ) -> Self;
+    pub fn with_projection_base_snapshot(
+        self,
+        projection_base_snapshot: ResolvedContextFrontierSnapshot,
+    ) -> Self;
     pub fn reconstitute(self) -> Result<ToolBatch, ToolBatchReconstitutionError>;
 }
 pub enum ToolBatchReconstitutionFailure {
@@ -5154,6 +5172,7 @@ pub enum ToolBatchReconstitutionFailure {
     RequestOwnershipMismatch,
     RequestOrderMismatch,
     YieldedSnapshotSessionMismatch,
+    ProjectionBaseMismatch,
     ApprovalInventoryMismatch,
     AttemptInventoryMismatch,
     AttemptAuthorizationMismatch,
@@ -5256,8 +5275,8 @@ impl ToolBatch {
         entry_ids: Vec<SemanticTranscriptEntryId>,
         terminal_frontier: ContextFrontierId,
     ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
-    // accessors: session(), turn(), producing_call(), yielded_snapshot(), requests(),
-    // approval(), attempt(), phase()
+    // accessors: session(), turn(), producing_call(), yielded_snapshot(),
+    // projection_base_snapshot(), requests(), approval(), attempt(), phase()
 }
 pub struct AwaitingToolApproval { /* private */ }
 // sealed: ToolBatch::awaiting_approval
@@ -5300,7 +5319,8 @@ pub enum ToolBatchExecutionFailure {
 pub struct ToolBatchExecutionError { /* private */ }
 // accessor: failure()
 pub struct PreparedToolResultProjection { /* private */ }
-// accessors: entries(), snapshot(), into_parts()
+// accessors: projection_base_snapshot(), entries(), snapshot(), into_parts();
+// crate-internal correlation accessors retain the yielded source
 pub enum ToolResultProjectionFailure {
     BatchNotResolved,
     TurnLevelFailure,
@@ -6264,6 +6284,11 @@ pub enum ModelConversationMessage {
         summarized: ContextCompactionRange,
         content: AssistantText,
     },
+    RunnerPlacementChanged {
+        source: SemanticTranscriptEntryRef,
+        placement_revision: RunnerGeneration,
+        sandbox: RunnerSandboxProfile,
+    },
     User {
         source: SemanticTranscriptEntryRef,
         accepted_input: AcceptedInputId,
@@ -6329,6 +6354,17 @@ pub enum ModelToolResultContent {
 }
 
 pub struct PreparedModelOperation { /* private */ }
+pub struct ResolvedRunnerPlacementConversationEntry { /* private */ }
+impl ResolvedRunnerPlacementConversationEntry {
+    pub const fn new(
+        source: SemanticTranscriptEntryRef,
+        placement_revision: RunnerGeneration,
+        sandbox: RunnerSandboxProfile,
+    ) -> Self;
+    pub const fn source(self) -> SemanticTranscriptEntryRef;
+    pub const fn placement_revision(self) -> RunnerGeneration;
+    pub const fn sandbox(self) -> RunnerSandboxProfile;
+}
 impl PreparedModelOperation {
     pub fn render(
         request: PreparedModelCallRequest,
@@ -6336,6 +6372,7 @@ impl PreparedModelOperation {
         system_prompt: Option<SessionSystemPrompt>,
         tools: Box<[ToolDefinition]>,
         tool_entries: &[ResolvedToolConversationEntry],
+        runner_placement_entries: &[ResolvedRunnerPlacementConversationEntry],
     ) -> Result<Self, ModelFrontierRenderingError>;
     // accessors: request(), credential_reference(), system_prompt(), messages(), tools()
 }
@@ -6349,6 +6386,9 @@ pub enum ModelFrontierRenderingError {
     MissingOrMismatchedToolEvidence { entry: SemanticTranscriptEntryRef },
     UnrenderableToolResult { entry: SemanticTranscriptEntryRef },
     UnexpectedToolEvidence { entry: SemanticTranscriptEntryRef },
+    DuplicateRunnerPlacementEvidence { entry: SemanticTranscriptEntryRef },
+    MissingOrMismatchedRunnerPlacementEvidence { entry: SemanticTranscriptEntryRef },
+    UnexpectedRunnerPlacementEvidence { entry: SemanticTranscriptEntryRef },
     MissingProjectedEntry { entry: SemanticTranscriptEntryRef },
     InvalidDelegationDelivery { entry: SemanticTranscriptEntryRef },
     InvalidContextProjection(ContextFrontierProjectionFailure),
@@ -6364,6 +6404,7 @@ pub enum PrepareModelCallOutcome {
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
         system_prompt: Option<SessionSystemPrompt>,
         tool_entries: Box<[ResolvedToolConversationEntry]>,
+        runner_placement_entries: Box<[ResolvedRunnerPlacementConversationEntry]>,
     },
     TargetUnavailable(Box<FailedModelCallTurn>),
 }
@@ -10589,7 +10630,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)    |
 | application: list_conversations                    | 8 (incl. 2 traits)    |
 | application: load_session                          | 2 (incl. 1 trait)     |
-| application: model_execution                       | 32 (incl. 8 traits)   |
+| application: model_execution                       | 33 (incl. 8 traits)   |
 | application: tool_loop                             | 26 (incl. 5 traits)   |
 | application: operator_failure                      | 2 (incl. 1 trait)     |
 | application: session_delegation                    | 1 (incl. 1 trait)     |
@@ -10605,4 +10646,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **249 (+1 free fn)**  |
+| **signalbox-application total**                    | **250 (+1 free fn)**  |

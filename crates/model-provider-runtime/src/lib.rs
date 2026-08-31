@@ -21,7 +21,13 @@ pub use context_compaction::{
     ContextCompactionModelResult, RuntimeContextCompactionModel,
 };
 
-use std::{collections::HashMap, error::Error, fmt, future::Future, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashMap},
+    error::Error,
+    fmt,
+    future::Future,
+    sync::Arc,
+};
 
 use signalbox_application::{
     ClassifyOperatorFailure, ModelCallCapabilityPreparation, ModelCallInputTokenCount,
@@ -35,7 +41,7 @@ use signalbox_domain::{
     FrozenModelSelection, ModelCallId, ModelCallTerminalObservation, NormalizedToolArguments,
     OpenAiServiceTier as DomainOpenAiServiceTier, ProviderModelCallFailureCause,
     ProviderReportedTokenUsage, ReasoningLevel as DomainReasoningLevel, ResolvedProviderTarget,
-    ServiceTier as DomainServiceTier, SessionId, ToolArgumentsKind,
+    RunnerSandboxProfile, ServiceTier as DomainServiceTier, SessionId, ToolArgumentsKind,
     ToolCallProposal as DomainToolCallProposal, ToolExecutionErrorKind, ToolName as DomainToolName,
     ToolResultContent, ToolUsingAssistantResponse, TurnAttemptId, TurnId, ValidatedModelSettings,
 };
@@ -61,6 +67,8 @@ const DIAGNOSTIC_MODEL_IDENTITY_LIMIT: usize = 128;
 
 const MODEL_IDENTITY_CHANGE_MESSAGE: &str = "Signalbox session event: your model identity is now";
 const CONTEXT_SUMMARY_MESSAGE: &str = "Signalbox prior-conversation summary:";
+const WORKSPACE_RESTRICTED_RUNNER_PLACEMENT_MESSAGE: &str = "Signalbox session event: runner placement changed to revision {revision} with profile workspace-restricted; the prior placement can no longer execute. The successor writable root and working directory are now active. Relocation did not delete prior files; they may still exist, but only paths exposed inside the successor restricted workspace are reachable.";
+const AMBIENT_RUNNER_PLACEMENT_MESSAGE: &str = "Signalbox session event: runner placement changed to revision {revision} with profile ambient; the prior placement can no longer execute. The successor working directory is now active. Relocation did not delete prior files, and they may remain reachable at their previous paths through the invoking user's filesystem; check before recreating or overwriting them.";
 
 /// One already-redacted provider text fragment for ephemeral presentation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1477,7 +1485,22 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
     let mut rendered = Vec::new();
     let mut assistant_call = None;
     let mut collecting_tool_results = false;
+    let mut pending_tool_results = BTreeSet::new();
+    let mut pending_tool_result_content = Vec::new();
     for message in messages {
+        if !matches!(
+            message,
+            ModelConversationMessage::RunnerPlacementChanged { .. }
+                | ModelConversationMessage::ToolResult { .. }
+        ) && !pending_tool_result_content.is_empty()
+        {
+            rendered.push(ConversationMessage {
+                role: ConversationRole::User,
+                parts: std::mem::take(&mut pending_tool_result_content),
+            });
+            assistant_call = None;
+            collecting_tool_results = false;
+        }
         match message {
             ModelConversationMessage::ModelIdentityChanged {
                 defaults_version,
@@ -1499,6 +1522,39 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
                 )));
                 assistant_call = None;
                 collecting_tool_results = false;
+            }
+            ModelConversationMessage::RunnerPlacementChanged {
+                placement_revision,
+                sandbox,
+                ..
+            } => {
+                let template = match sandbox {
+                    RunnerSandboxProfile::WorkspaceRestricted => {
+                        WORKSPACE_RESTRICTED_RUNNER_PLACEMENT_MESSAGE
+                    }
+                    RunnerSandboxProfile::Ambient => AMBIENT_RUNNER_PLACEMENT_MESSAGE,
+                };
+                let part = MessagePart::Text(
+                    template.replace("{revision}", &placement_revision.get().to_string()),
+                );
+                if collecting_tool_results && pending_tool_results.is_empty() {
+                    if let Some(message) = rendered.last_mut() {
+                        message.parts.push(part);
+                    } else {
+                        rendered.push(ConversationMessage {
+                            role: ConversationRole::User,
+                            parts: vec![part],
+                        });
+                    }
+                } else if !pending_tool_results.is_empty() {
+                    pending_tool_result_content.push(part);
+                } else {
+                    rendered.push(ConversationMessage {
+                        role: ConversationRole::User,
+                        parts: vec![part],
+                    });
+                }
+                assistant_call = None;
             }
             ModelConversationMessage::User { content, .. } => {
                 rendered.push(ConversationMessage::user_text(content.text().as_str()));
@@ -1565,6 +1621,7 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
                 request,
                 ..
             } => {
+                pending_tool_results.insert(request.id());
                 let part = MessagePart::ToolCall(ToolCallProposal {
                     id: ToolCallId::new(request.id().into_uuid().to_string()),
                     name: RuntimeToolName::new(request.name().as_str()),
@@ -1612,6 +1669,17 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
                         parts: vec![part],
                     });
                 }
+                pending_tool_results.remove(request);
+                if pending_tool_results.is_empty() && !pending_tool_result_content.is_empty() {
+                    if let Some(message) = rendered.last_mut() {
+                        message.parts.append(&mut pending_tool_result_content);
+                    } else {
+                        rendered.push(ConversationMessage {
+                            role: ConversationRole::User,
+                            parts: std::mem::take(&mut pending_tool_result_content),
+                        });
+                    }
+                }
                 assistant_call = None;
                 collecting_tool_results = true;
             }
@@ -1626,6 +1694,12 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
                 collecting_tool_results = false;
             }
         }
+    }
+    if !pending_tool_result_content.is_empty() {
+        rendered.push(ConversationMessage {
+            role: ConversationRole::User,
+            parts: pending_tool_result_content,
+        });
     }
     rendered
 }
@@ -2104,7 +2178,7 @@ mod tests {
         DirectModelSelection, FastMode, FastModeOverlay, FastModeSupport, ImportedText,
         ImportedTranscriptEntryId, ModelCallId, ModelCallTerminalObservation, ModelCapabilities,
         ModelSettingsOverlay, ModelSettingsPrecedence, NormalizedToolArguments, OpenAiServiceTier,
-        ProviderModelCallFailureCause, ProviderModelIdentity, ReasoningLevel,
+        ProviderModelCallFailureCause, ProviderModelIdentity, ReasoningLevel, RunnerSandboxProfile,
         SemanticTranscriptEntryId, SemanticTranscriptEntryRef, ServiceTier,
         SessionConfigurationDefaultsVersion, SessionId, SettingOverlay, ToolExecutionError,
         ToolExecutionErrorKind, ToolRequest, ToolRequestId, ToolRequestOrdinal,
@@ -2113,12 +2187,13 @@ mod tests {
     use signalbox_expect_table::table;
     use signalbox_model_runtime::{
         AssistantPart, BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence,
-        CompletionFinish, ConversationMessage, CredentialAccessError, CredentialAccessFailure,
-        ExchangeFacts, LossCause, NativeErrorFacts, Observation, ObservationFact, ObservationSink,
-        PreparationFailure, ProvenUnsentEvidence, ProviderErrorEvidence, ProviderErrorKind,
-        ProviderReportedModel, ReasoningLevel as RuntimeReasoningLevel, RefusalEvidence,
+        CompletionFinish, ConversationMessage, ConversationRole, CredentialAccessError,
+        CredentialAccessFailure, ExchangeFacts, LossCause, MessagePart, NativeErrorFacts,
+        Observation, ObservationFact, ObservationSink, PreparationFailure, ProvenUnsentEvidence,
+        ProviderErrorEvidence, ProviderErrorKind, ProviderReportedModel,
+        ReasoningLevel as RuntimeReasoningLevel, RefusalEvidence,
         ServiceTier as RuntimeServiceTier, TerminalEvidence, TokenUsage, ToolCallId,
-        ToolCallProposal, ToolCallsAtLoss, ToolName, TransportFacts, UnsentCause,
+        ToolCallProposal, ToolCallsAtLoss, ToolName, ToolResultRecord, TransportFacts, UnsentCause,
     };
     use uuid::Uuid;
 
@@ -2352,6 +2427,97 @@ mod tests {
                 selected,
             }]),
             vec![ConversationMessage::user_text(expected)]
+        );
+    }
+
+    #[test]
+    fn s32_inv015_inv044_workspace_restricted_placement_uses_the_exact_message() {
+        let source = source(14);
+        let placement_revision = signalbox_domain::RunnerGeneration::try_from_u64(7)
+            .expect("the fixture placement revision is positive");
+
+        assert_eq!(
+            render_runtime_messages(&[ModelConversationMessage::RunnerPlacementChanged {
+                source,
+                placement_revision,
+                sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            }]),
+            vec![ConversationMessage::user_text(
+                "Signalbox session event: runner placement changed to revision 7 with profile workspace-restricted; the prior placement can no longer execute. The successor writable root and working directory are now active. Relocation did not delete prior files; they may still exist, but only paths exposed inside the successor restricted workspace are reachable."
+            )]
+        );
+    }
+
+    #[test]
+    fn s32_inv015_inv044_ambient_runner_placement_uses_the_exact_message() {
+        let source = source(15);
+        let placement_revision = signalbox_domain::RunnerGeneration::try_from_u64(7)
+            .expect("the fixture placement revision is positive");
+
+        assert_eq!(
+            render_runtime_messages(&[ModelConversationMessage::RunnerPlacementChanged {
+                source,
+                placement_revision,
+                sandbox: RunnerSandboxProfile::Ambient,
+            }]),
+            vec![ConversationMessage::user_text(
+                "Signalbox session event: runner placement changed to revision 7 with profile ambient; the prior placement can no longer execute. The successor working directory is now active. Relocation did not delete prior files, and they may remain reachable at their previous paths through the invoking user's filesystem; check before recreating or overwriting them."
+            )]
+        );
+    }
+
+    /// S32 / INV-015 / INV-044: a placement boundary inside a yielded tool
+    /// exchange shares the required user result message and cannot interrupt
+    /// provider tool-call/result adjacency.
+    #[test]
+    fn s32_inv015_inv044_placement_boundary_preserves_tool_result_adjacency() {
+        let request = request(21, "{}");
+        let placement_revision = signalbox_domain::RunnerGeneration::try_from_u64(7)
+            .expect("the fixture placement revision is positive");
+
+        assert_eq!(
+            render_runtime_messages(&[
+                ModelConversationMessage::AssistantToolUse {
+                    source: source(16),
+                    producing_call: call(),
+                    request: request.clone(),
+                },
+                ModelConversationMessage::RunnerPlacementChanged {
+                    source: source(17),
+                    placement_revision,
+                    sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+                },
+                ModelConversationMessage::ToolResult {
+                    source: source(18),
+                    request: request.id(),
+                    content: ModelToolResultContent::ClosedByTurnEnd,
+                },
+            ]),
+            vec![
+                ConversationMessage {
+                    role: ConversationRole::Assistant,
+                    parts: vec![MessagePart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new(request.id().into_uuid().to_string()),
+                        name: ToolName::new(request.name().as_str()),
+                        arguments_json: String::from("{}"),
+                    })],
+                },
+                ConversationMessage {
+                    role: ConversationRole::User,
+                    parts: vec![
+                        MessagePart::ToolResult(ToolResultRecord {
+                            tool_call_id: ToolCallId::new(request.id().into_uuid().to_string(),),
+                            content: String::from(
+                                r#"{"error":{"detail":null,"kind":"closed_by_turn_end"}}"#,
+                            ),
+                            is_error: true,
+                        }),
+                        MessagePart::Text(String::from(
+                            "Signalbox session event: runner placement changed to revision 7 with profile workspace-restricted; the prior placement can no longer execute. The successor writable root and working directory are now active. Relocation did not delete prior files; they may still exist, but only paths exposed inside the successor restricted workspace are reachable.",
+                        )),
+                    ],
+                },
+            ]
         );
     }
 

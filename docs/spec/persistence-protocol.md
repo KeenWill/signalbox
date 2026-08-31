@@ -15,7 +15,10 @@ against this PR (`agent/runner-registration-reconciliation`). Pending-successor
 enrollment admission and exact receipt replay were verified against this PR
 (`agent/runner-pending-successor-promotion`). Creation-command runner placement
 and revision-one readback were verified against this PR
-(`agent/runner-creation-placement-persistence`).
+(`agent/runner-creation-placement-persistence`). The reference-only
+placement-change entry, successor-placement foreign key, and exact final-member
+frontier link were verified against this PR
+(`agent/runner-placement-semantic-persistence`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -529,9 +532,13 @@ Representation rules, all enforced in the schema:
   At most one such entry exists per session and revision, the session
   placement-frontier pointer names the exact entry and revision, and a deferred
   check requires the entry to be the final member of the frontier that installed
-  it. Reconstitution resolves the referenced placement record and rejects a
-  missing, cross-session, non-successor, or duplicated reference rather than
-  rendering the entry from its own payload.
+  it. That frontier is exactly a one-entry extension of its physical semantic
+  prefix, or a one-entry root only while the owning session has no earlier
+  nonempty frontier; inherited entries retain their ancestor source session and
+  are protected by that frontier-level check. Reconstitution resolves the
+  referenced placement record and rejects a missing, cross-session,
+  non-successor, or duplicated reference rather than rendering the entry from
+  its own payload.
 - The runner-orchestration foundation adds one append-only
   `runner_operation_failure` record for every durably admitted
   `operation_failed` frame. It stores the exact runner, one closed

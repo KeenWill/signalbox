@@ -281,6 +281,18 @@ fn visible_process_entry(
             TranscriptEntryKind::System,
             String::from("model identity changed"),
         ),
+        ProcessTranscriptEntry::RunnerPlacementChanged {
+            entry_index,
+            placement_revision,
+            ..
+        } => (
+            entry_index,
+            TranscriptEntryKind::System,
+            format!(
+                "runner placement changed to revision {}",
+                placement_revision.get()
+            ),
+        ),
         ProcessTranscriptEntry::ContextSummary {
             entry_index,
             content,

@@ -947,7 +947,7 @@ async fn prepare_in_transaction(
     if busy {
         return Ok((false, PrepareContextCompactionOutcome::Busy));
     }
-    let source = sqlx::query(
+    let sources = sqlx::query(
         "WITH candidate (frontier_id) AS (
             SELECT turn_lifecycle_effective_terminal_frontier(session_id, turn_id)
               FROM turn_lifecycle
@@ -961,21 +961,63 @@ async fn prepare_in_transaction(
             SELECT result_frontier_id
               FROM context_compaction
              WHERE session_id = $1
-         )
-         SELECT frontier.context_frontier_id, frontier.member_count
+            UNION ALL
+            SELECT pointer.context_frontier_id
+              FROM runner_current_session_placement AS head
+              JOIN runner_session_placement_record AS placement
+                ON placement.session_id = head.session_id
+               AND placement.event_ordinal = head.event_ordinal
+              JOIN session_runner_placement_frontier AS pointer
+                ON pointer.session_id = placement.session_id
+               AND pointer.placement_revision = placement.placement_revision
+             WHERE head.session_id = $1
+         ), candidate_frontier AS (
+            SELECT DISTINCT frontier.context_frontier_id, frontier.member_count
            FROM candidate
            JOIN context_frontier AS frontier
              ON frontier.owning_session_id = $1
             AND frontier.context_frontier_id = candidate.frontier_id
-          ORDER BY frontier.member_count DESC
-          LIMIT 1",
+         )
+         SELECT selected.context_frontier_id, selected.member_count,
+                NOT EXISTS (
+                    SELECT 1
+                      FROM candidate_frontier AS earlier
+                     WHERE earlier.context_frontier_id <> selected.context_frontier_id
+                       AND EXISTS (
+                           SELECT 1
+                             FROM resolve_context_frontier_members(
+                                      $1, earlier.context_frontier_id
+                                  ) AS earlier_member
+                             LEFT JOIN resolve_context_frontier_members(
+                                           $1, selected.context_frontier_id
+                                       ) AS selected_member
+                               ON selected_member.member_position =
+                                      earlier_member.member_position
+                              AND selected_member.source_session_id =
+                                      earlier_member.source_session_id
+                              AND selected_member.semantic_entry_id =
+                                      earlier_member.semantic_entry_id
+                            WHERE selected_member.member_position IS NULL
+                       )
+                ) AS contains_all_candidates
+           FROM candidate_frontier AS selected
+          ORDER BY selected.member_count DESC",
     )
     .bind(session_id_to_uuid(request.session))
-    .fetch_optional(&mut **transaction)
+    .fetch_all(&mut **transaction)
     .await?;
-    let Some(source) = source else {
+    if sources.is_empty() {
         return Ok((false, PrepareContextCompactionOutcome::NoBoundary));
-    };
+    }
+    let source = sources
+        .iter()
+        .find(|row| {
+            row.try_get::<bool, _>("contains_all_candidates")
+                .unwrap_or(false)
+        })
+        .ok_or(ContextCompactionCorruption::Inconsistent(
+            "compaction source frontier lineage",
+        ))?;
     let source_frontier = ContextFrontierId::from_uuid(source.try_get("context_frontier_id")?);
     let member_count = decode_u64(source.try_get("member_count")?, "source member count")?;
     if member_count == 0 {
@@ -1007,7 +1049,8 @@ async fn prepare_in_transaction(
     let through_index = match request.requested_through_position {
         Some(position) => visible
             .iter()
-            .position(|member| member.position == position),
+            .position(|member| member.position == position)
+            .filter(|index| placement_preserving_boundary(&visible, *index)),
         None => latest_safe_boundary(&visible),
     };
     let Some(through_index) = through_index else {
@@ -1292,7 +1335,13 @@ fn project_frontier_members(
                 ContextCompactionCorruption::Inconsistent("context frontier projection").into(),
             );
         }
+        let retained_placement = visible[..=through_index]
+            .iter()
+            .rev()
+            .find(|member| member.payload_kind == "runner_placement_changed")
+            .cloned();
         visible = std::iter::once(summary.clone())
+            .chain(retained_placement)
             .chain(
                 visible[through_index + 1..]
                     .iter()
@@ -1337,6 +1386,10 @@ fn latest_safe_boundary(members: &[ProjectedFrontierMember]) -> Option<usize> {
         }
     }
     latest
+}
+
+fn placement_preserving_boundary(members: &[ProjectedFrontierMember], through: usize) -> bool {
+    through < members.len()
 }
 
 fn required<T>(
@@ -1481,7 +1534,10 @@ impl From<ContextCompactionCorruption> for ContextCompactionRepositoryError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProjectedFrontierMember, Uuid, latest_safe_boundary, project_frontier_members};
+    use super::{
+        ProjectedFrontierMember, Uuid, latest_safe_boundary, placement_preserving_boundary,
+        project_frontier_members,
+    };
     use signalbox_domain::{SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId};
 
     fn entry(value: u128) -> SemanticTranscriptEntryRef {
@@ -1496,6 +1552,15 @@ mod tests {
             position,
             reference,
             payload_kind: String::from("origin_accepted_input"),
+            summary_range: None,
+        }
+    }
+
+    fn placement(position: u64, reference: SemanticTranscriptEntryRef) -> ProjectedFrontierMember {
+        ProjectedFrontierMember {
+            position,
+            reference,
+            payload_kind: String::from("runner_placement_changed"),
             summary_range: None,
         }
     }
@@ -1535,6 +1600,38 @@ mod tests {
         assert_eq!(visible[1].reference, retained_suffix);
         assert_eq!(visible[1].position, 3);
         assert_eq!(latest_safe_boundary(&visible), Some(1));
+    }
+
+    /// INV-015 / INV-044: compaction may summarize later closed history while
+    /// re-injecting the latest exact placement notice after the summary.
+    #[test]
+    fn inv015_inv044_compaction_preserves_latest_runner_placement() {
+        let visible = vec![
+            ordinary(1, entry(0x7021)),
+            placement(2, entry(0x7022)),
+            ordinary(3, entry(0x7023)),
+        ];
+
+        assert_eq!(latest_safe_boundary(&visible), Some(2));
+        assert!(placement_preserving_boundary(&visible, 0));
+        assert!(placement_preserving_boundary(&visible, 1));
+        assert!(placement_preserving_boundary(&visible, 2));
+
+        let summary_entry = entry(0x7024);
+        let projected = project_frontier_members(vec![
+            ordinary(1, entry(0x7021)),
+            placement(2, entry(0x7022)),
+            ordinary(3, entry(0x7023)),
+            summary(4, summary_entry, entry(0x7021), entry(0x7023)),
+        ])
+        .expect("the placement-aware summary projection is valid");
+        assert_eq!(
+            projected
+                .iter()
+                .map(|member| member.reference)
+                .collect::<Vec<_>>(),
+            vec![summary_entry, entry(0x7022)]
+        );
     }
 
     /// INV-015: a successor summary can replace a boundary whose physical

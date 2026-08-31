@@ -554,7 +554,18 @@ impl ContextFrontierProjection {
             if summary_index <= physical_through || visible_summary <= through {
                 return Err(ContextFrontierProjectionFailure::SummaryNotAfterBoundary);
             }
+            let retained_placement = visible[..=through]
+                .iter()
+                .rev()
+                .find(|entry| {
+                    matches!(
+                        entry.payload(),
+                        SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
+                    )
+                })
+                .copied();
             visible = std::iter::once(summary)
+                .chain(retained_placement)
                 .chain(
                     visible[through + 1..]
                         .iter()

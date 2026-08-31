@@ -5365,6 +5365,17 @@ pub enum TranscriptEntry {
         /// Exact direct model identity frozen for the turn.
         selected_model_id: CanonicalUuid,
     },
+    /// One checked successor runner placement became active.
+    RunnerPlacementChanged {
+        /// Exact runner retired by the successor placement.
+        prior_runner_id: CanonicalUuid,
+        /// Exact runner installed by the successor placement.
+        new_runner_id: CanonicalUuid,
+        /// Positive successor placement revision.
+        placement_revision: RunnerPlacementRevision,
+        /// Exact sandbox profile selected by the successor.
+        sandbox_profile: RunnerSandboxProfile,
+    },
     /// Assistant proposed one durable tool request.
     AssistantToolUse {
         /// Owning turn.
@@ -12828,6 +12839,30 @@ mod tests {
             &format!(
                 "{{\"type\":\"session_defaults\",\"session_id\":\"00000000-0000-0000-0000-000000000002\",\"defaults_version\":\"1\",\"model_selection\":{{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000004\"}},\"model_settings\":{PROVIDER_DEFAULT_SETTINGS_SNAPSHOT_JSON},\"dangerous_tool_auto_approval\":false,\"system_prompt\":null}}"
             ),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_inv044_runner_placement_change_entry_round_trips_closed_facts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let placement_entry = ServerMessage::TranscriptEntry {
+            entry_index: CanonicalU64::new(5),
+            source_session_id: uuid(2),
+            entry_id: uuid(6),
+            entry: TranscriptEntry::RunnerPlacementChanged {
+                prior_runner_id: uuid(7),
+                new_runner_id: uuid(8),
+                placement_revision: RunnerPlacementRevision::try_new(3)
+                    .expect("the fixture placement revision is positive"),
+                sandbox_profile: RunnerSandboxProfile::WorkspaceRestricted,
+            },
+        };
+
+        assert_server_message_round_trip(
+            request(10)?,
+            placement_entry,
+            r#"{"type":"transcript_entry","entry_index":"5","source_session_id":"00000000-0000-0000-0000-000000000002","entry_id":"00000000-0000-0000-0000-000000000006","entry":{"type":"runner_placement_changed","prior_runner_id":"00000000-0000-0000-0000-000000000007","new_runner_id":"00000000-0000-0000-0000-000000000008","placement_revision":"3","sandbox_profile":"workspace-restricted"}}"#,
         )?;
         Ok(())
     }

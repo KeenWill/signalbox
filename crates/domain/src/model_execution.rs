@@ -716,6 +716,7 @@ impl ModelCallExecution {
                 | SemanticTranscriptEntryPayload::DelegationResult { .. }
                 | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
                 | SemanticTranscriptEntryPayload::ContextSummary { .. }
+                | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
                 | SemanticTranscriptEntryPayload::Imported { .. }
                 | SemanticTranscriptEntryPayload::AssistantText { .. }
                 | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
@@ -946,9 +947,13 @@ impl ModelCallExecution {
             || result_projection.source_frontier() != self.current_snapshot.frontier().snapshot()
             || !self
                 .current_snapshot
+                .is_semantic_prefix_of(result_projection.projection_base_snapshot())
+            || !result_projection
+                .projection_base_snapshot()
                 .is_semantic_prefix_of(result_projection.snapshot())
             || result_projection.snapshot().entry_count()
-                != self.current_snapshot.entry_count() + result_projection.entries().len()
+                != result_projection.projection_base_snapshot().entry_count()
+                    + result_projection.entries().len()
         {
             return Err(ModelCallClosureError::InterruptCorrelationMismatch);
         }
@@ -956,6 +961,7 @@ impl ModelCallExecution {
             &self.active_turn,
             &identities.pending_steering_reclassifications,
         )?;
+        let cancellation_source = result_projection.projection_base_snapshot().clone();
         let (result_entries, _result_snapshot) = result_projection.into_parts();
         let mut cancelled = close_cancelled_turn(
             ModelCallTurnScope {
@@ -964,7 +970,7 @@ impl ModelCallExecution {
             },
             Some(self.current_attempt),
             None,
-            CancellationFrontierSource::new(self.current_snapshot, &result_entries),
+            CancellationFrontierSource::new(cancellation_source, &result_entries),
             interrupt.proof(),
             identities,
             reclassified_pending_steering,
@@ -3318,6 +3324,7 @@ fn reconstitute(
             | SemanticTranscriptEntryPayload::DelegationResult { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
+            | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
@@ -3695,6 +3702,7 @@ fn frontier_closes_latest_tool_round(
             | SemanticTranscriptEntryPayload::DelegationResult { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
+            | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::TurnFailed { .. }
@@ -3706,13 +3714,19 @@ fn frontier_closes_latest_tool_round(
             | SemanticTranscriptEntryPayload::TurnCancelled { .. } => None,
         })
         .collect::<Vec<_>>();
-    let Some(results_end) = response_end.checked_add(requests.len()) else {
-        return Ok(false);
-    };
-    if requests.is_empty() || results_end > suffix.len() {
+    if requests.is_empty() {
         return Ok(false);
     }
-    for (entry, request) in suffix[response_end..results_end].iter().zip(&requests) {
+    let mut remaining = suffix[response_end..].iter();
+    for request in &requests {
+        let Some(entry) = remaining.find(|entry| {
+            !matches!(
+                entry.payload(),
+                SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
+            )
+        }) else {
+            return Ok(false);
+        };
         let valid = match entry.payload() {
             SemanticTranscriptEntryPayload::ToolExecutionResult { attempt } => {
                 let Some(correlation) = tool_result_correlations.get(attempt) else {
@@ -3750,15 +3764,17 @@ fn frontier_closes_latest_tool_round(
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. } => false,
+            SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. } => false,
         };
         if !valid {
             return Ok(false);
         }
     }
-    Ok(suffix[results_end..].iter().all(|entry| {
+    Ok(remaining.all(|entry| {
         matches!(
             entry.payload(),
             SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
+                | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
         )
     }))
 }
@@ -3775,6 +3791,7 @@ fn assistant_entry_call(entry: &SemanticTranscriptEntry) -> Option<ModelCallId> 
         | SemanticTranscriptEntryPayload::DelegationResult { .. }
         | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
         | SemanticTranscriptEntryPayload::ContextSummary { .. }
+        | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
         | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
         | SemanticTranscriptEntryPayload::TurnFailed { .. }
         | SemanticTranscriptEntryPayload::Imported { .. }
@@ -4239,7 +4256,7 @@ pub(crate) fn apply_interrupt_to_runner_recovery_wait(
     let tool_result_entries = match result_projection {
         Some(projection)
             if projection.turn() == active_turn.turn()
-                && projection.source_frontier() == source_snapshot.frontier().snapshot()
+                && projection.projection_base_snapshot() == &source_snapshot
                 && projection.snapshot().frontier().owning_session() == active_turn.session()
                 && source_snapshot.is_semantic_prefix_of(projection.snapshot()) =>
         {
@@ -4393,11 +4410,13 @@ pub(crate) fn apply_interrupt_to_retryable_runner_tool_recovery_wait(
     {
         return Err(ModelCallClosureError::InterruptCorrelationMismatch);
     }
-    let source_snapshot = batch.yielded_snapshot().clone();
-    if !starting_snapshot.is_semantic_prefix_of(&source_snapshot)
+    let yielded_snapshot = batch.yielded_snapshot().clone();
+    let source_snapshot = batch.projection_base_snapshot().clone();
+    if !starting_snapshot.is_semantic_prefix_of(&yielded_snapshot)
         || result_projection.turn() != active_turn.turn()
         || result_projection.producing_call() != batch.producing_call()
-        || result_projection.source_frontier() != source_snapshot.frontier().snapshot()
+        || result_projection.source_frontier() != yielded_snapshot.frontier().snapshot()
+        || result_projection.projection_base_snapshot() != &source_snapshot
         || result_projection.snapshot().frontier().owning_session() != active_turn.session()
         || result_projection.snapshot().frontier().snapshot() != identities.terminal_frontier
         || !source_snapshot.is_semantic_prefix_of(result_projection.snapshot())
@@ -4556,10 +4575,12 @@ pub(crate) fn apply_interrupt_to_executing_tool_batch(
     {
         return Err(ModelCallClosureError::InterruptCorrelationMismatch);
     }
-    let source_snapshot = batch.yielded_snapshot().clone();
+    let yielded_snapshot = batch.yielded_snapshot().clone();
+    let source_snapshot = batch.projection_base_snapshot().clone();
     if result_projection.turn() != active_turn.turn()
         || result_projection.snapshot().frontier().owning_session() != active_turn.session()
-        || result_projection.source_frontier() != source_snapshot.frontier().snapshot()
+        || result_projection.source_frontier() != yielded_snapshot.frontier().snapshot()
+        || result_projection.projection_base_snapshot() != &source_snapshot
         || !source_snapshot.is_semantic_prefix_of(result_projection.snapshot())
         || result_projection.snapshot().entry_count()
             != source_snapshot.entry_count() + result_projection.entries().len()
@@ -4988,6 +5009,46 @@ mod tests {
                 delegation_result_entry(&execution, DelegationWaitMode::Foreground),
             ])
             .collect::<Vec<_>>();
+        assert_eq!(
+            frontier_closes_latest_tool_round(
+                &execution.starting_snapshot,
+                &entries,
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+            ),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn runner_placement_inside_results_closes_exact_tool_continuation_round() {
+        let execution = active_execution();
+        let tool_use = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(30),
+            execution.session(),
+            SemanticTranscriptEntryPayload::AssistantToolUse {
+                producing_call: model_call_id(29),
+                request: tool_request_id(35),
+            },
+        );
+        let placement = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(31),
+            execution.session(),
+            SemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                placement_revision: crate::RunnerGeneration::try_from_u64(2)
+                    .expect("the fixture placement revision is positive"),
+            },
+        );
+        let entries = execution
+            .frontier_entries()
+            .cloned()
+            .chain([
+                tool_use,
+                placement,
+                delegation_result_entry(&execution, DelegationWaitMode::Foreground),
+            ])
+            .collect::<Vec<_>>();
+
         assert_eq!(
             frontier_closes_latest_tool_round(
                 &execution.starting_snapshot,
@@ -5642,6 +5703,7 @@ mod tests {
             .expect("tool denial extends the yielded frontier");
         let projection = PreparedToolResultProjection::from_validated_parts(
             yielded.frontier().snapshot(),
+            yielded.clone(),
             initial.turn,
             model_call_id(32),
             vec![denied.clone()],

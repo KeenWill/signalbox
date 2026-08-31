@@ -414,6 +414,11 @@ jobs:
       # four concurrent tests remains the cap.
       - name: Run the ${{ matrix.suite }} partition
         env:
+          # These archive tests exercise the complete scheduling projection on
+          # Tokio workers. Keep enough worker stack for the finite, deeply
+          # nested reconstitution path instead of aborting at Tokio's 2 MiB
+          # default before an assertion can run.
+          RUST_MIN_STACK: 8388608
           SUITE: ${{ matrix.suite }}
           PARTITION: ${{ matrix.partition }}
           PARTITIONS: ${{ matrix.partitions }}

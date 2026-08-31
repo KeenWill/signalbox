@@ -3276,6 +3276,123 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
     else {
         panic!("the prepared child call must authorize before its parent stops");
     };
+    let placement_entry = Uuid::from_u128(0xf13d);
+    let placement_frontier = Uuid::from_u128(0xf13e);
+    let call_frontier = authorized.call().frontier().snapshot().into_uuid();
+    let mut placement_boundary = pool.begin().await?;
+    // This fixture supplies the already-authorized replacement projection;
+    // the command transaction that authorizes replacement is outside this
+    // cascade test's scope. The row still satisfies the closed replacement
+    // shape consumed by the placement-boundary predicate.
+    sqlx::query("ALTER TABLE runner_session_placement_record DISABLE TRIGGER ALL")
+        .execute(&mut *placement_boundary)
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_session_placement_record
+            (session_id, event_ordinal, placement_revision, event_kind,
+             selector_kind, selector_runner_id, directory_selection_kind,
+             requested_working_directory, workspace_requirement_kind,
+             requested_sandbox_profile, permission_override_count, state_kind,
+             pinned_runner_id, lost_runner_id, loss_source_kind,
+             pinned_working_directory,
+             registration_enrollment_id, registration_revision,
+             pinned_tool_count)
+         VALUES
+            ($1, 1, 1, 'runner_lost', 'identity', $2, 'exact', $3,
+             'none', 'workspace_restricted', 0, 'runner_lost',
+             $2, $2, 'connection', $3, $4, 1, 0),
+            ($1, 2, 2, 'runner_replaced', 'identity', $5, 'exact', $6,
+             'none', 'workspace_restricted', 0, 'pinned',
+             $5, NULL, NULL, $6, $7, 1, 0)",
+    )
+    .bind(Uuid::from_u128(bound_child))
+    .bind(Uuid::from_u128(0xf141))
+    .bind("/workspace/cascade-retired")
+    .bind(Uuid::from_u128(0xf142))
+    .bind(Uuid::from_u128(0xf13f))
+    .bind("/workspace/cascade-replacement")
+    .bind(Uuid::from_u128(0xf140))
+    .execute(&mut *placement_boundary)
+    .await?;
+    sqlx::query("ALTER TABLE runner_session_placement_record ENABLE TRIGGER ALL")
+        .execute(&mut *placement_boundary)
+        .await?;
+    sqlx::query("ALTER TABLE runner_connection_event DISABLE TRIGGER ALL")
+        .execute(&mut *placement_boundary)
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_connection_event
+            (enrollment_id, connection_epoch, event_ordinal,
+             state_kind, cause_kind)
+         VALUES ($1, 1, 1, 'connected', 'established')",
+    )
+    .bind(Uuid::from_u128(0xf140))
+    .execute(&mut *placement_boundary)
+    .await?;
+    sqlx::query("ALTER TABLE runner_connection_event ENABLE TRIGGER ALL")
+        .execute(&mut *placement_boundary)
+        .await?;
+    sqlx::query("ALTER TABLE runner_current_session_placement DISABLE TRIGGER ALL")
+        .execute(&mut *placement_boundary)
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_current_session_placement (session_id, event_ordinal)
+         VALUES ($1, 2)",
+    )
+    .bind(Uuid::from_u128(bound_child))
+    .execute(&mut *placement_boundary)
+    .await?;
+    sqlx::query("ALTER TABLE runner_current_session_placement ENABLE TRIGGER ALL")
+        .execute(&mut *placement_boundary)
+        .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             runner_placement_revision, runner_placement_event_ordinal)
+         VALUES ($1, $2, 'runner_placement_changed', 2, 2)",
+    )
+    .bind(Uuid::from_u128(bound_child))
+    .bind(placement_entry)
+    .execute(&mut *placement_boundary)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count,
+             prefix_context_frontier_id)
+         SELECT $1, $2, member_count + 1, context_frontier_id
+           FROM context_frontier
+          WHERE owning_session_id = $1 AND context_frontier_id = $3",
+    )
+    .bind(Uuid::from_u128(bound_child))
+    .bind(placement_frontier)
+    .bind(call_frontier)
+    .execute(&mut *placement_boundary)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         SELECT $1, $2, member_count, $1, $3
+           FROM context_frontier
+          WHERE owning_session_id = $1 AND context_frontier_id = $2",
+    )
+    .bind(Uuid::from_u128(bound_child))
+    .bind(placement_frontier)
+    .bind(placement_entry)
+    .execute(&mut *placement_boundary)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_runner_placement_frontier
+            (session_id, placement_revision, semantic_entry_id,
+             context_frontier_id)
+         VALUES ($1, 2, $2, $3)",
+    )
+    .bind(Uuid::from_u128(bound_child))
+    .bind(placement_entry)
+    .bind(placement_frontier)
+    .execute(&mut *placement_boundary)
+    .await?;
+    placement_boundary.commit().await?;
 
     let repository = GoalRepository::new(pool.clone());
     assert_applied_command(
@@ -3316,8 +3433,9 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
     .fetch_one(&pool)
     .await?;
     assert_eq!(cascade, ("goal_command".into(), "stopped".into(), 3));
-    let bound_terminal: (Uuid, Uuid, String, Uuid) = sqlx::query_as(
-        "SELECT child_session_id, child_turn_id, disposition_kind, root_command_id
+    let bound_terminal: (Uuid, Uuid, String, Uuid, Uuid) = sqlx::query_as(
+        "SELECT child_session_id, child_turn_id, disposition_kind, root_command_id,
+                terminal_frontier_id
            FROM session_delegation_logical_terminal
           WHERE spawning_tool_request_id = $1",
     )
@@ -3331,8 +3449,26 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
             Uuid::from_u128(bound_turn),
             "stopped".into(),
             Uuid::from_u128(stop_command),
+            bound_terminal.4,
         )
     );
+    let placement_missing_from_terminal: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM resolve_context_frontier_members($1, $2) AS placement_member
+               LEFT JOIN resolve_context_frontier_members($1, $3) AS terminal_member
+                 ON terminal_member.member_position = placement_member.member_position
+                AND terminal_member.source_session_id = placement_member.source_session_id
+                AND terminal_member.semantic_entry_id = placement_member.semantic_entry_id
+              WHERE terminal_member.member_position IS NULL
+         )",
+    )
+    .bind(Uuid::from_u128(bound_child))
+    .bind(placement_frontier)
+    .bind(bound_terminal.4)
+    .fetch_one(&pool)
+    .await?;
+    assert!(!placement_missing_from_terminal);
     let terminal_snapshot = ProcessReadRepository::new(pool.clone())
         .read_transcript(session(bound_child))
         .await?
