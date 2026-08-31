@@ -76,17 +76,19 @@ heartbeat-safe execution, terminal retention, and generic exec-family restricted
 sandbox composition are re-verified through this PR
 (`agent/runner-sandboxed-dispatch-execution`). Live offer admission, exact claim
 emission, and post-acknowledgement lease journaling for that generic slice are
-re-verified through this PR (`agent/runner-live-lease-admission`). The placement
-loss-source, pre-pin replacement and abandonment state shapes, and append-only
-reconstitution-history contract are re-verified through this PR
-(`agent/runner-placement-loss-domain`). It owns logical runner enrollment,
-daemon-authoritative catalog validation, runner leases, the independent
-session-composition axes, session placement and affinity, credential-profile
-grants, and workspace requirements. The tool registry's common declarations
-remain owned by [tool loop](tool-loop.md); session transcript and frontier
-mechanics remain owned by [sessions and transcript](sessions-and-transcript.md);
-physical tool attempts remain owned by [tool loop](tool-loop.md). Invariant tags
-cite [the invariant test index](../invariants.md).
+re-verified through this PR (`agent/runner-live-lease-admission`). The
+proof-only runner catalog configuration is re-verified through this PR
+(`agent/runner-execution-proof-catalog`). The placement loss-source, pre-pin
+replacement and abandonment state shapes, and append-only reconstitution-history
+contract are re-verified through this PR (`agent/runner-placement-loss-domain`).
+It owns logical runner enrollment, daemon-authoritative catalog validation,
+runner leases, the independent session-composition axes, session placement and
+affinity, credential-profile grants, and workspace requirements. The tool
+registry's common declarations remain owned by [tool loop](tool-loop.md);
+session transcript and frontier mechanics remain owned by
+[sessions and transcript](sessions-and-transcript.md); physical tool attempts
+remain owned by [tool loop](tool-loop.md). Invariant tags cite
+[the invariant test index](../invariants.md).
 
 The typed `ReplaceLostRunner`, `RunnerReplacementTarget`, and
 `AbandonLostRunner` domain command payloads are verified against this PR
@@ -329,6 +331,14 @@ claim, journals nothing before the canonical acknowledgement, then fsyncs
 arguments. Every refusal is a bounded `lease_admission_refused` operation
 failure. The shipped production catalog remains empty, so this machinery still
 does not select a production inventory:
+
+The `runner-execution-proof` Cargo feature is disabled by default and selected
+by the spawned process integration suite. Under that feature, the strict runner
+configuration admits the single `execution_proof = "generic_sandboxed_exec"`
+selector and advertises exactly `sandboxed_exec` plus `WorkspaceRestricted`.
+Builds without that feature reject the field as unknown and continue advertising
+no tool or sandbox inventory. This is a proof fixture for the already-committed
+generic dispatch contract, not a workstation registry decision.
 
 1. The daemon sends `lease_offer` with the complete lease correlation and
    immutable dispatch payload. The runner admits the exact tool, sandbox

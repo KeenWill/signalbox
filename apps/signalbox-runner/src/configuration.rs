@@ -11,6 +11,8 @@ use std::{
 
 use serde::Deserialize;
 use signalbox_runner_wire::{Advertisement, ProfileName, RepositoryKey, ValueError};
+#[cfg(feature = "runner-execution-proof")]
+use signalbox_runner_wire::{SandboxProfile, WireToolName};
 use url::Url;
 
 const CONFIGURATION_VERSION: u64 = 1;
@@ -188,14 +190,19 @@ impl RunnerConfiguration {
             validate_repositories(&raw.repositories, &credentials, &raw.allowed_network_hosts)?;
 
         // Every inventory is constructed independently from an actual compiled
-        // provider. This registration-only milestone compiles no workspace,
-        // sandbox, tool, or capability-class provider. Credential and repository
-        // availability is the exact validated configuration projection.
+        // provider. Ordinary builds select no workspace, sandbox, tool, or
+        // capability-class provider. Credential and repository availability is
+        // the exact validated configuration projection.
+        #[cfg(feature = "runner-execution-proof")]
+        let (tools, sandbox_profiles) = execution_proof_advertisement(raw.execution_proof)
+            .map_err(RunnerConfigurationError::InvalidAdvertisement)?;
+        #[cfg(not(feature = "runner-execution-proof"))]
+        let (tools, sandbox_profiles) = (Vec::new(), Vec::new());
         let advertisement = Advertisement {
             capability_classes: Vec::new(),
-            tools: Vec::new(),
+            tools,
             workspace_capabilities: Vec::new(),
-            sandbox_profiles: Vec::new(),
+            sandbox_profiles,
             credential_profiles: credentials.keys().cloned().collect(),
             repositories: repositories
                 .iter()
@@ -521,6 +528,28 @@ struct RawConfiguration {
     git_author_email: String,
     repositories: BTreeMap<String, RawRepository>,
     credentials: BTreeMap<String, RawCredential>,
+    #[cfg(feature = "runner-execution-proof")]
+    execution_proof: Option<RunnerExecutionProof>,
+}
+
+#[cfg(feature = "runner-execution-proof")]
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RunnerExecutionProof {
+    GenericSandboxedExec,
+}
+
+#[cfg(feature = "runner-execution-proof")]
+fn execution_proof_advertisement(
+    proof: Option<RunnerExecutionProof>,
+) -> Result<(Vec<WireToolName>, Vec<SandboxProfile>), ValueError> {
+    match proof {
+        Some(RunnerExecutionProof::GenericSandboxedExec) => Ok((
+            vec![WireToolName::try_new("sandboxed_exec".to_owned())?],
+            vec![SandboxProfile::WorkspaceRestricted],
+        )),
+        None => Ok((Vec::new(), Vec::new())),
+    }
 }
 
 /// Closed configured network-host inventory.
@@ -668,6 +697,21 @@ credentials = {}
     const CONFIGURED_CREDENTIAL_FILE: &str = "/run/secrets/github-token";
     const CONFIGURED_INJECTION_ENV: &str = "GH_TOKEN";
 
+    #[cfg(feature = "runner-execution-proof")]
+    fn generic_execution_proof_advertisement() -> Advertisement {
+        Advertisement {
+            capability_classes: Vec::new(),
+            tools: vec![
+                WireToolName::try_new("sandboxed_exec".to_owned())
+                    .expect("the generic proof tool name is valid"),
+            ],
+            workspace_capabilities: Vec::new(),
+            sandbox_profiles: vec![SandboxProfile::WorkspaceRestricted],
+            credential_profiles: Vec::new(),
+            repositories: Vec::new(),
+        }
+    }
+
     struct ConfiguredFixture {
         document: String,
         profile: ProfileName,
@@ -724,6 +768,40 @@ injection_env = "{CONFIGURED_INJECTION_ENV}""#,
 
         let error = RunnerConfiguration::parse(&document)
             .expect_err("an unknown root field must fail closed");
+
+        assert_eq!(
+            error.to_string(),
+            "runner configuration document is invalid"
+        );
+    }
+
+    #[cfg(feature = "runner-execution-proof")]
+    #[test]
+    fn execution_proof_feature_advertises_only_generic_restricted_exec() {
+        let document = EMPTY_CONFIGURATION.replace(
+            "version = 1",
+            "version = 1\nexecution_proof = \"generic_sandboxed_exec\"",
+        );
+
+        let configuration = RunnerConfiguration::parse(&document)
+            .expect("the feature-gated generic execution proof is valid");
+
+        assert_eq!(
+            configuration.advertisement(),
+            &generic_execution_proof_advertisement()
+        );
+    }
+
+    #[cfg(not(feature = "runner-execution-proof"))]
+    #[test]
+    fn ordinary_build_rejects_execution_proof_configuration() {
+        let document = EMPTY_CONFIGURATION.replace(
+            "version = 1",
+            "version = 1\nexecution_proof = \"generic_sandboxed_exec\"",
+        );
+
+        let error = RunnerConfiguration::parse(&document)
+            .expect_err("ordinary builds must reject the proof-only root field");
 
         assert_eq!(
             error.to_string(),
