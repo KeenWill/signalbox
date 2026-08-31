@@ -22,17 +22,19 @@ execution authority is re-verified against its frozen runner identity and
 registration revision through this PR (`agent/runner-offer-locus-binding`).
 Workspace-free exact-directory initial-pin atomicity, together with runner-lease
 admission against the durable request's selected locus, is re-verified through
-this PR (`agent/runner-initial-dispatch-transaction`). Closed initial-pin and
-existing-pin offer dispatch composition is re-verified through this PR
-(`agent/runner-dispatch-application-composition`). Durable lease-claim admission
-is re-verified through this PR (`agent/runner-lease-claim-transaction`). The
-application tool-loop handoff for a runner-selected prepared attempt is
-re-verified through this PR (`agent/tool-loop-runner-offer-handoff`). The
-production composition from that handoff through durable offer dispatch and the
-shared connection broker is re-verified through this PR
-(`agent/daemon-runner-tool-offer-adapter`). The atomic claimed-lease and
-physical-attempt result boundary is re-verified through this PR
-(`agent/runner-lease-result-transaction`). Immutable normalized dispatch
+this PR (`agent/runner-initial-dispatch-transaction`). Model-observation
+finalization for staged exact-directory pinned replacement is verified against
+this PR (`agent/runner-pinned-replacement-observation-finalizer`). Closed
+initial-pin and existing-pin offer dispatch composition is re-verified through
+this PR (`agent/runner-dispatch-application-composition`). Durable lease-claim
+admission is re-verified through this PR
+(`agent/runner-lease-claim-transaction`). The application tool-loop handoff for
+a runner-selected prepared attempt is re-verified through this PR
+(`agent/tool-loop-runner-offer-handoff`). The production composition from that
+handoff through durable offer dispatch and the shared connection broker is
+re-verified through this PR (`agent/daemon-runner-tool-offer-adapter`). The
+atomic claimed-lease and physical-attempt result boundary is re-verified through
+this PR (`agent/runner-lease-result-transaction`). Immutable normalized dispatch
 arguments on every lease and its durable readback are re-verified through this
 PR (`agent/runner-lease-argument-binding`). Exact daemon projection of sealed
 lease facts into `lease_offer`, `lease_claimed`, `dispatch`, and

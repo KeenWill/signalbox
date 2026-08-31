@@ -10,36 +10,39 @@ use std::{error::Error, num::NonZeroU64, time::Duration};
 
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_application::{
-    AbandonLostRunnerOutcome, CompiledTool, CompiledToolCatalog, ExecutableToolSnapshotSource,
-    ImportedConversationConverter, ImportedConversationStore, InitialRunnerDispatchRequest,
-    NoToolCatalog, PinnedRunnerDispatchRequest, PinnedRunnerReplacementIdentities,
-    PinnedRunnerReplacementOutcome, PinnedRunnerReplacementTransaction,
-    PromotePendingRunnerOutcome, ReplaceLostRunnerBeforePinOutcome, RunnerLeaseClaimRequest,
-    RunnerLeaseResultRequest, RunnerReplacementProvisioningOutcome, ToolDefinition,
-    ToolInputSchema,
+    AbandonLostRunnerOutcome, AuthorizeModelCallOutcome, CompiledTool, CompiledToolCatalog,
+    ExecutableToolSnapshotSource, ImportedConversationConverter, ImportedConversationStore,
+    InitialRunnerDispatchRequest, ModelCallCredentialReference, NoToolCatalog,
+    PinnedRunnerDispatchRequest, PinnedRunnerReplacementIdentities, PinnedRunnerReplacementOutcome,
+    PinnedRunnerReplacementTransaction, PromotePendingRunnerOutcome,
+    ReplaceLostRunnerBeforePinOutcome, RunnerLeaseClaimRequest, RunnerLeaseResultRequest,
+    RunnerReplacementProvisioningOutcome, ToolDefinition, ToolInputSchema,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
     AbandonLostRunner, AbandonLostRunnerRejection, AbandonLostRunnerResult, AbandonedLostRunner,
-    AcceptedInputId, AcceptedInputTurnActivationIdentities, ApprovedToolRequest,
-    CancelledModelCallTurnIdentities, CanonicalCloneUrlDigest, ContextFrontierId, CreateSession,
+    AcceptedInputId, AcceptedInputTurnActivationIdentities, ApprovedToolRequest, AssistantText,
+    AuthorizedModelCall, CancelledModelCallTurnIdentities, CanonicalCloneUrlDigest,
+    CompletedModelCallIdentities, ContextFrontierId, CreateSession,
     CreateSessionFromImportedFrontier, CredentialProfileGrant,
     CredentialProfileGrantReconstitutionInput, CredentialProfileName, CredentialProfilePolicy,
     CredentialToolApproval, DangerousToolAutoApproval, DecideToolRequest, DeliveryRequest,
     DescendantTerminationScope, DirectModelSelection, DurableCommandId, EndedToolAttempt,
-    ImportedConversation, ImportedConversationId, ImportedSessionRelationship,
-    ImportedTranscriptEntryId, InitialToolApproval, LostPinnedRunnerPlacement, ModelCallId,
-    ModelSelectionOverride, ModelSelectionRequest, NormalizedToolArguments,
+    FailedModelCallTurnIdentities, ImportedConversation, ImportedConversationId,
+    ImportedSessionRelationship, ImportedTranscriptEntryId, InitialToolApproval,
+    LostPinnedRunnerPlacement, ModelCallId, ModelCallTerminalIdentities,
+    ModelCallTerminalObservation, ModelSelectionOverride, ModelSelectionRequest,
+    ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
     PerInputConfigurationChoices, PinnedRunnerPlacement, PinnedRunnerReplacementResult,
     PromotePendingRunner, PromotePendingRunnerRejection, PromotePendingRunnerResult,
-    PromotedRunnerEnrollment, ProvisionedWorkspace, ReplaceLostRunner,
+    PromotedRunnerEnrollment, ProviderModelIdentity, ProvisionedWorkspace, ReplaceLostRunner,
     ReplaceLostRunnerBeforePinRejection, ReplaceLostRunnerBeforePinResult,
     ReplacedLostRunnerBeforePin, ReplacedPinnedRunner, ResolvedContextFrontierReconstitutionInput,
-    RunnerAdvertisement, RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog,
-    RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId, RunnerEnrollmentRequestId,
-    RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId,
-    RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation,
-    RunnerLeaseState, RunnerLostBeforePin, RunnerPlacementLossSource,
+    ResolvedProviderTarget, RunnerAdvertisement, RunnerAuthenticationId, RunnerCapabilityClass,
+    RunnerCatalog, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId,
+    RunnerEnrollmentRequestId, RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation,
+    RunnerLeaseId, RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput,
+    RunnerLeaseRetryPreparation, RunnerLeaseState, RunnerLostBeforePin, RunnerPlacementLossSource,
     RunnerPlacementReconstitutionHistory, RunnerPlacementRecoveryState,
     RunnerRegistrationReconciliation, RunnerReplacementProvisioningRejection,
     RunnerReplacementTarget, RunnerReplacementTargetUnavailableReason, RunnerRepositoryEntry,
@@ -69,6 +72,7 @@ use signalbox_persistence::{
     create_session::CreateSessionRepository,
     create_session_from_imported_frontier::ImportedSessionRepository,
     disposable_test_container_labels, local_test_connection_options, migrate,
+    model_execution::PostgresModelCallRepository,
     outbox::{
         DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedRunnerState, OutboxCorruption,
         OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
@@ -5350,6 +5354,14 @@ fn assert_store_corruption(error: RunnerProtocolStoreError, expected: RunnerProt
         panic!("the adapter must return typed corruption for malformed durable evidence")
     };
     assert_eq!(actual, expected);
+}
+
+#[track_caller]
+fn authorized_model_call(outcome: AuthorizeModelCallOutcome) -> Box<AuthorizedModelCall> {
+    let AuthorizeModelCallOutcome::Authorized(authorized) = outcome else {
+        panic!("the prepared model-call fixture must authorize")
+    };
+    authorized
 }
 
 #[track_caller]
@@ -23629,6 +23641,236 @@ async fn s32_inv044_active_turn_workspace_free_replacement_remains_staged()
     assert_eq!(stage_count, 1);
     assert_eq!(replacement_count, 0);
     assert_eq!(result_count, 0);
+    drop(pool);
+    Ok(())
+}
+
+/// S20 / S32 / INV-012 / INV-015 / INV-044: a staged exact-directory
+/// replacement extends the model call's newly committed observation frontier
+/// in the same transaction and retains the stage's boundary identities.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s20_s32_inv012_inv015_inv044_model_observation_finalizes_staged_replacement()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
+    let turn_attempt = TurnAttemptId::from_uuid(uuid(
+        INITIAL_PHYSICAL_ATTEMPT.turn + RELATED_IDENTITY_OFFSET,
+    ));
+    let selection = DirectModelSelection::from_uuid(uuid(0xa101));
+    let creation = CreateSession::new(
+        DurableCommandId::from_uuid(uuid(0xa102)),
+        SessionCreationProvenance::new(
+            SessionCreationCause::UserInitiated,
+            TranscriptAncestry::None,
+        ),
+        SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+    )
+    .prepare(session)
+    .expect("the observation fixture session creation is preparable");
+    CreateSessionRepository::new(pool.clone(), session_credential_pin())
+        .handle(creation)
+        .await?;
+    let pin_attempt = PhysicalAttemptFacts {
+        attempt: 0xb120,
+        request: 0xb121,
+        turn: 0xb122,
+    };
+    insert_physical_attempt_for(&pool, session, pin_attempt).await?;
+    let mut store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let predecessor = enrollment();
+    store.insert_enrollment(&predecessor).await?;
+    let predecessor_registration = store.register(&predecessor, advertisement()).await?;
+    store.open_connection(predecessor.enrollment()).await?;
+    let directory = exact_runner_directory();
+    let placement = SessionRunnerPlacement::new(
+        session,
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::Exact(directory.clone()),
+            credential_profile: None,
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            permission_overrides: no_permission_overrides(),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &predecessor,
+            predecessor_registration.registration(),
+            directory,
+            None,
+            authorized_for_session(session, pin_attempt),
+            offer_request(),
+        )
+        .expect("the in-flight model fixture permits an independent exact-directory pin");
+    store.store_pin(&pin, &predecessor_registration).await?;
+    append_runner_lost_projection(&pool, session).await?;
+    let successor = replacement_enrollment();
+    store.insert_enrollment(&successor).await?;
+    store.register(&successor, advertisement()).await?;
+    store.open_connection(successor.enrollment()).await?;
+
+    SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(uuid(0xa103)),
+                session,
+                UserContent::try_text(String::from("replacement observation fixture"))
+                    .expect("the observation fixture input is valid"),
+                DeliveryRequest::StartWhenNoActiveTurn {
+                    configuration: PerInputConfigurationChoices::new(
+                        SessionConfigurationDefaultsVersion::try_from_u64(1)
+                            .expect("the observation fixture defaults version is positive"),
+                        ModelSelectionOverride::UseSessionDefault,
+                    ),
+                },
+            ),
+            AcceptedInputId::from_uuid(uuid(0xa104)),
+            Some(turn),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa105)),
+                ContextFrontierId::from_uuid(uuid(0xa106)),
+            ),
+            |_| TurnId::from_uuid(uuid(0xa107)),
+            |_| (Vec::new(), ContextFrontierId::from_uuid(uuid(0xa108))),
+        )
+        .await?;
+    StartEligibleTurnRepository::new(pool.clone())
+        .handle(
+            session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa109)),
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa10a)),
+                ContextFrontierId::from_uuid(uuid(0xa10b)),
+                turn_attempt,
+            ),
+        )
+        .await?;
+
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(uuid(0xb101))),
+    )])
+    .expect("the observation fixture target catalog is valid");
+    let repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets,
+        ModelCallCredentialReference::new("fixture-credential-reference"),
+    )
+    .with_runner_observation_finalizer(store.clone());
+    let call = ModelCallId::from_uuid(uuid(0xb102));
+    repository
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xb103)),
+                ContextFrontierId::from_uuid(uuid(0xb104)),
+            ),
+            ContextFrontierId::from_uuid(uuid(0xb105)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(uuid(0xb106)),
+                    TurnId::from_uuid(uuid(0xb107)),
+                )
+            },
+        )
+        .await?;
+    repository
+        .prepare_initial_call(
+            session,
+            ModelCallId::from_uuid(uuid(0xb108)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xb109)),
+                ContextFrontierId::from_uuid(uuid(0xb10a)),
+            ),
+            ContextFrontierId::from_uuid(uuid(0xb10b)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(uuid(0xb10c)),
+                    TurnId::from_uuid(uuid(0xb10d)),
+                )
+            },
+        )
+        .await?;
+    let authorized_call = authorized_model_call(repository.authorize_send(session, call).await?);
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(WORKSPACE_REPLACEMENT_COMMAND)),
+        session,
+        RunnerGeneration::one(),
+        RunnerReplacementTarget::Runner(successor.runner()),
+    );
+    let identities = PinnedRunnerReplacementIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(uuid(PINNED_REPLACEMENT_SEMANTIC_ENTRY)),
+        ContextFrontierId::from_uuid(uuid(PINNED_REPLACEMENT_FRONTIER)),
+    );
+    let staged = store.complete(command, identities).await?;
+    let assistant_entry = SemanticTranscriptEntryId::from_uuid(uuid(0xb10e));
+    let completion_entry = SemanticTranscriptEntryId::from_uuid(uuid(0xb10f));
+    let observation_frontier = ContextFrontierId::from_uuid(uuid(0xb110));
+    let observation = authorized_call
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Completed {
+            assistant_text: vec![
+                AssistantText::try_new(String::from("replacement boundary"))
+                    .expect("the observation fixture assistant text is valid"),
+            ],
+        });
+    repository
+        .apply_terminal_observation(
+            session,
+            observation,
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![assistant_entry],
+                completion_entry,
+                observation_frontier,
+            )),
+            |_| TurnId::from_uuid(uuid(0xb111)),
+        )
+        .await?;
+    let boundary: (Uuid, Decimal, Uuid) = sqlx::query_as(
+        "SELECT frontier.prefix_context_frontier_id, frontier.member_count,
+                delta.semantic_entry_id
+           FROM context_frontier AS frontier
+           JOIN context_frontier_delta AS delta
+             ON delta.owning_session_id = frontier.owning_session_id
+            AND delta.context_frontier_id = frontier.context_frontier_id
+            AND delta.member_position = frontier.member_count
+          WHERE frontier.owning_session_id = $1
+            AND frontier.context_frontier_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(identities.context_frontier().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let observation_member_count: Decimal = sqlx::query_scalar(
+        "SELECT member_count
+           FROM context_frontier
+          WHERE owning_session_id = $1 AND context_frontier_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(observation_frontier.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let result_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM replace_lost_runner_result WHERE command_id = $1")
+            .bind(command.command().into_uuid())
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(
+        staged,
+        PinnedRunnerReplacementOutcome::Staged {
+            command: command.command()
+        }
+    );
+    assert_eq!(boundary.0, observation_frontier.into_uuid());
+    assert_eq!(boundary.1, observation_member_count + Decimal::ONE);
+    assert_eq!(boundary.2, identities.semantic_entry().into_uuid());
+    assert_eq!(result_count, 1);
     drop(pool);
     Ok(())
 }

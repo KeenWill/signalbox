@@ -1440,6 +1440,7 @@ async fn run_hub(
         model_targets,
         credential_reference,
     )
+    .with_runner_observation_finalizer(runner_protocol_store.clone())
     .with_session_credentials(model_configuration.credential_family_catalog())
     .with_cache_inclusive_input_targets(model_configuration.cache_inclusive_input_targets());
     let (execution, fatal_execution) = FatalExecutionSupervisor::new(
