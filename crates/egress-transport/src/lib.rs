@@ -9,6 +9,8 @@ use std::{
 
 use futures_util::StreamExt;
 use reqwest::{Client, Url, redirect::Policy};
+#[doc(hidden)]
+pub use signalbox_network_policy::is_public_destination_address;
 
 const MAX_RESOLVED_ADDRESSES: usize = 32;
 
@@ -145,38 +147,6 @@ pub fn build_web_fetch_client(
     builder
         .build()
         .map_err(|_| ReqwestWebFetchConstructionError)
-}
-
-#[doc(hidden)]
-pub fn is_public_destination_address(address: IpAddr) -> bool {
-    match address {
-        IpAddr::V4(address) => {
-            let [first, second, third, _fourth] = address.octets();
-            !(first == 0
-                || first == 10
-                || first == 127
-                || first >= 224
-                || (first == 100 && (64..=127).contains(&second))
-                || (first == 169 && second == 254)
-                || (first == 172 && (16..=31).contains(&second))
-                || (first == 192 && second == 0 && third == 0)
-                || (first == 192 && second == 0 && third == 2)
-                || (first == 192 && second == 88 && third == 99)
-                || (first == 192 && second == 168)
-                || (first == 198 && matches!(second, 18 | 19))
-                || (first == 198 && second == 51 && third == 100)
-                || (first == 203 && second == 0 && third == 113))
-        }
-        IpAddr::V6(address) => {
-            let segments = address.segments();
-            let in_global_unicast = (0x2000..=0x3fff).contains(&segments[0]);
-            let special_2001 =
-                segments[0] == 0x2001 && (segments[1] <= 0x01ff || segments[1] == 0x0db8);
-            let transition_6to4 = segments[0] == 0x2002;
-            let documentation_3fff = segments[0] == 0x3fff && segments[1] <= 0x0fff;
-            in_global_unicast && !special_2001 && !transition_6to4 && !documentation_3fff
-        }
-    }
 }
 
 #[doc(hidden)]

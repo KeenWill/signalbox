@@ -100,7 +100,10 @@ sandbox composition are re-verified through this PR
 (`agent/runner-sandboxed-dispatch-execution`). Live offer admission, exact claim
 emission, and post-acknowledgement lease journaling for that generic slice are
 re-verified through this PR (`agent/runner-live-lease-admission`). The
-proof-only runner catalog configuration is re-verified through this PR
+runner-owned HTTPS broker core's bounded CONNECT admission, configured hostname
+gate, public-address pinning, TLS ClientHello SNI check, and tunnel relay are
+verified against this PR (`agent/runner-https-broker`). The proof-only runner
+catalog configuration is re-verified through this PR
 (`agent/runner-execution-proof-catalog`). The profileless lease admission
 guard's exact `WorkspaceRestricted` policy-auto handling is re-verified through
 this PR (`agent/runner-profileless-lease-approval`). The placement loss-source,
@@ -1684,11 +1687,9 @@ The reusable process core implements that filesystem and namespace request
 shape: it pins every configured read-only identity, rechecks those identities
 before both the availability probe and dispatch, recreates standard usr-merge
 aliases only when their targets are inside the configured mounts, and derives
-`PATH` only from configured mounts. `signalbox-runner` does not yet invoke this
-constructor or advertise `WorkspaceRestricted`; the execution child slice must
-compose it before any runner tool is executable. The HTTPS broker and resource
-limits remain separate work, with first-release resource limits still
-owner-gated in
+`PATH` only from configured mounts. The proof-only generic exec-family runner
+composes that constructor and advertises `WorkspaceRestricted`. Resource limits
+remain separate work, with first-release resource limits still user-gated in
 [open questions](../open-questions.md#identity-credentials-and-resource-governance).
 
 Confinement is defined over that writable root, which need not be a repository.
@@ -1722,22 +1723,30 @@ sockets, and path escape. Writes replace a sibling temporary file atomically.
 Shell and build/test tools receive no host path that was not bound into their
 namespace.
 
-The restricted network namespace has no host interface. A namespace-local shim
-connects through one per-dispatch Unix socket to a runner-owned HTTPS broker.
-The broker accepts only `CONNECT` to port 443, checks the requested hostname
-before resolution, pins the resolved destination for that connection, parses the
-TLS ClientHello, and requires its SNI to equal the admitted hostname. Version
-one admits the `github.com` and `crates.io` hostname suffixes and the exact
-`api.anthropic.com` hostname; runner configuration may remove entries but cannot
-add another. CONNECT authorities are canonical ASCII DNS names: lowercase, no
-trailing dot, no empty label, and no IP literal. A suffix match is
-label-boundary exact: the host equals the base or ends in `.` plus the base, so
-`notgithub.com` never matches `github.com`. Resolution rejects unspecified,
-loopback, private, link-local, multicast, and otherwise nonpublic destinations
-before pinning. Direct IP destinations, plaintext forwarding, other ports, DNS
-rebinding, and missing or mismatched SNI fail closed. The broker proves a TLS
-tunnel to the checked host; it does not claim visibility into the encrypted
-application protocol.
+The restricted network namespace has no host interface. The runner-owned broker
+core accepts one bounded HTTP/1.1 `CONNECT` stream, admits only port 443, checks
+the requested hostname before resolving it once, rejects the entire answer when
+its bounded destination inventory is exceeded or any destination is nonpublic,
+and connects by the selected exact IP address. It then parses the bounded TLS
+ClientHello before forwarding any TLS bytes and requires its SNI to equal the
+admitted hostname. Version one admits the `github.com` and `crates.io` hostname
+suffixes and the exact `api.anthropic.com` hostname; runner configuration may
+remove entries but cannot add another. The caller supplies one deadline covering
+request admission, resolution, connection, SNI authentication, and bidirectional
+relay; expiry closes the tunnel. CONNECT authorities are canonical ASCII DNS
+names: lowercase, no trailing dot, no empty label, and no IP literal. A suffix
+match is label-boundary exact: the host equals the base or ends in `.` plus the
+base, so `notgithub.com` never matches `github.com`. Resolution rejects
+unspecified, loopback, private, link-local, multicast, and otherwise nonpublic
+destinations before pinning. Direct IP destinations, plaintext forwarding, other
+ports, DNS rebinding, and missing or mismatched SNI fail closed. The broker
+proves a TLS tunnel to the checked host; it does not claim visibility into the
+encrypted application protocol.
+
+**Committed unimplemented functionality.** No present surface creates the
+per-dispatch Unix socket or starts the namespace-local shim that will connect a
+restricted process to this broker core. Until those two pieces compose, a
+restricted runner dispatch has no network path.
 
 For `Ambient`, the runner still uses one labeled bubblewrap supervisor but binds
 the invoking user filesystem and shares host networking. It therefore provides
