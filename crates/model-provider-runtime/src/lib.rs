@@ -1128,7 +1128,7 @@ where
         )
         .ok_or(RuntimeInputTokenCountError::UnconfiguredTarget)?;
         let messages = render_runtime_messages(operation.messages());
-        let tools = runtime_tool_definitions(operation.tools()).map_err(|error| {
+        let tools = runtime_executable_tool_definitions(operation.tools()).map_err(|error| {
             report_invalid_runtime_tool_schema(telemetry, &error);
             RuntimeInputTokenCountError::InvalidToolSchema
         })?;
@@ -1218,7 +1218,7 @@ where
             frontier: call.frontier().snapshot(),
         };
         let messages = render_runtime_messages(operation.messages());
-        let tools = runtime_tool_definitions(operation.tools()).map_err(|error| {
+        let tools = runtime_executable_tool_definitions(operation.tools()).map_err(|error| {
             report_invalid_runtime_tool_schema(telemetry, &error);
             fail_closed(
                 telemetry,
@@ -1764,23 +1764,32 @@ impl Error for InvalidRuntimeToolSchema {
 pub fn runtime_tool_definitions(
     definitions: &[signalbox_application::ToolDefinition],
 ) -> Result<Vec<ToolDefinition>, InvalidRuntimeToolSchema> {
+    definitions.iter().map(runtime_tool_definition).collect()
+}
+
+fn runtime_executable_tool_definitions(
+    definitions: &[signalbox_application::ExecutableToolSnapshotEntry],
+) -> Result<Vec<ToolDefinition>, InvalidRuntimeToolSchema> {
     definitions
         .iter()
-        .map(|definition| {
-            let schema =
-                decode_checked_raw_json(definition.input_schema().as_str()).map_err(|source| {
-                    InvalidRuntimeToolSchema {
-                        tool_name: definition.name().as_str().to_owned(),
-                        source,
-                    }
-                })?;
-            Ok(ToolDefinition::with_raw_schema(
-                definition.name().as_str(),
-                definition.description(),
-                schema,
-            ))
-        })
+        .map(|snapshot| runtime_tool_definition(snapshot.definition()))
         .collect()
+}
+
+fn runtime_tool_definition(
+    definition: &signalbox_application::ToolDefinition,
+) -> Result<ToolDefinition, InvalidRuntimeToolSchema> {
+    let schema = decode_checked_raw_json(definition.input_schema().as_str()).map_err(|source| {
+        InvalidRuntimeToolSchema {
+            tool_name: definition.name().as_str().to_owned(),
+            source,
+        }
+    })?;
+    Ok(ToolDefinition::with_raw_schema(
+        definition.name().as_str(),
+        definition.description(),
+        schema,
+    ))
 }
 
 /// A correlation mismatch is a fail-closed bridge defect like any other, so

@@ -2399,6 +2399,7 @@ mod tests {
                     .expect("valid arguments"),
             ),
             InitialToolApproval::Confirm,
+            crate::SelectedToolExecutionLocus::Daemon,
         )
     }
 
@@ -3038,6 +3039,7 @@ mod aggregate_tests {
                     .expect("valid fixture arguments"),
             ),
             InitialToolApproval::Confirm,
+            crate::SelectedToolExecutionLocus::Daemon,
         )
     }
 

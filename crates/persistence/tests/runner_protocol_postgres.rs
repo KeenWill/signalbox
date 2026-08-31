@@ -40,21 +40,22 @@ use signalbox_domain::{
     RunnerReplacementTargetUnavailableReason, RunnerRepositoryEntry, RunnerSandboxProfile,
     RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
     RunnerToolModelDefinition, RunnerToolPermissionOverride, RunnerToolPermissionOverrides,
-    RunnerWorkingDirectory, SemanticTranscriptEntryId, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
-    SessionRunnerPlacementRequest, SessionRunnerPlacementState,
-    StoredRunnerRegistrationLossEvidence, SubmitInput, ToolAdmissibleLoci, ToolApprovalDecision,
-    ToolApprovalResolutionReconstitutionInput, ToolAttemptDispatchCorrelation,
-    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptEnd, ToolAttemptId,
-    ToolAttemptObservation, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
-    ToolBatch, ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput,
-    ToolDispatchGeneration, ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind, ToolName,
-    ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput,
-    ToolResultContent, ToolResultText, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
-    ValidatedRunnerRegistration, WorkingDirectorySelection, WorkspaceCapability,
-    WorkspaceManifestId, WorkspaceProvisioningAuthorizationId, WorkspaceRecovery,
-    WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRequirement, WorkspaceRevision,
+    RunnerWorkingDirectory, SelectedToolExecutionLocus, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, SessionId, SessionRunnerPin, SessionRunnerPlacement,
+    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
+    SessionRunnerPlacementState, StoredRunnerRegistrationLossEvidence, SubmitInput,
+    ToolAdmissibleLoci, ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput,
+    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
+    ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation, ToolAttemptReconstitutionInput,
+    ToolAttemptReconstitutionState, ToolBatch, ToolBatchPhaseReconstitutionInput,
+    ToolBatchReconstitutionInput, ToolDispatchGeneration, ToolEffectClass, ToolExecutionError,
+    ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal,
+    ToolRequestReconstitutionInput, ToolResultContent, ToolResultText, TranscriptAncestry,
+    TurnAttemptId, TurnId, UserContent, ValidatedRunnerRegistration, WorkingDirectorySelection,
+    WorkspaceCapability, WorkspaceManifestId, WorkspaceProvisioningAuthorizationId,
+    WorkspaceRecovery, WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRequirement,
+    WorkspaceRevision,
 };
 use signalbox_persistence::{
     MIGRATOR,
@@ -84,6 +85,7 @@ use signalbox_persistence::{
     session_credentials::{SessionCredentialPin, SessionModelCredential},
     start_eligible_turn::StartEligibleTurnRepository,
     submit_input::SubmitInputRepository,
+    tool_loop::PostgresToolLoopRepository,
 };
 use sqlx::{PgPool, Row, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -165,6 +167,7 @@ const PRE_RUNNER_LOSS_CURSOR_MIGRATION: i64 = 202608110005;
 const PRE_REGISTRATION_RECONCILIATION_MIGRATION: i64 = 202608110006;
 const PRE_PENDING_SUCCESSOR_MIGRATION: i64 = 202608110007;
 const PRE_PENDING_PROMOTION_MIGRATION: i64 = 202608110011;
+const PRE_TOOL_REQUEST_LOCUS_MIGRATION: i64 = 202608110018;
 const LEGACY_PLACEMENT_REFUSAL: &str =
     "runner wire contract requires empty legacy placement history";
 const LEGACY_PLACEMENT_LOSS_REFUSAL: &str =
@@ -6372,6 +6375,35 @@ async fn runner_wire_migration_rejects_legacy_placement_history() -> Result<(), 
         "migration refusal must name the unsupported legacy history"
     );
     assert_eq!(applied_version, Some(PRE_RUNNER_WIRE_MIGRATION));
+    drop(pool);
+    Ok(())
+}
+
+/// S31 / INV-043: existing durable requests migrate to the explicit daemon
+/// locus and reconstitute through the production request reader.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_tool_request_locus_migration_preserves_existing_request()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = unmigrated_postgres().await?;
+    MIGRATOR
+        .run_to(PRE_TOOL_REQUEST_LOCUS_MIGRATION, &pool)
+        .await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    migrate(&pool).await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let request = repository
+        .load_request(ToolRequestId::from_uuid(uuid(
+            INITIAL_PHYSICAL_ATTEMPT.request,
+        )))
+        .await?
+        .expect("the migrated request remains readable");
+
+    assert_eq!(
+        request.execution_locus(),
+        &SelectedToolExecutionLocus::Daemon
+    );
     drop(pool);
     Ok(())
 }
@@ -25173,6 +25205,172 @@ async fn s32_inv032_inv044_runner_outbox_insert_rejects_cross_wired_source()
     .expect_err("a cross-wired runner event cannot commit");
 
     assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// S31 / INV-043: the migrated daemon locus is read back through complete
+/// request reconstitution rather than inferred from a tool name.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_tool_request_daemon_locus_round_trips() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, _pin) = stored_side_effecting_pin_fixture(&pool).await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let request = repository
+        .load_request(ToolRequestId::from_uuid(uuid(
+            INITIAL_PHYSICAL_ATTEMPT.request,
+        )))
+        .await?
+        .expect("the fixture retains its request");
+
+    assert_eq!(
+        request.execution_locus(),
+        &SelectedToolExecutionLocus::Daemon
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// S31 / INV-043: an exact-runner locus retains the exact historical
+/// registration through complete request reconstitution.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_tool_request_exact_runner_locus_round_trips() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, expected_enrollment, registration, _pin) =
+        stored_side_effecting_pin_fixture(&pool).await?;
+    sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER tool_request_is_append_only")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_request
+            SET execution_locus_kind = 'exact_runner',
+                execution_runner_id = $1,
+                execution_registration_revision = $2
+          WHERE request_id = $3",
+    )
+    .bind(expected_enrollment.runner().into_uuid())
+    .bind(Decimal::from(registration.registration().revision().get()))
+    .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.request))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_request ENABLE TRIGGER tool_request_is_append_only")
+        .execute(&pool)
+        .await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let request = repository
+        .load_request(ToolRequestId::from_uuid(uuid(
+            INITIAL_PHYSICAL_ATTEMPT.request,
+        )))
+        .await?
+        .expect("the fixture retains its request");
+    let expected = SelectedToolExecutionLocus::ExactRunner {
+        runner: expected_enrollment.runner(),
+        registration_revision: registration.registration().revision(),
+    };
+
+    assert_eq!(request.execution_locus(), &expected);
+    drop(pool);
+    Ok(())
+}
+
+/// S31 / INV-043: a capability-class locus retains only its frozen class
+/// through complete request reconstitution.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_tool_request_capability_class_locus_round_trips() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, _pin) = stored_side_effecting_pin_fixture(&pool).await?;
+    sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER tool_request_is_append_only")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_request
+            SET execution_locus_kind = 'runner_capability_class',
+                execution_capability_class = $1
+          WHERE request_id = $2",
+    )
+    .bind(class().as_str())
+    .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.request))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_request ENABLE TRIGGER tool_request_is_append_only")
+        .execute(&pool)
+        .await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let request = repository
+        .load_request(ToolRequestId::from_uuid(uuid(
+            INITIAL_PHYSICAL_ATTEMPT.request,
+        )))
+        .await?
+        .expect("the fixture retains its request");
+    let expected = SelectedToolExecutionLocus::RunnerCapabilityClass { class: class() };
+
+    assert_eq!(request.execution_locus(), &expected);
+    drop(pool);
+    Ok(())
+}
+
+/// S31 / INV-043: the relational shape rejects a request that combines exact
+/// runner and capability-class authority.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_tool_request_locus_rejects_hybrid_runner_authority()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, expected_enrollment, registration, _pin) =
+        stored_side_effecting_pin_fixture(&pool).await?;
+    sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER tool_request_is_append_only")
+        .execute(&pool)
+        .await?;
+    let rejected = sqlx::query(
+        "UPDATE tool_request
+            SET execution_locus_kind = 'exact_runner',
+                execution_runner_id = $1,
+                execution_registration_revision = $2,
+                execution_capability_class = $3
+          WHERE request_id = $4",
+    )
+    .bind(expected_enrollment.runner().into_uuid())
+    .bind(Decimal::from(registration.registration().revision().get()))
+    .bind(class().as_str())
+    .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.request))
+    .execute(&pool)
+    .await
+    .expect_err("one request cannot combine two runner selection shapes");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// S31 / INV-043: an exact runner locus cannot name a registration that was
+/// never durably recorded for that runner.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_tool_request_locus_rejects_unknown_exact_registration()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, expected_enrollment, _, _pin) = stored_side_effecting_pin_fixture(&pool).await?;
+    sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER tool_request_is_append_only")
+        .execute(&pool)
+        .await?;
+    let rejected = sqlx::query(
+        "UPDATE tool_request
+            SET execution_locus_kind = 'exact_runner',
+                execution_runner_id = $1,
+                execution_registration_revision = 99
+          WHERE request_id = $2",
+    )
+    .bind(expected_enrollment.runner().into_uuid())
+    .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.request))
+    .execute(&pool)
+    .await
+    .expect_err("an exact locus requires its historical registration");
+
+    assert_foreign_key_violation(rejected);
     drop(pool);
     Ok(())
 }

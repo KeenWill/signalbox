@@ -34,12 +34,14 @@ detail through PR #285 (`agent/dev-instance-code-host-credential`), the client
 decision surface through PR #291 (`agent/turn-control-verbs`), and
 runner-protocol batch reconstitution through PR #260
 (`agent/runner-protocol-domain`). Atomic runner lease/attempt result admission
-is verified through this PR (`agent/runner-lease-result-transaction`).
-Template-derived blanket creation was verified through PR #311
-(`agent/session-templates-spec`), and the exact-origin `web_fetch` egress policy
-and complete bounded file-patch lookup through PR #330
-(`agent/audit-verified-fixes`). The exact-revision repository-read extension is
-verified through PR #348 (`agent/repository-read-tools`) at implementation ref
+is verified through this PR (`agent/runner-lease-result-transaction`). The
+closed selected-locus value and its durable request storage are verified against
+this PR (`agent/tool-request-execution-locus`). Template-derived blanket
+creation was verified through PR #311 (`agent/session-templates-spec`), and the
+exact-origin `web_fetch` egress policy and complete bounded file-patch lookup
+through PR #330 (`agent/audit-verified-fixes`). The exact-revision
+repository-read extension is verified through PR #348
+(`agent/repository-read-tools`) at implementation ref
 `2a55dbb65440dfae31b339b6726fe5ace6dab24c`. The runner executable stack rooted
 at this foundation proposal extends the same laws to the runner locus. The
 explicit-approval `AlwaysConfirm` declaration is verified through PR #366
@@ -78,18 +80,21 @@ repeat without changing that logical identity (INV-004, INV-006).
 A completed response carries ordered assistant text and tool proposals. For each
 proposal the application supplies one fresh UUIDv7 `ToolRequestId`; the domain
 assigns a zero-based ordinal among tool proposals in that producing call. The
-producing call, name, normalized arguments, ordinal, and resolved approval
-posture form one immutable `ToolRequest` record. The name is 1–64 ASCII letters,
-digits, underscore, or hyphen. `NormalizedToolArguments` has two closed arms.
-`Json` stores a decoded JSON value as compact text with object keys in lexical
-order; `Undecodable` stores the exact bounded UTF-8 text emitted by the provider
-adapter after that adapter applies its preparation-time credential scrub when
-JSON decoding fails. Undecodable text must also exclude U+0000, mirroring the
-result-content admission. Both arms must fit within 1 MiB before and after
-normalization. This preserves malformed arguments as bounded, identity-safe
-evidence without pretending they are JSON. An undecodable value, or valid JSON
-that does not decode against the selected tool's argument type, becomes a typed
-execution error later.
+producing call, name, normalized arguments, ordinal, resolved approval posture,
+and selected executable locus form one immutable `ToolRequest` record. The
+closed locus is daemon, one exact runner plus its positive registration
+revision, or one runner capability class whose current registration is selected
+only at initial dispatch. The name is 1–64 ASCII letters, digits, underscore, or
+hyphen. `NormalizedToolArguments` has two closed arms. `Json` stores a decoded
+JSON value as compact text with object keys in lexical order; `Undecodable`
+stores the exact bounded UTF-8 text emitted by the provider adapter after that
+adapter applies its preparation-time credential scrub when JSON decoding fails.
+Undecodable text must also exclude U+0000, mirroring the result-content
+admission. Both arms must fit within 1 MiB before and after normalization. This
+preserves malformed arguments as bounded, identity-safe evidence without
+pretending they are JSON. An undecodable value, or valid JSON that does not
+decode against the selected tool's argument type, becomes a typed execution
+error later.
 
 The same transaction that classifies the producing call `Completed` appends one
 `AssistantText` or `AssistantToolUse { producing_call, request }` semantic entry

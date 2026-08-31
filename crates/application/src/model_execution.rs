@@ -27,9 +27,10 @@ use signalbox_domain::{
     ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
     ModelCallTerminalOutcome, PhysicalCancellationModelCallTurnIdentities,
     PreparedModelCallRequest, RefusedModelCallTurnIdentities, RunnerGeneration,
-    RunnerSandboxProfile, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
-    SemanticTranscriptEntryRef, SessionConfigurationDefaultsVersion, SessionId,
-    SessionSystemPrompt, StopRequestedModelCallTurn, StoppedToolResponsePartIdentity,
+    RunnerSandboxProfile, SelectedToolExecutionLocus, SemanticTranscriptEntryId,
+    SemanticTranscriptEntryPayload, SemanticTranscriptEntryRef,
+    SessionConfigurationDefaultsVersion, SessionId, SessionSystemPrompt,
+    StopRequestedModelCallTurn, StoppedToolResponsePartIdentity,
     StoppedToolRoundModelCallIdentities, ToolApprovalDecision, ToolAttemptEnd, ToolDenialReason,
     ToolExecutionError, ToolRequest, ToolRequestId, ToolResponsePartIdentity, ToolResultContent,
     ToolRoundModelCallIdentities, TurnAttemptId, TurnId, UserContent,
@@ -559,6 +560,70 @@ fn render_frontier_messages<'a>(
     Ok(messages.into_boxed_slice())
 }
 
+/// One immutable model definition paired with its selected executable locus.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutableToolSnapshotEntry {
+    definition: ToolDefinition,
+    execution_locus: SelectedToolExecutionLocus,
+    initial_approval: InitialToolApproval,
+}
+
+impl ExecutableToolSnapshotEntry {
+    const fn from_validated_parts(
+        definition: ToolDefinition,
+        execution_locus: SelectedToolExecutionLocus,
+        initial_approval: InitialToolApproval,
+    ) -> Self {
+        Self {
+            definition,
+            execution_locus,
+            initial_approval,
+        }
+    }
+
+    /// Freezes one runner definition, locus, and runner-policy outcome.
+    ///
+    /// A daemon locus and daemon-only approval provenance are rejected rather
+    /// than laundered into runner execution authority.
+    pub fn runner(
+        definition: ToolDefinition,
+        execution_locus: SelectedToolExecutionLocus,
+        initial_approval: InitialToolApproval,
+    ) -> Option<Self> {
+        (!matches!(execution_locus, SelectedToolExecutionLocus::Daemon)
+            && matches!(
+                initial_approval,
+                InitialToolApproval::Confirm | InitialToolApproval::PolicyAuto
+            ))
+        .then(|| Self::from_validated_parts(definition, execution_locus, initial_approval))
+    }
+
+    /// Freezes one daemon-local definition under the turn's blanket posture.
+    pub fn daemon(definition: ToolDefinition, posture: DangerousToolAutoApproval) -> Self {
+        let initial_approval = initial_tool_approval(posture, Some(&definition));
+        Self::from_validated_parts(
+            definition,
+            SelectedToolExecutionLocus::Daemon,
+            initial_approval,
+        )
+    }
+
+    /// Borrows the exact provider-neutral definition.
+    pub const fn definition(&self) -> &ToolDefinition {
+        &self.definition
+    }
+
+    /// Borrows the executable locus selected for returned proposals.
+    pub const fn execution_locus(&self) -> &SelectedToolExecutionLocus {
+        &self.execution_locus
+    }
+
+    /// Returns the exact initial approval outcome frozen for this entry.
+    pub const fn initial_approval(&self) -> InitialToolApproval {
+        self.initial_approval
+    }
+}
+
 /// A checked prepared call plus its provider-neutral ordered messages.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedModelOperation {
@@ -566,7 +631,7 @@ pub struct PreparedModelOperation {
     credential_reference: ModelCallCredentialReference,
     system_prompt: Option<SessionSystemPrompt>,
     messages: Box<[ModelConversationMessage]>,
-    tools: Box<[ToolDefinition]>,
+    tools: Box<[ExecutableToolSnapshotEntry]>,
 }
 
 impl PreparedModelOperation {
@@ -575,7 +640,7 @@ impl PreparedModelOperation {
         request: PreparedModelCallRequest,
         credential_reference: ModelCallCredentialReference,
         system_prompt: Option<SessionSystemPrompt>,
-        tools: Box<[ToolDefinition]>,
+        tools: Box<[ExecutableToolSnapshotEntry]>,
         tool_entries: &[ResolvedToolConversationEntry],
         runner_placement_entries: &[ResolvedRunnerPlacementConversationEntry],
     ) -> Result<Self, ModelFrontierRenderingError> {
@@ -637,7 +702,7 @@ impl PreparedModelOperation {
     }
 
     /// Borrows the exact model-facing catalog snapshot.
-    pub fn tools(&self) -> &[ToolDefinition] {
+    pub fn tools(&self) -> &[ExecutableToolSnapshotEntry] {
         &self.tools
     }
 }
@@ -992,8 +1057,14 @@ enum RetainedModelCallExecutionStateKind {
         /// Unchanged correlated observation returned by provider work.
         observation: CorrelatedModelCallTerminalObservation,
         /// Frozen policy outcomes for each tool proposal, in proposal order.
-        tool_approvals: Box<[InitialToolApproval]>,
+        tool_approvals: Box<[FrozenToolProposalPolicy]>,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FrozenToolProposalPolicy {
+    approval: InitialToolApproval,
+    execution_locus: SelectedToolExecutionLocus,
 }
 
 /// Adapter-local result of credential lookup and capability preparation.
@@ -1673,7 +1744,16 @@ where
         let attempt = prepared.attempt();
         let turn = prepared.turn();
         let prepared_request = (*prepared).clone();
-        let advertised_tools = self.catalog.definitions();
+        let advertised_tools = self
+            .catalog
+            .definitions()
+            .into_vec()
+            .into_iter()
+            .map(|definition| {
+                ExecutableToolSnapshotEntry::daemon(definition, dangerous_tool_auto_approval)
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         let operation = PreparedModelOperation::render(
             *prepared,
             credential_reference,
@@ -1852,7 +1932,7 @@ where
         &mut self,
         session: SessionId,
         observation: CorrelatedModelCallTerminalObservation,
-        tool_approvals: Box<[InitialToolApproval]>,
+        tool_approvals: Box<[FrozenToolProposalPolicy]>,
     ) -> Result<
         ModelCallExecutionOutcome,
         ModelCallExecutionError<
@@ -1913,7 +1993,7 @@ where
     fn next_terminal_identities(
         &mut self,
         observation: &ModelCallTerminalObservation,
-        tool_approvals: &[InitialToolApproval],
+        tool_approvals: &[FrozenToolProposalPolicy],
     ) -> ModelCallTerminalIdentityCandidates {
         let exact = match observation {
             ModelCallTerminalObservation::Completed { assistant_text } => {
@@ -1943,16 +2023,19 @@ where
                             // defect. Confirm is the conservative candidate:
                             // it cannot grant unattended execution, and the
                             // domain still rejects it under blanket posture.
-                            let approval = tool_approvals
-                                .get(approval_index)
-                                .copied()
-                                .unwrap_or(InitialToolApproval::Confirm);
+                            let policy = tool_approvals.get(approval_index).cloned().unwrap_or(
+                                FrozenToolProposalPolicy {
+                                    approval: InitialToolApproval::Confirm,
+                                    execution_locus: SelectedToolExecutionLocus::Daemon,
+                                },
+                            );
                             approval_index += 1;
-                            every_request_approved &= !approval.requires_decision();
-                            continuing.push(ToolResponsePartIdentity::tool_call(
+                            every_request_approved &= !policy.approval.requires_decision();
+                            continuing.push(ToolResponsePartIdentity::tool_call_at_locus(
                                 self.ids.next_semantic_entry_id(),
                                 self.ids.next_tool_request_id(),
-                                approval,
+                                policy.approval,
+                                policy.execution_locus,
                             ));
                         }
                     }
@@ -1969,16 +2052,20 @@ where
                             ));
                         }
                         AssistantResponsePart::ToolCall(_) => {
-                            let approval = tool_approvals
+                            let policy = tool_approvals
                                 .get(stopped_approval_index)
-                                .copied()
-                                .unwrap_or(InitialToolApproval::Confirm);
+                                .cloned()
+                                .unwrap_or(FrozenToolProposalPolicy {
+                                    approval: InitialToolApproval::Confirm,
+                                    execution_locus: SelectedToolExecutionLocus::Daemon,
+                                });
                             stopped_approval_index += 1;
-                            stopped.push(StoppedToolResponsePartIdentity::tool_call(
+                            stopped.push(StoppedToolResponsePartIdentity::tool_call_at_locus(
                                 self.ids.next_semantic_entry_id(),
                                 self.ids.next_tool_request_id(),
                                 self.ids.next_semantic_entry_id(),
-                                approval,
+                                policy.approval,
+                                policy.execution_locus,
                             ));
                         }
                     }
@@ -2022,8 +2109,8 @@ where
         &self,
         observation: &ModelCallTerminalObservation,
         posture: DangerousToolAutoApproval,
-        advertised_tools: &[ToolDefinition],
-    ) -> Box<[InitialToolApproval]> {
+        advertised_tools: &[ExecutableToolSnapshotEntry],
+    ) -> Box<[FrozenToolProposalPolicy]> {
         let ModelCallTerminalObservation::CompletedWithTools { response } = observation else {
             return Box::new([]);
         };
@@ -2033,10 +2120,18 @@ where
             .filter_map(|part| match part {
                 AssistantResponsePart::Text(_) => None,
                 AssistantResponsePart::ToolCall(proposal) => {
-                    let definition = advertised_tools
+                    let snapshot = advertised_tools
                         .iter()
-                        .find(|definition| definition.name() == proposal.name());
-                    Some(initial_tool_approval(posture, definition))
+                        .find(|entry| entry.definition().name() == proposal.name());
+                    Some(FrozenToolProposalPolicy {
+                        approval: snapshot
+                            .map(ExecutableToolSnapshotEntry::initial_approval)
+                            .unwrap_or_else(|| initial_tool_approval(posture, None)),
+                        execution_locus: snapshot
+                            .map(ExecutableToolSnapshotEntry::execution_locus)
+                            .cloned()
+                            .unwrap_or(SelectedToolExecutionLocus::Daemon),
+                    })
                 }
             })
             .collect()
@@ -2288,7 +2383,13 @@ impl ModelCallProvider for ScriptedModelCallProvider {
         drop(cancellation);
         self.capability_preparation_count += 1;
         self.last_prepared_messages = Some(operation.messages().to_vec().into_boxed_slice());
-        self.last_prepared_tools = Some(operation.tools().to_vec().into_boxed_slice());
+        self.last_prepared_tools = Some(
+            operation
+                .tools()
+                .iter()
+                .map(|entry| entry.definition().clone())
+                .collect(),
+        );
         self.last_prepared_system_prompt = Some(operation.system_prompt().map(str::to_owned));
         let step = self.steps.front().cloned();
         if matches!(
@@ -3975,7 +4076,16 @@ mod tests {
         )
         .with_tool_catalog(catalog);
         let observation = tool_response();
-        let advertised_tools = service.catalog.definitions();
+        let advertised_tools = service
+            .catalog
+            .definitions()
+            .into_vec()
+            .into_iter()
+            .map(|definition| {
+                ExecutableToolSnapshotEntry::daemon(definition, DangerousToolAutoApproval::Disabled)
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         service.catalog = Arc::new(NoToolCatalog);
         let approvals = service.tool_approvals(
             &observation,
@@ -3985,73 +4095,246 @@ mod tests {
         assert_eq!(
             approvals.as_ref(),
             [
-                InitialToolApproval::PolicyAuto,
-                InitialToolApproval::Confirm
+                FrozenToolProposalPolicy {
+                    approval: InitialToolApproval::PolicyAuto,
+                    execution_locus: SelectedToolExecutionLocus::Daemon,
+                },
+                FrozenToolProposalPolicy {
+                    approval: InitialToolApproval::Confirm,
+                    execution_locus: SelectedToolExecutionLocus::Daemon,
+                },
             ]
         );
-
-        let ModelCallTerminalIdentityCandidates::ToolRound {
-            continuing,
-            stopped,
-        } = service.next_terminal_identities(&observation, &approvals)
-        else {
-            panic!("tool response requires both race-safe closures");
-        };
-        assert_eq!(continuing.response_parts().len(), 3);
-        assert_eq!(continuing.continuation_attempt(), None);
-        let [
-            ToolResponsePartIdentity::Text { .. },
-            ToolResponsePartIdentity::ToolCall {
-                approval: first_approval,
-                ..
-            },
-            ToolResponsePartIdentity::ToolCall {
-                approval: second_approval,
-                ..
-            },
-        ] = continuing.response_parts()
-        else {
-            panic!("fixture response preserves one text part then two tool calls");
-        };
-        assert_eq!(*first_approval, InitialToolApproval::PolicyAuto);
-        assert_eq!(*second_approval, InitialToolApproval::Confirm);
-
-        let non_overridable_approvals = [
-            InitialToolApproval::PolicyAuto,
-            InitialToolApproval::AlwaysConfirm,
-        ];
-        service.ids = FixedIds::baseline();
-        let ModelCallTerminalIdentityCandidates::ToolRound { continuing, .. } =
-            service.next_terminal_identities(&observation, &non_overridable_approvals)
-        else {
-            panic!("tool response requires both race-safe closures");
-        };
-        assert_eq!(continuing.continuation_attempt(), None);
         assert_eq!(
-            stopped,
-            StoppedToolRoundModelCallIdentities::new(
-                vec![
-                    StoppedToolResponsePartIdentity::text(identity(
-                        33,
-                        SemanticTranscriptEntryId::from_uuid,
-                    )),
-                    StoppedToolResponsePartIdentity::tool_call(
-                        identity(34, SemanticTranscriptEntryId::from_uuid),
-                        identity(62, ToolRequestId::from_uuid),
-                        identity(35, SemanticTranscriptEntryId::from_uuid),
-                        InitialToolApproval::PolicyAuto,
-                    ),
-                    StoppedToolResponsePartIdentity::tool_call(
-                        identity(36, SemanticTranscriptEntryId::from_uuid),
-                        identity(63, ToolRequestId::from_uuid),
-                        identity(37, SemanticTranscriptEntryId::from_uuid),
-                        InitialToolApproval::Confirm,
-                    ),
-                ],
-                identity(38, SemanticTranscriptEntryId::from_uuid),
-                identity(41, ContextFrontierId::from_uuid),
+            service.next_terminal_identities(&observation, &approvals),
+            ModelCallTerminalIdentityCandidates::ToolRound {
+                continuing: ToolRoundModelCallIdentities::new(
+                    vec![
+                        ToolResponsePartIdentity::text(identity(
+                            30,
+                            SemanticTranscriptEntryId::from_uuid,
+                        )),
+                        ToolResponsePartIdentity::tool_call(
+                            identity(31, SemanticTranscriptEntryId::from_uuid),
+                            identity(60, ToolRequestId::from_uuid),
+                            InitialToolApproval::PolicyAuto,
+                        ),
+                        ToolResponsePartIdentity::tool_call(
+                            identity(32, SemanticTranscriptEntryId::from_uuid),
+                            identity(61, ToolRequestId::from_uuid),
+                            InitialToolApproval::Confirm,
+                        ),
+                    ],
+                    identity(40, ContextFrontierId::from_uuid),
+                    None,
+                ),
+                stopped: StoppedToolRoundModelCallIdentities::new(
+                    vec![
+                        StoppedToolResponsePartIdentity::text(identity(
+                            33,
+                            SemanticTranscriptEntryId::from_uuid,
+                        )),
+                        StoppedToolResponsePartIdentity::tool_call(
+                            identity(34, SemanticTranscriptEntryId::from_uuid),
+                            identity(62, ToolRequestId::from_uuid),
+                            identity(35, SemanticTranscriptEntryId::from_uuid),
+                            InitialToolApproval::PolicyAuto,
+                        ),
+                        StoppedToolResponsePartIdentity::tool_call(
+                            identity(36, SemanticTranscriptEntryId::from_uuid),
+                            identity(63, ToolRequestId::from_uuid),
+                            identity(37, SemanticTranscriptEntryId::from_uuid),
+                            InitialToolApproval::Confirm,
+                        ),
+                    ],
+                    identity(38, SemanticTranscriptEntryId::from_uuid),
+                    identity(41, ContextFrontierId::from_uuid),
+                ),
+            },
+            "lifecycle-dependent candidates receive a disjoint identity inventory",
+        );
+    }
+
+    /// S10 / INV-020: an `AlwaysConfirm` snapshot remains a decision wait in
+    /// the continuing race candidate.
+    #[test]
+    fn s10_inv020_non_overridable_snapshot_does_not_mint_continuation_attempt() {
+        let observation = tool_response();
+        let policies = [
+            FrozenToolProposalPolicy {
+                approval: InitialToolApproval::PolicyAuto,
+                execution_locus: SelectedToolExecutionLocus::Daemon,
+            },
+            FrozenToolProposalPolicy {
+                approval: InitialToolApproval::AlwaysConfirm,
+                execution_locus: SelectedToolExecutionLocus::Daemon,
+            },
+        ];
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: VecDeque::new(),
+                calls: 0,
+            },
+            UnusedFailure,
+            UnusedAuthorization,
+            UnusedObservation,
+            UnusedProvider,
+            InProcessAttemptDispatchGate::default(),
+        );
+
+        assert_eq!(
+            service.next_terminal_identities(&observation, &policies),
+            ModelCallTerminalIdentityCandidates::ToolRound {
+                continuing: ToolRoundModelCallIdentities::new(
+                    vec![
+                        ToolResponsePartIdentity::text(identity(
+                            30,
+                            SemanticTranscriptEntryId::from_uuid,
+                        )),
+                        ToolResponsePartIdentity::tool_call(
+                            identity(31, SemanticTranscriptEntryId::from_uuid),
+                            identity(60, ToolRequestId::from_uuid),
+                            InitialToolApproval::PolicyAuto,
+                        ),
+                        ToolResponsePartIdentity::tool_call(
+                            identity(32, SemanticTranscriptEntryId::from_uuid),
+                            identity(61, ToolRequestId::from_uuid),
+                            InitialToolApproval::AlwaysConfirm,
+                        ),
+                    ],
+                    identity(40, ContextFrontierId::from_uuid),
+                    None,
+                ),
+                stopped: StoppedToolRoundModelCallIdentities::new(
+                    vec![
+                        StoppedToolResponsePartIdentity::text(identity(
+                            33,
+                            SemanticTranscriptEntryId::from_uuid,
+                        )),
+                        StoppedToolResponsePartIdentity::tool_call(
+                            identity(34, SemanticTranscriptEntryId::from_uuid),
+                            identity(62, ToolRequestId::from_uuid),
+                            identity(35, SemanticTranscriptEntryId::from_uuid),
+                            InitialToolApproval::PolicyAuto,
+                        ),
+                        StoppedToolResponsePartIdentity::tool_call(
+                            identity(36, SemanticTranscriptEntryId::from_uuid),
+                            identity(63, ToolRequestId::from_uuid),
+                            identity(37, SemanticTranscriptEntryId::from_uuid),
+                            InitialToolApproval::AlwaysConfirm,
+                        ),
+                    ],
+                    identity(38, SemanticTranscriptEntryId::from_uuid),
+                    identity(41, ContextFrontierId::from_uuid),
+                ),
+            }
+        );
+    }
+
+    /// S31 / INV-043: the model-operation snapshot rejects daemon-policy
+    /// laundering, then copies an exact runner locus into both race-safe
+    /// terminal identity candidates.
+    #[test]
+    fn s31_inv043_tool_response_candidates_retain_exact_runner_locus() {
+        let schema = crate::ToolInputSchema::try_new(String::from(r#"{"type":"object"}"#))
+            .expect("fixture schema is valid");
+        let definition = crate::ToolDefinition::new(
+            signalbox_domain::ToolName::try_new(String::from("sandboxed_exec"))
+                .expect("fixture name is valid"),
+            String::from("Runs one sandboxed command."),
+            schema,
+            signalbox_domain::ToolPermissionDefault::Auto,
+            signalbox_domain::ToolEffectClass::ExternalEffect,
+        );
+        let locus = SelectedToolExecutionLocus::ExactRunner {
+            runner: identity(90, signalbox_domain::RunnerId::from_uuid),
+            registration_revision: RunnerGeneration::try_from_u64(3)
+                .expect("fixture revision is positive"),
+        };
+        assert_eq!(
+            ExecutableToolSnapshotEntry::runner(
+                definition.clone(),
+                SelectedToolExecutionLocus::Daemon,
+                InitialToolApproval::PolicyAuto,
             ),
-            "lifecycle-dependent candidates receive a disjoint identity inventory"
+            None
+        );
+        assert_eq!(
+            ExecutableToolSnapshotEntry::runner(
+                definition.clone(),
+                locus.clone(),
+                InitialToolApproval::SessionBlanket,
+            ),
+            None
+        );
+        let snapshots = [ExecutableToolSnapshotEntry::runner(
+            definition,
+            locus.clone(),
+            InitialToolApproval::PolicyAuto,
+        )
+        .expect("runner policy and locus are compatible")];
+        let arguments =
+            signalbox_domain::NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                .expect("fixture arguments are valid");
+        let observation = ModelCallTerminalObservation::CompletedWithTools {
+            response: signalbox_domain::ToolUsingAssistantResponse::try_from_parts(vec![
+                AssistantResponsePart::ToolCall(signalbox_domain::ToolCallProposal::new(
+                    signalbox_domain::ToolName::try_new(String::from("sandboxed_exec"))
+                        .expect("fixture name is valid"),
+                    arguments,
+                )),
+            ])
+            .expect("fixture response contains one tool"),
+        };
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: VecDeque::new(),
+                calls: 0,
+            },
+            UnusedFailure,
+            UnusedAuthorization,
+            UnusedObservation,
+            UnusedProvider,
+            InProcessAttemptDispatchGate::default(),
+        );
+        let policies = service.tool_approvals(
+            &observation,
+            DangerousToolAutoApproval::Disabled,
+            &snapshots,
+        );
+        let expected_policy = FrozenToolProposalPolicy {
+            approval: InitialToolApproval::PolicyAuto,
+            execution_locus: locus.clone(),
+        };
+
+        assert_eq!(policies.as_ref(), [expected_policy]);
+        assert_eq!(
+            service.next_terminal_identities(&observation, &policies),
+            ModelCallTerminalIdentityCandidates::ToolRound {
+                continuing: ToolRoundModelCallIdentities::new(
+                    vec![ToolResponsePartIdentity::tool_call_at_locus(
+                        identity(30, SemanticTranscriptEntryId::from_uuid),
+                        identity(60, ToolRequestId::from_uuid),
+                        InitialToolApproval::PolicyAuto,
+                        locus.clone(),
+                    )],
+                    identity(40, ContextFrontierId::from_uuid),
+                    Some(identity(70, TurnAttemptId::from_uuid)),
+                ),
+                stopped: StoppedToolRoundModelCallIdentities::new(
+                    vec![StoppedToolResponsePartIdentity::tool_call_at_locus(
+                        identity(31, SemanticTranscriptEntryId::from_uuid),
+                        identity(61, ToolRequestId::from_uuid),
+                        identity(32, SemanticTranscriptEntryId::from_uuid),
+                        InitialToolApproval::PolicyAuto,
+                        locus,
+                    )],
+                    identity(33, SemanticTranscriptEntryId::from_uuid),
+                    identity(41, ContextFrontierId::from_uuid),
+                ),
+            }
         );
     }
     /// S28 / INV-038 / INV-039: attested imported text keeps its exact
