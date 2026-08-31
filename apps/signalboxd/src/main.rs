@@ -1419,6 +1419,7 @@ async fn run_hub(
         .with_lease_operation_service(runner_protocol_store.clone())
         .with_workspace_ready_operation_service(runner_protocol_store.clone())
         .with_workspace_release_operation_service(runner_protocol_store.clone())
+        .with_operation_failure_service(runner_protocol_store.clone())
         .with_connection_broker(runner_connection_broker.clone());
     let runner_tool_offer =
         PostgresRunnerToolOffer::new(runner_protocol_store.clone(), runner_connection_broker);
