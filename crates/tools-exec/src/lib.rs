@@ -26,11 +26,13 @@
 //! `known_truncated` flag reports positive truncation evidence; false never
 //! claims that the workspace-influenced collection is complete or authentic.
 //!
-//! The profile unshares the network namespace, imposes no resource limits,
-//! drops no uid or gid, and applies no seccomp or landlock policy. It is
-//! therefore not an admissible boundary for executing untrusted code; the
-//! network fence narrows that gap rather than closing it. Exactly what the
-//! profile does and does not confine is owned by
+//! The daemon-local profile unshares the network namespace, imposes no resource
+//! limits, drops no uid or gid or Linux capability, and applies no seccomp or
+//! landlock policy. The separately selected runner-restricted constructor also
+//! unshares the cgroup namespace, drops every capability, creates fresh runtime
+//! directories, and mounts only caller-supplied pinned read-only identities.
+//! Neither profile imposes resource limits, seccomp, or landlock policy.
+//! Exactly what each profile does and does not confine is owned by
 //! `docs/spec/configuration-and-credentials.md` and is not restated here.
 //! Because the sandbox binds no host Cargo home, a Cargo pass through
 //! [`CargoDiagnosticsTool`] now resolves only against an already-populated
