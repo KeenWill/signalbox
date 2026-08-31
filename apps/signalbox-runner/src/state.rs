@@ -505,7 +505,7 @@ impl RunnerStateRoot {
                 });
             }
         };
-        validate_operation_journal_owner(&state, &inventory, ready_workspace.as_ref())?;
+        validate_operation_journal_authority(&state, &inventory, ready_workspace.as_ref())?;
         Ok(Self {
             directory,
             state,
@@ -528,6 +528,18 @@ impl RunnerStateRoot {
     /// Borrows the exact current in-memory copy of the fsynced operation slots.
     pub const fn reconnect_inventory(&self) -> &ReconnectInventory {
         &self.inventory
+    }
+
+    /// Clones the pinned root descriptor into the managed-workspace store.
+    pub fn workspace_store(&self) -> Result<crate::RunnerWorkspaceStore, RunnerStateError> {
+        self.directory
+            .try_clone()
+            .map(crate::RunnerWorkspaceStore::from_root)
+            .map_err(|source| RunnerStateError::Io {
+                operation: StateOperation::Open,
+                resource: StateResource::Root,
+                source,
+            })
     }
 
     /// Borrows the complete ready payload retained beside its reconnect item.
@@ -1023,7 +1035,7 @@ impl RunnerStateRoot {
     }
 }
 
-fn validate_operation_journal_owner(
+fn validate_operation_journal_authority(
     state: &RunnerState,
     inventory: &ReconnectInventory,
     ready_workspace: Option<&WorkspaceReady>,

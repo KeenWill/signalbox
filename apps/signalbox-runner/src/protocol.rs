@@ -324,7 +324,8 @@ impl RunnerDispatchReady {
 /// Closed local recovery gap; no wire recovery facts are fabricated.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryGap {
-    WorkspaceProducerUnavailable,
+    /// No live workspace operation is composed with the protocol connection.
+    WorkspaceOperationUnavailable,
 }
 
 /// Typed proof that recovery is deliberately unavailable.
@@ -342,7 +343,8 @@ impl RecoveryUnavailable {
 
 impl fmt::Display for RecoveryUnavailable {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("runner recovery is unavailable because no workspace producer exists")
+        formatter
+            .write_str("runner recovery is unavailable because no workspace operation is composed")
     }
 }
 
@@ -785,7 +787,7 @@ where
     /// Reports the recovery design gap without constructing wire recovery facts.
     pub const fn recovery_unavailable(&self) -> RecoveryUnavailable {
         RecoveryUnavailable {
-            gap: RecoveryGap::WorkspaceProducerUnavailable,
+            gap: RecoveryGap::WorkspaceOperationUnavailable,
         }
     }
 
@@ -4465,7 +4467,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovery_seam_names_the_missing_workspace_producer() {
+    async fn recovery_seam_names_the_uncomposed_workspace_operation() {
         let parent = TempDir::new().expect("a temporary parent is available");
         let mut state = state_root(&parent);
         let receipt = issued_receipt(state.state().request_id());
@@ -4494,7 +4496,7 @@ mod tests {
 
         assert_eq!(
             connection.recovery_unavailable().gap(),
-            RecoveryGap::WorkspaceProducerUnavailable
+            RecoveryGap::WorkspaceOperationUnavailable
         );
     }
 
@@ -4651,7 +4653,7 @@ mod tests {
         assert!(matches!(
             error,
             RunnerConnectionError::RecoveryUnavailable(RecoveryUnavailable {
-                gap: RecoveryGap::WorkspaceProducerUnavailable,
+                gap: RecoveryGap::WorkspaceOperationUnavailable,
             })
         ));
     }

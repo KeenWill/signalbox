@@ -359,7 +359,7 @@ composition installs this source over the same runner-protocol store used by
 registration and dispatch. Its production runner catalog remains empty, so
 current production model calls still advertise no runner-locus entry; the narrow
 generic `sandboxed_exec` proof catalog is integration-only pending the
-owner-gated workstation inventory decision.
+[runner workstation tool-execution open question](../open-questions.md#scheduling-and-runners).
 
 Every message keeps its source-qualified semantic-entry reference and its
 content-authority provenance. Why: inherited entries need not come from a native

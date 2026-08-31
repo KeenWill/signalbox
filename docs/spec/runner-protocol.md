@@ -61,13 +61,15 @@ recorded acknowledgement consumption are verified against this PR
 (`agent/runner-workspace-ready-replay`). The recovery union's explicit
 unborn-branch arm, its canonical manifest digest, and durable readback are
 verified against this PR (`agent/runner-unborn-workspace-recovery`).
+Descriptor-relative private-root publication and exact ready-manifest replay are
+verified against this PR (`agent/runner-workspace-filesystem-producer`).
 Established-connection routing of those inbound claim and result frames through
 the durable transactions before acknowledgement is re-verified through this PR
 (`agent/runner-runtime-lease-operations`). Durable authorization followed by
 best-effort `lease_offer` projection and handoff is re-verified through this PR
 (`agent/runner-lease-offer-dispatcher`). The corrected reconstitution mismatch
 contract was re-verified through PR #322 (`agent/docs-discipline`; pinned and
-pinned-loss request mismatches). Owner-private storage of the one retained lease
+pinned-loss request mismatches). Effective-user-private storage of the one retained lease
 and its monotonic fsynced phases is re-verified through this PR
 (`agent/runner-operation-journal`). Matching terminal-result retention and
 atomic acknowledgement clearing are re-verified through this PR
@@ -1693,7 +1695,7 @@ before both the availability probe and dispatch, recreates standard usr-merge
 aliases only when their targets are inside the configured mounts, and derives
 `PATH` only from configured mounts. The proof-only generic exec-family runner
 composes that constructor and advertises `WorkspaceRestricted`. Resource limits
-remain separate work, with first-release resource limits still user-gated in
+remain separate work pending the first-release resource-limits question in
 [open questions](../open-questions.md#identity-credentials-and-resource-governance).
 
 Confinement is defined over that writable root, which need not be a repository.
@@ -1902,14 +1904,18 @@ the matching recorded acknowledgement. The outbound broker can transport a
 caller-constructed closed frame but does not authorize or journal it. The
 workspace recovery union represents an exact detached commit, an exact branch
 and revision, or an unborn branch naming where the repository's first commit
-will be born. The executable runner still leaves a typed `RecoveryUnavailable`
-seam because it has no filesystem producer from which to construct any of those
-facts.
+will be born. The descriptor-relative workspace store creates the explicit
+repository-free private-root shape below the locked runner root, publishes its
+versioned protected manifest through `staging` to `ready`, and returns the exact
+canonical ready-manifest digest. Reopening the store authenticates and replays
+that same ready manifest instead of creating another root.
 
-**Committed unimplemented functionality.** No present runner provisions or
-deletes a workspace, no filesystem producer populates the retained ready frame,
-and no present daemon producer constructs a workspace operation. Every remaining
-behavior in this section constrains that future implementation.
+**Committed unimplemented functionality.** No live protocol path invokes the
+private-root producer or places its result into the retained ready frame. No
+present runner provisions or deletes a repository workspace, no present daemon
+producer constructs a workspace operation, and startup staging/leak
+reconciliation remains absent. The typed `RecoveryUnavailable` seam therefore
+remains on live workspace operations.
 
 The application receipt boundary accepts complete already-validated
 repository-workspace manifest facts without deriving an execution working
@@ -1941,6 +1947,11 @@ persistence transaction implements that staging port.
 **Committed unimplemented functionality.** Dispatch of the provisioning
 authorization, receipt consumption into replacement terminalization, and a
 runner filesystem producer for the initial ready frame remain absent.
+
+**Committed unimplemented functionality.** The repository provisioning, clone,
+and cleanup contract in the following paragraphs remains absent. No present
+runner surface provides it; future implementations must remain compatible with
+these constraints.
 
 `WorkspaceRequirement::RepositoryWorktree` is satisfiable only when the selected
 validated registration advertises `WorkspaceCapability::WorktreePerSession` and
@@ -1995,34 +2006,34 @@ proceeds exactly as for a populated repository.
 
 A placement that requires no worktree and names no working directory still needs
 one writable root, and that private root is a managed workspace rather than
-scratch space the runner forgets. It lives at the sibling path
-`sessions/<canonical-session-uuid>/<placement-revision>/work`, and the runner
-creates it on first use with the same fsynced non-secret manifest in the
-non-mounted placement parent, recording no repository key, clone-URL digest, or
-credential-profile name. Because the path is a function of durable placement
-facts alone, a restarted runner recomputes it, authenticates it against that
-manifest, and re-adopts the same directory rather than creating a second one,
-and startup reconciliation treats it exactly as it treats a provisioned
-worktree: a private root whose placement is retired is reported as a typed
-retired-but-present leak, and no cleanup authority resumes for it. Why: a
-restricted session's writable root is where its file and shell tools put durable
-work, so a root the runner could not re-identify after a restart would discard
-that work silently while the session kept running.
+scratch space the runner forgets. The workspace store publishes it at
+`sessions/<canonical-session-uuid>/<placement-revision>/work` from an explicit
+request, with the same fsynced non-secret manifest in the non-mounted placement
+parent and no repository key, clone-URL digest, or credential-profile name.
+Because the path is a function of durable placement facts alone, a restarted
+store recomputes it, authenticates it against that manifest, and re-adopts the
+same directory rather than creating a second one. Why: a restricted session's
+writable root is where its file and shell tools put durable work, so a root the
+runner could not re-identify after a restart would discard that work silently
+while the session kept running.
 
-The workspace-manifest id is one daemon-correlated canonical UUID stable across
-all lifecycle changes. It is distinct from the `workspace-manifest` content
-digest: the digest authenticates the exact lifecycle-specific manifest bytes,
-while ready, recorded, and release frames correlate the stable id. The manifest
-lifecycle is the closed vocabulary `staging`, `ready`, `active`, or `releasing`.
-Creation writes `staging`; the atomic publication rename writes `ready`; durable
-`workspace_recorded` admission writes `active`; and an accepted release writes
-`releasing` before the trash rename. Transitions only advance in that order,
-equal replay retains the same value, and deletion is represented by absence
-rather than a fifth lifecycle token. The manifest records that lifecycle, its
-stable id, session, placement revision, runner, optional repository key, the
-optional lowercase SHA-256 digest of the configuration-validated canonical clone
-URL, optional credential-profile name, sandbox profile, relative workspace path,
-and the bounded commit or branch facts needed for recovery; the repository-bound
+**Committed unimplemented functionality.** Startup reconciliation will treat a
+private root whose placement is retired like a provisioned worktree: it reports
+a typed retired-but-present leak, and no cleanup authority resumes for it. No
+present startup scanner supplies that behavior.
+
+The workspace-manifest id is one canonical UUID returned for daemon correlation
+and stable across all lifecycle changes. It is distinct from the
+`workspace-manifest` content digest: the digest authenticates the exact
+lifecycle-specific manifest bytes, while ready, recorded, and release frames
+correlate the stable id. The manifest lifecycle is the closed vocabulary
+`staging`, `ready`, `active`, or `releasing`. Private-root creation writes
+`staging`; the atomic publication rename publishes `ready`; and equal replay
+retains the same value. The manifest records that lifecycle, its stable id,
+session, placement revision, runner, optional repository key, the optional
+lowercase SHA-256 digest of the configuration-validated canonical clone URL,
+optional credential-profile name, sandbox profile, relative workspace path, and
+the bounded commit or branch facts needed for recovery; the repository-bound
 members are absent together for a private root. The canonical URL is
 credential-free, but its digest is sufficient identity and avoids repeating the
 operator configuration value. Recovery resolves the repository key again and
@@ -2032,6 +2043,17 @@ clone. The writable repository `.git/config` is not authority. The manifest
 records no credential path or value. The same runner state root durably spools
 one unacknowledged terminal result, one unacknowledged workspace release, and
 one unacknowledged operation failure per the serial wire protocol.
+
+**Committed unimplemented functionality.** Durable `workspace_recorded`
+admission will advance the protected manifest to `active`; an accepted release
+will advance it to `releasing` before the trash rename; and deletion will be
+represented by absence rather than a fifth lifecycle token. No present
+filesystem adapter supplies those later transitions.
+
+**Committed unimplemented functionality.** The guarded Git invocation contract
+in the following paragraphs remains absent. No present runner surface provides
+repository Git execution; future implementations must preserve these
+constraints.
 
 Every Git invocation, in provisioning and in every Git tool alike, runs with its
 effective configuration forced by the runner rather than validated after the
@@ -2139,6 +2161,11 @@ reach is the structural answer that would retire the class instead of
 enumerating it, and it is recorded as a design question under
 [tool safety](../open-questions.md#tool-safety) rather than settled here.
 
+**Committed unimplemented functionality.** The release, deletion, and startup
+reconciliation contract in the remaining paragraphs of this section remains
+absent. No present runner filesystem adapter or startup scanner provides it;
+future implementations must preserve these constraints.
+
 A daemon release is accepted only for an exact retired placement revision —
 either superseded by replacement or terminal `RunnerAbandoned` — after no live
 lease or unacknowledged result remains. The session itself need not be terminal
@@ -2150,7 +2177,7 @@ workspace manifest. The candidate binds the session, exact retired placement
 revision, cleanup-owning runner, and protected manifest identity. It is not
 cleanup authority: the consuming durable transaction must still authenticate the
 exact retired predecessor against the current placement head, the empty lease
-and result boundary, and the live owner connection. A plain exact directory has
+and result boundary, and the live cleanup-authority connection. A plain exact directory has
 no manifest and produces no candidate.
 
 A release exists only for a workspace the runner itself created: a provisioned
