@@ -151,6 +151,8 @@ const WORKSPACE_PROVISIONING_AUTHORIZATION: u128 = 0x9380;
 const REPLAY_WORKSPACE_PROVISIONING_AUTHORIZATION: u128 = 0x9382;
 const PINNED_REPLACEMENT_SEMANTIC_ENTRY: u128 = 0x9383;
 const PINNED_REPLACEMENT_FRONTIER: u128 = 0x9384;
+const REPLAY_PINNED_REPLACEMENT_SEMANTIC_ENTRY: u128 = 0x9387;
+const REPLAY_PINNED_REPLACEMENT_FRONTIER: u128 = 0x9388;
 const ACTIVE_REPLACEMENT_TURN: u128 = 0x9385;
 const REGISTER_WORKSPACE_COMMAND: u128 = 0x9362;
 const REGISTERED_WORKSPACE: u128 = 0x9363;
@@ -178,6 +180,7 @@ const PRE_REGISTRATION_RECONCILIATION_MIGRATION: i64 = 202608110006;
 const PRE_PENDING_SUCCESSOR_MIGRATION: i64 = 202608110007;
 const PRE_PENDING_PROMOTION_MIGRATION: i64 = 202608110011;
 const PRE_TOOL_REQUEST_LOCUS_MIGRATION: i64 = 202608110018;
+const PRE_REPLACEMENT_BOUNDARY_IDENTITY_MIGRATION: i64 = 202608110022;
 const LEGACY_PLACEMENT_REFUSAL: &str =
     "runner wire contract requires empty legacy placement history";
 const LEGACY_PLACEMENT_LOSS_REFUSAL: &str =
@@ -2287,6 +2290,49 @@ struct WorkspaceFreeReplacementTerminalFixture {
     connection: signalbox_persistence::runner_protocol::RunnerConnectionSnapshot,
 }
 
+async fn insert_pre_boundary_identity_workspace_free_stage(
+    pool: &PgPool,
+    command: ReplaceLostRunner,
+    successor: RunnerId,
+    lost_event_ordinal: Decimal,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'replace_lost_runner', 1, transaction_timestamp())",
+    )
+    .bind(command.command().into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO replace_lost_runner_command
+            (command_id, session_id, expected_placement_revision,
+             target_kind, target_runner_id)
+         VALUES ($1, $2, $3, 'runner', $4)",
+    )
+    .bind(command.command().into_uuid())
+    .bind(command.session().into_uuid())
+    .bind(Decimal::from(command.expected_placement_revision().get()))
+    .bind(successor.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_workspace_free_replacement_stage
+            (command_id, session_id, lost_placement_event_ordinal,
+             lost_placement_revision, requested_working_directory)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(command.command().into_uuid())
+    .bind(command.session().into_uuid())
+    .bind(lost_event_ordinal)
+    .bind(Decimal::from(command.expected_placement_revision().get()))
+    .bind(exact_runner_directory().as_str())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await
+}
+
 async fn workspace_free_replacement_terminal_fixture(
     pool: &PgPool,
 ) -> Result<WorkspaceFreeReplacementTerminalFixture, Box<dyn Error>> {
@@ -2313,7 +2359,7 @@ async fn workspace_free_replacement_terminal_fixture(
         ContextFrontierId::from_uuid(uuid(PINNED_REPLACEMENT_FRONTIER)),
     );
     let staged = store
-        .stage_workspace_free_pinned_replacement(command)
+        .stage_workspace_free_pinned_replacement(command, identities)
         .await?;
     assert_eq!(
         staged,
@@ -2321,6 +2367,72 @@ async fn workspace_free_replacement_terminal_fixture(
             command: command.command()
         }
     );
+    let replacement = lost
+        .replace_lost_runner(
+            replacement_request,
+            registration.registration(),
+            exact_runner_directory(),
+            None,
+            None,
+        )
+        .expect("the exact connected successor can replace the lost runner");
+    store
+        .store_runner_replacement_projection_for_test(
+            &replacement.placement,
+            &registration,
+            replacement.grant.as_ref(),
+        )
+        .await?;
+    Ok(WorkspaceFreeReplacementTerminalFixture {
+        store,
+        command,
+        identities,
+        replacement: replacement.placement,
+        registration,
+        connection,
+    })
+}
+
+async fn workspace_free_replacement_terminal_fixture_before_boundary_migration(
+    pool: &PgPool,
+) -> Result<WorkspaceFreeReplacementTerminalFixture, Box<dyn Error>> {
+    let (store, _, _, pin) = stored_exact_directory_pin_fixture(pool).await?;
+    let lost = pin
+        .placement
+        .mark_runner_lost()
+        .expect("the exact-directory pinned runner may be marked lost");
+    let session = lost.session();
+    let replacement_request = lost.request().clone();
+    append_runner_lost_projection(pool, session).await?;
+    let successor = replacement_enrollment();
+    store.insert_enrollment(&successor).await?;
+    let registration = store.register(&successor, advertisement()).await?;
+    let connection = store.open_connection(successor.enrollment()).await?;
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(WORKSPACE_REPLACEMENT_COMMAND)),
+        session,
+        RunnerGeneration::one(),
+        RunnerReplacementTarget::Runner(successor.runner()),
+    );
+    let identities = PinnedRunnerReplacementIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(uuid(PINNED_REPLACEMENT_SEMANTIC_ENTRY)),
+        ContextFrontierId::from_uuid(uuid(PINNED_REPLACEMENT_FRONTIER)),
+    );
+    let lost_event_ordinal: Decimal = sqlx::query_scalar(
+        "SELECT event_ordinal
+           FROM runner_current_session_placement
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    insert_pre_boundary_identity_workspace_free_stage(
+        pool,
+        command,
+        successor.runner(),
+        lost_event_ordinal,
+    )
+    .await?;
     let replacement = lost
         .replace_lost_runner(
             replacement_request,
@@ -23052,6 +23164,134 @@ async fn s32_inv044_workspace_free_pinned_replacement_provisioning_is_not_applic
     Ok(())
 }
 
+/// S32 / INV-044: the boundary-identity migration gives an already durable
+/// pending stage one immutable, distinct identity pair that typed replay reads.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_replacement_boundary_identity_migration_backfills_pending_stage()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = unmigrated_postgres().await?;
+    MIGRATOR
+        .run_to(PRE_REPLACEMENT_BOUNDARY_IDENTITY_MIGRATION, &pool)
+        .await?;
+    let (store, _, _, pin) = stored_exact_directory_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    append_runner_lost_projection(&pool, session).await?;
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(WORKSPACE_REPLACEMENT_COMMAND)),
+        session,
+        RunnerGeneration::one(),
+        RunnerReplacementTarget::Runner(replacement_enrollment().runner()),
+    );
+    let lost_event_ordinal: Decimal = sqlx::query_scalar(
+        "SELECT event_ordinal
+           FROM runner_current_session_placement
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    insert_pre_boundary_identity_workspace_free_stage(
+        &pool,
+        command,
+        replacement_enrollment().runner(),
+        lost_event_ordinal,
+    )
+    .await?;
+    migrate(&pool).await?;
+    let retained: (Uuid, Uuid) = sqlx::query_as(
+        "SELECT boundary_entry_id, boundary_frontier_id
+           FROM runner_workspace_free_replacement_stage
+          WHERE command_id = $1",
+    )
+    .bind(command.command().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let replay = store
+        .stage_workspace_free_pinned_replacement(
+            command,
+            PinnedRunnerReplacementIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(
+                    REPLAY_PINNED_REPLACEMENT_SEMANTIC_ENTRY,
+                )),
+                ContextFrontierId::from_uuid(uuid(REPLAY_PINNED_REPLACEMENT_FRONTIER)),
+            ),
+        )
+        .await?;
+
+    assert!(!retained.0.is_nil());
+    assert!(!retained.1.is_nil());
+    assert_ne!(retained.0, retained.1);
+    assert_eq!(
+        replay,
+        PinnedRunnerReplacementOutcome::Staged {
+            command: command.command()
+        }
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: migration preserves the exact semantic entry and frontier
+/// already committed by an applied workspace-free replacement.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_replacement_boundary_identity_migration_preserves_applied_boundary()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = unmigrated_postgres().await?;
+    MIGRATOR
+        .run_to(PRE_REPLACEMENT_BOUNDARY_IDENTITY_MIGRATION, &pool)
+        .await?;
+    let mut fixture =
+        workspace_free_replacement_terminal_fixture_before_boundary_migration(&pool).await?;
+    insert_workspace_free_replacement_terminal_projection(
+        &pool,
+        &fixture,
+        &exact_runner_directory(),
+    )
+    .await?;
+    migrate(&pool).await?;
+    let retained: (Uuid, Uuid) = sqlx::query_as(
+        "SELECT boundary_entry_id, boundary_frontier_id
+           FROM runner_workspace_free_replacement_stage
+          WHERE command_id = $1",
+    )
+    .bind(fixture.command.command().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let replay = fixture
+        .store
+        .complete(
+            fixture.command,
+            PinnedRunnerReplacementIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(
+                    REPLAY_PINNED_REPLACEMENT_SEMANTIC_ENTRY,
+                )),
+                ContextFrontierId::from_uuid(uuid(REPLAY_PINNED_REPLACEMENT_FRONTIER)),
+            ),
+        )
+        .await?;
+    let expected = PinnedRunnerReplacementOutcome::Recorded(
+        PinnedRunnerReplacementResult::Applied(ReplacedPinnedRunner::new(
+            fixture.replacement.session(),
+            enrollment().runner(),
+            replacement_enrollment().runner(),
+            fixture.replacement.revision(),
+            exact_runner_directory(),
+            RunnerSandboxProfile::WorkspaceRestricted,
+        )),
+    );
+
+    assert_eq!(retained.0, fixture.identities.semantic_entry().into_uuid());
+    assert_eq!(
+        retained.1,
+        fixture.identities.context_frontier().into_uuid()
+    );
+    assert_eq!(replay, expected);
+    drop(pool);
+    Ok(())
+}
+
 /// S32 / INV-012 / INV-044: the terminal port claims an exact-directory,
 /// workspace-free pinned replacement without appending terminal facts, and an
 /// equal replay observes the same durable stage.
@@ -23073,19 +23313,30 @@ async fn s32_inv012_inv044_workspace_free_pinned_replacement_stage_round_trips()
         RunnerGeneration::one(),
         RunnerReplacementTarget::Runner(successor.runner()),
     );
+    let identities = PinnedRunnerReplacementIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(uuid(PINNED_REPLACEMENT_SEMANTIC_ENTRY)),
+        ContextFrontierId::from_uuid(uuid(PINNED_REPLACEMENT_FRONTIER)),
+    );
+    let replay_identities = PinnedRunnerReplacementIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(uuid(REPLAY_PINNED_REPLACEMENT_SEMANTIC_ENTRY)),
+        ContextFrontierId::from_uuid(uuid(REPLAY_PINNED_REPLACEMENT_FRONTIER)),
+    );
     let first = store
-        .stage_workspace_free_pinned_replacement(command)
+        .stage_workspace_free_pinned_replacement(command, identities)
         .await?;
     let replay = store
-        .stage_workspace_free_pinned_replacement(command)
+        .stage_workspace_free_pinned_replacement(command, replay_identities)
         .await?;
     let conflict = store
-        .stage_workspace_free_pinned_replacement(ReplaceLostRunner::new(
-            command.command(),
-            session,
-            RunnerGeneration::one(),
-            RunnerReplacementTarget::Runner(enrollment().runner()),
-        ))
+        .stage_workspace_free_pinned_replacement(
+            ReplaceLostRunner::new(
+                command.command(),
+                session,
+                RunnerGeneration::one(),
+                RunnerReplacementTarget::Runner(enrollment().runner()),
+            ),
+            replay_identities,
+        )
         .await?;
     let repository_port_replay = store
         .stage_runner_replacement_provisioning(
@@ -23122,6 +23373,14 @@ async fn s32_inv012_inv044_workspace_free_pinned_replacement_stage_round_trips()
     .bind(command.command().into_uuid())
     .fetch_one(&pool)
     .await?;
+    let stored_boundary: (Uuid, Uuid) = sqlx::query_as(
+        "SELECT boundary_entry_id, boundary_frontier_id
+           FROM runner_workspace_free_replacement_stage
+          WHERE command_id = $1",
+    )
+    .bind(command.command().into_uuid())
+    .fetch_one(&pool)
+    .await?;
 
     assert_eq!(
         first,
@@ -23144,6 +23403,8 @@ async fn s32_inv012_inv044_workspace_free_pinned_replacement_stage_round_trips()
     assert_eq!(result_count, 0);
     assert_eq!(provisioning_stage_count, 0);
     assert_eq!(workspace_free_stage_count, 1);
+    assert_eq!(stored_boundary.0, identities.semantic_entry().into_uuid());
+    assert_eq!(stored_boundary.1, identities.context_frontier().into_uuid());
     drop(pool);
     Ok(())
 }
@@ -23187,6 +23448,10 @@ async fn s32_inv012_inv032_inv044_frontier_root_workspace_free_replacement_commi
         SemanticTranscriptEntryId::from_uuid(uuid(PINNED_REPLACEMENT_SEMANTIC_ENTRY)),
         ContextFrontierId::from_uuid(uuid(PINNED_REPLACEMENT_FRONTIER)),
     );
+    let replay_identities = PinnedRunnerReplacementIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(uuid(REPLAY_PINNED_REPLACEMENT_SEMANTIC_ENTRY)),
+        ContextFrontierId::from_uuid(uuid(REPLAY_PINNED_REPLACEMENT_FRONTIER)),
+    );
     let expected = PinnedRunnerReplacementOutcome::Recorded(
         PinnedRunnerReplacementResult::Applied(ReplacedPinnedRunner::new(
             session,
@@ -23198,14 +23463,14 @@ async fn s32_inv012_inv032_inv044_frontier_root_workspace_free_replacement_commi
         )),
     );
     let staged = store
-        .stage_workspace_free_pinned_replacement(command)
+        .stage_workspace_free_pinned_replacement(command, identities)
         .await?;
     let mut first_store = store.clone();
     let mut second_store = store;
     let (first, replay) = tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, async {
         tokio::join!(
-            first_store.complete(command, identities),
-            second_store.complete(command, identities),
+            first_store.complete(command, replay_identities),
+            second_store.complete(command, replay_identities),
         )
     })
     .await
@@ -23257,6 +23522,17 @@ async fn s32_inv012_inv032_inv044_frontier_root_workspace_free_replacement_commi
     .bind(command.command().into_uuid())
     .fetch_one(&pool)
     .await?;
+    let stored_boundary: (Uuid, Uuid) = sqlx::query_as(
+        "SELECT semantic_entry_id, context_frontier_id
+           FROM session_runner_placement_frontier
+          WHERE session_id = $1 AND placement_revision = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(Decimal::from(
+        expected_replacement.placement.revision().get(),
+    ))
+    .fetch_one(&pool)
+    .await?;
 
     assert_eq!(
         staged,
@@ -23272,6 +23548,8 @@ async fn s32_inv012_inv032_inv044_frontier_root_workspace_free_replacement_commi
     assert_eq!(pointer_count, 1);
     assert_eq!(outbox_count, 1);
     assert_eq!(result_count, 1);
+    assert_eq!(stored_boundary.0, identities.semantic_entry().into_uuid());
+    assert_eq!(stored_boundary.1, identities.context_frontier().into_uuid());
     drop(pool);
     Ok(())
 }
@@ -23461,6 +23739,52 @@ async fn s32_inv044_workspace_free_pinned_replacement_result_readback_rejects_co
     Ok(())
 }
 
+/// S32 / INV-044: typed result replay rejects a stage whose reserved entry no
+/// longer names the exact committed relocation boundary.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_free_replacement_readback_rejects_boundary_identity_corruption()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let mut fixture = workspace_free_replacement_terminal_fixture(&pool).await?;
+    insert_workspace_free_replacement_terminal_projection(
+        &pool,
+        &fixture,
+        &exact_runner_directory(),
+    )
+    .await?;
+    sqlx::query(
+        "ALTER TABLE runner_workspace_free_replacement_stage
+         DISABLE TRIGGER runner_workspace_free_replacement_stage_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_workspace_free_replacement_stage
+            SET boundary_entry_id = $2
+          WHERE command_id = $1",
+    )
+    .bind(fixture.command.command().into_uuid())
+    .bind(uuid(REPLAY_PINNED_REPLACEMENT_SEMANTIC_ENTRY))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE runner_workspace_free_replacement_stage
+         ENABLE TRIGGER runner_workspace_free_replacement_stage_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    let corrupted = fixture
+        .store
+        .complete(fixture.command, fixture.identities)
+        .await
+        .expect_err("typed readback rejects a boundary detached from its stage");
+
+    assert_store_corruption(corrupted, RunnerProtocolCorruption::CrossWiredReference);
+    drop(pool);
+    Ok(())
+}
+
 /// S32 / INV-044: a runner-default placement remains unclaimed because no
 /// authenticated successor directory exists at the workspace-free boundary.
 #[tokio::test]
@@ -23477,8 +23801,12 @@ async fn s32_inv044_runner_default_pinned_replacement_stage_is_not_applicable()
         RunnerGeneration::one(),
         RunnerReplacementTarget::Runner(replacement_enrollment().runner()),
     );
+    let identities = PinnedRunnerReplacementIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(uuid(PINNED_REPLACEMENT_SEMANTIC_ENTRY)),
+        ContextFrontierId::from_uuid(uuid(PINNED_REPLACEMENT_FRONTIER)),
+    );
     let outcome = store
-        .stage_workspace_free_pinned_replacement(command)
+        .stage_workspace_free_pinned_replacement(command, identities)
         .await?;
     let claimed: bool = sqlx::query_scalar(
         "SELECT EXISTS (
@@ -23537,12 +23865,15 @@ async fn s32_inv044_workspace_free_replacement_stage_rejects_cross_wired_directo
     sqlx::query(
         "INSERT INTO runner_workspace_free_replacement_stage
             (command_id, session_id, lost_placement_event_ordinal,
-             lost_placement_revision, requested_working_directory)
-         VALUES ($1, $2, $3, 1, '/workspace/cross-wired')",
+             lost_placement_revision, requested_working_directory,
+             boundary_entry_id, boundary_frontier_id)
+         VALUES ($1, $2, $3, 1, '/workspace/cross-wired', $4, $5)",
     )
     .bind(command.into_uuid())
     .bind(session.into_uuid())
     .bind(lost_event_ordinal)
+    .bind(uuid(PINNED_REPLACEMENT_SEMANTIC_ENTRY))
+    .bind(uuid(PINNED_REPLACEMENT_FRONTIER))
     .execute(&mut *transaction)
     .await?;
     let rejected = transaction
@@ -23572,12 +23903,16 @@ async fn s32_inv012_equal_workspace_free_replacement_stages_serialize_with_timeo
         RunnerGeneration::one(),
         RunnerReplacementTarget::Runner(replacement_enrollment().runner()),
     );
+    let identities = PinnedRunnerReplacementIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(uuid(PINNED_REPLACEMENT_SEMANTIC_ENTRY)),
+        ContextFrontierId::from_uuid(uuid(PINNED_REPLACEMENT_FRONTIER)),
+    );
     let first_store = store.clone();
     let second_store = store;
     let (first, second) = tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, async {
         tokio::join!(
-            first_store.stage_workspace_free_pinned_replacement(command),
-            second_store.stage_workspace_free_pinned_replacement(command),
+            first_store.stage_workspace_free_pinned_replacement(command, identities),
+            second_store.stage_workspace_free_pinned_replacement(command, identities),
         )
     })
     .await

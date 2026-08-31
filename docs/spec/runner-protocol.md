@@ -113,17 +113,21 @@ coordination boundary that supplies one fresh authorization identity to the
 atomic staging transaction is verified against this PR
 (`agent/runner-replacement-provisioning-application`). The frontier-root
 workspace-free pinned-replacement transaction is verified against this PR
-(`agent/runner-pinned-replacement-transaction`).
+(`agent/runner-pinned-replacement-transaction`). Its crash-retained
+placement-boundary identities are verified against this PR
+(`agent/runner-replacement-boundary-identity`).
 
 The persistence adapter consumes the checked same-runner transition only while
 staging a pinned repository workspace. It completes the narrower workspace-free,
 credential-free, exact-directory replacement for a direct distinct active runner
 only when the session has no active turn and no earlier nonempty semantic
-frontier. **Committed unimplemented functionality.** No current adapter
-completes the repository-backed, pending-enrollment, same-runner, active-turn,
-or prefix-extending pinned-replacement cases or handles the replacement process
-request. Future adapters must preserve the closed constraints below for those
-slices.
+frontier. The workspace-free stage retains the generated placement-entry and
+frontier identities, so retry or restart cannot choose a different transcript
+boundary before terminal completion. **Committed unimplemented functionality.**
+No current adapter completes the repository-backed, pending-enrollment,
+same-runner, active-turn, or prefix-extending pinned-replacement cases or
+handles the replacement process request. Future adapters must preserve the
+closed constraints below for those slices.
 
 Pending enrollment admission was verified against the parent slice
 (`agent/runner-pending-successor-promotion`); its deployment-scoped activation

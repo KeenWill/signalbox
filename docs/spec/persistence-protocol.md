@@ -37,7 +37,9 @@ and execution-placement reconstitution facts are verified against this PR
 terminal-result representation and typed readback are verified against this PR
 (`agent/runner-pinned-replacement-result-persistence`). Frontier-root
 workspace-free pinned-replacement completion is verified against this PR
-(`agent/runner-pinned-replacement-transaction`). Existing-pin attempt-and-offer
+(`agent/runner-pinned-replacement-transaction`). The immutable replacement
+boundary identity pair retained by that stage is verified against this PR
+(`agent/runner-replacement-boundary-identity`). Existing-pin attempt-and-offer
 atomicity is verified against this PR
 (`agent/runner-pinned-dispatch-transaction`). The pinned-dispatch adapter's
 exact runner/registration lookup and returned enrollment routing identity are
@@ -667,11 +669,17 @@ Representation rules, all enforced in the schema:
   advertisement, then atomically installs the successor placement,
   reference-only relocation entry, one-entry root frontier and placement
   pointer, `Replaced` outbox event, and applied result. Equal replay returns the
-  retained typed result. No transaction remains open across runner I/O.
-  **Committed unimplemented functionality.** An active turn or earlier nonempty
-  frontier retains the stage for the observation-aware prefix-extension
-  transaction. Pending-enrollment and same-runner workspace-free targets also
-  remain staged for later checked completion.
+  retained typed result. Migration `202608110023` adds the fresh semantic-entry
+  and context-frontier identities to the immutable stage. Pending stages are
+  backfilled with a distinct pair, already-applied stages retain their exact
+  committed boundary, later terminal authority requires the stage and boundary
+  pointer to name the same pair, and typed replay rechecks that relationship. A
+  caller's later retry identities cannot replace the retained pair. No
+  transaction remains open across runner I/O. **Committed unimplemented
+  functionality.** An active turn or earlier nonempty frontier retains the stage
+  for the observation-aware prefix-extension transaction. Pending-enrollment and
+  same-runner workspace-free targets also remain staged for later checked
+  completion.
 - Migration `202608110018` separates the registration revision retained by an
   immutable pinned placement from the then-current registration revision that
   authorizes each lease offer. Existing lease generations preserve their
