@@ -11,7 +11,7 @@ use std::{error::Error, num::NonZeroU64, time::Duration};
 use rust_decimal::Decimal;
 use signalbox_application::{
     AbandonLostRunnerOutcome, ImportedConversationConverter, ImportedConversationStore,
-    PromotePendingRunnerOutcome,
+    PromotePendingRunnerOutcome, ReplaceLostRunnerBeforePinOutcome,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
@@ -25,14 +25,16 @@ use signalbox_domain::{
     ImportedConversationId, ImportedSessionRelationship, ImportedTranscriptEntryId, ModelCallId,
     ModelSelectionOverride, ModelSelectionRequest, NormalizedToolArguments,
     PerInputConfigurationChoices, PromotePendingRunner, PromotePendingRunnerRejection,
-    PromotePendingRunnerResult, PromotedRunnerEnrollment, ProvisionedWorkspace,
-    ResolvedContextFrontierReconstitutionInput, RunnerAdvertisement, RunnerAuthenticationId,
-    RunnerCapabilityClass, RunnerCatalog, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId,
-    RunnerEnrollmentRequestId, RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation,
-    RunnerLeaseId, RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput,
-    RunnerLeaseRetryPreparation, RunnerLostBeforePin, RunnerPlacementReconstitutionHistory,
-    RunnerPlacementRecoveryState, RunnerRepositoryEntry, RunnerSandboxProfile, RunnerSelector,
-    RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
+    PromotePendingRunnerResult, PromotedRunnerEnrollment, ProvisionedWorkspace, ReplaceLostRunner,
+    ReplaceLostRunnerBeforePinRejection, ReplaceLostRunnerBeforePinResult,
+    ReplacedLostRunnerBeforePin, ResolvedContextFrontierReconstitutionInput, RunnerAdvertisement,
+    RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog, RunnerDomainError,
+    RunnerEnrollment, RunnerEnrollmentId, RunnerEnrollmentRequestId, RunnerGeneration, RunnerId,
+    RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseOfferRequest,
+    RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerLostBeforePin,
+    RunnerPlacementReconstitutionHistory, RunnerPlacementRecoveryState, RunnerReplacementTarget,
+    RunnerReplacementTargetUnavailableReason, RunnerRepositoryEntry, RunnerSandboxProfile,
+    RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
     RunnerToolModelDefinition, RunnerToolPermissionOverride, RunnerToolPermissionOverrides,
     RunnerWorkingDirectory, SemanticTranscriptEntryId, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
@@ -114,6 +116,15 @@ const FORGED_MISMATCH_PROMOTION_COMMAND: u128 = 0x936c;
 const FORGED_DISCONNECTED_PROMOTION_COMMAND: u128 = 0x936d;
 const FORGED_ACTIVE_PROMOTION_COMMAND: u128 = 0x936e;
 const ABANDON_LOST_RUNNER_COMMAND: u128 = 0x936f;
+const REPLACE_LOST_RUNNER_COMMAND: u128 = 0x9370;
+const MISSING_SESSION_REPLACEMENT_COMMAND: u128 = 0x9371;
+const MISSING_PLACEMENT_REPLACEMENT_COMMAND: u128 = 0x9372;
+const STALE_REPLACEMENT_COMMAND: u128 = 0x9373;
+const NON_LOST_REPLACEMENT_COMMAND: u128 = 0x9374;
+const SAME_RUNNER_REPLACEMENT_COMMAND: u128 = 0x9375;
+const NONCURRENT_REPLACEMENT_COMMAND: u128 = 0x9376;
+const DISCONNECTED_REPLACEMENT_COMMAND: u128 = 0x9377;
+const UNADVERTISED_REPLACEMENT_COMMAND: u128 = 0x9378;
 const REGISTER_WORKSPACE_COMMAND: u128 = 0x9362;
 const REGISTERED_WORKSPACE: u128 = 0x9363;
 const MINT_GIT_REMOTE_COMMAND: u128 = 0x9364;
@@ -931,6 +942,21 @@ fn exact_runner_request_with_directory(
         sandbox: RunnerSandboxProfile::WorkspaceRestricted,
         permission_overrides: no_permission_overrides(),
     }
+}
+
+async fn stored_lost_pre_pin_fixture(
+    pool: &PgPool,
+) -> Result<(RunnerProtocolStore, SessionRunnerPlacement), Box<dyn Error>> {
+    insert_session(pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let initial_runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(initial_runner),
+    );
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(pool, placement.session()).await?;
+    Ok((store, placement))
 }
 
 fn catalog() -> RunnerCatalog {
@@ -14806,6 +14832,360 @@ async fn s32_inv044_generic_store_rejects_pre_pin_replacement_without_command_au
         .expect_err("the generic writer cannot invent replacement-command authority");
 
     assert_store_domain_error(rejected, RunnerDomainError::InvalidState);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-001 / INV-002 / INV-044: the durable command atomically installs and
+/// reconstitutes one unpinned successor without fabricating pinned authority.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv001_inv002_inv044_pre_pin_replacement_applies_and_replays()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let initial_runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(initial_runner),
+    );
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(&pool, placement.session()).await?;
+    let successor = replacement_enrollment();
+    store.insert_enrollment(&successor).await?;
+    let successor_registration = store.register(&successor, advertisement()).await?;
+    let successor_connection = store.open_connection(successor.enrollment()).await?;
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(REPLACE_LOST_RUNNER_COMMAND)),
+        placement.session(),
+        placement.revision(),
+        RunnerReplacementTarget::Runner(successor.runner()),
+    );
+    let successor_revision = RunnerGeneration::try_from_u64(2).expect("two is positive");
+    let expected = ReplaceLostRunnerBeforePinOutcome::Recorded(
+        ReplaceLostRunnerBeforePinResult::Applied(ReplacedLostRunnerBeforePin::new(
+            placement.session(),
+            initial_runner,
+            successor.runner(),
+            successor_revision,
+            RunnerSandboxProfile::WorkspaceRestricted,
+        )),
+    );
+
+    let applied = store.replace_lost_runner_before_pin(command).await?;
+    let replayed = store.replace_lost_runner_before_pin(command).await?;
+    let loaded = store
+        .load_placement(placement.session())
+        .await?
+        .expect("the successor placement reads back");
+    let result_authority: (Uuid, Decimal, Decimal, Decimal) = sqlx::query_as(
+        "SELECT target_enrollment_id, target_registration_revision,
+                target_connection_epoch, target_connection_event_ordinal
+           FROM replace_lost_runner_result
+          WHERE command_id = $1",
+    )
+    .bind(command.command().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(applied, expected);
+    assert_eq!(replayed, expected);
+    assert_eq!(loaded.placement().revision(), successor_revision);
+    assert_eq!(
+        loaded.placement().state(),
+        &SessionRunnerPlacementState::Unpinned
+    );
+    assert_eq!(
+        loaded.placement().request().selector,
+        RunnerSelector::Identity(successor.runner())
+    );
+    assert_eq!(loaded.registration(), None);
+    assert_eq!(loaded.grant(), None);
+    assert_eq!(result_authority.0, successor.enrollment().into_uuid());
+    assert_eq!(
+        result_authority.1,
+        Decimal::from(successor_registration.revision().get())
+    );
+    assert_eq!(
+        result_authority.2,
+        Decimal::from(successor_connection.epoch().get())
+    );
+    assert_eq!(
+        result_authority.3,
+        Decimal::from(successor_connection.event_ordinal())
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-001: a missing session is an immutable replacement result on equal replay.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv001_pre_pin_replacement_round_trips_session_not_found() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(MISSING_SESSION_REPLACEMENT_COMMAND)),
+        session,
+        RunnerGeneration::one(),
+        RunnerReplacementTarget::Runner(RunnerId::from_uuid(uuid(REPLACEMENT_RUNNER))),
+    );
+    let expected =
+        ReplaceLostRunnerBeforePinOutcome::Recorded(ReplaceLostRunnerBeforePinResult::Rejected(
+            ReplaceLostRunnerBeforePinRejection::SessionNotFound { session },
+        ));
+
+    let recorded = store.replace_lost_runner_before_pin(command).await?;
+    let replayed = store.replace_lost_runner_before_pin(command).await?;
+
+    assert_eq!(recorded, expected);
+    assert_eq!(replayed, expected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-001: a session without runner placement is an immutable replacement result.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv001_pre_pin_replacement_round_trips_placement_not_found()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(MISSING_PLACEMENT_REPLACEMENT_COMMAND)),
+        session,
+        RunnerGeneration::one(),
+        RunnerReplacementTarget::Runner(RunnerId::from_uuid(uuid(REPLACEMENT_RUNNER))),
+    );
+    let expected =
+        ReplaceLostRunnerBeforePinOutcome::Recorded(ReplaceLostRunnerBeforePinResult::Rejected(
+            ReplaceLostRunnerBeforePinRejection::RunnerPlacementNotFound { session },
+        ));
+
+    let recorded = store.replace_lost_runner_before_pin(command).await?;
+    let replayed = store.replace_lost_runner_before_pin(command).await?;
+
+    assert_eq!(recorded, expected);
+    assert_eq!(replayed, expected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-001 / INV-044: a stale expected revision records the exact current revision.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv001_inv044_pre_pin_replacement_round_trips_revision_mismatch()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, placement) = stored_lost_pre_pin_fixture(&pool).await?;
+    let stale_revision = RunnerGeneration::try_from_u64(2).expect("two is positive");
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(STALE_REPLACEMENT_COMMAND)),
+        placement.session(),
+        stale_revision,
+        RunnerReplacementTarget::Runner(RunnerId::from_uuid(uuid(REPLACEMENT_RUNNER))),
+    );
+    let expected =
+        ReplaceLostRunnerBeforePinOutcome::Recorded(ReplaceLostRunnerBeforePinResult::Rejected(
+            ReplaceLostRunnerBeforePinRejection::PlacementRevisionMismatch {
+                session: placement.session(),
+                expected: stale_revision,
+                current: placement.revision(),
+            },
+        ));
+
+    let recorded = store.replace_lost_runner_before_pin(command).await?;
+    let replayed = store.replace_lost_runner_before_pin(command).await?;
+
+    assert_eq!(recorded, expected);
+    assert_eq!(replayed, expected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-001 / INV-044: an ordinary unpinned placement cannot consume replacement.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv001_inv044_pre_pin_replacement_round_trips_placement_not_lost()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(RunnerId::from_uuid(uuid(RUNNER))),
+    );
+    store.store_placement(&placement, None, None).await?;
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(NON_LOST_REPLACEMENT_COMMAND)),
+        placement.session(),
+        placement.revision(),
+        RunnerReplacementTarget::Runner(RunnerId::from_uuid(uuid(REPLACEMENT_RUNNER))),
+    );
+    let expected =
+        ReplaceLostRunnerBeforePinOutcome::Recorded(ReplaceLostRunnerBeforePinResult::Rejected(
+            ReplaceLostRunnerBeforePinRejection::PlacementNotLost {
+                session: placement.session(),
+                placement_revision: placement.revision(),
+                state: RunnerPlacementRecoveryState::Unpinned,
+            },
+        ));
+
+    let recorded = store.replace_lost_runner_before_pin(command).await?;
+    let replayed = store.replace_lost_runner_before_pin(command).await?;
+
+    assert_eq!(recorded, expected);
+    assert_eq!(replayed, expected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-001 / INV-044: connection loss before pin never admits the same runner.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv001_inv044_pre_pin_replacement_round_trips_same_runner_rejection()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, placement) = stored_lost_pre_pin_fixture(&pool).await?;
+    let initial_runner = RunnerId::from_uuid(uuid(RUNNER));
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(SAME_RUNNER_REPLACEMENT_COMMAND)),
+        placement.session(),
+        placement.revision(),
+        RunnerReplacementTarget::Runner(initial_runner),
+    );
+    let expected =
+        ReplaceLostRunnerBeforePinOutcome::Recorded(ReplaceLostRunnerBeforePinResult::Rejected(
+            ReplaceLostRunnerBeforePinRejection::ReplacementSameRunner {
+                session: placement.session(),
+                runner: initial_runner,
+            },
+        ));
+
+    let recorded = store.replace_lost_runner_before_pin(command).await?;
+    let replayed = store.replace_lost_runner_before_pin(command).await?;
+
+    assert_eq!(recorded, expected);
+    assert_eq!(replayed, expected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-001 / INV-044: a target without current active enrollment is retained as data.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv001_inv044_pre_pin_replacement_round_trips_noncurrent_target()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, placement) = stored_lost_pre_pin_fixture(&pool).await?;
+    let target = RunnerReplacementTarget::Runner(RunnerId::from_uuid(uuid(REPLACEMENT_RUNNER)));
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(NONCURRENT_REPLACEMENT_COMMAND)),
+        placement.session(),
+        placement.revision(),
+        target,
+    );
+    let expected =
+        ReplaceLostRunnerBeforePinOutcome::Recorded(ReplaceLostRunnerBeforePinResult::Rejected(
+            ReplaceLostRunnerBeforePinRejection::ReplacementTargetUnavailable {
+                session: placement.session(),
+                target,
+                reason: RunnerReplacementTargetUnavailableReason::NotCurrent,
+            },
+        ));
+
+    let recorded = store.replace_lost_runner_before_pin(command).await?;
+    let replayed = store.replace_lost_runner_before_pin(command).await?;
+
+    assert_eq!(recorded, expected);
+    assert_eq!(replayed, expected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-001 / INV-044: active registration without a live connection is retained as data.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv001_inv044_pre_pin_replacement_round_trips_disconnected_target()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, placement) = stored_lost_pre_pin_fixture(&pool).await?;
+    let successor = replacement_enrollment();
+    store.insert_enrollment(&successor).await?;
+    store.register(&successor, advertisement()).await?;
+    let target = RunnerReplacementTarget::Runner(successor.runner());
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(DISCONNECTED_REPLACEMENT_COMMAND)),
+        placement.session(),
+        placement.revision(),
+        target,
+    );
+    let expected =
+        ReplaceLostRunnerBeforePinOutcome::Recorded(ReplaceLostRunnerBeforePinResult::Rejected(
+            ReplaceLostRunnerBeforePinRejection::ReplacementTargetUnavailable {
+                session: placement.session(),
+                target,
+                reason: RunnerReplacementTargetUnavailableReason::NotConnected,
+            },
+        ));
+
+    let recorded = store.replace_lost_runner_before_pin(command).await?;
+    let replayed = store.replace_lost_runner_before_pin(command).await?;
+
+    assert_eq!(recorded, expected);
+    assert_eq!(replayed, expected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-001 / INV-044: a connected target missing a requested profile is retained as data.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv001_inv044_pre_pin_replacement_round_trips_unadvertised_target()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let initial_runner = RunnerId::from_uuid(uuid(RUNNER));
+    let request = SessionRunnerPlacementRequest {
+        credential_profile: Some(profile()),
+        ..exact_runner_request(initial_runner)
+    };
+    let placement = SessionRunnerPlacement::new(SessionId::from_uuid(uuid(SESSION)), request);
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(&pool, placement.session()).await?;
+    let successor = replacement_enrollment();
+    store.insert_enrollment(&successor).await?;
+    store
+        .register(&successor, profileless_advertisement())
+        .await?;
+    store.open_connection(successor.enrollment()).await?;
+    let target = RunnerReplacementTarget::Runner(successor.runner());
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(UNADVERTISED_REPLACEMENT_COMMAND)),
+        placement.session(),
+        placement.revision(),
+        target,
+    );
+    let expected =
+        ReplaceLostRunnerBeforePinOutcome::Recorded(ReplaceLostRunnerBeforePinResult::Rejected(
+            ReplaceLostRunnerBeforePinRejection::ReplacementTargetUnavailable {
+                session: placement.session(),
+                target,
+                reason: RunnerReplacementTargetUnavailableReason::NotAdvertised,
+            },
+        ));
+
+    let recorded = store.replace_lost_runner_before_pin(command).await?;
+    let replayed = store.replace_lost_runner_before_pin(command).await?;
+
+    assert_eq!(recorded, expected);
+    assert_eq!(replayed, expected);
     drop(pool);
     Ok(())
 }

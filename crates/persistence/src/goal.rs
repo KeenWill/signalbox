@@ -425,7 +425,8 @@ impl GoalRepository {
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
                 | CommandKind::PromotePendingRunner
-                | CommandKind::AbandonLostRunner,
+                | CommandKind::AbandonLostRunner
+                | CommandKind::ReplaceLostRunner,
             ) => Err(GoalRepositoryError::DifferentCommandKind { command_id }),
         }
     }
@@ -1052,7 +1053,8 @@ async fn existing_or_conflicting(
         | CommandKind::MintGitRemote
         | CommandKind::WithdrawGitRemote
         | CommandKind::PromotePendingRunner
-        | CommandKind::AbandonLostRunner => {
+        | CommandKind::AbandonLostRunner
+        | CommandKind::ReplaceLostRunner => {
             return Ok(GoalCommandHandlingOutcome::ConflictingReuse {
                 command_id: command.command_id(),
             });

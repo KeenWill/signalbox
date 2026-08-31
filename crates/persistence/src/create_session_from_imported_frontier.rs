@@ -390,7 +390,8 @@ impl ImportedSessionRepository {
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
                 | CommandKind::PromotePendingRunner
-                | CommandKind::AbandonLostRunner,
+                | CommandKind::AbandonLostRunner
+                | CommandKind::ReplaceLostRunner,
             ) => Err(ImportedSessionRepositoryError::DifferentCommandKind { command_id }),
         }
     }
@@ -441,7 +442,8 @@ async fn existing_outcome(
         | CommandKind::MintGitRemote
         | CommandKind::WithdrawGitRemote
         | CommandKind::PromotePendingRunner
-        | CommandKind::AbandonLostRunner => {
+        | CommandKind::AbandonLostRunner
+        | CommandKind::ReplaceLostRunner => {
             return Ok(CreateSessionFromImportedFrontierOutcome::ConflictingReuse {
                 command_id: command.command_id(),
             });

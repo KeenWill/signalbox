@@ -13,6 +13,7 @@ mod load_session;
 mod model_execution;
 mod operator_failure;
 mod promote_pending_runner;
+mod replace_lost_runner_before_pin;
 mod replace_session_defaults;
 mod repo_watch;
 mod review_orchestration;
@@ -77,6 +78,10 @@ pub use operator_failure::{ClassifyOperatorFailure, OperatorFailureClass};
 pub use promote_pending_runner::{
     PromotePendingRunnerOutcome, PromotePendingRunnerRequest, PromotePendingRunnerService,
     PromotePendingRunnerTransaction,
+};
+pub use replace_lost_runner_before_pin::{
+    ReplaceLostRunnerBeforePinOutcome, ReplaceLostRunnerBeforePinRequest,
+    ReplaceLostRunnerBeforePinService, ReplaceLostRunnerBeforePinTransaction,
 };
 pub use replace_session_defaults::{
     PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,

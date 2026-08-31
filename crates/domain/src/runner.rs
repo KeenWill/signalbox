@@ -96,6 +96,116 @@ impl ReplaceLostRunner {
     }
 }
 
+/// Current-target failure retained by a refused pre-pin replacement.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RunnerReplacementTargetUnavailableReason {
+    /// The selected runner has no live connected authority.
+    NotConnected,
+    /// The selected runner or pending request is no longer current.
+    NotCurrent,
+    /// The selected runner's current registration cannot satisfy the placement.
+    NotAdvertised,
+    /// The selected pending request does not own the current pending candidate.
+    PendingRequestMismatch,
+    /// The selected pending candidate has no live connected authority.
+    PendingRequestDisconnected,
+}
+
+/// Exact unpinned successor installed by a successful pre-pin replacement.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ReplacedLostRunnerBeforePin {
+    session: SessionId,
+    prior_runner: RunnerId,
+    new_runner: RunnerId,
+    placement_revision: RunnerGeneration,
+    sandbox: RunnerSandboxProfile,
+}
+
+impl ReplacedLostRunnerBeforePin {
+    /// Constructs the complete terminal command receipt.
+    pub const fn new(
+        session: SessionId,
+        prior_runner: RunnerId,
+        new_runner: RunnerId,
+        placement_revision: RunnerGeneration,
+        sandbox: RunnerSandboxProfile,
+    ) -> Self {
+        Self {
+            session,
+            prior_runner,
+            new_runner,
+            placement_revision,
+            sandbox,
+        }
+    }
+
+    /// Returns the session whose exact selector changed.
+    pub const fn session(self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the exact lost identity consumed by replacement.
+    pub const fn prior_runner(self) -> RunnerId {
+        self.prior_runner
+    }
+
+    /// Returns the exact successor identity installed by replacement.
+    pub const fn new_runner(self) -> RunnerId {
+        self.new_runner
+    }
+
+    /// Returns the successor placement revision.
+    pub const fn placement_revision(self) -> RunnerGeneration {
+        self.placement_revision
+    }
+
+    /// Returns the retained sandbox policy.
+    pub const fn sandbox(self) -> RunnerSandboxProfile {
+        self.sandbox
+    }
+}
+
+/// Closed authoritative rejection for the transaction-only pre-pin slice.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ReplaceLostRunnerBeforePinRejection {
+    /// The selected session does not exist.
+    SessionNotFound { session: SessionId },
+    /// The selected session has no runner placement.
+    RunnerPlacementNotFound { session: SessionId },
+    /// The current placement revision differs from the caller's observation.
+    PlacementRevisionMismatch {
+        session: SessionId,
+        expected: RunnerGeneration,
+        current: RunnerGeneration,
+    },
+    /// The exact current placement is not a lost placement.
+    PlacementNotLost {
+        session: SessionId,
+        placement_revision: RunnerGeneration,
+        state: RunnerPlacementRecoveryState,
+    },
+    /// The command selected the exact runner lost before pinning.
+    ReplacementSameRunner {
+        session: SessionId,
+        runner: RunnerId,
+    },
+    /// Current typed runner authority refused the selected target.
+    ReplacementTargetUnavailable {
+        session: SessionId,
+        target: RunnerReplacementTarget,
+        reason: RunnerReplacementTargetUnavailableReason,
+    },
+}
+
+/// Terminal durable result of the transaction-only pre-pin replacement slice.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ReplaceLostRunnerBeforePinResult {
+    /// The exact lost-before-pin placement advanced to its unpinned successor.
+    Applied(ReplacedLostRunnerBeforePin),
+    /// Current typed state refused the command.
+    Rejected(ReplaceLostRunnerBeforePinRejection),
+}
+
 /// Complete session-scoped request to abandon one exact lost placement.
 #[derive(Clone, Copy, Debug)]
 pub struct AbandonLostRunner {

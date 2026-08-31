@@ -285,7 +285,8 @@ impl SessionMetadataRepository {
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
                 | CommandKind::PromotePendingRunner
-                | CommandKind::AbandonLostRunner,
+                | CommandKind::AbandonLostRunner
+                | CommandKind::ReplaceLostRunner,
             ) => Err(SessionMetadataRepositoryError::DifferentCommandKind { command_id }),
         }
     }
@@ -640,7 +641,8 @@ async fn existing_or_conflicting(
         | CommandKind::MintGitRemote
         | CommandKind::WithdrawGitRemote
         | CommandKind::PromotePendingRunner
-        | CommandKind::AbandonLostRunner => {
+        | CommandKind::AbandonLostRunner
+        | CommandKind::ReplaceLostRunner => {
             return Ok(ReplaceSessionMetadataHandlingOutcome::ConflictingReuse {
                 command_id: command.command_id(),
             });

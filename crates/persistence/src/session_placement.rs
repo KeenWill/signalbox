@@ -127,7 +127,8 @@ impl SessionPlacementRepository {
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
                 | CommandKind::PromotePendingRunner
-                | CommandKind::AbandonLostRunner,
+                | CommandKind::AbandonLostRunner
+                | CommandKind::ReplaceLostRunner,
             ) => {
                 transaction.rollback().await?;
                 return Ok(SessionPlacementRepositoryOutcome::ConflictingReuse { command_id });
@@ -176,7 +177,8 @@ impl SessionPlacementRepository {
                     | CommandKind::MintGitRemote
                     | CommandKind::WithdrawGitRemote
                     | CommandKind::PromotePendingRunner
-                    | CommandKind::AbandonLostRunner,
+                    | CommandKind::AbandonLostRunner
+                    | CommandKind::ReplaceLostRunner,
                 ) => SessionPlacementRepositoryOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(SessionPlacementRepositoryError::Corruption(

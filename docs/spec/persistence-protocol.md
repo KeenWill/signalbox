@@ -20,7 +20,9 @@ placement-change entry, successor-placement foreign key, and exact final-member
 frontier link were verified against this PR
 (`agent/runner-placement-semantic-persistence`). The deployment-scoped
 pending-successor activation transaction was verified against this PR
-(`agent/runner-pending-successor-activation`).
+(`agent/runner-pending-successor-activation`). The different-live-runner pre-pin
+replacement command and result transaction were verified against this PR
+(`agent/runner-pre-pin-replacement`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -341,9 +343,16 @@ Representation rules, all enforced in the schema:
   because those transitions require connection/loss, durable-command, scheduler,
   and outbox authority outside the placement aggregate. The connection-loss
   propagation adapter installs only loss transitions under those authorities;
-  replacement and abandonment remain **committed unimplemented functionality**
-  for their dedicated orchestration transactions. Direct snapshot storage cannot
-  stand in for any of those transactions.
+  the abandonment transaction installs terminal abandonment after proving the
+  active-turn slot empty, and the pre-pin replacement transaction installs an
+  ordinary unpinned successor only for a different exact active runner whose
+  current registration is connected and advertises every retained request axis.
+  Its applied receipt retains and reads back that exact enrollment, registration
+  revision, connection epoch, and connected event rather than trusting mutable
+  current heads on replay. **Committed unimplemented functionality.**
+  Pending-enrollment activation, same-runner recovery, and pinned replacement
+  remain for later dedicated transactions. Direct snapshot storage cannot stand
+  in for any of them.
 - Migration `202608110005` records the connection-loss epoch observed when each
   placement selects a known enrollment and carries that baseline through later
   loss or abandonment records. The value is derived while holding scheduler,
@@ -657,25 +666,25 @@ identifier: `command_id` is the primary key across all kinds and sessions
 `replace_session_metadata`, `submit_input`, `decide_tool_request`,
 `review_workflow`, `review_orchestration`, `compact_session`, `goal`,
 `update_session_placement`, `register_workspace`, `mint_git_remote`,
-`withdraw_git_remote`, `promote_pending_runner`) and a kind-scoped
-`storage_version`. The gates above fix the current numbers: create-session
-records write version 8, imported-create records write version 6,
-replace-defaults records write version 4, and submit-input records write version
-2; every other closed kind writes version 1. The four settings-bearing families
-require the migration's provider-default full settings or inherit-all overlay on
-every earlier supported version. Create-session records reconstitute version 1
-with the disabled dangerous-tool posture, and versions 1 and 2 with no system
-prompt — a pre-version-three row carrying one fails closed in both the schema
-and every Rust reader. A pre-version-four create row carrying template
-provenance and a pre-version-six create row carrying path placement likewise
-fail closed. Imported-create version 4 remains unsupported compatibility space
-for committed runner placement, so the model-settings writer skips it. Metadata,
-decision, review-workflow, compaction, and runner-recovery records use version
-1\. Each kind has one typed subordinate request record keyed by `command_id` that
-stores every caller-supplied semantic field in typed, `CHECK`-constrained
-columns. Every kind except runner replacement also stores the terminal
-`applied`/`rejected` result and typed result fields there.
-`replace_lost_runner_command` is the immutable request and
+`withdraw_git_remote`, `promote_pending_runner`, `abandon_lost_runner`,
+`replace_lost_runner`) and a kind-scoped `storage_version`. The gates above fix
+the current numbers: create-session records write version 8, imported-create
+records write version 6, replace-defaults records write version 4, and
+submit-input records write version 2; every other closed kind writes version 1.
+The four settings-bearing families require the migration's provider-default full
+settings or inherit-all overlay on every earlier supported version.
+Create-session records reconstitute version 1 with the disabled dangerous-tool
+posture, and versions 1 and 2 with no system prompt — a pre-version-three row
+carrying one fails closed in both the schema and every Rust reader. A
+pre-version-four create row carrying template provenance and a pre-version-six
+create row carrying path placement likewise fail closed. Imported-create version
+4 remains unsupported compatibility space for committed runner placement, so the
+model-settings writer skips it. Metadata, decision, review-workflow, compaction,
+and runner-recovery records use version 1. Each kind has one typed subordinate
+request record keyed by `command_id` that stores every caller-supplied semantic
+field in typed, `CHECK`-constrained columns. Every kind except runner
+replacement also stores the terminal `applied`/`rejected` result and typed
+result fields there. `replace_lost_runner_command` is the immutable request and
 provisioning-authorization root; at most one append-only
 `replace_lost_runner_result` supplies its terminal result after off-transaction
 runner I/O. Result-shape `CHECK` constraints tie each rejection kind to exactly
