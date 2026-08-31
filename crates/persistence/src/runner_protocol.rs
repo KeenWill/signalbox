@@ -15,11 +15,12 @@ use std::{
 
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_application::{
-    AbandonLostRunnerOutcome, AbandonLostRunnerTransaction, InitialRunnerDispatchRequest,
-    InitialRunnerDispatchTransaction, PinnedRunnerDispatchRequest, PinnedRunnerDispatchTransaction,
-    PinnedRunnerLeaseOffer, ReplaceLostRunnerBeforePinOutcome,
-    ReplaceLostRunnerBeforePinTransaction, RunnerLeaseClaimRequest, RunnerLeaseClaimTransaction,
-    RunnerLeaseResultRequest, RunnerLeaseResultTransaction, RunnerReplacementProvisioningOutcome,
+    AbandonLostRunnerOutcome, AbandonLostRunnerTransaction, ClassifyOperatorFailure,
+    InitialRunnerDispatchRequest, InitialRunnerDispatchTransaction, OperatorFailureClass,
+    PinnedRunnerDispatchRequest, PinnedRunnerDispatchTransaction, PinnedRunnerLeaseOffer,
+    ReplaceLostRunnerBeforePinOutcome, ReplaceLostRunnerBeforePinTransaction,
+    RunnerLeaseClaimRequest, RunnerLeaseClaimTransaction, RunnerLeaseResultRequest,
+    RunnerLeaseResultTransaction, RunnerReplacementProvisioningOutcome,
     RunnerReplacementProvisioningStage, RunnerReplacementProvisioningTransaction,
 };
 use signalbox_domain::{
@@ -12320,6 +12321,25 @@ impl Error for RunnerProtocolStoreError {
             Self::EnrollmentRequest(error) => Some(error),
             Self::Domain(_) => None,
         }
+    }
+}
+
+impl ClassifyOperatorFailure for RunnerProtocolStoreError {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        match self {
+            Self::Database(_) => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            },
+            Self::CommitAmbiguous(_) => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            },
+            Self::Corruption(_) => OperatorFailureClass::FailClosedCorruption,
+            Self::Domain(_) | Self::EnrollmentRequest(_) => OperatorFailureClass::CallerOrHubBug,
+        }
+    }
+
+    fn operator_failure_cause_code(&self) -> &'static str {
+        "runner_protocol_persistence"
     }
 }
 

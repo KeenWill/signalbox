@@ -55,11 +55,12 @@ use signalboxd::{
     FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport, HubModelConfiguration,
     HubModelConfigurationError, LocalProcessListener, LocalSocketError,
     MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime, PostgresGoalPassDisposition,
-    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
-    RepositoryWatchRuntime, RepositoryWatchRuntimeError, SessionTemplateConfiguration,
-    SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
-    TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
-    model_adapter::ConfiguredModelRuntime, usage_limits::UsageLimitedModelCallProvider,
+    PostgresProviderModelExecution, PostgresRunnerToolOffer, ProcessRuntime, ProcessRuntimeError,
+    PrometheusServer, RepositoryWatchRuntime, RepositoryWatchRuntimeError, RunnerConnectionBroker,
+    SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
+    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
+    TelemetryExportFilter, TelemetryMetrics, model_adapter::ConfiguredModelRuntime,
+    usage_limits::UsageLimitedModelCallProvider,
 };
 use tracing_subscriber::prelude::*;
 
@@ -1412,8 +1413,12 @@ async fn run_hub(
         None => None,
     };
     let runner_protocol_store = runner_service.protocol_store();
+    let runner_connection_broker = RunnerConnectionBroker::new();
     let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service)
-        .with_lease_operation_service(runner_protocol_store.clone());
+        .with_lease_operation_service(runner_protocol_store.clone())
+        .with_connection_broker(runner_connection_broker.clone());
+    let runner_tool_offer =
+        PostgresRunnerToolOffer::new(runner_protocol_store.clone(), runner_connection_broker);
     let process_runtime = ProcessRuntime::new_with_templates(
         listener,
         scheduler_pool.clone(),
@@ -1443,6 +1448,7 @@ async fn run_hub(
             UsageLimitedModelCallProvider::new(provider, &model_configuration),
         )
         .with_tool_loop(tool_dispatch_gate, tool_catalog, tool_executor)
+        .with_runner_tool_offer(runner_tool_offer)
         .with_approval_judge(
             approval_judge_model,
             model_configuration.configured_approval_judge_selection(),
