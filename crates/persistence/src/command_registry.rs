@@ -38,6 +38,8 @@ pub(crate) const WITHDRAW_GIT_REMOTE_KIND: &str =
     durable_command_kind_to_str(CommandKind::WithdrawGitRemote);
 pub(crate) const PROMOTE_PENDING_RUNNER_KIND: &str =
     durable_command_kind_to_str(CommandKind::PromotePendingRunner);
+pub(crate) const ABANDON_LOST_RUNNER_KIND: &str =
+    durable_command_kind_to_str(CommandKind::AbandonLostRunner);
 
 pub(crate) const fn create_session_storage_version_is_supported(version: i16) -> bool {
     matches!(version, 1..=4 | 6..=8)
@@ -56,7 +58,7 @@ struct CommandKindDefinition {
     maximum_version: i16,
 }
 
-const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 15] = [
+const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 16] = [
     CommandKindDefinition {
         kind: CommandKind::CreateSession,
         spelling: CREATE_SESSION_KIND,
@@ -159,6 +161,13 @@ const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 15] = [
         kind: CommandKind::PromotePendingRunner,
         spelling: PROMOTE_PENDING_RUNNER_KIND,
         typed_table: "promote_pending_runner_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
+    CommandKindDefinition {
+        kind: CommandKind::AbandonLostRunner,
+        spelling: ABANDON_LOST_RUNNER_KIND,
+        typed_table: "abandon_lost_runner_command",
         minimum_version: 1,
         maximum_version: 1,
     },

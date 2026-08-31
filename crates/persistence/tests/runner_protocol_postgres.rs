@@ -10,10 +10,12 @@ use std::{error::Error, num::NonZeroU64, time::Duration};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
-    ImportedConversationConverter, ImportedConversationStore, PromotePendingRunnerOutcome,
+    AbandonLostRunnerOutcome, ImportedConversationConverter, ImportedConversationStore,
+    PromotePendingRunnerOutcome,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
+    AbandonLostRunner, AbandonLostRunnerRejection, AbandonLostRunnerResult, AbandonedLostRunner,
     AcceptedInputId, AcceptedInputTurnActivationIdentities, ApprovedToolRequest,
     CancelledModelCallTurnIdentities, CanonicalCloneUrlDigest, ContextFrontierId, CreateSession,
     CreateSessionFromImportedFrontier, CredentialProfileGrant,
@@ -29,12 +31,12 @@ use signalbox_domain::{
     RunnerEnrollmentRequestId, RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation,
     RunnerLeaseId, RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput,
     RunnerLeaseRetryPreparation, RunnerLostBeforePin, RunnerPlacementReconstitutionHistory,
-    RunnerRepositoryEntry, RunnerSandboxProfile, RunnerSelector, RunnerToolAttemptAuthorization,
-    RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
-    RunnerToolPermissionOverride, RunnerToolPermissionOverrides, RunnerWorkingDirectory,
-    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionCreationCause, SessionCreationProvenance, SessionId, SessionRunnerPin,
-    SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
+    RunnerPlacementRecoveryState, RunnerRepositoryEntry, RunnerSandboxProfile, RunnerSelector,
+    RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
+    RunnerToolModelDefinition, RunnerToolPermissionOverride, RunnerToolPermissionOverrides,
+    RunnerWorkingDirectory, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionId, SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
     SessionRunnerPlacementRequest, SessionRunnerPlacementState, SubmitInput, ToolAdmissibleLoci,
     ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput,
     ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
@@ -111,6 +113,7 @@ const FORGED_NO_PENDING_PROMOTION_COMMAND: u128 = 0x936b;
 const FORGED_MISMATCH_PROMOTION_COMMAND: u128 = 0x936c;
 const FORGED_DISCONNECTED_PROMOTION_COMMAND: u128 = 0x936d;
 const FORGED_ACTIVE_PROMOTION_COMMAND: u128 = 0x936e;
+const ABANDON_LOST_RUNNER_COMMAND: u128 = 0x936f;
 const REGISTER_WORKSPACE_COMMAND: u128 = 0x9362;
 const REGISTERED_WORKSPACE: u128 = 0x9363;
 const MINT_GIT_REMOTE_COMMAND: u128 = 0x9364;
@@ -15810,6 +15813,250 @@ async fn s32_inv044_generic_store_rejects_abandonment_without_scheduler_authorit
         .expect_err("the generic writer cannot invent an empty active-turn proof");
 
     assert_store_domain_error(rejected, RunnerDomainError::InvalidState);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-001 / INV-032 / INV-044: abandonment claims one durable command,
+/// installs the exact terminal placement, and returns that result on replay.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv001_inv032_inv044_abandon_lost_runner_applies_and_replays()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    store.store_placement(&placement, None, None).await?;
+    let expected_placement = placement
+        .mark_runner_lost_before_pin(runner)
+        .expect("the exact selected runner may be lost before pinning")
+        .abandon_lost_runner()
+        .expect("the lost placement may be abandoned");
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let command = AbandonLostRunner::new(
+        DurableCommandId::from_uuid(uuid(ABANDON_LOST_RUNNER_COMMAND)),
+        session,
+        RunnerGeneration::try_from_u64(1).expect("the fixture revision is positive"),
+    );
+    let expected = AbandonLostRunnerResult::Applied(AbandonedLostRunner::new(
+        session,
+        RunnerGeneration::try_from_u64(1).expect("the fixture revision is positive"),
+    ));
+
+    let applied = store.abandon_lost_runner(command).await?;
+    let replay = store.abandon_lost_runner(command).await?;
+    let loaded = store
+        .load_placement(session)
+        .await?
+        .expect("the terminal placement is present");
+
+    assert_eq!(applied, AbandonLostRunnerOutcome::Recorded(expected));
+    assert_eq!(replay, AbandonLostRunnerOutcome::Recorded(expected));
+    assert_eq!(loaded.placement(), &expected_placement);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-001 / INV-044: a recorded abandonment command identity cannot be
+/// reused for another expected placement revision.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv001_inv044_abandon_lost_runner_rejects_conflicting_reuse()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let command_id = DurableCommandId::from_uuid(uuid(ABANDON_LOST_RUNNER_COMMAND));
+    let command = AbandonLostRunner::new(
+        command_id,
+        session,
+        RunnerGeneration::try_from_u64(1).expect("the fixture revision is positive"),
+    );
+    store.abandon_lost_runner(command).await?;
+    let conflicting = AbandonLostRunner::new(
+        command_id,
+        session,
+        RunnerGeneration::try_from_u64(2).expect("the fixture revision is positive"),
+    );
+
+    let outcome = store.abandon_lost_runner(conflicting).await?;
+
+    assert_eq!(
+        outcome,
+        AbandonLostRunnerOutcome::ConflictingReuse {
+            command: command_id
+        }
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: abandonment records that the selected session does not exist and
+/// returns the same refusal on equal replay.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_abandon_lost_runner_records_missing_session() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let command = AbandonLostRunner::new(
+        DurableCommandId::from_uuid(uuid(ABANDON_LOST_RUNNER_COMMAND)),
+        session,
+        RunnerGeneration::try_from_u64(1).expect("the fixture revision is positive"),
+    );
+    let expected = AbandonLostRunnerOutcome::Recorded(AbandonLostRunnerResult::Rejected(
+        AbandonLostRunnerRejection::SessionNotFound { session },
+    ));
+
+    let first = store.abandon_lost_runner(command).await?;
+    let replay = store.abandon_lost_runner(command).await?;
+
+    assert_eq!(first, expected);
+    assert_eq!(replay, expected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: abandonment distinguishes an existing daemon-only session from a
+/// missing session and records the absence of runner placement.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_abandon_lost_runner_records_missing_placement() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let command = AbandonLostRunner::new(
+        DurableCommandId::from_uuid(uuid(ABANDON_LOST_RUNNER_COMMAND)),
+        session,
+        RunnerGeneration::try_from_u64(1).expect("the fixture revision is positive"),
+    );
+
+    let outcome = store.abandon_lost_runner(command).await?;
+
+    assert_eq!(
+        outcome,
+        AbandonLostRunnerOutcome::Recorded(AbandonLostRunnerResult::Rejected(
+            AbandonLostRunnerRejection::RunnerPlacementNotFound { session }
+        ))
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: abandonment records the exact current revision when the caller's
+/// placement observation is stale.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_abandon_lost_runner_records_revision_mismatch() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    store.store_placement(&placement, None, None).await?;
+    let expected = RunnerGeneration::try_from_u64(2).expect("the fixture revision is positive");
+    let current = RunnerGeneration::try_from_u64(1).expect("the fixture revision is positive");
+    let command = AbandonLostRunner::new(
+        DurableCommandId::from_uuid(uuid(ABANDON_LOST_RUNNER_COMMAND)),
+        session,
+        expected,
+    );
+
+    let outcome = store.abandon_lost_runner(command).await?;
+
+    assert_eq!(
+        outcome,
+        AbandonLostRunnerOutcome::Recorded(AbandonLostRunnerResult::Rejected(
+            AbandonLostRunnerRejection::PlacementRevisionMismatch {
+                session,
+                expected,
+                current,
+            }
+        ))
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: an exact but ordinary unpinned placement is durably refused as
+/// not lost and remains unchanged.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_abandon_lost_runner_records_unpinned_rejection() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    store.store_placement(&placement, None, None).await?;
+    let revision = RunnerGeneration::try_from_u64(1).expect("the fixture revision is positive");
+    let command = AbandonLostRunner::new(
+        DurableCommandId::from_uuid(uuid(ABANDON_LOST_RUNNER_COMMAND)),
+        session,
+        revision,
+    );
+
+    let outcome = store.abandon_lost_runner(command).await?;
+
+    assert_eq!(
+        outcome,
+        AbandonLostRunnerOutcome::Recorded(AbandonLostRunnerResult::Rejected(
+            AbandonLostRunnerRejection::PlacementNotLost {
+                session,
+                placement_revision: revision,
+                state: RunnerPlacementRecoveryState::Unpinned,
+            }
+        ))
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-037 / INV-044: abandonment does not create cancellation authority for
+/// a lost placement whose existing turn still owns the active slot.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv037_inv044_abandon_lost_runner_records_active_turn_rejection()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let revision = RunnerGeneration::try_from_u64(1).expect("the fixture revision is positive");
+    let active_turn = TurnId::from_uuid(uuid(0xa200));
+    insert_runner_recovery_turn(&pool, session, active_turn, runner, revision, None, None).await?;
+    let command = AbandonLostRunner::new(
+        DurableCommandId::from_uuid(uuid(ABANDON_LOST_RUNNER_COMMAND)),
+        session,
+        revision,
+    );
+
+    let outcome = store.abandon_lost_runner(command).await?;
+
+    assert_eq!(
+        outcome,
+        AbandonLostRunnerOutcome::Recorded(AbandonLostRunnerResult::Rejected(
+            AbandonLostRunnerRejection::ActiveTurnRequiresExistingControl {
+                session,
+                active_turn,
+            }
+        ))
+    );
     drop(pool);
     Ok(())
 }

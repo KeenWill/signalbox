@@ -5832,6 +5832,45 @@ impl<Transaction: UpdateSessionPlacementTransaction>
 }
 ```
 
+## application: abandon_lost_runner
+
+```rust
+pub struct AbandonLostRunnerRequest { /* private */ }
+impl AbandonLostRunnerRequest {
+    pub fn try_new(
+        command: DurableCommandId,
+        session: SessionId,
+        expected_placement_revision: RunnerGeneration,
+    ) -> Result<Self, InvalidDurableCommandId>;
+}
+
+pub trait AbandonLostRunnerTransaction {
+    type Error;
+    fn handle(
+        &mut self,
+        command: AbandonLostRunner,
+    ) -> impl Future<Output = Result<AbandonLostRunnerOutcome, Self::Error>> + Send;
+}
+
+pub enum AbandonLostRunnerOutcome {
+    Recorded(AbandonLostRunnerResult),
+    ConflictingReuse { command: DurableCommandId },
+}
+
+pub struct AbandonLostRunnerService<Transaction> { /* private */ }
+impl<Transaction> AbandonLostRunnerService<Transaction> {
+    pub const fn new(transaction: Transaction) -> Self;
+}
+impl<Transaction: AbandonLostRunnerTransaction>
+    AbandonLostRunnerService<Transaction>
+{
+    pub async fn execute(
+        &mut self,
+        request: AbandonLostRunnerRequest,
+    ) -> Result<AbandonLostRunnerOutcome, Transaction::Error>;
+}
+```
+
 ## application: promote_pending_runner
 
 ```rust
@@ -8593,6 +8632,45 @@ impl AbandonLostRunner {
     pub const fn session(&self) -> SessionId;
     pub const fn expected_placement_revision(&self) -> RunnerGeneration;
 }
+pub enum RunnerPlacementRecoveryState {
+    Unpinned,
+    Pinned,
+    RunnerAbandoned,
+}
+pub struct AbandonedLostRunner { /* private */ }
+impl AbandonedLostRunner {
+    pub const fn new(
+        session: SessionId,
+        placement_revision: RunnerGeneration,
+    ) -> Self;
+    // accessors: session(), placement_revision()
+}
+pub enum AbandonLostRunnerRejection {
+    SessionNotFound {
+        session: SessionId,
+    },
+    RunnerPlacementNotFound {
+        session: SessionId,
+    },
+    PlacementRevisionMismatch {
+        session: SessionId,
+        expected: RunnerGeneration,
+        current: RunnerGeneration,
+    },
+    PlacementNotLost {
+        session: SessionId,
+        placement_revision: RunnerGeneration,
+        state: RunnerPlacementRecoveryState,
+    },
+    ActiveTurnRequiresExistingControl {
+        session: SessionId,
+        active_turn: TurnId,
+    },
+}
+pub enum AbandonLostRunnerResult {
+    Applied(AbandonedLostRunner),
+    Rejected(AbandonLostRunnerRejection),
+}
 
 pub struct PromotePendingRunner { /* private */ }
 impl PromotePendingRunner {
@@ -10498,14 +10576,15 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: goal_command                               | 5                     |
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
-| domain: runner                                     | 78                    |
+| domain: runner                                     | 82                    |
 | domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **780 (+12 free fn)** |
+| **signalbox-domain total**                         | **784 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
 | application: update_session_placement              | 4 (incl. 1 trait)     |
 | application: promote_pending_runner                | 4 (incl. 1 trait)     |
+| application: abandon_lost_runner                   | 4 (incl. 1 trait)     |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)    |
 | application: list_conversations                    | 8 (incl. 2 traits)    |
 | application: load_session                          | 2 (incl. 1 trait)     |
@@ -10525,4 +10604,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **255 (+1 free fn)**  |
+| **signalbox-application total**                    | **259 (+1 free fn)**  |

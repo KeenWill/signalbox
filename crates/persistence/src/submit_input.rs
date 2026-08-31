@@ -694,7 +694,8 @@ impl SubmitInputRepository {
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
-                | CommandKind::PromotePendingRunner,
+                | CommandKind::PromotePendingRunner
+                | CommandKind::AbandonLostRunner,
             ) => Err(Self::wrong_kind(command_id)),
         }
     }
@@ -788,7 +789,8 @@ where
             | CommandKind::RegisterWorkspace
             | CommandKind::MintGitRemote
             | CommandKind::WithdrawGitRemote
-            | CommandKind::PromotePendingRunner,
+            | CommandKind::PromotePendingRunner
+            | CommandKind::AbandonLostRunner,
         ) => {
             return Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },
@@ -831,7 +833,8 @@ where
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
-                | CommandKind::PromotePendingRunner,
+                | CommandKind::PromotePendingRunner
+                | CommandKind::AbandonLostRunner,
             ) => Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },
             )),
