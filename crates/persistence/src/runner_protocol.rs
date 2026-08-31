@@ -991,6 +991,45 @@ impl StoredRunnerWorkspaceRelease {
     }
 }
 
+/// Immutable proof that loss of the cleanup-owning connection retired one
+/// pending managed-workspace release as unowned.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StoredRunnerWorkspaceReleaseLossRetirement {
+    session: SessionId,
+    placement_revision: RunnerGeneration,
+    runner: RunnerId,
+    manifest: WorkspaceManifestId,
+    loss: RunnerConnectionLossSnapshot,
+}
+
+impl StoredRunnerWorkspaceReleaseLossRetirement {
+    /// Returns the retired session named by the release correlation.
+    pub const fn session(self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the exact retired placement revision.
+    pub const fn placement_revision(self) -> RunnerGeneration {
+        self.placement_revision
+    }
+
+    /// Returns the cleanup-owning runner.
+    pub const fn runner(self) -> RunnerId {
+        self.runner
+    }
+
+    /// Returns the protected predecessor manifest identity.
+    pub const fn manifest_id(self) -> WorkspaceManifestId {
+        self.manifest
+    }
+
+    /// Returns the exact durable physical-connection loss that made the
+    /// release unowned.
+    pub const fn loss(self) -> RunnerConnectionLossSnapshot {
+        self.loss
+    }
+}
+
 /// One relationally authenticated active turn parked on runner loss.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StoredRunnerRecoveryWait {
@@ -1750,42 +1789,62 @@ impl RunnerProtocolStore {
             Vec::new()
         } else {
             sqlx::query_scalar::<_, Uuid>(
-                "SELECT placement.session_id
-                   FROM runner_current_session_placement AS current_placement
-                   JOIN runner_session_placement_record AS placement
-                     ON placement.session_id = current_placement.session_id
-                    AND placement.event_ordinal = current_placement.event_ordinal
-                   JOIN runner_enrollment AS lost_enrollment
-                     ON lost_enrollment.enrollment_id = $1
-                  WHERE (
-                        placement.loss_fence_enrollment_id = $1
-                        OR (
-                            placement.loss_fence_enrollment_id IS NULL
-                            AND placement.state_kind = 'unpinned'
-                            AND placement.selector_kind = 'identity'
-                            AND placement.selector_runner_id =
-                                lost_enrollment.runner_id
-                        )
-                    )
-                    AND (
-                        placement.observed_runner_loss_epoch IS NULL
-                        OR placement.observed_runner_loss_epoch < $2
-                    )
-                    AND (
-                        placement.state_kind = 'pinned'
-                        OR (
-                            placement.state_kind = 'unpinned'
-                            AND placement.selector_kind = 'identity'
-                        )
-                    )
-                    AND ($3::uuid IS NULL OR placement.session_id > $3)
-                  ORDER BY placement.session_id
-                  LIMIT $4",
+                "WITH affected_session AS (
+                    SELECT placement.session_id
+                      FROM runner_current_session_placement AS current_placement
+                      JOIN runner_session_placement_record AS placement
+                        ON placement.session_id = current_placement.session_id
+                       AND placement.event_ordinal = current_placement.event_ordinal
+                      JOIN runner_enrollment AS lost_enrollment
+                        ON lost_enrollment.enrollment_id = $1
+                     WHERE (
+                           placement.loss_fence_enrollment_id = $1
+                           OR (
+                               placement.loss_fence_enrollment_id IS NULL
+                               AND placement.state_kind = 'unpinned'
+                               AND placement.selector_kind = 'identity'
+                               AND placement.selector_runner_id =
+                                   lost_enrollment.runner_id
+                           )
+                       )
+                       AND (
+                           placement.observed_runner_loss_epoch IS NULL
+                           OR placement.observed_runner_loss_epoch < $2
+                       )
+                       AND (
+                           placement.state_kind = 'pinned'
+                           OR (
+                               placement.state_kind = 'unpinned'
+                               AND placement.selector_kind = 'identity'
+                           )
+                       )
+                    UNION
+                    SELECT release.session_id
+                      FROM runner_workspace_release AS release
+                      LEFT JOIN runner_workspace_release_acknowledgement AS acknowledgement
+                        ON acknowledgement.session_id = release.session_id
+                       AND acknowledgement.placement_revision =
+                           release.placement_revision
+                      LEFT JOIN runner_workspace_release_loss_retirement AS retirement
+                        ON retirement.session_id = release.session_id
+                       AND retirement.placement_revision =
+                           release.placement_revision
+                     WHERE release.enrollment_id = $1
+                       AND release.connection_epoch = $5
+                       AND acknowledgement.session_id IS NULL
+                       AND retirement.session_id IS NULL
+                )
+                SELECT session_id
+                  FROM affected_session
+                 WHERE ($3::uuid IS NULL OR session_id > $3)
+                 ORDER BY session_id
+                 LIMIT $4",
             )
             .bind(loss.enrollment().into_uuid())
             .bind(Decimal::from(loss.loss_epoch().get()))
             .bind(propagated_through.map(SessionId::into_uuid))
             .bind(PAGE_LIMIT)
+            .bind(Decimal::from(loss.connection_epoch().get()))
             .fetch_all(transaction.as_mut())
             .await?
             .into_iter()
@@ -1830,6 +1889,7 @@ impl RunnerProtocolStore {
             .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
         let affected = placement_is_affected_by_loss(&prior, loss)?;
         if !affected {
+            retire_workspace_releases_for_connection_loss(&mut transaction, loss, session).await?;
             advance_runner_loss_cursor(&mut transaction, loss, session).await?;
             commit_mutation(transaction).await?;
             return Ok(RunnerConnectionLossSessionDisposition::Superseded);
@@ -1924,6 +1984,7 @@ impl RunnerProtocolStore {
             }),
         )
         .await?;
+        retire_workspace_releases_for_connection_loss(&mut transaction, loss, session).await?;
         advance_runner_loss_cursor(&mut transaction, loss, session).await?;
         commit_mutation(transaction).await?;
         Ok(RunnerConnectionLossSessionDisposition::Applied {
@@ -3578,6 +3639,18 @@ impl RunnerProtocolStore {
                     release.connection_event_ordinal, release.state_kind,
                     acknowledgement.runner_id AS acknowledgement_runner_id,
                     acknowledgement.manifest_id AS acknowledgement_manifest_id,
+                    retirement.runner_id AS retirement_runner_id,
+                    retirement.manifest_id AS retirement_manifest_id,
+                    retirement.enrollment_id AS retirement_enrollment_id,
+                    retirement.connection_epoch AS retirement_connection_epoch,
+                    retirement.loss_epoch AS retirement_loss_epoch,
+                    retirement.connection_event_ordinal AS
+                        retirement_connection_event_ordinal,
+                    retirement_loss.connection_epoch AS
+                        retirement_loss_connection_epoch,
+                    retirement_loss.connection_event_ordinal AS
+                        retirement_loss_connection_event_ordinal,
+                    source_loss.enrollment_id AS source_loss_enrollment_id,
                     retired.event_kind AS retired_event_kind,
                     retired.state_kind AS retired_state_kind,
                     retired.loss_source_kind AS retired_loss_source_kind,
@@ -3599,6 +3672,15 @@ impl RunnerProtocolStore {
                LEFT JOIN runner_workspace_release_acknowledgement AS acknowledgement
                  ON acknowledgement.session_id = release.session_id
                 AND acknowledgement.placement_revision = release.placement_revision
+               LEFT JOIN runner_workspace_release_loss_retirement AS retirement
+                 ON retirement.session_id = release.session_id
+                AND retirement.placement_revision = release.placement_revision
+               LEFT JOIN runner_connection_loss_epoch AS retirement_loss
+                 ON retirement_loss.enrollment_id = retirement.enrollment_id
+                AND retirement_loss.loss_epoch = retirement.loss_epoch
+               LEFT JOIN runner_connection_loss_epoch AS source_loss
+                 ON source_loss.enrollment_id = release.enrollment_id
+                AND source_loss.connection_epoch = release.connection_epoch
                JOIN runner_session_placement_record AS retired
                  ON retired.session_id = release.session_id
                 AND retired.event_ordinal =
@@ -3631,12 +3713,58 @@ impl RunnerProtocolStore {
             row.decode_column("acknowledgement_runner_id")?;
         let acknowledgement_manifest: Option<Uuid> =
             row.decode_column("acknowledgement_manifest_id")?;
-        if acknowledgement_runner.is_some() || acknowledgement_manifest.is_some() {
+        let retirement_runner: Option<Uuid> = row.decode_column("retirement_runner_id")?;
+        let retirement_manifest: Option<Uuid> = row.decode_column("retirement_manifest_id")?;
+        let retirement_enrollment: Option<Uuid> = row.decode_column("retirement_enrollment_id")?;
+        let retirement_connection_epoch: Option<Decimal> =
+            row.decode_column("retirement_connection_epoch")?;
+        let retirement_loss_epoch: Option<Decimal> = row.decode_column("retirement_loss_epoch")?;
+        let retirement_connection_event_ordinal: Option<Decimal> =
+            row.decode_column("retirement_connection_event_ordinal")?;
+        let retirement_loss_connection_epoch: Option<Decimal> =
+            row.decode_column("retirement_loss_connection_epoch")?;
+        let retirement_loss_connection_event_ordinal: Option<Decimal> =
+            row.decode_column("retirement_loss_connection_event_ordinal")?;
+        let has_acknowledgement =
+            acknowledgement_runner.is_some() || acknowledgement_manifest.is_some();
+        let has_retirement = retirement_runner.is_some()
+            || retirement_manifest.is_some()
+            || retirement_enrollment.is_some()
+            || retirement_connection_epoch.is_some()
+            || retirement_loss_epoch.is_some()
+            || retirement_connection_event_ordinal.is_some()
+            || retirement_loss_connection_epoch.is_some()
+            || retirement_loss_connection_event_ordinal.is_some();
+        let source_connection_is_lost = row
+            .decode_column::<Option<Uuid>>("source_loss_enrollment_id")?
+            .is_some();
+        if has_acknowledgement && has_retirement {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        if has_acknowledgement {
             if acknowledgement_runner != Some(runner.into_uuid())
                 || acknowledgement_manifest != Some(manifest.into_uuid())
             {
                 return Err(RunnerProtocolCorruption::CrossWiredReference.into());
             }
+            return Ok(None);
+        }
+        if has_retirement {
+            let retirement_is_exact = retirement_runner == Some(runner.into_uuid())
+                && retirement_manifest == Some(manifest.into_uuid())
+                && retirement_enrollment == Some(row.decode_column::<Uuid>("enrollment_id")?)
+                && retirement_connection_epoch
+                    == Some(row.decode_column::<Decimal>("connection_epoch")?)
+                && retirement_loss_epoch.is_some()
+                && retirement_connection_event_ordinal.is_some()
+                && retirement_loss_connection_epoch == retirement_connection_epoch
+                && retirement_loss_connection_event_ordinal == retirement_connection_event_ordinal;
+            if !retirement_is_exact {
+                return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+            }
+            return Ok(None);
+        }
+        if source_connection_is_lost {
             return Ok(None);
         }
         let retired_placement_event_ordinal =
@@ -3703,13 +3831,18 @@ impl RunnerProtocolStore {
         let row = sqlx::query(
             "SELECT acknowledgement.runner_id, acknowledgement.manifest_id,
                     release.session_id AS release_session_id,
-                    release.state_kind
+                    release.state_kind,
+                    retirement.session_id AS retirement_session_id
                FROM runner_workspace_release_acknowledgement AS acknowledgement
                LEFT JOIN runner_workspace_release AS release
                  ON release.session_id = acknowledgement.session_id
                 AND release.placement_revision = acknowledgement.placement_revision
                 AND release.runner_id = acknowledgement.runner_id
                 AND release.manifest_id = acknowledgement.manifest_id
+               LEFT JOIN runner_workspace_release_loss_retirement AS retirement
+                 ON retirement.session_id = acknowledgement.session_id
+                AND retirement.placement_revision =
+                    acknowledgement.placement_revision
               WHERE acknowledgement.session_id = $1
                 AND acknowledgement.placement_revision = $2",
         )
@@ -3725,6 +3858,9 @@ impl RunnerProtocolStore {
                 .decode_column::<Option<String>>("state_kind")?
                 .as_deref()
                 != Some("pending")
+            || row
+                .decode_column::<Option<Uuid>>("retirement_session_id")?
+                .is_some()
         {
             return Err(RunnerProtocolCorruption::CrossWiredReference.into());
         }
@@ -3734,6 +3870,95 @@ impl RunnerProtocolStore {
             runner_id(row.decode_column("runner_id")?),
             WorkspaceManifestId::from_uuid(row.decode_column("manifest_id")?),
         )))
+    }
+
+    /// Loads one immutable connection-loss retirement of a pending release.
+    pub async fn load_workspace_release_loss_retirement(
+        &self,
+        session: SessionId,
+        placement_revision: RunnerGeneration,
+    ) -> Result<Option<StoredRunnerWorkspaceReleaseLossRetirement>, RunnerProtocolStoreError> {
+        let row = sqlx::query(
+            "SELECT retirement.runner_id, retirement.manifest_id,
+                    retirement.enrollment_id, retirement.connection_epoch,
+                    retirement.loss_epoch, retirement.connection_event_ordinal,
+                    release.session_id AS release_session_id,
+                    release.runner_id AS release_runner_id,
+                    release.manifest_id AS release_manifest_id,
+                    release.enrollment_id AS release_enrollment_id,
+                    release.connection_epoch AS release_connection_epoch,
+                    release.state_kind,
+                    acknowledgement.session_id AS acknowledgement_session_id,
+                    loss.connection_epoch AS loss_connection_epoch,
+                    loss.connection_event_ordinal AS loss_connection_event_ordinal
+               FROM runner_workspace_release_loss_retirement AS retirement
+               LEFT JOIN runner_workspace_release AS release
+                 ON release.session_id = retirement.session_id
+                AND release.placement_revision = retirement.placement_revision
+               LEFT JOIN runner_connection_loss_epoch AS loss
+                 ON loss.enrollment_id = retirement.enrollment_id
+                AND loss.loss_epoch = retirement.loss_epoch
+               LEFT JOIN runner_workspace_release_acknowledgement AS acknowledgement
+                 ON acknowledgement.session_id = retirement.session_id
+                AND acknowledgement.placement_revision =
+                    retirement.placement_revision
+              WHERE retirement.session_id = $1
+                AND retirement.placement_revision = $2",
+        )
+        .bind(session.into_uuid())
+        .bind(Decimal::from(placement_revision.get()))
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let runner = runner_id(row.decode_column("runner_id")?);
+        let manifest = WorkspaceManifestId::from_uuid(row.decode_column("manifest_id")?);
+        let enrollment = RunnerEnrollmentId::from_uuid(row.decode_column("enrollment_id")?);
+        let connection_epoch = RunnerConnectionEpoch::try_from_u64(decode_u64(
+            row.decode_column("connection_epoch")?,
+        )?)
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        let loss_epoch =
+            RunnerConnectionLossEpoch::try_from_u64(decode_u64(row.decode_column("loss_epoch")?)?)
+                .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        let connection_event_ordinal =
+            NonZeroU64::new(decode_u64(row.decode_column("connection_event_ordinal")?)?)
+                .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        if row.decode_column::<Option<Uuid>>("release_session_id")? != Some(session.into_uuid())
+            || row.decode_column::<Option<Uuid>>("release_runner_id")? != Some(runner.into_uuid())
+            || row.decode_column::<Option<Uuid>>("release_manifest_id")?
+                != Some(manifest.into_uuid())
+            || row.decode_column::<Option<Uuid>>("release_enrollment_id")?
+                != Some(enrollment.into_uuid())
+            || row.decode_column::<Option<Decimal>>("release_connection_epoch")?
+                != Some(Decimal::from(connection_epoch.get()))
+            || row
+                .decode_column::<Option<String>>("state_kind")?
+                .as_deref()
+                != Some("pending")
+            || row
+                .decode_column::<Option<Uuid>>("acknowledgement_session_id")?
+                .is_some()
+            || row.decode_column::<Option<Decimal>>("loss_connection_epoch")?
+                != Some(Decimal::from(connection_epoch.get()))
+            || row.decode_column::<Option<Decimal>>("loss_connection_event_ordinal")?
+                != Some(Decimal::from(connection_event_ordinal.get()))
+        {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        Ok(Some(StoredRunnerWorkspaceReleaseLossRetirement {
+            session,
+            placement_revision,
+            runner,
+            manifest,
+            loss: RunnerConnectionLossSnapshot {
+                enrollment,
+                loss_epoch,
+                connection_epoch,
+                connection_event_ordinal,
+            },
+        }))
     }
 
     /// Atomically admits or exactly replays one completed workspace release.
@@ -9698,6 +9923,62 @@ async fn advance_runner_loss_cursor(
     if changed != 1 {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
+    Ok(())
+}
+
+async fn retire_workspace_releases_for_connection_loss(
+    transaction: &mut Transaction<'_, Postgres>,
+    loss: RunnerConnectionLossSnapshot,
+    session: SessionId,
+) -> Result<(), RunnerProtocolStoreError> {
+    sqlx::query(
+        "SELECT placement_revision
+           FROM runner_workspace_release
+          WHERE session_id = $1
+            AND enrollment_id = $2
+            AND connection_epoch = $3
+          FOR UPDATE",
+    )
+    .bind(session.into_uuid())
+    .bind(loss.enrollment().into_uuid())
+    .bind(Decimal::from(loss.connection_epoch().get()))
+    .fetch_all(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_workspace_release_loss_retirement
+            (session_id, placement_revision, runner_id, manifest_id,
+             enrollment_id, connection_epoch, loss_epoch,
+             connection_event_ordinal)
+         SELECT release.session_id, release.placement_revision,
+                release.runner_id, release.manifest_id,
+                release.enrollment_id, release.connection_epoch,
+                $4, $5
+           FROM runner_workspace_release AS release
+          WHERE release.session_id = $1
+            AND release.enrollment_id = $2
+            AND release.connection_epoch = $3
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM runner_workspace_release_acknowledgement AS acknowledgement
+                 WHERE acknowledgement.session_id = release.session_id
+                   AND acknowledgement.placement_revision =
+                        release.placement_revision
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM runner_workspace_release_loss_retirement AS retirement
+                 WHERE retirement.session_id = release.session_id
+                   AND retirement.placement_revision =
+                        release.placement_revision
+            )",
+    )
+    .bind(session.into_uuid())
+    .bind(loss.enrollment().into_uuid())
+    .bind(Decimal::from(loss.connection_epoch().get()))
+    .bind(Decimal::from(loss.loss_epoch().get()))
+    .bind(Decimal::from(loss.connection_event_ordinal()))
+    .execute(&mut **transaction)
+    .await?;
     Ok(())
 }
 
