@@ -44,7 +44,7 @@ the durable transactions before acknowledgement is re-verified through this PR
 best-effort `lease_offer` projection and handoff is re-verified through this PR
 (`agent/runner-lease-offer-dispatcher`). The corrected reconstitution mismatch
 contract was re-verified through PR #322 (`agent/docs-discipline`; pinned and
-pinned-loss request mismatches). Owner-private storage of the one retained lease
+pinned-loss request mismatches). Private storage of the one retained lease
 and its monotonic fsynced phases is re-verified through this PR
 (`agent/runner-operation-journal`). Matching terminal-result retention and
 atomic acknowledgement clearing are re-verified through this PR
@@ -55,17 +55,20 @@ this PR (`agent/runner-heartbeat-lease-phase`). Daemon pre-resume admission of
 the exact execution-possible lease and retained terminal-result pair is
 re-verified through this PR (`agent/daemon-retained-result-resume-runtime`);
 runner transmission and checked directive consumption are re-verified through
-this PR (`agent/runner-retained-result-resume`). The placement loss-source,
-pre-pin replacement and abandonment state shapes, and append-only
-reconstitution-history contract are re-verified through this PR
-(`agent/runner-placement-loss-domain`). It owns logical runner enrollment,
-daemon-authoritative catalog validation, runner leases, the independent
-session-composition axes, session placement and affinity, credential-profile
-grants, and workspace requirements. The tool registry's common declarations
-remain owned by [tool loop](tool-loop.md); session transcript and frontier
-mechanics remain owned by [sessions and transcript](sessions-and-transcript.md);
-physical tool attempts remain owned by [tool loop](tool-loop.md). Invariant tags
-cite [the invariant test index](../invariants.md).
+this PR (`agent/runner-retained-result-resume`). Lease-offer operation-failure
+retention, exact live acknowledgement, and checked reconnect resend or
+retirement are re-verified through this PR
+(`agent/runner-lease-offer-failure-journal`). The placement loss-source, pre-pin
+replacement and abandonment state shapes, and append-only reconstitution-history
+contract are re-verified through this PR (`agent/runner-placement-loss-domain`).
+It owns logical runner enrollment, daemon-authoritative catalog validation,
+runner leases, the independent session-composition axes, session placement and
+affinity, credential-profile grants, and workspace requirements. The tool
+registry's common declarations remain owned by [tool loop](tool-loop.md);
+session transcript and frontier mechanics remain owned by
+[sessions and transcript](sessions-and-transcript.md); physical tool attempts
+remain owned by [tool loop](tool-loop.md). Invariant tags cite
+[the invariant test index](../invariants.md).
 
 The typed `ReplaceLostRunner`, `RunnerReplacementTarget`, and
 `AbandonLostRunner` domain command payloads are verified against this PR
@@ -675,13 +678,20 @@ The runner's owner-private state root stores at most one retained lease,
 advances it monotonically through the three fsynced phases below, and retains
 one matching bounded terminal envelope only after execution may have started. An
 exact `result_recorded` acknowledgement atomically frees both slots. The root
-rejects the remaining unsupported inventory slots, cross-wired correlations, and
-journals belonging to another enrolled runner. The live serving loop consumes
-that exact acknowledgement for a result produced on the current connection. On
-resume the runner sends the complete stored inventory, accepts only matching
-paired `discard_as_recorded` or paired `fail_stale` directives for retained
-terminal evidence, and atomically frees both slots. Unsupported actions preserve
-the journal and fail closed. No live execution path populates this inventory.
+also retains at most one pre-claim lease-offer `operation_failed` envelope only
+while both lease slots are empty. Its exact `operation_failure_recorded`
+acknowledgement frees that failure slot. The root rejects workspace and leak
+slots, provisioning or release failures, cross-wired correlations, and journals
+belonging to another enrolled runner. The live serving loop consumes either
+exact acknowledgement for evidence produced on the current connection. On resume
+the runner sends the complete stored inventory. It accepts only matching paired
+`discard_as_recorded` or paired `fail_stale` directives for retained terminal
+evidence and atomically frees both slots. For a retained lease-offer failure,
+`resend` emits the exact stored envelope while retaining it, and
+`discard_as_recorded` or `fail_stale` frees it. Unsupported actions preserve the
+journal and fail closed. No live execution or offer-admission path populates
+this inventory, so the failure boundary supplies neither lease admission nor a
+workstation tool inventory.
 
 **Committed unimplemented functionality.** Future execution support populates
 the bounded inventory that resume already exchanges, containing at most the one
@@ -811,7 +821,7 @@ selected runner authority, and placement in the runner lock order, authenticates
 either a distinct live successor or the registration-loss-only same-runner
 exception, and returns the original durable stage on equal replay. A
 workspace-free placement returns `NotApplicable` without claiming the command,
-so its later terminal transaction remains the sole owner. The runner provisions
+so its later terminal transaction remains the sole authority. The runner provisions
 and spools `workspace_ready` under that limited authority. Only a later
 transaction can activate the pending enrollment: it rechecks the lost
 predecessor and connected candidate, consumes the exact workspace receipt,

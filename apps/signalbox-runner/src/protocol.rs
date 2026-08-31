@@ -13,8 +13,9 @@ use rustix::process::geteuid;
 use signalbox_runner_wire::{
     Advertise, Advertisement, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Digest,
     DirectiveAction, Enroll, Frame, FrameError, Heartbeat, HeartbeatAck, MAX_FRAME_BYTES, Message,
-    PositiveU64, ReconnectDirectives, ReconnectInventory, Registered, Rejected, RejectionCode,
-    Resume, Shutdown, ShutdownReason, ValueError, advertisement_digest, decode_line, encode_line,
+    OperationCorrelation, OperationFailed, OperationFailure, PositiveU64, ReconnectDirectives,
+    ReconnectInventory, Registered, Rejected, RejectionCode, Resume, Shutdown, ShutdownReason,
+    ValueError, advertisement_digest, decode_line, encode_line,
 };
 use tokio::{
     io::{
@@ -610,7 +611,15 @@ where
                     ));
                 }
                 let receipt = state.record_registration(resumed.registration_revision, digest)?;
-                apply_resume_directives(state, &inventory, &resumed.directives)?;
+                let resend_failure =
+                    apply_resume_directives(state, &inventory, &resumed.directives)?;
+                if let Some(failure) = resend_failure {
+                    send_message(
+                        &mut io,
+                        Message::OperationFailed(OperationFailed { failure }),
+                    )
+                    .await?;
+                }
                 (
                     receipt,
                     EnrollmentOutcome::Resumed,
@@ -829,6 +838,28 @@ where
                         | RunnerStateError::OperationCorrelationMismatch => {
                             RunnerConnectionError::Violation(
                                 ProtocolViolation::ResultAcknowledgementMismatch,
+                            )
+                        }
+                        other => RunnerConnectionError::State(other),
+                    })?;
+                Ok(None)
+            }
+            Message::OperationFailureRecorded(recorded) => {
+                match &recorded.correlation {
+                    OperationCorrelation::LeaseOffer(_) => {}
+                    OperationCorrelation::Provision(_) | OperationCorrelation::Release(_) => {
+                        return Err(RunnerConnectionError::Violation(
+                            ProtocolViolation::FailureAcknowledgementMismatch,
+                        ));
+                    }
+                }
+                state
+                    .acknowledge_lease_offer_failure(&recorded.correlation)
+                    .map_err(|error| match error {
+                        RunnerStateError::InvalidTransition
+                        | RunnerStateError::OperationCorrelationMismatch => {
+                            RunnerConnectionError::Violation(
+                                ProtocolViolation::FailureAcknowledgementMismatch,
                             )
                         }
                         other => RunnerConnectionError::State(other),
@@ -1064,9 +1095,40 @@ fn apply_resume_directives(
     state: &mut RunnerStateRoot,
     inventory: &ReconnectInventory,
     directives: &ReconnectDirectives,
-) -> Result<(), RunnerConnectionError> {
+) -> Result<Option<OperationFailure>, RunnerConnectionError> {
     if inventory == &ReconnectInventory::default() {
-        return Ok(());
+        return Ok(None);
+    }
+    if let (Some(failure), Some(directive)) = (
+        inventory.operation_failure.as_ref(),
+        directives.operation_failure.as_ref(),
+    ) && inventory.lease.is_none()
+        && inventory.result.is_none()
+        && inventory.workspace_operation.is_none()
+        && inventory.leak_page.is_none()
+        && directives.lease.is_none()
+        && directives.result.is_none()
+        && directives.workspace_operation.is_none()
+        && directives.leak_page.is_none()
+    {
+        return match directive.action {
+            DirectiveAction::Resend => Ok(Some(failure.clone())),
+            DirectiveAction::DiscardAsRecorded | DirectiveAction::FailStale => {
+                state
+                    .acknowledge_lease_offer_failure(&failure.correlation)
+                    .map_err(|error| match error {
+                        RunnerStateError::InvalidTransition
+                        | RunnerStateError::OperationCorrelationMismatch => {
+                            RunnerConnectionError::Violation(ProtocolViolation::ResumeDirectives)
+                        }
+                        other => RunnerConnectionError::State(other),
+                    })?;
+                Ok(None)
+            }
+            DirectiveAction::Await => Err(RunnerConnectionError::Violation(
+                ProtocolViolation::ResumeDirectives,
+            )),
+        };
     }
     let (Some(lease), Some(result), Some(lease_directive), Some(result_directive)) = (
         inventory.lease.as_ref(),
@@ -1098,7 +1160,8 @@ fn apply_resume_directives(
                 RunnerConnectionError::Violation(ProtocolViolation::ResumeDirectives)
             }
             other => RunnerConnectionError::State(other),
-        })
+        })?;
+    Ok(None)
 }
 
 async fn receive_message<S>(io: &mut BufReader<S>) -> Result<Message, RunnerConnectionError>
@@ -1126,9 +1189,10 @@ mod tests {
     use uuid::Uuid;
 
     use signalbox_runner_wire::{
-        Enrolled, LeaseCorrelation, LeasePhase, LeasePhaseKind, ReconnectDirectives,
-        ResultRecorded, Resumed, RetainedResult, SandboxProfile, Shutdown, TerminalResult,
-        WireToolName, WorkingDirectory, WorkspaceProvision,
+        DetailName, Enrolled, FailureCategory, FailureDetail, LeaseCorrelation, LeasePhase,
+        LeasePhaseKind, OperationFailureRecorded, ReconnectDirectives, ResultRecorded, Resumed,
+        RetainedResult, SandboxProfile, Shutdown, TerminalResult, WireToolName, WorkingDirectory,
+        WorkspaceProvision,
     };
 
     use super::*;
@@ -1262,6 +1326,33 @@ mod tests {
             }),
             result: Some(signalbox_runner_wire::Directive {
                 correlation,
+                action,
+            }),
+            ..ReconnectDirectives::default()
+        }
+    }
+
+    fn retained_lease_offer_failure() -> OperationFailure {
+        OperationFailure {
+            correlation: OperationCorrelation::LeaseOffer(retained_lease_correlation()),
+            category: FailureCategory::LeaseAdmissionRefused,
+            detail: FailureDetail::try_new(
+                DetailName::try_new("fixture-refusal".to_owned())
+                    .expect("the fixture detail code is valid"),
+                String::from("the synthetic offer is refused"),
+                serde_json::json!({}),
+            )
+            .expect("the fixture failure detail is bounded"),
+        }
+    }
+
+    fn retained_failure_directives(
+        failure: &OperationFailure,
+        action: DirectiveAction,
+    ) -> ReconnectDirectives {
+        ReconnectDirectives {
+            operation_failure: Some(signalbox_runner_wire::Directive {
+                correlation: failure.correlation.clone(),
                 action,
             }),
             ..ReconnectDirectives::default()
@@ -1586,6 +1677,166 @@ mod tests {
         assert_eq!(state.reconnect_inventory(), &retained);
     }
 
+    /// INV-011 / INV-024: reconnect resends the exact retained lease-offer
+    /// failure and keeps it durable until acknowledgement.
+    #[tokio::test]
+    async fn s31_inv011_inv024_resume_resends_retained_lease_offer_failure() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        let failure = retained_lease_offer_failure();
+        state
+            .record_lease_offer_failure(failure.clone())
+            .expect("the lease-offer failure is durable");
+        let retained = state.reconnect_inventory().clone();
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = RunnerConnection::establish(runner_io, &mut state, &advertisement);
+        let hub = async {
+            let observed_resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_failure_directives(&failure, DirectiveAction::Resend),
+                })),
+            )
+            .await;
+            let observed_failure = receive_hub_message(&mut hub_io).await;
+            (observed_resume, observed_failure)
+        };
+        let (connection, (observed_resume, observed_failure)) = tokio::join!(runner, hub);
+        let receipt = state
+            .state()
+            .receipt()
+            .expect("the retained fixture remains enrolled");
+        let expected_resume = Message::Resume(Box::new(Resume {
+            request_id: receipt.request_id(),
+            digest_version: DIGEST_VERSION,
+            enrollment_id: receipt.enrollment_id(),
+            runner_id: receipt.runner_id(),
+            authentication_id: receipt.authentication_id(),
+            advertisement: advertisement.clone(),
+            prior_registration_revision: receipt.registration_revision(),
+            inventory: retained.clone(),
+        }));
+
+        assert_eq!(
+            connection
+                .expect("the resend directive establishes the connection")
+                .outcome(),
+            EnrollmentOutcome::Resumed
+        );
+        assert_eq!(observed_resume, expected_resume);
+        assert_eq!(
+            observed_failure,
+            Message::OperationFailed(OperationFailed {
+                failure: failure.clone(),
+            })
+        );
+        assert_eq!(state.reconnect_inventory(), &retained);
+    }
+
+    /// INV-011 / INV-024: a daemon-recorded reconnect directive retires the
+    /// exact retained lease-offer failure before serving begins.
+    #[tokio::test]
+    async fn s31_inv011_inv024_resume_discards_recorded_lease_offer_failure() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        let failure = retained_lease_offer_failure();
+        state
+            .record_lease_offer_failure(failure.clone())
+            .expect("the lease-offer failure is durable");
+        let retained = state.reconnect_inventory().clone();
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = RunnerConnection::establish(runner_io, &mut state, &advertisement);
+        let hub = async {
+            let observed = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_failure_directives(
+                        &failure,
+                        DirectiveAction::DiscardAsRecorded,
+                    ),
+                })),
+            )
+            .await;
+            observed
+        };
+        let (connection, observed) = tokio::join!(runner, hub);
+        let receipt = state
+            .state()
+            .receipt()
+            .expect("the retained fixture remains enrolled");
+        let expected_resume = Message::Resume(Box::new(Resume {
+            request_id: receipt.request_id(),
+            digest_version: DIGEST_VERSION,
+            enrollment_id: receipt.enrollment_id(),
+            runner_id: receipt.runner_id(),
+            authentication_id: receipt.authentication_id(),
+            advertisement: advertisement.clone(),
+            prior_registration_revision: receipt.registration_revision(),
+            inventory: retained,
+        }));
+
+        assert_eq!(
+            connection
+                .expect("the recorded directive establishes the connection")
+                .outcome(),
+            EnrollmentOutcome::Resumed
+        );
+        assert_eq!(observed, expected_resume);
+        assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
+    }
+
+    /// INV-011 / INV-024: an unsupported failure directive preserves the
+    /// retained refusal evidence and fails the reconnect closed.
+    #[tokio::test]
+    async fn s31_inv011_inv024_resume_rejects_awaiting_lease_offer_failure() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        let failure = retained_lease_offer_failure();
+        state
+            .record_lease_offer_failure(failure.clone())
+            .expect("the lease-offer failure is durable");
+        let retained = state.reconnect_inventory().clone();
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = RunnerConnection::establish(runner_io, &mut state, &advertisement);
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_failure_directives(&failure, DirectiveAction::Await),
+                })),
+            )
+            .await;
+        };
+        let (rejected, ()) = tokio::join!(runner, hub);
+        let rejected = rejected
+            .err()
+            .expect("the unsupported failure directive fails closed");
+
+        assert!(matches!(
+            rejected,
+            RunnerConnectionError::Violation(ProtocolViolation::ResumeDirectives)
+        ));
+        assert_eq!(state.reconnect_inventory(), &retained);
+    }
+
     /// INV-011 / INV-024: heartbeat progress repeats the exact fsynced lease
     /// phase instead of inventing process-local execution state.
     #[tokio::test]
@@ -1806,6 +2057,166 @@ mod tests {
                 correlation: retained_lease_correlation(),
                 result: TerminalResult::Ambiguous,
             })
+        );
+    }
+
+    /// INV-011 / INV-024: the live exact acknowledgement clears a retained
+    /// lease-offer failure through the serving loop.
+    #[tokio::test]
+    async fn s31_inv011_inv024_exact_failure_acknowledgement_clears_retained_slot() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        let advertisement = empty_advertisement();
+        let failure = retained_lease_offer_failure();
+        let correlation = failure.correlation.clone();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before the acknowledgement");
+            state
+                .record_lease_offer_failure(failure)
+                .expect("the lease-offer failure is durable");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect("the exact failure acknowledgement is consumed")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::OperationFailureRecorded(OperationFailureRecorded { correlation }),
+            )
+            .await;
+        };
+        let (outcome, ()) = tokio::join!(runner, hub);
+
+        assert_eq!(outcome, None);
+        assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
+    }
+
+    /// INV-011 / INV-024: an acknowledgement for resent refusal evidence uses
+    /// the retained registration revision even when resume advances the head.
+    #[tokio::test]
+    async fn s31_inv011_inv024_resent_failure_acknowledgement_accepts_retained_revision() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        let failure = retained_lease_offer_failure();
+        let correlation = failure.correlation.clone();
+        state
+            .record_lease_offer_failure(failure.clone())
+            .expect("the lease-offer failure is durable");
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume resends the retained failure");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect("the retained-revision acknowledgement is consumed")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            let resumed = Resumed {
+                registration_revision: positive(NEXT_REGISTRATION_REVISION),
+                connection_epoch: positive(CONNECTION_EPOCH),
+                directives: retained_failure_directives(&failure, DirectiveAction::Resend),
+            };
+            let resumed_registration_revision = resumed.registration_revision;
+            send_hub_message(&mut hub_io, Message::Resumed(Box::new(resumed))).await;
+            assert_eq!(
+                receive_hub_message(&mut hub_io).await,
+                Message::OperationFailed(OperationFailed { failure })
+            );
+            send_hub_message(
+                &mut hub_io,
+                Message::OperationFailureRecorded(OperationFailureRecorded { correlation }),
+            )
+            .await;
+            resumed_registration_revision
+        };
+        let (outcome, resumed_registration_revision) = tokio::join!(runner, hub);
+
+        assert_eq!(outcome, None);
+        assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
+        assert_eq!(
+            state
+                .state()
+                .receipt()
+                .expect("the advanced registration remains durable")
+                .registration_revision(),
+            resumed_registration_revision
+        );
+    }
+
+    #[tokio::test]
+    async fn another_failure_acknowledgement_preserves_retained_slot() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        let advertisement = empty_advertisement();
+        let failure = retained_lease_offer_failure();
+        let retained = failure.clone();
+        let mut foreign = retained_lease_correlation();
+        foreign.lease_id = identity(ARBITRARY_OTHER_LEASE_UUID);
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before the acknowledgement");
+            state
+                .record_lease_offer_failure(failure)
+                .expect("the lease-offer failure is durable");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect_err("another lease cannot acknowledge retained failure evidence")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::OperationFailureRecorded(OperationFailureRecorded {
+                    correlation: OperationCorrelation::LeaseOffer(foreign),
+                }),
+            )
+            .await;
+        };
+        let (error, ()) = tokio::join!(runner, hub);
+
+        assert!(matches!(
+            error,
+            RunnerConnectionError::Violation(ProtocolViolation::FailureAcknowledgementMismatch)
+        ));
+        assert_eq!(
+            state.reconnect_inventory().operation_failure,
+            Some(retained)
         );
     }
 

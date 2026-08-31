@@ -16,7 +16,7 @@ use rustix::{
 use serde::{Deserialize, Serialize};
 use signalbox_runner_wire::{
     CanonicalUuid, Digest, LeaseCorrelation, LeasePhase, LeasePhaseKind, MAX_FRAME_BYTES,
-    PositiveU64, ReconnectInventory, RetainedResult,
+    OperationCorrelation, OperationFailure, PositiveU64, ReconnectInventory, RetainedResult,
 };
 use uuid::Uuid;
 
@@ -492,7 +492,7 @@ impl RunnerStateRoot {
                 });
             }
         };
-        validate_operation_journal_owner(&state, &inventory)?;
+        validate_operation_journal_identity(&state, &inventory)?;
         Ok(Self {
             directory,
             state,
@@ -549,6 +549,9 @@ impl RunnerStateRoot {
     /// Atomically journals one exact lease phase without opening another slot.
     pub fn record_lease_phase(&mut self, next: LeasePhase) -> Result<(), RunnerStateError> {
         self.validate_current_lease_correlation(&next.correlation)?;
+        if self.inventory.operation_failure.is_some() {
+            return Err(RunnerStateError::InvalidTransition);
+        }
         match self.inventory.lease.as_ref() {
             None if next.phase == LeasePhaseKind::WaitingDispatch => {}
             None => return Err(RunnerStateError::InvalidTransition),
@@ -629,6 +632,50 @@ impl RunnerStateRoot {
         Ok(())
     }
 
+    /// Atomically retains one refused lease offer until its exact acknowledgement.
+    pub fn record_lease_offer_failure(
+        &mut self,
+        failure: OperationFailure,
+    ) -> Result<(), RunnerStateError> {
+        let OperationCorrelation::LeaseOffer(correlation) = &failure.correlation else {
+            return Err(RunnerStateError::InvalidTransition);
+        };
+        self.validate_current_lease_correlation(correlation)?;
+        if self.inventory.lease.is_some() || self.inventory.result.is_some() {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        match self.inventory.operation_failure.as_ref() {
+            None => {}
+            Some(current) if current == &failure => return Ok(()),
+            Some(_) => return Err(RunnerStateError::OperationCorrelationMismatch),
+        }
+        let mut inventory = self.inventory.clone();
+        inventory.operation_failure = Some(failure);
+        write_operation_journal(&self.directory, &inventory)?;
+        self.inventory = inventory;
+        Ok(())
+    }
+
+    /// Atomically releases one exact retained lease-offer failure.
+    pub fn acknowledge_lease_offer_failure(
+        &mut self,
+        correlation: &OperationCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        if !matches!(correlation, OperationCorrelation::LeaseOffer(_)) {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        match self.inventory.operation_failure.as_ref() {
+            Some(failure) if &failure.correlation == correlation => {}
+            Some(_) => return Err(RunnerStateError::OperationCorrelationMismatch),
+            None => return Err(RunnerStateError::InvalidTransition),
+        }
+        let mut inventory = self.inventory.clone();
+        inventory.operation_failure = None;
+        write_operation_journal(&self.directory, &inventory)?;
+        self.inventory = inventory;
+        Ok(())
+    }
+
     fn validate_current_lease_correlation(
         &self,
         correlation: &LeaseCorrelation,
@@ -647,7 +694,7 @@ impl RunnerStateRoot {
     }
 }
 
-fn validate_operation_journal_owner(
+fn validate_operation_journal_identity(
     state: &RunnerState,
     inventory: &ReconnectInventory,
 ) -> Result<(), RunnerStateError> {
@@ -670,7 +717,24 @@ fn validate_operation_journal_owner(
         }
         (None, Some(_)) => false,
     };
-    if lease_owned && result_owned && result_matches_lease {
+    let failure_owned = match (receipt, inventory.operation_failure.as_ref()) {
+        (_, None) => true,
+        (Some(receipt), Some(failure)) => match &failure.correlation {
+            OperationCorrelation::LeaseOffer(correlation) => {
+                correlation.runner_id == receipt.runner_id()
+            }
+            OperationCorrelation::Provision(_) | OperationCorrelation::Release(_) => false,
+        },
+        (None, Some(_)) => false,
+    };
+    let failure_precedes_lease = inventory.operation_failure.is_none()
+        || (inventory.lease.is_none() && inventory.result.is_none());
+    if lease_owned
+        && result_owned
+        && result_matches_lease
+        && failure_owned
+        && failure_precedes_lease
+    {
         Ok(())
     } else {
         Err(RunnerStateError::CorruptOperationJournal)
@@ -679,7 +743,13 @@ fn validate_operation_journal_owner(
 
 fn operation_journal_has_only_supported_slots(inventory: &ReconnectInventory) -> bool {
     inventory.workspace_operation.is_none()
-        && inventory.operation_failure.is_none()
+        && inventory
+            .operation_failure
+            .as_ref()
+            .is_none_or(|failure| match &failure.correlation {
+                OperationCorrelation::LeaseOffer(_) => true,
+                OperationCorrelation::Provision(_) | OperationCorrelation::Release(_) => false,
+            })
         && inventory.leak_page.is_none()
 }
 
@@ -827,6 +897,12 @@ fn write_operation_journal(
     inventory
         .validate()
         .map_err(|_| RunnerStateError::CorruptOperationJournal)?;
+    if !operation_journal_has_only_supported_slots(inventory)
+        || (inventory.operation_failure.is_some()
+            && (inventory.lease.is_some() || inventory.result.is_some()))
+    {
+        return Err(RunnerStateError::CorruptOperationJournal);
+    }
     let document = OperationJournalDocument {
         version: STATE_DOCUMENT_VERSION,
         inventory: inventory.clone(),
@@ -903,8 +979,9 @@ fn rustix_error(error: rustix::io::Errno) -> io::Error {
 #[cfg(test)]
 mod tests {
     use signalbox_runner_wire::{
-        Advertisement, ExecutionErrorKind, ReleaseCorrelation, ReleasePhase, SandboxProfile,
-        TerminalResult, WireToolName, WorkingDirectory, WorkspaceOperation, advertisement_digest,
+        Advertisement, DetailName, ExecutionErrorKind, FailureCategory, FailureDetail,
+        ReleaseCorrelation, ReleasePhase, SandboxProfile, TerminalResult, WireToolName,
+        WorkingDirectory, WorkspaceOperation, advertisement_digest,
     };
     use tempfile::TempDir;
 
@@ -1020,6 +1097,31 @@ mod tests {
         RetainedResult {
             correlation: lease_correlation(),
             result,
+        }
+    }
+
+    fn lease_offer_failure() -> OperationFailure {
+        lease_offer_failure_for(lease_correlation())
+    }
+
+    fn lease_offer_failure_for(correlation: LeaseCorrelation) -> OperationFailure {
+        OperationFailure {
+            correlation: OperationCorrelation::LeaseOffer(correlation),
+            category: FailureCategory::LeaseAdmissionRefused,
+            detail: FailureDetail::try_new(
+                DetailName::try_new("fixture-refusal".to_owned())
+                    .expect("the fixture detail code is valid"),
+                String::from("the synthetic offer is refused"),
+                serde_json::json!({}),
+            )
+            .expect("the fixture failure detail is bounded"),
+        }
+    }
+
+    fn inventory_with_failure(failure: OperationFailure) -> ReconnectInventory {
+        ReconnectInventory {
+            operation_failure: Some(failure),
+            ..ReconnectInventory::default()
         }
     }
 
@@ -1350,6 +1452,120 @@ mod tests {
         assert_eq!(root.reconnect_inventory().result, Some(result));
     }
 
+    /// INV-011 / INV-024: a refused lease offer survives restart until its
+    /// exact durable acknowledgement.
+    #[test]
+    fn inv011_inv024_lease_offer_failure_survives_reopen() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = enrolled_root(&parent);
+        let failure = lease_offer_failure();
+        root.record_lease_offer_failure(failure.clone())
+            .expect("the lease-offer failure is durable");
+        drop(root);
+
+        let reopened = RunnerStateRoot::open(&path).expect("the private state root reopens");
+
+        assert_eq!(
+            reopened.reconnect_inventory(),
+            &inventory_with_failure(failure)
+        );
+    }
+
+    /// INV-011 / INV-024: the exact daemon acknowledgement retires the
+    /// refused lease offer across restart.
+    #[test]
+    fn inv011_inv024_lease_offer_failure_acknowledgement_survives_reopen() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = enrolled_root(&parent);
+        let failure = lease_offer_failure();
+        root.record_lease_offer_failure(failure.clone())
+            .expect("the lease-offer failure is durable");
+
+        root.acknowledge_lease_offer_failure(&failure.correlation)
+            .expect("the exact acknowledgement retires the failure");
+        drop(root);
+
+        let reopened = RunnerStateRoot::open(&path).expect("the private state root reopens");
+
+        assert_eq!(
+            reopened.reconnect_inventory(),
+            &ReconnectInventory::default()
+        );
+    }
+
+    #[test]
+    fn lease_offer_failure_acknowledgement_rejects_another_correlation() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut root = enrolled_root(&parent);
+        let failure = lease_offer_failure();
+        root.record_lease_offer_failure(failure.clone())
+            .expect("the lease-offer failure is durable");
+        let mut foreign = lease_correlation();
+        foreign.lease_id = CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_OTHER_LEASE_UUID));
+
+        let error = root
+            .acknowledge_lease_offer_failure(&OperationCorrelation::LeaseOffer(foreign))
+            .expect_err("another lease cannot retire the retained failure");
+
+        assert!(matches!(
+            error,
+            RunnerStateError::OperationCorrelationMismatch
+        ));
+        assert_eq!(root.reconnect_inventory(), &inventory_with_failure(failure));
+    }
+
+    #[test]
+    fn lease_offer_failure_rejects_an_occupied_lease_slot() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut root = enrolled_root(&parent);
+        let waiting = lease_phase(LeasePhaseKind::WaitingDispatch);
+        root.record_lease_phase(waiting.clone())
+            .expect("the waiting lease occupies the serial slot");
+
+        let error = root
+            .record_lease_offer_failure(lease_offer_failure())
+            .expect_err("a refused offer cannot coexist with a current lease");
+
+        assert!(matches!(error, RunnerStateError::InvalidTransition));
+        assert_eq!(root.reconnect_inventory(), &inventory_with_lease(waiting));
+    }
+
+    #[test]
+    fn lease_offer_failure_rejects_another_registration() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut root = enrolled_root(&parent);
+        let mut foreign = lease_correlation();
+        foreign.registration_revision = positive(SUCCESSOR_REGISTRATION_REVISION);
+
+        let error = root
+            .record_lease_offer_failure(lease_offer_failure_for(foreign))
+            .expect_err("another registration cannot journal refusal evidence");
+
+        assert!(matches!(
+            error,
+            RunnerStateError::OperationCorrelationMismatch
+        ));
+        assert_eq!(root.reconnect_inventory(), &ReconnectInventory::default());
+    }
+
+    #[test]
+    fn lease_phase_rejects_a_retained_offer_failure() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut root = enrolled_root(&parent);
+        let failure = lease_offer_failure();
+        root.record_lease_offer_failure(failure.clone())
+            .expect("the refused offer occupies the serial slot");
+
+        let error = root
+            .record_lease_phase(lease_phase(LeasePhaseKind::WaitingDispatch))
+            .expect_err("a lease cannot replace retained refusal evidence");
+
+        assert!(matches!(error, RunnerStateError::InvalidTransition));
+        assert_eq!(root.reconnect_inventory(), &inventory_with_failure(failure));
+    }
+
     #[test]
     fn second_process_cannot_share_state_root_lock() {
         let parent = TempDir::new().expect("a temporary parent is available");
@@ -1492,6 +1708,27 @@ mod tests {
     }
 
     #[test]
+    fn operation_failure_journal_for_another_runner_fails_closed() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = enrolled_root(&parent);
+        root.record_lease_offer_failure(lease_offer_failure())
+            .expect("the operation journal is created");
+        drop(root);
+        let mut foreign = lease_correlation();
+        foreign.runner_id = CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_OTHER_RUNNER_UUID));
+        replace_operation_journal(
+            &path,
+            inventory_with_failure(lease_offer_failure_for(foreign)),
+        );
+
+        let error = RunnerStateRoot::open(&path)
+            .expect_err("another runner's refusal journal fails closed");
+
+        assert!(matches!(error, RunnerStateError::CorruptOperationJournal));
+    }
+
+    #[test]
     fn unsupported_operation_journal_slot_fails_closed() {
         let parent = TempDir::new().expect("a temporary parent is available");
         let path = root_path(&parent);
@@ -1515,6 +1752,38 @@ mod tests {
 
         let error = RunnerStateRoot::open(&path)
             .expect_err("an unauthored operation-journal slot fails closed");
+
+        assert!(matches!(error, RunnerStateError::CorruptOperationJournal));
+    }
+
+    #[test]
+    fn unsupported_release_failure_journal_fails_closed() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = enrolled_root(&parent);
+        root.record_lease_phase(lease_phase(LeasePhaseKind::WaitingDispatch))
+            .expect("the operation journal is created");
+        drop(root);
+        let unsupported = OperationFailure {
+            correlation: OperationCorrelation::Release(ReleaseCorrelation {
+                session_id: CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_SESSION_UUID)),
+                placement_revision: positive(1),
+                runner_id: CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_RUNNER_UUID)),
+                manifest_id: CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_MANIFEST_UUID)),
+            }),
+            category: FailureCategory::WorkspaceCleanupFailed,
+            detail: FailureDetail::try_new(
+                DetailName::try_new("fixture-cleanup".to_owned())
+                    .expect("the fixture detail code is valid"),
+                String::from("the synthetic cleanup failed"),
+                serde_json::json!({}),
+            )
+            .expect("the fixture failure detail is bounded"),
+        };
+        replace_operation_journal(&path, inventory_with_failure(unsupported));
+
+        let error = RunnerStateRoot::open(&path)
+            .expect_err("an unauthored release-failure journal fails closed");
 
         assert!(matches!(error, RunnerStateError::CorruptOperationJournal));
     }
