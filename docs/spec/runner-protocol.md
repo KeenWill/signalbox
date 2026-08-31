@@ -71,17 +71,20 @@ bubblewrap request profile is re-verified through this PR
 lease-only resume directive is re-verified through this PR
 (`agent/runner-claimed-resume-client`). Runner ingestion of the daemon's
 canonical claim and dispatch replay is re-verified through this PR
-(`agent/runner-claimed-dispatch-replay`). The placement loss-source, pre-pin
-replacement and abandonment state shapes, and append-only reconstitution-history
-contract are re-verified through this PR (`agent/runner-placement-loss-domain`).
-It owns logical runner enrollment, daemon-authoritative catalog validation,
-runner leases, the independent session-composition axes, session placement and
-affinity, credential-profile grants, and workspace requirements. The tool
-registry's common declarations remain owned by [tool loop](tool-loop.md);
-session transcript and frontier mechanics remain owned by
-[sessions and transcript](sessions-and-transcript.md); physical tool attempts
-remain owned by [tool loop](tool-loop.md). Invariant tags cite
-[the invariant test index](../invariants.md).
+(`agent/runner-claimed-dispatch-replay`). Runner execution-phase journaling,
+heartbeat-safe execution, terminal retention, and generic exec-family restricted
+sandbox composition are re-verified through this PR
+(`agent/runner-sandboxed-dispatch-execution`). The placement loss-source,
+pre-pin replacement and abandonment state shapes, and append-only
+reconstitution-history contract are re-verified through this PR
+(`agent/runner-placement-loss-domain`). It owns logical runner enrollment,
+daemon-authoritative catalog validation, runner leases, the independent
+session-composition axes, session placement and affinity, credential-profile
+grants, and workspace requirements. The tool registry's common declarations
+remain owned by [tool loop](tool-loop.md); session transcript and frontier
+mechanics remain owned by [sessions and transcript](sessions-and-transcript.md);
+physical tool attempts remain owned by [tool loop](tool-loop.md). Invariant tags
+cite [the invariant test index](../invariants.md).
 
 The typed `ReplaceLostRunner`, `RunnerReplacementTarget`, and
 `AbandonLostRunner` domain command payloads are verified against this PR
@@ -298,14 +301,26 @@ After an exact lease-only `await` directive, it admits the daemon's repeated
 requires that capability on the current connection before accepting `dispatch`,
 fsyncs `dispatch_received`, and returns one sealed dispatch-ready handoff. A
 cross-wired acknowledgement, dispatch without its acknowledgement, or an
-execution-possible journal fails closed. The production binary currently refuses
-that handoff because no executor is composed.
+execution-possible journal fails closed. The production binary consumes that
+handoff by fsyncing `execution_may_have_started` before polling the executor,
+continues serving heartbeats while the supervised future runs, retains the
+bounded terminal envelope before projecting `result`, and resumes ordinary frame
+service while awaiting `result_recorded`.
 
-**Committed unimplemented functionality.** No runner surface completes the
-following lease/dispatch state machine. The established daemon connection does
-already implement the durable claim and result boundaries in steps 2 and 4. The
-daemon also accepts the pre-execution reconnect phases described below. The
-remaining runner surfaces stay compatible with the complete state machine:
+The composed execution adapter is deliberately the narrow generic exec-family
+proof slice, not a workstation registry decision. It admits only the existing
+`sandboxed_exec` argument contract with `WorkspaceRestricted`, treats the
+correlation's exact working directory as the single writable root, and invokes
+the configured supervisor and bubblewrap identities with the configured
+read-only paths. Invalid arguments and unavailable construction become closed
+known failures. The shipped production catalog remains empty, so no production
+registration can advertise or newly receive this tool yet.
+
+The runner and daemon implement the execution and result half of the following
+lease/dispatch state machine for an already claimed dispatch. Live offer
+admission remains unimplemented on the runner, and the production catalog
+remains empty. The remaining surfaces stay compatible with the complete state
+machine:
 
 1. The daemon sends `lease_offer` with the complete lease correlation and
    immutable dispatch payload. The runner admits the exact tool, sandbox
@@ -714,15 +729,16 @@ the runner sends the complete stored inventory. It accepts only matching paired
 evidence and atomically frees both slots. For a retained lease-offer failure,
 `resend` emits the exact stored envelope while retaining it, and
 `discard_as_recorded` or `fail_stale` frees it. Unsupported actions preserve the
-journal and fail closed. The only live producer is the registration-only empty
-catalog refusing an offered unknown tool; no successful offer admission or
-execution path populates this inventory, so the failure boundary supplies
-neither lease admission nor a workstation tool inventory.
+journal and fail closed. The registration-only empty catalog remains the only
+live producer of a pre-claim lease-offer failure; no successful live offer
+admission supplies lease authority or a workstation tool inventory. Separately,
+the live execution path for an already claimed dispatch populates the lease and
+result slots described above.
 
-**Committed unimplemented functionality.** Future execution support populates
-the bounded inventory that resume already exchanges, containing at most the one
-serial outstanding lease, its fsynced local phase, and retained terminal
-evidence. `waiting_dispatch`, `dispatch_received`, and
+That live execution path populates the bounded inventory that resume already
+exchanges, containing at most the one serial outstanding lease, its fsynced local
+phase, and retained terminal evidence. `waiting_dispatch`,
+`dispatch_received`, and
 `execution_may_have_started` retain the complete lease and dispatch correlation.
 The first two prove only that the journaled executor invocation had not started;
 the last carries ordinary effect-class ambiguity. Canonical durable state
@@ -754,11 +770,10 @@ consumes it. The runner consumes the exact lease-only `await` directive for
 `waiting_dispatch` and `dispatch_received` by preserving the journaled phase,
 and consumes `fail_stale` by atomically clearing only either of those
 execution-impossible phases. It rejects every other action and never clears an
-`execution_may_have_started` lease through this path. It does not yet consume
-the dispatch-ready handoff: it accepts the canonical replay frames and advances
-the durable phase through `dispatch_received`, but the binary fails typed before
-the executor gate. This daemon recovery path therefore cannot yet produce
-execution.
+`execution_may_have_started` lease through this path. It does not consume an
+`execution_may_have_started` lease without terminal evidence after restart; that
+shape remains unavailable until loss classification consumes it. The live path
+does consume the dispatch-ready handoff and retain its terminal result.
 
 ## Identity, enrollment, and registration
 
@@ -1567,11 +1582,13 @@ The reusable process core implements that filesystem and namespace request
 shape: it pins every configured read-only identity, rechecks those identities
 before both the availability probe and dispatch, recreates standard usr-merge
 aliases only when their targets are inside the configured mounts, and derives
-`PATH` only from configured mounts. `signalbox-runner` does not yet invoke this
-constructor or advertise `WorkspaceRestricted`; the execution child slice must
-compose it before any runner tool is executable. The HTTPS broker and resource
-limits remain separate work, with first-release resource limits still requiring
-a user decision in
+`PATH` only from configured mounts. `signalbox-runner` invokes this constructor
+for an exact `sandboxed_exec` dispatch carrying `WorkspaceRestricted`, using the
+correlation's exact working directory as the writable root and the configured
+read-only paths. The shipped catalog remains empty, so the runner does not yet
+advertise or newly receive that tool. The HTTPS broker and resource limits
+remain separate work, with first-release resource limits still requiring a user
+decision in
 [open questions](../open-questions.md#identity-credentials-and-resource-governance).
 
 Confinement is defined over that writable root, which need not be a repository.
