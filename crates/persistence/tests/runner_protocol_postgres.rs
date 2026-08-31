@@ -22,27 +22,30 @@ use signalbox_domain::{
     CredentialProfileGrantReconstitutionInput, CredentialProfileName, CredentialProfilePolicy,
     CredentialToolApproval, DecideToolRequest, DeliveryRequest, DescendantTerminationScope,
     DirectModelSelection, DurableCommandId, EndedToolAttempt, ImportedConversation,
-    ImportedConversationId, ImportedSessionRelationship, ImportedTranscriptEntryId, ModelCallId,
-    ModelSelectionOverride, ModelSelectionRequest, NormalizedToolArguments,
-    PerInputConfigurationChoices, PromotePendingRunner, PromotePendingRunnerRejection,
-    PromotePendingRunnerResult, PromotedRunnerEnrollment, ProvisionedWorkspace, ReplaceLostRunner,
+    ImportedConversationId, ImportedSessionRelationship, ImportedTranscriptEntryId,
+    LostPinnedRunnerPlacement, ModelCallId, ModelSelectionOverride, ModelSelectionRequest,
+    NormalizedToolArguments, PerInputConfigurationChoices, PinnedRunnerPlacement,
+    PromotePendingRunner, PromotePendingRunnerRejection, PromotePendingRunnerResult,
+    PromotedRunnerEnrollment, ProvisionedWorkspace, ReplaceLostRunner,
     ReplaceLostRunnerBeforePinRejection, ReplaceLostRunnerBeforePinResult,
     ReplacedLostRunnerBeforePin, ResolvedContextFrontierReconstitutionInput, RunnerAdvertisement,
     RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog, RunnerDomainError,
     RunnerEnrollment, RunnerEnrollmentId, RunnerEnrollmentRequestId, RunnerGeneration, RunnerId,
     RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseOfferRequest,
     RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerLostBeforePin,
-    RunnerPlacementReconstitutionHistory, RunnerPlacementRecoveryState, RunnerReplacementTarget,
+    RunnerPlacementLossSource, RunnerPlacementReconstitutionHistory, RunnerPlacementRecoveryState,
+    RunnerRegistrationReconciliation, RunnerReplacementTarget,
     RunnerReplacementTargetUnavailableReason, RunnerRepositoryEntry, RunnerSandboxProfile,
     RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
     RunnerToolModelDefinition, RunnerToolPermissionOverride, RunnerToolPermissionOverrides,
     RunnerWorkingDirectory, SemanticTranscriptEntryId, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
     SessionId, SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
-    SessionRunnerPlacementRequest, SessionRunnerPlacementState, SubmitInput, ToolAdmissibleLoci,
-    ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput,
-    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
-    ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
+    SessionRunnerPlacementRequest, SessionRunnerPlacementState,
+    StoredRunnerRegistrationLossEvidence, SubmitInput, ToolAdmissibleLoci, ToolApprovalDecision,
+    ToolApprovalResolutionReconstitutionInput, ToolAttemptDispatchCorrelation,
+    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
+    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
     ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
     ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal,
     ToolRequestReconstitutionInput, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
@@ -1413,6 +1416,14 @@ async fn stored_active_pin_fixture_with_authorization(
         pin,
         connection.epoch(),
     ))
+}
+
+#[track_caller]
+fn pinned_fixture_state(pin: &SessionRunnerPin) -> PinnedRunnerPlacement {
+    let SessionRunnerPlacementState::Pinned(pinned) = pin.placement.state() else {
+        panic!("the stored pin fixture carries a pinned placement");
+    };
+    pinned.clone()
 }
 
 async fn stored_side_effecting_pin_fixture(
@@ -3554,6 +3565,7 @@ async fn append_runner_registration_loss_projection(
 async fn append_same_runner_replacement_projection(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     session: SessionId,
+    successor_registration: &StoredValidatedRunnerRegistration,
     requested_directory: Option<&RunnerWorkingDirectory>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
@@ -3588,7 +3600,7 @@ async fn append_same_runner_replacement_projection(
                 'pinned', NULL, NULL, pinned_runner_id,
                 COALESCE($2::text, pinned_working_directory),
                 pinned_credential_profile_name,
-                registration_enrollment_id, registration_revision,
+                $3, $4,
                 pinned_tool_count, workspace_repository_key,
                 workspace_working_directory, workspace_manifest_id,
                 workspace_placement_revision,
@@ -3608,6 +3620,13 @@ async fn append_same_runner_replacement_projection(
     )
     .bind(session.into_uuid())
     .bind(requested_directory.map(RunnerWorkingDirectory::as_str))
+    .bind(
+        successor_registration
+            .registration()
+            .enrollment()
+            .into_uuid(),
+    )
+    .bind(Decimal::from(successor_registration.revision().get()))
     .execute(&mut **transaction)
     .await?;
     sqlx::query(
@@ -6449,17 +6468,28 @@ async fn s32_inv032_inv044_runner_loss_transaction_projects_exact_unpinned_sessi
 async fn s31_inv009_inv032_inv042_inv044_registration_reconciliation_projects_runner_loss()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let (store, expected_enrollment, _, pin, _) = stored_active_pin_fixture_with_authorization(
-        &pool,
-        authorized,
-        catalog(),
-        no_permission_overrides(),
-        "effect_free",
-    )
-    .await?;
+    let (store, expected_enrollment, pinned_registration, pin, _) =
+        stored_active_pin_fixture_with_authorization(
+            &pool,
+            authorized,
+            catalog(),
+            no_permission_overrides(),
+            "effect_free",
+        )
+        .await?;
     let registration = store
         .register(&expected_enrollment, narrowed_advertisement())
         .await?;
+    let expected_pinned = pinned_fixture_state(&pin);
+    let expected_state =
+        SessionRunnerPlacementState::RunnerLost(LostPinnedRunnerPlacement::from_stored(
+            expected_pinned,
+            RunnerPlacementLossSource::Registration,
+            Some(StoredRunnerRegistrationLossEvidence {
+                pinned_registration: pinned_registration.registration(),
+                loss_registration: registration.registration(),
+            }),
+        ));
     let pending = store.load_pending_registration_reconciliations().await?;
     let reconciliation = pending[0];
     let page = store
@@ -6506,10 +6536,10 @@ async fn s31_inv009_inv032_inv042_inv044_registration_reconciliation_projects_ru
         disposition,
         RunnerRegistrationReconciliationDisposition::RunnerLost
     );
-    assert!(matches!(
-        loaded.placement().state(),
-        SessionRunnerPlacementState::RunnerLost(_)
-    ));
+    assert_eq!(loaded.placement().session(), pin.placement.session());
+    assert_eq!(loaded.placement().revision(), pin.placement.revision());
+    assert_eq!(loaded.placement().request(), pin.placement.request());
+    assert_eq!(loaded.placement().state(), &expected_state);
     assert_eq!(
         stored_loss,
         (
@@ -9850,9 +9880,17 @@ async fn s32_inv044_registration_loss_admits_same_runner_replacement_shape()
         .register(&expected_enrollment, narrowed_advertisement())
         .await?;
     append_runner_registration_loss_projection(&store, &registration, &pin).await?;
-    let mut replacement = pool.begin().await?;
-    append_same_runner_replacement_projection(&mut replacement, pin.placement.session(), None)
+    let recovered_registration = store
+        .register(&expected_enrollment, advertisement())
         .await?;
+    let mut replacement = pool.begin().await?;
+    append_same_runner_replacement_projection(
+        &mut replacement,
+        pin.placement.session(),
+        &recovered_registration,
+        None,
+    )
+    .await?;
     replacement.commit().await?;
     let loaded_replacement = store
         .load_placement(pin.placement.session())
@@ -9867,8 +9905,43 @@ async fn s32_inv044_registration_loss_admits_same_runner_replacement_shape()
         loaded_replacement.placement().request(),
         pin.placement.request()
     );
-    assert_eq!(loaded_replacement.registration(), Some(&registration));
+    assert_eq!(
+        loaded_replacement.registration(),
+        Some(&recovered_registration)
+    );
     assert_eq!(loaded_replacement.grant(), None);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: a same-runner successor cannot authenticate itself with the
+/// historical pre-loss registration.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_same_runner_replacement_rejects_a_pre_loss_registration()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, historical, pin) =
+        stored_credentialless_pin_fixture(&pool).await?;
+    store
+        .register(&expected_enrollment, narrowed_advertisement())
+        .await?;
+    append_runner_registration_loss_projection(&store, &historical, &pin).await?;
+    let mut malformed = pool.begin().await?;
+    append_same_runner_replacement_projection(
+        &mut malformed,
+        pin.placement.session(),
+        &historical,
+        None,
+    )
+    .await?;
+    malformed.commit().await?;
+    let rejected = store
+        .load_placement(pin.placement.session())
+        .await
+        .expect_err("the successor registration must be no older than the loss cause");
+
+    assert_store_corruption(rejected, RunnerProtocolCorruption::CrossWiredReference);
     drop(pool);
     Ok(())
 }
@@ -9879,13 +9952,17 @@ async fn s32_inv044_registration_loss_admits_same_runner_replacement_shape()
 async fn s32_inv044_connection_loss_rejects_same_runner_replacement_shape()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
+    let (_, _, registration, pin) = stored_pin_fixture(&pool).await?;
     append_runner_lost_projection(&pool, pin.placement.session()).await?;
     let mut malformed = pool.begin().await?;
-    let rejected =
-        append_same_runner_replacement_projection(&mut malformed, pin.placement.session(), None)
-            .await
-            .expect_err("only registration loss may retain the runner identity");
+    let rejected = append_same_runner_replacement_projection(
+        &mut malformed,
+        pin.placement.session(),
+        &registration,
+        None,
+    )
+    .await
+    .expect_err("only registration loss may retain the runner identity");
 
     assert_check_violation(rejected);
     drop(malformed);
@@ -17039,7 +17116,10 @@ async fn s32_inv044_loaded_placement_retains_reconciliation_registration()
             .registration()
             .map(StoredValidatedRunnerRegistration::registration),
     )
-    .reconcile_registration(current.registration())
+    .reconcile_registration(RunnerRegistrationReconciliation {
+        pinned_registration: historical.registration().clone(),
+        current_registration: current.registration().clone(),
+    })
     .expect("withdrawn runner-required availability marks the placement lost");
     append_runner_registration_loss_projection(&store, &historical, &pin).await?;
     let reloaded = store
@@ -22625,8 +22705,17 @@ async fn s32_inv032_inv044_runner_outbox_rejects_historical_connection_placement
         .register(&expected_enrollment, narrowed_advertisement())
         .await?;
     append_runner_registration_loss_after_completed_lease_projection(&store, &pin).await?;
+    let recovered_registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
     let mut replacement = pool.begin().await?;
-    append_same_runner_replacement_projection(&mut replacement, session, None).await?;
+    append_same_runner_replacement_projection(
+        &mut replacement,
+        session,
+        &recovered_registration,
+        None,
+    )
+    .await?;
     replacement.commit().await?;
     let rejected = append_runner_state_transition_for_test(
         &pool,
@@ -22809,9 +22898,18 @@ async fn s32_inv032_inv044_runner_pinned_replaced_outbox_round_trips() -> Result
         .register(&expected_enrollment, narrowed_advertisement())
         .await?;
     append_runner_registration_loss_projection(&store, &registration, &pin).await?;
+    let recovered_registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
     dispatch_next_outbox_event(&pool).await?;
     let mut replacement = pool.begin().await?;
-    append_same_runner_replacement_projection(&mut replacement, session, None).await?;
+    append_same_runner_replacement_projection(
+        &mut replacement,
+        session,
+        &recovered_registration,
+        None,
+    )
+    .await?;
     replacement.commit().await?;
     let (placement_event_ordinal, placement_revision) =
         placement_outbox_facts(&pool, session, "runner_replaced").await?;
@@ -22860,12 +22958,16 @@ async fn s32_inv032_inv044_runner_working_directory_changed_outbox_round_trips()
         .register(&expected_enrollment, narrowed_advertisement())
         .await?;
     append_runner_registration_loss_projection(&store, &registration, &pin).await?;
+    let recovered_registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
     dispatch_next_outbox_event(&pool).await?;
     let replacement_directory = replacement_runner_directory();
     let mut replacement = pool.begin().await?;
     append_same_runner_replacement_projection(
         &mut replacement,
         session,
+        &recovered_registration,
         Some(&replacement_directory),
     )
     .await?;
@@ -22917,11 +23019,15 @@ async fn s32_inv032_inv044_runner_directory_relocation_rejects_replaced_state()
         .register(&expected_enrollment, narrowed_advertisement())
         .await?;
     append_runner_registration_loss_projection(&store, &registration, &pin).await?;
+    let recovered_registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
     let replacement_directory = replacement_runner_directory();
     let mut replacement = pool.begin().await?;
     append_same_runner_replacement_projection(
         &mut replacement,
         session,
+        &recovered_registration,
         Some(&replacement_directory),
     )
     .await?;
@@ -22962,12 +23068,16 @@ async fn s32_inv032_inv044_runner_outbox_dispatch_rejects_corrupted_relocation_s
         .register(&expected_enrollment, narrowed_advertisement())
         .await?;
     append_runner_registration_loss_projection(&store, &registration, &pin).await?;
+    let recovered_registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
     dispatch_next_outbox_event(&pool).await?;
     let replacement_directory = replacement_runner_directory();
     let mut replacement = pool.begin().await?;
     append_same_runner_replacement_projection(
         &mut replacement,
         session,
+        &recovered_registration,
         Some(&replacement_directory),
     )
     .await?;

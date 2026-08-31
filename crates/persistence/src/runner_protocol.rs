@@ -32,12 +32,13 @@ use signalbox_domain::{
     RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId,
     RunnerLeaseLoss, RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerLeaseState,
     RunnerLostBeforePin, RunnerPlacementLossSource, RunnerPlacementReconstitutionHistory,
-    RunnerPlacementRecoveryState, RunnerPrePinReplacementHistory, RunnerReplacementTarget,
-    RunnerReplacementTargetUnavailableReason, RunnerRepositoryEntry, RunnerSandboxProfile,
-    RunnerSelector, RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
-    RunnerToolPermissionOverride, RunnerToolPermissionOverrides, RunnerWorkingDirectory, SessionId,
-    SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
-    SessionRunnerPlacementRequest, SessionRunnerPlacementState, ToolAdmissibleLoci,
+    RunnerPlacementRecoveryState, RunnerPrePinReplacementHistory, RunnerRegistrationReconciliation,
+    RunnerReplacementTarget, RunnerReplacementTargetUnavailableReason, RunnerRepositoryEntry,
+    RunnerSandboxProfile, RunnerSelector, RunnerToolDeclaration, RunnerToolEffectClass,
+    RunnerToolModelDefinition, RunnerToolPermissionOverride, RunnerToolPermissionOverrides,
+    RunnerWorkingDirectory, SessionId, SessionRunnerPin, SessionRunnerPlacement,
+    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
+    SessionRunnerPlacementState, StoredRunnerRegistrationLossEvidence, ToolAdmissibleLoci,
     ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
     ToolAttemptEnd, ToolAttemptId, ToolDispatchGeneration, ToolEffectClass, ToolExecutionErrorKind,
     ToolName, ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId,
@@ -1635,8 +1636,17 @@ impl RunnerProtocolStore {
             .load_current_loss_lease_in(&mut transaction, session, prior_event_ordinal)
             .await?;
         let interrupted_attempt = current_lease.as_ref().map(RunnerLease::attempt);
+        let pinned_registration =
+            pinned_registration
+                .as_ref()
+                .ok_or(RunnerProtocolStoreError::Corruption(
+                    RunnerProtocolCorruption::MissingCanonicalRegistration,
+                ))?;
         let reconciled = placement
-            .reconcile_registration(registration.registration())
+            .reconcile_registration(RunnerRegistrationReconciliation {
+                pinned_registration: pinned_registration.registration().clone(),
+                current_registration: registration.registration().clone(),
+            })
             .map_err(RunnerProtocolStoreError::Domain)?;
         if matches!(reconciled.state(), SessionRunnerPlacementState::Pinned(_)) {
             insert_registration_reconciliation_observation(
@@ -1663,7 +1673,7 @@ impl RunnerProtocolStore {
             "runner_lost",
             &reconciled,
             PlacementRecordEvidence {
-                registration_identity: stored_registration_identity(pinned_registration.as_ref()),
+                registration_identity: stored_registration_identity(Some(pinned_registration)),
                 grant_origin,
                 interrupted_tool_attempt: interrupted_attempt,
                 loss_registration_revision: Some(reconciliation.registration_revision()),
@@ -7551,6 +7561,14 @@ async fn decode_placement(
             RunnerLostBeforePin::from_stored(runner),
         ))
     } else {
+        let loss_registration_revision =
+            if matches!(state_kind.as_str(), "runner_lost" | "runner_abandoned") {
+                row.decode_column::<Option<Decimal>>("loss_registration_revision")?
+                    .map(decode_generation)
+                    .transpose()?
+            } else {
+                None
+            };
         let pinned = decode_pinned_placement(
             connection,
             row,
@@ -7560,16 +7578,55 @@ async fn decode_placement(
         )
         .await?;
         let runner = pinned.runner;
+        let loss_registration = match (loss_source, loss_registration_revision) {
+            (Some(RunnerPlacementLossSource::Registration), Some(revision)) => {
+                let pinned_registration =
+                    registration.ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+                let revision = RunnerRegistrationRevision::try_from_u64(revision.get())
+                    .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+                load_registration_in(
+                    connection,
+                    pinned_registration.enrollment(),
+                    revision,
+                    None,
+                    catalog,
+                )
+                .await?
+            }
+            (Some(RunnerPlacementLossSource::Connection), _)
+            | (Some(RunnerPlacementLossSource::Registration), None)
+            | (None, _) => None,
+        };
+        let registration_loss = match (loss_source, registration, loss_registration.as_ref()) {
+            (
+                Some(RunnerPlacementLossSource::Registration),
+                Some(pinned_registration),
+                Some(loss_registration),
+            ) => Some(StoredRunnerRegistrationLossEvidence {
+                pinned_registration,
+                loss_registration: loss_registration.registration(),
+            }),
+            (Some(RunnerPlacementLossSource::Connection), _, _)
+            | (Some(RunnerPlacementLossSource::Registration), None, _)
+            | (Some(RunnerPlacementLossSource::Registration), Some(_), None)
+            | (None, _, _) => None,
+        };
         match (state_kind.as_str(), lost_runner, loss_source) {
             ("pinned", None, None) => SessionRunnerPlacementState::Pinned(pinned),
             ("runner_lost", Some(lost), Some(source)) if lost == runner => {
                 SessionRunnerPlacementState::RunnerLost(LostPinnedRunnerPlacement::from_stored(
-                    pinned, source,
+                    pinned,
+                    source,
+                    registration_loss,
                 ))
             }
             ("runner_abandoned", Some(lost), Some(source)) if lost == runner => {
                 SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::Pinned(
-                    Box::new(LostPinnedRunnerPlacement::from_stored(pinned, source)),
+                    Box::new(LostPinnedRunnerPlacement::from_stored(
+                        pinned,
+                        source,
+                        registration_loss,
+                    )),
                 ))
             }
             _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
@@ -7904,6 +7961,10 @@ async fn authenticate_pinned_predecessor(
                     })
                     .transpose()?
                     .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
+                let loss_registration_revision = predecessor
+                    .decode_column::<Option<Decimal>>("loss_registration_revision")?
+                    .map(decode_generation)
+                    .transpose()?;
                 let lost_runner = predecessor
                     .decode_column::<Option<Uuid>>("lost_runner_id")?
                     .map(runner_id)
@@ -7913,9 +7974,40 @@ async fn authenticate_pinned_predecessor(
                         .await?;
                 let grant_succeeds = runner_replacement_grant_is_successor(&predecessor, row)?
                     && durable_grant.matches;
+                let pinned_registration =
+                    load_placement_registration(connection, &predecessor, catalog)
+                        .await?
+                        .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+                let successor_registration = load_placement_registration(connection, row, catalog)
+                    .await?
+                    .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+                let loss_registration = match source {
+                    RunnerPlacementLossSource::Connection => None,
+                    RunnerPlacementLossSource::Registration => {
+                        let revision = loss_registration_revision
+                            .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
+                        let revision = RunnerRegistrationRevision::try_from_u64(revision.get())
+                            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+                        load_registration_in(
+                            connection,
+                            pinned_registration.registration().enrollment(),
+                            revision,
+                            None,
+                            catalog,
+                        )
+                        .await?
+                    }
+                };
                 let same_runner_replacement_admitted = match source {
                     RunnerPlacementLossSource::Connection => false,
-                    RunnerPlacementLossSource::Registration => true,
+                    RunnerPlacementLossSource::Registration => loss_registration_revision
+                        .is_some_and(|loss| {
+                            pinned_registration.registration().enrollment()
+                                == successor_registration.registration().enrollment()
+                                && pinned_registration.registration().authentication()
+                                    == successor_registration.registration().authentication()
+                                && successor_registration.revision().get() >= loss.get()
+                        }),
                 };
                 if lost_runner != prior_pinned.runner
                     || (current_pinned.runner == lost_runner && !same_runner_replacement_admitted)
@@ -7924,8 +8016,18 @@ async fn authenticate_pinned_predecessor(
                 {
                     return Err(RunnerProtocolCorruption::CrossWiredReference.into());
                 }
+                let registration_loss = match (source, loss_registration.as_ref()) {
+                    (RunnerPlacementLossSource::Connection, _) => None,
+                    (RunnerPlacementLossSource::Registration, Some(loss_registration)) => {
+                        Some(StoredRunnerRegistrationLossEvidence {
+                            pinned_registration: pinned_registration.registration(),
+                            loss_registration: loss_registration.registration(),
+                        })
+                    }
+                    (RunnerPlacementLossSource::Registration, None) => None,
+                };
                 let lost = SessionRunnerPlacementState::RunnerLost(
-                    LostPinnedRunnerPlacement::from_stored(prior_pinned, source),
+                    LostPinnedRunnerPlacement::from_stored(prior_pinned, source, registration_loss),
                 );
                 let (prior_row, prior_request, prior_pinned) =
                     load_authenticated_pinned_loss_predecessor(
