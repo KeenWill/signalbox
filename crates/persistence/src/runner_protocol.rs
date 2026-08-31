@@ -35,7 +35,7 @@ use signalbox_domain::{
     EndedToolAttempt, InitialToolApproval, LostPinnedRunnerPlacement, NormalizedToolArguments,
     PinnedRunnerPlacement, PinnedRunnerReplacementResult, ProvisionedWorkspace, ReplaceLostRunner,
     ReplaceLostRunnerBeforePinRejection, ReplaceLostRunnerBeforePinResult,
-    ReplacedLostRunnerBeforePin, RunnerAdvertisement, RunnerAuthenticationId,
+    ReplacedLostRunnerBeforePin, ReplacedPinnedRunner, RunnerAdvertisement, RunnerAuthenticationId,
     RunnerCapabilityClass, RunnerCatalog, RunnerClaimedAttemptReplacement,
     RunnerCredentialGrantLineage, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId,
     RunnerEnrollmentReconstitutionInput, RunnerEnrollmentRequestId, RunnerEnrollmentState,
@@ -7189,20 +7189,178 @@ async fn load_workspace_free_replacement_outcome(
     } else if !has_result {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
-    let (_, result) = load_replacement_record(connection, command.command())
+    let (recorded, result) = load_pinned_replacement_record(connection, command.command())
         .await?
         .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
-    let outcome = match result {
-        ReplaceLostRunnerBeforePinResult::Applied(_) => {
-            PinnedRunnerReplacementOutcome::NotApplicable
-        }
-        ReplaceLostRunnerBeforePinResult::Rejected(rejection) => {
-            PinnedRunnerReplacementOutcome::Recorded(PinnedRunnerReplacementResult::Rejected(
-                pinned_replacement_rejection(rejection),
-            ))
-        }
+    if recorded != command {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    Ok(Some(PinnedRunnerReplacementOutcome::Recorded(result)))
+}
+
+async fn load_pinned_replacement_record(
+    connection: &mut PgConnection,
+    command_id: DurableCommandId,
+) -> Result<Option<(ReplaceLostRunner, PinnedRunnerReplacementResult)>, RunnerProtocolStoreError> {
+    let row = sqlx::query(
+        "SELECT command.session_id, command.expected_placement_revision,
+                command.target_kind, command.target_runner_id,
+                command.target_pending_request_id, result.result_kind,
+                result.placement_event_ordinal, result.placement_state_kind,
+                result.placement_revision,
+                result.prior_runner_id, result.new_runner_id,
+                result.working_directory, result.sandbox_profile,
+                result.target_enrollment_id,
+                result.target_registration_revision,
+                result.target_connection_epoch,
+                result.target_connection_event_ordinal,
+                target_registration.runner_id AS target_registration_runner_id,
+                target_connection.state_kind AS target_connection_state_kind,
+                stage.lost_placement_event_ordinal,
+                stage.lost_placement_revision,
+                stage.requested_working_directory AS stage_working_directory,
+                lost.event_kind AS lost_event_kind,
+                lost.state_kind AS lost_state_kind,
+                lost.lost_runner_id AS lost_runner_id,
+                placement.event_kind AS placement_event_kind,
+                placement.state_kind AS stored_placement_state_kind,
+                placement.pinned_runner_id AS placement_runner_id,
+                placement.requested_working_directory AS placement_requested_directory,
+                placement.pinned_working_directory AS placement_working_directory,
+                placement.requested_sandbox_profile AS placement_sandbox_profile,
+                boundary.semantic_entry_id AS boundary_entry_id
+           FROM replace_lost_runner_command AS command
+           JOIN replace_lost_runner_result AS result
+             ON result.command_id = command.command_id
+            AND result.session_id = command.session_id
+           LEFT JOIN runner_workspace_free_replacement_stage AS stage
+             ON stage.command_id = result.command_id
+            AND stage.session_id = result.session_id
+           LEFT JOIN runner_session_placement_record AS lost
+             ON lost.session_id = stage.session_id
+            AND lost.event_ordinal = stage.lost_placement_event_ordinal
+            AND lost.placement_revision = stage.lost_placement_revision
+           LEFT JOIN runner_session_placement_record AS placement
+             ON placement.session_id = result.session_id
+            AND placement.event_ordinal = result.placement_event_ordinal
+            AND placement.placement_revision = result.placement_revision
+           LEFT JOIN session_runner_placement_frontier AS pointer
+             ON pointer.session_id = result.session_id
+            AND pointer.placement_revision = result.placement_revision
+           LEFT JOIN semantic_transcript_entry AS boundary
+             ON boundary.source_session_id = pointer.session_id
+            AND boundary.semantic_entry_id = pointer.semantic_entry_id
+            AND boundary.payload_kind = 'runner_placement_changed'
+            AND boundary.runner_placement_revision = result.placement_revision
+            AND boundary.runner_placement_event_ordinal =
+                result.placement_event_ordinal
+           LEFT JOIN runner_registration AS target_registration
+             ON target_registration.enrollment_id = result.target_enrollment_id
+            AND target_registration.registration_revision =
+                result.target_registration_revision
+           LEFT JOIN runner_connection_event AS target_connection
+             ON target_connection.enrollment_id = result.target_enrollment_id
+            AND target_connection.connection_epoch = result.target_connection_epoch
+            AND target_connection.event_ordinal =
+                result.target_connection_event_ordinal
+          WHERE command.command_id = $1",
+    )
+    .bind(command_id.into_uuid())
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
     };
-    Ok(Some(outcome))
+    let session = session_id(row.decode_column("session_id")?);
+    let expected = decode_runner_generation(row.decode_column("expected_placement_revision")?)?;
+    let replacement = decode_replacement_target(&row)?;
+    let command = ReplaceLostRunner::new(command_id, session, expected, replacement);
+    let result_kind: String = row.decode_column("result_kind")?;
+    if replace_lost_runner_result_from_str(&result_kind)
+        == Some(ReplaceLostRunnerResultStorageKind::Rejected)
+    {
+        let (_, result) = load_replacement_record(connection, command_id)
+            .await?
+            .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
+        let ReplaceLostRunnerBeforePinResult::Rejected(rejection) = result else {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        };
+        return Ok(Some((
+            command,
+            PinnedRunnerReplacementResult::Rejected(pinned_replacement_rejection(rejection)),
+        )));
+    }
+    if replace_lost_runner_result_from_str(&result_kind)
+        != Some(ReplaceLostRunnerResultStorageKind::Applied)
+    {
+        return Err(RunnerProtocolCorruption::InvalidEncoding.into());
+    }
+    let placement_state: String = row.decode_column("placement_state_kind")?;
+    if placement_state != "pinned" {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    let prior_runner = runner_id(row.decode_column("prior_runner_id")?);
+    let new_runner = runner_id(row.decode_column("new_runner_id")?);
+    let revision = decode_runner_generation(row.decode_column("placement_revision")?)?;
+    let event_ordinal = decode_u64(row.decode_column("placement_event_ordinal")?)?;
+    let working_directory =
+        RunnerWorkingDirectory::try_new(row.decode_column("working_directory")?)
+            .map_err(|_| RunnerProtocolCorruption::InvalidEncoding)?;
+    let sandbox: String = row.decode_column("sandbox_profile")?;
+    let sandbox =
+        runner_sandbox_from_str(&sandbox).ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+    let _: Uuid = row.decode_column("target_enrollment_id")?;
+    let _ = decode_registration_revision(row.decode_column("target_registration_revision")?)?;
+    let _ = RunnerConnectionEpoch::try_from_u64(decode_u64(
+        row.decode_column("target_connection_epoch")?,
+    )?)
+    .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+    let _ = decode_u64(row.decode_column("target_connection_event_ordinal")?)?;
+    let target_registration_runner = runner_id(row.decode_column("target_registration_runner_id")?);
+    let target_connection_state: String = row.decode_column("target_connection_state_kind")?;
+    let lost_event_ordinal = decode_u64(row.decode_column("lost_placement_event_ordinal")?)?;
+    let lost_revision = decode_runner_generation(row.decode_column("lost_placement_revision")?)?;
+    let stage_working_directory: String = row.decode_column("stage_working_directory")?;
+    let lost_event_kind: String = row.decode_column("lost_event_kind")?;
+    let lost_state_kind: String = row.decode_column("lost_state_kind")?;
+    let lost_runner = runner_id(row.decode_column("lost_runner_id")?);
+    let placement_event_kind: String = row.decode_column("placement_event_kind")?;
+    let stored_placement_state_kind: String = row.decode_column("stored_placement_state_kind")?;
+    let placement_runner = runner_id(row.decode_column("placement_runner_id")?);
+    let placement_requested_directory: String =
+        row.decode_column("placement_requested_directory")?;
+    let placement_working_directory: String = row.decode_column("placement_working_directory")?;
+    let placement_sandbox_profile: String = row.decode_column("placement_sandbox_profile")?;
+    let _: Uuid = row.decode_column("boundary_entry_id")?;
+    if target_registration_runner != new_runner
+        || runner_connection_state_from_str(&target_connection_state)
+            != Some(RunnerConnectionState::Connected)
+        || lost_event_kind != "runner_lost"
+        || lost_state_kind != "runner_lost"
+        || lost_runner != prior_runner
+        || lost_revision != expected
+        || lost_event_ordinal.checked_add(1) != Some(event_ordinal)
+        || stage_working_directory != working_directory.as_str()
+        || placement_event_kind != "runner_replaced"
+        || stored_placement_state_kind != "pinned"
+        || placement_runner != new_runner
+        || placement_requested_directory != working_directory.as_str()
+        || placement_working_directory != working_directory.as_str()
+        || runner_sandbox_from_str(&placement_sandbox_profile) != Some(sandbox)
+    {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    Ok(Some((
+        command,
+        PinnedRunnerReplacementResult::Applied(ReplacedPinnedRunner::new(
+            session,
+            prior_runner,
+            new_runner,
+            revision,
+            working_directory,
+            sandbox,
+        )),
+    )))
 }
 
 const fn pinned_replacement_rejection(

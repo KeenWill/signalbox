@@ -33,8 +33,10 @@ against this PR (`agent/runner-replacement-provisioning-transaction`). The exact
 workspace-free pinned-replacement command stage is verified against this PR
 (`agent/runner-pinned-replacement-staging`). The exact lease-offer registration
 and execution-placement reconstitution facts are verified against this PR
-(`agent/runner-lease-domain-correlation`). Existing-pin attempt-and-offer
-atomicity is verified against this PR
+(`agent/runner-lease-domain-correlation`). The workspace-free pinned-replacement
+terminal-result representation and typed readback are verified against this PR
+(`agent/runner-pinned-replacement-result-persistence`). Existing-pin
+attempt-and-offer atomicity is verified against this PR
 (`agent/runner-pinned-dispatch-transaction`). The pinned-dispatch adapter's
 exact runner/registration lookup and returned enrollment routing identity are
 verified against this PR (`agent/runner-offer-locus-binding`). The
@@ -647,9 +649,17 @@ Representation rules, all enforced in the schema:
   pinned loss, exact requested directory, and workspace-free request, and makes
   the repository-provisioning and workspace-free stage loci mutually exclusive.
   Readback decodes every retained field before returning the command-only stage.
-  No transaction remains open across runner I/O. **Committed unimplemented
-  functionality.** No present adapter consumes that stage to install the
-  terminal pinned placement, transcript boundary, or next frontier.
+  Migration `202608110022` adds the closed credential-free applied-pinned arm to
+  the existing replacement result. That arm retains the exact working directory
+  alongside the successor placement, runner, sandbox, registration, and
+  connected-event evidence. Its deferred authority check requires the historical
+  workspace-free stage, current successor placement, retained placement request,
+  live advertised registration, and exact final-member placement frontier to
+  agree. Typed readback reconstructs the closed pinned replacement receipt from
+  those independently joined rows. No transaction remains open across runner
+  I/O. **Committed unimplemented functionality.** No present adapter consumes
+  the stage to install the terminal pinned placement, transcript boundary,
+  frontier, and result atomically.
 - Migration `202608110018` separates the registration revision retained by an
   immutable pinned placement from the then-current registration revision that
   authorizes each lease offer. Existing lease generations preserve their
