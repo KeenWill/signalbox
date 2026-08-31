@@ -17,7 +17,7 @@ use signalbox_application::{
     PinnedRunnerReplacementTransaction, PromotePendingRunnerOutcome,
     ReplaceLostRunnerBeforePinOutcome, RunnerLeaseClaimRequest, RunnerLeaseResultRequest,
     RunnerReadyManifestDigest, RunnerReplacementProvisioningOutcome, RunnerWorkspaceReadyReceipt,
-    ToolDefinition, ToolInputSchema,
+    RunnerWorkspaceReleaseAcknowledgement, ToolDefinition, ToolInputSchema,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
@@ -23659,7 +23659,7 @@ async fn s32_inv044_workspace_release_rejects_a_cross_wired_manifest() -> Result
 }
 
 /// S32 / INV-044: a managed predecessor release cannot be enqueued after its
-/// cleanup-owning connection has become durably unreachable.
+/// cleanup source connection has become durably unreachable.
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv044_workspace_release_rejects_lost_cleanup_authority() -> Result<(), Box<dyn Error>>
@@ -23737,6 +23737,254 @@ async fn s32_inv044_workspace_release_readback_rejects_a_corrupted_manifest()
         )
         .await
         .expect_err("typed readback rejects the corrupted manifest identity");
+
+    assert_store_corruption(rejected, RunnerProtocolCorruption::CrossWiredReference);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: a completed release becomes immutable terminal evidence,
+/// exactly replays, and leaves no pending delivery.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_release_acknowledgement_round_trips_and_replays()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_release_projection_fixture(&pool).await?;
+    fixture
+        .store
+        .store_workspace_release_projection_for_test(
+            &fixture.candidate,
+            fixture.retired_placement_event_ordinal,
+            fixture.successor_placement_event_ordinal,
+            fixture.enrollment,
+            fixture.connection_epoch,
+            fixture.connection_event_ordinal,
+        )
+        .await?;
+    let acknowledgement = RunnerWorkspaceReleaseAcknowledgement::new(
+        fixture.candidate.session(),
+        fixture.candidate.placement_revision(),
+        fixture.candidate.runner(),
+        fixture.candidate.manifest_id(),
+    );
+
+    let recorded = fixture
+        .store
+        .record_workspace_release_acknowledgement(acknowledgement)
+        .await?;
+    let replayed = fixture
+        .store
+        .record_workspace_release_acknowledgement(acknowledgement)
+        .await?;
+    let loaded = fixture
+        .store
+        .load_workspace_release_acknowledgement(
+            fixture.candidate.session(),
+            fixture.candidate.placement_revision(),
+        )
+        .await?
+        .expect("the completed release acknowledgement reads back");
+    let pending = fixture
+        .store
+        .load_workspace_release(
+            fixture.candidate.session(),
+            fixture.candidate.placement_revision(),
+        )
+        .await?;
+
+    assert_eq!(recorded, acknowledgement);
+    assert_eq!(replayed, acknowledgement);
+    assert_eq!(loaded, acknowledgement);
+    assert_eq!(pending, None);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: completed-release admission cannot substitute another
+/// manifest for the exact pending correlation.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_release_acknowledgement_rejects_another_manifest()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_release_projection_fixture(&pool).await?;
+    fixture
+        .store
+        .store_workspace_release_projection_for_test(
+            &fixture.candidate,
+            fixture.retired_placement_event_ordinal,
+            fixture.successor_placement_event_ordinal,
+            fixture.enrollment,
+            fixture.connection_epoch,
+            fixture.connection_event_ordinal,
+        )
+        .await?;
+    let acknowledgement = RunnerWorkspaceReleaseAcknowledgement::new(
+        fixture.candidate.session(),
+        fixture.candidate.placement_revision(),
+        fixture.candidate.runner(),
+        WorkspaceManifestId::from_uuid(uuid(0x9383)),
+    );
+
+    let rejected = fixture
+        .store
+        .record_workspace_release_acknowledgement(acknowledgement)
+        .await
+        .expect_err("another manifest cannot complete the pending release");
+
+    assert_store_domain_error(rejected, RunnerDomainError::CorrelationMismatch);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: durable loss of the cleanup-owning physical connection wins
+/// over a later completed-release acknowledgement.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_release_acknowledgement_rejects_lost_source_connection()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_release_projection_fixture(&pool).await?;
+    fixture
+        .store
+        .store_workspace_release_projection_for_test(
+            &fixture.candidate,
+            fixture.retired_placement_event_ordinal,
+            fixture.successor_placement_event_ordinal,
+            fixture.enrollment,
+            fixture.connection_epoch,
+            fixture.connection_event_ordinal,
+        )
+        .await?;
+    fixture
+        .store
+        .transition_connection(
+            fixture.enrollment,
+            fixture.connection_epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let acknowledgement = RunnerWorkspaceReleaseAcknowledgement::new(
+        fixture.candidate.session(),
+        fixture.candidate.placement_revision(),
+        fixture.candidate.runner(),
+        fixture.candidate.manifest_id(),
+    );
+
+    let rejected = fixture
+        .store
+        .record_workspace_release_acknowledgement(acknowledgement)
+        .await
+        .expect_err("a durably lost cleanup connection cannot acknowledge release completion");
+
+    assert_store_domain_error(rejected, RunnerDomainError::InvalidState);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: the relational guard independently refuses a completed
+/// release after the exact cleanup source connection is durably lost.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_release_acknowledgement_guard_rejects_lost_source_connection()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_release_projection_fixture(&pool).await?;
+    fixture
+        .store
+        .store_workspace_release_projection_for_test(
+            &fixture.candidate,
+            fixture.retired_placement_event_ordinal,
+            fixture.successor_placement_event_ordinal,
+            fixture.enrollment,
+            fixture.connection_epoch,
+            fixture.connection_event_ordinal,
+        )
+        .await?;
+    fixture
+        .store
+        .transition_connection(
+            fixture.enrollment,
+            fixture.connection_epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+
+    let rejected = sqlx::query(
+        "INSERT INTO runner_workspace_release_acknowledgement
+            (session_id, placement_revision, runner_id, manifest_id)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(fixture.candidate.session().into_uuid())
+    .bind(Decimal::from(fixture.candidate.placement_revision().get()))
+    .bind(fixture.candidate.runner().into_uuid())
+    .bind(fixture.candidate.manifest_id().into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("the relational guard rejects acknowledgement after source loss");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: typed acknowledgement readback rejects identity corruption
+/// even after relational protections have been bypassed.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_release_acknowledgement_readback_rejects_corruption()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_release_projection_fixture(&pool).await?;
+    fixture
+        .store
+        .store_workspace_release_projection_for_test(
+            &fixture.candidate,
+            fixture.retired_placement_event_ordinal,
+            fixture.successor_placement_event_ordinal,
+            fixture.enrollment,
+            fixture.connection_epoch,
+            fixture.connection_event_ordinal,
+        )
+        .await?;
+    let acknowledgement = RunnerWorkspaceReleaseAcknowledgement::new(
+        fixture.candidate.session(),
+        fixture.candidate.placement_revision(),
+        fixture.candidate.runner(),
+        fixture.candidate.manifest_id(),
+    );
+    fixture
+        .store
+        .record_workspace_release_acknowledgement(acknowledgement)
+        .await?;
+    let mut corruption = pool.begin().await?;
+    sqlx::raw_sql("ALTER TABLE runner_workspace_release_acknowledgement DISABLE TRIGGER ALL")
+        .execute(&mut *corruption)
+        .await?;
+    sqlx::query(
+        "UPDATE runner_workspace_release_acknowledgement
+            SET manifest_id = $3
+          WHERE session_id = $1 AND placement_revision = $2",
+    )
+    .bind(fixture.candidate.session().into_uuid())
+    .bind(Decimal::from(fixture.candidate.placement_revision().get()))
+    .bind(uuid(0x9383))
+    .execute(&mut *corruption)
+    .await?;
+    sqlx::raw_sql("ALTER TABLE runner_workspace_release_acknowledgement ENABLE TRIGGER ALL")
+        .execute(&mut *corruption)
+        .await?;
+    corruption.commit().await?;
+
+    let rejected = fixture
+        .store
+        .load_workspace_release_acknowledgement(
+            fixture.candidate.session(),
+            fixture.candidate.placement_revision(),
+        )
+        .await
+        .expect_err("typed readback rejects the corrupted release acknowledgement");
 
     assert_store_corruption(rejected, RunnerProtocolCorruption::CrossWiredReference);
     drop(pool);

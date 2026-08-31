@@ -50,8 +50,10 @@ verified against this PR
 managed-workspace release representation and independently checked readback are
 verified against this PR
 (`agent/runner-workspace-release-authority-persistence`). The immutable
-repository replacement workspace-receipt representation and typed replay are
-verified against this PR
+completed-release acknowledgement, exact replay, and pending-delivery exclusion
+are verified against this PR (`agent/runner-workspace-release-acknowledgement`).
+The immutable repository replacement workspace-receipt representation and typed
+replay are verified against this PR
 (`agent/runner-replacement-workspace-receipt-persistence`). Workspace-ready
 admission under the exact current staging authority and equal receipt replay are
 verified against this PR (`agent/runner-workspace-ready-admission`). Live
@@ -736,8 +738,16 @@ Representation rules, all enforced in the schema:
   claimed lease. Typed readback rejoins both immutable placement records,
   enrollment, and historical connection event before returning the correlation.
   The relation is append-only and its initial state vocabulary is only
-  `pending`. **Committed unimplemented functionality.** No present production
-  transaction inserts, acknowledges, refuses, or retires this release; those
+  `pending`. Migration `202608140101` retains one immutable completed-release
+  acknowledgement under that exact correlation. Its transaction locks the
+  session scheduler, release enrollment, current placement head, and pending
+  release in order, rejects a completion after the cleanup-owning physical
+  connection is durably lost, returns exact replay, and makes pending-release
+  reads exclude the recorded terminal. Typed readback rejoins the complete
+  release correlation instead of trusting acknowledgement columns alone.
+  **Committed unimplemented
+  functionality.** No present production transaction inserts the pending
+  release, records cleanup refusal, or retires it on connection loss; those
   transitions must consume this exact representation rather than presenting
   `RunnerWorkspaceReleaseCandidate` as cleanup authority.
 - Migration `202608110028` retains one immutable repository-replacement
@@ -1364,14 +1374,17 @@ Locks per transaction, in acquisition order:
   Why: both frames that can retire a release require the holding runner to
   acknowledge deletion or report cleanup failure, so a release addressed to an
   unreachable identity is a durable record redelivered after every restart with
-  no transition able to clear it. Release acknowledgement uses the same
-  scheduler-then-placement order and never mutates turn lifecycle. Three
-  transitions retire the durable release record and no other does: the release
-  acknowledgement itself; durable admission of the runner's
-  `workspace_cleanup_failed` operation failure naming that same release, which
-  resolves it as refused when the runner cannot complete the deletion; and
-  durable loss of the connection that owed it, which resolves it as unowned and
-  leaves its workspace under that same recorded-leak response. Until one of the
+  no transition able to clear it. Release acknowledgement uses the scheduler →
+  release enrollment → current placement head → pending release order and never
+  mutates turn lifecycle. The
+  implemented release acknowledgement retains immutable completion evidence and
+  removes that correlation from pending delivery. **Committed unimplemented
+  functionality.** Two other transitions will retire the durable release record
+  and no other may do so: durable admission of the runner's
+  `workspace_cleanup_failed` operation failure naming that same release will
+  resolve it as refused when the runner cannot complete the deletion, and
+  durable loss of the connection that owed it will resolve it as unowned and
+  leave its workspace under that same recorded-leak response. Until one of the
   three commits, an unacknowledged release is redelivered after restart exactly
   as an unacknowledged result is.
 
