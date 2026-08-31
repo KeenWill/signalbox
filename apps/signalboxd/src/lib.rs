@@ -128,6 +128,7 @@ pub use goal_mode::{
 };
 pub use local_socket::{LocalProcessListener, LocalSocketError};
 pub use process_runtime::{
+    ProcessMonitor, ProcessMonitorReceiveError, ProcessMonitorSubscription, ProcessMonitorUpdate,
     ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError,
     shared_snapshot_reader_budget,
 };
