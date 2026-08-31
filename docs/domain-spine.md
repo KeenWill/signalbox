@@ -5981,6 +5981,68 @@ impl<Transaction: ReplaceLostRunnerBeforePinTransaction>
 }
 ```
 
+## application: pinned_runner_replacement
+
+```rust
+pub struct PinnedRunnerReplacementRequest { /* private */ }
+impl PinnedRunnerReplacementRequest {
+    pub fn try_new(
+        command: DurableCommandId,
+        session: SessionId,
+        expected_placement_revision: RunnerGeneration,
+        replacement: RunnerReplacementTarget,
+    ) -> Result<Self, InvalidDurableCommandId>;
+    // accessors: command(), session(), expected_placement_revision(), replacement()
+}
+
+pub struct PinnedRunnerReplacementIdentities { /* private */ }
+impl PinnedRunnerReplacementIdentities {
+    pub const fn new(
+        semantic_entry: SemanticTranscriptEntryId,
+        context_frontier: ContextFrontierId,
+    ) -> Self;
+    // accessors: semantic_entry(), context_frontier()
+}
+
+pub trait PinnedRunnerReplacementIdGenerator {
+    fn next_identities(&mut self) -> PinnedRunnerReplacementIdentities;
+}
+
+pub struct UuidV7PinnedRunnerReplacementIdGenerator;
+// Clone, Copy, Debug, Default; impl PinnedRunnerReplacementIdGenerator
+
+pub trait PinnedRunnerReplacementTransaction {
+    type Error;
+    fn complete(
+        &mut self,
+        command: ReplaceLostRunner,
+        identities: PinnedRunnerReplacementIdentities,
+    ) -> impl Future<Output = Result<PinnedRunnerReplacementOutcome, Self::Error>> + Send;
+}
+
+pub enum PinnedRunnerReplacementOutcome {
+    Staged { command: DurableCommandId },
+    Recorded(PinnedRunnerReplacementResult),
+    NotApplicable,
+    ConflictingReuse { command: DurableCommandId },
+}
+
+pub struct PinnedRunnerReplacementService<Transaction, Ids> { /* private */ }
+impl<Transaction, Ids> PinnedRunnerReplacementService<Transaction, Ids> {
+    pub const fn new(transaction: Transaction, ids: Ids) -> Self;
+}
+impl<Transaction, Ids> PinnedRunnerReplacementService<Transaction, Ids>
+where
+    Transaction: PinnedRunnerReplacementTransaction,
+    Ids: PinnedRunnerReplacementIdGenerator,
+{
+    pub async fn execute(
+        &mut self,
+        request: PinnedRunnerReplacementRequest,
+    ) -> Result<PinnedRunnerReplacementOutcome, Transaction::Error>;
+}
+```
+
 ## application: runner_replacement_provisioning
 
 ```rust
@@ -9093,6 +9155,23 @@ pub enum ReplaceLostRunnerBeforePinResult {
     Applied(ReplacedLostRunnerBeforePin),
     Rejected(ReplaceLostRunnerBeforePinRejection),
 }
+pub struct ReplacedPinnedRunner { /* private */ }
+impl ReplacedPinnedRunner {
+    pub fn new(
+        session: SessionId,
+        prior_runner: RunnerId,
+        new_runner: RunnerId,
+        placement_revision: RunnerGeneration,
+        working_directory: RunnerWorkingDirectory,
+        sandbox: RunnerSandboxProfile,
+    ) -> Self;
+    // accessors: session(), prior_runner(), new_runner(), placement_revision(),
+    // working_directory(), sandbox()
+}
+pub enum PinnedRunnerReplacementResult {
+    Applied(ReplacedPinnedRunner),
+    Rejected(RunnerReplacementProvisioningRejection),
+}
 pub enum RunnerReplacementProvisioningRejection {
     SessionNotFound { session: SessionId },
     RunnerPlacementNotFound { session: SessionId },
@@ -11139,9 +11218,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: goal_command                               | 5                     |
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
-| domain: runner                                     | 94                    |
+| domain: runner                                     | 96                    |
 | domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **798 (+12 free fn)** |
+| **signalbox-domain total**                         | **800 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
@@ -11149,6 +11228,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: promote_pending_runner                | 4 (incl. 1 trait)     |
 | application: abandon_lost_runner                   | 4 (incl. 1 trait)     |
 | application: replace_lost_runner_before_pin        | 4 (incl. 1 trait)     |
+| application: pinned_runner_replacement             | 7 (incl. 2 traits)    |
 | application: runner_replacement_provisioning       | 7 (incl. 2 traits)    |
 | application: runner_lease_claim                    | 3 (incl. 1 trait)     |
 | application: runner_lease_result                   | 3 (incl. 1 trait)     |
@@ -11172,4 +11252,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **298 (+1 free fn)**  |
+| **signalbox-application total**                    | **305 (+1 free fn)**  |
