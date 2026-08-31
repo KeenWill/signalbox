@@ -151,6 +151,7 @@ const WORKSPACE_PROVISIONING_AUTHORIZATION: u128 = 0x9380;
 const REPLAY_WORKSPACE_PROVISIONING_AUTHORIZATION: u128 = 0x9382;
 const PINNED_REPLACEMENT_SEMANTIC_ENTRY: u128 = 0x9383;
 const PINNED_REPLACEMENT_FRONTIER: u128 = 0x9384;
+const ACTIVE_REPLACEMENT_TURN: u128 = 0x9385;
 const REGISTER_WORKSPACE_COMMAND: u128 = 0x9362;
 const REGISTERED_WORKSPACE: u128 = 0x9363;
 const MINT_GIT_REMOTE_COMMAND: u128 = 0x9364;
@@ -2289,7 +2290,7 @@ struct WorkspaceFreeReplacementTerminalFixture {
 async fn workspace_free_replacement_terminal_fixture(
     pool: &PgPool,
 ) -> Result<WorkspaceFreeReplacementTerminalFixture, Box<dyn Error>> {
-    let (mut store, _, _, pin) = stored_exact_directory_pin_fixture(pool).await?;
+    let (store, _, _, pin) = stored_exact_directory_pin_fixture(pool).await?;
     let lost = pin
         .placement
         .mark_runner_lost()
@@ -2311,7 +2312,9 @@ async fn workspace_free_replacement_terminal_fixture(
         SemanticTranscriptEntryId::from_uuid(uuid(PINNED_REPLACEMENT_SEMANTIC_ENTRY)),
         ContextFrontierId::from_uuid(uuid(PINNED_REPLACEMENT_FRONTIER)),
     );
-    let staged = store.complete(command, identities).await?;
+    let staged = store
+        .stage_workspace_free_pinned_replacement(command)
+        .await?;
     assert_eq!(
         staged,
         PinnedRunnerReplacementOutcome::Staged {
@@ -23057,7 +23060,7 @@ async fn s32_inv044_workspace_free_pinned_replacement_provisioning_is_not_applic
 async fn s32_inv012_inv044_workspace_free_pinned_replacement_stage_round_trips()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let (mut store, _, _, pin) = stored_exact_directory_pin_fixture(&pool).await?;
+    let (store, _, _, pin) = stored_exact_directory_pin_fixture(&pool).await?;
     let session = pin.placement.session();
     append_runner_lost_projection(&pool, session).await?;
     let successor = replacement_enrollment();
@@ -23070,22 +23073,19 @@ async fn s32_inv012_inv044_workspace_free_pinned_replacement_stage_round_trips()
         RunnerGeneration::one(),
         RunnerReplacementTarget::Runner(successor.runner()),
     );
-    let identities = PinnedRunnerReplacementIdentities::new(
-        SemanticTranscriptEntryId::from_uuid(uuid(PINNED_REPLACEMENT_SEMANTIC_ENTRY)),
-        ContextFrontierId::from_uuid(uuid(PINNED_REPLACEMENT_FRONTIER)),
-    );
-    let first = store.complete(command, identities).await?;
-    let replay = store.complete(command, identities).await?;
+    let first = store
+        .stage_workspace_free_pinned_replacement(command)
+        .await?;
+    let replay = store
+        .stage_workspace_free_pinned_replacement(command)
+        .await?;
     let conflict = store
-        .complete(
-            ReplaceLostRunner::new(
-                command.command(),
-                session,
-                RunnerGeneration::one(),
-                RunnerReplacementTarget::Runner(enrollment().runner()),
-            ),
-            identities,
-        )
+        .stage_workspace_free_pinned_replacement(ReplaceLostRunner::new(
+            command.command(),
+            session,
+            RunnerGeneration::one(),
+            RunnerReplacementTarget::Runner(enrollment().runner()),
+        ))
         .await?;
     let repository_port_replay = store
         .stage_runner_replacement_provisioning(
@@ -23144,6 +23144,213 @@ async fn s32_inv012_inv044_workspace_free_pinned_replacement_stage_round_trips()
     assert_eq!(result_count, 0);
     assert_eq!(provisioning_stage_count, 0);
     assert_eq!(workspace_free_stage_count, 1);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-012 / INV-032 / INV-044: an idle frontier-root session consumes
+/// its exact workspace-free stage by atomically installing the successor,
+/// relocation boundary, root frontier, outbox event, and durable receipt.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv012_inv032_inv044_frontier_root_workspace_free_replacement_commits_atomically()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, _, pin) = stored_exact_directory_pin_fixture(&pool).await?;
+    let lost = pin
+        .placement
+        .mark_runner_lost()
+        .expect("the exact-directory pinned runner may be marked lost");
+    let session = lost.session();
+    let replacement_request = lost.request().clone();
+    append_runner_lost_projection(&pool, session).await?;
+    let successor = replacement_enrollment();
+    store.insert_enrollment(&successor).await?;
+    let registration = store.register(&successor, advertisement()).await?;
+    store.open_connection(successor.enrollment()).await?;
+    let expected_replacement = lost
+        .replace_lost_runner(
+            replacement_request,
+            registration.registration(),
+            exact_runner_directory(),
+            None,
+            None,
+        )
+        .expect("the connected distinct successor replaces the lost runner");
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(WORKSPACE_REPLACEMENT_COMMAND)),
+        session,
+        RunnerGeneration::one(),
+        RunnerReplacementTarget::Runner(successor.runner()),
+    );
+    let identities = PinnedRunnerReplacementIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(uuid(PINNED_REPLACEMENT_SEMANTIC_ENTRY)),
+        ContextFrontierId::from_uuid(uuid(PINNED_REPLACEMENT_FRONTIER)),
+    );
+    let expected = PinnedRunnerReplacementOutcome::Recorded(
+        PinnedRunnerReplacementResult::Applied(ReplacedPinnedRunner::new(
+            session,
+            enrollment().runner(),
+            successor.runner(),
+            expected_replacement.placement.revision(),
+            exact_runner_directory(),
+            RunnerSandboxProfile::WorkspaceRestricted,
+        )),
+    );
+    let staged = store
+        .stage_workspace_free_pinned_replacement(command)
+        .await?;
+    let mut first_store = store.clone();
+    let mut second_store = store;
+    let (first, replay) = tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, async {
+        tokio::join!(
+            first_store.complete(command, identities),
+            second_store.complete(command, identities),
+        )
+    })
+    .await
+    .expect("equal terminal claims complete within the fixture lock timeout");
+    let first = first?;
+    let replay = replay?;
+    let loaded = first_store
+        .load_placement(session)
+        .await?
+        .expect("the successor placement reads back");
+    let replacement_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = 'runner_replaced'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let boundary_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM semantic_transcript_entry
+          WHERE source_session_id = $1
+            AND payload_kind = 'runner_placement_changed'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let pointer_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM session_runner_placement_frontier
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let outbox_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM runner_state_transition_outbox_event
+          WHERE session_id = $1 AND state_kind = 'replaced'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let result_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM replace_lost_runner_result
+          WHERE command_id = $1 AND result_kind = 'applied'",
+    )
+    .bind(command.command().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(
+        staged,
+        PinnedRunnerReplacementOutcome::Staged {
+            command: command.command()
+        }
+    );
+    assert_eq!(first, expected);
+    assert_eq!(replay, expected);
+    assert_eq!(loaded.placement(), &expected_replacement.placement);
+    assert_eq!(replacement_count, 1);
+    assert_eq!(boundary_count, 1);
+    assert_eq!(pointer_count, 1);
+    assert_eq!(outbox_count, 1);
+    assert_eq!(result_count, 1);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: a session with an active turn retains its replacement stage
+/// until the observation-aware transaction owns the exact append boundary.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_active_turn_workspace_free_replacement_remains_staged()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (mut store, _, _, pin) = stored_exact_directory_pin_fixture(&pool).await?;
+    let lost = pin
+        .placement
+        .mark_runner_lost()
+        .expect("the exact-directory pinned runner may be marked lost");
+    let session = lost.session();
+    append_runner_lost_projection(&pool, session).await?;
+    insert_runner_recovery_turn(
+        &pool,
+        session,
+        TurnId::from_uuid(uuid(ACTIVE_REPLACEMENT_TURN)),
+        enrollment().runner(),
+        RunnerGeneration::one(),
+        None,
+        None,
+    )
+    .await?;
+    let successor = replacement_enrollment();
+    store.insert_enrollment(&successor).await?;
+    store.register(&successor, advertisement()).await?;
+    store.open_connection(successor.enrollment()).await?;
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(WORKSPACE_REPLACEMENT_COMMAND)),
+        session,
+        RunnerGeneration::one(),
+        RunnerReplacementTarget::Runner(successor.runner()),
+    );
+    let identities = PinnedRunnerReplacementIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(uuid(PINNED_REPLACEMENT_SEMANTIC_ENTRY)),
+        ContextFrontierId::from_uuid(uuid(PINNED_REPLACEMENT_FRONTIER)),
+    );
+    let outcome = store.complete(command, identities).await?;
+    let loaded = store
+        .load_placement(session)
+        .await?
+        .expect("the lost placement remains current");
+    let stage_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM runner_workspace_free_replacement_stage
+          WHERE command_id = $1",
+    )
+    .bind(command.command().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let replacement_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = 'runner_replaced'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let result_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM replace_lost_runner_result WHERE command_id = $1")
+            .bind(command.command().into_uuid())
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(
+        outcome,
+        PinnedRunnerReplacementOutcome::Staged {
+            command: command.command()
+        }
+    );
+    assert_eq!(loaded.placement(), &lost);
+    assert_eq!(stage_count, 1);
+    assert_eq!(replacement_count, 0);
+    assert_eq!(result_count, 0);
     drop(pool);
     Ok(())
 }
