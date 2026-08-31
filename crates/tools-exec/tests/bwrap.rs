@@ -13,11 +13,14 @@
 use signalbox_test_bin::test_bin_path;
 use signalbox_tools_exec::{
     BwrapAvailability, CaptureCompleteness, ExecArguments, ExecutionConfinement, OutputEncoding,
-    ProcessOutcome, ProcessSpawnFailure, SandboxedCommandRunner, TokioProcessRunner,
+    ProcessOutcome, ProcessSpawnFailure, SandboxEnvironmentVariable, SandboxedCommandRunner,
+    TokioProcessRunner,
 };
 
 const BRIDGE_REQUEST: &str = "bridge request";
 const BRIDGE_RESPONSE: &str = "bridge response";
+const SYNTHETIC_ENVIRONMENT_NAME: &str = "RUNNER_TEST_TOKEN";
+const SYNTHETIC_ENVIRONMENT_VALUE: &str = "synthetic-bwrap-token";
 
 #[tokio::test]
 async fn real_bwrap_profile_confines_or_proves_typed_host_refusal()
@@ -142,6 +145,26 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
     let restricted_result = runner.try_run(restricted_arguments).await?;
 
     assert_real_bwrap_result(restricted_result, ci)?;
+
+    let environment_arguments = ExecArguments {
+        program: String::from("sh"),
+        arguments: vec![
+            String::from("-c"),
+            format!("test \"${SYNTHETIC_ENVIRONMENT_NAME}\" = {SYNTHETIC_ENVIRONMENT_VALUE:?}"),
+        ],
+        working_directory: String::from("."),
+        timeout_seconds: 5,
+    };
+    let environment = SandboxEnvironmentVariable::try_new(
+        String::from(SYNTHETIC_ENVIRONMENT_NAME),
+        String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+    )?;
+
+    let environment_result = runner
+        .try_run_with_environment(environment_arguments, environment)
+        .await?;
+
+    assert_real_bwrap_result(environment_result, ci)?;
 
     let mut broker = BrokerSocketFixture::new()?;
     let broker_task = broker.spawn_one_tunnel()?;

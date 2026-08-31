@@ -84,15 +84,16 @@ Placement-scoped native conversation reads are verified through PR #400
 (`agent/scoped-visibility-wiring`). Invariant law lives in
 [docs/invariants.md](../invariants.md), cited here by tag. The runner
 configuration parser, filesystem admission, exact availability advertisement,
-and checked-in example are verified through PR #376 (`agent/runner-daemon`).
-Runner credential use during provisioning or execution remains committed
-unimplemented functionality as labeled below. The credential-profile and
-credential-pool grammar, its fail-closed admission, the deliveries this build
-supplies, the fail-closed rejection of reserved Codex deliveries, the
-operator-chosen model-provider profile names, and the retirement of both
-provider key-file environment channels are verified against this PR
-(`agent/credential-pools-parser`), in `apps/signalboxd/src/credential_pools.rs`
-and `apps/signalboxd/src/configuration.rs`. Preparation-time pool selection, the
+and checked-in example are re-verified against this PR
+(`agent/runner-restricted-command-environment`). Runner credential use during
+provisioning or execution remains committed unimplemented functionality as
+labeled below. The credential-profile and credential-pool grammar, its
+fail-closed admission, the deliveries this build supplies, the fail-closed
+rejection of reserved Codex deliveries, the operator-chosen model-provider
+profile names, and the retirement of both provider key-file environment channels
+are verified against this PR (`agent/credential-pools-parser`), in
+`apps/signalboxd/src/credential_pools.rs` and
+`apps/signalboxd/src/configuration.rs`. Preparation-time pool selection, the
 Codex `file`, `codex_home`, and `oauth` deliveries, durable quarantine, and the
 availability successor calls owned by
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine),
@@ -439,11 +440,15 @@ exact owner/repository path with an optional terminal `.git`. Its named
 credential profile, when present, must exist. Absence means that the entry
 admits anonymous HTTPS access only; it never asks the runner or daemon to select
 a credential. Any repository requires `github.com` in the effective network
-list. Environment names use `[A-Z_][A-Z0-9_]*`, cannot name runner control,
-model-provider, or dynamic-loader variables, and are unique. Absolute paths are
+list. Environment names use `[A-Z_][A-Z0-9_]*`, are at most 4,096 UTF-8 bytes,
+and are unique. They cannot name runner control or model-provider variables, any
+`LD_*` or `DYLD_*` dynamic-loader variable, or the process core's fixed `HOME`,
+`HTTPS_PROXY`, `LANG`, `LC_ALL`, and `PATH` entries. Absolute paths are
 canonicalized without following a final credential symlink; duplicate, nested,
 writable/read-only-overlapping, or runner-root-overlapping allowlist paths fail
-closed. Configuration may narrow network entries but cannot add a hostname.
+closed. A read-only path also cannot be an ancestor or descendant of the
+reserved `/run/signalbox/restricted-environment` delivery file. Configuration
+may narrow network entries but cannot add a hostname.
 
 The shipped example contains exactly one credential entry:
 `credentials.github-runner`, whose `file` names a fine-grained repository-scoped

@@ -13,6 +13,7 @@ use serde::Deserialize;
 use signalbox_runner_wire::{Advertisement, ProfileName, RepositoryKey, ValueError};
 #[cfg(feature = "runner-execution-proof")]
 use signalbox_runner_wire::{SandboxProfile, WireToolName};
+use signalbox_tools_exec::{SANDBOX_ENVIRONMENT_DELIVERY_PATH, SandboxEnvironmentName};
 use url::Url;
 
 const CONFIGURATION_VERSION: u64 = 1;
@@ -121,7 +122,7 @@ pub struct RunnerConfiguration {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunnerCredentialConfiguration {
     file: PathBuf,
-    injection_env: String,
+    injection_env: SandboxEnvironmentName,
 }
 
 impl RunnerCredentialConfiguration {
@@ -132,7 +133,7 @@ impl RunnerCredentialConfiguration {
 
     /// Returns the exact environment name used only inside an admitted dispatch.
     pub fn injection_env(&self) -> &str {
-        &self.injection_env
+        self.injection_env.as_str()
     }
 }
 
@@ -366,6 +367,7 @@ fn validate_read_only_paths(
     paths: &[PathBuf],
     runner_root: &Path,
 ) -> Result<(), RunnerConfigurationError> {
+    let environment_delivery_path = Path::new(SANDBOX_ENVIRONMENT_DELIVERY_PATH);
     if paths.is_empty() || paths.iter().any(|path| !valid_absolute_path(path)) {
         return Err(RunnerConfigurationError::InvalidReadOnlyPaths);
     }
@@ -374,6 +376,8 @@ fn validate_read_only_paths(
         || paths.iter().any(|path| {
             path.starts_with(runner_root)
                 || runner_root.starts_with(path)
+                || path.starts_with(environment_delivery_path)
+                || environment_delivery_path.starts_with(path)
                 || paths.iter().any(|other| {
                     path != other && (path.starts_with(other) || other.starts_with(path))
                 })
@@ -423,9 +427,10 @@ fn validate_credentials(
         if profile.as_str() == RESERVED_MODEL_PROFILE {
             return Err(RunnerConfigurationError::InvalidCredentials);
         }
+        let injection_env = SandboxEnvironmentName::try_new(credential.injection_env.clone())
+            .map_err(|_| RunnerConfigurationError::InvalidCredentials)?;
         if !valid_absolute_path(&credential.file)
-            || !valid_environment_name(&credential.injection_env)
-            || reserved_environment_name(&credential.injection_env)
+            || reserved_environment_name(injection_env.as_str())
             || !files.insert(credential.file.clone())
             || !environments.insert(credential.injection_env.clone())
         {
@@ -433,7 +438,7 @@ fn validate_credentials(
         }
         let configured = RunnerCredentialConfiguration {
             file: credential.file.clone(),
-            injection_env: credential.injection_env.clone(),
+            injection_env,
         };
         if profiles.insert(profile, configured).is_some() {
             return Err(RunnerConfigurationError::InvalidCredentials);
@@ -448,14 +453,6 @@ fn reserved_environment_name(value: &str) -> bool {
         || value.starts_with("OPENAI_")
         || value.starts_with("LD_")
         || value.starts_with("DYLD_")
-}
-
-fn valid_environment_name(value: &str) -> bool {
-    let mut bytes = value.bytes();
-    bytes
-        .next()
-        .is_some_and(|byte| byte.is_ascii_uppercase() || byte == b'_')
-        && bytes.all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 fn validate_repositories(
@@ -889,6 +886,37 @@ injection_env = "{CONFIGURED_INJECTION_ENV}""#,
     }
 
     #[test]
+    fn configuration_rejects_a_process_core_runtime_environment() {
+        let document = configured_fixture()
+            .document
+            .replace(CONFIGURED_INJECTION_ENV, "HOME");
+
+        let error = RunnerConfiguration::parse(&document)
+            .expect_err("a fixed process-core environment must fail closed");
+
+        assert_eq!(
+            error.to_string(),
+            "runner credential configuration is invalid"
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_environment_beyond_the_process_core_bound() {
+        let oversized = "A".repeat(4097);
+        let document = configured_fixture()
+            .document
+            .replace(CONFIGURED_INJECTION_ENV, &oversized);
+
+        let error = RunnerConfiguration::parse(&document)
+            .expect_err("an oversized process-core environment must fail closed");
+
+        assert_eq!(
+            error.to_string(),
+            "runner credential configuration is invalid"
+        );
+    }
+
+    #[test]
     fn configuration_rejects_duplicate_credential_environments() {
         let document = configured_fixture().document.replace(
             &format!("[credentials.{CONFIGURED_PROFILE}]"),
@@ -930,6 +958,39 @@ injection_env = "{CONFIGURED_INJECTION_ENV}""#,
 
         let error = RunnerConfiguration::parse(&document)
             .expect_err("nested read-only paths must fail closed");
+
+        assert_eq!(
+            error.to_string(),
+            "runner read-only path inventory is invalid"
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_read_only_ancestor_of_the_environment_delivery_path() {
+        let document = EMPTY_CONFIGURATION.replace(
+            "read_only_paths = [\"/usr\"]",
+            "read_only_paths = [\"/run\"]",
+        );
+
+        let error = RunnerConfiguration::parse(&document)
+            .expect_err("a delivery-path ancestor must fail closed at startup");
+
+        assert_eq!(
+            error.to_string(),
+            "runner read-only path inventory is invalid"
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_read_only_descendant_of_the_environment_delivery_path() {
+        let descendant = Path::new(SANDBOX_ENVIRONMENT_DELIVERY_PATH).join("cache");
+        let document = EMPTY_CONFIGURATION.replace(
+            "read_only_paths = [\"/usr\"]",
+            &format!("read_only_paths = [\"{}\"]", descendant.display()),
+        );
+
+        let error = RunnerConfiguration::parse(&document)
+            .expect_err("a delivery-path descendant must fail closed at startup");
 
         assert_eq!(
             error.to_string(),

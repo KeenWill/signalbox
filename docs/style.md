@@ -384,12 +384,12 @@ The workspace compiler configuration forbids unsafe code. One small internal
 crate locally lowers that lint to `deny` to isolate the owner-authorized
 `fchmodat2` syscall boundary behind a safe API; every other workspace crate
 retains the inherited prohibition. In production code, Clippy denies panicking
-convenience paths (`expect`, `panic`, `unwrap`,
-`todo`, `unimplemented`, and `unreachable`); the repository configuration permits
-`expect`, `panic`, and `unwrap` in test targets. Clippy also denies
-`sqlx::Row::get` plus `get_unchecked` in every target. These are whole-tree
-gates: CI promotes every warning to an error, so a lint is configured only when
-the whole workspace passes it at `deny`.
+convenience paths (`expect`, `panic`, `unwrap`, `todo`, `unimplemented`, and
+`unreachable`); the repository configuration permits `expect`, `panic`, and
+`unwrap` in test targets. Clippy also denies `sqlx::Row::get` plus
+`get_unchecked` in every target. These are whole-tree gates: CI promotes every
+warning to an error, so a lint is configured only when the whole workspace
+passes it at `deny`.
 
 `missing_docs` is not configured yet. A follow-up enables it at `deny` only
 after the outstanding undocumented items across the workspace are cleared.

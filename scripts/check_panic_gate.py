@@ -231,7 +231,7 @@ def display_path(manifest_path: Path) -> str:
 
 
 def check_inheritance(manifest_path: Path, failures: list[str]) -> None:
-    """Record a failure unless the member's manifest inherits workspace lints."""
+    """Record a failure unless the member inherits or repeats every panic lint."""
     shown = display_path(manifest_path)
     try:
         manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
@@ -243,12 +243,21 @@ def check_inheritance(manifest_path: Path, failures: list[str]) -> None:
         return
     lints = manifest.get("lints")
     inherits = isinstance(lints, dict) and lints.get("workspace") is True
-    if not inherits:
-        failures.append(
-            f"{shown} does not inherit workspace lints "
-            f"(needs a [lints] section with workspace = true), so the panic "
-            f"denies do not apply to it"
+    if inherits:
+        return
+    clippy = lints.get("clippy") if isinstance(lints, dict) else None
+    if isinstance(clippy, dict):
+        configured = normalized_lints(clippy, failures)
+        explicitly_gated = all(
+            lint in configured and lint_level(configured[lint]) in GATING_LEVELS
+            for lint in REQUIRED_PANIC_LINTS
         )
+        if explicitly_gated:
+            return
+    failures.append(
+        f"{shown} neither inherits workspace lints nor explicitly denies "
+        f"every required panic lint"
+    )
 
 
 def check_panic_lints(root_manifest: dict, failures: list[str]) -> None:
@@ -372,7 +381,7 @@ def main() -> int:
     print(
         f"panic-gate check passed "
         f"({len(REQUIRED_PANIC_LINTS)} panic lints denied, "
-        f"{len(manifests)} members inherit them)"
+        f"{len(manifests)} members covered)"
     )
     return 0
 

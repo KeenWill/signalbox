@@ -114,7 +114,7 @@ mod tests {
         .expect("the mode-zero fixture opens without read access");
 
         super::chmod_descriptor(descriptor.as_fd(), 0o700)
-            .expect("descriptor chmod restores owner access");
+            .expect("descriptor chmod restores effective-user access");
 
         assert_eq!(
             fs::symlink_metadata(&directory)

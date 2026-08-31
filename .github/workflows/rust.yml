@@ -130,7 +130,7 @@ jobs:
           inventory_hash="$(sha256sum \
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
-            5b6f4942f5e0689acba63eb2fc98ca7dc29c65ef24c35546ef8d1b3f69ba59d9
+            06181a3e400872cd0dc31dc33af133ab44d9f714587bd6ad12809704bf9a51eb
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
               next if $ARGV =~ m{/lock_inventory[.]rs$};
@@ -393,9 +393,10 @@ jobs:
     # observed against a 7.4m median), so the cap sat within noise of exactly
     # the runs whose results matter most — and a job the cap kills is reported
     # as `cancelled`, which reads as an infrastructure problem and hides the
-    # test failure underneath it. Fifteen minutes is about twice the median,
-    # leaves the p90 at half the cap, and still bounds a genuinely hung job.
-    timeout-minutes: 15
+    # test failure underneath it. The runner suite has now twice reached the
+    # fifteen-minute cap while its tests were still passing, so twenty-five
+    # minutes leaves that larger suite headroom while still bounding a hung job.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.postgres-integration-build.outputs.matrix) }}

@@ -397,6 +397,27 @@ pub(crate) const RUNNER_CONNECTION_LOSS_HEAD: &str = "SELECT loss_epoch
               WHERE enrollment_id = $1
               FOR UPDATE";
 
+pub(crate) const RUNNER_WORKSPACE_CLEANUP_CONNECTION_AUTHORITY: &str =
+    "SELECT head.connection_epoch, head.connection_event_ordinal,
+                    event.state_kind
+               FROM runner_connection_authority_head AS head
+               JOIN runner_connection_event AS event
+                 ON event.enrollment_id = head.enrollment_id
+                AND event.connection_epoch = head.connection_epoch
+                AND event.event_ordinal = head.connection_event_ordinal
+              WHERE head.enrollment_id = $1
+              FOR UPDATE OF head";
+pub(crate) const RUNNER_WORKSPACE_RELEASE: &str =
+    "SELECT runner_id, manifest_id, enrollment_id, connection_epoch
+               FROM runner_workspace_release
+              WHERE session_id = $1 AND placement_revision = $2
+              FOR UPDATE";
+pub(crate) const RUNNER_WORKSPACE_RELEASE_LOSS_RETIREMENT: &str = "SELECT placement_revision
+           FROM runner_workspace_release
+          WHERE session_id = $1
+            AND enrollment_id = $2
+            AND connection_epoch = $3
+          FOR UPDATE";
 pub(crate) const RUNNER_CONNECTION_LOSS_PROPAGATION: &str = "SELECT
                     propagation.propagated_through_session_id,
                     propagation.state_kind,

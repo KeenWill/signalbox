@@ -26,6 +26,7 @@ pub(crate) enum LauncherStatus {
     SpawnFailed {
         reason: SupervisorSpawnFailure,
     },
+    DeliveryFailed,
     SupervisionFailed,
 }
 
@@ -41,6 +42,7 @@ pub(crate) enum SupervisorStatus {
     SpawnFailed {
         reason: SupervisorSpawnFailure,
     },
+    DeliveryFailed,
     SupervisionFailed {
         stage: SupervisorFailureStage,
     },

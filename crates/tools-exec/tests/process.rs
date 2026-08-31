@@ -186,6 +186,7 @@ async fn production_runner_pins_the_supervisor_executable_identity()
             environment: BTreeMap::new(),
             environment_inheritance: ProcessEnvironment::Clear,
             status_protocol: ProcessStatusProtocol::Direct,
+            delivery_payload: None,
         };
 
         let result = runner.run(request).await;
@@ -215,6 +216,7 @@ async fn production_runner_preserves_outer_spawn_path_failure()
             environment: BTreeMap::new(),
             environment_inheritance: ProcessEnvironment::Clear,
             status_protocol: ProcessStatusProtocol::Direct,
+            delivery_payload: None,
         };
 
         let result = production_runner()?.run(request).await;
@@ -247,6 +249,7 @@ async fn production_runner_preserves_requested_program_spawn_failure()
             environment: BTreeMap::new(),
             environment_inheritance: ProcessEnvironment::Clear,
             status_protocol: ProcessStatusProtocol::Direct,
+            delivery_payload: None,
         };
 
         let result = production_runner()?.run(request).await;
@@ -275,6 +278,7 @@ async fn production_runner_reports_observed_bytes_beyond_limit()
             environment: BTreeMap::new(),
             environment_inheritance: ProcessEnvironment::Clear,
             status_protocol: ProcessStatusProtocol::Direct,
+            delivery_payload: None,
         };
 
         let result = production_runner()?.run(request).await;
@@ -305,6 +309,7 @@ async fn production_runner_clears_ambient_environment_when_requested()
             )]),
             environment_inheritance: ProcessEnvironment::Clear,
             status_protocol: ProcessStatusProtocol::Direct,
+            delivery_payload: None,
         };
 
         let result = production_runner()?.run(request).await;
@@ -345,6 +350,7 @@ async fn production_dispatcher_marks_started_target_that_exits_127()
             environment: BTreeMap::new(),
             environment_inheritance: ProcessEnvironment::Clear,
             status_protocol: ProcessStatusProtocol::SandboxDispatch,
+            delivery_payload: None,
         };
 
         let result = production_runner()?.run(request).await;
@@ -388,6 +394,7 @@ async fn production_dispatcher_forwards_target_stderr_without_deadlocking()
             environment: BTreeMap::new(),
             environment_inheritance: ProcessEnvironment::Clear,
             status_protocol: ProcessStatusProtocol::SandboxDispatch,
+            delivery_payload: None,
         };
 
         let result = production_runner()?.run(request).await;
@@ -423,6 +430,7 @@ async fn production_dispatcher_preserves_target_spawn_failure()
             environment: BTreeMap::new(),
             environment_inheritance: ProcessEnvironment::Clear,
             status_protocol: ProcessStatusProtocol::SandboxDispatch,
+            delivery_payload: None,
         };
 
         let result = production_runner()?.run(request).await;
@@ -458,6 +466,7 @@ async fn production_dispatcher_preserves_target_signal_termination()
             environment: BTreeMap::new(),
             environment_inheritance: ProcessEnvironment::Clear,
             status_protocol: ProcessStatusProtocol::SandboxDispatch,
+            delivery_payload: None,
         };
 
         let result = production_runner()?.run(request).await;
@@ -489,6 +498,7 @@ async fn production_dispatcher_does_not_wait_for_descendant_held_pipes()
             environment: BTreeMap::new(),
             environment_inheritance: ProcessEnvironment::Clear,
             status_protocol: ProcessStatusProtocol::SandboxDispatch,
+            delivery_payload: None,
         };
         let started = std::time::Instant::now();
 
@@ -520,6 +530,7 @@ async fn production_runner_kills_descendants_after_leader_completion()
             environment: BTreeMap::new(),
             environment_inheritance: ProcessEnvironment::Clear,
             status_protocol: ProcessStatusProtocol::Direct,
+            delivery_payload: None,
         };
 
         let result = production_runner()?.run(request).await;
@@ -550,6 +561,7 @@ async fn production_runner_kills_descendants_on_timeout() -> Result<(), Box<dyn 
             environment: BTreeMap::new(),
             environment_inheritance: ProcessEnvironment::Clear,
             status_protocol: ProcessStatusProtocol::Direct,
+            delivery_payload: None,
         };
 
         let result = production_runner()?.run(request).await;
@@ -924,6 +936,7 @@ fn shell_request(
         environment: BTreeMap::new(),
         environment_inheritance: ProcessEnvironment::Clear,
         status_protocol: ProcessStatusProtocol::Direct,
+        delivery_payload: None,
     })
 }
 
