@@ -11,9 +11,14 @@ use signalbox_persistence::turn_liveness::{
 };
 
 fn terminalization_bounds() -> TurnLivenessPersistenceBounds {
+    // The lock budgets stay tiny: a lock_timeout only trips while genuinely
+    // blocked, so they are insensitive to how loaded the host is. The acquire
+    // budget bounds an uncontended pool checkout, which on a saturated CI node
+    // can take tens of milliseconds; a starved checkout must not preempt the
+    // lock refusal these tests assert on.
     TurnLivenessPersistenceBounds::new(
         Some(std::time::Duration::from_millis(7)),
-        Some(std::time::Duration::from_millis(11)),
+        Some(std::time::Duration::from_secs(5)),
         Some(std::time::Duration::from_millis(13)),
     )
 }

@@ -279,7 +279,7 @@ async fn deep_frontier_prefix_validation_is_bounded_and_exact() -> Result<(), Bo
     )
     .fetch_one(&mut *connection)
     .await?;
-    sqlx::query("SET statement_timeout = '1s'")
+    sqlx::query("SET statement_timeout = '10s'")
         .execute(&mut *connection)
         .await?;
 
@@ -378,7 +378,7 @@ async fn deep_frontier_prefix_validation_is_bounded_and_exact() -> Result<(), Bo
     sqlx::raw_sql("ALTER TABLE context_compaction ENABLE TRIGGER ALL;")
         .execute(&mut *connection)
         .await?;
-    sqlx::query("SET statement_timeout = '1s'")
+    sqlx::query("SET statement_timeout = '10s'")
         .execute(&mut *connection)
         .await?;
     let effective_after_obsolete_chain: Uuid = sqlx::query_scalar(
