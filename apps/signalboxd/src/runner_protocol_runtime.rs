@@ -2414,6 +2414,12 @@ mod tests {
             lease_id: arbitrary_identity,
             lease_generation: first,
             runner_id: arbitrary_identity,
+            placement_revision: first,
+            working_directory: signalbox_runner_wire::WorkingDirectory::try_new(
+                RUNNER_SESSION_WORKING_DIRECTORY.to_owned(),
+            )
+            .expect("the fixture working directory is valid"),
+            sandbox_profile: signalbox_runner_wire::SandboxProfile::Ambient,
             tool_name: signalbox_runner_wire::WireToolName::try_new("git_fetch".to_owned())
                 .expect("the fixture tool name is valid"),
             session_id: arbitrary_identity,
