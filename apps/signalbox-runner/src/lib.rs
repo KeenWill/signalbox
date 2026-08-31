@@ -25,4 +25,7 @@ pub use state::{
     AcceptedWorkspaceRelease, EnrollmentAuthority, EnrollmentReceipt, RunnerState,
     RunnerStateError, RunnerStateRoot, StateOperation, StateResource,
 };
-pub use workspace::{PrivateWorkspaceRequest, RunnerWorkspaceError, RunnerWorkspaceStore};
+pub use workspace::{
+    PrepareRepositoryWorkspaceError, PrivateWorkspaceRequest, RepositoryWorkspaceRequest,
+    RepositoryWorkspaceTarget, RunnerWorkspaceError, RunnerWorkspaceStore,
+};
