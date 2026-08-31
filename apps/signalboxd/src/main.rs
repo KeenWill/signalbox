@@ -793,6 +793,7 @@ fn runner_runtime_failure_class(error: &RunnerProtocolRuntimeError) -> OperatorF
         | RunnerProtocolRuntimeError::Encode(_)
         | RunnerProtocolRuntimeError::HandshakeTimeout
         | RunnerProtocolRuntimeError::OwnershipUnavailable
+        | RunnerProtocolRuntimeError::Broker(_)
         | RunnerProtocolRuntimeError::HeartbeatSequenceExhausted
         | RunnerProtocolRuntimeError::ConnectionTask(_) => OperatorFailureClass::CallerOrHubBug,
     }

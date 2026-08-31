@@ -31,8 +31,13 @@ use tokio::{
     time::{MissedTickBehavior, interval, timeout},
 };
 
-use crate::LocalProcessListener;
 use crate::local_socket::LocalSocketError;
+use crate::{
+    LocalProcessListener,
+    runner_connection_broker::{
+        RunnerConnectionAddress, RunnerConnectionBroker, RunnerConnectionBrokerError,
+    },
+};
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const HEARTBEAT_MISSES_BEFORE_LOSS: u8 = 3;
@@ -1041,6 +1046,7 @@ impl Error for RunnerRegistrationFailure {}
 pub struct RunnerProtocolRuntime<S> {
     listener: Option<LocalProcessListener>,
     service: Option<S>,
+    broker: RunnerConnectionBroker,
 }
 
 struct RunnerListenerGuard {
@@ -1100,11 +1106,18 @@ where
     S: RunnerRegistrationService,
 {
     /// Composes the dedicated guarded listener with durable runner authority.
-    pub const fn new(listener: LocalProcessListener, service: S) -> Self {
+    pub fn new(listener: LocalProcessListener, service: S) -> Self {
         Self {
             listener: Some(listener),
             service: Some(service),
+            broker: RunnerConnectionBroker::new(),
         }
+    }
+
+    /// Replaces the default empty broker with one shared by operation producers.
+    pub fn with_connection_broker(mut self, broker: RunnerConnectionBroker) -> Self {
+        self.broker = broker;
+        self
     }
 
     /// Accepts runner connections until shutdown; each connection is serial.
@@ -1121,7 +1134,8 @@ where
             .take()
             .ok_or(RunnerProtocolRuntimeError::OwnershipUnavailable)?;
         let listener = RunnerListenerGuard::new(listener);
-        let outcome = run_connections(listener.listener()?, service, shutdown).await;
+        let outcome =
+            run_connections(listener.listener()?, service, self.broker.clone(), shutdown).await;
         let cleanup = listener.cleanup();
         match (outcome, cleanup) {
             (Ok(()), Ok(())) => Ok(()),
@@ -1141,6 +1155,7 @@ where
 async fn run_connections<S>(
     listener: &LocalProcessListener,
     service: S,
+    broker: RunnerConnectionBroker,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), RunnerProtocolRuntimeError>
 where
@@ -1192,9 +1207,10 @@ where
                     tracing::warn!(error = %error, "runner peer failed same-user admission");
                     continue;
                 }
-                connections.spawn(serve_connection(
+                connections.spawn(serve_connection_with_broker(
                     stream,
                     service.clone(),
+                    broker.clone(),
                     connection_shutdown.clone(),
                 ));
             }
@@ -1319,6 +1335,7 @@ fn verify_runner_peer(stream: &UnixStream) -> Result<(), RunnerPeerIdentityError
     }
 }
 
+#[cfg(test)]
 async fn serve_connection<S>(
     stream: UnixStream,
     service: S,
@@ -1327,12 +1344,52 @@ async fn serve_connection<S>(
 where
     S: RunnerRegistrationService,
 {
-    serve_connection_with_handshake_timeout(stream, service, shutdown, HANDSHAKE_TIMEOUT).await
+    serve_connection_with_broker(stream, service, RunnerConnectionBroker::new(), shutdown).await
 }
 
+async fn serve_connection_with_broker<S>(
+    stream: UnixStream,
+    service: S,
+    broker: RunnerConnectionBroker,
+    shutdown: watch::Receiver<bool>,
+) -> Result<(), RunnerProtocolRuntimeError>
+where
+    S: RunnerRegistrationService,
+{
+    serve_connection_with_handshake_timeout_and_broker(
+        stream,
+        service,
+        broker,
+        shutdown,
+        HANDSHAKE_TIMEOUT,
+    )
+    .await
+}
+
+#[cfg(test)]
 async fn serve_connection_with_handshake_timeout<S>(
     stream: UnixStream,
     service: S,
+    shutdown: watch::Receiver<bool>,
+    handshake_timeout: Duration,
+) -> Result<(), RunnerProtocolRuntimeError>
+where
+    S: RunnerRegistrationService,
+{
+    serve_connection_with_handshake_timeout_and_broker(
+        stream,
+        service,
+        RunnerConnectionBroker::new(),
+        shutdown,
+        handshake_timeout,
+    )
+    .await
+}
+
+async fn serve_connection_with_handshake_timeout_and_broker<S>(
+    stream: UnixStream,
+    service: S,
+    broker: RunnerConnectionBroker,
     mut shutdown: watch::Receiver<bool>,
     handshake_timeout: Duration,
 ) -> Result<(), RunnerProtocolRuntimeError>
@@ -1370,8 +1427,12 @@ where
             Ok(response) => {
                 let context = ConnectionContext {
                     enrollment: response.enrollment_id(),
+                    runner: response.runner_id(),
                     epoch: response.connection_epoch(),
                 };
+                let attachment = broker
+                    .attach(connection_address(context)?)
+                    .map_err(RunnerProtocolRuntimeError::Broker)?;
                 if let Err(error) = write_message(&mut writer, response.into_message()).await {
                     transition_is_current(
                         &service,
@@ -1381,7 +1442,7 @@ where
                     .await?;
                     return Err(error);
                 }
-                context
+                (context, attachment)
             }
             Err(failure) => {
                 write_rejected(&mut writer, failure).await?;
@@ -1390,12 +1451,17 @@ where
         },
         Message::Resume(request) => {
             let enrollment = request.enrollment_id;
+            let runner = request.runner_id;
             match service.resume(*request).await {
                 Ok(response) => {
                     let context = ConnectionContext {
                         enrollment,
+                        runner,
                         epoch: response.connection_epoch,
                     };
+                    let attachment = broker
+                        .attach(connection_address(context)?)
+                        .map_err(RunnerProtocolRuntimeError::Broker)?;
                     if let Err(error) =
                         write_message(&mut writer, Message::Resumed(Box::new(response))).await
                     {
@@ -1407,7 +1473,7 @@ where
                         .await?;
                         return Err(error);
                     }
-                    context
+                    (context, attachment)
                 }
                 Err(failure) => {
                     write_rejected(&mut writer, failure).await?;
@@ -1428,6 +1494,8 @@ where
             return Ok(());
         }
     };
+
+    let (context, mut attachment) = context;
 
     let outcome = async {
         let mut heartbeat = interval(HEARTBEAT_INTERVAL);
@@ -1627,6 +1695,19 @@ where
                     HeartbeatTick::Missed(_) => {}
                 }
             }
+            outbound = attachment.receive() => {
+                let Some(message) = outbound else {
+                    return Ok(());
+                };
+                if !transition_is_current(
+                    &service,
+                    context,
+                    RunnerConnectionTransition::Observe,
+                ).await? {
+                    return Ok(());
+                }
+                write_message(&mut writer, message).await?;
+            }
         }
         }
     }
@@ -1642,7 +1723,21 @@ where
 #[derive(Clone, Copy)]
 struct ConnectionContext {
     enrollment: CanonicalUuid,
+    runner: CanonicalUuid,
     epoch: PositiveU64,
+}
+
+fn connection_address(
+    context: ConnectionContext,
+) -> Result<RunnerConnectionAddress, RunnerProtocolRuntimeError> {
+    let epoch = RunnerConnectionEpoch::try_from_u64(context.epoch.get()).ok_or(
+        RunnerProtocolRuntimeError::Broker(RunnerConnectionBrokerError::StateUnavailable),
+    )?;
+    Ok(RunnerConnectionAddress::new(
+        RunnerEnrollmentId::from_uuid(context.enrollment.into_uuid()),
+        RunnerId::from_uuid(context.runner.into_uuid()),
+        epoch,
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1664,6 +1759,7 @@ const fn connection_failure_transition(
         | RunnerProtocolRuntimeError::HeartbeatSequenceExhausted => {
             Some(RunnerConnectionTransition::ProtocolFailure)
         }
+        RunnerProtocolRuntimeError::Broker(_) => Some(RunnerConnectionTransition::TransportClosed),
         RunnerProtocolRuntimeError::Accept(_)
         | RunnerProtocolRuntimeError::Cleanup(_)
         | RunnerProtocolRuntimeError::ConnectionTask(_)
@@ -2094,6 +2190,7 @@ pub enum RunnerProtocolRuntimeError {
     Closed,
     HandshakeTimeout,
     OwnershipUnavailable,
+    Broker(RunnerConnectionBrokerError),
     HeartbeatSequenceExhausted,
     ConnectionTask(JoinError),
     ConnectionDrainTimeout {
@@ -2117,6 +2214,7 @@ impl fmt::Display for RunnerProtocolRuntimeError {
             Self::OwnershipUnavailable => {
                 formatter.write_str("runner runtime ownership was unavailable")
             }
+            Self::Broker(_) => formatter.write_str("runner connection broker failed"),
             Self::HeartbeatSequenceExhausted => {
                 formatter.write_str("runner heartbeat sequence exhausted")
             }
@@ -2136,6 +2234,7 @@ impl Error for RunnerProtocolRuntimeError {
             Self::Cleanup(error) => Some(error),
             Self::Decode(error) | Self::Encode(error) => Some(error),
             Self::Lifecycle(error) => Some(error),
+            Self::Broker(error) => Some(error),
             Self::ConnectionTask(error) => Some(error),
             Self::ConnectionDrainTimeout {
                 initiating: Some(error),
@@ -2571,6 +2670,93 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn exact_resumed_connection_receives_brokered_workspace_release() {
+        let (_container, _database_url, store) = postgres_store().await;
+        let service = PostgresRunnerRegistrationService::new(store.clone(), []);
+        let enrolled = service
+            .enroll(Enroll {
+                request_id: identity(ARBITRARY_RUNNER_ENROLLMENT_REQUEST_ID_SEED),
+                digest_version: DIGEST_VERSION,
+                advertisement: empty_advertisement(),
+            })
+            .await
+            .expect("the runner enrolls before reconnecting");
+        let enrollment = RunnerEnrollmentId::from_uuid(enrolled.enrollment_id().into_uuid());
+        let runner = RunnerId::from_uuid(enrolled.runner_id().into_uuid());
+        let broker = RunnerConnectionBroker::new();
+        let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
+        let (_shutdown_sender, shutdown) = watch::channel(false);
+        let (resumed_sender, resumed_receiver) = tokio::sync::oneshot::channel();
+        let served = serve_connection_with_broker(server, service, broker.clone(), shutdown);
+        let runner_client = async {
+            let (reader, mut writer) = client.into_split();
+            let mut reader = BufReader::new(reader);
+            write_message(
+                &mut writer,
+                Message::Resume(Box::new(Resume {
+                    request_id: enrolled.request_id(),
+                    digest_version: DIGEST_VERSION,
+                    enrollment_id: enrolled.enrollment_id(),
+                    runner_id: enrolled.runner_id(),
+                    authentication_id: enrolled.authentication_id(),
+                    advertisement: empty_advertisement(),
+                    prior_registration_revision: enrolled.registration_revision(),
+                    inventory: Default::default(),
+                })),
+            )
+            .await
+            .expect("the resume request is sent");
+            let _receipt = read_frame(&mut reader)
+                .await
+                .expect("the resume receipt is received");
+            resumed_sender
+                .send(())
+                .expect("the producer awaits the resume receipt");
+            read_frame(&mut reader)
+                .await
+                .expect("the brokered operation is received")
+                .message
+        };
+        let operation_producer = async {
+            resumed_receiver
+                .await
+                .expect("the runner observes its resume receipt");
+            let connection = store
+                .load_connection(enrollment)
+                .await
+                .expect("the resumed connection loads")
+                .expect("the resumed connection exists");
+            let expected = Message::WorkspaceRelease(signalbox_runner_wire::WorkspaceRelease {
+                correlation: signalbox_runner_wire::ReleaseCorrelation {
+                    session_id: identity(ARBITRARY_PROVISION_SESSION_ID_SEED),
+                    placement_revision: PositiveU64::try_new(
+                        ARBITRARY_PROVISION_PLACEMENT_REVISION,
+                    )
+                    .expect("the fixture placement revision is positive"),
+                    runner_id: enrolled.runner_id(),
+                    manifest_id: identity(ARBITRARY_PROVISION_AUTHORIZATION_ID_SEED),
+                },
+            });
+            broker
+                .send(
+                    RunnerConnectionAddress::new(enrollment, runner, connection.epoch()),
+                    expected.clone(),
+                )
+                .expect("the exact resumed connection accepts the operation");
+            expected
+        };
+        let (served, observed, expected) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(served, runner_client, operation_producer)
+        })
+        .await
+        .expect("the resumed broker exchange completes within its test deadline");
+
+        served.expect("the runner connection closes cleanly");
+        assert_eq!(observed, expected);
+    }
+
+    #[tokio::test]
     async fn local_runner_peer_matches_the_daemon_effective_user() {
         let (server, _client) = UnixStream::pair().expect("a local runner stream pair exists");
 
@@ -2625,6 +2811,7 @@ mod tests {
         let response = enrolled_response(request_id, &advertisement);
         let context = ConnectionContext {
             enrollment: response.enrollment_id,
+            runner: response.runner_id,
             epoch: response.connection_epoch,
         };
         let service = EnrollmentService { response };
