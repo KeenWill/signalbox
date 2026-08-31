@@ -667,6 +667,27 @@ async fn pending_delivery_survives_store_restart() -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn pending_receipt_frontier_names_the_newest_admitted_delivery() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresRepoWatchWebhookStore::new(pool);
+    let empty = store.load_pending_receipt_frontier(&repository()?).await?;
+    let first = admitted_receipt(admit_fixture(&store, delivery_key(0x211)).await?);
+    let newest = admitted_receipt(admit_fixture(&store, delivery_key(0x212)).await?);
+
+    let frontier = store
+        .load_pending_receipt_frontier(&repository()?)
+        .await?
+        .expect("the admitted inventory has a frontier");
+
+    assert_eq!(empty, None);
+    assert_ne!(frontier, first.sequence());
+    assert_eq!(frontier, newest.sequence());
+    Ok(())
+}
+
 /// The drain monitor reads the oldest pending delivery on a fixed cadence for
 /// every webhook repository, so it must not transfer the admitted bodies that a
 /// pending page carries. Taking the payload table out of reach proves the

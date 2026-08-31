@@ -1473,14 +1473,13 @@ struct RepositoryWatchTask {
     webhook_drain_work_budget: Option<Duration>,
 }
 
-/// Exact provider refreshes already landed for one loaded pending page.
+/// Exact provider refreshes already landed for one admitted backlog snapshot.
 ///
-/// A work-budget yield ends one drain attempt but does not change which
-/// deliveries were admitted before the page's first refresh. Retaining the
-/// coalescer through that receipt frontier lets the next bounded attempt finish
-/// the same page without repeating the query. The first later receipt resets
-/// the scope before it can rely on evidence fetched before that receipt was
-/// admitted.
+/// The frontier is captured immediately before the first refresh in a scope.
+/// Retaining the coalescer through that receipt lets bounded attempts and
+/// storage pages finish the already-admitted backlog without repeating the
+/// query. The first later receipt resets the scope before it can rely on
+/// evidence fetched before that receipt was admitted.
 struct WebhookRefreshCoalescingScope {
     through_receipt: Option<NonZeroU64>,
     coalescer: RepoWatchTargetedRefreshCoalescerV1,
@@ -1494,18 +1493,17 @@ impl WebhookRefreshCoalescingScope {
         }
     }
 
-    fn for_delivery(
-        &mut self,
-        receipt: NonZeroU64,
-        loaded_through: NonZeroU64,
-    ) -> &mut RepoWatchTargetedRefreshCoalescerV1 {
-        if self
-            .through_receipt
+    fn excludes(&self, receipt: NonZeroU64) -> bool {
+        self.through_receipt
             .is_none_or(|through_receipt| receipt > through_receipt)
-        {
-            self.through_receipt = Some(loaded_through);
-            self.coalescer = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
-        }
+    }
+
+    fn reset_through(&mut self, through_receipt: NonZeroU64) {
+        self.through_receipt = Some(through_receipt);
+        self.coalescer = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+    }
+
+    fn coalescer(&mut self) -> &mut RepoWatchTargetedRefreshCoalescerV1 {
         &mut self.coalescer
     }
 
@@ -2582,18 +2580,27 @@ impl RepositoryWatchTask {
                 }
                 break;
             }
-            let Some(page_through) = deliveries
-                .last()
-                .map(|delivery| delivery.receipt().sequence())
-            else {
-                continue;
-            };
             for delivery in &deliveries {
                 after_receipt = Some(delivery.receipt().sequence());
                 if deferred.contains(&delivery.key()) {
                     continue;
                 }
-                let page = coalescing.for_delivery(delivery.receipt().sequence(), page_through);
+                if coalescing.excludes(delivery.receipt().sequence()) {
+                    let frontier = match self
+                        .webhook_store
+                        .load_pending_receipt_frontier(&self.repository)
+                        .await
+                    {
+                        Ok(Some(frontier)) if frontier >= delivery.receipt().sequence() => frontier,
+                        Ok(Some(_) | None) | Err(_) => {
+                            return WebhookDrainOutcome::ProjectionFailed(
+                                RepositoryWatchAttemptError::Persistence,
+                            );
+                        }
+                    };
+                    coalescing.reset_through(frontier);
+                }
+                let page = coalescing.coalescer();
                 let terminalized = match self
                     .process_webhook_delivery(delivery, page, &mut dispatch_failure)
                     .await
@@ -2981,7 +2988,7 @@ impl RepositoryWatchTask {
                         };
                         // Only refreshes actually sent are recorded, so neither a
                         // branch-only delivery naming no pull request nor one
-                        // whose hydration this page already issued can claim a
+                        // whose hydration this scope already issued can claim a
                         // query the poller never made.
                         let issued = prepared
                             .as_ref()
@@ -3015,7 +3022,7 @@ impl RepositoryWatchTask {
                             // A superseded commit leaves this delivery terminal
                             // but never reached the cursor, so the coalescer must
                             // not treat its hydration as landed: a later delivery
-                            // for the same pull request on this page still owes
+                            // for the same pull request in this scope still owes
                             // the targeted query this one failed to commit.
                             if settlement == TargetedRefreshSettlement::Landed {
                                 page.record_issued(&issued);
@@ -3193,7 +3200,7 @@ impl RepositoryWatchTask {
         // from the cursor this commit already advanced. Only the targeted
         // queries are recorded, and only those actually sent, so neither a
         // branch-only delivery naming no pull request nor one whose hydration
-        // this page already issued can claim a query the poller never made.
+        // this scope already issued can claim a query the poller never made.
         let projections = issued
             .iter()
             .map(targeted_query_projection)
@@ -9011,40 +9018,44 @@ mod tests {
     const SECOND_WEBHOOK_REVIEW: u64 = 9_002;
 
     #[test]
-    fn a_work_budget_yield_retains_the_loaded_pages_exact_refresh() {
+    fn a_work_budget_yield_retains_the_snapshot_frontiers_exact_refresh() {
         let refresh = RepoWatchTargetedRefreshV1::CheckRollupForCommit {
             head: CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture SHA is valid"),
         };
-        let first_receipt = NonZeroU64::new(10).expect("fixture receipt is positive");
         let next_receipt = NonZeroU64::new(11).expect("fixture receipt is positive");
-        let original_page_tail = NonZeroU64::new(34).expect("fixture receipt is positive");
-        let refilled_page_tail = NonZeroU64::new(50).expect("fixture receipt is positive");
+        let snapshot_frontier = NonZeroU64::new(50).expect("fixture receipt is positive");
         let mut scope = WebhookRefreshCoalescingScope::empty();
-        let first_page = scope.for_delivery(first_receipt, original_page_tail);
-        first_page.record_issued(std::slice::from_ref(&refresh));
+        scope.reset_through(snapshot_frontier);
+        scope
+            .coalescer()
+            .record_issued(std::slice::from_ref(&refresh));
 
-        let resumed_page = scope.for_delivery(next_receipt, refilled_page_tail);
-        let unissued = resumed_page.unissued(std::slice::from_ref(&refresh));
+        let excluded = scope.excludes(next_receipt);
+        let unissued = scope.coalescer().unissued(std::slice::from_ref(&refresh));
 
+        assert!(!excluded);
         assert!(unissued.is_empty());
     }
 
     #[test]
-    fn a_receipt_beyond_the_loaded_page_resets_exact_refreshes() {
+    fn a_receipt_beyond_the_snapshot_frontier_requires_a_new_refresh_scope() {
         let refresh = RepoWatchTargetedRefreshV1::CheckRollupForCommit {
             head: CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture SHA is valid"),
         };
-        let first_receipt = NonZeroU64::new(10).expect("fixture receipt is positive");
-        let original_page_tail = NonZeroU64::new(34).expect("fixture receipt is positive");
-        let later_receipt = NonZeroU64::new(35).expect("fixture receipt is positive");
-        let later_page_tail = NonZeroU64::new(59).expect("fixture receipt is positive");
+        let snapshot_frontier = NonZeroU64::new(50).expect("fixture receipt is positive");
+        let later_receipt = NonZeroU64::new(51).expect("fixture receipt is positive");
+        let later_frontier = NonZeroU64::new(75).expect("fixture receipt is positive");
         let mut scope = WebhookRefreshCoalescingScope::empty();
-        let first_page = scope.for_delivery(first_receipt, original_page_tail);
-        first_page.record_issued(std::slice::from_ref(&refresh));
+        scope.reset_through(snapshot_frontier);
+        scope
+            .coalescer()
+            .record_issued(std::slice::from_ref(&refresh));
 
-        let later_page = scope.for_delivery(later_receipt, later_page_tail);
-        let unissued = later_page.unissued(std::slice::from_ref(&refresh));
+        let excluded = scope.excludes(later_receipt);
+        scope.reset_through(later_frontier);
+        let unissued = scope.coalescer().unissued(std::slice::from_ref(&refresh));
 
+        assert!(excluded);
         assert_eq!(unissued, vec![refresh]);
     }
     const WEBHOOK_BODY_DIGEST_FILL: u8 = 0x71;
