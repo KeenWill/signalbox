@@ -739,6 +739,8 @@ pub struct ReadyManifest {
     pub manifest: WorkspaceManifest,
     /// Exact content digest of these lifecycle-specific facts.
     pub manifest_digest: Digest,
+    /// Exact runner-interpreted directory selected for later execution.
+    pub working_directory: WorkingDirectory,
 }
 
 impl ReadyManifest {
