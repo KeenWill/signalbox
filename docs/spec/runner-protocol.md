@@ -17,19 +17,20 @@ placement facts are re-verified against the parent slice
 reconstitution fences are re-verified through this PR
 (`agent/runner-lease-domain-correlation`). Existing-pin attempt-and-offer
 atomicity is re-verified through this PR
-(`agent/runner-pinned-dispatch-transaction`). The corrected reconstitution
-mismatch contract was re-verified through PR #322 (`agent/docs-discipline`;
-pinned and pinned-loss request mismatches). The placement loss-source, pre-pin
-replacement and abandonment state shapes, and append-only reconstitution-history
-contract are re-verified through this PR (`agent/runner-placement-loss-domain`).
-It owns logical runner enrollment, daemon-authoritative catalog validation,
-runner leases, the independent session-composition axes, session placement and
-affinity, credential-profile grants, and workspace requirements. The tool
-registry's common declarations remain owned by [tool loop](tool-loop.md);
-session transcript and frontier mechanics remain owned by
-[sessions and transcript](sessions-and-transcript.md); physical tool attempts
-remain owned by [tool loop](tool-loop.md). Invariant tags cite
-[the invariant test index](../invariants.md).
+(`agent/runner-pinned-dispatch-transaction`). Durable lease-claim admission is
+re-verified through this PR (`agent/runner-lease-claim-transaction`). The
+corrected reconstitution mismatch contract was re-verified through PR #322
+(`agent/docs-discipline`; pinned and pinned-loss request mismatches). The
+placement loss-source, pre-pin replacement and abandonment state shapes, and
+append-only reconstitution-history contract are re-verified through this PR
+(`agent/runner-placement-loss-domain`). It owns logical runner enrollment,
+daemon-authoritative catalog validation, runner leases, the independent
+session-composition axes, session placement and affinity, credential-profile
+grants, and workspace requirements. The tool registry's common declarations
+remain owned by [tool loop](tool-loop.md); session transcript and frontier
+mechanics remain owned by [sessions and transcript](sessions-and-transcript.md);
+physical tool attempts remain owned by [tool loop](tool-loop.md). Invariant tags
+cite [the invariant test index](../invariants.md).
 
 The typed `ReplaceLostRunner`, `RunnerReplacementTarget`, and
 `AbandonLostRunner` domain command payloads are verified against this PR
@@ -1045,10 +1046,14 @@ proof exposes no public raw-parts constructor, so an offered lease and its
 public correlation cannot mint this authority. The persistence adapter may
 reconstitute it only by comparing the complete stored proof correlation with the
 independently loaded lease correlation through the checked reconstitution input.
-The local transport is the independently authoritative producer. Its claim
-transaction serializes against the current connection/loss head and commits the
-exact claim before acknowledging it; only that acknowledgement can enable
-execution. When loss wins first, the fenced connection epoch plus the durable
+The durable claim transaction is the independently authoritative producer. It
+serializes against the current connection/loss and registration heads, commits
+the exact claim, and returns the canonical claimed lease before acknowledgement;
+the generic projection writer cannot originate a claim. **Committed
+unimplemented functionality.** No daemon transport currently routes an inbound
+`lease_claim` through this transaction or emits `lease_claimed`; that future
+binding may acknowledge only the complete correlation returned by the committed
+transaction. When loss wins first, the fenced connection epoch plus the durable
 absence of a claim proves that no execution capability was issued, and the same
 transaction records `LostUnclaimed` with its exact proof. When claim wins first,
 the durable lease is `Claimed` even if acknowledgement delivery is uncertain and

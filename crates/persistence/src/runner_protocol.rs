@@ -17,8 +17,9 @@ use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_application::{
     AbandonLostRunnerOutcome, AbandonLostRunnerTransaction, PinnedRunnerDispatchRequest,
     PinnedRunnerDispatchTransaction, ReplaceLostRunnerBeforePinOutcome,
-    ReplaceLostRunnerBeforePinTransaction, RunnerReplacementProvisioningOutcome,
-    RunnerReplacementProvisioningStage, RunnerReplacementProvisioningTransaction,
+    ReplaceLostRunnerBeforePinTransaction, RunnerLeaseClaimRequest, RunnerLeaseClaimTransaction,
+    RunnerReplacementProvisioningOutcome, RunnerReplacementProvisioningStage,
+    RunnerReplacementProvisioningTransaction,
 };
 use signalbox_domain::{
     AbandonLostRunner, AbandonLostRunnerRejection, AbandonLostRunnerResult, AbandonedLostRunner,
@@ -4555,12 +4556,82 @@ impl RunnerProtocolStore {
     /// [`Self::store_claimed_retry_replacement`], which commits it atomically
     /// with the fresh replacement attempt the schema requires.
     pub async fn store_lease(&self, lease: &RunnerLease) -> Result<(), RunnerProtocolStoreError> {
-        if lease.state() == RunnerLeaseState::LostUnclaimed {
+        if matches!(
+            lease.state(),
+            RunnerLeaseState::Claimed | RunnerLeaseState::LostUnclaimed
+        ) {
             return Err(RunnerProtocolStoreError::Domain(
                 RunnerDomainError::InvalidState,
             ));
         }
         self.store_lease_without_proof(lease).await
+    }
+
+    /// Stores a checked claimed-lease projection for PostgreSQL integration tests.
+    #[cfg(feature = "postgres-integration")]
+    #[doc(hidden)]
+    pub async fn store_claimed_lease_projection_for_test(
+        &self,
+        lease: &RunnerLease,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        if lease.state() != RunnerLeaseState::Claimed {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
+        }
+        self.store_lease_without_proof(lease).await
+    }
+
+    /// Atomically commits one exact offered-lease claim before acknowledgement.
+    pub async fn claim_lease(
+        &self,
+        request: RunnerLeaseClaimRequest,
+    ) -> Result<RunnerLease, RunnerProtocolStoreError> {
+        let correlation = request.into_correlation();
+        let mut transaction = self.pool.begin().await?;
+        lock_runner_session_scheduler(&mut transaction, correlation.dispatch.session()).await?;
+        let enrollment: Uuid = sqlx::query_scalar(
+            "SELECT registration_enrollment_id
+               FROM runner_lease_generation
+              WHERE lease_id = $1 AND generation = $2",
+        )
+        .bind(correlation.lease.into_uuid())
+        .bind(Decimal::from(correlation.generation.get()))
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RunnerProtocolStoreError::Domain(
+            RunnerDomainError::InvalidState,
+        ))?;
+        let enrollment_state: String = sqlx::query_scalar(RUNNER_LEASE_ENROLLMENT_AUTHORITY)
+            .bind(enrollment)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalEnrollment)?;
+        if enrollment_state != "active" {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
+        }
+        lock_runner_lease_claim_connection_authority(&mut transaction, &correlation).await?;
+        let current_registration: Option<Decimal> = sqlx::query_scalar(RUNNER_REGISTRATION_HEAD)
+            .bind(enrollment)
+            .fetch_optional(&mut *transaction)
+            .await?;
+        if current_registration.is_none() {
+            return Err(RunnerProtocolCorruption::MissingCanonicalRegistration.into());
+        }
+        let offered = self
+            .load_lease_in(&mut transaction, correlation.lease, correlation.generation)
+            .await?
+            .ok_or(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ))?;
+        let claimed = offered
+            .claim(correlation)
+            .map_err(RunnerProtocolStoreError::Domain)?;
+        append_lease_event_in(&mut transaction, &claimed).await?;
+        commit_mutation(transaction).await?;
+        Ok(claimed)
     }
 
     /// Atomically authorizes one prepared tool attempt and stores its offered
@@ -5427,6 +5498,17 @@ impl PinnedRunnerDispatchTransaction for RunnerProtocolStore {
         lease: RunnerLeaseId,
     ) -> Result<RunnerLease, Self::Error> {
         self.authorize_pinned_dispatch(request, lease).await
+    }
+}
+
+impl RunnerLeaseClaimTransaction for RunnerProtocolStore {
+    type Error = RunnerProtocolStoreError;
+
+    async fn claim(
+        &mut self,
+        request: RunnerLeaseClaimRequest,
+    ) -> Result<RunnerLease, Self::Error> {
+        self.claim_lease(request).await
     }
 }
 
