@@ -13,11 +13,12 @@ use rustix::{
     fs::{AtFlags, FlockOperation, Mode, OFlags, flock, open, openat, renameat, unlinkat},
     process::geteuid,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use signalbox_runner_wire::{
-    CanonicalUuid, Digest, LeaseCorrelation, LeasePhase, LeasePhaseKind, MAX_FRAME_BYTES,
-    OperationCorrelation, OperationFailure, PositiveU64, ReconnectInventory, ReleaseCorrelation,
-    ReleasePhase, RetainedResult, WorkspaceOperation,
+    CanonicalUuid, Digest, Frame, LeaseCorrelation, LeasePhase, LeasePhaseKind, MAX_FRAME_BYTES,
+    Message, OperationCorrelation, OperationFailure, PositiveU64, ProvisionCorrelation,
+    ProvisionPhase, ReconnectInventory, ReleaseCorrelation, ReleasePhase, RetainedResult,
+    WorkspaceOperation, WorkspaceReady, WorkspaceRecorded,
 };
 use uuid::Uuid;
 
@@ -29,6 +30,14 @@ const STATE_FILE: &str = "enrollment-state.json";
 const OPERATION_JOURNAL_FILE: &str = "operation-journal.json";
 const MAX_STATE_BYTES: u64 = 16 * 1024;
 const MAX_OPERATION_JOURNAL_BYTES: u64 = MAX_FRAME_BYTES as u64;
+
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
 
 /// Authority carried by the daemon-issued enrollment receipt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -173,6 +182,8 @@ struct StateDocument {
 struct OperationJournalDocument {
     version: u64,
     inventory: ReconnectInventory,
+    #[serde(deserialize_with = "deserialize_present")]
+    ready_workspace: Option<WorkspaceReady>,
 }
 
 /// Resource named by a durable-state I/O failure without exposing configured paths.
@@ -352,6 +363,7 @@ pub struct RunnerStateRoot {
     directory: File,
     state: RunnerState,
     inventory: ReconnectInventory,
+    ready_workspace: Option<WorkspaceReady>,
 }
 
 impl RunnerStateRoot {
@@ -477,14 +489,14 @@ impl RunnerStateRoot {
                 });
             }
         };
-        let inventory = match openat(
+        let (inventory, ready_workspace) = match openat(
             &directory,
             OPERATION_JOURNAL_FILE,
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         ) {
             Ok(descriptor) => read_operation_journal(File::from(descriptor), effective_user)?,
-            Err(rustix::io::Errno::NOENT) => ReconnectInventory::default(),
+            Err(rustix::io::Errno::NOENT) => (ReconnectInventory::default(), None),
             Err(error) => {
                 return Err(RunnerStateError::Io {
                     operation: StateOperation::Open,
@@ -493,11 +505,12 @@ impl RunnerStateRoot {
                 });
             }
         };
-        validate_operation_journal_owner(&state, &inventory)?;
+        validate_operation_journal_owner(&state, &inventory, ready_workspace.as_ref())?;
         Ok(Self {
             directory,
             state,
             inventory,
+            ready_workspace,
         })
     }
 
@@ -509,6 +522,11 @@ impl RunnerStateRoot {
     /// Borrows the exact current in-memory copy of the fsynced operation slots.
     pub const fn reconnect_inventory(&self) -> &ReconnectInventory {
         &self.inventory
+    }
+
+    /// Borrows the complete ready payload retained beside its reconnect item.
+    pub const fn retained_workspace_ready(&self) -> Option<&WorkspaceReady> {
+        self.ready_workspace.as_ref()
     }
 
     /// Atomically fsyncs the first exact daemon-issued receipt.
@@ -581,7 +599,7 @@ impl RunnerStateRoot {
         }
         let mut inventory = self.inventory.clone();
         inventory.lease = Some(next);
-        write_operation_journal(&self.directory, &inventory)?;
+        write_operation_journal(&self.directory, &inventory, self.ready_workspace.as_ref())?;
         self.inventory = inventory;
         Ok(())
     }
@@ -610,7 +628,7 @@ impl RunnerStateRoot {
         }
         let mut inventory = self.inventory.clone();
         inventory.result = Some(result);
-        write_operation_journal(&self.directory, &inventory)?;
+        write_operation_journal(&self.directory, &inventory, self.ready_workspace.as_ref())?;
         self.inventory = inventory;
         Ok(())
     }
@@ -636,7 +654,7 @@ impl RunnerStateRoot {
         let mut inventory = self.inventory.clone();
         inventory.lease = None;
         inventory.result = None;
-        write_operation_journal(&self.directory, &inventory)?;
+        write_operation_journal(&self.directory, &inventory, self.ready_workspace.as_ref())?;
         self.inventory = inventory;
         Ok(())
     }
@@ -666,7 +684,7 @@ impl RunnerStateRoot {
         }
         let mut inventory = self.inventory.clone();
         inventory.lease = None;
-        write_operation_journal(&self.directory, &inventory)?;
+        write_operation_journal(&self.directory, &inventory, self.ready_workspace.as_ref())?;
         self.inventory = inventory;
         Ok(())
     }
@@ -690,7 +708,7 @@ impl RunnerStateRoot {
         }
         let mut inventory = self.inventory.clone();
         inventory.operation_failure = Some(failure);
-        write_operation_journal(&self.directory, &inventory)?;
+        write_operation_journal(&self.directory, &inventory, self.ready_workspace.as_ref())?;
         self.inventory = inventory;
         Ok(())
     }
@@ -710,8 +728,118 @@ impl RunnerStateRoot {
         }
         let mut inventory = self.inventory.clone();
         inventory.operation_failure = None;
-        write_operation_journal(&self.directory, &inventory)?;
+        write_operation_journal(&self.directory, &inventory, self.ready_workspace.as_ref())?;
         self.inventory = inventory;
+        Ok(())
+    }
+
+    /// Atomically retains one complete ready manifest until exact recording.
+    pub fn record_workspace_ready(
+        &mut self,
+        ready: WorkspaceReady,
+    ) -> Result<(), RunnerStateError> {
+        Frame::try_new(Message::WorkspaceReady(ready.clone()))
+            .map_err(|_| RunnerStateError::CorruptOperationJournal)?;
+        self.validate_current_provision_correlation(&ready.correlation)?;
+        if ready.correlation.repository.is_none() {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        let next_operation = WorkspaceOperation::Provision {
+            correlation: ready.correlation.clone(),
+            phase: ProvisionPhase::ReadyUnrecorded,
+        };
+        match (
+            self.inventory.workspace_operation.as_ref(),
+            self.ready_workspace.as_ref(),
+        ) {
+            (Some(current_operation), Some(current_ready))
+                if current_operation == &next_operation && current_ready == &ready =>
+            {
+                return Ok(());
+            }
+            (None, None) if self.inventory == ReconnectInventory::default() => {}
+            (Some(current_operation), _)
+                if current_operation != &next_operation
+                    || self
+                        .ready_workspace
+                        .as_ref()
+                        .is_some_and(|current| current != &ready) =>
+            {
+                return Err(RunnerStateError::OperationCorrelationMismatch);
+            }
+            _ => return Err(RunnerStateError::InvalidTransition),
+        }
+        let mut inventory = self.inventory.clone();
+        inventory.workspace_operation = Some(next_operation);
+        write_operation_journal(&self.directory, &inventory, Some(&ready))?;
+        self.inventory = inventory;
+        self.ready_workspace = Some(ready);
+        Ok(())
+    }
+
+    /// Atomically releases one ready manifest after the exact receipt is recorded.
+    pub fn acknowledge_workspace_ready(
+        &mut self,
+        recorded: &WorkspaceRecorded,
+    ) -> Result<(), RunnerStateError> {
+        let Some(WorkspaceOperation::Provision {
+            correlation,
+            phase: ProvisionPhase::ReadyUnrecorded,
+        }) = self.inventory.workspace_operation.as_ref()
+        else {
+            return Err(RunnerStateError::InvalidTransition);
+        };
+        let ready = self
+            .ready_workspace
+            .as_ref()
+            .ok_or(RunnerStateError::InvalidTransition)?;
+        if correlation != &recorded.correlation
+            || ready.correlation != recorded.correlation
+            || ready.ready.manifest.manifest_id != recorded.manifest_id
+            || ready.ready.manifest_digest != recorded.manifest_digest
+        {
+            return Err(RunnerStateError::OperationCorrelationMismatch);
+        }
+        let mut inventory = self.inventory.clone();
+        inventory.workspace_operation = None;
+        write_operation_journal(&self.directory, &inventory, None)?;
+        self.inventory = inventory;
+        self.ready_workspace = None;
+        Ok(())
+    }
+
+    /// Atomically retires one exact ready item classified stale on resume.
+    pub fn fail_stale_workspace_ready(
+        &mut self,
+        correlation: &ProvisionCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        match (
+            self.inventory.workspace_operation.as_ref(),
+            self.ready_workspace.as_ref(),
+        ) {
+            (
+                Some(WorkspaceOperation::Provision {
+                    correlation: current,
+                    phase: ProvisionPhase::ReadyUnrecorded,
+                }),
+                Some(ready),
+            ) if current == correlation && &ready.correlation == correlation => {}
+            (
+                Some(WorkspaceOperation::Provision {
+                    correlation: current,
+                    ..
+                }),
+                _,
+            ) if current != correlation => {
+                return Err(RunnerStateError::OperationCorrelationMismatch);
+            }
+            _ => return Err(RunnerStateError::InvalidTransition),
+        }
+        let mut inventory = self.inventory.clone();
+        inventory.workspace_operation = None;
+        write_operation_journal(&self.directory, &inventory, None)?;
+        self.inventory = inventory;
+        self.ready_workspace = None;
         Ok(())
     }
 
@@ -747,7 +875,7 @@ impl RunnerStateRoot {
         }
         let mut inventory = self.inventory.clone();
         inventory.workspace_operation = Some(next);
-        write_operation_journal(&self.directory, &inventory)?;
+        write_operation_journal(&self.directory, &inventory, self.ready_workspace.as_ref())?;
         self.inventory = inventory;
         Ok(())
     }
@@ -772,7 +900,7 @@ impl RunnerStateRoot {
         }
         let mut inventory = self.inventory.clone();
         inventory.workspace_operation = None;
-        write_operation_journal(&self.directory, &inventory)?;
+        write_operation_journal(&self.directory, &inventory, self.ready_workspace.as_ref())?;
         self.inventory = inventory;
         Ok(())
     }
@@ -806,7 +934,7 @@ impl RunnerStateRoot {
         }
         let mut inventory = self.inventory.clone();
         inventory.operation_failure = Some(failure);
-        write_operation_journal(&self.directory, &inventory)?;
+        write_operation_journal(&self.directory, &inventory, self.ready_workspace.as_ref())?;
         self.inventory = inventory;
         Ok(())
     }
@@ -834,7 +962,7 @@ impl RunnerStateRoot {
         let mut inventory = self.inventory.clone();
         inventory.workspace_operation = None;
         inventory.operation_failure = None;
-        write_operation_journal(&self.directory, &inventory)?;
+        write_operation_journal(&self.directory, &inventory, self.ready_workspace.as_ref())?;
         self.inventory = inventory;
         Ok(())
     }
@@ -870,11 +998,29 @@ impl RunnerStateRoot {
             Err(RunnerStateError::OperationCorrelationMismatch)
         }
     }
+
+    fn validate_current_provision_correlation(
+        &self,
+        correlation: &ProvisionCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        let receipt = self
+            .state
+            .receipt()
+            .ok_or(RunnerStateError::InvalidTransition)?;
+        if correlation.runner_id == receipt.runner_id()
+            && correlation.registration_revision == receipt.registration_revision()
+        {
+            Ok(())
+        } else {
+            Err(RunnerStateError::OperationCorrelationMismatch)
+        }
+    }
 }
 
 fn validate_operation_journal_owner(
     state: &RunnerState,
     inventory: &ReconnectInventory,
+    ready_workspace: Option<&WorkspaceReady>,
 ) -> Result<(), RunnerStateError> {
     let receipt = state.receipt();
     let lease_owned = match (receipt, inventory.lease.as_ref()) {
@@ -900,7 +1046,24 @@ fn validate_operation_journal_owner(
         (Some(receipt), Some(WorkspaceOperation::Release { correlation, .. })) => {
             correlation.runner_id == receipt.runner_id()
         }
-        (Some(_), Some(WorkspaceOperation::Provision { .. })) | (None, Some(_)) => false,
+        (
+            Some(receipt),
+            Some(WorkspaceOperation::Provision {
+                correlation,
+                phase: ProvisionPhase::ReadyUnrecorded,
+            }),
+        ) => {
+            correlation.runner_id == receipt.runner_id()
+                && ready_workspace.is_some_and(|ready| ready.correlation == *correlation)
+        }
+        (
+            Some(_),
+            Some(WorkspaceOperation::Provision {
+                phase: ProvisionPhase::Provisioning,
+                ..
+            }),
+        )
+        | (None, Some(_)) => false,
     };
     let failure_owned = match (receipt, inventory.operation_failure.as_ref()) {
         (_, None) => true,
@@ -922,7 +1085,10 @@ fn validate_operation_journal_owner(
     }
 }
 
-fn operation_journal_has_only_supported_slots(inventory: &ReconnectInventory) -> bool {
+fn operation_journal_has_only_supported_slots(
+    inventory: &ReconnectInventory,
+    ready_workspace: Option<&WorkspaceReady>,
+) -> bool {
     let result_matches_lease = match (inventory.lease.as_ref(), inventory.result.as_ref()) {
         (_, None) => true,
         (Some(lease), Some(result)) => {
@@ -931,10 +1097,40 @@ fn operation_journal_has_only_supported_slots(inventory: &ReconnectInventory) ->
         }
         (None, Some(_)) => false,
     };
-    let supported_workspace = inventory
-        .workspace_operation
-        .as_ref()
-        .is_none_or(|operation| matches!(operation, WorkspaceOperation::Release { .. }));
+    let supported_workspace = match (inventory.workspace_operation.as_ref(), ready_workspace) {
+        (None, None) | (Some(WorkspaceOperation::Release { .. }), None) => true,
+        (
+            Some(WorkspaceOperation::Provision {
+                correlation,
+                phase: ProvisionPhase::ReadyUnrecorded,
+            }),
+            Some(ready),
+        ) => {
+            correlation.repository.is_some()
+                && ready.correlation == *correlation
+                && Frame::try_new(Message::WorkspaceReady(ready.clone())).is_ok()
+                && inventory.lease.is_none()
+                && inventory.result.is_none()
+                && inventory.operation_failure.is_none()
+                && inventory.leak_page.is_none()
+        }
+        (
+            Some(WorkspaceOperation::Provision {
+                phase: ProvisionPhase::Provisioning,
+                ..
+            }),
+            _,
+        )
+        | (None, Some(_))
+        | (Some(WorkspaceOperation::Release { .. }), Some(_))
+        | (
+            Some(WorkspaceOperation::Provision {
+                phase: ProvisionPhase::ReadyUnrecorded,
+                ..
+            }),
+            None,
+        ) => false,
+    };
     let failure_matches_predecessor = match inventory.operation_failure.as_ref() {
         None => true,
         Some(
@@ -1007,7 +1203,7 @@ fn read_state(mut file: File, effective_user: u32) -> Result<RunnerState, Runner
 fn read_operation_journal(
     mut file: File,
     effective_user: u32,
-) -> Result<ReconnectInventory, RunnerStateError> {
+) -> Result<(ReconnectInventory, Option<WorkspaceReady>), RunnerStateError> {
     let metadata = file.metadata().map_err(|source| RunnerStateError::Io {
         operation: StateOperation::Inspect,
         resource: StateResource::OperationJournal,
@@ -1038,11 +1234,14 @@ fn read_operation_journal(
         serde_json::from_slice(&content).map_err(|_| RunnerStateError::CorruptOperationJournal)?;
     if document.version != STATE_DOCUMENT_VERSION
         || document.inventory.validate().is_err()
-        || !operation_journal_has_only_supported_slots(&document.inventory)
+        || !operation_journal_has_only_supported_slots(
+            &document.inventory,
+            document.ready_workspace.as_ref(),
+        )
     {
         return Err(RunnerStateError::CorruptOperationJournal);
     }
-    Ok(document.inventory)
+    Ok((document.inventory, document.ready_workspace))
 }
 
 fn write_state(directory: &File, state: &RunnerState) -> Result<(), RunnerStateError> {
@@ -1109,16 +1308,18 @@ fn write_state(directory: &File, state: &RunnerState) -> Result<(), RunnerStateE
 fn write_operation_journal(
     directory: &File,
     inventory: &ReconnectInventory,
+    ready_workspace: Option<&WorkspaceReady>,
 ) -> Result<(), RunnerStateError> {
     inventory
         .validate()
         .map_err(|_| RunnerStateError::CorruptOperationJournal)?;
-    if !operation_journal_has_only_supported_slots(inventory) {
+    if !operation_journal_has_only_supported_slots(inventory, ready_workspace) {
         return Err(RunnerStateError::CorruptOperationJournal);
     }
     let document = OperationJournalDocument {
         version: STATE_DOCUMENT_VERSION,
         inventory: inventory.clone(),
+        ready_workspace: ready_workspace.cloned(),
     };
     let mut encoded =
         serde_json::to_vec(&document).map_err(|_| RunnerStateError::CorruptOperationJournal)?;
@@ -1193,8 +1394,10 @@ fn rustix_error(error: rustix::io::Errno) -> io::Error {
 mod tests {
     use signalbox_runner_wire::{
         Advertisement, DetailName, ExecutionErrorKind, FailureCategory, FailureDetail,
-        ProvisionCorrelation, ProvisionPhase, ReleaseCorrelation, ReleasePhase, SandboxProfile,
-        TerminalResult, WireToolName, WorkingDirectory, WorkspaceOperation, advertisement_digest,
+        ManifestLifecycle, ProvisionCorrelation, ProvisionPhase, ReadyManifest, Recovery,
+        ReleaseCorrelation, ReleasePhase, RepositoryKey, SandboxProfile, TerminalResult,
+        WireToolName, WorkingDirectory, WorkspaceManifest, WorkspaceOperation,
+        advertisement_digest, workspace_manifest_digest,
     };
     use tempfile::TempDir;
 
@@ -1215,6 +1418,7 @@ mod tests {
     const ARBITRARY_ISSUING_ATTEMPT_UUID: u128 = 0x900;
     const ARBITRARY_OTHER_RUNNER_UUID: u128 = 0xa00;
     const ARBITRARY_MANIFEST_UUID: u128 = 0xb00;
+    const ARBITRARY_AUTHORIZATION_UUID: u128 = 0xc00;
     const INITIAL_REGISTRATION_REVISION: u64 = 1;
     const SUCCESSOR_REGISTRATION_REVISION: u64 = 2;
 
@@ -1347,6 +1551,76 @@ mod tests {
         }
     }
 
+    fn provision_correlation() -> ProvisionCorrelation {
+        ProvisionCorrelation {
+            authorization_id: CanonicalUuid::from_uuid(Uuid::from_u128(
+                ARBITRARY_AUTHORIZATION_UUID,
+            )),
+            session_id: CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_SESSION_UUID)),
+            placement_revision: positive(1),
+            runner_id: CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_RUNNER_UUID)),
+            registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+            repository: Some(
+                RepositoryKey::try_new("fixture-repository".to_owned())
+                    .expect("the fixture repository key is valid"),
+            ),
+            sandbox_profile: SandboxProfile::WorkspaceRestricted,
+            credential_profile: None,
+        }
+    }
+
+    fn workspace_ready() -> WorkspaceReady {
+        let correlation = provision_correlation();
+        let manifest = WorkspaceManifest {
+            lifecycle: ManifestLifecycle::Ready,
+            manifest_id: CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_MANIFEST_UUID)),
+            session: correlation.session_id,
+            placement_revision: correlation.placement_revision,
+            runner: correlation.runner_id,
+            repository: correlation.repository.clone(),
+            canonical_clone_url_digest: Some(
+                Digest::try_new("b".repeat(64)).expect("the fixture clone digest is canonical"),
+            ),
+            credential_profile: None,
+            sandbox_profile: correlation.sandbox_profile,
+            relative_path: format!(
+                "sessions/{}/{}/repo",
+                correlation.session_id,
+                correlation.placement_revision.get()
+            ),
+            recovery: Some(Recovery::Commit {
+                revision: "a".repeat(40),
+            }),
+        };
+        let manifest_digest = workspace_manifest_digest(&manifest)
+            .expect("the fixture manifest has a canonical digest");
+        WorkspaceReady {
+            correlation,
+            ready: ReadyManifest {
+                manifest,
+                manifest_digest,
+            },
+        }
+    }
+
+    fn workspace_recorded(ready: &WorkspaceReady) -> WorkspaceRecorded {
+        WorkspaceRecorded {
+            correlation: ready.correlation.clone(),
+            manifest_id: ready.ready.manifest.manifest_id,
+            manifest_digest: ready.ready.manifest_digest.clone(),
+        }
+    }
+
+    fn inventory_with_ready(ready: &WorkspaceReady) -> ReconnectInventory {
+        ReconnectInventory {
+            workspace_operation: Some(WorkspaceOperation::Provision {
+                correlation: ready.correlation.clone(),
+                phase: ProvisionPhase::ReadyUnrecorded,
+            }),
+            ..ReconnectInventory::default()
+        }
+    }
+
     fn release_operation(phase: ReleasePhase) -> WorkspaceOperation {
         WorkspaceOperation::Release {
             correlation: release_correlation(),
@@ -1393,14 +1667,23 @@ mod tests {
         root
     }
 
-    fn replace_operation_journal(path: &Path, inventory: ReconnectInventory) {
+    fn replace_operation_document(
+        path: &Path,
+        inventory: ReconnectInventory,
+        ready_workspace: Option<WorkspaceReady>,
+    ) {
         let document = OperationJournalDocument {
             version: STATE_DOCUMENT_VERSION,
             inventory,
+            ready_workspace,
         };
         let encoded = serde_json::to_vec(&document).expect("the journal fixture encodes");
         fs::write(path.join(OPERATION_JOURNAL_FILE), encoded)
             .expect("the operation journal fixture is replaced");
+    }
+
+    fn replace_operation_journal(path: &Path, inventory: ReconnectInventory) {
+        replace_operation_document(path, inventory, None);
     }
 
     #[test]
@@ -1771,6 +2054,158 @@ mod tests {
             RunnerStateError::OperationCorrelationMismatch
         ));
         assert_eq!(root.reconnect_inventory().result, Some(result));
+    }
+
+    #[test]
+    fn s32_ready_workspace_payload_survives_reopen_exactly() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = enrolled_root(&parent);
+        let ready = workspace_ready();
+        root.record_workspace_ready(ready.clone())
+            .expect("the complete ready payload is durable");
+        drop(root);
+
+        let reopened = RunnerStateRoot::open(&path).expect("the private state root reopens");
+
+        assert_eq!(
+            reopened.reconnect_inventory(),
+            &inventory_with_ready(&ready)
+        );
+        assert_eq!(reopened.retained_workspace_ready(), Some(&ready));
+    }
+
+    #[test]
+    fn s32_workspace_recorded_acknowledgement_clears_ready_payload_durably() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = enrolled_root(&parent);
+        let ready = workspace_ready();
+        root.record_workspace_ready(ready.clone())
+            .expect("the complete ready payload is durable");
+
+        root.acknowledge_workspace_ready(&workspace_recorded(&ready))
+            .expect("the exact recorded acknowledgement frees the ready payload");
+        drop(root);
+        let reopened = RunnerStateRoot::open(&path).expect("the private state root reopens");
+
+        assert_eq!(
+            reopened.reconnect_inventory(),
+            &ReconnectInventory::default()
+        );
+        assert_eq!(reopened.retained_workspace_ready(), None);
+    }
+
+    #[test]
+    fn s32_fail_stale_ready_workspace_clears_payload_durably() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = enrolled_root(&parent);
+        let ready = workspace_ready();
+        root.record_workspace_ready(ready.clone())
+            .expect("the complete ready payload is durable");
+
+        root.fail_stale_workspace_ready(&ready.correlation)
+            .expect("the exact stale item frees its ready payload");
+        drop(root);
+        let reopened = RunnerStateRoot::open(&path).expect("the private state root reopens");
+
+        assert_eq!(
+            reopened.reconnect_inventory(),
+            &ReconnectInventory::default()
+        );
+        assert_eq!(reopened.retained_workspace_ready(), None);
+    }
+
+    #[test]
+    fn s32_ready_workspace_inventory_without_payload_fails_closed() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = enrolled_root(&parent);
+        root.record_lease_phase(lease_phase(LeasePhaseKind::WaitingDispatch))
+            .expect("the operation journal is created");
+        drop(root);
+        let ready = workspace_ready();
+        replace_operation_journal(&path, inventory_with_ready(&ready));
+
+        let error = RunnerStateRoot::open(&path)
+            .expect_err("a ready correlation without its full payload fails closed");
+
+        assert!(matches!(error, RunnerStateError::CorruptOperationJournal));
+    }
+
+    #[test]
+    fn s32_operation_journal_without_ready_workspace_field_fails_closed() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = enrolled_root(&parent);
+        root.record_lease_phase(lease_phase(LeasePhaseKind::WaitingDispatch))
+            .expect("the operation journal is created");
+        drop(root);
+        let document = OperationJournalDocument {
+            version: STATE_DOCUMENT_VERSION,
+            inventory: inventory_with_lease(lease_phase(LeasePhaseKind::WaitingDispatch)),
+            ready_workspace: None,
+        };
+        let mut omitted = serde_json::to_value(document).expect("the journal fixture encodes");
+        omitted
+            .as_object_mut()
+            .expect("the journal fixture is an object")
+            .remove("ready_workspace")
+            .expect("the ready-workspace field was encoded");
+        fs::write(
+            path.join(OPERATION_JOURNAL_FILE),
+            serde_json::to_vec(&omitted).expect("the omitted-field fixture encodes"),
+        )
+        .expect("the operation journal fixture is replaced");
+
+        let error = RunnerStateRoot::open(&path)
+            .expect_err("an operation journal omitting the current field fails closed");
+
+        assert!(matches!(error, RunnerStateError::CorruptOperationJournal));
+    }
+
+    #[test]
+    fn s32_cross_wired_ready_workspace_payload_fails_closed() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = enrolled_root(&parent);
+        root.record_workspace_ready(workspace_ready())
+            .expect("the complete ready payload is durable");
+        drop(root);
+        let ready = workspace_ready();
+        let mut cross_wired = ready.clone();
+        cross_wired.correlation.authorization_id =
+            CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_AUTHORIZATION_UUID + 1));
+        replace_operation_document(&path, inventory_with_ready(&ready), Some(cross_wired));
+
+        let error = RunnerStateRoot::open(&path)
+            .expect_err("the full payload must match the reconnect correlation");
+
+        assert!(matches!(error, RunnerStateError::CorruptOperationJournal));
+    }
+
+    #[test]
+    fn s32_workspace_recorded_mismatch_preserves_ready_payload() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut root = enrolled_root(&parent);
+        let ready = workspace_ready();
+        root.record_workspace_ready(ready.clone())
+            .expect("the complete ready payload is durable");
+        let mut mismatched = workspace_recorded(&ready);
+        mismatched.manifest_id =
+            CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_MANIFEST_UUID + 1));
+
+        let error = root
+            .acknowledge_workspace_ready(&mismatched)
+            .expect_err("another manifest cannot free the ready payload");
+
+        assert!(matches!(
+            error,
+            RunnerStateError::OperationCorrelationMismatch
+        ));
+        assert_eq!(root.reconnect_inventory(), &inventory_with_ready(&ready));
+        assert_eq!(root.retained_workspace_ready(), Some(&ready));
     }
 
     /// INV-011 / INV-024: accepted release authority survives restart before
