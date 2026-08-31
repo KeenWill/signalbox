@@ -691,15 +691,24 @@ impl PostgresRunnerRegistrationService {
                     (action == DirectiveAction::Await).then_some(claimed),
                 )
             }
-            ResumeOperation::ReadyWorkspace(_) => (
-                ready_workspace_directives(&request.inventory, DirectiveAction::FailStale)
-                    .map_err(|code| {
-                        RunnerRegistrationFailure::new(
-                            RunnerInboundFrameKind::Resume,
-                            correlation.clone(),
-                            code,
-                        )
-                    })?,
+            ResumeOperation::ReadyWorkspace(ready_correlation) => (
+                ready_workspace_directives(
+                    &request.inventory,
+                    if ready_correlation.runner_id == request.runner_id
+                        && ready_correlation.registration_revision.get() == prior.get()
+                    {
+                        DirectiveAction::Resend
+                    } else {
+                        DirectiveAction::FailStale
+                    },
+                )
+                .map_err(|code| {
+                    RunnerRegistrationFailure::new(
+                        RunnerInboundFrameKind::Resume,
+                        correlation.clone(),
+                        code,
+                    )
+                })?,
                 None,
             ),
             ResumeOperation::Empty => (ReconnectDirectives::default(), None),
@@ -3519,7 +3528,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv012_ready_workspace_resume_fails_stale_without_durable_reauthorization() {
+    fn s32_inv012_ready_workspace_resume_resends_matching_authenticated_evidence() {
         let correlation = repository_workspace_provision_correlation();
         let inventory = ReconnectInventory {
             workspace_operation: Some(WorkspaceOperation::Provision {
@@ -3531,8 +3540,8 @@ mod tests {
 
         let operation = classify_resume_inventory(&inventory)
             .expect("one ready-unrecorded workspace is structurally admissible");
-        let directives = ready_workspace_directives(&inventory, DirectiveAction::FailStale)
-            .expect("the exact ready inventory accepts a fail-stale directive");
+        let directives = ready_workspace_directives(&inventory, DirectiveAction::Resend)
+            .expect("the exact ready inventory accepts a resend directive");
 
         assert_eq!(
             operation,
@@ -3543,7 +3552,7 @@ mod tests {
             directives.workspace_operation,
             Some(Directive {
                 correlation: signalbox_runner_wire::OperationCorrelation::Provision(correlation),
-                action: DirectiveAction::FailStale,
+                action: DirectiveAction::Resend,
             })
         );
     }
