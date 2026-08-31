@@ -3210,6 +3210,15 @@ pub enum ClientRequest {
         /// Exact pending enrollment request to consume.
         pending_request_id: CanonicalUuid,
     },
+    /// Terminalize one exact lost runner placement after turn control is clear.
+    AbandonLostRunner {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Session whose current runner placement is lost.
+        session_id: CanonicalUuid,
+        /// Exact positive placement revision observed by the caller.
+        expected_placement_revision: RunnerPlacementRevision,
+    },
     /// Read one session's complete current or named immutable defaults epoch.
     ReadSessionDefaults {
         /// Target session.
@@ -3525,6 +3534,7 @@ impl ClientRequest {
             | Self::ReplaceSessionMetadata { .. }
             | Self::ReplaceSessionDefaults { .. }
             | Self::PromotePendingRunner { .. }
+            | Self::AbandonLostRunner { .. }
             | Self::ReadSessionDefaults { .. }
             | Self::ImportConversation { .. }
             | Self::BeginConversationImport { .. }
@@ -3981,6 +3991,36 @@ pub enum RejectionDetail {
         /// Absent target.
         session_id: CanonicalUuid,
     },
+    /// The session has no runner placement to abandon.
+    RunnerPlacementNotFound {
+        /// Session whose runner placement is absent.
+        session_id: CanonicalUuid,
+    },
+    /// The current runner placement revision differs from the caller's observation.
+    PlacementRevisionMismatch {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Positive placement revision named by the command.
+        expected: RunnerPlacementRevision,
+        /// Positive current placement revision.
+        current: RunnerPlacementRevision,
+    },
+    /// The exact current runner placement is not lost.
+    PlacementNotLost {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Positive current placement revision.
+        placement_revision: RunnerPlacementRevision,
+        /// Closed authoritative non-lost placement state.
+        state: RunnerPlacementRecoveryState,
+    },
+    /// Existing turn control must clear the active slot before abandonment.
+    ActiveTurnRequiresExistingControl {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Authoritative active turn.
+        active_turn_id: CanonicalUuid,
+    },
     /// No provisioning-only pending enrollment currently exists.
     NoPendingRunnerEnrollment {},
     /// A different request owns the pending-successor slot.
@@ -4261,6 +4301,10 @@ impl RejectionDetail {
             | Self::ConversationImportSourceSizeMismatch { .. }
             | Self::ConversationImportConversionFailed { .. } => true,
             Self::SessionNotFound { .. }
+            | Self::RunnerPlacementNotFound { .. }
+            | Self::PlacementRevisionMismatch { .. }
+            | Self::PlacementNotLost { .. }
+            | Self::ActiveTurnRequiresExistingControl { .. }
             | Self::NoPendingRunnerEnrollment {}
             | Self::PendingRequestMismatch { .. }
             | Self::PendingRequestDisconnected { .. }
@@ -5487,6 +5531,18 @@ pub enum RunnerNonLostConnectionState {
     Suspect,
     /// The connection ended through an orderly shutdown.
     Shutdown,
+}
+
+/// Closed non-lost placement state carried by a refused recovery command.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerPlacementRecoveryState {
+    /// The session has not pinned a runner.
+    Unpinned,
+    /// The session remains pinned to a usable runner.
+    Pinned,
+    /// A prior command already terminalized the runner placement.
+    RunnerAbandoned,
 }
 
 /// Closed current state carried by an authoritative runner projection.
@@ -6948,6 +7004,13 @@ pub enum ServerMessage {
         /// Exact retained registration revision.
         registration_revision: CanonicalU64,
     },
+    /// One exact lost runner placement became terminal.
+    RunnerAbandoned {
+        /// Session whose placement became terminal.
+        session_id: CanonicalUuid,
+        /// Positive terminal placement revision.
+        placement_revision: RunnerPlacementRevision,
+    },
     /// One complete current or named immutable session-defaults epoch.
     SessionDefaults {
         /// Selected session.
@@ -7693,11 +7756,17 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
             current_placement_version,
             ..
         } => current_placement_version.value() == u64::MAX,
+        RejectionDetail::PlacementRevisionMismatch {
+            expected, current, ..
+        } => expected != current,
         RejectionDetail::DelegationEventOrdinalExhausted { last, .. } => last.value() == u64::MAX,
         RejectionDetail::DelegationDeliverySequenceExhausted { last, .. } => {
             last.value() == u64::MAX
         }
         RejectionDetail::SessionNotFound { .. }
+        | RejectionDetail::RunnerPlacementNotFound { .. }
+        | RejectionDetail::PlacementNotLost { .. }
+        | RejectionDetail::ActiveTurnRequiresExistingControl { .. }
         | RejectionDetail::NoPendingRunnerEnrollment {}
         | RejectionDetail::PendingRequestMismatch { .. }
         | RejectionDetail::PendingRequestDisconnected { .. }
@@ -7794,6 +7863,10 @@ fn validate_conversation_import_detail(
             }
         },
         RejectionDetail::SessionNotFound { .. }
+        | RejectionDetail::RunnerPlacementNotFound { .. }
+        | RejectionDetail::PlacementRevisionMismatch { .. }
+        | RejectionDetail::PlacementNotLost { .. }
+        | RejectionDetail::ActiveTurnRequiresExistingControl { .. }
         | RejectionDetail::NoPendingRunnerEnrollment {}
         | RejectionDetail::PendingRequestMismatch { .. }
         | RejectionDetail::PendingRequestDisconnected { .. }
@@ -8363,12 +8436,12 @@ mod tests {
         ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
         ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewTargetSubject,
         RunnerCapabilityClass, RunnerConnectionHealth, RunnerCredentialProfileName,
-        RunnerNonLostConnectionState, RunnerPlacementRevision, RunnerProjection,
-        RunnerProjectionSelector, RunnerProjectionState, RunnerRepositoryKey, RunnerSandboxProfile,
-        RunnerStateTransitionState, RunnerWorkingDirectory, ServerFrame, ServerMessage,
-        ServiceTier, SessionEvent, SessionMetadata, SettingOverlay, SystemPromptMember,
-        SystemPromptText, ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState,
-        ToolDecision, TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval,
+        RunnerNonLostConnectionState, RunnerPlacementRecoveryState, RunnerPlacementRevision,
+        RunnerProjection, RunnerProjectionSelector, RunnerProjectionState, RunnerRepositoryKey,
+        RunnerSandboxProfile, RunnerStateTransitionState, RunnerWorkingDirectory, ServerFrame,
+        ServerMessage, ServiceTier, SessionEvent, SessionMetadata, SettingOverlay,
+        SystemPromptMember, SystemPromptText, ToolApprovalEventDecider, ToolApprovalEventDecision,
+        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval,
         TurnModelSettingsSnapshot, TurnState, UsageProvenance, decode_client_line,
         decode_server_line, encode_client_line, encode_server_line, validate_adjustments,
     };
@@ -15648,6 +15721,134 @@ mod tests {
             r#"{"type":"error","code":"rejected","message":"request rejected","detail":{"type":"active_runner_not_lost","runner_id":"00000000-0000-0000-0000-000000000002","connection_state":"shutdown"}}"#,
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn inv033_lost_runner_abandonment_request_round_trips() -> Result<(), Box<dyn std::error::Error>>
+    {
+        assert_client_request_round_trip(
+            request(1)?,
+            ClientRequest::AbandonLostRunner {
+                command_id: command(2)?,
+                session_id: uuid(3),
+                expected_placement_revision: RunnerPlacementRevision::try_new(4)
+                    .expect("the fixture placement revision is positive"),
+            },
+            r#"{"type":"abandon_lost_runner","command_id":"00000000-0000-0000-0000-000000000002","session_id":"00000000-0000-0000-0000-000000000003","expected_placement_revision":"4"}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_lost_runner_abandonment_receipt_round_trips() -> Result<(), Box<dyn std::error::Error>>
+    {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::RunnerAbandoned {
+                session_id: uuid(3),
+                placement_revision: RunnerPlacementRevision::try_new(4)
+                    .expect("the fixture placement revision is positive"),
+            },
+            r#"{"type":"runner_abandoned","session_id":"00000000-0000-0000-0000-000000000003","placement_revision":"4"}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_runner_placement_not_found_rejection_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("request rejected"),
+                detail: ErrorDetail::rejected(RejectionDetail::RunnerPlacementNotFound {
+                    session_id: uuid(2),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"request rejected","detail":{"type":"runner_placement_not_found","session_id":"00000000-0000-0000-0000-000000000002"}}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_runner_placement_revision_mismatch_rejection_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("request rejected"),
+                detail: ErrorDetail::rejected(RejectionDetail::PlacementRevisionMismatch {
+                    session_id: uuid(2),
+                    expected: RunnerPlacementRevision::try_new(3)
+                        .expect("the expected fixture revision is positive"),
+                    current: RunnerPlacementRevision::try_new(4)
+                        .expect("the current fixture revision is positive"),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"request rejected","detail":{"type":"placement_revision_mismatch","session_id":"00000000-0000-0000-0000-000000000002","expected":"3","current":"4"}}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_runner_placement_not_lost_rejection_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("request rejected"),
+                detail: ErrorDetail::rejected(RejectionDetail::PlacementNotLost {
+                    session_id: uuid(2),
+                    placement_revision: RunnerPlacementRevision::try_new(3)
+                        .expect("the fixture placement revision is positive"),
+                    state: RunnerPlacementRecoveryState::RunnerAbandoned,
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"request rejected","detail":{"type":"placement_not_lost","session_id":"00000000-0000-0000-0000-000000000002","placement_revision":"3","state":"runner_abandoned"}}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_active_turn_requires_existing_control_rejection_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("request rejected"),
+                detail: ErrorDetail::rejected(RejectionDetail::ActiveTurnRequiresExistingControl {
+                    session_id: uuid(2),
+                    active_turn_id: uuid(3),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"request rejected","detail":{"type":"active_turn_requires_existing_control","session_id":"00000000-0000-0000-0000-000000000002","active_turn_id":"00000000-0000-0000-0000-000000000003"}}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_placement_revision_mismatch_rejects_equal_revisions() {
+        let revision = RunnerPlacementRevision::try_new(3)
+            .expect("the fixture placement revision is positive");
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("request rejected"),
+                detail: ErrorDetail::rejected(RejectionDetail::PlacementRevisionMismatch {
+                    session_id: uuid(2),
+                    expected: revision,
+                    current: revision,
+                }),
+            },
+        )
+        .expect_err("equal revisions contradict mismatch evidence");
+
+        assert_eq!(error, FrameValidationError::ErrorDetailShape);
     }
 
     #[test]

@@ -165,6 +165,11 @@ impl PostgresRunnerRegistrationService {
         ))
     }
 
+    /// Returns the shared durable runner-protocol adapter for process commands.
+    pub fn protocol_store(&self) -> RunnerProtocolStore {
+        self.store.clone()
+    }
+
     /// Classifies prior-process nonterminal connections as lost before admission.
     pub async fn mark_orphaned_connections_lost(
         &self,

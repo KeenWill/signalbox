@@ -16,6 +16,10 @@ The deployment-scoped pending-runner promotion request, receipt, and rejection
 vocabulary was verified against this PR
 (`agent/runner-pending-successor-process`).
 
+The session-scoped lost-runner abandonment request, receipt, rejection
+vocabulary, and daemon adapter are verified against this PR
+(`agent/runner-abandonment-process`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
@@ -289,7 +293,7 @@ that variant.
 | `compact_session`                       | `command_id` and `session_id` (canonical UUID strings), `through_position` (positive canonical decimal string or null)                                                                                                                                                                                        | Append a dedicated-call summary through the exact requested safe position, or through the latest safe boundary for null, without deleting or rewriting transcript history.                                                                                                                                                                                                      |
 | `read_runner_status` (proposed)         | `page_size` (canonical decimal string) and `after` (runner-evidence cursor object or null)                                                                                                                                                                                                                    | Read the active and optional pending runner registrations, connection/loss state, advertised availability, retained operation failures, and startup workspace-leak reports, with one bounded evidence page.                                                                                                                                                                     |
 | `replace_lost_runner` (proposed)        | `command_id` and `session_id` (canonical UUID strings), `expected_placement_revision` (positive canonical decimal string), and `replacement` (target object)                                                                                                                                                  | Replace the exact current lost placement with a different live runner, atomically activate one pending replacement enrollment, or — for a registration-triggered loss, where it is the only version-one recovery — re-enroll the same runner against its current connection; pinned loss provisions a new workspace boundary, while pre-pin loss returns to unpinned selection. |
-| `abandon_lost_runner` (proposed)        | `command_id` and `session_id` (canonical UUID strings), `expected_placement_revision` (positive canonical decimal string)                                                                                                                                                                                     | Terminalize the exact lost placement only after the existing turn-control algebra has left no active turn; queued work remains and later sees only daemon-executable tools.                                                                                                                                                                                                     |
+| `abandon_lost_runner`                   | `command_id` and `session_id` (canonical UUID strings), `expected_placement_revision` (positive canonical decimal string)                                                                                                                                                                                     | Terminalize the exact lost placement only after the existing turn-control algebra has left no active turn; queued work remains and later sees only daemon-executable tools.                                                                                                                                                                                                     |
 | `promote_pending_runner`                | `command_id` and `pending_request_id` (canonical UUID strings)                                                                                                                                                                                                                                                | Activate the one provisioning-only pending enrollment on the deployment-scoped fact that this daemon's active runner is durably gone; it names and mutates no session placement.                                                                                                                                                                                                |
 
 | Type                                 | Additional required members                                                                                                | Meaning                                                                  |
@@ -1407,7 +1411,7 @@ the refused operation required none, and `runner_detail` is JSON null or the
 bounded runner-authored `{ code, message, payload }` object the runner reported
 with its failure. The failure class is the layer the daemon and this rejection's
 readers branch on; the detail is data the runner may extend freely and the
-daemon never interprets. The proposed `abandon_lost_runner` rejection admits
+daemon never interprets. The `abandon_lost_runner` rejection admits
 `session_not_found`, `runner_placement_not_found`,
 `placement_revision_mismatch`, `placement_not_lost`, and
 `active_turn_requires_existing_control { session_id, active_turn_id }` with

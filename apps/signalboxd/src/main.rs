@@ -1409,6 +1409,7 @@ async fn run_hub(
         },
         None => None,
     };
+    let runner_protocol_store = runner_service.protocol_store();
     let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
     let process_runtime = ProcessRuntime::new_with_templates(
         listener,
@@ -1418,6 +1419,7 @@ async fn run_hub(
         model_configuration.clone(),
         template_configuration,
     )
+    .with_runner_protocol_store(runner_protocol_store)
     .with_context_compaction_model(Arc::clone(&context_compaction_model));
     let process_runtime = match prometheus_runtime.as_ref() {
         Some((metrics, _server)) => process_runtime.with_metrics(metrics.clone()),
