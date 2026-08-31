@@ -153,6 +153,13 @@ async fn run(
                     RunnerConnectionError::Violation(ProtocolViolation::DispatchMismatch),
                 ));
             }
+            Ok(ServeOutcome::WorkspaceReleaseReady(_)) => {
+                return Err(RunnerDaemonError::Connection(
+                    RunnerConnectionError::Violation(
+                        ProtocolViolation::WorkspaceReleaseHandoffUncomposed,
+                    ),
+                ));
+            }
             Err(error) if error.is_reconnectable() => {
                 let delay = backoff.next_delay();
                 report_reconnect(ReconnectStage::Serving, &error, delay);
