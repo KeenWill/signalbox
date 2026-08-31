@@ -11,6 +11,7 @@ use std::{
     fmt,
     future::Future,
     num::NonZeroU64,
+    pin::Pin,
     sync::{Arc, Weak},
 };
 
@@ -622,6 +623,119 @@ impl ExecutableToolSnapshotEntry {
     pub const fn initial_approval(&self) -> InitialToolApproval {
         self.initial_approval
     }
+}
+
+/// Session-aware source of the exact tools executable by one model operation.
+///
+/// The source receives the daemon-local catalog separately so an adapter can
+/// combine daemon and runner availability without changing argument validation
+/// or execution policy. Its returned order is the provider-visible order.
+pub trait ExecutableToolSnapshotSource: Send + Sync {
+    /// Resolves one session's exact executable definitions and selected loci.
+    #[allow(
+        clippy::type_complexity,
+        reason = "the boxed borrow-scoped future keeps this adapter port object-safe"
+    )]
+    fn executable_tools<'a>(
+        &'a self,
+        session: SessionId,
+        daemon_catalog: &'a dyn ToolCatalog,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Box<[ExecutableToolSnapshotEntry]>,
+                        ExecutableToolSnapshotSourceError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    >;
+}
+
+/// Default snapshot source exposing only the daemon-local catalog.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DaemonExecutableToolSnapshotSource;
+
+impl ExecutableToolSnapshotSource for DaemonExecutableToolSnapshotSource {
+    fn executable_tools<'a>(
+        &'a self,
+        _session: SessionId,
+        daemon_catalog: &'a dyn ToolCatalog,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Box<[ExecutableToolSnapshotEntry]>,
+                        ExecutableToolSnapshotSourceError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            Ok(daemon_catalog
+                .definitions()
+                .into_vec()
+                .into_iter()
+                .map(|definition| {
+                    ExecutableToolSnapshotEntry::daemon(definition, dangerous_tool_auto_approval)
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice())
+        })
+    }
+}
+
+/// Classified adapter failure while deriving an executable tool snapshot.
+#[derive(Debug)]
+pub struct ExecutableToolSnapshotSourceError {
+    class: OperatorFailureClass,
+    cause_code: &'static str,
+    source: Box<dyn Error + Send + Sync>,
+}
+
+impl ExecutableToolSnapshotSourceError {
+    /// Retains one adapter-specific error behind the shared classified seam.
+    pub fn new(error: impl Error + ClassifyOperatorFailure + Send + Sync + 'static) -> Self {
+        let class = error.operator_failure_class();
+        let cause_code = error.operator_failure_cause_code();
+        Self {
+            class,
+            cause_code,
+            source: Box::new(error),
+        }
+    }
+}
+
+impl fmt::Display for ExecutableToolSnapshotSourceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("executable tool snapshot source failed")
+    }
+}
+
+impl Error for ExecutableToolSnapshotSourceError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+impl ClassifyOperatorFailure for ExecutableToolSnapshotSourceError {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        self.class
+    }
+
+    fn operator_failure_cause_code(&self) -> &'static str {
+        self.cause_code
+    }
+}
+
+/// Owned model-tool ports preserved across explicit service decomposition.
+pub struct ExecutableToolSnapshotComposition {
+    catalog: Arc<dyn ToolCatalog>,
+    source: Arc<dyn ExecutableToolSnapshotSource>,
 }
 
 /// A checked prepared call plus its provider-neutral ordered messages.
@@ -1253,6 +1367,8 @@ pub enum ModelCallExecutionError<
     Prepare(PrepareError),
     /// Provider-neutral request rendering failed closed.
     Render(ModelFrontierRenderingError),
+    /// Session-aware executable-tool snapshot derivation failed.
+    ExecutableToolSnapshot(ExecutableToolSnapshotSourceError),
     /// Credential lookup or capability preparation failed as an operator error.
     CapabilityPreparation(ProviderError),
     /// The guarded trustworthy-capability-failure transaction failed.
@@ -1300,6 +1416,12 @@ where
         match self {
             Self::Prepare(error) => write!(formatter, "model-call prepare stage failed: {error}"),
             Self::Render(error) => write!(formatter, "model-call render stage failed: {error}"),
+            Self::ExecutableToolSnapshot(error) => {
+                write!(
+                    formatter,
+                    "model-call executable-tool snapshot stage failed: {error}"
+                )
+            }
             Self::CapabilityPreparation(error) => {
                 write!(formatter, "model-call capability stage failed: {error}")
             }
@@ -1375,6 +1497,7 @@ where
         match self {
             Self::Prepare(error) => error.operator_failure_class(),
             Self::Render(error) => error.operator_failure_class(),
+            Self::ExecutableToolSnapshot(error) => error.operator_failure_class(),
             Self::CapabilityPreparation(error) | Self::Provider(error) => {
                 error.operator_failure_class()
             }
@@ -1392,6 +1515,7 @@ where
         match self {
             Self::Prepare(_) => "model_call_prepare",
             Self::Render(_) => "model_call_render",
+            Self::ExecutableToolSnapshot(_) => "model_call_executable_tool_snapshot",
             Self::CapabilityPreparation(_) => "model_call_capability_preparation",
             Self::CapabilityFailureCommit(_) => "model_call_capability_failure_commit",
             Self::CapabilityFailureReread(_) => "model_call_capability_failure_reread",
@@ -1422,6 +1546,7 @@ pub struct ModelCallExecutionService<
     provider: Provider,
     gate: Gate,
     catalog: Arc<dyn ToolCatalog>,
+    executable_tool_snapshot_source: Arc<dyn ExecutableToolSnapshotSource>,
     retained_state: Option<RetainedModelCallExecutionState>,
 }
 
@@ -1447,6 +1572,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
             provider,
             gate,
             catalog: Arc::new(NoToolCatalog),
+            executable_tool_snapshot_source: Arc::new(DaemonExecutableToolSnapshotSource),
             retained_state: None,
         }
     }
@@ -1454,6 +1580,15 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
     /// Replaces the empty compatibility catalog with one tool-capable port.
     pub fn with_tool_catalog(mut self, catalog: impl ToolCatalog + 'static) -> Self {
         self.catalog = Arc::new(catalog);
+        self
+    }
+
+    /// Replaces daemon-only advertisement with one session-aware snapshot source.
+    pub fn with_executable_tool_snapshot_source(
+        mut self,
+        source: impl ExecutableToolSnapshotSource + 'static,
+    ) -> Self {
+        self.executable_tool_snapshot_source = Arc::new(source);
         self
     }
 
@@ -1467,7 +1602,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         observation: Observation,
         provider: Provider,
         gate: Gate,
-        catalog: Arc<dyn ToolCatalog>,
+        executable_tools: ExecutableToolSnapshotComposition,
         retained_state: Option<RetainedModelCallExecutionState>,
     ) -> Self {
         Self {
@@ -1478,7 +1613,8 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
             observation,
             provider,
             gate,
-            catalog,
+            catalog: executable_tools.catalog,
+            executable_tool_snapshot_source: executable_tools.source,
             retained_state,
         }
     }
@@ -1498,7 +1634,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         Observation,
         Provider,
         Gate,
-        Arc<dyn ToolCatalog>,
+        ExecutableToolSnapshotComposition,
         Option<RetainedModelCallExecutionState>,
     ) {
         (
@@ -1509,7 +1645,10 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
             self.observation,
             self.provider,
             self.gate,
-            self.catalog,
+            ExecutableToolSnapshotComposition {
+                catalog: self.catalog,
+                source: self.executable_tool_snapshot_source,
+            },
             self.retained_state,
         )
     }
@@ -1744,21 +1883,11 @@ where
         let attempt = prepared.attempt();
         let turn = prepared.turn();
         let prepared_request = (*prepared).clone();
-        let advertised_tools = self
-            .catalog
-            .definitions()
-            .into_vec()
-            .into_iter()
-            .map(|definition| {
-                ExecutableToolSnapshotEntry::daemon(definition, dangerous_tool_auto_approval)
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        let operation = PreparedModelOperation::render(
+        let mut operation = PreparedModelOperation::render(
             *prepared,
             credential_reference,
             system_prompt,
-            advertised_tools.clone(),
+            Box::new([]),
             &tool_entries,
             &runner_placement_entries,
         )
@@ -1766,6 +1895,12 @@ where
         if automatic_tool_round_limit_reached(turn, operation.messages()) {
             return self.commit_capability_known_failure(session, call).await;
         }
+        let advertised_tools = self
+            .executable_tool_snapshot_source
+            .executable_tools(session, self.catalog.as_ref(), dangerous_tool_auto_approval)
+            .await
+            .map_err(ModelCallExecutionError::ExecutableToolSnapshot)?;
+        operation.tools = advertised_tools.clone();
         let preparation_cancellation = self.authorization.cancellation_signal(session, call);
         let capability = match self
             .provider
@@ -3536,6 +3671,104 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug)]
+    struct FixedExecutableToolSnapshotSource {
+        entry: ExecutableToolSnapshotEntry,
+        observed_session: Arc<std::sync::Mutex<Option<SessionId>>>,
+    }
+
+    impl ExecutableToolSnapshotSource for FixedExecutableToolSnapshotSource {
+        fn executable_tools<'a>(
+            &'a self,
+            session: SessionId,
+            _daemon_catalog: &'a dyn ToolCatalog,
+            _dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            Box<[ExecutableToolSnapshotEntry]>,
+                            ExecutableToolSnapshotSourceError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                *self
+                    .observed_session
+                    .lock()
+                    .expect("fixture observation lock") = Some(session);
+                Ok(vec![self.entry.clone()].into_boxed_slice())
+            })
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct FailingExecutableToolSnapshotSource;
+
+    impl ExecutableToolSnapshotSource for FailingExecutableToolSnapshotSource {
+        fn executable_tools<'a>(
+            &'a self,
+            _session: SessionId,
+            _daemon_catalog: &'a dyn ToolCatalog,
+            _dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            Box<[ExecutableToolSnapshotEntry]>,
+                            ExecutableToolSnapshotSourceError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async {
+                Err(ExecutableToolSnapshotSourceError::new(
+                    FakeError::Infrastructure,
+                ))
+            })
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct InspectingSnapshotProvider {
+        observed: Arc<std::sync::Mutex<Option<Box<[ExecutableToolSnapshotEntry]>>>>,
+    }
+
+    impl ModelCallProvider for InspectingSnapshotProvider {
+        type Capability = ();
+        type Error = FakeError;
+
+        async fn prepare_capability<Cancellation>(
+            &mut self,
+            operation: PreparedModelOperation,
+            _cancellation: Cancellation,
+        ) -> Result<ModelCallCapabilityPreparation<Self::Capability>, Self::Error>
+        where
+            Cancellation: Future<Output = ()> + Send + 'static,
+        {
+            *self.observed.lock().expect("fixture snapshot lock") =
+                Some(operation.tools().to_vec().into_boxed_slice());
+            Ok(ModelCallCapabilityPreparation::Cancelled)
+        }
+
+        async fn invoke<AcceptancePossible, Cancellation>(
+            &mut self,
+            _authorized: AuthorizedModelCall,
+            _capability: Self::Capability,
+            _acceptance_possible: AcceptancePossible,
+            _cancellation: Cancellation,
+        ) -> Result<CorrelatedModelCallTerminalObservation, Self::Error>
+        where
+            AcceptancePossible: FnOnce() + Send,
+            Cancellation: Future<Output = ()> + Send + 'static,
+        {
+            panic!("cancelled fixture capability is never invoked")
+        }
+    }
+
     #[derive(Debug)]
     struct FakePrepare {
         outcomes: VecDeque<Result<PrepareModelCallOutcome, FakeError>>,
@@ -5198,6 +5431,132 @@ mod tests {
         );
     }
 
+    /// S31 / INV-043: model preparation asks the session-aware snapshot source
+    /// and retains its exact runner definition, locus, and approval policy.
+    #[tokio::test]
+    async fn s31_inv043_prepared_capability_receives_session_runner_snapshot() {
+        let (request, _) = prepared_fixture();
+        let session = request.session();
+        let definition = crate::ToolDefinition::new(
+            ToolName::try_new(String::from("sandboxed_exec")).expect("fixture tool name"),
+            String::from("Runs one generic sandboxed command."),
+            crate::ToolInputSchema::try_new(String::from(
+                r#"{"additionalProperties":false,"properties":{},"type":"object"}"#,
+            ))
+            .expect("fixture schema"),
+            ToolPermissionDefault::Auto,
+            ToolEffectClass::ExternalEffect,
+        );
+        let entry = ExecutableToolSnapshotEntry::runner(
+            definition,
+            SelectedToolExecutionLocus::ExactRunner {
+                runner: identity(90, signalbox_domain::RunnerId::from_uuid),
+                registration_revision: RunnerGeneration::try_from_u64(3)
+                    .expect("fixture registration revision"),
+            },
+            InitialToolApproval::PolicyAuto,
+        )
+        .expect("runner policy and locus are compatible");
+        let observed_session = Arc::new(std::sync::Mutex::new(None));
+        let observed_snapshot = Arc::new(std::sync::Mutex::new(None));
+        let service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(ready(request))].into(),
+                calls: 0,
+            },
+            UnusedFailure,
+            UnusedAuthorization,
+            UnusedObservation,
+            InspectingSnapshotProvider {
+                observed: Arc::clone(&observed_snapshot),
+            },
+            InProcessAttemptDispatchGate::default(),
+        )
+        .with_executable_tool_snapshot_source(FixedExecutableToolSnapshotSource {
+            entry: entry.clone(),
+            observed_session: Arc::clone(&observed_session),
+        });
+        let (
+            ids,
+            prepare,
+            failure,
+            authorization,
+            observation,
+            provider,
+            gate,
+            executable_tools,
+            retained,
+        ) = service.into_parts();
+        let mut service = ModelCallExecutionService::from_parts(
+            ids,
+            prepare,
+            failure,
+            authorization,
+            observation,
+            provider,
+            gate,
+            executable_tools,
+            retained,
+        );
+
+        assert_eq!(
+            service
+                .execute(session)
+                .await
+                .expect("durable cancellation is authoritative"),
+            ModelCallExecutionOutcome::NoWork
+        );
+        assert_eq!(
+            *observed_session.lock().expect("fixture observation lock"),
+            Some(session)
+        );
+        assert_eq!(
+            observed_snapshot
+                .lock()
+                .expect("fixture snapshot lock")
+                .as_deref(),
+            Some([entry].as_slice())
+        );
+    }
+
+    #[tokio::test]
+    async fn executable_tool_snapshot_failure_stops_before_provider_preparation() {
+        let (request, _) = prepared_fixture();
+        let session = request.session();
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(ready(request))].into(),
+                calls: 0,
+            },
+            UnusedFailure,
+            UnusedAuthorization,
+            UnusedObservation,
+            UnusedProvider,
+            InProcessAttemptDispatchGate::default(),
+        )
+        .with_executable_tool_snapshot_source(FailingExecutableToolSnapshotSource);
+
+        let error = service
+            .execute(session)
+            .await
+            .expect_err("snapshot failure stops before provider preparation");
+
+        expect![["model-call executable-tool snapshot stage failed: executable tool snapshot source failed"]]
+            .assert_eq(&error.to_string());
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            }
+        );
+        assert_eq!(
+            error.operator_failure_cause_code(),
+            "model_call_executable_tool_snapshot"
+        );
+    }
+
     /// S34 / INV-046: the execution loop presents the prepare transaction's
     /// exact frozen-epoch system prompt to the provider port with the
     /// capability operation; a promptless epoch presents none.
@@ -5479,10 +5838,10 @@ mod tests {
     }
 
     /// A turn that already recorded the maximum automatic tool rounds
-    /// terminalizes as a capability failure before the provider is entered at
-    /// all. Without this bound a model that keeps requesting tools drives an
-    /// unbounded paid provider loop the operator never asked for and cannot
-    /// stop.
+    /// terminalizes as a capability failure before the fallible executable-tool
+    /// snapshot source or provider is entered at all. Without this bound a model
+    /// that keeps requesting tools drives an unbounded paid provider loop the
+    /// operator never asked for and cannot stop.
     #[tokio::test]
     async fn s15_a_turn_at_the_automatic_tool_round_bound_fails_before_provider_entry() {
         let (request, tool_entries, failed) =
@@ -5506,7 +5865,8 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([]),
             InProcessAttemptDispatchGate::default(),
-        );
+        )
+        .with_executable_tool_snapshot_source(FailingExecutableToolSnapshotSource);
 
         assert_eq!(
             service
