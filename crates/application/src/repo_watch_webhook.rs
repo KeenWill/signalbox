@@ -270,7 +270,7 @@ pub enum RepoWatchTargetedRefreshV1 {
     },
 }
 
-/// Whole-pull-request hydrations one drained delivery page has already issued.
+/// Provider refreshes one drained delivery page has already issued.
 ///
 /// Every delivery on a page is durably admitted before the page is read, so the
 /// provider state each one reports is already in place when the page issues its
@@ -283,27 +283,30 @@ pub enum RepoWatchTargetedRefreshV1 {
 /// per-hook rate limit all admit repeated comment creation, edit, and deletion
 /// as distinct legitimate deliveries.
 ///
-/// Only whole-pull-request hydration coalesces. A mergeability or check-rollup
-/// refresh names the commit it expects and an earlier hydration carries no
-/// evidence about that commit, so those reach the poller with their guards
-/// intact. The scope is one page and never a whole drain: a later page may hold
-/// deliveries admitted after this page's hydration ran, reporting state that
-/// hydration cannot have observed.
+/// Whole-pull-request hydrations coalesce by pull request. Exact check-rollup
+/// refreshes coalesce only when both their query form and guarded identity are
+/// equal: pull-request-scoped queries use the pull request and head, while
+/// commit-scoped queries use the head. Mergeability never coalesces. The scope
+/// is one page and never a whole drain: a later page may hold deliveries
+/// admitted after this page's refresh ran, reporting state that refresh cannot
+/// have observed.
 ///
-/// Asking and recording are separate because only a hydration that reached the
-/// provider makes a later one redundant. A refresh that fails before its fetch
-/// or before its commit leaves its delivery pending for a later drain, so
-/// recording the ask rather than the landing would leave the page suppressing a
-/// hydration that never happened. Success alone is not enough either, which is why [`record_issued`]
-/// takes the whole submission: the runtime merges every refresh naming one pull
-/// request into a single request carrying the strictest head guard among them,
-/// and a targeted poll whose guard no longer matches the provider head discards
-/// what it fetched and still reports success.
+/// Asking and recording are separate because only a refresh that reached the
+/// provider and landed in the cursor makes a later one redundant. A refresh
+/// that fails before its fetch or commit leaves its delivery pending for a
+/// later drain, so recording the ask rather than the landing would suppress a
+/// refresh that never happened. [`record_issued`] takes the whole submission
+/// because the runtime merges every refresh naming one pull request into a
+/// single request carrying the strictest head guard among them, and a targeted
+/// poll whose guard no longer matches the provider head discards what it fetched
+/// and still reports success.
 ///
 /// [`record_issued`]: RepoWatchTargetedRefreshCoalescerV1::record_issued
 #[derive(Debug)]
 pub struct RepoWatchTargetedRefreshCoalescerV1 {
     hydrated: BTreeSet<PullRequestNumber>,
+    checked_pull_request_heads: BTreeSet<(PullRequestNumber, CommitSha)>,
+    checked_heads: BTreeSet<CommitSha>,
 }
 
 impl RepoWatchTargetedRefreshCoalescerV1 {
@@ -311,6 +314,8 @@ impl RepoWatchTargetedRefreshCoalescerV1 {
     pub fn for_delivery_page() -> Self {
         Self {
             hydrated: BTreeSet::new(),
+            checked_pull_request_heads: BTreeSet::new(),
+            checked_heads: BTreeSet::new(),
         }
     }
 
@@ -325,29 +330,51 @@ impl RepoWatchTargetedRefreshCoalescerV1 {
                 RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request } => {
                     !self.hydrated.contains(pull_request)
                 }
-                RepoWatchTargetedRefreshV1::Mergeability { .. }
-                | RepoWatchTargetedRefreshV1::CheckRollup { .. }
-                | RepoWatchTargetedRefreshV1::CheckRollupForCommit { .. } => true,
+                RepoWatchTargetedRefreshV1::Mergeability { .. } => true,
+                RepoWatchTargetedRefreshV1::CheckRollup {
+                    pull_request,
+                    expected_head,
+                } => !self
+                    .checked_pull_request_heads
+                    .contains(&(*pull_request, expected_head.clone())),
+                RepoWatchTargetedRefreshV1::CheckRollupForCommit { head } => {
+                    !self.checked_heads.contains(head)
+                }
             })
             .cloned()
             .collect()
     }
 
-    /// Records the hydrations one submission issued with nothing to discard
-    /// them.
+    /// Records the refreshes one submission issued and landed.
     ///
-    /// A submission asking for anything head-guarded records nothing: the
+    /// Head-guarded check-rollup queries record their exact identity. A
+    /// hydration submitted beside any head guard still records nothing: the
     /// merged request carries that guard, so a head the provider has already
     /// moved past leaves the hydration fetched and thrown away rather than
-    /// applied, and the poll reports success either way. Recording less than
-    /// was issued only costs a repeated hydration; recording more would
-    /// suppress one that never landed.
+    /// applied. Recording less than was issued only costs a repeated refresh;
+    /// recording more would suppress one that never landed.
     pub fn record_issued(&mut self, refreshes: &[RepoWatchTargetedRefreshV1]) {
-        if refreshes.iter().any(Self::carries_head_guard) {
-            return;
+        self.checked_pull_request_heads
+            .extend(refreshes.iter().filter_map(|refresh| match refresh {
+                RepoWatchTargetedRefreshV1::CheckRollup {
+                    pull_request,
+                    expected_head,
+                } => Some((*pull_request, expected_head.clone())),
+                RepoWatchTargetedRefreshV1::PullRequestHydration { .. }
+                | RepoWatchTargetedRefreshV1::Mergeability { .. }
+                | RepoWatchTargetedRefreshV1::CheckRollupForCommit { .. } => None,
+            }));
+        self.checked_heads
+            .extend(refreshes.iter().filter_map(|refresh| match refresh {
+                RepoWatchTargetedRefreshV1::CheckRollupForCommit { head } => Some(head.clone()),
+                RepoWatchTargetedRefreshV1::PullRequestHydration { .. }
+                | RepoWatchTargetedRefreshV1::Mergeability { .. }
+                | RepoWatchTargetedRefreshV1::CheckRollup { .. } => None,
+            }));
+        if !refreshes.iter().any(Self::carries_head_guard) {
+            self.hydrated
+                .extend(refreshes.iter().filter_map(Self::hydrated_pull_request));
         }
-        self.hydrated
-            .extend(refreshes.iter().filter_map(Self::hydrated_pull_request));
     }
 
     fn carries_head_guard(refresh: &RepoWatchTargetedRefreshV1) -> bool {
@@ -2015,6 +2042,126 @@ mod tests {
         let unissued = page.unissued(&guarded_refreshes);
 
         assert_eq!(unissued, guarded_refreshes.to_vec());
+    }
+
+    #[test]
+    fn one_delivery_page_checks_an_exact_pull_request_head_once() {
+        let refresh = RepoWatchTargetedRefreshV1::CheckRollup {
+            pull_request: pull_request_number(),
+            expected_head: CommitSha::try_new(String::from(CURRENT_HEAD))
+                .expect("fixture SHA is valid"),
+        };
+        let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+
+        let first = page.unissued(slice::from_ref(&refresh));
+        page.record_issued(&first);
+        let repeat = page.unissued(slice::from_ref(&refresh));
+
+        assert_eq!(first, vec![refresh]);
+        assert!(repeat.is_empty());
+    }
+
+    #[test]
+    fn one_delivery_page_checks_an_exact_commit_once() {
+        let refresh = RepoWatchTargetedRefreshV1::CheckRollupForCommit {
+            head: CommitSha::try_new(String::from(CURRENT_HEAD)).expect("fixture SHA is valid"),
+        };
+        let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+
+        let first = page.unissued(slice::from_ref(&refresh));
+        page.record_issued(&first);
+        let repeat = page.unissued(slice::from_ref(&refresh));
+
+        assert_eq!(first, vec![refresh]);
+        assert!(repeat.is_empty());
+    }
+
+    #[test]
+    fn a_different_pull_request_head_stays_unissued() {
+        let current = RepoWatchTargetedRefreshV1::CheckRollup {
+            pull_request: pull_request_number(),
+            expected_head: CommitSha::try_new(String::from(CURRENT_HEAD))
+                .expect("fixture SHA is valid"),
+        };
+        let initial = RepoWatchTargetedRefreshV1::CheckRollup {
+            pull_request: pull_request_number(),
+            expected_head: CommitSha::try_new(String::from(INITIAL_HEAD))
+                .expect("fixture SHA is valid"),
+        };
+        let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+        page.record_issued(slice::from_ref(&current));
+
+        let unissued = page.unissued(slice::from_ref(&initial));
+
+        assert_eq!(unissued, vec![initial]);
+    }
+
+    #[test]
+    fn the_same_head_on_a_different_pull_request_stays_unissued() {
+        let first_pull_request = RepoWatchTargetedRefreshV1::CheckRollup {
+            pull_request: pull_request_number(),
+            expected_head: CommitSha::try_new(String::from(CURRENT_HEAD))
+                .expect("fixture SHA is valid"),
+        };
+        let other_pull_request = RepoWatchTargetedRefreshV1::CheckRollup {
+            pull_request: other_pull_request_number(),
+            expected_head: CommitSha::try_new(String::from(CURRENT_HEAD))
+                .expect("fixture SHA is valid"),
+        };
+        let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+        page.record_issued(slice::from_ref(&first_pull_request));
+
+        let unissued = page.unissued(slice::from_ref(&other_pull_request));
+
+        assert_eq!(unissued, vec![other_pull_request]);
+    }
+
+    #[test]
+    fn a_different_commit_stays_unissued() {
+        let current = RepoWatchTargetedRefreshV1::CheckRollupForCommit {
+            head: CommitSha::try_new(String::from(CURRENT_HEAD)).expect("fixture SHA is valid"),
+        };
+        let initial = RepoWatchTargetedRefreshV1::CheckRollupForCommit {
+            head: CommitSha::try_new(String::from(INITIAL_HEAD)).expect("fixture SHA is valid"),
+        };
+        let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+        page.record_issued(slice::from_ref(&current));
+
+        let unissued = page.unissued(slice::from_ref(&initial));
+
+        assert_eq!(unissued, vec![initial]);
+    }
+
+    #[test]
+    fn pull_request_and_commit_check_forms_do_not_coalesce() {
+        let pull_request_refresh = RepoWatchTargetedRefreshV1::CheckRollup {
+            pull_request: pull_request_number(),
+            expected_head: CommitSha::try_new(String::from(CURRENT_HEAD))
+                .expect("fixture SHA is valid"),
+        };
+        let commit_refresh = RepoWatchTargetedRefreshV1::CheckRollupForCommit {
+            head: CommitSha::try_new(String::from(CURRENT_HEAD)).expect("fixture SHA is valid"),
+        };
+        let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+        page.record_issued(slice::from_ref(&pull_request_refresh));
+
+        let unissued = page.unissued(slice::from_ref(&commit_refresh));
+
+        assert_eq!(unissued, vec![commit_refresh]);
+    }
+
+    #[test]
+    fn an_unrecorded_check_rollup_stays_unissued() {
+        let refresh = RepoWatchTargetedRefreshV1::CheckRollupForCommit {
+            head: CommitSha::try_new(String::from(CURRENT_HEAD)).expect("fixture SHA is valid"),
+        };
+        let page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+        let asked = page.unissued(slice::from_ref(&refresh));
+
+        let reissued = page.unissued(slice::from_ref(&refresh));
+
+        assert_eq!(asked, vec![refresh.clone()]);
+        assert_eq!(reissued, vec![refresh]);
     }
 
     #[test]
