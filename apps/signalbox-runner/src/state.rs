@@ -519,6 +519,12 @@ impl RunnerStateRoot {
         &self.state
     }
 
+    /// Duplicates the validated, process-locked root descriptor for one dispatch.
+    #[doc(hidden)]
+    pub fn duplicate_directory(&self) -> io::Result<File> {
+        self.directory.try_clone()
+    }
+
     /// Borrows the exact current in-memory copy of the fsynced operation slots.
     pub const fn reconnect_inventory(&self) -> &ReconnectInventory {
         &self.inventory

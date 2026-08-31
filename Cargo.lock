@@ -3495,6 +3495,7 @@ dependencies = [
 name = "signalbox-tools-exec"
 version = "0.0.0"
 dependencies = [
+ "nix",
  "rustix",
  "schemars 1.2.2",
  "serde",
