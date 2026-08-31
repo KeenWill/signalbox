@@ -6,7 +6,8 @@ use rustix::process::geteuid;
 use signalbox_application::{
     RunnerLeaseClaimRequest, RunnerLeaseClaimService, RunnerLeaseResultRequest,
     RunnerLeaseResultService, RunnerReadyManifestDigest, RunnerWorkspaceReadyReceipt,
-    RunnerWorkspaceReadyService,
+    RunnerWorkspaceReadyService, RunnerWorkspaceReleaseAcknowledgement,
+    RunnerWorkspaceReleaseService,
 };
 use signalbox_domain::{
     CanonicalCloneUrlDigest, CredentialProfileName, CredentialProfilePolicy,
@@ -31,7 +32,8 @@ use signalbox_runner_wire::{
     ProvisionPhase, ReconnectDirectives, ReconnectInventory, Recovery as WireWorkspaceRecovery,
     Registered, Rejected, RejectionCode, ReplacementPending, ResultFrame, Resume, Resumed,
     SandboxProfile, Shutdown, ShutdownReason, WorkspaceFailureCorrelation, WorkspaceOperation,
-    WorkspaceReady, WorkspaceRecorded, advertisement_digest, decode_line, encode_line,
+    WorkspaceReady, WorkspaceRecorded, WorkspaceReleaseRecorded, WorkspaceReleased,
+    advertisement_digest, decode_line, encode_line,
 };
 use sqlx::PgPool;
 use tokio::{
@@ -184,6 +186,63 @@ impl RunnerWorkspaceReadyOperationService for UnavailableRunnerWorkspaceReadyOpe
     ) -> RunnerWorkspaceReadyOperationFuture<'_, RunnerWorkspaceReadyReceipt> {
         Box::pin(std::future::ready(Err(
             RunnerWorkspaceReadyOperationFailure::new(
+                RejectionCode::Unavailable,
+                RunnerRegistrationFailureCause::Policy,
+            ),
+        )))
+    }
+}
+
+/// Boxed future returned by the injected durable workspace-release service.
+pub type RunnerWorkspaceReleaseOperationFuture<'a, T> =
+    Pin<Box<dyn Future<Output = Result<T, RunnerWorkspaceReleaseOperationFailure>> + Send + 'a>>;
+
+/// Closed durable failure classification for one completed workspace release.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RunnerWorkspaceReleaseOperationFailure {
+    code: RejectionCode,
+    cause: RunnerRegistrationFailureCause,
+}
+
+impl RunnerWorkspaceReleaseOperationFailure {
+    /// Constructs one classified durable-operation failure.
+    pub const fn new(code: RejectionCode, cause: RunnerRegistrationFailureCause) -> Self {
+        Self { code, cause }
+    }
+
+    fn into_registration_failure(
+        self,
+        correlation: AvailableCorrelation,
+    ) -> RunnerRegistrationFailure {
+        RunnerRegistrationFailure::from_durable_cause(
+            RunnerInboundFrameKind::WorkspaceReleased,
+            correlation,
+            self.code,
+            self.cause,
+        )
+    }
+}
+
+/// Durable-before-ack completed-release boundary for an established connection.
+pub trait RunnerWorkspaceReleaseOperationService: fmt::Debug + Send + Sync + 'static {
+    /// Commits or exactly replays one validated completed release.
+    fn record_workspace_release(
+        &self,
+        acknowledgement: RunnerWorkspaceReleaseAcknowledgement,
+    ) -> RunnerWorkspaceReleaseOperationFuture<'_, RunnerWorkspaceReleaseAcknowledgement>;
+}
+
+/// Fail-closed release service retained by registration-only test composition.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UnavailableRunnerWorkspaceReleaseOperationService;
+
+impl RunnerWorkspaceReleaseOperationService for UnavailableRunnerWorkspaceReleaseOperationService {
+    fn record_workspace_release(
+        &self,
+        _acknowledgement: RunnerWorkspaceReleaseAcknowledgement,
+    ) -> RunnerWorkspaceReleaseOperationFuture<'_, RunnerWorkspaceReleaseAcknowledgement> {
+        Box::pin(std::future::ready(Err(
+            RunnerWorkspaceReleaseOperationFailure::new(
                 RejectionCode::Unavailable,
                 RunnerRegistrationFailureCause::Policy,
             ),
@@ -1327,6 +1386,21 @@ impl RunnerWorkspaceReadyOperationService for RunnerProtocolStore {
     }
 }
 
+impl RunnerWorkspaceReleaseOperationService for RunnerProtocolStore {
+    fn record_workspace_release(
+        &self,
+        acknowledgement: RunnerWorkspaceReleaseAcknowledgement,
+    ) -> RunnerWorkspaceReleaseOperationFuture<'_, RunnerWorkspaceReleaseAcknowledgement> {
+        let store = self.clone();
+        Box::pin(async move {
+            RunnerWorkspaceReleaseService::new(store)
+                .execute(acknowledgement)
+                .await
+                .map_err(runner_workspace_release_operation_failure)
+        })
+    }
+}
+
 fn positive_epoch(epoch: RunnerConnectionEpoch) -> Result<PositiveU64, RunnerRegistrationFailure> {
     PositiveU64::try_new(epoch.get()).map_err(|_| {
         RunnerRegistrationFailure::new(
@@ -1395,6 +1469,20 @@ fn runner_workspace_ready_operation_failure(
         );
     }
     RunnerWorkspaceReadyOperationFailure::new(failure.code, failure.cause)
+}
+
+fn runner_workspace_release_operation_failure(
+    error: RunnerProtocolStoreError,
+) -> RunnerWorkspaceReleaseOperationFailure {
+    let failure = runner_store_failure_classification(&error);
+    if failure.cause.operator_actionable() {
+        tracing::error!(
+            error = %error,
+            cause = ?failure.cause,
+            "durable runner workspace-release operation failed"
+        );
+    }
+    RunnerWorkspaceReleaseOperationFailure::new(failure.code, failure.cause)
 }
 
 fn runner_store_failure_classification(
@@ -1668,7 +1756,15 @@ pub struct RunnerProtocolRuntime<
     service: Option<S>,
     operations: Option<O>,
     workspace_ready: Option<W>,
+    workspace_release: Option<Arc<dyn RunnerWorkspaceReleaseOperationService>>,
     broker: RunnerConnectionBroker,
+}
+
+#[derive(Clone)]
+struct RunnerOperationServices<O, W> {
+    lease: O,
+    workspace_ready: W,
+    workspace_release: Arc<dyn RunnerWorkspaceReleaseOperationService>,
 }
 
 struct RunnerListenerGuard {
@@ -1734,6 +1830,7 @@ where
             service: Some(service),
             operations: Some(UnavailableRunnerLeaseOperationService),
             workspace_ready: Some(UnavailableRunnerWorkspaceReadyOperationService),
+            workspace_release: Some(Arc::new(UnavailableRunnerWorkspaceReleaseOperationService)),
             broker: RunnerConnectionBroker::new(),
         }
     }
@@ -1758,6 +1855,7 @@ where
             service: self.service.take(),
             operations: Some(operations),
             workspace_ready: self.workspace_ready.take(),
+            workspace_release: self.workspace_release.take(),
             broker: self.broker.clone(),
         }
     }
@@ -1775,8 +1873,21 @@ where
             service: self.service.take(),
             operations: self.operations.take(),
             workspace_ready: Some(workspace_ready),
+            workspace_release: self.workspace_release.take(),
             broker: self.broker.clone(),
         }
+    }
+
+    /// Installs the durable completed-release boundary used by established connections.
+    pub fn with_workspace_release_operation_service<Replacement>(
+        mut self,
+        workspace_release: Replacement,
+    ) -> Self
+    where
+        Replacement: RunnerWorkspaceReleaseOperationService,
+    {
+        self.workspace_release = Some(Arc::new(workspace_release));
+        self
     }
 
     /// Replaces the default empty broker with one shared by operation producers.
@@ -1806,12 +1917,19 @@ where
             .workspace_ready
             .take()
             .ok_or(RunnerProtocolRuntimeError::OwnershipUnavailable)?;
+        let workspace_release = self
+            .workspace_release
+            .take()
+            .ok_or(RunnerProtocolRuntimeError::OwnershipUnavailable)?;
         let listener = RunnerListenerGuard::new(listener);
         let outcome = run_connections(
             listener.listener()?,
             service,
-            operations,
-            workspace_ready,
+            RunnerOperationServices {
+                lease: operations,
+                workspace_ready,
+                workspace_release,
+            },
             self.broker.clone(),
             shutdown,
         )
@@ -1835,8 +1953,7 @@ where
 async fn run_connections<S, O, W>(
     listener: &LocalProcessListener,
     service: S,
-    operations: O,
-    workspace_ready: W,
+    operation_services: RunnerOperationServices<O, W>,
     broker: RunnerConnectionBroker,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), RunnerProtocolRuntimeError>
@@ -1894,8 +2011,7 @@ where
                 connections.spawn(serve_connection_with_operations_and_broker(
                     stream,
                     service.clone(),
-                    operations.clone(),
-                    workspace_ready.clone(),
+                    operation_services.clone(),
                     broker.clone(),
                     connection_shutdown.clone(),
                 ));
@@ -2033,8 +2149,11 @@ where
     serve_connection_with_operations_and_broker(
         stream,
         service,
-        UnavailableRunnerLeaseOperationService,
-        UnavailableRunnerWorkspaceReadyOperationService,
+        RunnerOperationServices {
+            lease: UnavailableRunnerLeaseOperationService,
+            workspace_ready: UnavailableRunnerWorkspaceReadyOperationService,
+            workspace_release: Arc::new(UnavailableRunnerWorkspaceReleaseOperationService),
+        },
         RunnerConnectionBroker::new(),
         shutdown,
     )
@@ -2054,8 +2173,11 @@ where
     serve_connection_with_handshake_timeout_operations_and_broker(
         stream,
         service,
-        UnavailableRunnerLeaseOperationService,
-        UnavailableRunnerWorkspaceReadyOperationService,
+        RunnerOperationServices {
+            lease: UnavailableRunnerLeaseOperationService,
+            workspace_ready: UnavailableRunnerWorkspaceReadyOperationService,
+            workspace_release: Arc::new(UnavailableRunnerWorkspaceReleaseOperationService),
+        },
         broker,
         shutdown,
         HANDSHAKE_TIMEOUT,
@@ -2076,8 +2198,11 @@ where
     serve_connection_with_handshake_timeout_operations_and_broker(
         stream,
         service,
-        UnavailableRunnerLeaseOperationService,
-        UnavailableRunnerWorkspaceReadyOperationService,
+        RunnerOperationServices {
+            lease: UnavailableRunnerLeaseOperationService,
+            workspace_ready: UnavailableRunnerWorkspaceReadyOperationService,
+            workspace_release: Arc::new(UnavailableRunnerWorkspaceReleaseOperationService),
+        },
         RunnerConnectionBroker::new(),
         shutdown,
         handshake_timeout,
@@ -2088,8 +2213,7 @@ where
 async fn serve_connection_with_operations_and_broker<S, O, W>(
     stream: UnixStream,
     service: S,
-    operations: O,
-    workspace_ready: W,
+    operation_services: RunnerOperationServices<O, W>,
     broker: RunnerConnectionBroker,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), RunnerProtocolRuntimeError>
@@ -2101,8 +2225,7 @@ where
     serve_connection_with_handshake_timeout_operations_and_broker(
         stream,
         service,
-        operations,
-        workspace_ready,
+        operation_services,
         broker,
         shutdown,
         HANDSHAKE_TIMEOUT,
@@ -2113,8 +2236,7 @@ where
 async fn serve_connection_with_handshake_timeout_operations_and_broker<S, O, W>(
     stream: UnixStream,
     service: S,
-    operations: O,
-    workspace_ready: W,
+    operation_services: RunnerOperationServices<O, W>,
     broker: RunnerConnectionBroker,
     mut shutdown: watch::Receiver<bool>,
     handshake_timeout: Duration,
@@ -2124,6 +2246,11 @@ where
     O: RunnerLeaseOperationService,
     W: RunnerWorkspaceReadyOperationService,
 {
+    let RunnerOperationServices {
+        lease: operations,
+        workspace_ready,
+        workspace_release,
+    } = operation_services;
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let first = match timeout(handshake_timeout, async {
@@ -2408,6 +2535,52 @@ where
                             }
                         }
                     }
+                    Message::WorkspaceReleased(released) => {
+                        if !workspace_released_matches_connection(&released, context) {
+                            terminalize_protocol_rejection(
+                                &service,
+                                context,
+                                &mut writer,
+                                RunnerInboundFrameKind::WorkspaceReleased,
+                                context.epoch,
+                                RunnerRegistrationFailure::new(
+                                    RunnerInboundFrameKind::WorkspaceReleased,
+                                    AvailableCorrelation::Release(released.correlation),
+                                    RejectionCode::CorrelationMismatch,
+                                ),
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                        if !transition_or_reject_not_current(
+                            &service,
+                            context,
+                            &mut writer,
+                            RunnerInboundFrameKind::WorkspaceReleased,
+                            context.epoch,
+                            RunnerConnectionTransition::Observe,
+                        )
+                        .await?
+                        {
+                            return Ok(());
+                        }
+                        match admit_workspace_release(workspace_release.as_ref(), released).await {
+                            Ok(acknowledgement) => {
+                                write_message(&mut writer, acknowledgement).await?;
+                            }
+                            Err(failure) => {
+                                terminalize_operation_rejection(
+                                    &service,
+                                    context,
+                                    &mut writer,
+                                    RunnerInboundFrameKind::WorkspaceReleased,
+                                    failure,
+                                )
+                                .await?;
+                                return Ok(());
+                            }
+                        }
+                    }
                     Message::LeaseClaim(claim) => {
                         if !lease_correlation_matches_connection(&claim.correlation, context) {
                             terminalize_protocol_rejection(
@@ -2652,6 +2825,53 @@ where
     }))
 }
 
+async fn admit_workspace_release(
+    workspace_release: &dyn RunnerWorkspaceReleaseOperationService,
+    released: WorkspaceReleased,
+) -> Result<Message, RunnerRegistrationFailure> {
+    let correlation = AvailableCorrelation::Release(released.correlation.clone());
+    let acknowledgement = workspace_release_acknowledgement(&released).ok_or_else(|| {
+        RunnerRegistrationFailure::new(
+            RunnerInboundFrameKind::WorkspaceReleased,
+            correlation.clone(),
+            RejectionCode::CorrelationMismatch,
+        )
+    })?;
+    let recorded = workspace_release
+        .record_workspace_release(acknowledgement)
+        .await
+        .map_err(|failure| failure.into_registration_failure(correlation))?;
+    let placement_revision =
+        PositiveU64::try_new(recorded.placement_revision().get()).map_err(|_| {
+            RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::WorkspaceReleased,
+                AvailableCorrelation::Release(released.correlation.clone()),
+                RejectionCode::CorrelationMismatch,
+            )
+        })?;
+    Ok(Message::WorkspaceReleaseRecorded(
+        WorkspaceReleaseRecorded {
+            correlation: signalbox_runner_wire::ReleaseCorrelation {
+                session_id: CanonicalUuid::from_uuid(recorded.session().into_uuid()),
+                placement_revision,
+                runner_id: CanonicalUuid::from_uuid(recorded.runner().into_uuid()),
+                manifest_id: CanonicalUuid::from_uuid(recorded.manifest_id().into_uuid()),
+            },
+        },
+    ))
+}
+
+fn workspace_release_acknowledgement(
+    released: &WorkspaceReleased,
+) -> Option<RunnerWorkspaceReleaseAcknowledgement> {
+    Some(RunnerWorkspaceReleaseAcknowledgement::new(
+        SessionId::from_uuid(released.correlation.session_id.into_uuid()),
+        RunnerGeneration::try_from_u64(released.correlation.placement_revision.get())?,
+        RunnerId::from_uuid(released.correlation.runner_id.into_uuid()),
+        WorkspaceManifestId::from_uuid(released.correlation.manifest_id.into_uuid()),
+    ))
+}
+
 fn workspace_ready_receipt(ready: &WorkspaceReady) -> Option<RunnerWorkspaceReadyReceipt> {
     let manifest = &ready.ready.manifest;
     let repository = manifest.repository.as_ref()?;
@@ -2771,6 +2991,13 @@ fn lease_correlation_matches_connection(
 
 fn workspace_ready_matches_connection(ready: &WorkspaceReady, context: ConnectionContext) -> bool {
     ready.correlation.runner_id == context.runner
+}
+
+fn workspace_released_matches_connection(
+    released: &WorkspaceReleased,
+    context: ConnectionContext,
+) -> bool {
+    released.correlation.runner_id == context.runner
 }
 
 #[derive(Clone, Copy)]
@@ -3977,6 +4204,25 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct RecordingWorkspaceReleaseOperationService {
+        acknowledgements: Arc<std::sync::Mutex<Vec<RunnerWorkspaceReleaseAcknowledgement>>>,
+    }
+
+    impl RunnerWorkspaceReleaseOperationService for RecordingWorkspaceReleaseOperationService {
+        fn record_workspace_release(
+            &self,
+            acknowledgement: RunnerWorkspaceReleaseAcknowledgement,
+        ) -> RunnerWorkspaceReleaseOperationFuture<'_, RunnerWorkspaceReleaseAcknowledgement>
+        {
+            self.acknowledgements
+                .lock()
+                .expect("the fixture workspace-release recorder is available")
+                .push(acknowledgement);
+            Box::pin(std::future::ready(Ok(acknowledgement)))
+        }
+    }
+
     #[tokio::test]
     async fn s32_inv012_inv044_workspace_ready_commit_precedes_exact_acknowledgement() {
         let workspace_ready = RecordingWorkspaceReadyOperationService::default();
@@ -4052,6 +4298,68 @@ mod tests {
 
         assert!(workspace_ready_matches_connection(&ready, matching_context));
         assert!(!workspace_ready_matches_connection(&ready, foreign_context));
+    }
+
+    #[tokio::test]
+    async fn s32_inv044_workspace_release_commit_precedes_exact_acknowledgement() {
+        let workspace_release = RecordingWorkspaceReleaseOperationService::default();
+        let released = workspace_released();
+        let expected = workspace_release_acknowledgement_fixture();
+
+        let acknowledgement = admit_workspace_release(&workspace_release, released.clone())
+            .await
+            .expect("the committed workspace release projects");
+        let recorded = workspace_release
+            .acknowledgements
+            .lock()
+            .expect("the fixture workspace-release recorder is available")
+            .pop()
+            .expect("one release reached the durable boundary");
+
+        assert_eq!(recorded, expected);
+        assert_eq!(
+            acknowledgement,
+            Message::WorkspaceReleaseRecorded(WorkspaceReleaseRecorded {
+                correlation: released.correlation,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn s32_inv044_unavailable_workspace_release_emits_no_acknowledgement() {
+        let rejection = admit_workspace_release(
+            &UnavailableRunnerWorkspaceReleaseOperationService,
+            workspace_released(),
+        )
+        .await
+        .expect_err("an unavailable transaction cannot acknowledge workspace release");
+
+        assert_eq!(rejection.code, RejectionCode::Unavailable);
+        assert_eq!(rejection.cause, RunnerRegistrationFailureCause::Policy);
+    }
+
+    #[test]
+    fn s32_inv044_workspace_released_frames_bind_to_the_established_runner() {
+        let released = workspace_released();
+        let matching_context = ConnectionContext {
+            enrollment: identity(2),
+            runner: identity(ARBITRARY_PROVISION_RUNNER_ID_SEED),
+            epoch: PositiveU64::try_new(1).expect("the fixture epoch is positive"),
+        };
+        let foreign_context = ConnectionContext {
+            enrollment: identity(2),
+            runner: identity(3),
+            epoch: PositiveU64::try_new(1).expect("the fixture epoch is positive"),
+        };
+
+        assert!(workspace_released_matches_connection(
+            &released,
+            matching_context
+        ));
+        assert!(!workspace_released_matches_connection(
+            &released,
+            foreign_context
+        ));
     }
 
     #[test]
@@ -4338,6 +4646,30 @@ mod tests {
                 manifest_digest,
             },
         }
+    }
+
+    fn workspace_released() -> WorkspaceReleased {
+        WorkspaceReleased {
+            correlation: signalbox_runner_wire::ReleaseCorrelation {
+                session_id: identity(ARBITRARY_PROVISION_SESSION_ID_SEED),
+                placement_revision: PositiveU64::try_new(ARBITRARY_PROVISION_PLACEMENT_REVISION)
+                    .expect("the fixture placement revision is positive"),
+                runner_id: identity(ARBITRARY_PROVISION_RUNNER_ID_SEED),
+                manifest_id: identity(ARBITRARY_WORKSPACE_MANIFEST_ID_SEED),
+            },
+        }
+    }
+
+    fn workspace_release_acknowledgement_fixture() -> RunnerWorkspaceReleaseAcknowledgement {
+        RunnerWorkspaceReleaseAcknowledgement::new(
+            SessionId::from_uuid(identity(ARBITRARY_PROVISION_SESSION_ID_SEED).into_uuid()),
+            RunnerGeneration::try_from_u64(ARBITRARY_PROVISION_PLACEMENT_REVISION)
+                .expect("the fixture placement revision is positive"),
+            RunnerId::from_uuid(identity(ARBITRARY_PROVISION_RUNNER_ID_SEED).into_uuid()),
+            WorkspaceManifestId::from_uuid(
+                identity(ARBITRARY_WORKSPACE_MANIFEST_ID_SEED).into_uuid(),
+            ),
+        )
     }
 
     fn repository_workspace_ready_receipt() -> RunnerWorkspaceReadyReceipt {

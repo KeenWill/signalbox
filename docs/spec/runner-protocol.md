@@ -70,8 +70,11 @@ failure journaling before projection are verified against this PR
 (`agent/runner-live-workspace-release-handoff`). Top-level private-root cleanup
 composition is verified against this PR
 (`agent/runner-private-release-composition`). Established-connection routing of
-those inbound claim and result frames through the durable transactions before
-acknowledgement is re-verified through this PR
+one inbound `workspace_released` frame through durable completion admission,
+followed by exact `workspace_release_recorded` projection, is verified against
+this PR (`agent/daemon-workspace-release-routing`). Established-connection
+routing of those inbound claim and result frames through the durable
+transactions before acknowledgement is re-verified through this PR
 (`agent/runner-runtime-lease-operations`). Durable authorization followed by
 best-effort `lease_offer` projection and handoff is re-verified through this PR
 (`agent/runner-lease-offer-dispatcher`). The corrected reconstitution mismatch
@@ -825,6 +828,14 @@ workspace cleanup returning failure. For
 retained ready-workspace evidence, `resend` emits the complete stored frame
 while retaining it and `fail_stale` frees the exact correlation and payload
 together; every other action preserves them and fails closed.
+
+On the hub, an established connection accepts `workspace_released` only when its
+correlation names that connection's runner. The daemon observes the exact
+current connection, commits or exactly replays the durable release-completion
+transaction, and sends `workspace_release_recorded` from the committed facts. It
+sends no acknowledgement when durable admission fails and terminalizes the
+connection with the classified rejection. No present production path inserts a
+pending release or sends the initiating `workspace_release` frame.
 
 **Committed unimplemented functionality.** No present filesystem producer
 creates ready evidence, and resumed release directives remain unsupported. This
