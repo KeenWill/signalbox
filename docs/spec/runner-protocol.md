@@ -46,8 +46,9 @@ coordination boundary that supplies one fresh authorization identity to the
 atomic staging transaction is verified against this PR
 (`agent/runner-replacement-provisioning-application`).
 
-**Committed unimplemented functionality.** No current adapter consumes the
-checked same-runner transition or handles pinned replacement staging or the
+The persistence adapter consumes the checked same-runner transition only while
+staging a pinned repository workspace. **Committed unimplemented
+functionality.** No current adapter completes pinned replacement or handles the
 replacement process request. Future adapters must preserve the closed
 constraints below for those slices.
 
@@ -662,9 +663,12 @@ placement axis, and the same commit activates it, revokes its predecessor,
 installs the unpinned successor placement, and records the terminal command
 result. It performs no workspace operation. **Committed unimplemented
 functionality.** No present pending enrollment can perform the future
-user-command-bound workspace operation required by a pinned replacement.
-Same-runner recovery and pinned replacement staging are also unimplemented; no
-present daemon or runner command surface provides them.
+user-command-bound workspace operation required by a pinned replacement. Pinned
+replacement staging is implemented at the application and persistence boundary
+for a distinct active runner, an exact pending enrollment, or the
+registration-loss-only same-runner exception. No present daemon or runner
+command surface invokes it, and no present transaction completes the pinned
+replacement.
 
 Loss triggered by re-registration has its own recovery. When a live runner stops
 advertising a capability that a pinned placement requires, the
@@ -689,9 +693,11 @@ loss revision or a genuinely newer registration, both registrations retain the
 exact enrollment, runner, and authentication-reference lineage, and the current
 registration satisfies the complete successor request. The ordinary replacement
 transition still refuses the same runner, so a reconstituted registration-loss
-label alone is not recovery authority. **Committed unimplemented
-functionality.** No persistence transaction or daemon adapter yet supplies those
-checked registrations or installs the resulting pinned replacement.
+label alone is not recovery authority. The pinned repository-workspace staging
+transaction supplies those checked registrations and accepts the same runner
+only through the explicit reenrollment target. **Committed unimplemented
+functionality.** No daemon adapter yet invokes that transaction or installs the
+resulting pinned replacement.
 
 A pending successor may also be promoted with no lost session placement
 involved. The implemented `promote_pending_runner` transaction is the
@@ -723,10 +729,16 @@ result without reinterpreting current runner state.
 
 For a pinned repository-backed loss, `replace_lost_runner` first durably claims
 the user command and its complete request, then creates one single-use
-provisioning authorization naming that command and pending registration. The
-runner provisions and spools `workspace_ready` under that limited authority.
-Only a later transaction can activate the pending enrollment: it rechecks the
-lost predecessor and connected candidate, consumes the exact workspace receipt,
+provisioning authorization naming that command and selected current
+registration. That atomic staging transaction takes the session scheduler,
+selected runner authority, and placement in the runner lock order, authenticates
+either a distinct live successor or the registration-loss-only same-runner
+exception, and returns the original durable stage on equal replay. A
+workspace-free placement returns `NotApplicable` without claiming the command,
+so its later terminal transaction remains the sole command claimant. The runner
+provisions and spools `workspace_ready` under that limited authority. Only a later
+transaction can activate the pending enrollment: it rechecks the lost
+predecessor and connected candidate, consumes the exact workspace receipt,
 revokes the predecessor, constructs the active enrollment and validated
 registration from the exact pending facts, and installs the successor placement,
 grant, semantic boundary, and terminal command result atomically. Pre-pin

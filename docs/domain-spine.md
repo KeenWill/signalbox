@@ -5981,8 +5981,26 @@ pub trait RunnerReplacementProvisioningTransaction {
     ) -> impl Future<Output = Result<RunnerReplacementProvisioningOutcome, Self::Error>> + Send;
 }
 
+pub struct RunnerReplacementProvisioningStage { /* private */ }
+impl RunnerReplacementProvisioningStage {
+    pub fn from_authorization(authorization: &WorkspaceProvisioningAuthorization) -> Self;
+    pub fn from_stored(
+        authorization: WorkspaceProvisioningAuthorizationId,
+        session: SessionId,
+        placement_revision: RunnerGeneration,
+        enrollment: RunnerEnrollmentId,
+        runner: RunnerId,
+        registration_revision: RunnerGeneration,
+        repository: WorkspaceRepositoryKey,
+        sandbox: RunnerSandboxProfile,
+        credential_profile: Option<CredentialProfileName>,
+    ) -> Self;
+    // accessors: authorization(), session(), placement_revision(), enrollment(),
+    // runner(), registration_revision(), repository(), sandbox(), credential_profile()
+}
+
 pub enum RunnerReplacementProvisioningOutcome {
-    Staged(WorkspaceProvisioningAuthorization),
+    Staged(RunnerReplacementProvisioningStage),
     Rejected(RunnerReplacementProvisioningRejection),
     NotApplicable,
     ConflictingReuse { command: DurableCommandId },
@@ -10781,7 +10799,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: promote_pending_runner                | 4 (incl. 1 trait)     |
 | application: abandon_lost_runner                   | 4 (incl. 1 trait)     |
 | application: replace_lost_runner_before_pin        | 4 (incl. 1 trait)     |
-| application: runner_replacement_provisioning       | 6 (incl. 2 traits)    |
+| application: runner_replacement_provisioning       | 7 (incl. 2 traits)    |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)    |
 | application: list_conversations                    | 8 (incl. 2 traits)    |
 | application: load_session                          | 2 (incl. 1 trait)     |
@@ -10801,4 +10819,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **269 (+1 free fn)**  |
+| **signalbox-application total**                    | **270 (+1 free fn)**  |
