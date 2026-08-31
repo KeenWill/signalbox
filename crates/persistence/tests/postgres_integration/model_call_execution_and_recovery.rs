@@ -1876,7 +1876,7 @@ async fn s04_inv029_inv034_user_reconciliation_releases_a_restart_parked_ambiguo
     Ok(())
 }
 
-async fn park_restart_ambiguity(
+pub(crate) async fn park_restart_ambiguity(
     pool: &PgPool,
     seed: u128,
 ) -> Result<RestartModelCallFixture, Box<dyn Error>> {
