@@ -350,6 +350,7 @@ pub enum ProtocolViolation {
     },
     RunnerSequenceExhausted,
     FailureAcknowledgementMismatch,
+    ResultAcknowledgementMismatch,
     InvalidShutdownReason,
     PendingRegistrationMutation,
     ConnectionCorrelationMismatch,
@@ -418,6 +419,9 @@ impl fmt::Display for ProtocolViolation {
             }
             Self::FailureAcknowledgementMismatch => {
                 formatter.write_str("operation-failure acknowledgement correlation differs")
+            }
+            Self::ResultAcknowledgementMismatch => {
+                formatter.write_str("result acknowledgement correlation differs")
             }
             Self::InvalidShutdownReason => {
                 formatter.write_str("daemon sent a shutdown frame with runner reason")
@@ -748,7 +752,7 @@ where
 
     async fn serve_message(
         &mut self,
-        _state: &mut RunnerStateRoot,
+        state: &mut RunnerStateRoot,
         message: Message,
     ) -> Result<Option<ConnectionEnd>, RunnerConnectionError> {
         match message {
@@ -811,6 +815,24 @@ where
                 Err(RunnerConnectionError::RecoveryUnavailable(
                     self.recovery_unavailable(),
                 ))
+            }
+            Message::ResultRecorded(recorded) => {
+                self.validate_connection_correlation(
+                    recorded.correlation.runner_id,
+                    recorded.correlation.registration_revision,
+                )?;
+                state
+                    .acknowledge_terminal_result(&recorded.correlation)
+                    .map_err(|error| match error {
+                        RunnerStateError::InvalidTransition
+                        | RunnerStateError::OperationCorrelationMismatch => {
+                            RunnerConnectionError::Violation(
+                                ProtocolViolation::ResultAcknowledgementMismatch,
+                            )
+                        }
+                        other => RunnerConnectionError::State(other),
+                    })?;
+                Ok(None)
             }
             Message::Rejected(rejected) => Err(rejected_error(rejected)),
             other => Err(RunnerConnectionError::Violation(
@@ -1054,7 +1076,9 @@ mod tests {
     use uuid::Uuid;
 
     use signalbox_runner_wire::{
-        Enrolled, ReconnectDirectives, Resumed, Shutdown, WorkspaceProvision,
+        Enrolled, LeaseCorrelation, LeasePhase, LeasePhaseKind, ReconnectDirectives,
+        ResultRecorded, Resumed, RetainedResult, SandboxProfile, Shutdown, TerminalResult,
+        WireToolName, WorkingDirectory, WorkspaceProvision,
     };
 
     use super::*;
@@ -1070,6 +1094,14 @@ mod tests {
     const ARBITRARY_AUTHORIZATION_UUID: u128 = 0x400;
     /// Arbitrary session identity used by the unsupported-operation test.
     const ARBITRARY_SESSION_UUID: u128 = 0x500;
+    /// Arbitrary lease identity used by retained-result fixtures.
+    const ARBITRARY_LEASE_UUID: u128 = 0x600;
+    /// Another lease identity used to prove acknowledgement fencing.
+    const ARBITRARY_OTHER_LEASE_UUID: u128 = 0x601;
+    const ARBITRARY_TURN_UUID: u128 = 0x700;
+    const ARBITRARY_TOOL_REQUEST_UUID: u128 = 0x800;
+    const ARBITRARY_TOOL_ATTEMPT_UUID: u128 = 0x900;
+    const ARBITRARY_ISSUING_TURN_ATTEMPT_UUID: u128 = 0xa00;
     const INITIAL_REGISTRATION_REVISION: u64 = 1;
     const NEXT_REGISTRATION_REVISION: u64 = 2;
     const FIRST_CHALLENGE_SEQUENCE: u64 = 7;
@@ -1105,6 +1137,61 @@ mod tests {
                 .expect("the explicit empty advertisement has a digest"),
             EnrollmentAuthority::Active,
         )
+    }
+
+    fn retained_lease_correlation() -> LeaseCorrelation {
+        LeaseCorrelation {
+            registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+            lease_id: identity(ARBITRARY_LEASE_UUID),
+            lease_generation: positive(1),
+            runner_id: identity(ARBITRARY_RUNNER_UUID),
+            placement_revision: positive(1),
+            working_directory: WorkingDirectory::try_new("sessions/example".to_owned())
+                .expect("the fixture working directory is valid"),
+            sandbox_profile: SandboxProfile::WorkspaceRestricted,
+            tool_name: WireToolName::try_new("sandboxed_exec".to_owned())
+                .expect("the generic exec-family fixture name is valid"),
+            session_id: identity(ARBITRARY_SESSION_UUID),
+            turn_id: identity(ARBITRARY_TURN_UUID),
+            tool_request_id: identity(ARBITRARY_TOOL_REQUEST_UUID),
+            tool_attempt_id: identity(ARBITRARY_TOOL_ATTEMPT_UUID),
+            issuing_turn_attempt_id: identity(ARBITRARY_ISSUING_TURN_ATTEMPT_UUID),
+            tool_dispatch_generation: positive(1),
+        }
+    }
+
+    fn state_with_terminal_result(parent: &TempDir) -> RunnerStateRoot {
+        let mut state = state_root(parent);
+        let receipt = issued_receipt(state.state().request_id());
+        state
+            .record_receipt(receipt)
+            .expect("the issued receipt is journaled");
+        let correlation = retained_lease_correlation();
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: correlation.clone(),
+                phase: LeasePhaseKind::WaitingDispatch,
+            })
+            .expect("the waiting-dispatch phase is durable");
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: correlation.clone(),
+                phase: LeasePhaseKind::DispatchReceived,
+            })
+            .expect("the dispatch-received phase is durable");
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: correlation.clone(),
+                phase: LeasePhaseKind::ExecutionMayHaveStarted,
+            })
+            .expect("the execution-possible phase is durable");
+        state
+            .record_terminal_result(RetainedResult {
+                correlation,
+                result: TerminalResult::Ambiguous,
+            })
+            .expect("the terminal result is durable");
+        state
     }
 
     fn state_root(parent: &TempDir) -> RunnerStateRoot {
@@ -1285,6 +1372,97 @@ mod tests {
                 workspace_phase: None,
             })
         );
+    }
+
+    /// INV-011 / INV-024: an exact durable result acknowledgement frees the
+    /// retained terminal envelope and lease through the live serving loop.
+    #[tokio::test]
+    async fn inv011_inv024_exact_result_acknowledgement_clears_retained_slots() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = state_with_terminal_result(&parent);
+        let advertisement = empty_advertisement();
+        let correlation = retained_lease_correlation();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before the acknowledgement");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect("the exact result acknowledgement is consumed")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::ResultRecorded(ResultRecorded { correlation }),
+            )
+            .await;
+        };
+        let (outcome, ()) = tokio::join!(runner, hub);
+
+        assert_eq!(outcome, None);
+        assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
+    }
+
+    #[tokio::test]
+    async fn another_lease_result_acknowledgement_preserves_retained_slots() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = state_with_terminal_result(&parent);
+        let retained = state.reconnect_inventory().clone();
+        let advertisement = empty_advertisement();
+        let mut foreign = retained_lease_correlation();
+        foreign.lease_id = identity(ARBITRARY_OTHER_LEASE_UUID);
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before the acknowledgement");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect_err("another lease cannot acknowledge retained evidence")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::ResultRecorded(ResultRecorded {
+                    correlation: foreign,
+                }),
+            )
+            .await;
+        };
+        let (error, ()) = tokio::join!(runner, hub);
+
+        assert!(matches!(
+            error,
+            RunnerConnectionError::Violation(ProtocolViolation::ResultAcknowledgementMismatch)
+        ));
+        assert_eq!(state.reconnect_inventory(), &retained);
     }
 
     #[tokio::test]

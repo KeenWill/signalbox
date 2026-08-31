@@ -48,17 +48,18 @@ pinned-loss request mismatches). Private storage of the one retained lease
 and its monotonic fsynced phases is re-verified through this PR
 (`agent/runner-operation-journal`). Matching terminal-result retention and
 atomic acknowledgement clearing are re-verified through this PR
-(`agent/runner-result-journal`). The placement loss-source, pre-pin replacement
-and abandonment state shapes, and append-only reconstitution-history contract
-are re-verified through this PR (`agent/runner-placement-loss-domain`). It owns
-logical runner enrollment, daemon-authoritative catalog validation, runner
-leases, the independent session-composition axes, session placement and
-affinity, credential-profile grants, and workspace requirements. The tool
-registry's common declarations remain owned by [tool loop](tool-loop.md);
-session transcript and frontier mechanics remain owned by
-[sessions and transcript](sessions-and-transcript.md); physical tool attempts
-remain owned by [tool loop](tool-loop.md). Invariant tags cite
-[the invariant test index](../invariants.md).
+(`agent/runner-result-journal`), and live exact acknowledgement consumption is
+re-verified through this PR (`agent/runner-result-acknowledgement`). The
+placement loss-source, pre-pin replacement and abandonment state shapes, and
+append-only reconstitution-history contract are re-verified through this PR
+(`agent/runner-placement-loss-domain`). It owns logical runner enrollment,
+daemon-authoritative catalog validation, runner leases, the independent
+session-composition axes, session placement and affinity, credential-profile
+grants, and workspace requirements. The tool registry's common declarations
+remain owned by [tool loop](tool-loop.md); session transcript and frontier
+mechanics remain owned by [sessions and transcript](sessions-and-transcript.md);
+physical tool attempts remain owned by [tool loop](tool-loop.md). Invariant tags
+cite [the invariant test index](../invariants.md).
 
 The typed `ReplaceLostRunner`, `RunnerReplacementTarget`, and
 `AbandonLostRunner` domain command payloads are verified against this PR
@@ -666,8 +667,9 @@ advances it monotonically through the three fsynced phases below, and retains
 one matching bounded terminal envelope only after execution may have started. An
 exact `result_recorded` acknowledgement atomically frees both slots. The root
 rejects the remaining unsupported inventory slots, cross-wired correlations, and
-journals belonging to another enrolled runner. No live protocol path populates
-or sends this stored inventory.
+journals belonging to another enrolled runner. The live serving loop consumes
+that exact acknowledgement for an already-retained result; no live protocol path
+populates or sends this stored inventory.
 
 **Committed unimplemented functionality.** No present runner sends a nonempty
 reconnect inventory. Future execution support repeats resume and advertisement,
