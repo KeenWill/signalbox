@@ -24,7 +24,7 @@ pub enum ValueError {
     WorkingDirectory,
     /// A sorted inventory was unordered, duplicated, or over its cap.
     Inventory,
-    /// A terminal result bound differed from version one's fixed contract.
+    /// A terminal result bound differed from version two's fixed contract.
     ResultBounds,
     /// A result member violated its domain bound or vocabulary.
     Result,
@@ -43,7 +43,7 @@ impl fmt::Display for ValueError {
             Self::PortableName => "portable name is invalid",
             Self::WorkingDirectory => "runner working directory is invalid",
             Self::Inventory => "inventory is not sorted, unique, and within its cap",
-            Self::ResultBounds => "result bounds differ from runner-wire version one",
+            Self::ResultBounds => "result bounds differ from runner-wire version two",
             Self::Result => "terminal result is outside its closed domain shape",
             Self::FailureDetail => "failure detail is outside its recursive bounds",
             Self::Correlation => "correlation union is invalid",
@@ -339,6 +339,13 @@ impl WorkingDirectory {
             .map_err(|_| ValueError::WorkingDirectory)
     }
 
+    /// Checks that this exact runner working directory is absolute.
+    pub fn validate_absolute(&self) -> Result<(), ValueError> {
+        RunnerWorkingDirectory::try_new_absolute(self.0.clone())
+            .map(|_| ())
+            .map_err(|_| ValueError::WorkingDirectory)
+    }
+
     /// Returns the exact directory text.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -414,9 +421,9 @@ pub enum ExecutionErrorKind {
     CrashLost,
 }
 
-/// Version-one fixed successful result UTF-8 bound.
+/// Version-two fixed successful result UTF-8 bound.
 pub const SUCCESS_TEXT_BYTES: u64 = 1_048_576;
-/// Version-one fixed known-failure detail UTF-8 bound.
+/// Version-two fixed known-failure detail UTF-8 bound.
 pub const FAILURE_DETAIL_BYTES: u64 = 4_096;
 
 /// Exact fixed result bounds carried by every lease offer.
@@ -430,8 +437,8 @@ pub struct ResultBounds {
 }
 
 impl ResultBounds {
-    /// Returns the only admitted version-one pair.
-    pub const fn version_one() -> Self {
+    /// Returns the only admitted version-two pair.
+    pub const fn version_two() -> Self {
         Self {
             success_text_bytes: SUCCESS_TEXT_BYTES,
             failure_detail_bytes: FAILURE_DETAIL_BYTES,

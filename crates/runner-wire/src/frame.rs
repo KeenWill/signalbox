@@ -1,6 +1,6 @@
-//! Closed version-one runner frame vocabulary and payload validation.
+//! Closed version-two runner frame vocabulary and payload validation.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::{
@@ -15,7 +15,7 @@ use crate::{
 };
 
 /// The only admitted runner protocol version.
-pub const PROTOCOL_VERSION: u64 = 1;
+pub const PROTOCOL_VERSION: u64 = 2;
 
 /// One complete lease and physical-dispatch correlation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -732,23 +732,73 @@ pub enum ShutdownReason {
 }
 
 /// One successfully recorded workspace manifest and its exact digest.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReadyManifest {
     /// Complete ready manifest facts.
-    pub manifest: WorkspaceManifest,
+    manifest: WorkspaceManifest,
     /// Exact content digest of these lifecycle-specific facts.
-    pub manifest_digest: Digest,
+    manifest_digest: Digest,
+    /// Absolute runner-authored directory selected for later execution.
+    execution_directory: WorkingDirectory,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReadyManifest {
+    manifest: WorkspaceManifest,
+    manifest_digest: Digest,
+    execution_directory: WorkingDirectory,
+}
+
+impl<'de> Deserialize<'de> for ReadyManifest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawReadyManifest::deserialize(deserializer)?;
+        Self::try_new(raw.manifest, raw.manifest_digest, raw.execution_directory)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl ReadyManifest {
+    /// Constructs ready evidence only when its digest and execution directory are valid.
+    pub fn try_new(
+        manifest: WorkspaceManifest,
+        manifest_digest: Digest,
+        execution_directory: WorkingDirectory,
+    ) -> Result<Self, ValueError> {
+        let ready = Self {
+            manifest,
+            manifest_digest,
+            execution_directory,
+        };
+        ready.validate()?;
+        Ok(ready)
+    }
+
+    /// Borrows the complete ready manifest facts.
+    pub const fn manifest(&self) -> &WorkspaceManifest {
+        &self.manifest
+    }
+
+    /// Borrows the exact content digest of the ready manifest.
+    pub const fn manifest_digest(&self) -> &Digest {
+        &self.manifest_digest
+    }
+
+    /// Borrows the absolute runner-authored execution directory.
+    pub const fn execution_directory(&self) -> &WorkingDirectory {
+        &self.execution_directory
+    }
+
     fn validate(&self) -> Result<(), ValueError> {
         let expected = workspace_manifest_digest(&self.manifest)?;
-        if expected == self.manifest_digest {
-            Ok(())
-        } else {
-            Err(ValueError::Digest)
+        if expected != self.manifest_digest {
+            return Err(ValueError::Digest);
         }
+        self.execution_directory.validate_absolute()
     }
 }
 
@@ -920,7 +970,7 @@ payload!(Rejected {
     code: RejectionCode
 });
 
-/// Complete closed version-one message vocabulary.
+/// Complete closed version-two message vocabulary.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
 pub enum Message {

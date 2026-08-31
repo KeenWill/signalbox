@@ -1943,7 +1943,7 @@ fn workspace_ready_receipt(
         .as_ref()
         .expect("the ready receipt fixture names its recovery facts")
         .clone();
-    RunnerWorkspaceReadyReceipt::new(
+    RunnerWorkspaceReadyReceipt::try_new(
         fixture.authorization,
         fixture.workspace.session,
         fixture.workspace.placement_revision,
@@ -1956,15 +1956,17 @@ fn workspace_ready_receipt(
         fixture.workspace.credential_profile.clone(),
         fixture.workspace.sandbox,
         fixture.workspace.relative_path.clone(),
+        fixture.workspace.working_directory.clone(),
         recovery,
     )
+    .expect("the ready receipt fixture execution directory is absolute")
 }
 
 fn unborn_workspace_ready_receipt(
     fixture: &WorkspaceReceiptProjectionFixture,
 ) -> RunnerWorkspaceReadyReceipt {
     let receipt = workspace_ready_receipt(fixture);
-    RunnerWorkspaceReadyReceipt::new(
+    RunnerWorkspaceReadyReceipt::try_new(
         receipt.authorization(),
         receipt.session(),
         receipt.placement_revision(),
@@ -1976,18 +1978,20 @@ fn unborn_workspace_ready_receipt(
         receipt.credential_profile().cloned(),
         receipt.sandbox(),
         receipt.relative_path().clone(),
+        receipt.execution_directory().clone(),
         WorkspaceRecovery::UnbornBranch {
             name: WorkspaceBranchName::try_new("main".to_owned())
                 .expect("the unborn receipt fixture branch is checked"),
         },
     )
+    .expect("the unborn receipt fixture execution directory is absolute")
 }
 
 fn conflicting_workspace_ready_receipt(
     fixture: &WorkspaceReceiptProjectionFixture,
 ) -> RunnerWorkspaceReadyReceipt {
     let receipt = workspace_ready_receipt(fixture);
-    RunnerWorkspaceReadyReceipt::new(
+    RunnerWorkspaceReadyReceipt::try_new(
         receipt.authorization(),
         receipt.session(),
         receipt.placement_revision(),
@@ -1999,8 +2003,33 @@ fn conflicting_workspace_ready_receipt(
         receipt.credential_profile().cloned(),
         receipt.sandbox(),
         receipt.relative_path().clone(),
+        receipt.execution_directory().clone(),
         receipt.recovery().clone(),
     )
+    .expect("the conflicting receipt fixture execution directory is absolute")
+}
+
+fn conflicting_workspace_execution_directory_receipt(
+    fixture: &WorkspaceReceiptProjectionFixture,
+) -> RunnerWorkspaceReadyReceipt {
+    let receipt = workspace_ready_receipt(fixture);
+    RunnerWorkspaceReadyReceipt::try_new(
+        receipt.authorization(),
+        receipt.session(),
+        receipt.placement_revision(),
+        receipt.runner(),
+        receipt.manifest_id(),
+        receipt.manifest_digest().clone(),
+        receipt.repository().clone(),
+        receipt.canonical_clone_url_digest().clone(),
+        receipt.credential_profile().cloned(),
+        receipt.sandbox(),
+        receipt.relative_path().clone(),
+        RunnerWorkingDirectory::try_new("/workspace/another-ready-replacement".to_owned())
+            .expect("the conflicting execution directory is absolute"),
+        receipt.recovery().clone(),
+    )
+    .expect("the conflicting receipt execution directory is absolute")
 }
 
 async fn same_runner_workspace_provisioning_authorization_fixture(
@@ -23268,6 +23297,10 @@ async fn s32_inv044_replacement_workspace_receipt_round_trips() -> Result<(), Bo
     assert_eq!(loaded.credential_profile(), None);
     assert_eq!(loaded.sandbox(), fixture.workspace.sandbox);
     assert_eq!(loaded.relative_path(), &fixture.workspace.relative_path);
+    assert_eq!(
+        loaded.execution_directory(),
+        &fixture.workspace.working_directory
+    );
     assert_eq!(loaded.recovery(), expected_recovery);
     drop(pool);
     Ok(())
@@ -23309,6 +23342,7 @@ async fn s32_inv044_unborn_workspace_receipt_round_trips() -> Result<(), Box<dyn
     assert_eq!(loaded.credential_profile(), expected.credential_profile());
     assert_eq!(loaded.sandbox(), expected.sandbox());
     assert_eq!(loaded.relative_path(), expected.relative_path());
+    assert_eq!(loaded.execution_directory(), expected.execution_directory());
     assert_eq!(loaded.recovery(), expected.recovery());
     drop(pool);
     Ok(())
@@ -23414,6 +23448,56 @@ async fn s32_inv012_workspace_ready_admission_rejects_conflicting_reuse()
 
     assert_store_domain_error(rejected, RunnerDomainError::CorrelationMismatch);
     assert_eq!(receipt_count, 1);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-012: one recorded ready receipt cannot be replayed with a
+/// different runner-authored execution directory.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv012_workspace_ready_admission_rejects_a_changed_execution_directory()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_receipt_projection_fixture(&pool).await?;
+    fixture
+        .store
+        .record_workspace_ready_receipt(workspace_ready_receipt(&fixture))
+        .await?;
+    let rejected = fixture
+        .store
+        .record_workspace_ready_receipt(conflicting_workspace_execution_directory_receipt(&fixture))
+        .await
+        .expect_err("another execution directory cannot reuse the recorded authorization");
+
+    assert_store_domain_error(rejected, RunnerDomainError::CorrelationMismatch);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: the relational receipt rejects a runner-relative execution
+/// directory before it can become replacement authority.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_replacement_workspace_receipt_rejects_a_relative_execution_directory()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_receipt_projection_fixture(&pool).await?;
+    let mut relative = fixture.workspace.clone();
+    relative.working_directory =
+        RunnerWorkingDirectory::try_new("sessions/replacement/repo".to_owned())
+            .expect("the relative execution-directory fixture is exact text");
+    let rejected = fixture
+        .store
+        .store_workspace_provisioning_receipt_projection_for_test(
+            fixture.authorization,
+            &relative,
+            &fixture.manifest_digest,
+        )
+        .await
+        .expect_err("the relational receipt requires an absolute execution directory");
+
+    assert_store_check_violation(rejected);
     drop(pool);
     Ok(())
 }
@@ -24816,7 +24900,7 @@ async fn s32_inv042_inv044_pending_successor_stages_pinned_replacement_provision
         .expect("the pending successor authorization reads back");
     let successor_revision = RunnerGeneration::try_from_u64(2)
         .expect("the pending successor placement revision is positive");
-    let ready = RunnerWorkspaceReadyReceipt::new(
+    let ready = RunnerWorkspaceReadyReceipt::try_new(
         authorization,
         session,
         successor_revision,
@@ -24835,11 +24919,14 @@ async fn s32_inv042_inv044_pending_successor_stages_pinned_replacement_provision
             successor_revision.get()
         ))
         .expect("the pending ready-manifest path is relative"),
+        RunnerWorkingDirectory::try_new("/workspace/pending-successor".to_owned())
+            .expect("the pending ready execution directory is absolute"),
         WorkspaceRecovery::Commit {
             revision: WorkspaceRevision::try_new("e".repeat(40))
                 .expect("the pending ready-manifest revision is canonical"),
         },
-    );
+    )
+    .expect("the pending ready receipt execution directory is absolute");
     let recorded = store
         .record_workspace_ready_receipt(ready.clone())
         .await

@@ -6,7 +6,7 @@ use std::{
     fs::File,
     io::{self, Read, Write},
     os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use rustix::{
@@ -378,6 +378,7 @@ impl Error for RunnerStateError {
 #[derive(Debug)]
 pub struct RunnerStateRoot {
     directory: File,
+    canonical_path: PathBuf,
     state: RunnerState,
     inventory: ReconnectInventory,
     ready_workspace: Option<WorkspaceReady>,
@@ -460,6 +461,17 @@ impl RunnerStateRoot {
                 resource: StateResource::Root,
                 source,
             })?;
+        let canonical_path = fs::canonicalize(path).map_err(|source| RunnerStateError::Io {
+            operation: StateOperation::Inspect,
+            resource: StateResource::Root,
+            source,
+        })?;
+        let canonical_metadata =
+            fs::metadata(&canonical_path).map_err(|source| RunnerStateError::Io {
+                operation: StateOperation::Inspect,
+                resource: StateResource::Root,
+                source,
+            })?;
         let effective_user = geteuid().as_raw();
         if !path_metadata.is_dir()
             || path_metadata.uid() != effective_user
@@ -469,6 +481,8 @@ impl RunnerStateRoot {
             || descriptor_metadata.mode() & PERMISSION_MASK != ROOT_MODE
             || path_metadata.dev() != descriptor_metadata.dev()
             || path_metadata.ino() != descriptor_metadata.ino()
+            || canonical_metadata.dev() != descriptor_metadata.dev()
+            || canonical_metadata.ino() != descriptor_metadata.ino()
         {
             return Err(RunnerStateError::InvalidRootIdentity);
         }
@@ -525,6 +539,7 @@ impl RunnerStateRoot {
         validate_operation_journal_owner(&state, &inventory, ready_workspace.as_ref())?;
         Ok(Self {
             directory,
+            canonical_path,
             state,
             inventory,
             ready_workspace,
@@ -545,7 +560,9 @@ impl RunnerStateRoot {
     pub fn workspace_store(&self) -> Result<crate::RunnerWorkspaceStore, RunnerStateError> {
         self.directory
             .try_clone()
-            .map(crate::RunnerWorkspaceStore::from_root)
+            .map(|directory| {
+                crate::RunnerWorkspaceStore::from_root(directory, self.canonical_path.clone())
+            })
             .map_err(|source| RunnerStateError::Io {
                 operation: StateOperation::Open,
                 resource: StateResource::Root,
@@ -824,8 +841,8 @@ impl RunnerStateRoot {
             .ok_or(RunnerStateError::InvalidTransition)?;
         if correlation != &recorded.correlation
             || ready.correlation != recorded.correlation
-            || ready.ready.manifest.manifest_id != recorded.manifest_id
-            || ready.ready.manifest_digest != recorded.manifest_digest
+            || ready.ready.manifest().manifest_id != recorded.manifest_id
+            || ready.ready.manifest_digest() != &recorded.manifest_digest
         {
             return Err(RunnerStateError::OperationCorrelationMismatch);
         }
@@ -1659,10 +1676,13 @@ mod tests {
             .expect("the fixture manifest has a canonical digest");
         WorkspaceReady {
             correlation,
-            ready: ReadyManifest {
+            ready: ReadyManifest::try_new(
                 manifest,
                 manifest_digest,
-            },
+                WorkingDirectory::try_new("/runner/sessions/provision/repo".to_owned())
+                    .expect("the fixture execution directory is absolute"),
+            )
+            .expect("the fixture ready manifest is valid"),
         }
     }
 
@@ -1670,8 +1690,8 @@ mod tests {
         let ready = workspace_ready();
         WorkspaceRecorded {
             correlation: ready.correlation,
-            manifest_id: ready.ready.manifest.manifest_id,
-            manifest_digest: ready.ready.manifest_digest,
+            manifest_id: ready.ready.manifest().manifest_id,
+            manifest_digest: ready.ready.manifest_digest().clone(),
         }
     }
 

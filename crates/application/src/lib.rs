@@ -160,8 +160,9 @@ pub use runner_replacement_provisioning::{
     UuidV7RunnerReplacementProvisioningIdGenerator,
 };
 pub use runner_workspace_ready::{
-    InvalidRunnerReadyManifestDigest, RunnerReadyManifestDigest, RunnerWorkspaceReadyReceipt,
-    RunnerWorkspaceReadyService, RunnerWorkspaceReadyTransaction,
+    InvalidRunnerReadyManifestDigest, InvalidRunnerWorkspaceExecutionDirectory,
+    RunnerReadyManifestDigest, RunnerWorkspaceReadyReceipt, RunnerWorkspaceReadyService,
+    RunnerWorkspaceReadyTransaction,
 };
 pub use runner_workspace_release::{
     RunnerWorkspaceReleaseAcknowledgement, RunnerWorkspaceReleaseService,

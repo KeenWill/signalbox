@@ -870,6 +870,7 @@ pub struct StoredWorkspaceProvisioningReceipt {
     credential_profile: Option<CredentialProfileName>,
     sandbox: RunnerSandboxProfile,
     relative_path: WorkspaceRelativePath,
+    execution_directory: RunnerWorkingDirectory,
     recovery: WorkspaceRecovery,
 }
 
@@ -927,6 +928,11 @@ impl StoredWorkspaceProvisioningReceipt {
     /// Returns the runner-root-relative workspace path from the manifest.
     pub const fn relative_path(&self) -> &WorkspaceRelativePath {
         &self.relative_path
+    }
+
+    /// Returns the absolute runner-authored execution directory.
+    pub const fn execution_directory(&self) -> &RunnerWorkingDirectory {
+        &self.execution_directory
     }
 
     /// Returns the repository recovery facts from the ready manifest.
@@ -3228,7 +3234,8 @@ impl RunnerProtocolStore {
                     receipt.manifest_digest, receipt.repository_key,
                     receipt.canonical_clone_url_digest,
                     receipt.credential_profile_name, receipt.sandbox_profile,
-                    receipt.relative_path, receipt.recovery_kind,
+                    receipt.relative_path, receipt.execution_directory,
+                    receipt.recovery_kind,
                     receipt.branch_name, receipt.revision,
                     staged.session_id AS staged_session_id,
                     staged.lost_placement_event_ordinal,
@@ -3304,6 +3311,9 @@ impl RunnerProtocolStore {
             .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
         let relative_path = WorkspaceRelativePath::try_new(row.decode_column("relative_path")?)
             .map_err(RunnerProtocolStoreError::Domain)?;
+        let execution_directory =
+            RunnerWorkingDirectory::try_new(row.decode_column("execution_directory")?)
+                .map_err(RunnerProtocolStoreError::Domain)?;
         let recovery_kind: String = row.decode_column("recovery_kind")?;
         let branch_name: Option<String> = row.decode_column("branch_name")?;
         let revision = row.decode_column::<Option<String>>("revision")?;
@@ -3394,6 +3404,7 @@ impl RunnerProtocolStore {
             || row.decode_column::<Uuid>("registration_runner_id")? != runner.into_uuid()
             || row.decode_column::<String>("connection_state_kind")? != "connected"
             || relative_path.as_str() != expected_relative_path
+            || !execution_directory.as_str().starts_with('/')
             || lost_event_ordinal == 0
             || !target_matches
         {
@@ -3411,6 +3422,7 @@ impl RunnerProtocolStore {
             credential_profile,
             sandbox,
             relative_path,
+            execution_directory,
             recovery,
         }))
     }
@@ -3601,10 +3613,10 @@ impl RunnerProtocolStore {
                 (authorization_id, session_id, placement_revision, runner_id,
                  manifest_id, manifest_digest, repository_key,
                  canonical_clone_url_digest, credential_profile_name,
-                 sandbox_profile, relative_path, recovery_kind, branch_name,
-                 revision)
+                 sandbox_profile, relative_path, execution_directory,
+                 recovery_kind, branch_name, revision)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                     $12, $13, $14)",
+                     $12, $13, $14, $15)",
         )
         .bind(authorization.into_uuid())
         .bind(workspace.session.into_uuid())
@@ -3622,6 +3634,7 @@ impl RunnerProtocolStore {
         )
         .bind(runner_sandbox_to_str(workspace.sandbox))
         .bind(workspace.relative_path.as_str())
+        .bind(workspace.working_directory.as_str())
         .bind(recovery_kind)
         .bind(branch_name)
         .bind(revision)
@@ -8533,7 +8546,7 @@ fn exact_workspace_ready_replay(
     supplied: RunnerWorkspaceReadyReceipt,
     stored: StoredWorkspaceProvisioningReceipt,
 ) -> Result<RunnerWorkspaceReadyReceipt, RunnerProtocolStoreError> {
-    let recorded = RunnerWorkspaceReadyReceipt::new(
+    let recorded = RunnerWorkspaceReadyReceipt::try_new(
         stored.authorization,
         stored.session,
         stored.placement_revision,
@@ -8546,8 +8559,10 @@ fn exact_workspace_ready_replay(
         stored.credential_profile,
         stored.sandbox,
         stored.relative_path,
+        stored.execution_directory,
         stored.recovery,
-    );
+    )
+    .map_err(|_| RunnerProtocolCorruption::InvalidEncoding)?;
     if supplied != recorded {
         return Err(RunnerProtocolStoreError::Domain(
             RunnerDomainError::CorrelationMismatch,
@@ -8634,10 +8649,10 @@ async fn insert_workspace_ready_receipt(
             (authorization_id, session_id, placement_revision, runner_id,
              manifest_id, manifest_digest, repository_key,
              canonical_clone_url_digest, credential_profile_name,
-             sandbox_profile, relative_path, recovery_kind, branch_name,
-             revision)
+             sandbox_profile, relative_path, execution_directory,
+             recovery_kind, branch_name, revision)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                 $12, $13, $14)",
+                 $12, $13, $14, $15)",
     )
     .bind(receipt.authorization().into_uuid())
     .bind(receipt.session().into_uuid())
@@ -8654,6 +8669,7 @@ async fn insert_workspace_ready_receipt(
     )
     .bind(runner_sandbox_to_str(receipt.sandbox()))
     .bind(receipt.relative_path().as_str())
+    .bind(receipt.execution_directory().as_str())
     .bind(recovery_kind)
     .bind(branch_name)
     .bind(revision)

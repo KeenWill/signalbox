@@ -4,8 +4,9 @@ use std::{error::Error, fmt, future::Future};
 
 use signalbox_domain::{
     CanonicalCloneUrlDigest, CredentialProfileName, RunnerGeneration, RunnerId,
-    RunnerSandboxProfile, SessionId, WorkspaceManifestId, WorkspaceProvisioningAuthorizationId,
-    WorkspaceRecovery, WorkspaceRelativePath, WorkspaceRepositoryKey,
+    RunnerSandboxProfile, RunnerWorkingDirectory, SessionId, WorkspaceManifestId,
+    WorkspaceProvisioningAuthorizationId, WorkspaceRecovery, WorkspaceRelativePath,
+    WorkspaceRepositoryKey,
 };
 
 /// One canonical lowercase SHA-256 digest of a ready workspace manifest.
@@ -60,13 +61,26 @@ pub struct RunnerWorkspaceReadyReceipt {
     credential_profile: Option<CredentialProfileName>,
     sandbox: RunnerSandboxProfile,
     relative_path: WorkspaceRelativePath,
+    execution_directory: RunnerWorkingDirectory,
     recovery: WorkspaceRecovery,
 }
+
+/// A ready receipt did not carry an absolute runner-authored execution directory.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidRunnerWorkspaceExecutionDirectory;
+
+impl fmt::Display for InvalidRunnerWorkspaceExecutionDirectory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ready workspace execution directory must be absolute")
+    }
+}
+
+impl Error for InvalidRunnerWorkspaceExecutionDirectory {}
 
 impl RunnerWorkspaceReadyReceipt {
     /// Retains the exact checked wire receipt without deriving execution-directory facts.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn try_new(
         authorization: WorkspaceProvisioningAuthorizationId,
         session: SessionId,
         placement_revision: RunnerGeneration,
@@ -78,9 +92,15 @@ impl RunnerWorkspaceReadyReceipt {
         credential_profile: Option<CredentialProfileName>,
         sandbox: RunnerSandboxProfile,
         relative_path: WorkspaceRelativePath,
+        execution_directory: RunnerWorkingDirectory,
         recovery: WorkspaceRecovery,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, InvalidRunnerWorkspaceExecutionDirectory> {
+        if RunnerWorkingDirectory::try_new_absolute(execution_directory.as_str().to_owned())
+            .is_err()
+        {
+            return Err(InvalidRunnerWorkspaceExecutionDirectory);
+        }
+        Ok(Self {
             authorization,
             session,
             placement_revision,
@@ -92,8 +112,9 @@ impl RunnerWorkspaceReadyReceipt {
             credential_profile,
             sandbox,
             relative_path,
+            execution_directory,
             recovery,
-        }
+        })
     }
 
     /// Returns the single-use provisioning authorization.
@@ -151,6 +172,11 @@ impl RunnerWorkspaceReadyReceipt {
         &self.relative_path
     }
 
+    /// Returns the absolute execution directory stated by the runner.
+    pub const fn execution_directory(&self) -> &RunnerWorkingDirectory {
+        &self.execution_directory
+    }
+
     /// Returns the exact repository recovery facts.
     pub const fn recovery(&self) -> &WorkspaceRecovery {
         &self.recovery
@@ -201,14 +227,16 @@ mod tests {
 
     use signalbox_domain::{
         CanonicalCloneUrlDigest, CredentialProfileName, RunnerGeneration, RunnerId,
-        RunnerSandboxProfile, SessionId, WorkspaceManifestId, WorkspaceProvisioningAuthorizationId,
-        WorkspaceRecovery, WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRevision,
+        RunnerSandboxProfile, RunnerWorkingDirectory, SessionId, WorkspaceManifestId,
+        WorkspaceProvisioningAuthorizationId, WorkspaceRecovery, WorkspaceRelativePath,
+        WorkspaceRepositoryKey, WorkspaceRevision,
     };
     use uuid::Uuid;
 
     use super::{
-        InvalidRunnerReadyManifestDigest, RunnerReadyManifestDigest, RunnerWorkspaceReadyReceipt,
-        RunnerWorkspaceReadyService, RunnerWorkspaceReadyTransaction,
+        InvalidRunnerReadyManifestDigest, InvalidRunnerWorkspaceExecutionDirectory,
+        RunnerReadyManifestDigest, RunnerWorkspaceReadyReceipt, RunnerWorkspaceReadyService,
+        RunnerWorkspaceReadyTransaction,
     };
 
     const AUTHORIZATION: u128 = 1;
@@ -229,6 +257,7 @@ mod tests {
         credential_profile: Option<CredentialProfileName>,
         sandbox: RunnerSandboxProfile,
         relative_path: WorkspaceRelativePath,
+        execution_directory: RunnerWorkingDirectory,
         recovery: WorkspaceRecovery,
     }
 
@@ -253,11 +282,14 @@ mod tests {
             placement_revision.get()
         ))
         .expect("the fixture manifest path is relative");
+        let execution_directory =
+            RunnerWorkingDirectory::try_new("/runner/sessions/2/1/repo".to_owned())
+                .expect("the fixture execution directory is valid");
         let recovery = WorkspaceRecovery::Commit {
             revision: WorkspaceRevision::try_new("c".repeat(40))
                 .expect("the fixture revision is canonical"),
         };
-        let receipt = RunnerWorkspaceReadyReceipt::new(
+        let receipt = RunnerWorkspaceReadyReceipt::try_new(
             authorization,
             session,
             placement_revision,
@@ -269,8 +301,10 @@ mod tests {
             credential_profile.clone(),
             sandbox,
             relative_path.clone(),
+            execution_directory.clone(),
             recovery.clone(),
-        );
+        )
+        .expect("the fixture execution directory is absolute");
         ReceiptFixture {
             receipt,
             authorization,
@@ -284,6 +318,7 @@ mod tests {
             credential_profile,
             sandbox,
             relative_path,
+            execution_directory,
             recovery,
         }
     }
@@ -337,7 +372,37 @@ mod tests {
         );
         assert_eq!(fixture.receipt.sandbox(), fixture.sandbox);
         assert_eq!(fixture.receipt.relative_path(), &fixture.relative_path);
+        assert_eq!(
+            fixture.receipt.execution_directory(),
+            &fixture.execution_directory
+        );
         assert_eq!(fixture.receipt.recovery(), &fixture.recovery);
+    }
+
+    #[test]
+    fn receipt_rejects_a_relative_execution_directory() {
+        let fixture = receipt_fixture();
+        let relative = RunnerWorkingDirectory::try_new("sessions/2/1/repo".to_owned())
+            .expect("the relative fixture directory is exact text");
+
+        assert_eq!(
+            RunnerWorkspaceReadyReceipt::try_new(
+                fixture.authorization,
+                fixture.session,
+                fixture.placement_revision,
+                fixture.runner,
+                fixture.manifest,
+                fixture.manifest_digest,
+                fixture.repository,
+                fixture.clone_url_digest,
+                fixture.credential_profile,
+                fixture.sandbox,
+                fixture.relative_path,
+                relative,
+                fixture.recovery,
+            ),
+            Err(InvalidRunnerWorkspaceExecutionDirectory)
+        );
     }
 
     #[tokio::test]

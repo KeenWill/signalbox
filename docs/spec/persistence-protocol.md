@@ -64,8 +64,10 @@ Workspace-ready admission under the exact current staging authority and equal
 receipt replay are verified against this PR
 (`agent/runner-workspace-ready-admission`). Live post-commit daemon
 acknowledgement projection is verified against this PR
-(`agent/daemon-runner-workspace-ready-routing`). Existing-pin attempt-and-offer
-atomicity is verified against this PR
+(`agent/daemon-runner-workspace-ready-routing`). The version-two ready receipt's
+runner-authored absolute execution directory and fail-closed typed readback are
+verified against this PR (`agent/runner-workspace-ready-execution-directory`).
+Existing-pin attempt-and-offer atomicity is verified against this PR
 (`agent/runner-pinned-dispatch-transaction`). The pinned-dispatch adapter's
 exact runner/registration lookup and returned enrollment routing identity are
 verified against this PR (`agent/runner-offer-locus-binding`). The
@@ -788,9 +790,18 @@ Representation rules, all enforced in the schema:
   root retains the complete validated ready frame beside that correlation,
   resends it exactly while retaining it, consumes the exact recorded
   acknowledgement, and retires a daemon-classified stale item atomically.
+- Migration `202608150100` adds the version-two ready exchange's absolute
+  runner-authored execution directory to the immutable repository-replacement
+  receipt. New admission stores it beside, not inside, the canonical manifest
+  digest; equal replay compares it exactly. The relational shape and typed
+  readback reject a relative directory. No daemon path is concatenated with the
+  runner-relative manifest path, and later replacement attachment must consume
+  this exact stored directory or reject a mismatch. Because the current shipped
+  composition has no repository-workspace producer, the migration refuses a
+  populated version-one receipt relation rather than inventing an absolute path
+  for evidence that never carried one.
 - **Committed unimplemented functionality.** No heartbeat path reconciles
-  provisioning progress, and no present transaction maps the runner-relative
-  manifest path into execution placement facts or consumes the receipt to
+  provisioning progress, and no present transaction consumes the receipt to
   terminalize the repository-backed replacement.
 - Migration `202608110018` separates the registration revision retained by an
   immutable pinned placement from the then-current registration revision that

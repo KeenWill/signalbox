@@ -596,6 +596,8 @@ pub enum RunnerDomainError {
     InvalidBranchName,
     /// The supplied runner-root-relative path is not canonical.
     InvalidRelativePath,
+    /// The supplied runner working directory is not absolute.
+    InvalidAbsolutePath,
     /// The tool input schema is not a normalized JSON object.
     InvalidToolInputSchema,
     /// A capability class appears more than once.
@@ -756,6 +758,16 @@ impl RunnerWorkingDirectory {
     /// Validates and constructs exact runner working-directory text.
     pub fn try_new(value: String) -> Result<Self, RunnerDomainError> {
         validate_exact(value).map(Self)
+    }
+
+    /// Validates and constructs an absolute runner working directory.
+    pub fn try_new_absolute(value: String) -> Result<Self, RunnerDomainError> {
+        let directory = Self::try_new(value)?;
+        if directory.as_str().starts_with('/') {
+            Ok(directory)
+        } else {
+            Err(RunnerDomainError::InvalidAbsolutePath)
+        }
     }
 
     /// Returns the exact runner working-directory text.

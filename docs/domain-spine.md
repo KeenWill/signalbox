@@ -6225,9 +6225,11 @@ impl RunnerReadyManifestDigest {
 
 pub struct InvalidRunnerReadyManifestDigest;
 
+pub struct InvalidRunnerWorkspaceExecutionDirectory;
+
 pub struct RunnerWorkspaceReadyReceipt { /* private */ }
 impl RunnerWorkspaceReadyReceipt {
-    pub fn new(
+    pub fn try_new(
         authorization: WorkspaceProvisioningAuthorizationId,
         session: SessionId,
         placement_revision: RunnerGeneration,
@@ -6239,11 +6241,12 @@ impl RunnerWorkspaceReadyReceipt {
         credential_profile: Option<CredentialProfileName>,
         sandbox: RunnerSandboxProfile,
         relative_path: WorkspaceRelativePath,
+        execution_directory: RunnerWorkingDirectory,
         recovery: WorkspaceRecovery,
-    ) -> Self;
+    ) -> Result<Self, InvalidRunnerWorkspaceExecutionDirectory>;
     // accessors: authorization(), session(), placement_revision(), runner(),
     // manifest_id(), manifest_digest(), repository(), canonical_clone_url_digest(),
-    // credential_profile(), sandbox(), relative_path(), recovery()
+    // credential_profile(), sandbox(), relative_path(), execution_directory(), recovery()
 }
 
 pub trait RunnerWorkspaceReadyTransaction {
@@ -9045,6 +9048,7 @@ pub enum RunnerDomainError {
     InvalidHex,
     InvalidBranchName,
     InvalidRelativePath,
+    InvalidAbsolutePath,
     InvalidToolInputSchema,
     DuplicateCapabilityClass(RunnerCapabilityClass),
     DuplicateTool(ToolName),
@@ -9102,6 +9106,7 @@ impl CredentialProfileName {
 }
 impl RunnerWorkingDirectory {
     pub fn try_new(value: String) -> Result<Self, RunnerDomainError>;
+    pub fn try_new_absolute(value: String) -> Result<Self, RunnerDomainError>;
     // accessor: as_str()
 }
 impl WorkspaceRepositoryKey {
@@ -11394,7 +11399,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: runner_replacement_provisioning       | 7 (incl. 2 traits)    |
 | application: runner_operation_failure              | 7 (incl. 1 trait)     |
 | application: runner_workspace_release              | 3 (incl. 1 trait)     |
-| application: runner_workspace_ready                | 5 (incl. 1 trait)     |
+| application: runner_workspace_ready                | 6 (incl. 1 trait)     |
 | application: runner_lease_claim                    | 3 (incl. 1 trait)     |
 | application: runner_lease_result                   | 3 (incl. 1 trait)     |
 | application: pinned_runner_dispatch                | 11 (incl. 3 traits)   |
