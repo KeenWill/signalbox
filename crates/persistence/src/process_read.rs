@@ -2267,7 +2267,7 @@ async fn open_transcript_in_transaction(
     })
 }
 
-async fn load_process_runner_projection(
+pub(crate) async fn load_process_runner_projection(
     transaction: &mut Transaction<'static, Postgres>,
     session: SessionId,
 ) -> Result<Option<ProcessRunnerProjection>, ProcessReadError> {
