@@ -775,6 +775,7 @@ fn runner_runtime_failure_class(error: &RunnerProtocolRuntimeError) -> OperatorF
         | RunnerProtocolRuntimeError::Cleanup(_)
         | RunnerProtocolRuntimeError::Read(_)
         | RunnerProtocolRuntimeError::Write(_)
+        | RunnerProtocolRuntimeError::ClaimedReplayWriteTimeout
         | RunnerProtocolRuntimeError::Closed => OperatorFailureClass::Infrastructure {
             commit_ambiguous: false,
         },

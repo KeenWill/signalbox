@@ -63,16 +63,19 @@ whose tool is absent from the registration-only empty catalog is re-verified
 through this PR (`agent/runner-empty-catalog-offer-refusal`). Durable checked
 readback of an exact claimed lease under authenticated resume facts is
 re-verified through this PR (`agent/runner-claimed-resume-readback`). The
-placement loss-source, pre-pin replacement and abandonment state shapes, and
-append-only reconstitution-history contract are re-verified through this PR
-(`agent/runner-placement-loss-domain`). It owns logical runner enrollment,
-daemon-authoritative catalog validation, runner leases, the independent
-session-composition axes, session placement and affinity, credential-profile
-grants, and workspace requirements. The tool registry's common declarations
-remain owned by [tool loop](tool-loop.md); session transcript and frontier
-mechanics remain owned by [sessions and transcript](sessions-and-transcript.md);
-physical tool attempts remain owned by [tool loop](tool-loop.md). Invariant tags
-cite [the invariant test index](../invariants.md).
+daemon's checked lease-only resume directives and canonical claim/dispatch
+replay are re-verified through this PR
+(`agent/runner-claimed-resume-transaction`). The placement loss-source, pre-pin
+replacement and abandonment state shapes, and append-only reconstitution-history
+contract are re-verified through this PR (`agent/runner-placement-loss-domain`).
+It owns logical runner enrollment, daemon-authoritative catalog validation,
+runner leases, the independent session-composition axes, session placement and
+affinity, credential-profile grants, and workspace requirements. The tool
+registry's common declarations remain owned by [tool loop](tool-loop.md);
+session transcript and frontier mechanics remain owned by
+[sessions and transcript](sessions-and-transcript.md); physical tool attempts
+remain owned by [tool loop](tool-loop.md). Invariant tags cite
+[the invariant test index](../invariants.md).
 
 The typed `ReplaceLostRunner`, `RunnerReplacementTarget`, and
 `AbandonLostRunner` domain command payloads are verified against this PR
@@ -286,7 +289,8 @@ take the durable boundaries described under
 **Committed unimplemented functionality.** No runner surface serves the
 following lease/dispatch state machine. The established daemon connection does
 already implement the durable claim and result boundaries in steps 2 and 4. The
-remaining surfaces stay compatible with the complete state machine:
+daemon also accepts the pre-execution reconnect phases described below. The
+remaining runner surfaces stay compatible with the complete state machine:
 
 1. The daemon sends `lease_offer` with the complete lease correlation and
    immutable dispatch payload. The runner admits the exact tool, sandbox
@@ -722,9 +726,21 @@ enrollment request, all daemon-issued enrollment identities, the current
 registration and advertisement, and the complete durable lease correlation under
 the owning session lock. It returns only the canonical `Claimed` lease as
 repeatable-read reconstitution evidence. The read does not authorize later
-projection: no live resume transaction consumes and rechecks it yet, so a
-lease-only reconnect inventory remains unavailable rather than reconstructing
-claim or dispatch authority from connection memory.
+projection by itself. For a lease-only inventory at `waiting_dispatch` or
+`dispatch_received`, the daemon validates this evidence before resume. If resume
+advances the registration, it returns `fail_stale`; otherwise it returns an
+exact `await` directive, opens the successor connection, then repeats the
+complete checked readback before projecting anything. After writing `resumed`,
+it holds successor-connection admission while rechecking the new connection
+epoch and writing the canonical `lease_claimed`, then rechecking the epoch and
+writing the canonical immutable `dispatch`. A failed replay write durably closes
+that epoch as transport loss. An exact inventory whose claimed lease is already
+stale instead receives
+`fail_stale` and no replayed operation frame. An `execution_may_have_started`
+lease without a result remains unavailable until the loss-classification slice
+consumes it. The runner does not yet consume the lease-only `await` directive or
+either replayed frame, so this daemon recovery path cannot yet produce
+execution.
 
 ## Identity, enrollment, and registration
 
