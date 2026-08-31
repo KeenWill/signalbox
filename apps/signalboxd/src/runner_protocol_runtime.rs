@@ -21,10 +21,11 @@ use signalbox_persistence::runner_protocol::{
     RunnerRegistrationRevision,
 };
 use signalbox_runner_wire::{
-    Advertise, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Enroll, Enrolled, Frame,
-    FrameError, Heartbeat, HeartbeatAck, HeartbeatWorkspacePhase, LeaseClaim, LeaseCorrelation,
-    MAX_FRAME_BYTES, Message, PositiveU64, ReconnectDirectives, Registered, Rejected,
-    RejectionCode, ReplacementPending, ResultFrame, Resume, Resumed, Shutdown, ShutdownReason,
+    Advertise, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Directive, DirectiveAction,
+    Enroll, Enrolled, Frame, FrameError, Heartbeat, HeartbeatAck, HeartbeatWorkspacePhase,
+    LeaseClaim, LeaseCorrelation, LeasePhaseKind, MAX_FRAME_BYTES, Message, PositiveU64,
+    ReconnectDirectives, ReconnectInventory, Registered, Rejected, RejectionCode,
+    ReplacementPending, ResultFrame, Resume, Resumed, Shutdown, ShutdownReason,
     WorkspaceFailureCorrelation, advertisement_digest, decode_line, encode_line,
 };
 use sqlx::PgPool;
@@ -476,13 +477,13 @@ impl PostgresRunnerRegistrationService {
                 RejectionCode::UnsupportedDigestVersion,
             ));
         }
-        if request.inventory != Default::default() {
-            return Err(RunnerRegistrationFailure::new(
+        let retained_result = retained_result_resume(&request.inventory).map_err(|code| {
+            RunnerRegistrationFailure::new(
                 RunnerInboundFrameKind::Resume,
-                correlation,
-                RejectionCode::Unavailable,
-            ));
-        }
+                correlation.clone(),
+                code,
+            )
+        })?;
         let prior =
             RunnerRegistrationRevision::try_from_u64(request.prior_registration_revision.get())
                 .ok_or_else(|| {
@@ -504,6 +505,48 @@ impl PostgresRunnerRegistrationService {
             RunnerId::from_uuid(request.runner_id.into_uuid()),
             RunnerAuthenticationId::from_uuid(request.authentication_id.into_uuid()),
         );
+        let directives = match retained_result {
+            Some(result) => {
+                let result = RunnerDispatchWireAdapter::result_request(result).map_err(|_| {
+                    RunnerRegistrationFailure::new(
+                        RunnerInboundFrameKind::Resume,
+                        correlation.clone(),
+                        RejectionCode::CorrelationMismatch,
+                    )
+                })?;
+                let action = match self
+                    .store
+                    .commit_retained_result_before_resume(
+                        RunnerEnrollmentRequestId::from_uuid(request.request_id.into_uuid()),
+                        identities,
+                        prior,
+                        advertisement.clone(),
+                        result,
+                    )
+                    .await
+                {
+                    Ok(_) => DirectiveAction::DiscardAsRecorded,
+                    Err(RunnerProtocolStoreError::Domain(
+                        RunnerDomainError::InvalidState | RunnerDomainError::CorrelationMismatch,
+                    )) => DirectiveAction::FailStale,
+                    Err(error) => {
+                        return Err(store_failure(
+                            RunnerInboundFrameKind::Resume,
+                            correlation.clone(),
+                            error,
+                        ));
+                    }
+                };
+                retained_result_directives(&request.inventory, action).map_err(|code| {
+                    RunnerRegistrationFailure::new(
+                        RunnerInboundFrameKind::Resume,
+                        correlation.clone(),
+                        code,
+                    )
+                })?
+            }
+            None => ReconnectDirectives::default(),
+        };
         let previous_registration_revision = match self
             .store
             .load_enrollment(identities.enrollment())
@@ -563,7 +606,7 @@ impl PostgresRunnerRegistrationService {
         Ok(Resumed {
             registration_revision: positive_revision(receipt.registration().revision())?,
             connection_epoch: positive_epoch(connection.epoch())?,
-            directives: ReconnectDirectives::default(),
+            directives,
         })
     }
 
@@ -825,6 +868,56 @@ impl RunnerRegistrationService for PostgresRunnerRegistrationService {
     ) -> RunnerRegistrationFuture<'_, RunnerConnectionTransitionOutcome> {
         Box::pin(self.transition_connection_durably(enrollment, epoch, transition))
     }
+}
+
+fn retained_result_resume(
+    inventory: &ReconnectInventory,
+) -> Result<Option<ResultFrame>, RejectionCode> {
+    if inventory == &ReconnectInventory::default() {
+        return Ok(None);
+    }
+    if inventory.workspace_operation.is_some()
+        || inventory.operation_failure.is_some()
+        || inventory.leak_page.is_some()
+    {
+        return Err(RejectionCode::Unavailable);
+    }
+    let (Some(lease), Some(result)) = (inventory.lease.as_ref(), inventory.result.as_ref()) else {
+        return Err(RejectionCode::CorrelationMismatch);
+    };
+    if lease.phase != LeasePhaseKind::ExecutionMayHaveStarted
+        || lease.correlation != result.correlation
+    {
+        return Err(RejectionCode::CorrelationMismatch);
+    }
+    Ok(Some(ResultFrame {
+        correlation: result.correlation.clone(),
+        result: result.result.clone(),
+    }))
+}
+
+fn retained_result_directives(
+    inventory: &ReconnectInventory,
+    action: DirectiveAction,
+) -> Result<ReconnectDirectives, RejectionCode> {
+    let (Some(lease), Some(result)) = (inventory.lease.as_ref(), inventory.result.as_ref()) else {
+        return Err(RejectionCode::CorrelationMismatch);
+    };
+    let directives = ReconnectDirectives {
+        lease: Some(Directive {
+            correlation: lease.correlation.clone(),
+            action,
+        }),
+        result: Some(Directive {
+            correlation: result.correlation.clone(),
+            action,
+        }),
+        ..ReconnectDirectives::default()
+    };
+    directives
+        .validate_against(inventory)
+        .map_err(|_| RejectionCode::CorrelationMismatch)?;
+    Ok(directives)
 }
 
 impl RunnerLeaseOperationService for RunnerProtocolStore {
@@ -2830,6 +2923,101 @@ mod tests {
             issuing_turn_attempt_id: arbitrary_identity,
             tool_dispatch_generation: first,
         }
+    }
+
+    #[test]
+    fn s31_inv011_inv043_retained_terminal_resume_discards_the_exact_pair() {
+        let correlation = canonical_lease_correlation();
+        let inventory = ReconnectInventory {
+            lease: Some(signalbox_runner_wire::LeasePhase {
+                correlation: correlation.clone(),
+                phase: LeasePhaseKind::ExecutionMayHaveStarted,
+            }),
+            result: Some(signalbox_runner_wire::RetainedResult {
+                correlation: correlation.clone(),
+                result: signalbox_runner_wire::TerminalResult::Success {
+                    text: String::from("completed"),
+                },
+            }),
+            ..ReconnectInventory::default()
+        };
+
+        let frame = retained_result_resume(&inventory)
+            .expect("the complete retained pair is supported")
+            .expect("the nonempty inventory produces a recovery action");
+        let directives = retained_result_directives(&inventory, DirectiveAction::DiscardAsRecorded)
+            .expect("the exact inventory accepts matching directives");
+
+        assert_eq!(frame.correlation, correlation);
+        assert_eq!(
+            frame.result,
+            inventory.result.as_ref().expect("the result exists").result
+        );
+        assert_eq!(directives.validate_against(&inventory), Ok(()));
+        assert_eq!(
+            directives.lease.expect("the lease directive exists").action,
+            DirectiveAction::DiscardAsRecorded
+        );
+        assert_eq!(
+            directives
+                .result
+                .expect("the result directive exists")
+                .action,
+            DirectiveAction::DiscardAsRecorded
+        );
+    }
+
+    #[test]
+    fn s31_inv011_inv043_stale_retained_terminal_resume_fails_both_items() {
+        let correlation = canonical_lease_correlation();
+        let inventory = ReconnectInventory {
+            lease: Some(signalbox_runner_wire::LeasePhase {
+                correlation: correlation.clone(),
+                phase: LeasePhaseKind::ExecutionMayHaveStarted,
+            }),
+            result: Some(signalbox_runner_wire::RetainedResult {
+                correlation,
+                result: signalbox_runner_wire::TerminalResult::Success {
+                    text: String::from("completed"),
+                },
+            }),
+            ..ReconnectInventory::default()
+        };
+
+        let directives = retained_result_directives(&inventory, DirectiveAction::FailStale)
+            .expect("the exact stale inventory accepts matching directives");
+
+        assert_eq!(directives.validate_against(&inventory), Ok(()));
+        assert_eq!(
+            directives.lease.expect("the lease directive exists").action,
+            DirectiveAction::FailStale
+        );
+        assert_eq!(
+            directives
+                .result
+                .expect("the result directive exists")
+                .action,
+            DirectiveAction::FailStale
+        );
+    }
+
+    #[test]
+    fn s31_inv011_inv043_retained_terminal_resume_rejects_result_without_lease() {
+        let correlation = canonical_lease_correlation();
+        let inventory = ReconnectInventory {
+            result: Some(signalbox_runner_wire::RetainedResult {
+                correlation,
+                result: signalbox_runner_wire::TerminalResult::Success {
+                    text: String::from("completed"),
+                },
+            }),
+            ..ReconnectInventory::default()
+        };
+
+        let rejected = retained_result_resume(&inventory)
+            .expect_err("terminal evidence requires its execution-possible lease phase");
+
+        assert_eq!(rejected, RejectionCode::CorrelationMismatch);
     }
 
     fn runner_operation_tool() -> ToolName {
