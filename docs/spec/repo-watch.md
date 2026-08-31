@@ -1102,10 +1102,13 @@ and aggregate-review evidence is read before the thread inventory, matching the
 operational reference's ordering so a review thread opened between those reads
 cannot be hidden by an earlier thread snapshot. The branch-head snapshot is read
 before pull-request hydration and supplies the assessed base revision committed
-in the cursor. The rollup's commit, head, and base-branch evidence must agree
-with the REST pull-request projection and cursor generation or the poll fails
-without recording an assessment; independently sampled REST and GraphQL
-mergeability values need not be equal while GitHub settles them.
+in the cursor for an open pull request. A terminal pull request instead uses its
+convergence response's exact historical base revision because its base branch
+may already have advanced or been deleted. The rollup's commit, head, and
+base-branch evidence must agree with the REST pull-request projection and cursor
+generation or the poll fails without recording an assessment; independently
+sampled REST and GraphQL mergeability values need not be equal while GitHub
+settles them.
 
 **Implemented behavior.** A passing assessment for a pull request based on
 `main` is `merge_ready`. A passing assessment based on another branch is
