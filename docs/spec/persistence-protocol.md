@@ -46,7 +46,10 @@ Registration-loss-only same-runner completion for that workspace-free stage is
 verified against this PR (`agent/runner-same-runner-replacement-finalization`).
 Pending-enrollment activation inside that workspace-free terminal transaction is
 verified against this PR
-(`agent/runner-pending-workspace-free-replacement-finalization`). Existing-pin
+(`agent/runner-pending-workspace-free-replacement-finalization`). The pending
+managed-workspace release representation and independently checked readback are
+verified against this PR
+(`agent/runner-workspace-release-authority-persistence`). Existing-pin
 attempt-and-offer atomicity is verified against this PR
 (`agent/runner-pinned-dispatch-transaction`). The pinned-dispatch adapter's
 exact runner/registration lookup and returned enrollment routing identity are
@@ -716,6 +719,20 @@ Representation rules, all enforced in the schema:
   receipt. **Committed unimplemented functionality.** Repository-backed pending
   replacement remains staged until the workspace-receipt terminal transaction
   exists.
+- Migration `202608110027` retains one pending managed-workspace release under
+  the complete wire correlation plus storage-only predecessor, successor,
+  enrollment, and connected-event identities. Its deferred check admits only a
+  registration-lost managed predecessor followed immediately by a pinned
+  same-runner successor with its own revision-bound manifest, requires that
+  successor to be the current placement, authenticates the active enrollment and
+  exact connected authority head, and rejects a predecessor with an offered or
+  claimed lease. Typed readback rejoins both immutable placement records,
+  enrollment, and historical connection event before returning the correlation.
+  The relation is append-only and its initial state vocabulary is only
+  `pending`. **Committed unimplemented functionality.** No present production
+  transaction inserts, acknowledges, refuses, or retires this release; those
+  transitions must consume this exact representation rather than presenting
+  `RunnerWorkspaceReleaseCandidate` as cleanup authority.
 - Migration `202608110018` separates the registration revision retained by an
   immutable pinned placement from the then-current registration revision that
   authorizes each lease offer. Existing lease generations preserve their

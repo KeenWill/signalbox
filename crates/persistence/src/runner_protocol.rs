@@ -27,6 +27,8 @@ use signalbox_application::{
     RunnerReplacementProvisioningStage, RunnerReplacementProvisioningTransaction, ToolCatalog,
     ToolDefinition, ToolInputSchema,
 };
+#[cfg(feature = "postgres-integration")]
+use signalbox_domain::RunnerWorkspaceReleaseCandidate;
 use signalbox_domain::{
     AbandonLostRunner, AbandonLostRunnerRejection, AbandonLostRunnerResult, AbandonedLostRunner,
     AbandonedRunnerPlacement, CanonicalCloneUrlDigest, CredentialDispatchAuthorization,
@@ -844,6 +846,67 @@ impl StoredWorkspaceProvisioningAuthorization {
     /// Returns the exact optional credential profile.
     pub const fn credential_profile(&self) -> Option<&CredentialProfileName> {
         self.credential_profile.as_ref()
+    }
+}
+
+/// One relationally authenticated pending managed-workspace release.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StoredRunnerWorkspaceRelease {
+    session: SessionId,
+    placement_revision: RunnerGeneration,
+    runner: RunnerId,
+    manifest: WorkspaceManifestId,
+    retired_placement_event_ordinal: u64,
+    successor_placement_event_ordinal: u64,
+    enrollment: RunnerEnrollmentId,
+    connection_epoch: RunnerConnectionEpoch,
+    connection_event_ordinal: u64,
+}
+
+impl StoredRunnerWorkspaceRelease {
+    /// Returns the retired session named by the wire correlation.
+    pub const fn session(self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the exact retired placement revision.
+    pub const fn placement_revision(self) -> RunnerGeneration {
+        self.placement_revision
+    }
+
+    /// Returns the cleanup-owning runner.
+    pub const fn runner(self) -> RunnerId {
+        self.runner
+    }
+
+    /// Returns the protected predecessor manifest identity.
+    pub const fn manifest_id(self) -> WorkspaceManifestId {
+        self.manifest
+    }
+
+    /// Returns the storage-only retired placement event ordinal.
+    pub const fn retired_placement_event_ordinal(self) -> u64 {
+        self.retired_placement_event_ordinal
+    }
+
+    /// Returns the storage-only successor placement event ordinal.
+    pub const fn successor_placement_event_ordinal(self) -> u64 {
+        self.successor_placement_event_ordinal
+    }
+
+    /// Returns the enrollment that retained cleanup authority at enqueue.
+    pub const fn enrollment(self) -> RunnerEnrollmentId {
+        self.enrollment
+    }
+
+    /// Returns the connected epoch authenticated at enqueue.
+    pub const fn connection_epoch(self) -> RunnerConnectionEpoch {
+        self.connection_epoch
+    }
+
+    /// Returns the connected event ordinal authenticated at enqueue.
+    pub const fn connection_event_ordinal(self) -> u64 {
+        self.connection_event_ordinal
     }
 }
 
@@ -3005,6 +3068,157 @@ impl RunnerProtocolStore {
             sandbox,
             credential_profile,
         }))
+    }
+
+    /// Loads one exact pending managed-workspace release correlation.
+    pub async fn load_workspace_release(
+        &self,
+        session: SessionId,
+        placement_revision: RunnerGeneration,
+    ) -> Result<Option<StoredRunnerWorkspaceRelease>, RunnerProtocolStoreError> {
+        let row = sqlx::query(
+            "SELECT release.runner_id, release.manifest_id,
+                    release.retired_placement_event_ordinal,
+                    release.successor_placement_event_ordinal,
+                    release.enrollment_id, release.connection_epoch,
+                    release.connection_event_ordinal, release.state_kind,
+                    retired.event_kind AS retired_event_kind,
+                    retired.state_kind AS retired_state_kind,
+                    retired.loss_source_kind AS retired_loss_source_kind,
+                    retired.lost_runner_id AS retired_lost_runner_id,
+                    retired.pinned_runner_id AS retired_pinned_runner_id,
+                    retired.registration_enrollment_id AS retired_enrollment_id,
+                    retired.workspace_manifest_id AS retired_manifest_id,
+                    retired.workspace_placement_revision AS retired_workspace_revision,
+                    successor.event_kind AS successor_event_kind,
+                    successor.state_kind AS successor_state_kind,
+                    successor.placement_revision AS successor_revision,
+                    successor.pinned_runner_id AS successor_runner_id,
+                    successor.registration_enrollment_id AS successor_enrollment_id,
+                    successor.workspace_manifest_id AS successor_manifest_id,
+                    successor.workspace_placement_revision AS successor_workspace_revision,
+                    enrollment.runner_id AS enrollment_runner_id,
+                    connection.state_kind AS connection_state_kind
+               FROM runner_workspace_release AS release
+               JOIN runner_session_placement_record AS retired
+                 ON retired.session_id = release.session_id
+                AND retired.event_ordinal =
+                    release.retired_placement_event_ordinal
+                AND retired.placement_revision = release.placement_revision
+               JOIN runner_session_placement_record AS successor
+                 ON successor.session_id = release.session_id
+                AND successor.event_ordinal =
+                    release.successor_placement_event_ordinal
+               JOIN runner_enrollment AS enrollment
+                 ON enrollment.enrollment_id = release.enrollment_id
+               JOIN runner_connection_event AS connection
+                 ON connection.enrollment_id = release.enrollment_id
+                AND connection.connection_epoch = release.connection_epoch
+                AND connection.event_ordinal =
+                    release.connection_event_ordinal
+              WHERE release.session_id = $1
+                AND release.placement_revision = $2",
+        )
+        .bind(session.into_uuid())
+        .bind(Decimal::from(placement_revision.get()))
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let runner = runner_id(row.decode_column("runner_id")?);
+        let manifest = WorkspaceManifestId::from_uuid(row.decode_column("manifest_id")?);
+        let retired_placement_event_ordinal =
+            decode_u64(row.decode_column("retired_placement_event_ordinal")?)?;
+        let successor_placement_event_ordinal =
+            decode_u64(row.decode_column("successor_placement_event_ordinal")?)?;
+        let enrollment = RunnerEnrollmentId::from_uuid(row.decode_column("enrollment_id")?);
+        let connection_epoch = RunnerConnectionEpoch::try_from_u64(decode_u64(
+            row.decode_column("connection_epoch")?,
+        )?)
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        let connection_event_ordinal = decode_u64(row.decode_column("connection_event_ordinal")?)?;
+        let successor_revision =
+            decode_runner_generation(row.decode_column("successor_revision")?)?;
+        let expected_successor_revision = placement_revision
+            .checked_next()
+            .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
+        if row.decode_column::<String>("state_kind")? != "pending"
+            || row.decode_column::<String>("retired_event_kind")? != "runner_lost"
+            || row.decode_column::<String>("retired_state_kind")? != "runner_lost"
+            || row.decode_column::<String>("retired_loss_source_kind")? != "registration"
+            || row.decode_column::<Uuid>("retired_lost_runner_id")? != runner.into_uuid()
+            || row.decode_column::<Uuid>("retired_pinned_runner_id")? != runner.into_uuid()
+            || row.decode_column::<Uuid>("retired_enrollment_id")? != enrollment.into_uuid()
+            || row.decode_column::<Uuid>("retired_manifest_id")? != manifest.into_uuid()
+            || decode_runner_generation(row.decode_column("retired_workspace_revision")?)?
+                != placement_revision
+            || row.decode_column::<String>("successor_event_kind")? != "runner_replaced"
+            || row.decode_column::<String>("successor_state_kind")? != "pinned"
+            || successor_revision != expected_successor_revision
+            || row.decode_column::<Uuid>("successor_runner_id")? != runner.into_uuid()
+            || row.decode_column::<Uuid>("successor_enrollment_id")? != enrollment.into_uuid()
+            || row.decode_column::<Uuid>("successor_manifest_id")? == manifest.into_uuid()
+            || decode_runner_generation(row.decode_column("successor_workspace_revision")?)?
+                != successor_revision
+            || row.decode_column::<Uuid>("enrollment_runner_id")? != runner.into_uuid()
+            || row.decode_column::<String>("connection_state_kind")? != "connected"
+            || successor_placement_event_ordinal
+                != retired_placement_event_ordinal
+                    .checked_add(1)
+                    .ok_or(RunnerProtocolCorruption::GenerationExhausted)?
+        {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        Ok(Some(StoredRunnerWorkspaceRelease {
+            session,
+            placement_revision,
+            runner,
+            manifest,
+            retired_placement_event_ordinal,
+            successor_placement_event_ordinal,
+            enrollment,
+            connection_epoch,
+            connection_event_ordinal,
+        }))
+    }
+
+    /// Stores a checked pending release projection for PostgreSQL integration tests.
+    ///
+    /// Production enqueue belongs to the later replacement terminal transaction;
+    /// this feature-gated surface only exercises the durable representation and
+    /// typed readback without presenting candidate evidence as cleanup authority.
+    #[cfg(feature = "postgres-integration")]
+    #[doc(hidden)]
+    pub async fn store_workspace_release_projection_for_test(
+        &self,
+        candidate: &RunnerWorkspaceReleaseCandidate,
+        retired_placement_event_ordinal: u64,
+        successor_placement_event_ordinal: u64,
+        enrollment: RunnerEnrollmentId,
+        connection_epoch: RunnerConnectionEpoch,
+        connection_event_ordinal: u64,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        sqlx::query(
+            "INSERT INTO runner_workspace_release
+                (session_id, placement_revision, runner_id, manifest_id,
+                 retired_placement_event_ordinal,
+                 successor_placement_event_ordinal, enrollment_id,
+                 connection_epoch, connection_event_ordinal, state_kind)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending')",
+        )
+        .bind(candidate.session().into_uuid())
+        .bind(Decimal::from(candidate.placement_revision().get()))
+        .bind(candidate.runner().into_uuid())
+        .bind(candidate.manifest_id().into_uuid())
+        .bind(Decimal::from(retired_placement_event_ordinal))
+        .bind(Decimal::from(successor_placement_event_ordinal))
+        .bind(enrollment.into_uuid())
+        .bind(Decimal::from(connection_epoch.get()))
+        .bind(Decimal::from(connection_event_ordinal))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Claims one exact-directory pinned replacement for later terminalization.
