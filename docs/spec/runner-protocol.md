@@ -67,7 +67,9 @@ daemon's checked lease-only resume directives and canonical claim/dispatch
 replay are re-verified through this PR
 (`agent/runner-claimed-resume-transaction`). The reusable runner-restricted
 bubblewrap request profile is re-verified through this PR
-(`agent/runner-strict-sandbox-profile`). The placement loss-source, pre-pin
+(`agent/runner-strict-sandbox-profile`). Runner consumption of the exact
+lease-only resume directive is re-verified through this PR
+(`agent/runner-claimed-resume-client`). The placement loss-source, pre-pin
 replacement and abandonment state shapes, and append-only reconstitution-history
 contract are re-verified through this PR (`agent/runner-placement-loss-domain`).
 It owns logical runner enrollment, daemon-authoritative catalog validation,
@@ -740,8 +742,12 @@ that epoch as transport loss. An exact inventory whose claimed lease is already
 stale instead receives
 `fail_stale` and no replayed operation frame. An `execution_may_have_started`
 lease without a result remains unavailable until the loss-classification slice
-consumes it. The runner does not yet consume the lease-only `await` directive or
-either replayed frame, so this daemon recovery path cannot yet produce
+consumes it. The runner consumes the exact lease-only `await` directive for
+`waiting_dispatch` and `dispatch_received` by preserving the journaled phase,
+and consumes `fail_stale` by atomically clearing only either of those
+execution-impossible phases. It rejects every other action and never clears an
+`execution_may_have_started` lease through this path. It does not yet consume
+either replayed operation frame, so this daemon recovery path cannot yet produce
 execution.
 
 ## Identity, enrollment, and registration
