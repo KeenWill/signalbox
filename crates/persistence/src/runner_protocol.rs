@@ -44,8 +44,8 @@ use signalbox_domain::{
     ToolName, ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId,
     ValidatedRunnerRegistration, ValidatedRunnerRegistrationReconstitutionInput,
     WorkingDirectorySelection, WorkspaceBranchName, WorkspaceCapability, WorkspaceManifestId,
-    WorkspaceRecovery, WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRequirement,
-    WorkspaceRevision,
+    WorkspaceProvisioningAuthorizationId, WorkspaceRecovery, WorkspaceRelativePath,
+    WorkspaceRepositoryKey, WorkspaceRequirement, WorkspaceRevision,
 };
 use sqlx::{
     PgConnection, PgPool, Postgres, QueryBuilder, Row, Transaction, postgres::PgRow, types::Uuid,
@@ -735,6 +735,97 @@ pub struct StoredSessionRunnerPlacement {
     registration: Option<StoredValidatedRunnerRegistration>,
     grant: Option<CredentialProfileGrant>,
     interrupted_tool_attempt: Option<ToolAttemptId>,
+}
+
+/// Immutable relational facts for one staged repository-provisioning boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredWorkspaceProvisioningAuthorization {
+    command: DurableCommandId,
+    authorization: WorkspaceProvisioningAuthorizationId,
+    session: SessionId,
+    lost_placement_event_ordinal: u64,
+    lost_placement_revision: RunnerGeneration,
+    successor_placement_revision: RunnerGeneration,
+    enrollment: RunnerEnrollmentId,
+    runner: RunnerId,
+    registration_revision: RunnerGeneration,
+    connection_epoch: RunnerConnectionEpoch,
+    connection_event_ordinal: u64,
+    repository: WorkspaceRepositoryKey,
+    sandbox: RunnerSandboxProfile,
+    credential_profile: Option<CredentialProfileName>,
+}
+
+impl StoredWorkspaceProvisioningAuthorization {
+    /// Returns the durable replacement command that owns the authorization.
+    pub const fn command(&self) -> DurableCommandId {
+        self.command
+    }
+
+    /// Returns the single-use provisioning identity.
+    pub const fn authorization(&self) -> WorkspaceProvisioningAuthorizationId {
+        self.authorization
+    }
+
+    /// Returns the owning session.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the exact lost-placement event ordinal observed at staging.
+    pub const fn lost_placement_event_ordinal(&self) -> u64 {
+        self.lost_placement_event_ordinal
+    }
+
+    /// Returns the exact lost placement revision observed at staging.
+    pub const fn lost_placement_revision(&self) -> RunnerGeneration {
+        self.lost_placement_revision
+    }
+
+    /// Returns the successor placement revision being provisioned.
+    pub const fn successor_placement_revision(&self) -> RunnerGeneration {
+        self.successor_placement_revision
+    }
+
+    /// Returns the selected enrollment.
+    pub const fn enrollment(&self) -> RunnerEnrollmentId {
+        self.enrollment
+    }
+
+    /// Returns the selected runner.
+    pub const fn runner(&self) -> RunnerId {
+        self.runner
+    }
+
+    /// Returns the exact selected registration revision.
+    pub const fn registration_revision(&self) -> RunnerGeneration {
+        self.registration_revision
+    }
+
+    /// Returns the connected epoch observed at staging.
+    pub const fn connection_epoch(&self) -> RunnerConnectionEpoch {
+        self.connection_epoch
+    }
+
+    /// Returns the connected event ordinal observed at staging.
+    pub const fn connection_event_ordinal(&self) -> u64 {
+        self.connection_event_ordinal
+    }
+
+    /// Returns the exact repository key.
+    pub const fn repository(&self) -> &WorkspaceRepositoryKey {
+        &self.repository
+    }
+
+    /// Returns the immutable sandbox profile.
+    pub const fn sandbox(&self) -> RunnerSandboxProfile {
+        self.sandbox
+    }
+
+    /// Returns the exact optional credential profile.
+    pub const fn credential_profile(&self) -> Option<&CredentialProfileName> {
+        self.credential_profile.as_ref()
+    }
 }
 
 /// One relationally authenticated active turn parked on runner loss.
@@ -2409,6 +2500,209 @@ impl RunnerProtocolStore {
         };
         transaction.commit().await?;
         Ok(loaded)
+    }
+
+    /// Loads one immutable staged workspace-provisioning authorization.
+    pub async fn load_workspace_provisioning_authorization(
+        &self,
+        authorization: WorkspaceProvisioningAuthorizationId,
+    ) -> Result<Option<StoredWorkspaceProvisioningAuthorization>, RunnerProtocolStoreError> {
+        let row = sqlx::query(
+            "SELECT staged.command_id, staged.session_id,
+                    staged.lost_placement_event_ordinal,
+                    staged.lost_placement_revision,
+                    staged.successor_placement_revision,
+                    staged.enrollment_id, staged.runner_id,
+                    staged.registration_revision,
+                    staged.connection_epoch,
+                    staged.connection_event_ordinal,
+                    staged.repository_key,
+                    staged.sandbox_profile,
+                    staged.credential_profile_name,
+                    command.expected_placement_revision,
+                    command.target_kind, command.target_runner_id,
+                    command.target_pending_request_id,
+                    placement.state_kind AS placement_state_kind,
+                    placement.lost_runner_id,
+                    placement.loss_source_kind,
+                    placement.loss_registration_revision,
+                    placement.workspace_requirement_kind,
+                    placement.requested_repository_key,
+                    placement.requested_sandbox_profile,
+                    placement.requested_credential_profile_name,
+                    registration.runner_id AS registration_runner_id,
+                    connection.state_kind AS connection_state_kind,
+                    pending.enrollment_id AS pending_enrollment_id,
+                    repository.credential_profile_name AS repository_profile_name,
+                    EXISTS (
+                        SELECT 1 FROM runner_registration_workspace AS workspace
+                         WHERE workspace.enrollment_id = staged.enrollment_id
+                           AND workspace.registration_revision =
+                                staged.registration_revision
+                           AND workspace.workspace_kind = 'worktree_per_session'
+                    ) AS advertises_workspace,
+                    EXISTS (
+                        SELECT 1 FROM runner_registration_sandbox AS sandbox
+                         WHERE sandbox.enrollment_id = staged.enrollment_id
+                           AND sandbox.registration_revision =
+                                staged.registration_revision
+                           AND sandbox.sandbox_profile = staged.sandbox_profile
+                    ) AS advertises_sandbox,
+                    staged.credential_profile_name IS NULL OR EXISTS (
+                        SELECT 1 FROM runner_registration_profile AS profile
+                         WHERE profile.enrollment_id = staged.enrollment_id
+                           AND profile.registration_revision =
+                                staged.registration_revision
+                           AND profile.credential_profile_name =
+                                staged.credential_profile_name
+                    ) AS advertises_profile
+               FROM runner_workspace_provisioning_authorization AS staged
+               JOIN replace_lost_runner_command AS command
+                 ON command.command_id = staged.command_id
+                AND command.session_id = staged.session_id
+               JOIN runner_session_placement_record AS placement
+                 ON placement.session_id = staged.session_id
+                AND placement.event_ordinal =
+                    staged.lost_placement_event_ordinal
+                AND placement.placement_revision =
+                    staged.lost_placement_revision
+               JOIN runner_registration AS registration
+                 ON registration.enrollment_id = staged.enrollment_id
+                AND registration.registration_revision =
+                    staged.registration_revision
+                AND registration.runner_id = staged.runner_id
+               JOIN runner_connection_event AS connection
+                 ON connection.enrollment_id = staged.enrollment_id
+                AND connection.connection_epoch = staged.connection_epoch
+                AND connection.event_ordinal =
+                    staged.connection_event_ordinal
+               LEFT JOIN runner_pending_enrollment AS pending
+                 ON pending.request_id = command.target_pending_request_id
+                AND pending.enrollment_id = staged.enrollment_id
+               LEFT JOIN runner_registration_repository AS repository
+                 ON repository.enrollment_id = staged.enrollment_id
+                AND repository.registration_revision =
+                    staged.registration_revision
+                AND repository.repository_key = staged.repository_key
+              WHERE staged.authorization_id = $1",
+        )
+        .bind(authorization.into_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let command = DurableCommandId::from_uuid(row.decode_column("command_id")?);
+        let session = session_id(row.decode_column("session_id")?);
+        let lost_placement_event_ordinal =
+            decode_u64(row.decode_column("lost_placement_event_ordinal")?)?;
+        let lost_placement_revision =
+            decode_runner_generation(row.decode_column("lost_placement_revision")?)?;
+        let successor_placement_revision =
+            decode_runner_generation(row.decode_column("successor_placement_revision")?)?;
+        let enrollment = RunnerEnrollmentId::from_uuid(row.decode_column("enrollment_id")?);
+        let runner = runner_id(row.decode_column("runner_id")?);
+        let registration_revision =
+            decode_runner_generation(row.decode_column("registration_revision")?)?;
+        let connection_epoch = RunnerConnectionEpoch::try_from_u64(decode_u64(
+            row.decode_column("connection_epoch")?,
+        )?)
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        let connection_event_ordinal = decode_u64(row.decode_column("connection_event_ordinal")?)?;
+        let repository = WorkspaceRepositoryKey::try_new(row.decode_column("repository_key")?)
+            .map_err(|_| RunnerProtocolCorruption::InvalidEncoding)?;
+        let sandbox: String = row.decode_column("sandbox_profile")?;
+        let sandbox =
+            runner_sandbox_from_str(&sandbox).ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        let credential_profile: Option<String> = row.decode_column("credential_profile_name")?;
+        let credential_profile = credential_profile
+            .map(CredentialProfileName::try_new)
+            .transpose()
+            .map_err(|_| RunnerProtocolCorruption::InvalidEncoding)?;
+        let expected = decode_runner_generation(row.decode_column("expected_placement_revision")?)?;
+        let target_kind: String = row.decode_column("target_kind")?;
+        let target_runner: Option<Uuid> = row.decode_column("target_runner_id")?;
+        let target_pending_request: Option<Uuid> =
+            row.decode_column("target_pending_request_id")?;
+        let pending_enrollment: Option<Uuid> = row.decode_column("pending_enrollment_id")?;
+        let placement_state: String = row.decode_column("placement_state_kind")?;
+        let lost_runner: Uuid = row.decode_column("lost_runner_id")?;
+        let loss_source: String = row.decode_column("loss_source_kind")?;
+        let loss_registration: Option<Decimal> = row.decode_column("loss_registration_revision")?;
+        let workspace_requirement: String = row.decode_column("workspace_requirement_kind")?;
+        let requested_repository: String = row.decode_column("requested_repository_key")?;
+        let requested_sandbox: String = row.decode_column("requested_sandbox_profile")?;
+        let requested_profile: Option<String> =
+            row.decode_column("requested_credential_profile_name")?;
+        let registration_runner: Uuid = row.decode_column("registration_runner_id")?;
+        let connection_state: String = row.decode_column("connection_state_kind")?;
+        let repository_profile: Option<String> = row.decode_column("repository_profile_name")?;
+        let advertises_workspace: bool = row.decode_column("advertises_workspace")?;
+        let advertises_sandbox: bool = row.decode_column("advertises_sandbox")?;
+        let advertises_profile: bool = row.decode_column("advertises_profile")?;
+        let next_revision = lost_placement_revision
+            .checked_next()
+            .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
+        let target_matches = match target_kind.as_str() {
+            "runner" => {
+                target_runner == Some(runner.into_uuid())
+                    && target_pending_request.is_none()
+                    && lost_runner != runner.into_uuid()
+            }
+            "pending_enrollment" => {
+                target_runner.is_none()
+                    && target_pending_request.is_some()
+                    && pending_enrollment == Some(enrollment.into_uuid())
+                    && lost_runner != runner.into_uuid()
+            }
+            "same_runner_reenrollment" => {
+                target_runner == Some(runner.into_uuid())
+                    && target_pending_request.is_none()
+                    && lost_runner == runner.into_uuid()
+                    && loss_source == "registration"
+                    && loss_registration.is_some()
+            }
+            _ => false,
+        };
+        if expected != lost_placement_revision
+            || successor_placement_revision != next_revision
+            || placement_state != "runner_lost"
+            || workspace_requirement != "repository_worktree"
+            || requested_repository != repository.as_str()
+            || requested_sandbox != runner_sandbox_to_str(sandbox)
+            || requested_profile.as_deref()
+                != credential_profile
+                    .as_ref()
+                    .map(CredentialProfileName::as_str)
+            || registration_runner != runner.into_uuid()
+            || connection_state != "connected"
+            || repository_profile.as_deref()
+                != credential_profile
+                    .as_ref()
+                    .map(CredentialProfileName::as_str)
+            || !advertises_workspace
+            || !advertises_sandbox
+            || !advertises_profile
+            || !target_matches
+        {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        Ok(Some(StoredWorkspaceProvisioningAuthorization {
+            command,
+            authorization,
+            session,
+            lost_placement_event_ordinal,
+            lost_placement_revision,
+            successor_placement_revision,
+            enrollment,
+            runner,
+            registration_revision,
+            connection_epoch,
+            connection_event_ordinal,
+            repository,
+            sandbox,
+            credential_profile,
+        }))
     }
 
     /// Replaces one exact runner lost before pinning with a different live runner.

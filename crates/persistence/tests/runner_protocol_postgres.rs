@@ -8,7 +8,7 @@
 
 use std::{error::Error, num::NonZeroU64, time::Duration};
 
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_application::{
     AbandonLostRunnerOutcome, ImportedConversationConverter, ImportedConversationStore,
     PromotePendingRunnerOutcome, ReplaceLostRunnerBeforePinOutcome,
@@ -50,8 +50,8 @@ use signalbox_domain::{
     ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal,
     ToolRequestReconstitutionInput, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
     ValidatedRunnerRegistration, WorkingDirectorySelection, WorkspaceCapability,
-    WorkspaceManifestId, WorkspaceRecovery, WorkspaceRelativePath, WorkspaceRepositoryKey,
-    WorkspaceRequirement, WorkspaceRevision,
+    WorkspaceManifestId, WorkspaceProvisioningAuthorizationId, WorkspaceRecovery,
+    WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRequirement, WorkspaceRevision,
 };
 use signalbox_persistence::{
     MIGRATOR,
@@ -134,6 +134,8 @@ const PENDING_DISCONNECTED_REPLACEMENT_COMMAND: u128 = 0x937b;
 const FOREIGN_PREDECESSOR_REPLACEMENT_COMMAND: u128 = 0x937c;
 const ACTIVATED_PENDING_REPLACEMENT_COMMAND: u128 = 0x937d;
 const UNADVERTISED_PENDING_REPLACEMENT_COMMAND: u128 = 0x937e;
+const WORKSPACE_REPLACEMENT_COMMAND: u128 = 0x937f;
+const WORKSPACE_PROVISIONING_AUTHORIZATION: u128 = 0x9380;
 const REGISTER_WORKSPACE_COMMAND: u128 = 0x9362;
 const REGISTERED_WORKSPACE: u128 = 0x9363;
 const MINT_GIT_REMOTE_COMMAND: u128 = 0x9364;
@@ -200,6 +202,24 @@ struct PendingPrePinReplacementFixture {
     candidate_request: RunnerEnrollmentRequestId,
     candidate_registration: RunnerGeneration,
     successor_placement_revision: RunnerGeneration,
+}
+
+struct WorkspaceProvisioningAuthorizationFixture {
+    store: RunnerProtocolStore,
+    command: DurableCommandId,
+    authorization: WorkspaceProvisioningAuthorizationId,
+    session: SessionId,
+    lost_placement_event_ordinal: u64,
+    lost_placement_revision: RunnerGeneration,
+    successor_placement_revision: RunnerGeneration,
+    enrollment: RunnerEnrollmentId,
+    runner: RunnerId,
+    registration_revision: RunnerGeneration,
+    connection_epoch: RunnerConnectionEpoch,
+    connection_event_ordinal: u64,
+    repository: WorkspaceRepositoryKey,
+    sandbox: RunnerSandboxProfile,
+    credential_profile: Option<CredentialProfileName>,
 }
 
 async fn pending_promotion_fixture(
@@ -1314,6 +1334,190 @@ async fn stored_pin_fixture(
         "effect_free",
     )
     .await
+}
+
+async fn workspace_provisioning_authorization_fixture(
+    pool: &PgPool,
+    credential_profile: Option<CredentialProfileName>,
+) -> Result<WorkspaceProvisioningAuthorizationFixture, Box<dyn Error>> {
+    insert_session(pool).await?;
+    insert_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let predecessor = enrollment();
+    store.insert_enrollment(&predecessor).await?;
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let repository = repository_key();
+    let sandbox = RunnerSandboxProfile::Ambient;
+    let fixture_advertisement = RunnerAdvertisement::new(
+        [class()],
+        [tool("inspect")],
+        [profile(), replacement_profile()],
+        [WorkspaceCapability::WorktreePerSession],
+        sandbox_profiles(),
+        [RunnerRepositoryEntry::new(
+            repository.clone(),
+            credential_profile.clone(),
+        )],
+    );
+    let predecessor_registration = store
+        .register(&predecessor, fixture_advertisement.clone())
+        .await?;
+    store.open_connection(predecessor.enrollment()).await?;
+    let request = SessionRunnerPlacementRequest {
+        selector: RunnerSelector::CapabilityClass(class()),
+        working_directory: WorkingDirectorySelection::RunnerDefault,
+        credential_profile: credential_profile.clone(),
+        workspace: WorkspaceRequirement::RepositoryWorktree {
+            repository: repository.clone(),
+        },
+        sandbox,
+        permission_overrides: no_permission_overrides(),
+    };
+    let placement = SessionRunnerPlacement::new(session, request);
+    store.store_placement(&placement, None, None).await?;
+    let working_directory = RunnerWorkingDirectory::try_new(
+        "/workspace/replacement-authorization-predecessor".to_owned(),
+    )
+    .expect("the fixture workspace directory is valid");
+    let workspace = ProvisionedWorkspace {
+        session,
+        placement_revision: RunnerGeneration::one(),
+        runner: predecessor.runner(),
+        repository: Some(repository.clone()),
+        canonical_clone_url_digest: Some(
+            CanonicalCloneUrlDigest::try_new("a".repeat(64))
+                .expect("the fixture clone URL digest is canonical"),
+        ),
+        credential_profile: credential_profile.clone(),
+        sandbox,
+        working_directory: working_directory.clone(),
+        relative_path: WorkspaceRelativePath::try_new(format!(
+            "sessions/{}/1/repo",
+            session.as_uuid()
+        ))
+        .expect("the fixture repository path is relative"),
+        manifest_id: WorkspaceManifestId::from_uuid(uuid(0x9381)),
+        recovery: Some(WorkspaceRecovery::Commit {
+            revision: WorkspaceRevision::try_new("b".repeat(40))
+                .expect("the fixture revision is canonical"),
+        }),
+    };
+    let pin = placement
+        .pin_and_offer_lease(
+            &predecessor,
+            predecessor_registration.registration(),
+            working_directory,
+            Some(workspace),
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the repository placement pins with its complete workspace");
+    store.store_pin(&pin, &predecessor_registration).await?;
+    append_runner_lost_projection(pool, session).await?;
+    let successor = replacement_enrollment();
+    store.insert_enrollment(&successor).await?;
+    let successor_registration = store.register(&successor, fixture_advertisement).await?;
+    let connection = store.open_connection(successor.enrollment()).await?;
+    let lost_placement_event_ordinal: Decimal = sqlx::query_scalar(
+        "SELECT event_ordinal
+           FROM runner_current_session_placement
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    let connection_event_ordinal: Decimal = sqlx::query_scalar(
+        "SELECT connection_event_ordinal
+           FROM runner_connection_authority_head
+          WHERE enrollment_id = $1",
+    )
+    .bind(successor.enrollment().into_uuid())
+    .fetch_one(pool)
+    .await?;
+    Ok(WorkspaceProvisioningAuthorizationFixture {
+        store,
+        command: DurableCommandId::from_uuid(uuid(WORKSPACE_REPLACEMENT_COMMAND)),
+        authorization: WorkspaceProvisioningAuthorizationId::from_uuid(uuid(
+            WORKSPACE_PROVISIONING_AUTHORIZATION,
+        )),
+        session,
+        lost_placement_event_ordinal: lost_placement_event_ordinal
+            .to_u64()
+            .expect("the fixture event ordinal is an unsigned integer"),
+        lost_placement_revision: RunnerGeneration::one(),
+        successor_placement_revision: RunnerGeneration::try_from_u64(2)
+            .expect("the successor revision is positive"),
+        enrollment: successor.enrollment(),
+        runner: successor.runner(),
+        registration_revision: successor_registration.registration().revision(),
+        connection_epoch: connection.epoch(),
+        connection_event_ordinal: connection_event_ordinal
+            .to_u64()
+            .expect("the fixture connection event ordinal is unsigned"),
+        repository,
+        sandbox,
+        credential_profile,
+    })
+}
+
+async fn insert_workspace_provisioning_authorization_projection(
+    pool: &PgPool,
+    fixture: &WorkspaceProvisioningAuthorizationFixture,
+    repository: &WorkspaceRepositoryKey,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'replace_lost_runner', 1, transaction_timestamp())",
+    )
+    .bind(fixture.command.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO replace_lost_runner_command
+            (command_id, session_id, expected_placement_revision,
+             target_kind, target_runner_id)
+         VALUES ($1, $2, $3, 'runner', $4)",
+    )
+    .bind(fixture.command.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(Decimal::from(fixture.lost_placement_revision.get()))
+    .bind(fixture.runner.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_workspace_provisioning_authorization
+            (authorization_id, command_id, session_id,
+             lost_placement_event_ordinal, lost_placement_revision,
+             successor_placement_revision, enrollment_id, runner_id,
+             registration_revision, connection_epoch,
+             connection_event_ordinal, repository_key, sandbox_profile,
+             credential_profile_name)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                 'ambient', $13)",
+    )
+    .bind(fixture.authorization.into_uuid())
+    .bind(fixture.command.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(Decimal::from(fixture.lost_placement_event_ordinal))
+    .bind(Decimal::from(fixture.lost_placement_revision.get()))
+    .bind(Decimal::from(fixture.successor_placement_revision.get()))
+    .bind(fixture.enrollment.into_uuid())
+    .bind(fixture.runner.into_uuid())
+    .bind(Decimal::from(fixture.registration_revision.get()))
+    .bind(Decimal::from(fixture.connection_epoch.get()))
+    .bind(Decimal::from(fixture.connection_event_ordinal))
+    .bind(repository.as_str())
+    .bind(
+        fixture
+            .credential_profile
+            .as_ref()
+            .map(CredentialProfileName::as_str),
+    )
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await
 }
 
 async fn stored_active_pin_fixture_with_authorization(
@@ -19891,6 +20095,144 @@ async fn s32_inv044_worktree_pin_requires_provisioned_facts() -> Result<(), Box<
     .expect_err("a pinned worktree placement requires both provisioned facts");
 
     assert_check_violation(missing_workspace);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: staged replacement provisioning retains and independently
+/// reads every command, loss-boundary, runner, and workspace correlation.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_profileless_workspace_provisioning_authorization_round_trips()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_provisioning_authorization_fixture(&pool, None).await?;
+    insert_workspace_provisioning_authorization_projection(&pool, &fixture, &fixture.repository)
+        .await?;
+    let loaded = fixture
+        .store
+        .load_workspace_provisioning_authorization(fixture.authorization)
+        .await?
+        .expect("the checked authorization reads back");
+
+    assert_eq!(loaded.command(), fixture.command);
+    assert_eq!(loaded.authorization(), fixture.authorization);
+    assert_eq!(loaded.session(), fixture.session);
+    assert_eq!(
+        loaded.lost_placement_event_ordinal(),
+        fixture.lost_placement_event_ordinal
+    );
+    assert_eq!(
+        loaded.lost_placement_revision(),
+        fixture.lost_placement_revision
+    );
+    assert_eq!(
+        loaded.successor_placement_revision(),
+        fixture.successor_placement_revision
+    );
+    assert_eq!(loaded.enrollment(), fixture.enrollment);
+    assert_eq!(loaded.runner(), fixture.runner);
+    assert_eq!(
+        loaded.registration_revision(),
+        fixture.registration_revision
+    );
+    assert_eq!(loaded.connection_epoch(), fixture.connection_epoch);
+    assert_eq!(
+        loaded.connection_event_ordinal(),
+        fixture.connection_event_ordinal
+    );
+    assert_eq!(loaded.repository(), &fixture.repository);
+    assert_eq!(loaded.sandbox(), fixture.sandbox);
+    assert_eq!(loaded.credential_profile(), None);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: the optional credential arm reads back the exact profile
+/// selected by both the placement and repository entry.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_profiled_workspace_provisioning_authorization_round_trips()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let selected_profile = profile();
+    let fixture =
+        workspace_provisioning_authorization_fixture(&pool, Some(selected_profile.clone())).await?;
+    insert_workspace_provisioning_authorization_projection(&pool, &fixture, &fixture.repository)
+        .await?;
+    let loaded = fixture
+        .store
+        .load_workspace_provisioning_authorization(fixture.authorization)
+        .await?
+        .expect("the profiled authorization reads back");
+
+    assert_eq!(loaded.authorization(), fixture.authorization);
+    assert_eq!(loaded.credential_profile(), Some(&selected_profile));
+    assert_eq!(loaded.repository(), &fixture.repository);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: readback rejects a stored sandbox that no longer matches the
+/// exact lost placement even when the selected registration advertises it.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_provisioning_authorization_readback_rejects_cross_wired_sandbox()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_provisioning_authorization_fixture(&pool, None).await?;
+    insert_workspace_provisioning_authorization_projection(&pool, &fixture, &fixture.repository)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE runner_workspace_provisioning_authorization
+         DISABLE TRIGGER runner_workspace_provisioning_authorization_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_workspace_provisioning_authorization
+            SET sandbox_profile = 'workspace_restricted'
+          WHERE authorization_id = $1",
+    )
+    .bind(fixture.authorization.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE runner_workspace_provisioning_authorization
+         ENABLE TRIGGER runner_workspace_provisioning_authorization_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    let corrupted = fixture
+        .store
+        .load_workspace_provisioning_authorization(fixture.authorization)
+        .await
+        .expect_err("the read boundary rejects a cross-wired sandbox");
+
+    assert_store_corruption(corrupted, RunnerProtocolCorruption::CrossWiredReference);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: the relational boundary rejects repository authority absent
+/// from both the lost placement and the selected registration.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_provisioning_authorization_rejects_a_cross_wired_repository()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_provisioning_authorization_fixture(&pool, None).await?;
+    let foreign_repository = WorkspaceRepositoryKey::try_new("foreign".to_owned())
+        .expect("the foreign fixture repository key is valid");
+    let rejected = insert_workspace_provisioning_authorization_projection(
+        &pool,
+        &fixture,
+        &foreign_repository,
+    )
+    .await
+    .expect_err("the authorization cannot select a foreign repository");
+
+    assert_check_violation(rejected);
     drop(pool);
     Ok(())
 }
