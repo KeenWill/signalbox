@@ -8,7 +8,7 @@ use std::{
 use signalbox_process_protocol::{
     AnthropicServiceTier, CodexCliServiceTier, ConversationImportRejectionClass, ErrorCode,
     ErrorDetail, FailedModelCallCause, FrameDecodeError, FrameEncodeError, GoalCommandRejection,
-    OpenAiServiceTier, ReasoningLevel, RejectionDetail, ServiceTier,
+    OpenAiServiceTier, ReasoningLevel, RejectionDetail, RunnerNonLostConnectionState, ServiceTier,
 };
 
 #[derive(Debug)]
@@ -323,6 +323,16 @@ const fn goal_command_rejection_name(reason: GoalCommandRejection) -> &'static s
     }
 }
 
+const fn runner_non_lost_connection_state_name(
+    state: RunnerNonLostConnectionState,
+) -> &'static str {
+    match state {
+        RunnerNonLostConnectionState::Connected => "connected",
+        RunnerNonLostConnectionState::Suspect => "suspect",
+        RunnerNonLostConnectionState::Shutdown => "shutdown",
+    }
+}
+
 struct RejectionDisplay(RejectionDetail);
 
 impl fmt::Display for RejectionDisplay {
@@ -350,6 +360,25 @@ impl fmt::Display for RejectionDisplay {
             RejectionDetail::SessionNotFound { session_id } => {
                 write!(formatter, "session_not_found session={session_id}")
             }
+            RejectionDetail::NoPendingRunnerEnrollment {} => {
+                formatter.write_str("no_pending_runner_enrollment")
+            }
+            RejectionDetail::PendingRequestMismatch { pending_request_id } => write!(
+                formatter,
+                "pending_request_mismatch pending_request={pending_request_id}"
+            ),
+            RejectionDetail::PendingRequestDisconnected { pending_request_id } => write!(
+                formatter,
+                "pending_request_disconnected pending_request={pending_request_id}"
+            ),
+            RejectionDetail::ActiveRunnerNotLost {
+                runner_id,
+                connection_state,
+            } => write!(
+                formatter,
+                "active_runner_not_lost runner={runner_id} connection_state={}",
+                runner_non_lost_connection_state_name(connection_state)
+            ),
             RejectionDetail::SessionPlacementCurrentVersionMismatch {
                 session_id,
                 expected_placement_version,

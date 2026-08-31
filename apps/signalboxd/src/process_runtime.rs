@@ -19,6 +19,7 @@ use signalbox_application::{
     ImportConversationOutcome, ImportConversationService, ImportedConversationConverter,
     InProcessEligibilityNudge, InProcessToolDispatchGate, ListConversationsService,
     ListSessionMetadataService, LoadSessionMetadataService, OperatorFailureClass,
+    PromotePendingRunnerOutcome, PromotePendingRunnerRequest, PromotePendingRunnerService,
     PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
     ReplaceSessionDefaultsService, ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest,
     ReplaceSessionMetadataService, ReviewPassCompletionStatus, ReviewWorkflowCommand,
@@ -58,14 +59,14 @@ use signalbox_domain::{
     ModelSelectionRequest, ModelSettingSource as DomainModelSettingSource,
     ModelSettingsOverlay as DomainModelSettingsOverlay,
     ModelSettingsPrecedence as DomainModelSettingsPrecedence, ParentTerminationCommandSource,
-    PerInputConfigurationChoices, ReasoningLevel as DomainReasoningLevel,
-    ReplaceSessionDefaults as DomainReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
-    ReplaceSessionDefaultsResult, ReplaceSessionMetadataRejectedResult,
-    ReplaceSessionMetadataResult, ReviewChangeRequestNumber, ReviewConfidence, ReviewEventOrdinal,
-    ReviewExternalLink, ReviewExternalLinkAssociation, ReviewExternalLinkAttachment,
-    ReviewExternalLinkAttachmentResult, ReviewExternalLinkId, ReviewExternalObjectKind,
-    ReviewFinding, ReviewFindingConfidenceAxes, ReviewFindingContent, ReviewFindingDiffSide,
-    ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
+    PerInputConfigurationChoices, PromotePendingRunnerRejection, PromotePendingRunnerResult,
+    ReasoningLevel as DomainReasoningLevel, ReplaceSessionDefaults as DomainReplaceSessionDefaults,
+    ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
+    ReplaceSessionMetadataRejectedResult, ReplaceSessionMetadataResult, ReviewChangeRequestNumber,
+    ReviewConfidence, ReviewEventOrdinal, ReviewExternalLink, ReviewExternalLinkAssociation,
+    ReviewExternalLinkAttachment, ReviewExternalLinkAttachmentResult, ReviewExternalLinkId,
+    ReviewExternalObjectKind, ReviewFinding, ReviewFindingConfidenceAxes, ReviewFindingContent,
+    ReviewFindingDiffSide, ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
     ReviewFindingEventResultKind, ReviewFindingId, ReviewFindingLocation,
     ReviewFindingPendingExternalLinkRef, ReviewFindingProposal, ReviewFindingRef,
     ReviewFindingSeverity, ReviewKey, ReviewLineRange, ReviewPass, ReviewPassAcceptedInputEvidence,
@@ -73,8 +74,10 @@ use signalbox_domain::{
     ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy,
     ReviewProducedFindings, ReviewReferencedFindingEvidence, ReviewRun, ReviewRunId, ReviewRunRef,
     ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText,
-    ReviewWorkflowKind, RunnerSandboxProfile as DomainRunnerSandboxProfile, RunnerSelector,
-    SemanticTranscriptEntryId, ServiceTier as DomainServiceTier, SessionConfigurationDefaults,
+    ReviewWorkflowKind, RunnerEnrollmentRequestId,
+    RunnerNonLostConnectionState as DomainRunnerNonLostConnectionState,
+    RunnerSandboxProfile as DomainRunnerSandboxProfile, RunnerSelector, SemanticTranscriptEntryId,
+    ServiceTier as DomainServiceTier, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent,
     SessionMetadataLastWriter, SessionMetadataSnapshot,
     SessionModelSettingsChanged as DomainSessionModelSettingsChanged,
@@ -129,6 +132,7 @@ use signalbox_persistence::{
         ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
     },
     review_workflow::{ReviewWorkflowStore, ReviewWorkflowStoreError},
+    runner_promotion::{PromotePendingRunnerRepository, PromotePendingRunnerRepositoryError},
     session_delegation::{
         DelegationOperationRejection, DelegationRequestExecutionState, ProcessDelegationOutcome,
         ProcessDelegationRequestRejection,
@@ -176,6 +180,7 @@ use signalbox_process_protocol::{
     RunnerCapabilityClass as WireRunnerCapabilityClass,
     RunnerConnectionHealth as WireRunnerConnectionHealth,
     RunnerCredentialProfileName as WireRunnerCredentialProfileName,
+    RunnerNonLostConnectionState as WireRunnerNonLostConnectionState,
     RunnerPlacementRevision as WireRunnerPlacementRevision,
     RunnerProjection as WireRunnerProjection,
     RunnerProjectionSelector as WireRunnerProjectionSelector,
@@ -894,6 +899,7 @@ fn conversation_import_request_requires_permit(
         | ClientRequest::ReadSessionMetadata { .. }
         | ClientRequest::ReplaceSessionMetadata { .. }
         | ClientRequest::ReplaceSessionDefaults { .. }
+        | ClientRequest::PromotePendingRunner { .. }
         | ClientRequest::ReadSessionDefaults { .. }
         | ClientRequest::AppendConversationImport { .. }
         | ClientRequest::CommitConversationImport {}
@@ -1068,6 +1074,7 @@ impl SnapshotReaderAdmission {
             | ClientRequest::ListModelCapabilities {}
             | ClientRequest::ReplaceSessionMetadata { .. }
             | ClientRequest::ReplaceSessionDefaults { .. }
+            | ClientRequest::PromotePendingRunner { .. }
             | ClientRequest::ReadSessionDefaults { .. }
             | ClientRequest::ImportConversation { .. }
             | ClientRequest::BeginConversationImport { .. }
@@ -1709,6 +1716,20 @@ where
                 system_prompt,
                 &services.pool,
                 services.model_configuration.as_ref(),
+            )
+            .await
+        }
+        ClientRequest::PromotePendingRunner {
+            command_id,
+            pending_request_id,
+        } => {
+            handle_promote_pending_runner(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                pending_request_id,
+                &services.pool,
             )
             .await
         }
@@ -8917,6 +8938,132 @@ where
     }
 }
 
+async fn handle_promote_pending_runner<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    command_id: uuid::Uuid,
+    pending_request_id: CanonicalUuid,
+    pool: &PgPool,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let request = PromotePendingRunnerRequest::try_new(
+        DurableCommandId::from_uuid(command_id),
+        RunnerEnrollmentRequestId::from_uuid(pending_request_id.into_uuid()),
+    );
+    let Ok(request) = request else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let mut service =
+        PromotePendingRunnerService::new(PromotePendingRunnerRepository::new(pool.clone()));
+    match service.execute(request).await {
+        Ok(PromotePendingRunnerOutcome::Recorded(PromotePendingRunnerResult::Applied(applied))) => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::RunnerPromoted {
+                    pending_request_id: wire_uuid(applied.pending_request().into_uuid()),
+                    runner_id: wire_uuid(applied.runner().into_uuid()),
+                    enrollment_id: wire_uuid(applied.enrollment().into_uuid()),
+                    registration_revision: CanonicalU64::new(applied.registration_revision().get()),
+                },
+            )
+            .await
+        }
+        Ok(PromotePendingRunnerOutcome::Recorded(PromotePendingRunnerResult::Rejected(
+            rejection,
+        ))) => {
+            let detail = match rejection {
+                PromotePendingRunnerRejection::NoPendingRunnerEnrollment => {
+                    RejectionDetail::NoPendingRunnerEnrollment {}
+                }
+                PromotePendingRunnerRejection::PendingRequestMismatch { pending_request } => {
+                    RejectionDetail::PendingRequestMismatch {
+                        pending_request_id: wire_uuid(pending_request.into_uuid()),
+                    }
+                }
+                PromotePendingRunnerRejection::PendingRequestDisconnected { pending_request } => {
+                    RejectionDetail::PendingRequestDisconnected {
+                        pending_request_id: wire_uuid(pending_request.into_uuid()),
+                    }
+                }
+                PromotePendingRunnerRejection::ActiveRunnerNotLost {
+                    runner,
+                    connection_state,
+                } => RejectionDetail::ActiveRunnerNotLost {
+                    runner_id: wire_uuid(runner.into_uuid()),
+                    connection_state: match connection_state {
+                        DomainRunnerNonLostConnectionState::Connected => {
+                            WireRunnerNonLostConnectionState::Connected
+                        }
+                        DomainRunnerNonLostConnectionState::Suspect => {
+                            WireRunnerNonLostConnectionState::Suspect
+                        }
+                        DomainRunnerNonLostConnectionState::Shutdown => {
+                            WireRunnerNonLostConnectionState::Shutdown
+                        }
+                    },
+                },
+            };
+            write_error(writer, version, request_id, ProtocolError::rejected(detail)).await
+        }
+        Ok(PromotePendingRunnerOutcome::ConflictingReuse { .. }) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await
+        }
+        Err(PromotePendingRunnerRepositoryError::Database(_)) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await
+        }
+        Err(PromotePendingRunnerRepositoryError::CommitAmbiguous(_)) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(true),
+            )
+            .await
+        }
+        Err(PromotePendingRunnerRepositoryError::InvalidCommandId) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::InvalidRequest),
+            )
+            .await
+        }
+        Err(PromotePendingRunnerRepositoryError::Corruption(_)) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(None, InternalDiagnostic::RunnerPromotionCorruption),
+            )
+            .await
+        }
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "the complete defaults replacement remains explicit at the wire adapter"
@@ -12379,6 +12526,7 @@ enum InternalDiagnostic {
     SessionDefaultsCommitAmbiguous,
     SessionDefaultsCommandKindMismatch,
     SessionDefaultsCorruption,
+    RunnerPromotionCorruption,
     SessionDelegationDatabase,
     SessionDelegationCorruption,
     SessionDelegationContract,
@@ -12456,6 +12604,7 @@ impl InternalDiagnostic {
             | Self::ConversationListingCorruption
             | Self::SessionMetadataCorruption
             | Self::SessionDefaultsCorruption
+            | Self::RunnerPromotionCorruption
             | Self::SessionDelegationCorruption
             | Self::SubmitInputCorruption
             | Self::SubmitInputModelExecutionCorruption
@@ -12515,6 +12664,7 @@ impl InternalDiagnostic {
             Self::SessionDefaultsCommitAmbiguous => "session_defaults_commit_ambiguous",
             Self::SessionDefaultsCommandKindMismatch => "session_defaults_command_kind_mismatch",
             Self::SessionDefaultsCorruption => "session_defaults_corruption",
+            Self::RunnerPromotionCorruption => "runner_promotion_corruption",
             Self::SessionDelegationDatabase => "session_delegation_database",
             Self::SessionDelegationCorruption => "session_delegation_corruption",
             Self::SessionDelegationContract => "session_delegation_contract",
