@@ -54,8 +54,10 @@ repository replacement workspace-receipt representation and typed replay are
 verified against this PR
 (`agent/runner-replacement-workspace-receipt-persistence`). Workspace-ready
 admission under the exact current staging authority and equal receipt replay are
-verified against this PR (`agent/runner-workspace-ready-admission`).
-Existing-pin attempt-and-offer atomicity is verified against this PR
+verified against this PR (`agent/runner-workspace-ready-admission`). Live
+post-commit daemon acknowledgement projection is verified against this PR
+(`agent/daemon-runner-workspace-ready-routing`). Existing-pin attempt-and-offer
+atomicity is verified against this PR
 (`agent/runner-pinned-dispatch-transaction`). The pinned-dispatch adapter's
 exact runner/registration lookup and returned enrollment routing identity are
 verified against this PR (`agent/runner-offer-locus-binding`). The
@@ -756,10 +758,14 @@ Representation rules, all enforced in the schema:
   immutable authorization, target state, exact connected event, current lost
   placement, and absent terminal result; and commits the receipt before any
   acknowledgement can be emitted. Equal replay returns the canonical recorded
-  receipt, while unequal reuse is a correlation failure. **Committed
-  unimplemented functionality.** No present runtime sends `workspace_recorded`,
-  maps the runner-relative manifest path into execution placement facts, or
-  consumes the receipt to terminalize the repository-backed replacement.
+  receipt, while unequal reuse is a correlation failure. The established runner
+  runtime checks the frame's runner against the physical connection, observes
+  current connection authority, invokes this transaction, and sends the exact
+  `workspace_recorded` correlation only after the commit or equal replay
+  succeeds. **Committed unimplemented functionality.** No present resume or
+  heartbeat path reconciles a retained provisioning journal after connection
+  loss, maps the runner-relative manifest path into execution placement facts,
+  or consumes the receipt to terminalize the repository-backed replacement.
 - Migration `202608110018` separates the registration revision retained by an
   immutable pinned placement from the then-current registration revision that
   authorizes each lease offer. Existing lease generations preserve their

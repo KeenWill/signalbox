@@ -1,16 +1,20 @@
-//! Hub-side registration, lifecycle, and lease-operation runtime for the local runner wire.
+//! Hub-side registration, lifecycle, and durable-operation runtime for the local runner wire.
 
 use std::{error::Error, fmt, future::Future, io, pin::Pin, sync::Arc, time::Duration};
 
 use rustix::process::geteuid;
 use signalbox_application::{
     RunnerLeaseClaimRequest, RunnerLeaseClaimService, RunnerLeaseResultRequest,
-    RunnerLeaseResultService,
+    RunnerLeaseResultService, RunnerReadyManifestDigest, RunnerWorkspaceReadyReceipt,
+    RunnerWorkspaceReadyService,
 };
 use signalbox_domain::{
-    CredentialProfileName, CredentialProfilePolicy, RunnerAuthenticationId, RunnerCapabilityClass,
-    RunnerCatalog, RunnerDomainError, RunnerEnrollmentId, RunnerEnrollmentRequestId, RunnerId,
-    RunnerLease,
+    CanonicalCloneUrlDigest, CredentialProfileName, CredentialProfilePolicy,
+    RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog, RunnerDomainError,
+    RunnerEnrollmentId, RunnerEnrollmentRequestId, RunnerGeneration, RunnerId, RunnerLease,
+    RunnerSandboxProfile, SessionId, WorkspaceBranchName, WorkspaceManifestId,
+    WorkspaceProvisioningAuthorizationId, WorkspaceRecovery, WorkspaceRelativePath,
+    WorkspaceRepositoryKey, WorkspaceRevision,
 };
 use signalbox_persistence::runner_protocol::{
     AppliedRunnerConnectionTransition, IssuedRunnerEnrollmentIdentities,
@@ -24,9 +28,10 @@ use signalbox_runner_wire::{
     Advertise, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Directive, DirectiveAction,
     Enroll, Enrolled, Frame, FrameError, Heartbeat, HeartbeatAck, HeartbeatWorkspacePhase,
     LeaseClaim, LeaseCorrelation, LeasePhaseKind, MAX_FRAME_BYTES, Message, PositiveU64,
-    ReconnectDirectives, ReconnectInventory, Registered, Rejected, RejectionCode,
-    ReplacementPending, ResultFrame, Resume, Resumed, Shutdown, ShutdownReason,
-    WorkspaceFailureCorrelation, advertisement_digest, decode_line, encode_line,
+    ReconnectDirectives, ReconnectInventory, Recovery as WireWorkspaceRecovery, Registered,
+    Rejected, RejectionCode, ReplacementPending, ResultFrame, Resume, Resumed, SandboxProfile,
+    Shutdown, ShutdownReason, WorkspaceFailureCorrelation, WorkspaceReady, WorkspaceRecorded,
+    advertisement_digest, decode_line, encode_line,
 };
 use sqlx::PgPool;
 use tokio::{
@@ -126,6 +131,63 @@ impl RunnerLeaseOperationService for UnavailableRunnerLeaseOperationService {
             RejectionCode::Unavailable,
             RunnerRegistrationFailureCause::Policy,
         ))))
+    }
+}
+
+/// Boxed future returned by the injected durable workspace-ready service.
+pub type RunnerWorkspaceReadyOperationFuture<'a, T> =
+    Pin<Box<dyn Future<Output = Result<T, RunnerWorkspaceReadyOperationFailure>> + Send + 'a>>;
+
+/// Closed durable failure classification for one workspace-ready receipt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RunnerWorkspaceReadyOperationFailure {
+    code: RejectionCode,
+    cause: RunnerRegistrationFailureCause,
+}
+
+impl RunnerWorkspaceReadyOperationFailure {
+    /// Constructs one classified durable-operation failure.
+    pub const fn new(code: RejectionCode, cause: RunnerRegistrationFailureCause) -> Self {
+        Self { code, cause }
+    }
+
+    fn into_registration_failure(
+        self,
+        correlation: AvailableCorrelation,
+    ) -> RunnerRegistrationFailure {
+        RunnerRegistrationFailure::from_durable_cause(
+            RunnerInboundFrameKind::WorkspaceReady,
+            correlation,
+            self.code,
+            self.cause,
+        )
+    }
+}
+
+/// Durable-before-ack workspace-ready boundary consumed by an established connection.
+pub trait RunnerWorkspaceReadyOperationService: Clone + Send + Sync + 'static {
+    /// Commits or exactly replays one validated ready-workspace receipt.
+    fn record_workspace_ready(
+        &self,
+        receipt: RunnerWorkspaceReadyReceipt,
+    ) -> RunnerWorkspaceReadyOperationFuture<'_, RunnerWorkspaceReadyReceipt>;
+}
+
+/// Fail-closed workspace-ready service retained by registration-only test composition.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UnavailableRunnerWorkspaceReadyOperationService;
+
+impl RunnerWorkspaceReadyOperationService for UnavailableRunnerWorkspaceReadyOperationService {
+    fn record_workspace_ready(
+        &self,
+        _receipt: RunnerWorkspaceReadyReceipt,
+    ) -> RunnerWorkspaceReadyOperationFuture<'_, RunnerWorkspaceReadyReceipt> {
+        Box::pin(std::future::ready(Err(
+            RunnerWorkspaceReadyOperationFailure::new(
+                RejectionCode::Unavailable,
+                RunnerRegistrationFailureCause::Policy,
+            ),
+        )))
     }
 }
 
@@ -1088,6 +1150,21 @@ impl RunnerLeaseOperationService for RunnerProtocolStore {
     }
 }
 
+impl RunnerWorkspaceReadyOperationService for RunnerProtocolStore {
+    fn record_workspace_ready(
+        &self,
+        receipt: RunnerWorkspaceReadyReceipt,
+    ) -> RunnerWorkspaceReadyOperationFuture<'_, RunnerWorkspaceReadyReceipt> {
+        let store = self.clone();
+        Box::pin(async move {
+            RunnerWorkspaceReadyService::new(store)
+                .execute(receipt)
+                .await
+                .map_err(runner_workspace_ready_operation_failure)
+        })
+    }
+}
+
 fn positive_epoch(epoch: RunnerConnectionEpoch) -> Result<PositiveU64, RunnerRegistrationFailure> {
     PositiveU64::try_new(epoch.get()).map_err(|_| {
         RunnerRegistrationFailure::new(
@@ -1142,6 +1219,20 @@ fn runner_lease_operation_failure(error: RunnerProtocolStoreError) -> RunnerLeas
         );
     }
     failure
+}
+
+fn runner_workspace_ready_operation_failure(
+    error: RunnerProtocolStoreError,
+) -> RunnerWorkspaceReadyOperationFailure {
+    let failure = runner_store_failure_classification(&error);
+    if failure.cause.operator_actionable() {
+        tracing::error!(
+            error = %error,
+            cause = ?failure.cause,
+            "durable runner workspace-ready operation failed"
+        );
+    }
+    RunnerWorkspaceReadyOperationFailure::new(failure.code, failure.cause)
 }
 
 fn runner_store_failure_classification(
@@ -1406,10 +1497,15 @@ impl Error for RunnerRegistrationFailure {}
 
 /// Dedicated local runner listener and its durable registration service.
 #[derive(Debug)]
-pub struct RunnerProtocolRuntime<S, O = UnavailableRunnerLeaseOperationService> {
+pub struct RunnerProtocolRuntime<
+    S,
+    O = UnavailableRunnerLeaseOperationService,
+    W = UnavailableRunnerWorkspaceReadyOperationService,
+> {
     listener: Option<LocalProcessListener>,
     service: Option<S>,
     operations: Option<O>,
+    workspace_ready: Option<W>,
     broker: RunnerConnectionBroker,
 }
 
@@ -1452,7 +1548,7 @@ impl Drop for RunnerListenerGuard {
     }
 }
 
-impl<S, O> Drop for RunnerProtocolRuntime<S, O> {
+impl<S, O, W> Drop for RunnerProtocolRuntime<S, O, W> {
     fn drop(&mut self) {
         if let Some(listener) = self.listener.take()
             && let Err(error) = listener.cleanup()
@@ -1475,21 +1571,23 @@ where
             listener: Some(listener),
             service: Some(service),
             operations: Some(UnavailableRunnerLeaseOperationService),
+            workspace_ready: Some(UnavailableRunnerWorkspaceReadyOperationService),
             broker: RunnerConnectionBroker::new(),
         }
     }
 }
 
-impl<S, O> RunnerProtocolRuntime<S, O>
+impl<S, O, W> RunnerProtocolRuntime<S, O, W>
 where
     S: RunnerRegistrationService,
     O: RunnerLeaseOperationService,
+    W: RunnerWorkspaceReadyOperationService,
 {
     /// Installs the durable claim and result boundary used by established connections.
     pub fn with_lease_operation_service<Replacement>(
         mut self,
         operations: Replacement,
-    ) -> RunnerProtocolRuntime<S, Replacement>
+    ) -> RunnerProtocolRuntime<S, Replacement, W>
     where
         Replacement: RunnerLeaseOperationService,
     {
@@ -1497,6 +1595,24 @@ where
             listener: self.listener.take(),
             service: self.service.take(),
             operations: Some(operations),
+            workspace_ready: self.workspace_ready.take(),
+            broker: self.broker.clone(),
+        }
+    }
+
+    /// Installs the durable workspace-ready boundary used by established connections.
+    pub fn with_workspace_ready_operation_service<Replacement>(
+        mut self,
+        workspace_ready: Replacement,
+    ) -> RunnerProtocolRuntime<S, O, Replacement>
+    where
+        Replacement: RunnerWorkspaceReadyOperationService,
+    {
+        RunnerProtocolRuntime {
+            listener: self.listener.take(),
+            service: self.service.take(),
+            operations: self.operations.take(),
+            workspace_ready: Some(workspace_ready),
             broker: self.broker.clone(),
         }
     }
@@ -1524,11 +1640,16 @@ where
             .operations
             .take()
             .ok_or(RunnerProtocolRuntimeError::OwnershipUnavailable)?;
+        let workspace_ready = self
+            .workspace_ready
+            .take()
+            .ok_or(RunnerProtocolRuntimeError::OwnershipUnavailable)?;
         let listener = RunnerListenerGuard::new(listener);
         let outcome = run_connections(
             listener.listener()?,
             service,
             operations,
+            workspace_ready,
             self.broker.clone(),
             shutdown,
         )
@@ -1549,16 +1670,18 @@ where
     }
 }
 
-async fn run_connections<S, O>(
+async fn run_connections<S, O, W>(
     listener: &LocalProcessListener,
     service: S,
     operations: O,
+    workspace_ready: W,
     broker: RunnerConnectionBroker,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), RunnerProtocolRuntimeError>
 where
     S: RunnerRegistrationService,
     O: RunnerLeaseOperationService,
+    W: RunnerWorkspaceReadyOperationService,
 {
     let mut connections = JoinSet::new();
     let (connection_shutdown_sender, connection_shutdown) = watch::channel(*shutdown.borrow());
@@ -1610,6 +1733,7 @@ where
                     stream,
                     service.clone(),
                     operations.clone(),
+                    workspace_ready.clone(),
                     broker.clone(),
                     connection_shutdown.clone(),
                 ));
@@ -1748,6 +1872,7 @@ where
         stream,
         service,
         UnavailableRunnerLeaseOperationService,
+        UnavailableRunnerWorkspaceReadyOperationService,
         RunnerConnectionBroker::new(),
         shutdown,
     )
@@ -1768,6 +1893,7 @@ where
         stream,
         service,
         UnavailableRunnerLeaseOperationService,
+        UnavailableRunnerWorkspaceReadyOperationService,
         broker,
         shutdown,
         HANDSHAKE_TIMEOUT,
@@ -1789,6 +1915,7 @@ where
         stream,
         service,
         UnavailableRunnerLeaseOperationService,
+        UnavailableRunnerWorkspaceReadyOperationService,
         RunnerConnectionBroker::new(),
         shutdown,
         handshake_timeout,
@@ -1796,21 +1923,24 @@ where
     .await
 }
 
-async fn serve_connection_with_operations_and_broker<S, O>(
+async fn serve_connection_with_operations_and_broker<S, O, W>(
     stream: UnixStream,
     service: S,
     operations: O,
+    workspace_ready: W,
     broker: RunnerConnectionBroker,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), RunnerProtocolRuntimeError>
 where
     S: RunnerRegistrationService,
     O: RunnerLeaseOperationService,
+    W: RunnerWorkspaceReadyOperationService,
 {
     serve_connection_with_handshake_timeout_operations_and_broker(
         stream,
         service,
         operations,
+        workspace_ready,
         broker,
         shutdown,
         HANDSHAKE_TIMEOUT,
@@ -1818,10 +1948,11 @@ where
     .await
 }
 
-async fn serve_connection_with_handshake_timeout_operations_and_broker<S, O>(
+async fn serve_connection_with_handshake_timeout_operations_and_broker<S, O, W>(
     stream: UnixStream,
     service: S,
     operations: O,
+    workspace_ready: W,
     broker: RunnerConnectionBroker,
     mut shutdown: watch::Receiver<bool>,
     handshake_timeout: Duration,
@@ -1829,6 +1960,7 @@ async fn serve_connection_with_handshake_timeout_operations_and_broker<S, O>(
 where
     S: RunnerRegistrationService,
     O: RunnerLeaseOperationService,
+    W: RunnerWorkspaceReadyOperationService,
 {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -1862,6 +1994,7 @@ where
                 let context = ConnectionContext {
                     enrollment: response.enrollment_id(),
                     runner: response.runner_id(),
+                    registration_revision: response.registration_revision(),
                     epoch: response.connection_epoch(),
                 };
                 let attachment = broker
@@ -1891,6 +2024,7 @@ where
                     let context = ConnectionContext {
                         enrollment,
                         runner,
+                        registration_revision: accepted.registration_revision(),
                         epoch: accepted.connection_epoch(),
                     };
                     let attachment = broker
@@ -1954,7 +2088,7 @@ where
         }
     };
 
-    let (context, mut attachment) = context;
+    let (mut context, mut attachment) = context;
 
     let outcome = async {
         let mut heartbeat = interval(HEARTBEAT_INTERVAL);
@@ -2026,6 +2160,7 @@ where
                             .await
                         {
                             Ok(response) => {
+                                context.registration_revision = response.registration_revision;
                                 write_message(&mut writer, Message::Registered(response)).await?;
                             }
                             Err(failure) => {
@@ -2066,6 +2201,52 @@ where
                             RunnerConnectionTransition::HeartbeatRecovered,
                         ).await? {
                             return Ok(());
+                        }
+                    }
+                    Message::WorkspaceReady(ready) => {
+                        if !workspace_ready_matches_connection(&ready, context) {
+                            terminalize_protocol_rejection(
+                                &service,
+                                context,
+                                &mut writer,
+                                RunnerInboundFrameKind::WorkspaceReady,
+                                context.epoch,
+                                RunnerRegistrationFailure::new(
+                                    RunnerInboundFrameKind::WorkspaceReady,
+                                    AvailableCorrelation::Provision(ready.correlation),
+                                    RejectionCode::CorrelationMismatch,
+                                ),
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                        if !transition_or_reject_not_current(
+                            &service,
+                            context,
+                            &mut writer,
+                            RunnerInboundFrameKind::WorkspaceReady,
+                            context.epoch,
+                            RunnerConnectionTransition::Observe,
+                        )
+                        .await?
+                        {
+                            return Ok(());
+                        }
+                        match admit_workspace_ready(&workspace_ready, ready).await {
+                            Ok(acknowledgement) => {
+                                write_message(&mut writer, acknowledgement).await?;
+                            }
+                            Err(failure) => {
+                                terminalize_operation_rejection(
+                                    &service,
+                                    context,
+                                    &mut writer,
+                                    RunnerInboundFrameKind::WorkspaceReady,
+                                    failure,
+                                )
+                                .await?;
+                                return Ok(());
+                            }
                         }
                     }
                     Message::LeaseClaim(claim) => {
@@ -2277,6 +2458,82 @@ fn claimed_resume_messages(
     ])
 }
 
+async fn admit_workspace_ready<W>(
+    workspace_ready: &W,
+    ready: WorkspaceReady,
+) -> Result<Message, RunnerRegistrationFailure>
+where
+    W: RunnerWorkspaceReadyOperationService,
+{
+    let correlation = AvailableCorrelation::Provision(ready.correlation.clone());
+    let receipt = workspace_ready_receipt(&ready).ok_or_else(|| {
+        RunnerRegistrationFailure::new(
+            RunnerInboundFrameKind::WorkspaceReady,
+            correlation.clone(),
+            RejectionCode::CorrelationMismatch,
+        )
+    })?;
+    let recorded = workspace_ready
+        .record_workspace_ready(receipt)
+        .await
+        .map_err(|failure| failure.into_registration_failure(correlation))?;
+    let manifest_digest =
+        signalbox_runner_wire::Digest::try_new(recorded.manifest_digest().as_str().to_owned())
+            .map_err(|_| {
+                RunnerRegistrationFailure::new(
+                    RunnerInboundFrameKind::WorkspaceReady,
+                    AvailableCorrelation::Provision(ready.correlation.clone()),
+                    RejectionCode::CorrelationMismatch,
+                )
+            })?;
+    Ok(Message::WorkspaceRecorded(WorkspaceRecorded {
+        correlation: ready.correlation,
+        manifest_id: CanonicalUuid::from_uuid(recorded.manifest_id().into_uuid()),
+        manifest_digest,
+    }))
+}
+
+fn workspace_ready_receipt(ready: &WorkspaceReady) -> Option<RunnerWorkspaceReadyReceipt> {
+    let manifest = &ready.ready.manifest;
+    let repository = manifest.repository.as_ref()?;
+    let canonical_clone_url_digest = manifest.canonical_clone_url_digest.as_ref()?;
+    let recovery = manifest.recovery.as_ref()?;
+    let credential_profile = manifest
+        .credential_profile
+        .as_ref()
+        .map(|profile| CredentialProfileName::try_new(profile.as_str().to_owned()))
+        .transpose()
+        .ok()?;
+    let recovery = match recovery {
+        WireWorkspaceRecovery::Commit { revision } => WorkspaceRecovery::Commit {
+            revision: WorkspaceRevision::try_new(revision.clone()).ok()?,
+        },
+        WireWorkspaceRecovery::Branch { name, revision } => WorkspaceRecovery::Branch {
+            name: WorkspaceBranchName::try_new(name.clone()).ok()?,
+            revision: WorkspaceRevision::try_new(revision.clone()).ok()?,
+        },
+    };
+    Some(RunnerWorkspaceReadyReceipt::new(
+        WorkspaceProvisioningAuthorizationId::from_uuid(
+            ready.correlation.authorization_id.into_uuid(),
+        ),
+        SessionId::from_uuid(ready.correlation.session_id.into_uuid()),
+        RunnerGeneration::try_from_u64(ready.correlation.placement_revision.get())?,
+        RunnerId::from_uuid(ready.correlation.runner_id.into_uuid()),
+        WorkspaceManifestId::from_uuid(manifest.manifest_id.into_uuid()),
+        RunnerReadyManifestDigest::try_new(ready.ready.manifest_digest.as_str().to_owned()).ok()?,
+        WorkspaceRepositoryKey::try_new(repository.as_str().to_owned()).ok()?,
+        CanonicalCloneUrlDigest::try_new(canonical_clone_url_digest.as_str().to_owned()).ok()?,
+        credential_profile,
+        match manifest.sandbox_profile {
+            SandboxProfile::Ambient => RunnerSandboxProfile::Ambient,
+            SandboxProfile::WorkspaceRestricted => RunnerSandboxProfile::WorkspaceRestricted,
+        },
+        WorkspaceRelativePath::try_new(manifest.relative_path.clone()).ok()?,
+        recovery,
+    ))
+}
+
 async fn admit_lease_claim<O>(
     operations: &O,
     claim: LeaseClaim,
@@ -2350,10 +2607,16 @@ fn lease_correlation_matches_connection(
     correlation.runner_id == context.runner
 }
 
+fn workspace_ready_matches_connection(ready: &WorkspaceReady, context: ConnectionContext) -> bool {
+    ready.correlation.runner_id == context.runner
+        && ready.correlation.registration_revision == context.registration_revision
+}
+
 #[derive(Clone, Copy)]
 struct ConnectionContext {
     enrollment: CanonicalUuid,
     runner: CanonicalUuid,
+    registration_revision: PositiveU64,
     epoch: PositiveU64,
 }
 
@@ -2956,6 +3219,7 @@ mod tests {
     const ARBITRARY_PROVISION_AUTHORIZATION_ID_SEED: u128 = 5;
     const ARBITRARY_PROVISION_SESSION_ID_SEED: u128 = 6;
     const ARBITRARY_PROVISION_RUNNER_ID_SEED: u128 = 7;
+    const ARBITRARY_WORKSPACE_MANIFEST_ID_SEED: u128 = 8;
     const ARBITRARY_PROVISION_PLACEMENT_REVISION: u64 = 1;
     const ARBITRARY_PROVISION_REGISTRATION_REVISION: u64 = 1;
     const ARBITRARY_RUNNER_ENROLLMENT_REQUEST_ID_SEED: u128 = 0x300;
@@ -3443,6 +3707,100 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct RecordingWorkspaceReadyOperationService {
+        receipts: Arc<std::sync::Mutex<Vec<RunnerWorkspaceReadyReceipt>>>,
+    }
+
+    impl RunnerWorkspaceReadyOperationService for RecordingWorkspaceReadyOperationService {
+        fn record_workspace_ready(
+            &self,
+            receipt: RunnerWorkspaceReadyReceipt,
+        ) -> RunnerWorkspaceReadyOperationFuture<'_, RunnerWorkspaceReadyReceipt> {
+            self.receipts
+                .lock()
+                .expect("the fixture workspace-ready recorder is available")
+                .push(receipt.clone());
+            Box::pin(std::future::ready(Ok(receipt)))
+        }
+    }
+
+    #[tokio::test]
+    async fn s32_inv012_inv044_workspace_ready_commit_precedes_exact_acknowledgement() {
+        let workspace_ready = RecordingWorkspaceReadyOperationService::default();
+        let ready = repository_workspace_ready();
+        let expected_receipt = repository_workspace_ready_receipt();
+
+        let acknowledgement = admit_workspace_ready(&workspace_ready, ready.clone())
+            .await
+            .expect("the committed workspace-ready receipt projects");
+        let recorded = workspace_ready
+            .receipts
+            .lock()
+            .expect("the fixture workspace-ready recorder is available")
+            .pop()
+            .expect("one receipt reached the durable boundary");
+
+        assert_eq!(recorded, expected_receipt);
+        assert_eq!(
+            acknowledgement,
+            Message::WorkspaceRecorded(WorkspaceRecorded {
+                correlation: ready.correlation,
+                manifest_id: ready.ready.manifest.manifest_id,
+                manifest_digest: ready.ready.manifest_digest,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn s32_inv044_unavailable_workspace_ready_transaction_emits_no_acknowledgement() {
+        let rejection = admit_workspace_ready(
+            &UnavailableRunnerWorkspaceReadyOperationService,
+            repository_workspace_ready(),
+        )
+        .await
+        .expect_err("an unavailable transaction cannot emit workspace acknowledgement");
+
+        assert_eq!(rejection.code, RejectionCode::Unavailable);
+        assert_eq!(rejection.cause, RunnerRegistrationFailureCause::Policy);
+    }
+
+    #[test]
+    fn s32_inv044_workspace_ready_frames_require_exact_connection_authority() {
+        let ready = repository_workspace_ready();
+        let matching_context = ConnectionContext {
+            enrollment: identity(2),
+            runner: identity(ARBITRARY_PROVISION_RUNNER_ID_SEED),
+            registration_revision: ready.correlation.registration_revision,
+            epoch: PositiveU64::try_new(1).expect("the fixture epoch is positive"),
+        };
+        let foreign_runner_context = ConnectionContext {
+            enrollment: identity(2),
+            runner: identity(3),
+            registration_revision: ready.correlation.registration_revision,
+            epoch: PositiveU64::try_new(1).expect("the fixture epoch is positive"),
+        };
+        let foreign_revision_context = ConnectionContext {
+            enrollment: identity(2),
+            runner: identity(ARBITRARY_PROVISION_RUNNER_ID_SEED),
+            registration_revision: PositiveU64::try_new(
+                ready.correlation.registration_revision.get() + 1,
+            )
+            .expect("the foreign fixture registration revision is positive"),
+            epoch: PositiveU64::try_new(1).expect("the fixture epoch is positive"),
+        };
+
+        assert!(workspace_ready_matches_connection(&ready, matching_context));
+        assert!(!workspace_ready_matches_connection(
+            &ready,
+            foreign_runner_context
+        ));
+        assert!(!workspace_ready_matches_connection(
+            &ready,
+            foreign_revision_context
+        ));
+    }
+
     #[test]
     fn s31_inv011_inv043_claimed_resume_replays_acknowledgement_before_exact_dispatch() {
         let correlation = canonical_lease_correlation();
@@ -3571,11 +3929,15 @@ mod tests {
         let matching_context = ConnectionContext {
             enrollment: identity(2),
             runner: identity(1),
+            registration_revision: PositiveU64::try_new(1)
+                .expect("the fixture registration revision is positive"),
             epoch: PositiveU64::try_new(1).expect("the fixture epoch is positive"),
         };
         let foreign_context = ConnectionContext {
             enrollment: identity(2),
             runner: identity(3),
+            registration_revision: PositiveU64::try_new(1)
+                .expect("the fixture registration revision is positive"),
             epoch: PositiveU64::try_new(1).expect("the fixture epoch is positive"),
         };
         let correlation = canonical_lease_correlation();
@@ -3657,6 +4019,109 @@ mod tests {
             sandbox_profile: signalbox_runner_wire::SandboxProfile::Ambient,
             credential_profile: None,
         }
+    }
+
+    fn repository_workspace_provision_correlation() -> signalbox_runner_wire::ProvisionCorrelation {
+        signalbox_runner_wire::ProvisionCorrelation {
+            authorization_id: identity(ARBITRARY_PROVISION_AUTHORIZATION_ID_SEED),
+            session_id: identity(ARBITRARY_PROVISION_SESSION_ID_SEED),
+            placement_revision: PositiveU64::try_new(ARBITRARY_PROVISION_PLACEMENT_REVISION)
+                .expect("the fixture placement revision is positive"),
+            runner_id: identity(ARBITRARY_PROVISION_RUNNER_ID_SEED),
+            registration_revision: PositiveU64::try_new(ARBITRARY_PROVISION_REGISTRATION_REVISION)
+                .expect("the fixture registration revision is positive"),
+            repository: Some(
+                signalbox_runner_wire::RepositoryKey::try_new(CONFIGURED_REPOSITORY.to_owned())
+                    .expect("the fixture repository key is checked"),
+            ),
+            sandbox_profile: signalbox_runner_wire::SandboxProfile::WorkspaceRestricted,
+            credential_profile: Some(
+                signalbox_runner_wire::ProfileName::try_new(
+                    REGISTRATION_ONLY_CREDENTIAL_PROFILE.to_owned(),
+                )
+                .expect("the fixture credential profile is checked"),
+            ),
+        }
+    }
+
+    fn workspace_revision_text() -> String {
+        "a".repeat(40)
+    }
+
+    fn clone_url_digest_text() -> String {
+        "b".repeat(64)
+    }
+
+    fn repository_workspace_ready() -> WorkspaceReady {
+        let correlation = repository_workspace_provision_correlation();
+        let manifest = signalbox_runner_wire::WorkspaceManifest {
+            lifecycle: signalbox_runner_wire::ManifestLifecycle::Ready,
+            manifest_id: identity(ARBITRARY_WORKSPACE_MANIFEST_ID_SEED),
+            session: correlation.session_id,
+            placement_revision: correlation.placement_revision,
+            runner: correlation.runner_id,
+            repository: correlation.repository.clone(),
+            canonical_clone_url_digest: Some(
+                signalbox_runner_wire::Digest::try_new(clone_url_digest_text())
+                    .expect("the fixture clone URL digest is canonical"),
+            ),
+            credential_profile: correlation.credential_profile.clone(),
+            sandbox_profile: correlation.sandbox_profile,
+            relative_path: format!(
+                "sessions/{}/{}/repo",
+                correlation.session_id,
+                correlation.placement_revision.get()
+            ),
+            recovery: Some(WireWorkspaceRecovery::Commit {
+                revision: workspace_revision_text(),
+            }),
+        };
+        let manifest_digest = signalbox_runner_wire::workspace_manifest_digest(&manifest)
+            .expect("the fixture ready manifest has a canonical digest");
+        WorkspaceReady {
+            correlation,
+            ready: signalbox_runner_wire::ReadyManifest {
+                manifest,
+                manifest_digest,
+            },
+        }
+    }
+
+    fn repository_workspace_ready_receipt() -> RunnerWorkspaceReadyReceipt {
+        let correlation = repository_workspace_provision_correlation();
+        let ready = repository_workspace_ready();
+        RunnerWorkspaceReadyReceipt::new(
+            WorkspaceProvisioningAuthorizationId::from_uuid(
+                correlation.authorization_id.into_uuid(),
+            ),
+            SessionId::from_uuid(correlation.session_id.into_uuid()),
+            RunnerGeneration::one(),
+            RunnerId::from_uuid(correlation.runner_id.into_uuid()),
+            WorkspaceManifestId::from_uuid(
+                identity(ARBITRARY_WORKSPACE_MANIFEST_ID_SEED).into_uuid(),
+            ),
+            RunnerReadyManifestDigest::try_new(ready.ready.manifest_digest.as_str().to_owned())
+                .expect("the fixture ready digest is canonical"),
+            WorkspaceRepositoryKey::try_new(CONFIGURED_REPOSITORY.to_owned())
+                .expect("the fixture repository key is checked"),
+            CanonicalCloneUrlDigest::try_new(clone_url_digest_text())
+                .expect("the fixture clone URL digest is canonical"),
+            Some(
+                CredentialProfileName::try_new(REGISTRATION_ONLY_CREDENTIAL_PROFILE.to_owned())
+                    .expect("the fixture credential profile is checked"),
+            ),
+            RunnerSandboxProfile::WorkspaceRestricted,
+            WorkspaceRelativePath::try_new(format!(
+                "sessions/{}/{}/repo",
+                correlation.session_id,
+                correlation.placement_revision.get()
+            ))
+            .expect("the fixture relative path is checked"),
+            WorkspaceRecovery::Commit {
+                revision: WorkspaceRevision::try_new(workspace_revision_text())
+                    .expect("the fixture revision is canonical"),
+            },
+        )
     }
 
     fn private_tempdir() -> tempfile::TempDir {
@@ -3977,6 +4442,7 @@ mod tests {
         let context = ConnectionContext {
             enrollment: response.enrollment_id,
             runner: response.runner_id,
+            registration_revision: response.registration_revision,
             epoch: response.connection_epoch,
         };
         let service = EnrollmentService { response };
@@ -5127,6 +5593,96 @@ mod tests {
         assert_eq!(registered.registration_revision.get(), 2);
         assert_eq!(state, "completed");
         assert_eq!(pending, []);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn workspace_ready_uses_the_registration_revision_returned_by_advertise() {
+        let (_container, database_url, _empty_store) = postgres_store().await;
+        let store = RunnerProtocolStore::new(fresh_pool(&database_url).await, configured_catalog());
+        let service = PostgresRunnerRegistrationService::new(store, []);
+        let workspace_ready = RecordingWorkspaceReadyOperationService::default();
+        let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
+        let (_shutdown_sender, shutdown) = watch::channel(false);
+        let server = serve_connection_with_operations_and_broker(
+            server,
+            service,
+            UnavailableRunnerLeaseOperationService,
+            workspace_ready,
+            RunnerConnectionBroker::new(),
+            shutdown,
+        );
+        let client = async {
+            let (reader, mut writer) = client.into_split();
+            let mut reader = BufReader::new(reader);
+            write_message(
+                &mut writer,
+                Message::Enroll(Enroll {
+                    request_id: identity(1),
+                    digest_version: DIGEST_VERSION,
+                    advertisement: configured_advertisement(),
+                }),
+            )
+            .await
+            .expect("the configured runner enrolls");
+            let Message::Enrolled(enrolled) = read_frame(&mut reader)
+                .await
+                .expect("the enrollment response is received")
+                .message
+            else {
+                panic!("the runner receives its enrollment receipt");
+            };
+            write_message(
+                &mut writer,
+                Message::Advertise(Advertise {
+                    enrollment_id: enrolled.enrollment_id,
+                    runner_id: enrolled.runner_id,
+                    authentication_id: enrolled.authentication_id,
+                    registration_revision: enrolled.registration_revision,
+                    advertisement: empty_advertisement(),
+                }),
+            )
+            .await
+            .expect("the changed advertisement is sent");
+            let Message::Registered(registered) = read_frame(&mut reader)
+                .await
+                .expect("the changed advertisement is acknowledged")
+                .message
+            else {
+                panic!("the runner receives its updated registration receipt");
+            };
+            let mut ready = repository_workspace_ready();
+            ready.correlation.runner_id = enrolled.runner_id;
+            ready.correlation.registration_revision = registered.registration_revision;
+            ready.ready.manifest.runner = enrolled.runner_id;
+            ready.ready.manifest_digest =
+                signalbox_runner_wire::workspace_manifest_digest(&ready.ready.manifest)
+                    .expect("the updated fixture manifest has a canonical digest");
+            write_message(&mut writer, Message::WorkspaceReady(ready.clone()))
+                .await
+                .expect("workspace-ready is sent under the updated registration");
+            let acknowledgement = read_frame(&mut reader)
+                .await
+                .expect("workspace-ready is acknowledged")
+                .message;
+            (enrolled, registered, ready, acknowledgement)
+        };
+
+        let (served, (enrolled, registered, ready, acknowledgement)) = tokio::join!(server, client);
+
+        served.expect("the established connection closes cleanly");
+        assert_ne!(
+            registered.registration_revision,
+            enrolled.registration_revision
+        );
+        assert_eq!(
+            acknowledgement,
+            Message::WorkspaceRecorded(WorkspaceRecorded {
+                correlation: ready.correlation,
+                manifest_id: ready.ready.manifest.manifest_id,
+                manifest_digest: ready.ready.manifest_digest,
+            })
+        );
     }
 
     #[tokio::test]
