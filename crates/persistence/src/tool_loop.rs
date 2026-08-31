@@ -2876,6 +2876,13 @@ const fn encode_error_kind(value: ToolExecutionErrorKind) -> &'static str {
     }
 }
 
+pub(crate) async fn persist_ambiguous_tool_recovery_wait(
+    connection: &mut PgConnection,
+    attempt: &EndedToolAttempt,
+) -> Result<(), ToolLoopRepositoryError> {
+    persist_tool_recovery_wait(connection, attempt, false).await
+}
+
 pub(crate) async fn persist_tool_recovery_wait(
     connection: &mut PgConnection,
     attempt: &EndedToolAttempt,

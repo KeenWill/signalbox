@@ -5006,6 +5006,10 @@ impl ToolBatch {
         &self,
         attempt: ToolAttemptId,
     ) -> Result<RunnerToolAttemptAuthorization, ToolBatchExecutionError>;
+    pub fn resume_runner_result_attempt(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> Result<RunnerToolResultAuthority, ToolBatchExecutionError>;
     pub fn prepare_result_projection(
         &self,
         entry_ids: Vec<SemanticTranscriptEntryId>,
@@ -6048,6 +6052,38 @@ impl<Transaction: RunnerLeaseClaimTransaction> RunnerLeaseClaimService<Transacti
         &mut self,
         request: RunnerLeaseClaimRequest,
     ) -> Result<RunnerLease, Transaction::Error>;
+}
+```
+
+## application: runner_lease_result
+
+```rust
+pub struct RunnerLeaseResultRequest { /* private */ }
+impl RunnerLeaseResultRequest {
+    pub const fn new(
+        correlation: RunnerLeaseCorrelation,
+        observation: ToolAttemptObservation,
+    ) -> Self;
+    // accessors: correlation(), observation(), into_parts()
+}
+
+pub trait RunnerLeaseResultTransaction {
+    type Error;
+    fn commit_result(
+        &mut self,
+        request: RunnerLeaseResultRequest,
+    ) -> impl Future<Output = Result<RunnerLeaseCompletion, Self::Error>> + Send;
+}
+
+pub struct RunnerLeaseResultService<Transaction> { /* private */ }
+impl<Transaction> RunnerLeaseResultService<Transaction> {
+    pub const fn new(transaction: Transaction) -> Self;
+}
+impl<Transaction: RunnerLeaseResultTransaction> RunnerLeaseResultService<Transaction> {
+    pub async fn execute(
+        &mut self,
+        request: RunnerLeaseResultRequest,
+    ) -> Result<RunnerLeaseCompletion, Transaction::Error>;
 }
 ```
 
@@ -9062,6 +9098,10 @@ impl RunnerToolAttemptAuthorization {
     pub const fn tool(&self) -> &ToolName;
     pub const fn correlation(&self) -> ToolAttemptDispatchCorrelation;
 }
+pub struct RunnerToolResultAuthority { /* private */ }
+impl RunnerToolResultAuthority {
+    pub const fn correlation(&self) -> ToolAttemptDispatchCorrelation;
+}
 pub enum RunnerLeaseState {
     Offered,
     Claimed,
@@ -9073,6 +9113,12 @@ pub enum RunnerLeaseState {
 pub struct RunnerLeaseNoExecutionProof { /* private durable correlation */ }
 impl RunnerLeaseNoExecutionProof {
     pub const fn correlation(&self) -> &RunnerLeaseCorrelation;
+}
+pub struct RunnerLeaseCompletion { /* private */ }
+impl RunnerLeaseCompletion {
+    pub const fn lease(&self) -> &RunnerLease;
+    pub const fn attempt(&self) -> &EndedToolAttempt;
+    pub fn into_parts(self) -> (RunnerLease, EndedToolAttempt);
 }
 pub struct RunnerLease { /* private */ }
 impl RunnerLease {
@@ -9086,6 +9132,18 @@ impl RunnerLease {
         self,
         correlation: RunnerLeaseCorrelation,
     ) -> Result<Self, RunnerDomainError>;
+    pub fn complete_with_observation(
+        self,
+        authorization: RunnerToolResultAuthority,
+        correlation: RunnerLeaseCorrelation,
+        observation: ToolAttemptObservation,
+    ) -> Result<RunnerLeaseCompletion, RunnerDomainError>;
+    pub fn verify_completed_observation(
+        self,
+        attempt: EndedToolAttempt,
+        correlation: RunnerLeaseCorrelation,
+        observation: ToolAttemptObservation,
+    ) -> Result<RunnerLeaseCompletion, RunnerDomainError>;
     pub fn lose(self) -> Result<RunnerLeaseLoss, RunnerDomainError>;
     pub fn lose_unclaimed(
         self,
@@ -10868,9 +10926,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: goal_command                               | 5                     |
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
-| domain: runner                                     | 91                    |
+| domain: runner                                     | 93                    |
 | domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **794 (+12 free fn)** |
+| **signalbox-domain total**                         | **796 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
@@ -10880,6 +10938,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: replace_lost_runner_before_pin        | 4 (incl. 1 trait)     |
 | application: runner_replacement_provisioning       | 7 (incl. 2 traits)    |
 | application: runner_lease_claim                    | 3 (incl. 1 trait)     |
+| application: runner_lease_result                   | 3 (incl. 1 trait)     |
 | application: pinned_runner_dispatch                | 5 (incl. 2 traits)    |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)    |
 | application: list_conversations                    | 8 (incl. 2 traits)    |
@@ -10900,4 +10959,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **278 (+1 free fn)**  |
+| **signalbox-application total**                    | **281 (+1 free fn)**  |

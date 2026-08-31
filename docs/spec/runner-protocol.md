@@ -18,19 +18,21 @@ reconstitution fences are re-verified through this PR
 (`agent/runner-lease-domain-correlation`). Existing-pin attempt-and-offer
 atomicity is re-verified through this PR
 (`agent/runner-pinned-dispatch-transaction`). Durable lease-claim admission is
-re-verified through this PR (`agent/runner-lease-claim-transaction`). The
-corrected reconstitution mismatch contract was re-verified through PR #322
-(`agent/docs-discipline`; pinned and pinned-loss request mismatches). The
-placement loss-source, pre-pin replacement and abandonment state shapes, and
-append-only reconstitution-history contract are re-verified through this PR
-(`agent/runner-placement-loss-domain`). It owns logical runner enrollment,
-daemon-authoritative catalog validation, runner leases, the independent
-session-composition axes, session placement and affinity, credential-profile
-grants, and workspace requirements. The tool registry's common declarations
-remain owned by [tool loop](tool-loop.md); session transcript and frontier
-mechanics remain owned by [sessions and transcript](sessions-and-transcript.md);
-physical tool attempts remain owned by [tool loop](tool-loop.md). Invariant tags
-cite [the invariant test index](../invariants.md).
+re-verified through this PR (`agent/runner-lease-claim-transaction`). The atomic
+claimed-lease and physical-attempt result boundary is re-verified through this
+PR (`agent/runner-lease-result-transaction`). The corrected reconstitution
+mismatch contract was re-verified through PR #322 (`agent/docs-discipline`;
+pinned and pinned-loss request mismatches). The placement loss-source, pre-pin
+replacement and abandonment state shapes, and append-only reconstitution-history
+contract are re-verified through this PR (`agent/runner-placement-loss-domain`).
+It owns logical runner enrollment, daemon-authoritative catalog validation,
+runner leases, the independent session-composition axes, session placement and
+affinity, credential-profile grants, and workspace requirements. The tool
+registry's common declarations remain owned by [tool loop](tool-loop.md);
+session transcript and frontier mechanics remain owned by
+[sessions and transcript](sessions-and-transcript.md); physical tool attempts
+remain owned by [tool loop](tool-loop.md). Invariant tags cite
+[the invariant test index](../invariants.md).
 
 The typed `ReplaceLostRunner`, `RunnerReplacementTarget`, and
 `AbandonLostRunner` domain command payloads are verified against this PR
@@ -1049,18 +1051,24 @@ independently loaded lease correlation through the checked reconstitution input.
 The durable claim transaction is the independently authoritative producer. It
 serializes against the current connection/loss and registration heads, commits
 the exact claim, and returns the canonical claimed lease before acknowledgement;
-the generic projection writer cannot originate a claim. **Committed
-unimplemented functionality.** No daemon transport currently routes an inbound
-`lease_claim` through this transaction or emits `lease_claimed`; that future
-binding may acknowledge only the complete correlation returned by the committed
-transaction. When loss wins first, the fenced connection epoch plus the durable
-absence of a claim proves that no execution capability was issued, and the same
-transaction records `LostUnclaimed` with its exact proof. When claim wins first,
-the durable lease is `Claimed` even if acknowledgement delivery is uncertain and
-loss follows execution-possible law. Mere absence of a frame in process memory
-is never proof. The Postgres representation commits the proof atomically with
-the lost-unclaimed event and requires it before a successor generation can
-consume that retry path. Every retryable loss admission — lost-unclaimed, whose
+the generic projection writer cannot originate a claim. The durable result
+transaction reloads that exact claimed lease and a result-only authority from
+the canonical active tool batch, then commits lease completion and terminal
+attempt evidence together. Duplicate or cross-wired evidence advances neither
+aggregate; ambiguous external-effect evidence enters the exact tool-recovery
+wait in the same transaction. Generic projection cannot originate completion.
+**Committed unimplemented functionality.** No daemon transport currently routes
+an inbound `lease_claim` or `result` through these transactions or emits
+`lease_claimed` or `result_recorded`; future bindings may acknowledge only the
+complete correlation returned by the committed transaction. When loss wins
+first, the fenced connection epoch plus the durable absence of a claim proves
+that no execution capability was issued, and the same transaction records
+`LostUnclaimed` with its exact proof. When claim wins first, the durable lease
+is `Claimed` even if acknowledgement delivery is uncertain and loss follows
+execution-possible law. Mere absence of a frame in process memory is never
+proof. The Postgres representation commits the proof atomically with the
+lost-unclaimed event and requires it before a successor generation can consume
+that retry path. Every retryable loss admission — lost-unclaimed, whose
 proof-backed retry reissues the never-executed attempt for every effect class,
 and claimed pure or idempotent loss — reads its source attempt under a row lock
 and requires it to still be in flight, so a concurrent terminal attempt update

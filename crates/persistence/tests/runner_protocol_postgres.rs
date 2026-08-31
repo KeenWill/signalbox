@@ -12,7 +12,7 @@ use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_application::{
     AbandonLostRunnerOutcome, ImportedConversationConverter, ImportedConversationStore,
     PinnedRunnerDispatchRequest, PromotePendingRunnerOutcome, ReplaceLostRunnerBeforePinOutcome,
-    RunnerLeaseClaimRequest, RunnerReplacementProvisioningOutcome,
+    RunnerLeaseClaimRequest, RunnerLeaseResultRequest, RunnerReplacementProvisioningOutcome,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
@@ -46,11 +46,12 @@ use signalbox_domain::{
     SessionRunnerPlacementRequest, SessionRunnerPlacementState,
     StoredRunnerRegistrationLossEvidence, SubmitInput, ToolAdmissibleLoci, ToolApprovalDecision,
     ToolApprovalResolutionReconstitutionInput, ToolAttemptDispatchCorrelation,
-    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
-    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
-    ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
-    ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal,
-    ToolRequestReconstitutionInput, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
+    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptEnd, ToolAttemptId,
+    ToolAttemptObservation, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
+    ToolBatch, ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput,
+    ToolDispatchGeneration, ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind, ToolName,
+    ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput,
+    ToolResultContent, ToolResultText, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
     ValidatedRunnerRegistration, WorkingDirectorySelection, WorkspaceCapability,
     WorkspaceManifestId, WorkspaceProvisioningAuthorizationId, WorkspaceRecovery,
     WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRequirement, WorkspaceRevision,
@@ -2012,6 +2013,59 @@ async fn stored_later_lease_fixture(
         "effect_free",
     )
     .await
+}
+
+async fn stored_claimed_pinned_dispatch_fixture(
+    pool: &PgPool,
+) -> Result<(RunnerProtocolStore, RunnerLease), Box<dyn Error>> {
+    stored_claimed_pinned_dispatch_fixture_with_authorization(
+        pool,
+        authorized,
+        catalog(),
+        no_permission_overrides(),
+        "effect_free",
+    )
+    .await
+}
+
+async fn stored_claimed_pinned_dispatch_fixture_with_authorization(
+    pool: &PgPool,
+    authorize: fn(PhysicalAttemptFacts) -> RunnerToolAttemptAuthorization,
+    fixture_catalog: RunnerCatalog,
+    fixture_overrides: RunnerToolPermissionOverrides,
+    fixture_effect_kind: &'static str,
+) -> Result<(RunnerProtocolStore, RunnerLease), Box<dyn Error>> {
+    let (store, expected_enrollment, registration, pin, _) =
+        stored_active_pin_fixture_with_authorization(
+            pool,
+            authorize,
+            fixture_catalog,
+            fixture_overrides,
+            fixture_effect_kind,
+        )
+        .await?;
+    terminalize_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    append_prepared_pinned_dispatch_attempt(pool).await?;
+    set_fixture_physical_attempt_effect(
+        pool,
+        PINNED_DISPATCH_PHYSICAL_ATTEMPT,
+        fixture_effect_kind,
+    )
+    .await?;
+    let request = PinnedRunnerDispatchRequest::new(
+        pin.placement.session(),
+        TurnId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.turn)),
+        ToolAttemptId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt)),
+        expected_enrollment.enrollment(),
+        registration.registration().revision(),
+    );
+    let offered = store
+        .authorize_pinned_dispatch(request, RunnerLeaseId::from_uuid(uuid(LEASE + 5)))
+        .await?;
+    let claimed = store
+        .claim_lease(RunnerLeaseClaimRequest::new(offered.correlation()))
+        .await?;
+    Ok((store, claimed))
 }
 
 async fn stored_side_effecting_later_lease_fixture(
@@ -4117,7 +4171,9 @@ async fn complete_runner_lease_projection(
     let completed = claimed
         .complete(pin.lease.correlation())
         .expect("the exact claimed fixture lease correlation completes");
-    store.store_lease(&completed).await?;
+    store
+        .store_completed_lease_projection_for_test(&completed)
+        .await?;
     Ok(())
 }
 
@@ -14755,7 +14811,8 @@ async fn s32_inv009_inv044_runner_recovery_serializes_lease_head_advances()
     .bind(session.into_uuid())
     .fetch_one(&mut *stop)
     .await?;
-    let mut lease_store = Box::pin(store.store_lease(&stale_completion));
+    let mut lease_store =
+        Box::pin(store.store_completed_lease_projection_for_test(&stale_completion));
     tokio::time::timeout(LOCK_WAIT_PROBE, &mut lease_store)
         .await
         .expect_err("lease admission must wait for the scheduler rendezvous");
@@ -14904,7 +14961,9 @@ async fn s32_inv009_inv044_runner_recovery_rejects_completed_lease_attempt()
     let completed = claimed
         .complete(pin.lease.correlation())
         .expect("the exact claimed lease correlation completes");
-    store.store_lease(&completed).await?;
+    store
+        .store_completed_lease_projection_for_test(&completed)
+        .await?;
     mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
     let rejected = insert_runner_recovery_turn_with_interrupted_loss(
         &pool,
@@ -18023,6 +18082,225 @@ async fn s31_inv043_runner_lease_claim_rejects_cross_wired_execution_locus()
     assert_store_domain_error(rejected, RunnerDomainError::CorrelationMismatch);
     assert_eq!(loaded.state(), RunnerLeaseState::Offered);
     assert_eq!(loaded.correlation(), correlation);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-011 / INV-021 / INV-043: one exact runner result terminalizes the
+/// physical attempt and claimed lease in the same durable transaction.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv011_inv021_inv043_runner_result_commits_attempt_and_lease_once()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, claimed) = stored_claimed_pinned_dispatch_fixture(&pool).await?;
+    let correlation = claimed.correlation();
+    let result = ToolResultText::try_new("runner complete".to_owned())
+        .expect("the fixture runner result is bounded");
+    let request = RunnerLeaseResultRequest::new(
+        correlation.clone(),
+        ToolAttemptObservation::Completed {
+            result: ToolResultContent::Text(result.clone()),
+        },
+    );
+    let completion = store.commit_lease_result(request.clone()).await?;
+    let replay = store.commit_lease_result(request).await?;
+    let mismatched_replay = store
+        .commit_lease_result(RunnerLeaseResultRequest::new(
+            correlation.clone(),
+            ToolAttemptObservation::KnownFailed {
+                error: ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None),
+            },
+        ))
+        .await
+        .expect_err("a completed lease cannot acknowledge different terminal evidence");
+    let loaded = store
+        .load_lease(correlation.lease, correlation.generation)
+        .await?
+        .expect("the completed lease remains readable");
+    let (attempt_state, disposition, result_text): (String, Option<String>, Option<String>) =
+        sqlx::query_as(
+            "SELECT state_kind, terminal_disposition_kind, result_text
+               FROM tool_attempt
+              WHERE attempt_id = $1",
+        )
+        .bind(correlation.dispatch.attempt().into_uuid())
+        .fetch_one(&pool)
+        .await?;
+
+    assert_eq!(completion.lease(), &loaded);
+    assert_eq!(completion.lease().state(), RunnerLeaseState::Completed);
+    assert_eq!(
+        completion.attempt().end(),
+        &ToolAttemptEnd::Completed {
+            result: ToolResultContent::Text(result.clone()),
+        }
+    );
+    assert_eq!(replay.lease(), &loaded);
+    assert_eq!(replay.attempt(), completion.attempt());
+    assert_store_domain_error(mismatched_replay, RunnerDomainError::CorrelationMismatch);
+    assert_eq!(attempt_state, "terminal");
+    assert_eq!(disposition.as_deref(), Some("completed"));
+    assert_eq!(result_text.as_deref(), Some(result.as_str()));
+    drop(pool);
+    Ok(())
+}
+
+/// INV-011 / INV-021 / INV-043: a cross-wired runner result rolls back both
+/// aggregates, retaining the claimed lease and in-flight attempt.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv011_inv021_inv043_runner_result_rejects_cross_wired_execution_locus()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, claimed) = stored_claimed_pinned_dispatch_fixture(&pool).await?;
+    let correlation = claimed.correlation();
+    let cross_wired = RunnerLeaseCorrelation {
+        working_directory: RunnerWorkingDirectory::try_new("/workspace/other".to_owned())
+            .expect("the cross-wired directory remains structurally valid"),
+        ..correlation.clone()
+    };
+    let rejected = store
+        .commit_lease_result(RunnerLeaseResultRequest::new(
+            cross_wired,
+            ToolAttemptObservation::KnownFailed {
+                error: signalbox_domain::ToolExecutionError::new(
+                    signalbox_domain::ToolExecutionErrorKind::ExecutionFailed,
+                    None,
+                ),
+            },
+        ))
+        .await
+        .expect_err("the result must match the complete claimed correlation");
+    let loaded = store
+        .load_lease(correlation.lease, correlation.generation)
+        .await?
+        .expect("the rejected result leaves its claim readable");
+    let attempt_state: String =
+        sqlx::query_scalar("SELECT state_kind FROM tool_attempt WHERE attempt_id = $1")
+            .bind(correlation.dispatch.attempt().into_uuid())
+            .fetch_one(&pool)
+            .await?;
+
+    assert_store_domain_error(rejected, RunnerDomainError::CorrelationMismatch);
+    assert_eq!(loaded.state(), RunnerLeaseState::Claimed);
+    assert_eq!(attempt_state, "in_flight");
+    drop(pool);
+    Ok(())
+}
+
+/// INV-011 / INV-021 / INV-043: definitive runner failure terminalizes both
+/// aggregates without manufacturing success content.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv011_inv021_inv043_runner_result_commits_known_failure() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, claimed) = stored_claimed_pinned_dispatch_fixture(&pool).await?;
+    let correlation = claimed.correlation();
+    let expected_error = ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None);
+    let completion = store
+        .commit_lease_result(RunnerLeaseResultRequest::new(
+            correlation,
+            ToolAttemptObservation::KnownFailed {
+                error: expected_error.clone(),
+            },
+        ))
+        .await?;
+    let (disposition, error_kind, result_text): (String, Option<String>, Option<String>) =
+        sqlx::query_as(
+            "SELECT terminal_disposition_kind, error_kind, result_text
+               FROM tool_attempt
+              WHERE attempt_id = $1",
+        )
+        .bind(completion.attempt().attempt().into_uuid())
+        .fetch_one(&pool)
+        .await?;
+
+    assert_eq!(completion.lease().state(), RunnerLeaseState::Completed);
+    assert_eq!(
+        completion.attempt().end(),
+        &ToolAttemptEnd::KnownFailed {
+            error: expected_error,
+        }
+    );
+    assert_eq!(disposition, "known_failed");
+    assert_eq!(error_kind.as_deref(), Some("execution_failed"));
+    assert_eq!(result_text, None);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-011 / INV-021 / INV-043: ambiguous side-effecting runner evidence
+/// completes the lease while atomically yielding the turn to tool recovery.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv011_inv021_inv043_runner_result_commits_ambiguous_recovery_wait()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, claimed) = stored_claimed_pinned_dispatch_fixture_with_authorization(
+        &pool,
+        external_authorized,
+        side_effecting_catalog(),
+        permission_overrides(RunnerToolPermissionOverride::Auto),
+        "external_effect",
+    )
+    .await?;
+    let correlation = claimed.correlation();
+    let completion = store
+        .commit_lease_result(RunnerLeaseResultRequest::new(
+            correlation.clone(),
+            ToolAttemptObservation::Ambiguous,
+        ))
+        .await?;
+    let (phase, recovery_attempt): (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT active_phase_kind, recovery_tool_attempt_id
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(correlation.dispatch.session().into_uuid())
+    .bind(correlation.dispatch.turn().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let (turn_attempt_state, turn_disposition): (String, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, end_disposition
+           FROM turn_attempt
+          WHERE turn_attempt_id = $1",
+    )
+    .bind(correlation.dispatch.issuing_attempt().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(completion.lease().state(), RunnerLeaseState::Completed);
+    assert_eq!(completion.attempt().end(), &ToolAttemptEnd::Ambiguous);
+    assert_eq!(phase, "awaiting_tool_recovery");
+    assert_eq!(
+        recovery_attempt,
+        Some(correlation.dispatch.attempt().into_uuid())
+    );
+    assert_eq!(turn_attempt_state, "ended");
+    assert_eq!(turn_disposition.as_deref(), Some("ambiguous"));
+    drop(pool);
+    Ok(())
+}
+
+/// INV-021 / INV-043: generic projection cannot bypass the result transaction.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv021_inv043_generic_lease_store_rejects_completed_state()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, claimed) = stored_claimed_pinned_dispatch_fixture(&pool).await?;
+    let correlation = claimed.correlation();
+    let completed = claimed
+        .complete(correlation)
+        .expect("the fixture claim admits its exact aggregate transition");
+    let rejected = store
+        .store_lease(&completed)
+        .await
+        .expect_err("generic persistence cannot originate runner completion");
+
+    assert_store_domain_error(rejected, RunnerDomainError::InvalidState);
     drop(pool);
     Ok(())
 }

@@ -20,6 +20,7 @@ mod repo_watch;
 mod review_orchestration;
 mod review_workflow;
 mod runner_lease_claim;
+mod runner_lease_result;
 mod runner_replacement_provisioning;
 mod scheduler;
 mod session_delegation;
@@ -129,6 +130,9 @@ pub use review_workflow::{
 };
 pub use runner_lease_claim::{
     RunnerLeaseClaimRequest, RunnerLeaseClaimService, RunnerLeaseClaimTransaction,
+};
+pub use runner_lease_result::{
+    RunnerLeaseResultRequest, RunnerLeaseResultService, RunnerLeaseResultTransaction,
 };
 pub use runner_replacement_provisioning::{
     RunnerReplacementProvisioningIdGenerator, RunnerReplacementProvisioningOutcome,
