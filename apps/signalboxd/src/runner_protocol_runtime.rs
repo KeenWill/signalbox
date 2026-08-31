@@ -2045,7 +2045,9 @@ where
                         }
                     }
                     Message::HeartbeatAck(acknowledgement) => {
-                        if let Err(failure) = heartbeat_state.accept(&acknowledgement) {
+                        if let Err(failure) =
+                            heartbeat_state.accept(&acknowledgement, context.runner)
+                        {
                             terminalize_protocol_rejection(
                                 &service,
                                 context,
@@ -2617,12 +2619,51 @@ impl HeartbeatState {
         }))
     }
 
-    fn accept(&mut self, acknowledgement: &HeartbeatAck) -> Result<(), RunnerRegistrationFailure> {
-        if acknowledgement.lease_phase.is_some() || acknowledgement.workspace_phase.is_some() {
+    fn accept(
+        &mut self,
+        acknowledgement: &HeartbeatAck,
+        connection_runner: CanonicalUuid,
+    ) -> Result<(), RunnerRegistrationFailure> {
+        if acknowledgement.lease_phase.is_some()
+            || matches!(
+                acknowledgement.workspace_phase.as_ref(),
+                Some(
+                    HeartbeatWorkspacePhase::Provisioning { .. }
+                        | HeartbeatWorkspacePhase::ReadyUnrecorded { .. }
+                        | HeartbeatWorkspacePhase::FailureUnrecorded {
+                            correlation: WorkspaceFailureCorrelation::Provision(_),
+                        }
+                )
+            )
+        {
             return Err(RunnerRegistrationFailure::new(
                 RunnerInboundFrameKind::HeartbeatAck,
                 heartbeat_ack_correlation(acknowledgement),
                 RejectionCode::Unavailable,
+            ));
+        }
+        let release_runner = match acknowledgement.workspace_phase.as_ref() {
+            Some(HeartbeatWorkspacePhase::ReleaseAccepted { correlation })
+            | Some(HeartbeatWorkspacePhase::ReleaseCompleted { correlation }) => {
+                Some(correlation.runner_id)
+            }
+            Some(HeartbeatWorkspacePhase::FailureUnrecorded {
+                correlation: WorkspaceFailureCorrelation::Release(correlation),
+            }) => Some(correlation.runner_id),
+            Some(
+                HeartbeatWorkspacePhase::Provisioning { .. }
+                | HeartbeatWorkspacePhase::ReadyUnrecorded { .. }
+                | HeartbeatWorkspacePhase::FailureUnrecorded {
+                    correlation: WorkspaceFailureCorrelation::Provision(_),
+                },
+            )
+            | None => None,
+        };
+        if release_runner.is_some_and(|runner| runner != connection_runner) {
+            return Err(RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::HeartbeatAck,
+                heartbeat_ack_correlation(acknowledgement),
+                RejectionCode::CorrelationMismatch,
             ));
         }
         if Some(acknowledgement.challenge_sequence.get()) != self.outstanding_challenge
@@ -5627,7 +5668,7 @@ mod tests {
         };
 
         let failure = state
-            .accept(&stale)
+            .accept(&stale, identity(1))
             .expect_err("a nonmatching challenge must fail closed");
 
         assert_eq!(failure.code, RejectionCode::CorrelationMismatch);
@@ -5638,13 +5679,16 @@ mod tests {
         let mut state = HeartbeatState::new();
         let first = challenge_tick(&mut state);
         state
-            .accept(&HeartbeatAck {
-                challenge_sequence: first.sequence,
-                runner_sequence: PositiveU64::try_new(1)
-                    .expect("the first runner sequence is positive"),
-                lease_phase: None,
-                workspace_phase: None,
-            })
+            .accept(
+                &HeartbeatAck {
+                    challenge_sequence: first.sequence,
+                    runner_sequence: PositiveU64::try_new(1)
+                        .expect("the first runner sequence is positive"),
+                    lease_phase: None,
+                    workspace_phase: None,
+                },
+                identity(1),
+            )
             .expect("the first acknowledgement is admitted");
         let second = challenge_tick(&mut state);
         let repeated = HeartbeatAck {
@@ -5656,7 +5700,7 @@ mod tests {
         };
 
         let failure = state
-            .accept(&repeated)
+            .accept(&repeated, identity(1))
             .expect_err("a repeated runner sequence must fail closed");
 
         assert_eq!(failure.code, RejectionCode::CorrelationMismatch);
@@ -5738,13 +5782,98 @@ mod tests {
         };
 
         let failure = state
-            .accept(&acknowledgement)
+            .accept(&acknowledgement, identity(12))
             .expect_err("operation state is unavailable in this runtime");
 
         assert_eq!(failure.code, RejectionCode::Unavailable);
         assert_eq!(
             failure.available_correlation.as_ref(),
             &AvailableCorrelation::Provision(correlation)
+        );
+    }
+
+    #[test]
+    fn heartbeat_release_phase_is_admitted_for_the_established_runner() {
+        let mut state = HeartbeatState::new();
+        let challenge = challenge_tick(&mut state);
+        let runner = identity(12);
+        let correlation = signalbox_runner_wire::ReleaseCorrelation {
+            session_id: identity(10),
+            placement_revision: PositiveU64::try_new(1)
+                .expect("the first placement revision is positive"),
+            runner_id: runner,
+            manifest_id: identity(11),
+        };
+        let acknowledgement = HeartbeatAck {
+            challenge_sequence: challenge.sequence,
+            runner_sequence: PositiveU64::try_new(1)
+                .expect("the first runner sequence is positive"),
+            lease_phase: None,
+            workspace_phase: Some(HeartbeatWorkspacePhase::ReleaseAccepted { correlation }),
+        };
+
+        state
+            .accept(&acknowledgement, runner)
+            .expect("the established runner's retained release phase is admitted");
+    }
+
+    #[test]
+    fn heartbeat_release_failure_is_admitted_for_the_established_runner() {
+        let mut state = HeartbeatState::new();
+        let challenge = challenge_tick(&mut state);
+        let runner = identity(12);
+        let correlation = signalbox_runner_wire::ReleaseCorrelation {
+            session_id: identity(10),
+            placement_revision: PositiveU64::try_new(1)
+                .expect("the first placement revision is positive"),
+            runner_id: runner,
+            manifest_id: identity(11),
+        };
+        let acknowledgement = HeartbeatAck {
+            challenge_sequence: challenge.sequence,
+            runner_sequence: PositiveU64::try_new(1)
+                .expect("the first runner sequence is positive"),
+            lease_phase: None,
+            workspace_phase: Some(HeartbeatWorkspacePhase::FailureUnrecorded {
+                correlation: WorkspaceFailureCorrelation::Release(correlation),
+            }),
+        };
+
+        state
+            .accept(&acknowledgement, runner)
+            .expect("the established runner's retained release failure is admitted");
+    }
+
+    #[test]
+    fn heartbeat_release_phase_rejects_a_foreign_runner() {
+        let mut state = HeartbeatState::new();
+        let challenge = challenge_tick(&mut state);
+        let established_runner = identity(12);
+        let correlation = signalbox_runner_wire::ReleaseCorrelation {
+            session_id: identity(10),
+            placement_revision: PositiveU64::try_new(1)
+                .expect("the first placement revision is positive"),
+            runner_id: identity(13),
+            manifest_id: identity(11),
+        };
+        let acknowledgement = HeartbeatAck {
+            challenge_sequence: challenge.sequence,
+            runner_sequence: PositiveU64::try_new(1)
+                .expect("the first runner sequence is positive"),
+            lease_phase: None,
+            workspace_phase: Some(HeartbeatWorkspacePhase::ReleaseCompleted {
+                correlation: correlation.clone(),
+            }),
+        };
+
+        let failure = state
+            .accept(&acknowledgement, established_runner)
+            .expect_err("a foreign retained release must fail closed");
+
+        assert_eq!(failure.code, RejectionCode::CorrelationMismatch);
+        assert_eq!(
+            failure.available_correlation.as_ref(),
+            &AvailableCorrelation::Release(correlation)
         );
     }
 }
