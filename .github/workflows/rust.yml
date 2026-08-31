@@ -298,9 +298,9 @@ jobs:
       # compiled under features it did not previously see. The runner suite
       # repeats the persistence package archive with the same feature set so a
       # positive binary filter can isolate that target; Cargo reuses the build
-      # artifacts. The runner-process suite packages the actual runner binary
-      # with its process integration test. Other suites retain their independent
-      # feature resolution.
+      # artifacts. The runner-process suite packages the actual runner and exec
+      # supervisor binaries with its process integration test. Other suites
+      # retain their independent feature resolution.
       #
       # The loop reads the manifest rather than restating it: package and
       # feature selection exist in exactly one place, which is the same place
@@ -416,6 +416,12 @@ jobs:
         with:
           name: postgres-integration-archive-${{ matrix.suite }}
           path: ${{ runner.temp }}/archive
+      - name: Install bubblewrap for the runner execution proof
+        if: ${{ matrix.suite == 'runner-process' }}
+        run: sudo apt-get install --yes bubblewrap
+      - name: Enable unprivileged user namespaces for the runner execution proof
+        if: ${{ matrix.suite == 'runner-process' }}
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       # Flag for flag against the `cargo test` invocation this replaces:
       # `--run-ignored only` is `-- --ignored`, `--test-threads 4` is
       # `--test-threads=4`, `--no-fail-fast` is unchanged, and the archive
