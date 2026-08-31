@@ -236,8 +236,9 @@ pub use runner::{
     SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
     SessionRunnerPlacementState, StoredRunnerRegistrationLossEvidence, ToolAdmissibleLoci,
     ValidatedRunnerRegistration, ValidatedRunnerRegistrationReconstitutionInput,
-    WorkingDirectorySelection, WorkspaceBranchName, WorkspaceCapability, WorkspaceRecovery,
-    WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRequirement, WorkspaceRevision,
+    WorkingDirectorySelection, WorkspaceBranchName, WorkspaceCapability,
+    WorkspaceProvisioningAuthorization, WorkspaceRecovery, WorkspaceRelativePath,
+    WorkspaceRepositoryKey, WorkspaceRequirement, WorkspaceRevision,
 };
 pub(crate) use semantic_entry::InitialSemanticTranscriptEntryPayload;
 pub use semantic_entry::{
@@ -504,6 +505,11 @@ define_identity!(
 );
 
 define_identity!(
+    /// Identifies one single-use runner workspace provisioning authorization.
+    WorkspaceProvisioningAuthorizationId
+);
+
+define_identity!(
     /// Identifies one immutable review-target snapshot.
     ReviewTargetId
 );
@@ -611,6 +617,7 @@ mod tests {
         ProviderTargetEvidenceId, RepoWatchDispatchId, RepoWatchEventId, RunnerAuthenticationId,
         RunnerEnrollmentId, RunnerId, RunnerLeaseId, SemanticTranscriptEntryId, SessionId,
         ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId, WorkspaceId, WorkspaceManifestId,
+        WorkspaceProvisioningAuthorizationId,
     };
     use uuid::Uuid;
 
@@ -649,6 +656,7 @@ mod tests {
         assert_uuid_contract!(RunnerAuthenticationId);
         assert_uuid_contract!(RunnerLeaseId);
         assert_uuid_contract!(WorkspaceManifestId);
+        assert_uuid_contract!(WorkspaceProvisioningAuthorizationId);
         assert_uuid_contract!(RepoWatchEventId);
         assert_uuid_contract!(RepoWatchDispatchId);
         assert_uuid_contract!(WorkspaceId);

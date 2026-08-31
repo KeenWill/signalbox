@@ -38,7 +38,10 @@ are verified against this PR (`agent/runner-pre-pin-replacement`).
 Pending-enrollment activation inside that pre-pin replacement transaction is
 verified against this PR (`agent/runner-pending-pre-pin-replacement`). The
 checked same-runner registration-recovery domain transition is verified against
-this PR (`agent/runner-same-runner-domain`).
+this PR (`agent/runner-same-runner-domain`). The checked repository-workspace
+provisioning authorization for a distinct successor or the narrow same-runner
+recovery is verified against this PR
+(`agent/runner-replacement-workspace-authorization-domain`).
 
 **Committed unimplemented functionality.** No current adapter consumes the
 checked same-runner transition or handles pinned replacement staging or the
@@ -1542,6 +1545,17 @@ behavior in this section constrains that future implementation. The executable
 runner leaves a typed `RecoveryUnavailable` seam whose exact `RecoveryGap` is
 `UnbornHeadNotRepresentable`; it constructs no wire recovery fact because the
 current recovery union cannot represent an empty clone's unborn `HEAD`.
+
+The domain constructs a `WorkspaceProvisioningAuthorization` only for a
+repository-backed successor request that the selected current registration can
+satisfy. It binds a single-use identity, session, next placement revision,
+enrollment, runner, registration revision, repository, sandbox, and optional
+credential profile. A distinct successor uses the ordinary pinned-replacement
+check; the same runner additionally requires the exact registration-loss
+recovery evidence. A connection loss cannot authorize a same-runner successor,
+and a stale registration, unsupported request, or request with no repository
+produces no authorization. Durable command claim, storage, dispatch, receipt
+consumption, and restart recovery remain the unimplemented producer named above.
 
 `WorkspaceRequirement::RepositoryWorktree` is satisfiable only when the selected
 validated registration advertises `WorkspaceCapability::WorktreePerSession` and

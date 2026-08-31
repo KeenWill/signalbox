@@ -18,6 +18,7 @@ use crate::{
     RunnerId, RunnerLeaseId, SessionId, ToolArgumentsKind, ToolAttemptDispatchCorrelation,
     ToolAttemptId, ToolBatch, ToolBatchExecutionFailure, ToolDecisionSource, ToolEffectClass,
     ToolName, ToolPermissionDefault, TurnId, WorkspaceManifestId,
+    WorkspaceProvisioningAuthorizationId,
 };
 
 /// Exact user-selected successor for one lost session placement.
@@ -2645,6 +2646,67 @@ pub struct ProvisionedWorkspace {
     pub recovery: Option<WorkspaceRecovery>,
 }
 
+/// Checked facts authorizing one repository-workspace provisioning operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceProvisioningAuthorization {
+    authorization: WorkspaceProvisioningAuthorizationId,
+    session: SessionId,
+    placement_revision: RunnerGeneration,
+    enrollment: RunnerEnrollmentId,
+    runner: RunnerId,
+    registration_revision: RunnerGeneration,
+    repository: WorkspaceRepositoryKey,
+    sandbox: RunnerSandboxProfile,
+    credential_profile: Option<CredentialProfileName>,
+}
+
+impl WorkspaceProvisioningAuthorization {
+    /// Returns the single-use authorization identity.
+    pub const fn authorization(&self) -> WorkspaceProvisioningAuthorizationId {
+        self.authorization
+    }
+
+    /// Returns the owning session.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the exact placement revision whose workspace may be provisioned.
+    pub const fn placement_revision(&self) -> RunnerGeneration {
+        self.placement_revision
+    }
+
+    /// Returns the selected enrollment.
+    pub const fn enrollment(&self) -> RunnerEnrollmentId {
+        self.enrollment
+    }
+
+    /// Returns the selected runner.
+    pub const fn runner(&self) -> RunnerId {
+        self.runner
+    }
+
+    /// Returns the exact registration revision admitted for provisioning.
+    pub const fn registration_revision(&self) -> RunnerGeneration {
+        self.registration_revision
+    }
+
+    /// Returns the exact repository to provision.
+    pub const fn repository(&self) -> &WorkspaceRepositoryKey {
+        &self.repository
+    }
+
+    /// Returns the immutable sandbox profile.
+    pub const fn sandbox(&self) -> RunnerSandboxProfile {
+        self.sandbox
+    }
+
+    /// Returns the exact optional credential profile selected by the placement.
+    pub const fn credential_profile(&self) -> Option<&CredentialProfileName> {
+        self.credential_profile.as_ref()
+    }
+}
+
 /// Complete requested placement axes.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SessionRunnerPlacementRequest {
@@ -3200,6 +3262,44 @@ impl SessionRunnerPlacement {
         )
     }
 
+    /// Authorizes repository provisioning for a distinct-runner replacement.
+    pub fn authorize_lost_runner_replacement_workspace(
+        &self,
+        authorization: WorkspaceProvisioningAuthorizationId,
+        request: &SessionRunnerPlacementRequest,
+        registration: &ValidatedRunnerRegistration,
+    ) -> Result<WorkspaceProvisioningAuthorization, RunnerDomainError> {
+        let placement_revision =
+            self.checked_lost_replacement_revision(registration, SameRunnerReplacement::Refuse)?;
+        workspace_provisioning_authorization(
+            authorization,
+            self.session,
+            placement_revision,
+            request,
+            registration,
+        )
+    }
+
+    /// Authorizes repository provisioning for checked same-runner recovery.
+    pub fn authorize_same_runner_replacement_workspace(
+        &self,
+        authorization: WorkspaceProvisioningAuthorizationId,
+        request: &SessionRunnerPlacementRequest,
+        recovery: &SameRunnerRegistrationRecovery,
+    ) -> Result<WorkspaceProvisioningAuthorization, RunnerDomainError> {
+        let placement_revision = self.checked_lost_replacement_revision(
+            &recovery.current_registration,
+            SameRunnerReplacement::RegistrationLoss(&recovery.loss_registration),
+        )?;
+        workspace_provisioning_authorization(
+            authorization,
+            self.session,
+            placement_revision,
+            request,
+            &recovery.current_registration,
+        )
+    }
+
     /// Replaces a registration-lost pin on the same runner after checking the
     /// exact loss-causing and current registration lineage.
     pub fn replace_lost_runner_after_same_runner_registration_recovery(
@@ -3233,6 +3333,7 @@ impl SessionRunnerPlacement {
         prior_grant: Option<CredentialProfileGrant>,
         same_runner: SameRunnerReplacement<'_>,
     ) -> Result<RunnerPlacementReplacement, RunnerDomainError> {
+        let revision = self.checked_lost_replacement_revision(registration, same_runner)?;
         let lost = match self.state {
             SessionRunnerPlacementState::RunnerLost(lost) => lost,
             SessionRunnerPlacementState::Unpinned
@@ -3243,49 +3344,6 @@ impl SessionRunnerPlacement {
             }
         };
         let before = lost.pinned;
-        if !registration.is_current() {
-            return Err(RunnerDomainError::RegistrationChanged);
-        }
-        if registration.runner == before.runner {
-            let loss_registration = match same_runner {
-                SameRunnerReplacement::Refuse => {
-                    return Err(RunnerDomainError::CorrelationMismatch);
-                }
-                SameRunnerReplacement::RegistrationLoss(loss_registration) => loss_registration,
-            };
-            let exact_loss_registration = match lost.source {
-                RunnerPlacementLossSource::Connection => {
-                    return Err(RunnerDomainError::CorrelationMismatch);
-                }
-                RunnerPlacementLossSource::Registration => lost.loss_registration.as_deref(),
-            };
-            if exact_loss_registration != Some(loss_registration)
-                || lost
-                    .pinned_registration
-                    .is_none_or(|pinned| !pinned.matches(loss_registration))
-                || loss_registration.enrollment != registration.enrollment
-                || loss_registration.runner != before.runner
-                || loss_registration.runner != registration.runner
-                || loss_registration.authentication != registration.authentication
-                || loss_registration.revision > registration.revision
-                || (loss_registration.revision == registration.revision
-                    && loss_registration != registration)
-                || registration_preserves_snapshot(&self.request, &before, loss_registration)
-            {
-                return Err(RunnerDomainError::CorrelationMismatch);
-            }
-        } else {
-            match same_runner {
-                SameRunnerReplacement::Refuse => {}
-                SameRunnerReplacement::RegistrationLoss(_) => {
-                    return Err(RunnerDomainError::CorrelationMismatch);
-                }
-            }
-        }
-        let revision = self
-            .revision
-            .checked_next()
-            .ok_or(RunnerDomainError::GenerationExhausted)?;
         let mut after = validate_placement(
             self.session,
             revision,
@@ -3321,6 +3379,54 @@ impl SessionRunnerPlacement {
             grant,
             grant_change,
         })
+    }
+
+    fn checked_lost_replacement_revision(
+        &self,
+        registration: &ValidatedRunnerRegistration,
+        same_runner: SameRunnerReplacement<'_>,
+    ) -> Result<RunnerGeneration, RunnerDomainError> {
+        let SessionRunnerPlacementState::RunnerLost(lost) = &self.state else {
+            return Err(RunnerDomainError::InvalidState);
+        };
+        let before = &lost.pinned;
+        if !registration.is_current() {
+            return Err(RunnerDomainError::RegistrationChanged);
+        }
+        if registration.runner == before.runner {
+            let loss_registration = match same_runner {
+                SameRunnerReplacement::Refuse => {
+                    return Err(RunnerDomainError::CorrelationMismatch);
+                }
+                SameRunnerReplacement::RegistrationLoss(loss_registration) => loss_registration,
+            };
+            let exact_loss_registration = match lost.source {
+                RunnerPlacementLossSource::Connection => {
+                    return Err(RunnerDomainError::CorrelationMismatch);
+                }
+                RunnerPlacementLossSource::Registration => lost.loss_registration.as_deref(),
+            };
+            if exact_loss_registration != Some(loss_registration)
+                || lost
+                    .pinned_registration
+                    .is_none_or(|pinned| !pinned.matches(loss_registration))
+                || loss_registration.enrollment != registration.enrollment
+                || loss_registration.runner != before.runner
+                || loss_registration.runner != registration.runner
+                || loss_registration.authentication != registration.authentication
+                || loss_registration.revision > registration.revision
+                || (loss_registration.revision == registration.revision
+                    && loss_registration != registration)
+                || registration_preserves_snapshot(&self.request, before, loss_registration)
+            {
+                return Err(RunnerDomainError::CorrelationMismatch);
+            }
+        } else if matches!(same_runner, SameRunnerReplacement::RegistrationLoss(_)) {
+            return Err(RunnerDomainError::CorrelationMismatch);
+        }
+        self.revision
+            .checked_next()
+            .ok_or(RunnerDomainError::GenerationExhausted)
     }
 
     /// Terminally abandons the exact current lost placement.
@@ -3871,6 +3977,30 @@ fn validate_placement_request(
         return Err(RunnerDomainError::RegistrationChanged);
     }
     validate_placement_request_against(request, registration)
+}
+
+fn workspace_provisioning_authorization(
+    authorization: WorkspaceProvisioningAuthorizationId,
+    session: SessionId,
+    placement_revision: RunnerGeneration,
+    request: &SessionRunnerPlacementRequest,
+    registration: &ValidatedRunnerRegistration,
+) -> Result<WorkspaceProvisioningAuthorization, RunnerDomainError> {
+    validate_placement_request(request, registration)?;
+    let WorkspaceRequirement::RepositoryWorktree { repository } = &request.workspace else {
+        return Err(RunnerDomainError::WorkspaceMismatch);
+    };
+    Ok(WorkspaceProvisioningAuthorization {
+        authorization,
+        session,
+        placement_revision,
+        enrollment: registration.enrollment,
+        runner: registration.runner,
+        registration_revision: registration.revision,
+        repository: repository.clone(),
+        sandbox: request.sandbox,
+        credential_profile: request.credential_profile.clone(),
+    })
 }
 
 fn validate_placement_request_against(
@@ -4458,6 +4588,8 @@ mod tests {
     const ABANDONMENT_COMMAND: u128 = 0x7e00;
     /// Arbitrary distinct identity for equal abandonment-command replay.
     const ABANDONMENT_REPLAY_COMMAND: u128 = 0x7e01;
+    /// Arbitrary workspace-provisioning authorization identity.
+    const WORKSPACE_PROVISIONING_AUTHORIZATION: u128 = 0x7f00;
     /// Arbitrary empty context-frontier identity for complete batch fixtures.
     const YIELDED_FRONTIER: u128 = 0x7a00;
 
@@ -4639,6 +4771,66 @@ mod tests {
             sandbox: RunnerSandboxProfile::WorkspaceRestricted,
             permission_overrides: no_permission_overrides(),
         }
+    }
+
+    fn repository_placement_request(runner: RunnerId) -> SessionRunnerPlacementRequest {
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::Identity(runner),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: None,
+            workspace: WorkspaceRequirement::RepositoryWorktree {
+                repository: repository_key(),
+            },
+            sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            permission_overrides: no_permission_overrides(),
+        }
+    }
+
+    fn repository_workspace(runner: RunnerId) -> ProvisionedWorkspace {
+        ProvisionedWorkspace {
+            session: session_id(SESSION),
+            placement_revision: RunnerGeneration::one(),
+            runner,
+            repository: Some(repository_key()),
+            canonical_clone_url_digest: Some(
+                CanonicalCloneUrlDigest::try_new("b".repeat(64))
+                    .expect("the fixture clone URL digest is canonical"),
+            ),
+            credential_profile: None,
+            sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            working_directory: directory("/workspace/session"),
+            relative_path: WorkspaceRelativePath::try_new(format!(
+                "sessions/{}/1/repo",
+                session_id(SESSION).as_uuid()
+            ))
+            .expect("the fixture relative path is valid"),
+            manifest_id: WorkspaceManifestId::from_uuid(uuid::Uuid::from_u128(0x7b03)),
+            recovery: Some(WorkspaceRecovery::Commit {
+                revision: WorkspaceRevision::try_new("c".repeat(40))
+                    .expect("the fixture recovery revision is canonical"),
+            }),
+        }
+    }
+
+    fn pinned_repository(registration: &ValidatedRunnerRegistration) -> SessionRunnerPlacement {
+        SessionRunnerPlacement::new(
+            session_id(SESSION),
+            repository_placement_request(registration.runner()),
+        )
+        .pin_and_offer_lease(
+            &enrollment_for_registration(registration),
+            registration,
+            directory("/workspace/session"),
+            Some(repository_workspace(registration.runner())),
+            authorized(
+                "inspect",
+                tool_attempt_id(ATTEMPT),
+                RunnerToolEffectClass::Pure,
+            ),
+            lease_offer_request("inspect"),
+        )
+        .expect("the repository workspace pins against its exact registration")
+        .placement
     }
 
     fn directory(value: &str) -> RunnerWorkingDirectory {
@@ -7239,6 +7431,127 @@ mod tests {
         );
         assert_eq!(replaced.change.before.runner, initial.runner());
         assert_eq!(replaced.change.after.runner, replacement.runner());
+    }
+
+    #[test]
+    fn s32_inv044_replacement_workspace_authorization_binds_every_admitted_axis() {
+        let initial = registration();
+        let replacement = registration_for(runner_id(REPLACEMENT_RUNNER));
+        let request = repository_placement_request(replacement.runner());
+        let authorization_id = WorkspaceProvisioningAuthorizationId::from_uuid(
+            uuid::Uuid::from_u128(WORKSPACE_PROVISIONING_AUTHORIZATION),
+        );
+        let lost = pinned_repository(&initial)
+            .mark_runner_lost()
+            .expect("the repository placement can record connection loss");
+        let authorization = lost
+            .authorize_lost_runner_replacement_workspace(authorization_id, &request, &replacement)
+            .expect("the distinct current registration may provision the successor repository");
+        let expected_revision =
+            RunnerGeneration::try_from_u64(2).expect("the fixture states revision two");
+
+        assert_eq!(authorization.authorization(), authorization_id);
+        assert_eq!(authorization.session(), lost.session());
+        assert_eq!(authorization.placement_revision(), expected_revision);
+        assert_eq!(authorization.enrollment(), replacement.enrollment());
+        assert_eq!(authorization.runner(), replacement.runner());
+        assert_eq!(
+            authorization.registration_revision(),
+            replacement.revision()
+        );
+        assert_eq!(authorization.repository(), &repository_key());
+        assert_eq!(authorization.sandbox(), request.sandbox);
+        assert_eq!(
+            authorization.credential_profile(),
+            request.credential_profile.as_ref()
+        );
+    }
+
+    #[test]
+    fn s32_inv044_replacement_workspace_authorization_rejects_a_non_repository_request() {
+        let initial = registration();
+        let replacement = registration_for(runner_id(REPLACEMENT_RUNNER));
+        let request = exact_placement_request(replacement.runner());
+        let authorization_id = WorkspaceProvisioningAuthorizationId::from_uuid(
+            uuid::Uuid::from_u128(WORKSPACE_PROVISIONING_AUTHORIZATION),
+        );
+        let lost = pinned_repository(&initial)
+            .mark_runner_lost()
+            .expect("the repository placement can record connection loss");
+
+        assert_eq!(
+            lost.authorize_lost_runner_replacement_workspace(
+                authorization_id,
+                &request,
+                &replacement,
+            ),
+            Err(RunnerDomainError::WorkspaceMismatch)
+        );
+    }
+
+    #[test]
+    fn s32_inv044_same_runner_workspace_authorization_requires_checked_registration_recovery() {
+        let enrollment = enrollment();
+        let pinned_registration = enrollment
+            .register(advertisement(), &catalog())
+            .expect("the complete advertisement registers");
+        let pinned = pinned_repository(&pinned_registration);
+        let loss_registration = enrollment
+            .register(registration_loss_advertisement(), &catalog())
+            .expect("the narrowed advertisement remains valid");
+        let lost = pinned
+            .reconcile_registration(RunnerRegistrationReconciliation {
+                pinned_registration,
+                current_registration: loss_registration.clone(),
+            })
+            .expect("repository omission records the exact registration loss");
+        let current_registration = enrollment
+            .register(advertisement(), &catalog())
+            .expect("the repository advertisement recovers");
+        let request = repository_placement_request(current_registration.runner());
+        let recovery = SameRunnerRegistrationRecovery {
+            loss_registration,
+            current_registration: current_registration.clone(),
+        };
+        let authorization_id = WorkspaceProvisioningAuthorizationId::from_uuid(
+            uuid::Uuid::from_u128(WORKSPACE_PROVISIONING_AUTHORIZATION),
+        );
+        let authorization = lost
+            .authorize_same_runner_replacement_workspace(authorization_id, &request, &recovery)
+            .expect("the exact registration recovery authorizes successor provisioning");
+
+        assert_eq!(authorization.authorization(), authorization_id);
+        assert_eq!(authorization.runner(), current_registration.runner());
+        assert_eq!(
+            authorization.registration_revision(),
+            current_registration.revision()
+        );
+        assert_eq!(authorization.repository(), &repository_key());
+    }
+
+    #[test]
+    fn s32_inv044_connection_loss_cannot_authorize_same_runner_workspace_provisioning() {
+        let registration = registration();
+        let request = repository_placement_request(registration.runner());
+        let authorization_id = WorkspaceProvisioningAuthorizationId::from_uuid(
+            uuid::Uuid::from_u128(WORKSPACE_PROVISIONING_AUTHORIZATION),
+        );
+        let lost = pinned_repository(&registration)
+            .mark_runner_lost()
+            .expect("the repository placement can record connection loss");
+        let recovery = SameRunnerRegistrationRecovery {
+            loss_registration: registration.clone(),
+            current_registration: registration,
+        };
+
+        assert_eq!(
+            lost.authorize_same_runner_replacement_workspace(
+                authorization_id,
+                &request,
+                &recovery,
+            ),
+            Err(RunnerDomainError::CorrelationMismatch)
+        );
     }
 
     #[test]
