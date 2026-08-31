@@ -719,6 +719,24 @@ class WorkflowAgreementTests(unittest.TestCase):
             [],
         )
 
+    def test_diverging_shard_selections_are_reported(self) -> None:
+        dynamic = (
+            "runs-on: ${{ github.event_name == 'pull_request' && "
+            "(github.event.pull_request.head.repo.full_name != github.repository "
+            "|| contains(fromJSON('[\"dependabot[bot]\",\"renovate[bot]\"]'), "
+            "github.event.pull_request.user.login)) && 'ubuntu-latest' || "
+            "'signalbox-docker' }}"
+        )
+        failures = self.disagreements(
+            AGREEING_WORKFLOW.replace(
+                "  postgres-integration-run:\n    runs-on: signalbox-docker\n",
+                "  postgres-integration-run:\n    " + dynamic + "\n",
+            )
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("share one complete runner selection", failures[0])
+
     def test_run_job_leaving_signalbox_docker_is_reported(self) -> None:
         failures = self.disagreements(
             AGREEING_WORKFLOW.replace(
