@@ -30,9 +30,11 @@ verified against this PR
 (`agent/runner-workspace-provisioning-authorization-persistence`). The atomic
 pinned-replacement command claim and provisioning-stage producer were verified
 against this PR (`agent/runner-replacement-provisioning-transaction`). The exact
-lease-offer registration and execution-placement reconstitution facts are
-verified against this PR (`agent/runner-lease-domain-correlation`). Existing-pin
-attempt-and-offer atomicity is verified against this PR
+workspace-free pinned-replacement command stage is verified against this PR
+(`agent/runner-pinned-replacement-staging`). The exact lease-offer registration
+and execution-placement reconstitution facts are verified against this PR
+(`agent/runner-lease-domain-correlation`). Existing-pin attempt-and-offer
+atomicity is verified against this PR
 (`agent/runner-pinned-dispatch-transaction`). The pinned-dispatch adapter's
 exact runner/registration lookup and returned enrollment routing identity are
 verified against this PR (`agent/runner-offer-locus-binding`). The
@@ -388,10 +390,16 @@ Representation rules, all enforced in the schema:
   to advertise every retained request axis, then activates the candidate,
   revokes its recorded predecessor, and installs the same unpinned successor in
   one terminal commit. A mismatch or disconnected candidate is a typed durable
-  rejection and leaves the pending authority intact. **Committed unimplemented
+  rejection and leaves the pending authority intact. The workspace-free pinned
+  replacement port claims an immutable exact-directory command while holding the
+  session scheduler and lost placement. Equal replay returns the same
+  nonterminal stage; repository-backed, runner-default, pre-pin, and non-lost
+  placements remain unclaimed at this boundary. It appends no placement,
+  semantic entry, frontier, grant, or result. **Committed unimplemented
   functionality.** Pending-enrollment activation for a pinned placement,
-  same-runner recovery, and pinned replacement remain for later dedicated
-  transactions. Direct snapshot storage cannot stand in for any of them.
+  same-runner recovery, and terminal pinned replacement remain for later
+  dedicated transactions. Direct snapshot storage cannot stand in for any of
+  them.
 - Migration `202608110005` records the connection-loss epoch observed when each
   placement selects a known enrollment and carries that baseline through later
   loss or abandonment records. The value is derived while holding scheduler,
@@ -628,8 +636,20 @@ Representation rules, all enforced in the schema:
   either this nonterminal authorization or an exact durable refusal atomically.
   Equal replay returns the first authorization or refusal; unequal reuse returns
   a command conflict. A workspace-free or pre-pin placement rolls the claim back
-  and returns `NotApplicable`, leaving its terminal replacement transaction as
-  the only command owner. No transaction remains open across runner I/O.
+  and returns `NotApplicable`, leaving the workspace-free replacement port as
+  the only command claimant. That port currently claims only a pinned loss whose
+  request names an exact directory and no workspace; it returns a nonterminal
+  stage without appending any relocation facts, while equal provisioning replay
+  recognizes that command as outside its repository-backed locus. Migration
+  `202608110021` retains that stage in its own append-only typed row, bound by
+  composite foreign keys to the exact command and lost placement. Its deferred
+  guard takes the scheduler before the placement head, requires the current
+  pinned loss, exact requested directory, and workspace-free request, and makes
+  the repository-provisioning and workspace-free stage loci mutually exclusive.
+  Readback decodes every retained field before returning the command-only stage.
+  No transaction remains open across runner I/O. **Committed unimplemented
+  functionality.** No present adapter consumes that stage to install the
+  terminal pinned placement, transcript boundary, or next frontier.
 - Migration `202608110018` separates the registration revision retained by an
   immutable pinned placement from the then-current registration revision that
   authorizes each lease offer. Existing lease generations preserve their
@@ -797,8 +817,8 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Twenty-seven explicit lock
-statements live in the schema instead:
+`crates/persistence/src/lock_inventory.rs`. Twenty-nine explicit lock statements
+live in the schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
   takes `FOR UPDATE` on the named `turn_lifecycle` row when a pending-steering
@@ -855,7 +875,11 @@ statements live in the schema instead:
   reconnects; and
 - the lease-offer registration fence in migration `202608110018` takes
   `FOR SHARE` on the selected enrollment's current registration head after the
-  connection-loss offer fence has acquired enrollment and connection authority.
+  connection-loss offer fence has acquired enrollment and connection authority;
+  and
+- the workspace-free replacement-stage guard in migration `202608110021` takes
+  `FOR UPDATE` on the session scheduler and then its current placement head
+  before authenticating the exact lost placement and directory.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here
