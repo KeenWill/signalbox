@@ -71,6 +71,7 @@ const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded direct-command arguments
 pub(crate) const BWRAP_PROGRAM: &str = "/usr/bin/bwrap";
 const SANDBOX_WORKSPACE: &str = "/workspace";
 const SANDBOX_DISPATCH_PROGRAM: &str = "/signalbox-exec-dispatch";
+const SANDBOX_HTTPS_PROXY: &str = "http://127.0.0.1:18080";
 const SANDBOX_FALLBACK_PATH: &str = "/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 pub(crate) const SANDBOX_DISPATCH_MARKER: &[u8] = b"signalbox-exec:dispatched\n";
 #[cfg(target_os = "linux")]
@@ -160,6 +161,13 @@ pub enum ExecToolConstructionError {
         /// Underlying filesystem failure, when one occurred.
         source: Option<std::io::Error>,
     },
+    /// A per-dispatch HTTPS broker endpoint was not one exact Unix socket.
+    HttpsBrokerSocket {
+        /// Supplied socket path associated with the failure.
+        path: PathBuf,
+        /// Underlying filesystem failure, when one occurred.
+        source: Option<std::io::Error>,
+    },
     /// The injected supervisor program was not an absolute canonical file.
     SupervisorProgram {
         /// Supplied program associated with the failure.
@@ -197,6 +205,13 @@ impl fmt::Display for ExecToolConstructionError {
                     path.display()
                 )
             }
+            Self::HttpsBrokerSocket { path, .. } => {
+                write!(
+                    formatter,
+                    "exec HTTPS broker socket `{}` is invalid",
+                    path.display()
+                )
+            }
             Self::SupervisorProgram { path, .. } => {
                 write!(
                     formatter,
@@ -226,6 +241,10 @@ impl Error for ExecToolConstructionError {
                 source: Some(source),
                 ..
             }
+            | Self::HttpsBrokerSocket {
+                source: Some(source),
+                ..
+            }
             | Self::SupervisorProgram {
                 source: Some(source),
                 ..
@@ -240,6 +259,7 @@ impl Error for ExecToolConstructionError {
             | Self::Duplicate
             | Self::WorkspaceRoot { source: None, .. }
             | Self::ReadOnlyPath { source: None, .. }
+            | Self::HttpsBrokerSocket { source: None, .. }
             | Self::SupervisorProgram { source: None, .. }
             | Self::BubblewrapProgram { source: None, .. } => None,
         }
@@ -864,21 +884,32 @@ pub struct SandboxedCommandRunner<Runner> {
 #[derive(Clone, Debug)]
 enum SandboxMountProfile {
     DaemonLocal,
-    RunnerRestricted(Vec<ReadOnlyPathIdentity>),
+    RunnerRestricted {
+        paths: Vec<ReadOnlyPathIdentity>,
+        https_broker: Option<HttpsBrokerSocketIdentity>,
+    },
 }
 
 impl SandboxMountProfile {
     fn identities_are_current(&self) -> bool {
         match self {
             Self::DaemonLocal => true,
-            Self::RunnerRestricted(paths) => paths.iter().all(ReadOnlyPathIdentity::matches),
+            Self::RunnerRestricted {
+                paths,
+                https_broker,
+            } => {
+                paths.iter().all(ReadOnlyPathIdentity::matches)
+                    && https_broker
+                        .as_ref()
+                        .is_none_or(HttpsBrokerSocketIdentity::matches)
+            }
         }
     }
 
     fn executable_path(&self, workspace_root: &Path) -> OsString {
         match self {
             Self::DaemonLocal => sandbox_path(workspace_root),
-            Self::RunnerRestricted(paths) => configured_sandbox_path(workspace_root, paths),
+            Self::RunnerRestricted { paths, .. } => configured_sandbox_path(workspace_root, paths),
         }
     }
 }
@@ -907,7 +938,30 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         Self::try_new_with_mount_profile(
             runner,
             workspace_root,
-            SandboxMountProfile::RunnerRestricted(read_only_paths),
+            SandboxMountProfile::RunnerRestricted {
+                paths: read_only_paths,
+                https_broker: None,
+            },
+        )
+    }
+
+    /// Admits the restricted profile plus one exact per-dispatch HTTPS broker
+    /// Unix socket exposed only to the namespace-local proxy shim.
+    pub fn try_new_runner_restricted_with_https_broker(
+        runner: Runner,
+        workspace_root: impl AsRef<Path>,
+        read_only_paths: &[PathBuf],
+        https_broker_socket: impl AsRef<Path>,
+    ) -> Result<Self, ExecToolConstructionError> {
+        let read_only_paths = capture_read_only_paths(read_only_paths)?;
+        let https_broker = HttpsBrokerSocketIdentity::capture(https_broker_socket.as_ref())?;
+        Self::try_new_with_mount_profile(
+            runner,
+            workspace_root,
+            SandboxMountProfile::RunnerRestricted {
+                paths: read_only_paths,
+                https_broker: Some(https_broker),
+            },
         )
     }
 
@@ -1169,6 +1223,107 @@ struct ReadOnlyPathIdentity {
     inode: u64,
     #[cfg(target_os = "linux")]
     _descriptor: Arc<rustix::fd::OwnedFd>,
+}
+
+#[derive(Clone, Debug)]
+struct HttpsBrokerSocketIdentity {
+    destination: PathBuf,
+    #[cfg(target_os = "linux")]
+    device: u64,
+    #[cfg(target_os = "linux")]
+    inode: u64,
+    #[cfg(target_os = "linux")]
+    descriptor: i32,
+    #[cfg(target_os = "linux")]
+    _descriptor: Arc<rustix::fd::OwnedFd>,
+}
+
+impl HttpsBrokerSocketIdentity {
+    fn capture(path: &Path) -> Result<Self, ExecToolConstructionError> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            return Err(ExecToolConstructionError::HttpsBrokerSocket {
+                path: path.to_owned(),
+                source: None,
+            });
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if !path.is_absolute()
+                || path
+                    .symlink_metadata()
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                return Err(ExecToolConstructionError::HttpsBrokerSocket {
+                    path: path.to_owned(),
+                    source: None,
+                });
+            }
+            let destination = path.canonicalize().map_err(|source| {
+                ExecToolConstructionError::HttpsBrokerSocket {
+                    path: path.to_owned(),
+                    source: Some(source),
+                }
+            })?;
+            if destination != path {
+                return Err(ExecToolConstructionError::HttpsBrokerSocket {
+                    path: path.to_owned(),
+                    source: None,
+                });
+            }
+            let descriptor = rustix::fs::open(
+                &destination,
+                rustix::fs::OFlags::PATH | rustix::fs::OFlags::NOFOLLOW,
+                rustix::fs::Mode::empty(),
+            )
+            .map_err(|source| ExecToolConstructionError::HttpsBrokerSocket {
+                path: path.to_owned(),
+                source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+            })?;
+            let descriptor =
+                inherited_descriptor_above_standard_streams(descriptor).map_err(|source| {
+                    ExecToolConstructionError::HttpsBrokerSocket {
+                        path: path.to_owned(),
+                        source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+                    }
+                })?;
+            let metadata = rustix::fs::fstat(&descriptor).map_err(|source| {
+                ExecToolConstructionError::HttpsBrokerSocket {
+                    path: path.to_owned(),
+                    source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+                }
+            })?;
+            if rustix::fs::FileType::from_raw_mode(metadata.st_mode) != rustix::fs::FileType::Socket
+            {
+                return Err(ExecToolConstructionError::HttpsBrokerSocket {
+                    path: path.to_owned(),
+                    source: None,
+                });
+            }
+            Ok(Self {
+                destination,
+                device: metadata.st_dev,
+                inode: metadata.st_ino,
+                descriptor: rustix::fd::AsRawFd::as_raw_fd(&descriptor),
+                _descriptor: Arc::new(descriptor),
+            })
+        }
+    }
+
+    fn matches(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.destination.symlink_metadata().is_ok_and(|metadata| {
+                rustix::fs::FileType::from_raw_mode(metadata.mode()) == rustix::fs::FileType::Socket
+                    && metadata.dev() == self.device
+                    && metadata.ino() == self.inode
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
 }
 
 impl ReadOnlyPathIdentity {
@@ -1619,11 +1774,11 @@ fn bwrap_request(
     .into_iter()
     .map(OsString::from)
     .collect::<Vec<_>>();
-    if matches!(profile.mounts, SandboxMountProfile::RunnerRestricted(_)) {
+    if matches!(profile.mounts, SandboxMountProfile::RunnerRestricted { .. }) {
         bwrap_arguments.push(OsString::from("--unshare-cgroup"));
     }
     bwrap_arguments.push(OsString::from("--unshare-net"));
-    if matches!(profile.mounts, SandboxMountProfile::RunnerRestricted(_)) {
+    if matches!(profile.mounts, SandboxMountProfile::RunnerRestricted { .. }) {
         bwrap_arguments.extend([OsString::from("--cap-drop"), OsString::from("ALL")]);
     }
     bwrap_arguments.extend([
@@ -1670,7 +1825,10 @@ fn bwrap_request(
             .into_iter()
             .map(OsString::from),
         ),
-        SandboxMountProfile::RunnerRestricted(paths) => {
+        SandboxMountProfile::RunnerRestricted {
+            paths,
+            https_broker,
+        } => {
             bwrap_arguments.extend([OsString::from("--tmpfs"), OsString::from("/run")]);
             append_read_only_parent_directories(&mut bwrap_arguments, paths);
             for path in paths {
@@ -1681,6 +1839,12 @@ fn bwrap_request(
                 ]);
             }
             append_usr_merge_aliases(&mut bwrap_arguments, paths);
+            if let Some(https_broker) = https_broker {
+                bwrap_arguments.extend([
+                    OsString::from("--preserve-fds"),
+                    OsString::from(https_broker.descriptor.saturating_sub(2).to_string()),
+                ]);
+            }
         }
     }
     #[cfg(target_os = "linux")]
@@ -1723,17 +1887,46 @@ fn bwrap_request(
         context.launcher.as_os_str().to_owned(),
         OsString::from(SANDBOX_DISPATCH_PROGRAM),
     ]);
+    let https_broker_descriptor = match profile.mounts {
+        SandboxMountProfile::RunnerRestricted {
+            https_broker: Some(https_broker),
+            ..
+        } => Some(https_broker.descriptor),
+        SandboxMountProfile::DaemonLocal
+        | SandboxMountProfile::RunnerRestricted {
+            https_broker: None, ..
+        } => None,
+    };
     bwrap_arguments.extend([
         OsString::from("--chdir"),
         OsString::from(sandbox_directory),
         OsString::from("--setenv"),
         OsString::from("HOME"),
         OsString::from(SANDBOX_WORKSPACE),
+    ]);
+    if https_broker_descriptor.is_some() {
+        bwrap_arguments.extend([
+            OsString::from("--setenv"),
+            OsString::from("HTTPS_PROXY"),
+            OsString::from(SANDBOX_HTTPS_PROXY),
+            OsString::from("--setenv"),
+            OsString::from("https_proxy"),
+            OsString::from(SANDBOX_HTTPS_PROXY),
+        ]);
+    }
+    bwrap_arguments.extend([
         OsString::from("--"),
         OsString::from(SANDBOX_DISPATCH_PROGRAM),
-        OsString::from("--dispatch"),
-        OsString::from(invocation.program),
+        OsString::from(if https_broker_descriptor.is_some() {
+            "--dispatch-with-https-proxy"
+        } else {
+            "--dispatch"
+        }),
     ]);
+    if let Some(descriptor) = https_broker_descriptor {
+        bwrap_arguments.push(OsString::from(descriptor.to_string()));
+    }
+    bwrap_arguments.push(OsString::from(invocation.program));
     bwrap_arguments.extend(invocation.arguments.iter().map(OsString::from));
     ProcessRequest {
         program: bubblewrap_program.as_os_str().to_owned(),
@@ -3181,7 +3374,10 @@ fn discarded_process_result(outcome: ProcessOutcome) -> ProcessRunResult {
 #[cfg(test)]
 mod tests {
     #[cfg(target_os = "linux")]
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::os::unix::{
+        fs::{PermissionsExt, symlink},
+        net::UnixListener,
+    };
     use std::sync::{Arc, Mutex, PoisonError};
 
     use signalbox_application::{ToolCatalog, ToolCatalogValidationFailure};
@@ -4550,6 +4746,146 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
+    async fn runner_restricted_https_bridge_passes_only_the_pinned_descriptor_and_proxy_mode()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let read_only = ReplacementWorkspace::new()?;
+        let broker_root = ReplacementWorkspace::new()?;
+        let broker_socket = broker_root.path().join("broker.sock");
+        let _broker = UnixListener::bind(&broker_socket)?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
+        );
+        let observation = runner.clone();
+        let mut command_runner =
+            SandboxedCommandRunner::try_new_runner_restricted_with_https_broker(
+                runner,
+                workspace.path(),
+                &[read_only.path().to_owned()],
+                &broker_socket,
+            )?;
+        let arguments = ExecArguments {
+            program: String::from("fixture-program"),
+            arguments: Vec::new(),
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+        let proxy_environment = [
+            OsString::from("--setenv"),
+            OsString::from("HTTPS_PROXY"),
+            OsString::from(SANDBOX_HTTPS_PROXY),
+            OsString::from("--setenv"),
+            OsString::from("https_proxy"),
+            OsString::from(SANDBOX_HTTPS_PROXY),
+        ];
+        let result = command_runner.try_run(arguments).await?;
+        let requests = observation.recorded_requests();
+        let request = requests
+            .first()
+            .ok_or_else(|| std::io::Error::other("one requested process"))?;
+        let preserved_descriptors = request
+            .arguments
+            .windows(2)
+            .find(|arguments| arguments[0] == "--preserve-fds")
+            .ok_or_else(|| std::io::Error::other("one preserved HTTPS broker descriptor"))?;
+        let preserved_descriptors = preserved_descriptors[1].to_string_lossy().parse::<i32>()?;
+        let broker_descriptor = preserved_descriptors + 2;
+        let dispatch_arguments = [
+            OsString::from("--"),
+            OsString::from(SANDBOX_DISPATCH_PROGRAM),
+            OsString::from("--dispatch-with-https-proxy"),
+            OsString::from(broker_descriptor.to_string()),
+            OsString::from("fixture-program"),
+        ];
+
+        assert!(broker_descriptor >= 3);
+        assert!(
+            !request
+                .arguments
+                .iter()
+                .any(|argument| argument == broker_socket.as_os_str())
+        );
+        assert!(
+            request
+                .arguments
+                .windows(proxy_environment.len())
+                .any(|arguments| arguments == proxy_environment)
+        );
+        assert!(request.arguments.ends_with(&dispatch_arguments));
+        assert_eq!(result.stdout.text, SANDBOXED_STDOUT);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runner_restricted_https_bridge_rejects_a_regular_file_endpoint() -> Result<(), Box<dyn Error>>
+    {
+        let workspace = ReplacementWorkspace::new()?;
+        let read_only = ReplacementWorkspace::new()?;
+        let broker_root = ReplacementWorkspace::new()?;
+        let broker_socket = broker_root.path().join("broker.sock");
+        std::fs::write(&broker_socket, b"not a socket")?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
+        );
+
+        let rejected = SandboxedCommandRunner::try_new_runner_restricted_with_https_broker(
+            runner,
+            workspace.path(),
+            &[read_only.path().to_owned()],
+            &broker_socket,
+        );
+
+        assert!(matches!(
+            rejected,
+            Err(ExecToolConstructionError::HttpsBrokerSocket { source: None, .. })
+        ));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn runner_restricted_https_bridge_rechecks_socket_identity_before_probe()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let read_only = ReplacementWorkspace::new()?;
+        let broker_root = ReplacementWorkspace::new()?;
+        let broker_socket = broker_root.path().join("broker.sock");
+        let broker = UnixListener::bind(&broker_socket)?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
+        );
+        let observation = runner.clone();
+        let mut command_runner =
+            SandboxedCommandRunner::try_new_runner_restricted_with_https_broker(
+                runner,
+                workspace.path(),
+                &[read_only.path().to_owned()],
+                &broker_socket,
+            )?;
+        drop(broker);
+        std::fs::remove_file(&broker_socket)?;
+        let _replacement = UnixListener::bind(&broker_socket)?;
+        let arguments = ExecArguments {
+            program: String::from("fixture-program"),
+            arguments: Vec::new(),
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+
+        let result = command_runner.try_run(arguments).await?;
+
+        assert_eq!(result.confinement, ExecutionConfinement::SandboxSetupFailed);
+        assert_eq!(observation.recorded_probes(), Vec::new());
+        assert_eq!(observation.recorded_requests(), Vec::new());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
     async fn runner_restricted_request_rechecks_read_only_path_identity_before_probe()
     -> Result<(), Box<dyn Error>> {
         let workspace = ReplacementWorkspace::new()?;
@@ -4658,7 +4994,10 @@ mod tests {
         let workspace_root = Path::new(TEST_SANDBOX_WORKSPACE_ROOT);
         let read_only_paths = vec![ReadOnlyPathIdentity::capture(Path::new("/usr"))?];
         let executable_path = configured_sandbox_path(workspace_root, &read_only_paths);
-        let mount_profile = SandboxMountProfile::RunnerRestricted(read_only_paths);
+        let mount_profile = SandboxMountProfile::RunnerRestricted {
+            paths: read_only_paths,
+            https_broker: None,
+        };
         let expected_bin_alias = [
             OsString::from("--symlink"),
             OsString::from("usr/bin"),

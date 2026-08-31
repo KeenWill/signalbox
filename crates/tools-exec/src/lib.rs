@@ -31,6 +31,10 @@
 //! landlock policy. The separately selected runner-restricted constructor also
 //! unshares the cgroup namespace, drops every capability, creates fresh runtime
 //! directories, and mounts only caller-supplied pinned read-only identities.
+//! Its optional HTTPS-bridge constructor additionally pins one Unix socket,
+//! hands its descriptor to a procfs-inaccessible supervisor, and starts that
+//! supervisor's bounded loopback-to-Unix proxy mode. The caller still owns
+//! socket creation, the host-side broker, and the whole-tunnel deadline.
 //! Neither profile imposes resource limits, seccomp, or landlock policy.
 //! Exactly what each profile does and does not confine is owned by
 //! `docs/spec/configuration-and-credentials.md` and is not restated here.

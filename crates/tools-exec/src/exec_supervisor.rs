@@ -21,7 +21,10 @@ mod linux {
         collections::{BTreeMap, BTreeSet},
         ffi::OsString,
         io::{Read, Write},
+        net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream},
+        os::unix::net::UnixStream,
         os::unix::process::CommandExt,
+        path::{Path, PathBuf},
         process::{Command, ExitCode, ExitStatus, Stdio},
         sync::{
             Arc, Mutex, MutexGuard, PoisonError, TryLockError,
@@ -45,6 +48,9 @@ mod linux {
     const MAXIMUM_POLL_INTERVAL: Duration = Duration::from_millis(100);
     const REAP_DEADLINE: Duration = Duration::from_secs(1);
     const DISPATCH_MODE: &str = "--dispatch";
+    const DISPATCH_HTTPS_PROXY_MODE: &str = "--dispatch-with-https-proxy";
+    const HTTPS_PROXY_PORT: u16 = 18_080;
+    const MAX_HTTPS_PROXY_TUNNELS: usize = 8;
     const CARGO_TEST_RUNNER_MODE: &str = "--cargo-test-runner";
     const LAUNCH_MODE: &str = "--launch";
     const OUTER_MODE: &str = "--outer";
@@ -95,6 +101,9 @@ mod linux {
         };
         if mode_or_timeout == DISPATCH_MODE {
             return dispatch(arguments.collect());
+        }
+        if mode_or_timeout == DISPATCH_HTTPS_PROXY_MODE {
+            return dispatch_with_https_proxy(arguments.collect());
         }
         if mode_or_timeout == CARGO_TEST_RUNNER_MODE {
             return cargo_test_runner(arguments.collect());
@@ -286,6 +295,186 @@ mod linux {
         // byte to stderr, which is why silent targets appear to work.
         drop(stderr);
         emit_target_status(arguments)
+    }
+
+    fn dispatch_with_https_proxy(mut arguments: Vec<OsString>) -> ExitCode {
+        if arguments.len() < 2 {
+            return ExitCode::FAILURE;
+        }
+        // The relay must retain the broker descriptor while the target runs.
+        // Refuse to expose that descriptor through this supervisor's procfs
+        // entry to its same-UID child.
+        if rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
+            .is_err()
+        {
+            return ExitCode::FAILURE;
+        }
+        let Ok(descriptor) = parse_u64(arguments.remove(0)) else {
+            return ExitCode::FAILURE;
+        };
+        let Ok(descriptor) = i32::try_from(descriptor) else {
+            return ExitCode::FAILURE;
+        };
+        let Ok(broker_descriptor) = rustix::fs::open(
+            format!("/proc/self/fd/{descriptor}"),
+            rustix::fs::OFlags::PATH | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        ) else {
+            return ExitCode::FAILURE;
+        };
+        let broker_descriptor_number = rustix::fd::AsRawFd::as_raw_fd(&broker_descriptor);
+        let Ok(inherited_descriptors) = std::fs::read_dir("/proc/self/fd").and_then(|entries| {
+            entries
+                .map(|entry| {
+                    entry.and_then(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .parse::<i32>()
+                            .map_err(std::io::Error::other)
+                    })
+                })
+                .collect::<std::io::Result<Vec<_>>>()
+        }) else {
+            return ExitCode::FAILURE;
+        };
+        for inherited_descriptor in inherited_descriptors {
+            if inherited_descriptor > 2 && inherited_descriptor != broker_descriptor_number {
+                // SAFETY: these descriptor numbers were enumerated from this single-threaded
+                // supervisor after the directory iterator was dropped, and the retained broker
+                // descriptor is excluded above. No live handle remains for an inherited descriptor.
+                unsafe {
+                    rustix::io::close(inherited_descriptor);
+                }
+            }
+        }
+        let broker = PathBuf::from(format!("/proc/self/fd/{}", broker_descriptor_number));
+        let Ok(_proxy) = NamespaceHttpsProxy::start(
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, HTTPS_PROXY_PORT)),
+            broker,
+        ) else {
+            return ExitCode::FAILURE;
+        };
+        dispatch(arguments)
+    }
+
+    struct NamespaceHttpsProxy {
+        stop: Arc<AtomicBool>,
+        listener: Option<JoinHandle<()>>,
+        #[cfg(test)]
+        address: SocketAddr,
+    }
+
+    impl NamespaceHttpsProxy {
+        fn start(address: SocketAddr, broker: PathBuf) -> std::io::Result<Self> {
+            let listener = TcpListener::bind(address)?;
+            listener.set_nonblocking(true)?;
+            #[cfg(test)]
+            let bound_address = listener.local_addr()?;
+            let stop = Arc::new(AtomicBool::new(false));
+            let listener_stop = Arc::clone(&stop);
+            let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let listener_thread = std::thread::Builder::new()
+                .name(String::from("signalbox-https-proxy"))
+                .spawn(move || {
+                    serve_https_proxy(listener, &broker, &listener_stop, &active);
+                })?;
+            Ok(Self {
+                stop,
+                listener: Some(listener_thread),
+                #[cfg(test)]
+                address: bound_address,
+            })
+        }
+
+        #[cfg(test)]
+        fn address(&self) -> SocketAddr {
+            self.address
+        }
+    }
+
+    impl Drop for NamespaceHttpsProxy {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(listener) = self.listener.take() {
+                let _ = listener.join();
+            }
+        }
+    }
+
+    fn serve_https_proxy(
+        listener: TcpListener,
+        broker: &Path,
+        stop: &AtomicBool,
+        active: &Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        while !stop.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((client, _peer)) => {
+                    start_https_proxy_tunnel(client, broker, active);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(MINIMUM_POLL_INTERVAL);
+                }
+                Err(_) => return,
+            }
+        }
+    }
+
+    fn start_https_proxy_tunnel(
+        client: TcpStream,
+        broker: &Path,
+        active: &Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        if active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                (current < MAX_HTTPS_PROXY_TUNNELS).then_some(current + 1)
+            })
+            .is_err()
+        {
+            return;
+        }
+        let active_tunnel = Arc::clone(active);
+        let broker = broker.to_owned();
+        if std::thread::Builder::new()
+            .name(String::from("signalbox-https-tunnel"))
+            .spawn(move || {
+                let _active = ActiveHttpsTunnel(active_tunnel);
+                let _ = relay_https_proxy(client, &broker);
+            })
+            .is_err()
+        {
+            active.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    struct ActiveHttpsTunnel(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Drop for ActiveHttpsTunnel {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    fn relay_https_proxy(mut client: TcpStream, broker: &Path) -> std::io::Result<()> {
+        let mut upstream = UnixStream::connect(broker)?;
+        let mut client_reader = client.try_clone()?;
+        let mut upstream_writer = upstream.try_clone()?;
+        let upload = std::thread::Builder::new()
+            .name(String::from("signalbox-https-upload"))
+            .spawn(move || {
+                let result = std::io::copy(&mut client_reader, &mut upstream_writer);
+                let _ = upstream_writer.shutdown(Shutdown::Write);
+                result
+            })?;
+        let download = std::io::copy(&mut upstream, &mut client);
+        let _ = client.shutdown(Shutdown::Write);
+        let upload = upload
+            .join()
+            .map_err(|_| std::io::Error::other("HTTPS proxy upload thread failed"))?;
+        upload?;
+        download?;
+        Ok(())
     }
 
     #[derive(Clone, Copy, serde::Serialize)]
@@ -1756,7 +1945,7 @@ mod linux {
 
     #[cfg(test)]
     mod tests {
-        use std::os::unix::{fs::PermissionsExt, process::ExitStatusExt};
+        use std::os::unix::{fs::PermissionsExt, net::UnixListener, process::ExitStatusExt};
 
         use super::*;
 
@@ -1766,6 +1955,8 @@ mod linux {
         const CARGO_PASSING_TEST: &str = "example::passes";
         const CARGO_IGNORED_TEST: &str = "example::ignored";
         const CARGO_IGNORED_REASON: &str = "platform unavailable";
+        const HTTPS_PROXY_REQUEST: &[u8] = b"CONNECT fixture:443 HTTP/1.1\r\n\r\n";
+        const HTTPS_PROXY_RESPONSE: &[u8] = b"HTTP/1.1 200 fixture\r\n\r\n";
 
         struct CustomHarnessFixture {
             root: std::path::PathBuf,
@@ -1799,6 +1990,68 @@ mod linux {
             fn drop(&mut self) {
                 let _ = std::fs::remove_dir_all(&self.root);
             }
+        }
+
+        struct HttpsProxyFixture {
+            root: PathBuf,
+            socket: PathBuf,
+            listener: UnixListener,
+        }
+
+        impl HttpsProxyFixture {
+            fn new() -> Result<Self, Box<dyn std::error::Error>> {
+                let identity = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_nanos();
+                let root = std::env::temp_dir().join(format!(
+                    "signalbox-https-proxy-{}-{identity}",
+                    std::process::id()
+                ));
+                std::fs::create_dir(&root)?;
+                let socket = root.join("broker.sock");
+                let listener = UnixListener::bind(&socket)?;
+                Ok(Self {
+                    root,
+                    socket,
+                    listener,
+                })
+            }
+        }
+
+        impl Drop for HttpsProxyFixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.root);
+            }
+        }
+
+        #[test]
+        fn namespace_https_proxy_relays_one_bidirectional_unix_tunnel()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let fixture = HttpsProxyFixture::new()?;
+            let proxy = NamespaceHttpsProxy::start(
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)),
+                fixture.socket.clone(),
+            )?;
+            let client = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+                let mut stream = TcpStream::connect(proxy.address())?;
+                stream.write_all(HTTPS_PROXY_REQUEST)?;
+                stream.shutdown(Shutdown::Write)?;
+                let mut response = Vec::new();
+                stream.read_to_end(&mut response)?;
+                Ok(response)
+            });
+            let (mut broker, _address) = fixture.listener.accept()?;
+            let mut request = Vec::new();
+            broker.read_to_end(&mut request)?;
+            broker.write_all(HTTPS_PROXY_RESPONSE)?;
+            broker.shutdown(Shutdown::Write)?;
+            let response = client
+                .join()
+                .map_err(|_| std::io::Error::other("proxy client thread failed"))??;
+
+            assert_eq!(request, HTTPS_PROXY_REQUEST);
+            assert_eq!(response, HTTPS_PROXY_RESPONSE);
+            Ok(())
         }
 
         #[test]
