@@ -30,8 +30,8 @@ use tokio::{
 };
 
 use crate::{
-    AcceptedWorkspaceRelease, EnrollmentAuthority, EnrollmentReceipt, RunnerState,
-    RunnerStateError, RunnerStateRoot,
+    AcceptedWorkspaceRelease, EnrollmentAuthority, EnrollmentReceipt, LeaseCredentialAuthorization,
+    RunnerState, RunnerStateError, RunnerStateRoot,
 };
 use signalbox_tools_exec::{ExecArguments, SANDBOXED_EXEC_NAME};
 
@@ -320,6 +320,7 @@ impl ServeOutcome {
 pub struct RunnerDispatchReady {
     correlation: LeaseCorrelation,
     normalized_arguments: serde_json::Value,
+    credential: LeaseCredentialAuthorization,
     connection_epoch: PositiveU64,
 }
 
@@ -332,6 +333,11 @@ impl RunnerDispatchReady {
     /// Borrows the daemon's canonical normalized argument object.
     pub const fn normalized_arguments(&self) -> &serde_json::Value {
         &self.normalized_arguments
+    }
+
+    /// Borrows the exact non-secret credential authorization retained at claim.
+    pub const fn credential(&self) -> &LeaseCredentialAuthorization {
+        &self.credential
     }
 }
 
@@ -966,10 +972,10 @@ where
                 Ok(None)
             }
             Message::LeaseClaimed(LeaseClaimed { correlation }) => {
-                let pending_matches = self
+                let pending_offer = self
                     .pending_offer
                     .as_ref()
-                    .is_some_and(|offer| offer.correlation == correlation);
+                    .filter(|offer| offer.correlation == correlation);
                 let retained_matches =
                     state
                         .reconnect_inventory()
@@ -983,7 +989,7 @@ where
                                         | LeasePhaseKind::DispatchReceived
                                 )
                         });
-                if (!pending_matches && !retained_matches)
+                if (pending_offer.is_none() && !retained_matches)
                     || state.reconnect_inventory().result.is_some()
                     || self
                         .claimed_capability
@@ -994,11 +1000,19 @@ where
                         ProtocolViolation::LeaseAcknowledgementMismatch,
                     ));
                 }
-                if pending_matches {
-                    state.record_lease_phase(LeasePhase {
-                        correlation: correlation.clone(),
-                        phase: LeasePhaseKind::WaitingDispatch,
-                    })?;
+                if let Some(offer) = pending_offer {
+                    let credential = lease_credential_authorization(offer).ok_or(
+                        RunnerConnectionError::Violation(
+                            ProtocolViolation::LeaseAcknowledgementMismatch,
+                        ),
+                    )?;
+                    state.record_claimed_lease(
+                        LeasePhase {
+                            correlation: correlation.clone(),
+                            phase: LeasePhaseKind::WaitingDispatch,
+                        },
+                        credential,
+                    )?;
                 }
                 self.claimed_capability = Some(correlation);
                 Ok(None)
@@ -1032,12 +1046,16 @@ where
                         }
                         other => RunnerConnectionError::State(other),
                     })?;
+                let credential = state.retained_lease_credential().cloned().ok_or(
+                    RunnerConnectionError::State(RunnerStateError::CorruptOperationJournal),
+                )?;
                 self.claimed_capability = None;
                 self.pending_offer = None;
                 Ok(Some(ServeOutcome::DispatchReady(Box::new(
                     RunnerDispatchReady {
                         correlation,
                         normalized_arguments,
+                        credential,
                         connection_epoch: self.connection_epoch,
                     },
                 ))))
@@ -1553,6 +1571,17 @@ fn live_offer_is_admissible(offer: &LeaseOffer) -> bool {
             .is_ok_and(|canonical| canonical == working_directory && canonical.is_dir())
 }
 
+fn lease_credential_authorization(offer: &LeaseOffer) -> Option<LeaseCredentialAuthorization> {
+    match (&offer.credential_profile, offer.grant_revision) {
+        (None, None) => Some(LeaseCredentialAuthorization::Profileless),
+        (Some(profile), Some(grant_revision)) => Some(LeaseCredentialAuthorization::Granted {
+            profile: profile.clone(),
+            grant_revision,
+        }),
+        (None, Some(_)) | (Some(_), None) => None,
+    }
+}
+
 async fn send_message<S>(
     io: &mut BufReader<S>,
     message: Message,
@@ -1979,6 +2008,14 @@ mod tests {
         }
     }
 
+    fn granted_lease_credential() -> LeaseCredentialAuthorization {
+        LeaseCredentialAuthorization::Granted {
+            profile: signalbox_runner_wire::ProfileName::try_new("github-runner".to_owned())
+                .expect("the fixture profile is valid"),
+            grant_revision: positive(7),
+        }
+    }
+
     fn release_correlation() -> ReleaseCorrelation {
         ReleaseCorrelation {
             session_id: identity(ARBITRARY_SESSION_UUID),
@@ -2301,6 +2338,29 @@ mod tests {
             .expect("the runner sends one valid frame")
     }
 
+    #[test]
+    fn lease_offer_credential_authorization_preserves_only_the_closed_pair() {
+        let profileless = unavailable_lease_offer();
+        let mut granted = unavailable_lease_offer();
+        granted.credential_profile = Some(
+            signalbox_runner_wire::ProfileName::try_new("github-runner".to_owned())
+                .expect("the fixture profile is valid"),
+        );
+        granted.grant_revision = Some(positive(7));
+        let mut malformed = granted.clone();
+        malformed.grant_revision = None;
+
+        assert_eq!(
+            lease_credential_authorization(&profileless),
+            Some(LeaseCredentialAuthorization::Profileless)
+        );
+        assert_eq!(
+            lease_credential_authorization(&granted),
+            Some(granted_lease_credential())
+        );
+        assert_eq!(lease_credential_authorization(&malformed), None);
+    }
+
     async fn send_hub_message(io: &mut BufReader<DuplexStream>, message: Message) {
         send_message(io, message)
             .await
@@ -2611,7 +2671,14 @@ mod tests {
                 phase: LeasePhaseKind::WaitingDispatch,
             })
         );
-        assert!(matches!(ready, Some(ServeOutcome::DispatchReady(_))));
+        let ready = ready
+            .expect("the dispatch yields one executor handoff")
+            .into_dispatch_ready()
+            .expect("the handoff is the dispatch arm");
+        assert_eq!(
+            ready.credential(),
+            &LeaseCredentialAuthorization::Profileless
+        );
         assert_eq!(observed, expected);
         assert_eq!(
             state.reconnect_inventory().lease,
@@ -2619,6 +2686,10 @@ mod tests {
                 correlation,
                 phase: LeasePhaseKind::DispatchReceived,
             })
+        );
+        assert_eq!(
+            state.retained_lease_credential(),
+            Some(&LeaseCredentialAuthorization::Profileless)
         );
     }
 
@@ -2879,16 +2950,21 @@ mod tests {
         let advertisement = advertisement_with_exec_tool();
         let mut state = enrolled_state_for(&parent, &advertisement);
         let correlation = retained_lease_correlation();
+        let credential = granted_lease_credential();
         state
-            .record_lease_phase(LeasePhase {
-                correlation: correlation.clone(),
-                phase: LeasePhaseKind::WaitingDispatch,
-            })
+            .record_claimed_lease(
+                LeasePhase {
+                    correlation: correlation.clone(),
+                    phase: LeasePhaseKind::WaitingDispatch,
+                },
+                credential.clone(),
+            )
             .expect("the waiting-dispatch phase is durable");
         let dispatch = retained_dispatch();
         let expected = ServeOutcome::DispatchReady(Box::new(RunnerDispatchReady {
             correlation: correlation.clone(),
             normalized_arguments: dispatch.normalized_arguments.clone(),
+            credential: credential.clone(),
             connection_epoch: positive(CONNECTION_EPOCH),
         }));
         let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
@@ -2926,6 +3002,7 @@ mod tests {
         let (outcome, ()) = tokio::join!(runner, hub);
 
         assert_eq!(outcome, expected);
+        assert_eq!(state.retained_lease_credential(), Some(&credential));
         assert_eq!(
             state.reconnect_inventory().lease,
             Some(LeasePhase {
@@ -2960,6 +3037,7 @@ mod tests {
         let expected = Some(ServeOutcome::DispatchReady(Box::new(RunnerDispatchReady {
             correlation: correlation.clone(),
             normalized_arguments: dispatch.normalized_arguments.clone(),
+            credential: LeaseCredentialAuthorization::Profileless,
             connection_epoch: positive(CONNECTION_EPOCH),
         })));
         let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
