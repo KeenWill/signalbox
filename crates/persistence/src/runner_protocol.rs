@@ -5246,6 +5246,24 @@ impl RunnerProtocolStore {
             ));
         }
         let mut transaction = self.pool.begin().await?;
+        if let Some(stored) = self
+            .load_lease_in(
+                &mut transaction,
+                lease.correlation().lease,
+                lease.correlation().generation,
+            )
+            .await?
+        {
+            if stored.correlation() != lease.correlation()
+                || stored.session() != lease.session()
+                || stored.effect() != lease.effect()
+                || stored.arguments() != lease.arguments()
+                || stored.credential_authorization() != lease.credential_authorization()
+            {
+                transaction.rollback().await?;
+                return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+            }
+        }
         append_lease_event_in(&mut transaction, lease).await?;
         commit_mutation(transaction).await
     }
