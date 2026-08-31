@@ -25,7 +25,9 @@ commissions with its session, and the binding of the dispatched work turn to
 that goal's generation, are verified against this PR
 (`agent/commission-binding`). Exact-object correlation between session GitHub
 writes and watcher events is verified against this PR
-(`agent/repo-watch-self-cause`).
+(`agent/repo-watch-self-cause`). Pull-request lifecycle dispatch cutoff and
+commission withdrawal are verified against this PR
+(`agent/repo-watch-lifecycle-cutoff`).
 
 ## Configuration and credential boundary
 
@@ -532,6 +534,25 @@ recorded between the tool attempt and its receipt. The retried matching rule
 then records `self_caused` and creates no dispatch batch or session. Correlation
 uses provider object identity, never author login: a distinct user-created
 review remains eligible even when the session token and user share one login.
+
+**Implemented behavior.** Pull-request dispatch admission reads the latest
+durable lifecycle under the repository transaction lock. A matching event whose
+target is currently closed or merged records `target_closed` and creates no
+batch or session, including when evaluation loaded the event before the closing
+poll committed. Branch events are unchanged, and absent pull-request lifecycle
+evidence fails closed as durable corruption rather than assuming an open target.
+
+**Implemented behavior.** A rule-independent lifecycle consumer runs before
+dispatch evaluation at startup and immediately after every poll commit. Each
+durable close or merge is processed exactly once; a historical closure whose
+latest lifecycle is reopened records a no-op. Otherwise it composes a
+parent-only stop for every still-active generation-one goal commissioned by
+repository watch for that repository and pull request. It does not stop an
+operator session, descendants, an already-terminal goal, or a later
+user-authored generation. Cutoff completion and each applied stop are
+append-only audit records. Stopping a queued commission makes its delivery turn
+non-runtime-relevant and releases the dispatch singleton in the same
+transaction, while a running turn may finish but cannot schedule a successor.
 
 **Committed unimplemented functionality.** The structured-rule dispatch surface
 converges onto the program substrate by replacing each rule with a subscription
