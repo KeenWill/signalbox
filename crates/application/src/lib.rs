@@ -82,7 +82,8 @@ pub use operator_failure::{ClassifyOperatorFailure, OperatorFailureClass};
 pub use pinned_runner_dispatch::{
     InitialRunnerDispatchRequest, InitialRunnerDispatchService, InitialRunnerDispatchTransaction,
     PinnedRunnerDispatchRequest, PinnedRunnerDispatchService, PinnedRunnerDispatchTransaction,
-    PinnedRunnerLeaseOffer, RunnerLeaseIdGenerator, UuidV7RunnerLeaseIdGenerator,
+    PinnedRunnerLeaseOffer, RunnerDispatchRequest, RunnerDispatchService, RunnerLeaseIdGenerator,
+    UuidV7RunnerLeaseIdGenerator,
 };
 pub use promote_pending_runner::{
     PromotePendingRunnerOutcome, PromotePendingRunnerRequest, PromotePendingRunnerService,

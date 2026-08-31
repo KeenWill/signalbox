@@ -6140,6 +6140,16 @@ impl InitialRunnerDispatchRequest {
     // accessors: session(), turn(), attempt(), runner(), registration_revision()
 }
 
+pub enum RunnerDispatchRequest {
+    Initial(InitialRunnerDispatchRequest),
+    Pinned(PinnedRunnerDispatchRequest),
+}
+impl RunnerDispatchRequest {
+    // accessors: session(), turn(), attempt(), runner(), registration_revision()
+}
+impl From<InitialRunnerDispatchRequest> for RunnerDispatchRequest { /* ... */ }
+impl From<PinnedRunnerDispatchRequest> for RunnerDispatchRequest { /* ... */ }
+
 pub struct PinnedRunnerLeaseOffer { /* private */ }
 impl PinnedRunnerLeaseOffer {
     pub const fn new(enrollment: RunnerEnrollmentId, lease: RunnerLease) -> Self;
@@ -6201,6 +6211,24 @@ where
         &mut self,
         request: InitialRunnerDispatchRequest,
     ) -> Result<PinnedRunnerLeaseOffer, Transaction::Error>;
+}
+
+pub struct RunnerDispatchService<Transaction, Ids> { /* private */ }
+impl<Transaction, Ids> RunnerDispatchService<Transaction, Ids> {
+    pub const fn new(transaction: Transaction, ids: Ids) -> Self;
+}
+impl<Transaction, Ids> RunnerDispatchService<Transaction, Ids>
+where
+    Transaction: InitialRunnerDispatchTransaction
+        + PinnedRunnerDispatchTransaction<
+            Error = <Transaction as InitialRunnerDispatchTransaction>::Error,
+        >,
+    Ids: RunnerLeaseIdGenerator,
+{
+    pub async fn execute(
+        &mut self,
+        request: RunnerDispatchRequest,
+    ) -> Result<PinnedRunnerLeaseOffer, <Transaction as InitialRunnerDispatchTransaction>::Error>;
 }
 ```
 
@@ -11022,7 +11050,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: runner_replacement_provisioning       | 7 (incl. 2 traits)    |
 | application: runner_lease_claim                    | 3 (incl. 1 trait)     |
 | application: runner_lease_result                   | 3 (incl. 1 trait)     |
-| application: pinned_runner_dispatch                | 9 (incl. 3 traits)    |
+| application: pinned_runner_dispatch                | 11 (incl. 3 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)    |
 | application: list_conversations                    | 8 (incl. 2 traits)    |
 | application: load_session                          | 2 (incl. 1 trait)     |
@@ -11042,4 +11070,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **286 (+1 free fn)**  |
+| **signalbox-application total**                    | **288 (+1 free fn)**  |
