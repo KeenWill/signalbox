@@ -762,10 +762,17 @@ Representation rules, all enforced in the schema:
   runtime checks the frame's runner against the physical connection, observes
   current connection authority, invokes this transaction, and sends the exact
   `workspace_recorded` correlation only after the commit or equal replay
-  succeeds. **Committed unimplemented functionality.** No present resume or
-  heartbeat path reconciles a retained provisioning journal after connection
-  loss, maps the runner-relative manifest path into execution placement facts,
-  or consumes the receipt to terminalize the repository-backed replacement.
+  succeeds. On authenticated resume, the daemon accepts an otherwise-empty
+  repository `ready_unrecorded` inventory structurally but directs it to
+  `fail_stale`, because the immutable provisioning authorization still names the
+  prior connection event and no durable transaction reauthorizes the resumed
+  connection to admit the retained payload. **Committed unimplemented
+  functionality.** No present runner state retains or resends the full ready
+  payload, no heartbeat path reconciles provisioning progress, no resume
+  transaction reauthorizes the retained provisioning operation, and no present
+  transaction maps the runner-relative manifest path into execution placement
+  facts or consumes the receipt to terminalize the repository-backed
+  replacement.
 - Migration `202608110018` separates the registration revision retained by an
   immutable pinned placement from the then-current registration revision that
   authorizes each lease offer. Existing lease generations preserve their
