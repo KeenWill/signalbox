@@ -15,13 +15,15 @@ persistence-adapter contracts were re-verified through PR #350
 placement facts are re-verified against the parent slice
 (`agent/runner-lease-execution-correlation`); its domain and durable
 reconstitution fences are re-verified through this PR
-(`agent/runner-lease-domain-correlation`). The corrected reconstitution mismatch
-contract was re-verified through PR #322 (`agent/docs-discipline`; pinned and
-pinned-loss request mismatches). The placement loss-source, pre-pin replacement
-and abandonment state shapes, and append-only reconstitution-history contract
-are re-verified through this PR (`agent/runner-placement-loss-domain`). It owns
-logical runner enrollment, daemon-authoritative catalog validation, runner
-leases, the independent session-composition axes, session placement and
+(`agent/runner-lease-domain-correlation`). Existing-pin attempt-and-offer
+atomicity is re-verified through this PR
+(`agent/runner-pinned-dispatch-transaction`). The corrected reconstitution
+mismatch contract was re-verified through PR #322 (`agent/docs-discipline`;
+pinned and pinned-loss request mismatches). The placement loss-source, pre-pin
+replacement and abandonment state shapes, and append-only reconstitution-history
+contract are re-verified through this PR (`agent/runner-placement-loss-domain`).
+It owns logical runner enrollment, daemon-authoritative catalog validation,
+runner leases, the independent session-composition axes, session placement and
 affinity, credential-profile grants, and workspace requirements. The tool
 registry's common declarations remain owned by [tool loop](tool-loop.md);
 session transcript and frontier mechanics remain owned by
@@ -744,10 +746,11 @@ selected runner authority, and placement in the runner lock order, authenticates
 either a distinct live successor or the registration-loss-only same-runner
 exception, and returns the original durable stage on equal replay. A
 workspace-free placement returns `NotApplicable` without claiming the command,
-so its later terminal transaction remains the sole owner. The runner provisions
-and spools `workspace_ready` under that limited authority. Only a later
-transaction can activate the pending enrollment: it rechecks the lost
-predecessor and connected candidate, consumes the exact workspace receipt,
+so its later terminal transaction remains the sole command-claiming
+transaction.
+The runner provisions and spools `workspace_ready` under that limited authority.
+Only a later transaction can activate the pending enrollment: it rechecks the
+lost predecessor and connected candidate, consumes the exact workspace receipt,
 revokes the predecessor, constructs the active enrollment and validated
 registration from the exact pending facts, and installs the successor placement,
 grant, semantic boundary, and terminal command result atomically. Pre-pin
@@ -1244,18 +1247,23 @@ repository and no model-selected tool. The runner rejects an unknown credential
 profile before accepting the authorization and returns one
 `ProvisionedWorkspace` receipt whose manifest facts match every correlation.
 
-The first dispatch transaction atomically consumes the workspace authorization
-and receipt when present, consumes the exact tool-attempt authorization,
-validates the placement request against the same current registration, installs
-`Pinned` state, creates any initial credential grant, and stores the offered
-lease. A crash can therefore leave either retryable provisioning evidence or the
-complete pin/grant/lease boundary, never an in-flight tool attempt without its
-lease. The pinned state contains the runner, selected working directory,
-credential-profile selection, tool inventory, runner-required tool inventory,
-provisioned workspace, sandbox profile, and exact permission overrides. Ordinary
-attachment and lease creation accept only that exact runner and current grant.
-Re-registration or reconnect changes none of these facts, and there is no
-automatic migration or class-based rescheduling (INV-044, INV-045).
+Dispatch through an existing pin consumes the exact tool-attempt authorization,
+revalidates the frozen enrollment and current registration revision, and stores
+the `InFlight` attempt and offered lease atomically. A crash therefore leaves
+both facts or neither. **Committed unimplemented functionality.** No present
+transaction performs the first dispatch boundary. Its future implementation must
+atomically consume the workspace authorization and receipt when present,
+validate the placement request against the same current registration, install
+`Pinned` state, create any initial credential grant, mark the exact attempt in
+flight, and store the offered lease. A crash may then leave either retryable
+provisioning evidence or the complete pin/grant/lease boundary, never an
+in-flight tool attempt without its lease. The pinned state contains the runner,
+selected working directory, credential-profile selection, tool inventory,
+runner-required tool inventory, provisioned workspace, sandbox profile, and
+exact permission overrides. Ordinary attachment and lease creation accept only
+that exact runner and current grant. Re-registration or reconnect changes none
+of these facts, and there is no automatic migration or class-based rescheduling
+(INV-044, INV-045).
 
 For `RepositoryWorktree`, the provisioned workspace's working directory is the
 selected execution directory. Attachment and reconstitution reject a provisioned

@@ -11,7 +11,7 @@ use std::{error::Error, num::NonZeroU64, time::Duration};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_application::{
     AbandonLostRunnerOutcome, ImportedConversationConverter, ImportedConversationStore,
-    PromotePendingRunnerOutcome, ReplaceLostRunnerBeforePinOutcome,
+    PinnedRunnerDispatchRequest, PromotePendingRunnerOutcome, ReplaceLostRunnerBeforePinOutcome,
     RunnerReplacementProvisioningOutcome,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
@@ -33,20 +33,21 @@ use signalbox_domain::{
     RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog, RunnerDomainError,
     RunnerEnrollment, RunnerEnrollmentId, RunnerEnrollmentRequestId, RunnerGeneration, RunnerId,
     RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseOfferRequest,
-    RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerLostBeforePin,
-    RunnerPlacementLossSource, RunnerPlacementReconstitutionHistory, RunnerPlacementRecoveryState,
-    RunnerRegistrationReconciliation, RunnerReplacementProvisioningRejection,
-    RunnerReplacementTarget, RunnerReplacementTargetUnavailableReason, RunnerRepositoryEntry,
-    RunnerSandboxProfile, RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration,
-    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerToolPermissionOverride,
-    RunnerToolPermissionOverrides, RunnerWorkingDirectory, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SessionRunnerPin, SessionRunnerPlacement,
-    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
-    SessionRunnerPlacementState, StoredRunnerRegistrationLossEvidence, SubmitInput,
-    ToolAdmissibleLoci, ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput,
-    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
-    ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
+    RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerLeaseState,
+    RunnerLostBeforePin, RunnerPlacementLossSource, RunnerPlacementReconstitutionHistory,
+    RunnerPlacementRecoveryState, RunnerRegistrationReconciliation,
+    RunnerReplacementProvisioningRejection, RunnerReplacementTarget,
+    RunnerReplacementTargetUnavailableReason, RunnerRepositoryEntry, RunnerSandboxProfile,
+    RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
+    RunnerToolModelDefinition, RunnerToolPermissionOverride, RunnerToolPermissionOverrides,
+    RunnerWorkingDirectory, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionId, SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
+    SessionRunnerPlacementRequest, SessionRunnerPlacementState,
+    StoredRunnerRegistrationLossEvidence, SubmitInput, ToolAdmissibleLoci, ToolApprovalDecision,
+    ToolApprovalResolutionReconstitutionInput, ToolAttemptDispatchCorrelation,
+    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
+    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
     ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
     ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal,
     ToolRequestReconstitutionInput, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
@@ -564,6 +565,11 @@ const SECOND_LATER_LEASE_PHYSICAL_ATTEMPT: PhysicalAttemptFacts = PhysicalAttemp
     attempt: 0x9605,
     request: 0x9703,
     turn: 0x9803,
+};
+const PINNED_DISPATCH_PHYSICAL_ATTEMPT: PhysicalAttemptFacts = PhysicalAttemptFacts {
+    attempt: 0x9607,
+    request: 0x9705,
+    turn: INITIAL_PHYSICAL_ATTEMPT.turn,
 };
 const SECOND_SESSION_PHYSICAL_ATTEMPT: PhysicalAttemptFacts = PhysicalAttemptFacts {
     attempt: 0x9606,
@@ -2207,6 +2213,7 @@ async fn migrated_unconnected_later_lease_fixture(
     MIGRATOR
         .run_to(PRE_PLACEMENT_LOSS_FENCE_MIGRATION, pool)
         .await?;
+    install_runner_lease_offer_registration_compatibility(pool).await?;
     terminalize_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     insert_physical_attempt(pool, LATER_LEASE_PHYSICAL_ATTEMPT).await?;
     let lease = pin
@@ -2226,6 +2233,7 @@ async fn migrated_unconnected_later_lease_fixture(
 }
 
 async fn install_pre_loss_fence_compatibility_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
+    install_runner_lease_offer_registration_compatibility(pool).await?;
     sqlx::query(
         "CREATE TABLE runner_connection_authority_head (
             enrollment_id uuid PRIMARY KEY,
@@ -2246,12 +2254,37 @@ async fn install_pre_loss_fence_compatibility_tables(pool: &PgPool) -> Result<()
 }
 
 async fn drop_pre_loss_fence_compatibility_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
+    drop_runner_lease_offer_registration_compatibility(pool).await?;
     sqlx::query("DROP TABLE runner_current_connection_loss")
         .execute(pool)
         .await?;
     sqlx::query("DROP TABLE runner_connection_authority_head")
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+async fn install_runner_lease_offer_registration_compatibility(
+    pool: &PgPool,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "ALTER TABLE runner_lease_generation
+         ADD COLUMN offer_registration_revision numeric(20, 0)",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn drop_runner_lease_offer_registration_compatibility(
+    pool: &PgPool,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "ALTER TABLE runner_lease_generation
+         DROP COLUMN offer_registration_revision",
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -2607,6 +2640,179 @@ async fn insert_physical_attempt_for(
         .await?;
     inserted?;
     Ok(())
+}
+
+async fn append_prepared_pinned_dispatch_attempt(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let (session, producing_call, prior_attempt, boundary, boundary_count): (
+        Uuid,
+        Uuid,
+        Uuid,
+        Uuid,
+        Decimal,
+    ) = sqlx::query_as(
+        "SELECT request.session_id, request.producing_model_call_id,
+                attempt.issuing_turn_attempt_id, round.boundary_frontier_id,
+                frontier.member_count
+           FROM tool_request AS request
+           JOIN tool_attempt AS attempt ON attempt.request_id = request.request_id
+           JOIN tool_round AS round
+             ON round.producing_model_call_id = request.producing_model_call_id
+           JOIN context_frontier AS frontier
+             ON frontier.owning_session_id = request.session_id
+            AND frontier.context_frontier_id = round.boundary_frontier_id
+          WHERE request.request_id = $1 AND attempt.attempt_id = $2",
+    )
+    .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.request))
+    .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt))
+    .fetch_one(pool)
+    .await?;
+    let issuing_attempt = uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt + RELATED_IDENTITY_OFFSET);
+    let assistant_entry = uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET);
+    let mut transaction = pool.begin().await?;
+    sqlx::raw_sql(
+        "ALTER TABLE tool_round DISABLE TRIGGER ALL;
+         ALTER TABLE tool_request DISABLE TRIGGER ALL;
+         ALTER TABLE tool_approval_decision DISABLE TRIGGER ALL;
+         ALTER TABLE tool_attempt DISABLE TRIGGER ALL;
+         ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL;
+         ALTER TABLE turn_attempt DISABLE TRIGGER ALL;
+         ALTER TABLE semantic_transcript_entry DISABLE TRIGGER ALL;
+         ALTER TABLE context_frontier DISABLE TRIGGER ALL;
+         ALTER TABLE context_frontier_delta DISABLE TRIGGER ALL;",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1",
+    )
+    .bind(prior_attempt)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, $4, 'prepared', NULL, NULL)",
+    )
+    .bind(issuing_attempt)
+    .bind(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.turn))
+    .bind(session)
+    .bind(prior_attempt)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET current_attempt_id = $1, active_phase_kind = 'running'
+          WHERE session_id = $2 AND turn_id = $3",
+    )
+    .bind(issuing_attempt)
+    .bind(session)
+    .bind(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.turn))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE tool_attempt
+            SET issuing_turn_attempt_id = $1
+          WHERE attempt_id = $2",
+    )
+    .bind(issuing_attempt)
+    .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE tool_round
+            SET request_count = 2, response_part_count = 2
+          WHERE producing_model_call_id = $1",
+    )
+    .bind(producing_call)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_request
+            (request_id, session_id, turn_id, producing_model_call_id,
+             request_ordinal, tool_name, arguments_kind, arguments_text)
+         VALUES ($1, $2, $3, $4, 1, 'inspect', 'json', '{}')",
+    )
+    .bind(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.request))
+    .bind(session)
+    .bind(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.turn))
+    .bind(producing_call)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source, denial_reason,
+             user_command_id)
+         VALUES ($1, 'approve', 'policy_auto', NULL, NULL)",
+    )
+    .bind(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.request))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             producing_model_call_id, assistant_tool_request_id,
+             assistant_response_part_ordinal)
+         VALUES ($1, $2, 'assistant_tool_use', $3, $4, 1)",
+    )
+    .bind(session)
+    .bind(assistant_entry)
+    .bind(producing_call)
+    .bind(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.request))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE context_frontier
+            SET member_count = member_count + 1
+          WHERE owning_session_id = $1 AND context_frontier_id = $2",
+    )
+    .bind(session)
+    .bind(boundary)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, $3 + 1, $1, $4)",
+    )
+    .bind(session)
+    .bind(boundary)
+    .bind(boundary_count)
+    .bind(assistant_entry)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_attempt
+            (attempt_id, request_id, session_id, turn_id,
+             issuing_turn_attempt_id, effect_class, dispatch_generation,
+             state_kind)
+         VALUES ($1, $2, $3, $4, $5, 'effect_free', 1, 'prepared')",
+    )
+    .bind(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt))
+    .bind(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.request))
+    .bind(session)
+    .bind(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.turn))
+    .bind(issuing_attempt)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE tool_round ENABLE TRIGGER ALL;
+         ALTER TABLE tool_request ENABLE TRIGGER ALL;
+         ALTER TABLE tool_approval_decision ENABLE TRIGGER ALL;
+         ALTER TABLE tool_attempt ENABLE TRIGGER ALL;
+         ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL;
+         ALTER TABLE turn_attempt ENABLE TRIGGER ALL;
+         ALTER TABLE semantic_transcript_entry ENABLE TRIGGER ALL;
+         ALTER TABLE context_frontier ENABLE TRIGGER ALL;
+         ALTER TABLE context_frontier_delta ENABLE TRIGGER ALL;",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await
 }
 
 async fn set_fixture_physical_attempt_effect(
@@ -6270,6 +6476,7 @@ async fn s31_inv043_inv044_placement_loss_fence_migration_rejects_legacy_history
     MIGRATOR
         .run_to(PRE_PLACEMENT_LOSS_FENCE_MIGRATION, &pool)
         .await?;
+    install_runner_lease_offer_registration_compatibility(&pool).await?;
     let (store, expected_enrollment, _, _) = stored_pin_fixture(&pool).await?;
     let connection = store
         .open_connection(expected_enrollment.enrollment())
@@ -6280,6 +6487,7 @@ async fn s31_inv043_inv044_placement_loss_fence_migration_rejects_legacy_history
         connection.epoch(),
     )
     .await?;
+    drop_runner_lease_offer_registration_compatibility(&pool).await?;
     let refusal = migrate(&pool)
         .await
         .expect_err("legacy placement history has no exact loss baseline");
@@ -17627,6 +17835,143 @@ async fn s31_inv043_initial_lease_rejects_cross_wired_dispatch_fence() -> Result
     Ok(())
 }
 
+/// INV-043: a pinned runner dispatch commits the physical attempt and offered
+/// lease together against the frozen registration locus.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_pinned_dispatch_atomically_authorizes_attempt_and_lease()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, pin, _) =
+        stored_active_pin_fixture_with_authorization(
+            &pool,
+            authorized,
+            catalog(),
+            no_permission_overrides(),
+            "effect_free",
+        )
+        .await?;
+    terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    append_prepared_pinned_dispatch_attempt(&pool).await?;
+    let request = PinnedRunnerDispatchRequest::new(
+        pin.placement.session(),
+        TurnId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.turn)),
+        ToolAttemptId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt)),
+        expected_enrollment.enrollment(),
+        registration.registration().revision(),
+    );
+    let lease = RunnerLeaseId::from_uuid(uuid(LEASE + 5));
+    let offered = store.authorize_pinned_dispatch(request, lease).await?;
+    let loaded = store
+        .load_lease(lease, RunnerGeneration::one())
+        .await?
+        .expect("the atomic dispatch stores its offered lease");
+    let attempt_state: String =
+        sqlx::query_scalar("SELECT state_kind FROM tool_attempt WHERE attempt_id = $1")
+            .bind(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt))
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(offered.state(), RunnerLeaseState::Offered);
+    assert_eq!(loaded, offered);
+    assert_eq!(attempt_state, "in_flight");
+    drop(pool);
+    Ok(())
+}
+
+/// INV-043: advancing the frozen registration rejects the whole transaction,
+/// leaving both the prepared attempt and proposed lease untouched.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_pinned_dispatch_rejects_stale_registration_atomically()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, pin, _) =
+        stored_active_pin_fixture_with_authorization(
+            &pool,
+            authorized,
+            catalog(),
+            no_permission_overrides(),
+            "effect_free",
+        )
+        .await?;
+    terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    append_prepared_pinned_dispatch_attempt(&pool).await?;
+    store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let request = PinnedRunnerDispatchRequest::new(
+        pin.placement.session(),
+        TurnId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.turn)),
+        ToolAttemptId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt)),
+        expected_enrollment.enrollment(),
+        registration.registration().revision(),
+    );
+    let lease = RunnerLeaseId::from_uuid(uuid(LEASE + 5));
+    let rejected = store
+        .authorize_pinned_dispatch(request, lease)
+        .await
+        .expect_err("a stale executable locus cannot authorize runner dispatch");
+    let attempt_state: String =
+        sqlx::query_scalar("SELECT state_kind FROM tool_attempt WHERE attempt_id = $1")
+            .bind(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt))
+            .fetch_one(&pool)
+            .await?;
+    let lease_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM runner_lease_generation WHERE lease_id = $1")
+            .bind(lease.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+
+    assert_store_domain_error(rejected, RunnerDomainError::RegistrationChanged);
+    assert_eq!(attempt_state, "prepared");
+    assert_eq!(lease_count, 0);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-007 / INV-043: a lease append rejected after attempt authorization
+/// rolls the attempt back to Prepared instead of exposing partial authority.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv007_inv043_pinned_dispatch_rolls_back_attempt_when_lease_is_rejected()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, pin, _) =
+        stored_active_pin_fixture_with_authorization(
+            &pool,
+            authorized,
+            catalog(),
+            no_permission_overrides(),
+            "effect_free",
+        )
+        .await?;
+    terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    append_prepared_pinned_dispatch_attempt(&pool).await?;
+    let request = PinnedRunnerDispatchRequest::new(
+        pin.placement.session(),
+        TurnId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.turn)),
+        ToolAttemptId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt)),
+        expected_enrollment.enrollment(),
+        registration.registration().revision(),
+    );
+    let conflicting_lease = pin.lease.correlation().lease;
+    let rejected = store
+        .authorize_pinned_dispatch(request, conflicting_lease)
+        .await
+        .expect_err("one lease identity cannot bind a second physical attempt");
+    let attempt_state: String =
+        sqlx::query_scalar("SELECT state_kind FROM tool_attempt WHERE attempt_id = $1")
+            .bind(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt))
+            .fetch_one(&pool)
+            .await?;
+
+    assert_store_corruption(rejected, RunnerProtocolCorruption::CrossWiredReference);
+    assert_eq!(attempt_state, "prepared");
+    drop(pool);
+    Ok(())
+}
+
 /// INV-043: the durable offer rejects every caller-supplied execution-placement
 /// fact that differs from the exact immutable placement record it references.
 #[tokio::test]
@@ -21602,14 +21947,14 @@ async fn s31_inv043_first_generation_requires_null_predecessor() -> Result<(), B
             (lease_id, generation, attempt_id, session_id, runner_id,
              tool_name, effect_class, placement_event_ordinal,
              registration_enrollment_id, registration_revision,
-             credential_profile_name,
+             offer_registration_revision, credential_profile_name,
              credential_grant_lineage_origin_ordinal,
              credential_grant_revision, credential_approval_kind,
              predecessor_generation)
          SELECT $2, 1, attempt_id, session_id, runner_id,
                 tool_name, effect_class, placement_event_ordinal,
                 registration_enrollment_id, registration_revision,
-                credential_profile_name,
+                offer_registration_revision, credential_profile_name,
                 credential_grant_lineage_origin_ordinal,
                 credential_grant_revision, credential_approval_kind, 0
            FROM runner_lease_generation

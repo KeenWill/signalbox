@@ -6022,6 +6022,53 @@ where
 }
 ```
 
+## application: pinned_runner_dispatch
+
+```rust
+pub struct PinnedRunnerDispatchRequest { /* private */ }
+impl PinnedRunnerDispatchRequest {
+    pub const fn new(
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+        enrollment: RunnerEnrollmentId,
+        registration_revision: RunnerGeneration,
+    ) -> Self;
+    // accessors: session(), turn(), attempt(), enrollment(), registration_revision()
+}
+
+pub trait RunnerLeaseIdGenerator {
+    fn next_lease_id(&mut self) -> RunnerLeaseId;
+}
+
+pub struct UuidV7RunnerLeaseIdGenerator;
+// Clone, Copy, Debug, Default; impl RunnerLeaseIdGenerator
+
+pub trait PinnedRunnerDispatchTransaction {
+    type Error;
+    fn authorize(
+        &mut self,
+        request: PinnedRunnerDispatchRequest,
+        lease: RunnerLeaseId,
+    ) -> impl Future<Output = Result<RunnerLease, Self::Error>> + Send;
+}
+
+pub struct PinnedRunnerDispatchService<Transaction, Ids> { /* private */ }
+impl<Transaction, Ids> PinnedRunnerDispatchService<Transaction, Ids> {
+    pub const fn new(transaction: Transaction, ids: Ids) -> Self;
+}
+impl<Transaction, Ids> PinnedRunnerDispatchService<Transaction, Ids>
+where
+    Transaction: PinnedRunnerDispatchTransaction,
+    Ids: RunnerLeaseIdGenerator,
+{
+    pub async fn execute(
+        &mut self,
+        request: PinnedRunnerDispatchRequest,
+    ) -> Result<RunnerLease, Transaction::Error>;
+}
+```
+
 ## application: create_session_from_imported_frontier
 
 ```rust
@@ -8984,6 +9031,7 @@ pub struct RunnerLeaseOfferRequest {
 pub struct RunnerToolAttemptAuthorization { /* private */ }
 impl RunnerToolAttemptAuthorization {
     pub const fn tool(&self) -> &ToolName;
+    pub const fn correlation(&self) -> ToolAttemptDispatchCorrelation;
 }
 pub enum RunnerLeaseState {
     Offered,
@@ -10802,6 +10850,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: abandon_lost_runner                   | 4 (incl. 1 trait)     |
 | application: replace_lost_runner_before_pin        | 4 (incl. 1 trait)     |
 | application: runner_replacement_provisioning       | 7 (incl. 2 traits)    |
+| application: pinned_runner_dispatch                | 5 (incl. 2 traits)    |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)    |
 | application: list_conversations                    | 8 (incl. 2 traits)    |
 | application: load_session                          | 2 (incl. 1 trait)     |
@@ -10821,4 +10870,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **270 (+1 free fn)**  |
+| **signalbox-application total**                    | **275 (+1 free fn)**  |

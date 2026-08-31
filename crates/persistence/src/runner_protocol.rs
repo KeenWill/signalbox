@@ -15,7 +15,8 @@ use std::{
 
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_application::{
-    AbandonLostRunnerOutcome, AbandonLostRunnerTransaction, ReplaceLostRunnerBeforePinOutcome,
+    AbandonLostRunnerOutcome, AbandonLostRunnerTransaction, PinnedRunnerDispatchRequest,
+    PinnedRunnerDispatchTransaction, ReplaceLostRunnerBeforePinOutcome,
     ReplaceLostRunnerBeforePinTransaction, RunnerReplacementProvisioningOutcome,
     RunnerReplacementProvisioningStage, RunnerReplacementProvisioningTransaction,
 };
@@ -31,9 +32,10 @@ use signalbox_domain::{
     RunnerCredentialGrantLineage, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId,
     RunnerEnrollmentReconstitutionInput, RunnerEnrollmentRequestId, RunnerEnrollmentState,
     RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId,
-    RunnerLeaseLoss, RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerLeaseState,
-    RunnerLostBeforePin, RunnerPlacementLossSource, RunnerPlacementReconstitutionHistory,
-    RunnerPlacementRecoveryState, RunnerPrePinReplacementHistory, RunnerRegistrationReconciliation,
+    RunnerLeaseLoss, RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput,
+    RunnerLeaseRetryPreparation, RunnerLeaseState, RunnerLostBeforePin, RunnerPlacementLossSource,
+    RunnerPlacementReconstitutionHistory, RunnerPlacementRecoveryState,
+    RunnerPrePinReplacementHistory, RunnerRegistrationReconciliation,
     RunnerReplacementProvisioningRejection, RunnerReplacementTarget,
     RunnerReplacementTargetUnavailableReason, RunnerRepositoryEntry, RunnerSandboxProfile,
     RunnerSelector, RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
@@ -4561,6 +4563,139 @@ impl RunnerProtocolStore {
         self.store_lease_without_proof(lease).await
     }
 
+    /// Atomically authorizes one prepared tool attempt and stores its offered
+    /// lease against an existing pinned placement.
+    pub async fn authorize_pinned_dispatch(
+        &self,
+        request: PinnedRunnerDispatchRequest,
+        lease: RunnerLeaseId,
+    ) -> Result<RunnerLease, RunnerProtocolStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        crate::tool_loop::lock_tool_session(transaction.as_mut(), request.session())
+            .await
+            .map_err(map_runner_tool_loop_error)?;
+        let enrollment_id = request.enrollment();
+        let enrollment_locked = sqlx::query(RUNNER_ENROLLMENT)
+            .bind(enrollment_id.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+        if enrollment_locked.is_none() {
+            return Err(RunnerProtocolCorruption::MissingCanonicalEnrollment.into());
+        }
+        let enrollment = load_enrollment_in(transaction.as_mut(), enrollment_id)
+            .await?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalEnrollment)?;
+        match enrollment.state() {
+            RunnerEnrollmentState::Active => {}
+            RunnerEnrollmentState::Pending => {
+                return Err(RunnerProtocolStoreError::Domain(
+                    RunnerDomainError::InvalidState,
+                ));
+            }
+            RunnerEnrollmentState::Revoked => {
+                return Err(RunnerProtocolStoreError::Domain(
+                    RunnerDomainError::EnrollmentRevoked,
+                ));
+            }
+        }
+        let connection_authority =
+            sqlx::query_scalar::<_, Decimal>(RUNNER_PLACEMENT_CONNECTION_AUTHORITY)
+                .bind(enrollment_id.into_uuid())
+                .fetch_optional(&mut *transaction)
+                .await?;
+        if connection_authority.is_none() {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
+        }
+        sqlx::query_scalar::<_, Decimal>(RUNNER_PLACEMENT_CURRENT_LOSS)
+            .bind(enrollment_id.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+        let connection = load_connection_head_in(transaction.as_mut(), enrollment_id)
+            .await?
+            .ok_or(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ))?;
+        if connection.state() != RunnerConnectionState::Connected {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
+        }
+        let current_registration: Decimal = sqlx::query_scalar(RUNNER_REGISTRATION_HEAD)
+            .bind(enrollment_id.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+        let requested_registration =
+            RunnerRegistrationRevision::try_from_u64(request.registration_revision().get())
+                .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        if decode_registration_revision(current_registration)? != requested_registration {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::RegistrationChanged,
+            ));
+        }
+        let registration = load_registration_in(
+            transaction.as_mut(),
+            enrollment_id,
+            requested_registration,
+            Some(&enrollment),
+            &self.catalog,
+        )
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+        let placement_row = sqlx::query(RUNNER_PLACEMENT_HEAD)
+            .bind(request.session().into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
+        let stored_placement = self
+            .decode_stored_placement_in(&mut transaction, &placement_row)
+            .await?;
+        let (_, placement, _, grant, _) = stored_placement.into_parts();
+        if pinned_placement(placement.state()).is_none() {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
+        }
+        if let Some(grant) = grant.as_ref() {
+            let origin = placement_row
+                .decode_column::<Option<Decimal>>("credential_grant_lineage_origin_ordinal")?
+                .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
+            let locked_profile: Option<String> = sqlx::query_scalar(RUNNER_LEASE_GRANT_AUTHORITY)
+                .bind(grant.session().into_uuid())
+                .bind(origin)
+                .bind(grant.runner().into_uuid())
+                .bind(Decimal::from(grant.revision().get()))
+                .fetch_optional(&mut *transaction)
+                .await?;
+            if locked_profile.as_deref() != Some(grant.profile().as_str()) {
+                return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+            }
+        }
+        let authorization = crate::tool_loop::authorize_runner_attempt_from_connection(
+            transaction.as_mut(),
+            request.session(),
+            request.turn(),
+            request.attempt(),
+        )
+        .await
+        .map_err(map_runner_tool_loop_error)?;
+        let tool = authorization.tool().clone();
+        let offered = placement
+            .offer_lease(
+                &enrollment,
+                registration.registration(),
+                grant.as_ref(),
+                authorization,
+                RunnerLeaseOfferRequest { lease, tool },
+            )
+            .map_err(RunnerProtocolStoreError::Domain)?;
+        append_lease_event_in(&mut transaction, &offered).await?;
+        commit_mutation(transaction).await?;
+        Ok(offered)
+    }
+
     async fn load_current_loss_lease_in(
         &self,
         transaction: &mut Transaction<'_, Postgres>,
@@ -5280,6 +5415,37 @@ impl RunnerReplacementProvisioningTransaction for RunnerProtocolStore {
     ) -> Result<RunnerReplacementProvisioningOutcome, Self::Error> {
         self.stage_runner_replacement_provisioning(command, authorization)
             .await
+    }
+}
+
+impl PinnedRunnerDispatchTransaction for RunnerProtocolStore {
+    type Error = RunnerProtocolStoreError;
+
+    async fn authorize(
+        &mut self,
+        request: PinnedRunnerDispatchRequest,
+        lease: RunnerLeaseId,
+    ) -> Result<RunnerLease, Self::Error> {
+        self.authorize_pinned_dispatch(request, lease).await
+    }
+}
+
+fn map_runner_tool_loop_error(
+    error: crate::tool_loop::ToolLoopRepositoryError,
+) -> RunnerProtocolStoreError {
+    match error {
+        crate::tool_loop::ToolLoopRepositoryError::Database { source, .. } => {
+            RunnerProtocolStoreError::Database(source)
+        }
+        crate::tool_loop::ToolLoopRepositoryError::Corruption(_) => {
+            RunnerProtocolCorruption::CrossWiredReference.into()
+        }
+        crate::tool_loop::ToolLoopRepositoryError::IdentityCollision
+        | crate::tool_loop::ToolLoopRepositoryError::DifferentCommandKind
+        | crate::tool_loop::ToolLoopRepositoryError::ConflictingCommandReuse
+        | crate::tool_loop::ToolLoopRepositoryError::InvalidTransition(_) => {
+            RunnerProtocolStoreError::Domain(RunnerDomainError::InvalidState)
+        }
     }
 }
 
