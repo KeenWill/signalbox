@@ -8,14 +8,14 @@
 use std::{error::Error, fmt, future::Future};
 
 use signalbox_application::{
-    ClassifyOperatorFailure, EligibilityPass, InProcessAttemptDispatchGate,
-    InProcessToolDispatchGate, ModelCallExecutionError, ModelCallExecutionOutcome,
-    ModelCallExecutionService, ModelCallProvider, OperatorFailureClass, RunnerToolOffer,
-    ScriptedModelCallError, ScriptedModelCallProvider, ScriptedModelCallStep,
-    StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,
-    StartEligibleTurnTransaction, ToolCatalog, ToolExecutionService, ToolExecutionServiceError,
-    ToolExecutionServiceOutcome, ToolExecutor, UnavailableRunnerToolOffer,
-    UuidV7ModelCallExecutionIdGenerator, UuidV7ToolLoopIdGenerator,
+    ClassifyOperatorFailure, DaemonExecutableToolSnapshotSource, EligibilityPass,
+    ExecutableToolSnapshotSource, InProcessAttemptDispatchGate, InProcessToolDispatchGate,
+    ModelCallExecutionError, ModelCallExecutionOutcome, ModelCallExecutionService,
+    ModelCallProvider, OperatorFailureClass, RunnerToolOffer, ScriptedModelCallError,
+    ScriptedModelCallProvider, ScriptedModelCallStep, StartEligibleTurnIdGenerator,
+    StartEligibleTurnOutcome, StartEligibleTurnService, StartEligibleTurnTransaction, ToolCatalog,
+    ToolExecutionService, ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor,
+    UnavailableRunnerToolOffer, UuidV7ModelCallExecutionIdGenerator, UuidV7ToolLoopIdGenerator,
 };
 use signalbox_domain::{
     ActivatedTurn, AssistantText, DirectModelSelection, ModelCallId, ProviderReportedTokenUsage,
@@ -892,6 +892,7 @@ impl<Provider> PostgresProviderModelExecution<Provider> {
             catalog,
             executor,
             runner: UnavailableRunnerToolOffer,
+            executable_tool_snapshot_source: DaemonExecutableToolSnapshotSource,
             approval_judge: None,
             approval_judge_selection: None,
             approval_judge_configuration: None,
@@ -959,6 +960,7 @@ pub struct PostgresProviderToolLoopExecution<
     Catalog,
     Executor,
     Runner = UnavailableRunnerToolOffer,
+    Snapshots = DaemonExecutableToolSnapshotSource,
 > {
     model_repository: PostgresModelCallRepository,
     tool_repository: PostgresToolLoopRepository,
@@ -969,19 +971,21 @@ pub struct PostgresProviderToolLoopExecution<
     catalog: Catalog,
     executor: Executor,
     runner: Runner,
+    executable_tool_snapshot_source: Snapshots,
     approval_judge: Option<std::sync::Arc<dyn ApprovalJudgeModel>>,
     approval_judge_selection: Option<DirectModelSelection>,
     approval_judge_configuration: Option<HubModelConfiguration>,
 }
 
-impl<Provider, Catalog, Executor, Runner>
-    PostgresProviderToolLoopExecution<Provider, Catalog, Executor, Runner>
+impl<Provider, Catalog, Executor, Runner, Snapshots>
+    PostgresProviderToolLoopExecution<Provider, Catalog, Executor, Runner, Snapshots>
 {
     /// Installs the runner-offer handoff used by non-daemon execution loci.
     pub fn with_runner_tool_offer<Replacement>(
         self,
         runner: Replacement,
-    ) -> PostgresProviderToolLoopExecution<Provider, Catalog, Executor, Replacement> {
+    ) -> PostgresProviderToolLoopExecution<Provider, Catalog, Executor, Replacement, Snapshots>
+    {
         PostgresProviderToolLoopExecution {
             model_repository: self.model_repository,
             tool_repository: self.tool_repository,
@@ -992,6 +996,29 @@ impl<Provider, Catalog, Executor, Runner>
             catalog: self.catalog,
             executor: self.executor,
             runner,
+            executable_tool_snapshot_source: self.executable_tool_snapshot_source,
+            approval_judge: self.approval_judge,
+            approval_judge_selection: self.approval_judge_selection,
+            approval_judge_configuration: self.approval_judge_configuration,
+        }
+    }
+
+    /// Installs the session-aware source that freezes executable tool loci.
+    pub fn with_executable_tool_snapshot_source<Replacement>(
+        self,
+        source: Replacement,
+    ) -> PostgresProviderToolLoopExecution<Provider, Catalog, Executor, Runner, Replacement> {
+        PostgresProviderToolLoopExecution {
+            model_repository: self.model_repository,
+            tool_repository: self.tool_repository,
+            approval_judge_repository: self.approval_judge_repository,
+            model_gate: self.model_gate,
+            tool_gate: self.tool_gate,
+            provider: self.provider,
+            catalog: self.catalog,
+            executor: self.executor,
+            runner: self.runner,
+            executable_tool_snapshot_source: source,
             approval_judge: self.approval_judge,
             approval_judge_selection: self.approval_judge_selection,
             approval_judge_configuration: self.approval_judge_configuration,
@@ -1423,8 +1450,8 @@ const fn provider_reported_usage(usage: TokenUsage) -> ProviderReportedTokenUsag
         .with_cache_read_input_tokens(usage.cache_read_input_tokens)
 }
 
-impl<Provider, Catalog, Executor, Runner>
-    PostgresProviderToolLoopExecution<Provider, Catalog, Executor, Runner>
+impl<Provider, Catalog, Executor, Runner, Snapshots>
+    PostgresProviderToolLoopExecution<Provider, Catalog, Executor, Runner, Snapshots>
 where
     Provider: ModelCallProvider + Clone + Send + 'static,
     Provider::Capability: Send,
@@ -1433,6 +1460,7 @@ where
     Executor: ToolExecutor + Clone + Send + 'static,
     Executor::Error: Send + 'static,
     Runner: RunnerToolOffer + Clone + Send + 'static,
+    Snapshots: ExecutableToolSnapshotSource + Clone + Send + 'static,
 {
     /// Enables delegated approval judging through the configured model runtime.
     pub fn with_approval_judge(
@@ -1467,6 +1495,7 @@ where
         let catalog = self.catalog.clone();
         let executor = self.executor.clone();
         let runner = self.runner.clone();
+        let executable_tool_snapshot_source = self.executable_tool_snapshot_source.clone();
         let approval_judge = self.approval_judge.clone();
         let approval_judge_selection = self.approval_judge_selection;
         let approval_judge_configuration = self.approval_judge_configuration.clone();
@@ -1480,7 +1509,8 @@ where
                 provider,
                 model_gate,
             )
-            .with_tool_catalog(catalog.clone());
+            .with_tool_catalog(catalog.clone())
+            .with_executable_tool_snapshot_source(executable_tool_snapshot_source);
             let mut tools = ToolExecutionService::new(
                 UuidV7ToolLoopIdGenerator,
                 tool_repository,
@@ -1593,8 +1623,8 @@ where
     }
 }
 
-impl<Provider, Catalog, Executor, Runner> ActivatedTurnExecution
-    for PostgresProviderToolLoopExecution<Provider, Catalog, Executor, Runner>
+impl<Provider, Catalog, Executor, Runner, Snapshots> ActivatedTurnExecution
+    for PostgresProviderToolLoopExecution<Provider, Catalog, Executor, Runner, Snapshots>
 where
     Provider: ModelCallProvider + Clone + Send + 'static,
     Provider::Capability: Send,
@@ -1603,6 +1633,7 @@ where
     Executor: ToolExecutor + Clone + Send + 'static,
     Executor::Error: Send + 'static,
     Runner: RunnerToolOffer + Clone + Send + 'static,
+    Snapshots: ExecutableToolSnapshotSource + Clone + Send + 'static,
 {
     type Error = PostgresProviderToolLoopExecutionError<Provider::Error, Executor::Error>;
 

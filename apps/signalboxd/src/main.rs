@@ -40,7 +40,8 @@ use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiConstructionError, Open
 use signalbox_persistence::{
     conversation_import::backfill_imported_conversation_display_titles, migrate,
     model_execution::PostgresModelCallRepository,
-    repo_watch_dispatch::PostgresRepoWatchDispatchStore, scheduler::PostgresEligibilitySweep,
+    repo_watch_dispatch::PostgresRepoWatchDispatchStore,
+    runner_protocol::PostgresExecutableToolSnapshotSource, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
 };
 use signalbox_tools_web::BRAVE_SEARCH_CREDENTIAL_REFERENCE;
@@ -1427,7 +1428,7 @@ async fn run_hub(
         model_configuration.clone(),
         template_configuration,
     )
-    .with_runner_protocol_store(runner_protocol_store)
+    .with_runner_protocol_store(runner_protocol_store.clone())
     .with_context_compaction_model(Arc::clone(&context_compaction_model));
     let process_runtime = match prometheus_runtime.as_ref() {
         Some((metrics, _server)) => process_runtime.with_metrics(metrics.clone()),
@@ -1449,6 +1450,9 @@ async fn run_hub(
         )
         .with_tool_loop(tool_dispatch_gate, tool_catalog, tool_executor)
         .with_runner_tool_offer(runner_tool_offer)
+        .with_executable_tool_snapshot_source(PostgresExecutableToolSnapshotSource::new(
+            runner_protocol_store,
+        ))
         .with_approval_judge(
             approval_judge_model,
             model_configuration.configured_approval_judge_selection(),

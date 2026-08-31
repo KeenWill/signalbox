@@ -7,21 +7,24 @@
 use std::{
     error::Error,
     fmt, fs,
+    future::Future,
     os::unix::fs::PermissionsExt,
+    pin::Pin,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
-    CreateSessionOutcome, CreateSessionRequest, CreateSessionService, DecideToolRequestService,
-    InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
-    ModelCallCredentialReference, OperatorFailureClass, StartEligibleTurnOutcome,
-    StartEligibleTurnService, StartupScanService, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputService, ToolDefinition, ToolExecutionInvocation, ToolExecutor,
-    ToolExecutorEvidence, ToolInputSchema, UuidV7SessionIdGenerator,
-    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator, UuidV7SubmitInputIdGenerator,
-    UuidV7ToolLoopIdGenerator,
+    CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
+    DaemonExecutableToolSnapshotSource, DecideToolRequestService, ExecutableToolSnapshotEntry,
+    ExecutableToolSnapshotSource, ExecutableToolSnapshotSourceError, InProcessAttemptDispatchGate,
+    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
+    OperatorFailureClass, StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanService,
+    SubmitInputOutcome, SubmitInputRequest, SubmitInputService, ToolCatalog, ToolDefinition,
+    ToolExecutionInvocation, ToolExecutor, ToolExecutorEvidence, ToolInputSchema,
+    UuidV7SessionIdGenerator, UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
+    UuidV7SubmitInputIdGenerator, UuidV7ToolLoopIdGenerator,
 };
 use signalbox_domain::{
     ActivatedTurn, DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestResult,
@@ -223,6 +226,40 @@ type FixtureJudgeExecution<Catalog, Executor> = (
     Arc<ScriptedModel<ModelCallId>>,
     Arc<ScriptedModel<ModelCallId>>,
 );
+
+#[derive(Clone, Debug)]
+struct RecordingExecutableToolSnapshotSource {
+    observed_session: Arc<Mutex<Option<SessionId>>>,
+}
+
+impl ExecutableToolSnapshotSource for RecordingExecutableToolSnapshotSource {
+    fn executable_tools<'a>(
+        &'a self,
+        session: SessionId,
+        daemon_catalog: &'a dyn ToolCatalog,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Box<[ExecutableToolSnapshotEntry]>,
+                        ExecutableToolSnapshotSourceError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            *self
+                .observed_session
+                .lock()
+                .expect("fixture snapshot observation lock") = Some(session);
+            DaemonExecutableToolSnapshotSource
+                .executable_tools(session, daemon_catalog, dangerous_tool_auto_approval)
+                .await
+        })
+    }
+}
 
 #[derive(Debug, sqlx::FromRow)]
 struct DelegateDecisionProjection {
@@ -2388,6 +2425,38 @@ async fn s10_inv004_inv005_inv019_inv021_inv024_tool_loop_completes() -> Result<
     assert_eq!(correlation.request(), requests[0]);
     assert_eq!(correlation.attempt().into_uuid(), identity_shape.2);
     assert_eq!(correlation.generation(), ToolDispatchGeneration::first());
+    Ok(())
+}
+
+/// The production execution factory carries its installed session-aware
+/// snapshot source into the model-call service that prepares the operation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn execution_composition_uses_the_installed_executable_snapshot_source()
+-> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let observed_session = Arc::new(Mutex::new(None));
+    let (execution, runtime) = fixture.execution(
+        [completion_script("snapshot observed")],
+        catalog(std::iter::empty::<CompiledTool>()),
+        RecordingExecutor::completing(),
+    );
+    let execution =
+        execution.with_executable_tool_snapshot_source(RecordingExecutableToolSnapshotSource {
+            observed_session: Arc::clone(&observed_session),
+        });
+
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+
+    assert_eq!(
+        *observed_session
+            .lock()
+            .expect("fixture snapshot observation lock"),
+        Some(fixture.session)
+    );
+    assert_eq!(runtime.received_operations().len(), 1);
     Ok(())
 }
 
