@@ -76,8 +76,11 @@ this PR (`agent/daemon-workspace-release-routing`). Established-connection
 resume classification of an accepted or completed workspace release against the
 durable pending/recorded state, together with exact runner replay or retirement,
 is verified against this PR (`agent/runner-workspace-release-resume`).
-Established-connection routing of those inbound claim and result frames through
-the durable transactions before acknowledgement is re-verified through this PR
+Post-resume revalidation and exact accepted-release redelivery on the newly
+observed connection are verified against this PR
+(`agent/runner-workspace-release-redelivery`). Established-connection routing of
+those inbound claim and result frames through the durable transactions before
+acknowledgement is re-verified through this PR
 (`agent/runner-runtime-lease-operations`). Durable authorization followed by
 best-effort `lease_offer` projection and handoff is re-verified through this PR
 (`agent/runner-lease-offer-dispatcher`). The corrected reconstitution mismatch
@@ -842,7 +845,11 @@ foreign, or phase-inconsistent evidence receives `fail_stale`. The runner
 preserves accepted state for `await`, re-emits the exact `workspace_released`
 frame for `resend`, and atomically frees the exact journal for
 `discard_as_recorded` or `fail_stale`; any other action preserves the journal
-and fails closed. Reconnect inventory does not create release authority.
+and fails closed. Reconnect inventory does not create release authority. After
+opening the successor physical connection, the hub re-reads the exact pending
+release selected for `await`, writes `resumed`, observes that new epoch, and
+then writes the canonical `workspace_release`. A changed or missing durable row
+fails the resume boundary rather than projecting from the earlier read.
 
 On the hub, an established connection accepts `workspace_released` only when its
 correlation names that connection's runner. The daemon observes the exact
@@ -850,7 +857,8 @@ current connection, commits or exactly replays the durable release-completion
 transaction, and sends `workspace_release_recorded` from the committed facts. It
 sends no acknowledgement when durable admission fails and terminalizes the
 connection with the classified rejection. No present production path inserts a
-pending release or sends the initiating `workspace_release` frame.
+pending release or initiates one on an ordinary enrolled connection; the only
+initiating send is the authenticated resume redelivery above.
 
 **Committed unimplemented functionality.** No present repository-backed
 filesystem producer creates ready evidence or begins or advances a release, and
