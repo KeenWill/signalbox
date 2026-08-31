@@ -11,11 +11,12 @@ use std::{
 
 use rustix::process::geteuid;
 use signalbox_runner_wire::{
-    Advertise, Advertisement, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Digest,
-    DirectiveAction, Enroll, Frame, FrameError, Heartbeat, HeartbeatAck, MAX_FRAME_BYTES, Message,
-    OperationCorrelation, OperationFailed, OperationFailure, PositiveU64, ReconnectDirectives,
-    ReconnectInventory, Registered, Rejected, RejectionCode, Resume, Shutdown, ShutdownReason,
-    ValueError, advertisement_digest, decode_line, encode_line,
+    Advertise, Advertisement, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, DetailName,
+    Digest, DirectiveAction, Enroll, FailureCategory, FailureDetail, Frame, FrameError, Heartbeat,
+    HeartbeatAck, LeaseCorrelation, MAX_FRAME_BYTES, Message, OperationCorrelation,
+    OperationFailed, OperationFailure, PositiveU64, ReconnectDirectives, ReconnectInventory,
+    Registered, Rejected, RejectionCode, Resume, Shutdown, ShutdownReason, ValueError,
+    advertisement_digest, decode_line, encode_line,
 };
 use tokio::{
     io::{
@@ -33,6 +34,8 @@ const SOCKET_MODE: u32 = 0o600;
 const PERMISSION_MASK: u32 = 0o7777;
 const FIRST_RUNNER_SEQUENCE: u64 = 1;
 const NO_ACCEPTED_PEER_SEQUENCE: u64 = 0;
+const TOOL_UNAVAILABLE_DETAIL_CODE: &str = "tool-unavailable";
+const TOOL_UNAVAILABLE_DETAIL_MESSAGE: &str = "offered tool is absent from the registered catalog";
 
 /// Connects only to one stable owner-only same-user Unix socket identity.
 pub async fn connect_verified(path: &Path) -> Result<UnixStream, SocketConnectError> {
@@ -822,9 +825,24 @@ where
                     offer.correlation.runner_id,
                     offer.correlation.registration_revision,
                 )?;
-                Err(RunnerConnectionError::RecoveryUnavailable(
-                    self.recovery_unavailable(),
-                ))
+                if self
+                    .advertisement
+                    .tools
+                    .binary_search(&offer.correlation.tool_name)
+                    .is_ok()
+                {
+                    return Err(RunnerConnectionError::RecoveryUnavailable(
+                        self.recovery_unavailable(),
+                    ));
+                }
+                let failure = empty_catalog_offer_failure(offer.correlation)?;
+                state.record_lease_offer_failure(failure.clone())?;
+                send_message(
+                    &mut self.io,
+                    Message::OperationFailed(OperationFailed { failure }),
+                )
+                .await?;
+                Ok(None)
             }
             Message::ResultRecorded(recorded) => {
                 self.validate_connection_correlation(
@@ -1072,6 +1090,24 @@ fn rejected_error(rejected: Rejected) -> RunnerConnectionError {
     }
 }
 
+fn empty_catalog_offer_failure(
+    correlation: LeaseCorrelation,
+) -> Result<OperationFailure, RunnerConnectionError> {
+    let code = DetailName::try_new(String::from(TOOL_UNAVAILABLE_DETAIL_CODE))
+        .map_err(RunnerConnectionError::InvalidLocalFrame)?;
+    let detail = FailureDetail::try_new(
+        code,
+        String::from(TOOL_UNAVAILABLE_DETAIL_MESSAGE),
+        serde_json::Value::Object(serde_json::Map::new()),
+    )
+    .map_err(RunnerConnectionError::InvalidLocalFrame)?;
+    Ok(OperationFailure {
+        correlation: OperationCorrelation::LeaseOffer(correlation),
+        category: FailureCategory::LeaseAdmissionRefused,
+        detail,
+    })
+}
+
 async fn send_message<S>(
     io: &mut BufReader<S>,
     message: Message,
@@ -1189,10 +1225,10 @@ mod tests {
     use uuid::Uuid;
 
     use signalbox_runner_wire::{
-        DetailName, Enrolled, FailureCategory, FailureDetail, LeaseCorrelation, LeasePhase,
-        LeasePhaseKind, OperationFailureRecorded, ReconnectDirectives, ResultRecorded, Resumed,
-        RetainedResult, SandboxProfile, Shutdown, TerminalResult, WireToolName, WorkingDirectory,
-        WorkspaceProvision,
+        DetailName, EffectClass, Enrolled, FailureCategory, FailureDetail, LeaseCorrelation,
+        LeaseOffer, LeasePhase, LeasePhaseKind, OperationFailureRecorded, ReconnectDirectives,
+        ResultBounds, ResultRecorded, Resumed, RetainedResult, SandboxProfile, Shutdown,
+        TerminalResult, WireToolName, WorkingDirectory, WorkspaceProvision,
     };
 
     use super::*;
@@ -1241,14 +1277,21 @@ mod tests {
     }
 
     fn issued_receipt(request_id: CanonicalUuid) -> EnrollmentReceipt {
+        issued_receipt_for(request_id, &empty_advertisement())
+    }
+
+    fn issued_receipt_for(
+        request_id: CanonicalUuid,
+        advertisement: &Advertisement,
+    ) -> EnrollmentReceipt {
         EnrollmentReceipt::new(
             request_id,
             identity(ARBITRARY_ENROLLMENT_UUID),
             identity(ARBITRARY_RUNNER_UUID),
             identity(ARBITRARY_AUTHENTICATION_UUID),
             positive(INITIAL_REGISTRATION_REVISION),
-            advertisement_digest(&empty_advertisement())
-                .expect("the explicit empty advertisement has a digest"),
+            advertisement_digest(advertisement)
+                .expect("the explicit fixture advertisement has a digest"),
             EnrollmentAuthority::Active,
         )
     }
@@ -1281,12 +1324,26 @@ mod tests {
     }
 
     fn enrolled_state(parent: &TempDir) -> RunnerStateRoot {
+        enrolled_state_for(parent, &empty_advertisement())
+    }
+
+    fn enrolled_state_for(parent: &TempDir, advertisement: &Advertisement) -> RunnerStateRoot {
         let mut state = state_root(parent);
-        let receipt = issued_receipt(state.state().request_id());
+        let receipt = issued_receipt_for(state.state().request_id(), advertisement);
         state
             .record_receipt(receipt)
             .expect("the issued receipt is journaled");
         state
+    }
+
+    fn advertisement_with_exec_tool() -> Advertisement {
+        Advertisement {
+            tools: vec![
+                WireToolName::try_new("sandboxed_exec".to_owned())
+                    .expect("the generic exec-family fixture name is valid"),
+            ],
+            ..empty_advertisement()
+        }
     }
 
     fn record_terminal_result_fixture(state: &mut RunnerStateRoot) {
@@ -1337,12 +1394,23 @@ mod tests {
             correlation: OperationCorrelation::LeaseOffer(retained_lease_correlation()),
             category: FailureCategory::LeaseAdmissionRefused,
             detail: FailureDetail::try_new(
-                DetailName::try_new("fixture-refusal".to_owned())
+                DetailName::try_new(TOOL_UNAVAILABLE_DETAIL_CODE.to_owned())
                     .expect("the fixture detail code is valid"),
-                String::from("the synthetic offer is refused"),
+                String::from(TOOL_UNAVAILABLE_DETAIL_MESSAGE),
                 serde_json::json!({}),
             )
             .expect("the fixture failure detail is bounded"),
+        }
+    }
+
+    fn unavailable_lease_offer() -> LeaseOffer {
+        LeaseOffer {
+            correlation: retained_lease_correlation(),
+            effect_class: EffectClass::SideEffecting,
+            credential_profile: None,
+            grant_revision: None,
+            normalized_arguments: serde_json::json!({ "program": "true" }),
+            result_bounds: ResultBounds::version_one(),
         }
     }
 
@@ -1537,6 +1605,101 @@ mod tests {
                 workspace_phase: None,
             })
         );
+    }
+
+    /// INV-011 / INV-024 / INV-042: the registration-only empty catalog
+    /// refuses an unknown offer only after its exact failure is durable.
+    #[tokio::test]
+    async fn s31_inv011_inv024_inv042_empty_catalog_offer_is_durably_refused() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        let advertisement = empty_advertisement();
+        let offer = unavailable_lease_offer();
+        let expected_failure = retained_lease_offer_failure();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before the lease offer");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect("the unavailable offer is refused without closing the connection")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(&mut hub_io, Message::LeaseOffer(offer)).await;
+            receive_hub_message(&mut hub_io).await
+        };
+        let (outcome, observed) = tokio::join!(runner, hub);
+
+        assert_eq!(outcome, None);
+        assert_eq!(
+            observed,
+            Message::OperationFailed(OperationFailed {
+                failure: expected_failure.clone(),
+            })
+        );
+        assert_eq!(
+            state.reconnect_inventory(),
+            &ReconnectInventory {
+                operation_failure: Some(expected_failure),
+                ..ReconnectInventory::default()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn advertised_offer_stays_at_the_typed_execution_seam() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let advertisement = advertisement_with_exec_tool();
+        let mut state = enrolled_state_for(&parent, &advertisement);
+        let offer = unavailable_lease_offer();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before the advertised lease offer");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect_err("advertised execution remains at the typed unimplemented seam")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(&mut hub_io, Message::LeaseOffer(offer)).await;
+        };
+        let (error, ()) = tokio::join!(runner, hub);
+
+        assert!(matches!(
+            error,
+            RunnerConnectionError::RecoveryUnavailable(RecoveryUnavailable {
+                gap: RecoveryGap::UnbornHeadNotRepresentable,
+            })
+        ));
+        assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
     }
 
     /// INV-011 / INV-024 / INV-043: resume sends the exact retained terminal
