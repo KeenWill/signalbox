@@ -67,7 +67,7 @@ env:
 jobs:
   gate:
     name: Codex smoke eligibility
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     timeout-minutes: 5
     permissions:
       contents: read
@@ -153,7 +153,7 @@ jobs:
     # when a newer push supersedes the *same* ref. A concurrent real exchange
     # costs a small fraction of a cent; required-check integrity is worth more
     # than serializing that spend.
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     timeout-minutes: 20
     env:
       # Keeps the CLI's credential store inside the job's workspace instead of
@@ -257,7 +257,7 @@ jobs:
     name: Codex smoke compatibility
     needs: [gate, smoke]
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     timeout-minutes: 5
     env:
       EVENT_NAME: ${{ github.event_name }}

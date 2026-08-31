@@ -84,6 +84,7 @@ export type WebContractCapabilities = {
   readonly blob_derivations: boolean;
   readonly bounded_json: boolean;
   readonly bounded_lexical_search: boolean;
+  readonly bounded_session_live: boolean;
   readonly bounded_session_timeline: boolean;
   readonly bounded_session_timeline_detail: boolean;
   readonly bounded_usage_cost: boolean;
@@ -106,6 +107,7 @@ export type WebContractLimits = {
   readonly max_search_page_items: number;
   readonly max_search_query_bytes: number;
   readonly max_search_snippet_bytes: number;
+  readonly max_session_live_queued_turns: number;
   readonly max_timeline_detail_bytes: number;
   readonly max_timeline_detail_items: number;
   readonly max_timeline_window_bytes: number;
@@ -184,6 +186,8 @@ export type WebImportedSessionRelationship = "resume" | "fork";
 
 export type WebImportedSpeakerEvidence = "not_attested" | "attested_absent" | "user" | "assistant";
 
+export type WebLiveResourceId = string;
+
 export type WebModelSelection = {
   readonly kind: "direct";
   readonly selection_id: string;
@@ -195,6 +199,8 @@ export type WebModelSelection = {
 export type WebNullableU128 = WebU128 | null;
 
 export type WebNullableU64 = WebU64 | null;
+
+export type WebPositiveU64 = string;
 
 export type WebProviderModelCallFailureCause = "credential_rejected" | "permission_denied" | "invalid_request" | "target_not_found" | "request_too_large" | "rate_limited" | "quota_exhausted" | "overloaded" | "provider_internal" | "unrecognized";
 
@@ -501,6 +507,30 @@ export type WebSessionCatalogSummary = {
 
 export type WebSessionId = string;
 
+export type WebSessionLiveActiveState = {
+  readonly kind: "running";
+  readonly model_call_id: string | null;
+} | {
+  readonly kind: "awaiting_model_call_recovery";
+  readonly model_call_id: WebLiveResourceId;
+} | {
+  readonly kind: "awaiting_tool_approval";
+  readonly tool_request_id: WebLiveResourceId;
+} | {
+  readonly child_session_id: WebSessionId;
+  readonly kind: "awaiting_child";
+  readonly tool_request_id: WebLiveResourceId;
+} | {
+  readonly kind: "awaiting_tool_recovery";
+  readonly tool_attempt_id: WebLiveResourceId;
+} | {
+  readonly kind: "awaiting_runner_recovery";
+  readonly placement_revision: WebPositiveU64;
+  readonly runner_id: WebLiveResourceId;
+};
+
+export type WebSessionLiveRunnerConnectionHealth = "connected" | "suspect" | "shutdown" | "lost";
+
 export type WebSessionTimelineDetail = {
   readonly address: WebTimelineAddress;
   readonly body: WebSessionTimelineDetailBody;
@@ -611,6 +641,8 @@ export type WebTimelineTextExcerpt = {
 };
 
 export type WebTimelineTurnLifecycleKind = "activated" | "terminalized";
+
+export type WebTurnId = string;
 
 export type WebU128 = string;
 
@@ -777,6 +809,66 @@ export type WebSessionCatalogSnapshot = {
   readonly total: WebU64;
 };
 
+export type WebSessionLiveSnapshot = {
+  readonly active: {
+  readonly state: WebSessionLiveActiveState;
+  readonly turn_id: WebTurnId;
+} | null;
+  readonly observed_through: WebPositiveU64;
+  readonly queued_turn_count: WebU64;
+  readonly queued_turn_ids: ReadonlyArray<WebTurnId>;
+  readonly reconciliation: {
+  readonly kind: "model_call";
+  readonly model_call_id: WebLiveResourceId;
+  readonly turn_id: WebTurnId;
+} | {
+  readonly kind: "tool_attempt";
+  readonly tool_attempt_id: WebLiveResourceId;
+  readonly turn_id: WebTurnId;
+} | null;
+  readonly runner: {
+  readonly placement_revision: WebPositiveU64;
+  readonly state: "unpinned";
+} | {
+  readonly connection_health: WebSessionLiveRunnerConnectionHealth;
+  readonly placement_revision: WebPositiveU64;
+  readonly runner_id: WebLiveResourceId;
+  readonly state: "pinned";
+} | {
+  readonly placement_revision: WebPositiveU64;
+  readonly runner_id: WebLiveResourceId;
+  readonly state: "runner_lost_before_pin";
+} | {
+  readonly placement_revision: WebPositiveU64;
+  readonly runner_id: WebLiveResourceId;
+  readonly state: "runner_lost";
+} | {
+  readonly placement_revision: WebPositiveU64;
+  readonly runner_id: WebLiveResourceId;
+  readonly state: "runner_abandoned";
+} | null;
+  readonly session_id: WebSessionId;
+};
+
+export type WebSessionLiveStreamEvent = {
+  readonly kind: "snapshot";
+  readonly snapshot: WebSessionLiveSnapshot;
+} | {
+  readonly address: WebTimelineAddress;
+  readonly cursor: WebU64;
+  readonly event_kind: WebSessionTimelineEventKind;
+  readonly kind: "durable";
+} | {
+  readonly content: string;
+  readonly kind: "provider_text_delta";
+  readonly model_call_id: WebLiveResourceId;
+  readonly part_index: number;
+  readonly turn_id: WebTurnId;
+} | {
+  readonly cursor: WebPositiveU64;
+  readonly kind: "resync_required";
+};
+
 export type WebImportListRequest = {
   readonly after?: string | null;
   readonly format?: WebImportFormat | null;
@@ -893,6 +985,8 @@ export function decodeWebSessionTimelineDetailPage(value: unknown): WebSessionTi
 export function decodeWebAttentionSnapshot(value: unknown): WebAttentionSnapshot;
 export function decodeWebAttentionStreamEvent(value: unknown): WebAttentionStreamEvent;
 export function decodeWebSessionCatalogSnapshot(value: unknown): WebSessionCatalogSnapshot;
+export function decodeWebSessionLiveSnapshot(value: unknown): WebSessionLiveSnapshot;
+export function decodeWebSessionLiveStreamEvent(value: unknown): WebSessionLiveStreamEvent;
 export function decodeWebImportListRequest(value: unknown): WebImportListRequest;
 export function decodeWebImportListPage(value: unknown): WebImportListPage;
 export function decodeWebImportDescriptor(value: unknown): WebImportDescriptor;
