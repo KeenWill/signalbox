@@ -264,7 +264,7 @@ jobs:
   postgres-integration-build:
     name: postgres-integration (build)
     runs-on: ubuntu-latest
-    # Generous by design: this job now absorbs all four suites' compilation,
+    # Generous by design: this job now absorbs all five suites' compilation,
     # which a cold cache serializes into one runner instead of spreading it
     # across three.
     timeout-minutes: 35
@@ -298,7 +298,9 @@ jobs:
       # compiled under features it did not previously see. The runner suite
       # repeats the persistence package archive with the same feature set so a
       # positive binary filter can isolate that target; Cargo reuses the build
-      # artifacts. Other suites retain their independent feature resolution.
+      # artifacts. The runner-process suite packages the actual runner binary
+      # with its process integration test. Other suites retain their independent
+      # feature resolution.
       #
       # The loop reads the manifest rather than restating it: package and
       # feature selection exist in exactly one place, which is the same place
@@ -343,6 +345,13 @@ jobs:
           path: ${{ runner.temp }}/runner.tar.zst
           if-no-files-found: error
           retention-days: 1
+      - name: Upload the runner-process archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: postgres-integration-archive-runner-process
+          path: ${{ runner.temp }}/runner-process.tar.zst
+          if-no-files-found: error
+          retention-days: 1
       - name: Upload the terminal-client archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -352,7 +361,7 @@ jobs:
           retention-days: 1
 
   # GitHub-hosted Ubuntu runners provide Docker. Each test below starts its own
-  # pinned PostgreSQL container through testcontainers, so the four runner CPUs
+  # pinned PostgreSQL container through testcontainers, so the seven runner CPUs
   # can execute isolated tests concurrently without sharing database state.
   #
   # The matrix is generated from `.github/postgres-integration-suites.toml`:
@@ -362,9 +371,9 @@ jobs:
   # 22m22s as a single job against roughly 7m at three ways.
   #
   # Runner cost, stated plainly: this asks for more runners than the matrix it
-  # replaces. That was three jobs at its widest; this is six shards plus the
-  # build ahead of them, so seven jobs and a peak of six. The trade is that each
-  # of the three used to compile its own suite, where the six compile nothing
+  # replaces. That was three jobs at its widest; this is seven shards plus the
+  # build ahead of them, so eight jobs and a peak of seven. The trade is that each
+  # of the three used to compile its own suite, where the seven compile nothing
   # and run for minutes. Wall clock falls even so, and the build's single cache
   # key replaces three that evicted one another.
   postgres-integration-run:

@@ -64,6 +64,16 @@ skip = []
 include_binaries = ["runner_protocol_postgres"]
 
 [[suite]]
+name = "runner-process"
+package = "signalbox-runner"
+features = []
+# This archive includes the actual runner executable and only the spawned
+# registration integration target; it does not repeat the persistence suite.
+shards = 1
+skip = []
+include_binaries = ["runner_process_postgres"]
+
+[[suite]]
 name = "signalboxd"
 package = "signalboxd"
 features = []

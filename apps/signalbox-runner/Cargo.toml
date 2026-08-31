@@ -11,6 +11,10 @@ publish.workspace = true
 name = "signalbox-runner"
 path = "src/main.rs"
 
+[[test]]
+name = "runner_process_postgres"
+path = "tests/runner_process_postgres.rs"
+
 [dependencies]
 rustix = { version = "1.1.4", default-features = false, features = [
     "fs",
@@ -24,8 +28,10 @@ tokio = { version = "1.53.0", default-features = false, features = [
     "io-util",
     "macros",
     "net",
+    "process",
     "rt-multi-thread",
     "signal",
+    "sync",
     "time",
 ] }
 toml = "1.1.3"
@@ -36,7 +42,18 @@ uuid = { version = "1.24.0", default-features = false, features = [
 url = "2.5.8"
 
 [dev-dependencies]
+signalbox-persistence = { path = "../../crates/persistence" }
+signalbox-test-bin = { path = "../../crates/test-bin" }
+signalboxd = { path = "../signalboxd" }
+sqlx = { version = "0.9.0", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+] }
 tempfile = "3.27.0"
+testcontainers-modules = { version = "0.15.0", default-features = false, features = [
+    "postgres",
+    "ring",
+] }
 
 [lints]
 workspace = true
