@@ -18900,6 +18900,111 @@ async fn s31_runner_result_process_projection_rejects_incomplete_lease_evidence(
     Ok(())
 }
 
+/// INV-011 / INV-034 / INV-043: resume authenticates the exact durable claimed
+/// lease as readback evidence before a later recovery transaction consumes it.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv011_inv034_inv043_claimed_lease_resume_readback_round_trips_exactly()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = stored_claimed_resume_fixture(&pool).await?;
+    let correlation = fixture.claimed.correlation();
+
+    let authenticated = fixture
+        .store
+        .load_claimed_lease_for_authenticated_resume(
+            fixture.request,
+            fixture.identities,
+            fixture.registration,
+            advertisement(),
+            correlation,
+        )
+        .await?;
+
+    assert_eq!(authenticated, fixture.claimed);
+    assert_eq!(authenticated.state(), RunnerLeaseState::Claimed);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-011 / INV-034 / INV-043: a runner cannot authenticate a claimed lease
+/// after changing any member of its complete durable execution correlation.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv011_inv034_inv043_claimed_lease_resume_rejects_cross_wired_correlation()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = stored_claimed_resume_fixture(&pool).await?;
+    let canonical = fixture.claimed.correlation();
+    let mut cross_wired = canonical.clone();
+    cross_wired.working_directory =
+        RunnerWorkingDirectory::try_new("/workspace/other-session".to_owned())
+            .expect("the cross-wired working directory is valid");
+
+    let rejected = fixture
+        .store
+        .load_claimed_lease_for_authenticated_resume(
+            fixture.request,
+            fixture.identities,
+            fixture.registration,
+            advertisement(),
+            cross_wired,
+        )
+        .await
+        .expect_err("a changed execution correlation cannot authenticate the claimed lease");
+    let loaded = fixture
+        .store
+        .load_lease(canonical.lease, canonical.generation)
+        .await?
+        .expect("the canonical claimed lease remains readable");
+
+    assert_store_domain_error(rejected, RunnerDomainError::CorrelationMismatch);
+    assert_eq!(loaded, fixture.claimed);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-011 / INV-034 / INV-043: an otherwise exact claimed lease from an older
+/// registration cannot become recovery authority after availability advances.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv011_inv034_inv043_claimed_lease_resume_rejects_stale_registration()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = stored_claimed_resume_fixture(&pool).await?;
+    let correlation = fixture.claimed.correlation();
+    let current_advertisement = narrowed_advertisement();
+    let resumed = fixture
+        .store
+        .resume_registration(
+            fixture.request,
+            fixture.identities,
+            fixture.registration,
+            current_advertisement.clone(),
+        )
+        .await?;
+
+    let rejected = fixture
+        .store
+        .load_claimed_lease_for_authenticated_resume(
+            fixture.request,
+            fixture.identities,
+            fixture.registration,
+            current_advertisement,
+            correlation,
+        )
+        .await
+        .expect_err("an older lease registration cannot authenticate after re-registration");
+
+    assert_eq!(
+        resumed.registration().revision(),
+        fixture.successor_registration
+    );
+    assert_store_domain_error(rejected, RunnerDomainError::CorrelationMismatch);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-011 / INV-034 / INV-043: retained terminal evidence commits under the
 /// authenticated resume identity before a changed advertisement advances its
 /// registration and starts availability reconciliation.
