@@ -10,9 +10,10 @@ use std::{
 
 use signalbox_runner::{
     AcceptedWorkspaceRelease, ArgumentError, ConnectionEnd, DispatchHttpsEndpoint,
-    EnrollmentOutcome, HttpsBroker, ProtocolViolation, RunnerConfiguration,
-    RunnerConfigurationError, RunnerConfigurationPath, RunnerConnection, RunnerConnectionError,
-    RunnerStateError, RunnerStateRoot, ServeOutcome, SocketConnectError, connect_verified,
+    EnrollmentOutcome, HttpsBroker, LeaseCredentialAuthorization, ProtocolViolation,
+    RunnerConfiguration, RunnerConfigurationError, RunnerConfigurationPath, RunnerConnection,
+    RunnerConnectionError, RunnerStateError, RunnerStateRoot, ServeOutcome, SocketConnectError,
+    connect_verified,
 };
 use signalbox_runner_wire::{ExecutionErrorKind, SandboxProfile, TerminalResult};
 use signalbox_tools_exec::{ExecArguments, SandboxedCommandRunner, TokioProcessRunner};
@@ -110,15 +111,17 @@ async fn run(
                     _ = interrupt.recv() => {}
                 }
             };
-            match connection.serve_until_shutdown(&mut state, shutdown).await {
+            match connection
+                .serve_until_shutdown_with_credential_admission(&mut state, shutdown, |_| false)
+                .await
+            {
                 Ok(ServeOutcome::DispatchReady(dispatch)) => {
                     let execution = execute_dispatch(
+                        &configuration,
                         execution_programs.clone(),
-                        configuration.read_only_paths().to_vec(),
-                        configuration.runner_root().to_owned(),
-                        configuration.allowed_network_hosts().to_vec(),
                         dispatch.correlation().clone(),
                         dispatch.normalized_arguments().clone(),
+                        dispatch.credential().clone(),
                     );
                     if let Err(error) = connection
                         .execute_while_serving(&mut state, *dispatch, execution)
@@ -197,13 +200,18 @@ fn release_private_workspace(
 }
 
 async fn execute_dispatch(
+    configuration: &RunnerConfiguration,
     process_runner: TokioProcessRunner,
-    read_only_paths: Vec<std::path::PathBuf>,
-    runner_root: std::path::PathBuf,
-    allowed_network_hosts: Vec<signalbox_runner::AllowedNetworkHost>,
     correlation: signalbox_runner_wire::LeaseCorrelation,
     normalized_arguments: serde_json::Value,
+    authorization: LeaseCredentialAuthorization,
 ) -> TerminalResult {
+    if !matches!(authorization, LeaseCredentialAuthorization::Profileless) {
+        return TerminalResult::KnownFailure {
+            error_kind: ExecutionErrorKind::ExecutionFailed,
+            detail: None,
+        };
+    }
     if correlation.sandbox_profile != SandboxProfile::WorkspaceRestricted {
         return TerminalResult::KnownFailure {
             error_kind: ExecutionErrorKind::ExecutionFailed,
@@ -219,19 +227,20 @@ async fn execute_dispatch(
             };
         }
     };
-    let endpoint = match DispatchHttpsEndpoint::bind(&runner_root, correlation.lease_id) {
-        Ok(endpoint) => endpoint,
-        Err(_) => {
-            return TerminalResult::KnownFailure {
-                error_kind: ExecutionErrorKind::ExecutionFailed,
-                detail: None,
-            };
-        }
-    };
+    let endpoint =
+        match DispatchHttpsEndpoint::bind(configuration.runner_root(), correlation.lease_id) {
+            Ok(endpoint) => endpoint,
+            Err(_) => {
+                return TerminalResult::KnownFailure {
+                    error_kind: ExecutionErrorKind::ExecutionFailed,
+                    detail: None,
+                };
+            }
+        };
     let mut runner = match SandboxedCommandRunner::try_new_runner_restricted_with_https_broker(
         process_runner,
         correlation.working_directory.as_str(),
-        &read_only_paths,
+        configuration.read_only_paths(),
         endpoint.socket_path(),
     ) {
         Ok(runner) => runner,
@@ -252,11 +261,11 @@ async fn execute_dispatch(
     };
     let (broker_stop, stop_broker) = tokio::sync::oneshot::channel();
     let broker = tokio::spawn(endpoint.serve(
-        HttpsBroker::production(&allowed_network_hosts),
+        HttpsBroker::production(configuration.allowed_network_hosts()),
         deadline,
         stop_broker,
     ));
-    let result = runner.try_run(arguments).await;
+    let result = runner.try_run(arguments).await.map_err(|_| ());
     let _ = broker_stop.send(());
     if !matches!(broker.await, Ok(Ok(()))) {
         return TerminalResult::KnownFailure {
@@ -273,7 +282,7 @@ async fn execute_dispatch(
             };
         }
     };
-    match serde_json::to_string(&result) {
+    match encode_dispatch_result(&result) {
         Ok(text) if text.len() <= signalbox_runner_wire::SUCCESS_TEXT_BYTES as usize => {
             TerminalResult::Success { text }
         }
@@ -286,6 +295,12 @@ async fn execute_dispatch(
             detail: None,
         },
     }
+}
+
+fn encode_dispatch_result(
+    result: &signalbox_tools_exec::ExecResult,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(result)
 }
 
 async fn shutdown_with_timeout(
@@ -466,6 +481,10 @@ mod tests {
         Advertisement, CanonicalUuid, PositiveU64, ReleaseCorrelation, SandboxProfile,
         advertisement_digest,
     };
+    use signalbox_tools_exec::{
+        CaptureCompleteness, ExecResult, ExecutionConfinement, OutputCapture, OutputEncoding,
+        ProcessOutcome,
+    };
     use tempfile::TempDir;
     use uuid::Uuid;
 
@@ -542,6 +561,23 @@ mod tests {
         }
     }
 
+    fn completed_exec_result(text: String) -> ExecResult {
+        ExecResult {
+            confinement: ExecutionConfinement::FilesystemConfined,
+            outcome: ProcessOutcome::Exited { code: Some(0) },
+            stdout: OutputCapture {
+                text,
+                completeness: CaptureCompleteness::Complete,
+                encoding: OutputEncoding::Utf8,
+            },
+            stderr: OutputCapture {
+                text: String::new(),
+                completeness: CaptureCompleteness::Complete,
+                encoding: OutputEncoding::Utf8,
+            },
+        }
+    }
+
     #[test]
     fn reconnect_backoff_caps_and_resets() {
         let mut backoff = ReconnectBackoff::new();
@@ -566,5 +602,17 @@ mod tests {
             .expect("the accepted private workspace cleanup completes");
 
         assert!(!fixture.placement.exists());
+    }
+
+    #[test]
+    fn dispatch_result_encoding_preserves_json_structure() {
+        let captured = "quoted \"text\" with \\ and {braces}".to_owned();
+        let result = completed_exec_result(captured.clone());
+
+        let encoded = encode_dispatch_result(&result).expect("the result encodes");
+        let decoded: serde_json::Value =
+            serde_json::from_str(&encoded).expect("the encoded result remains valid JSON");
+
+        assert_eq!(decoded["stdout"]["text"], captured);
     }
 }
