@@ -95,7 +95,7 @@ env:
 jobs:
   gate:
     name: Claude smoke eligibility
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     timeout-minutes: 5
     permissions:
       contents: read
@@ -170,7 +170,7 @@ jobs:
     # when a newer push supersedes the *same* ref. A concurrent real exchange
     # costs a small fraction of a cent; required-check integrity is worth more
     # than serializing that spend.
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     timeout-minutes: 20
     env:
       SIGNALBOX_CLAUDE_SMOKE_EXECUTABLE: >-
@@ -275,7 +275,7 @@ jobs:
     name: Claude smoke compatibility
     needs: [gate, smoke]
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     timeout-minutes: 5
     env:
       EVENT_NAME: ${{ github.event_name }}

@@ -2118,7 +2118,7 @@ async fn run_hub(
         }
         None => None,
     };
-    let web_http_runtime = match WebHttpRuntime::bind_with_snapshot_reader_budget(
+    let web_http_listener = match WebHttpRuntime::bind_listener_with_snapshot_reader_budget(
         web_configuration,
         pool.clone(),
         web_blob_runtime,
@@ -2355,7 +2355,6 @@ async fn run_hub(
         }
     }
     tool_executor = tool_executor.with_blob_executor(blob_executor);
-    let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
     let process_runtime = ProcessRuntime::new_with_templates(
         listener,
         scheduler_pool.clone(),
@@ -2374,6 +2373,8 @@ async fn run_hub(
         Some(ref registry) => process_runtime.with_blob_store_registry(Arc::clone(registry)),
         None => process_runtime,
     };
+    let web_http_runtime = web_http_listener.into_runtime(process_runtime.monitor());
+    let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
     let provider = provider.with_text_delta_sink(process_runtime.provider_text_delta_sink());
     let model_repository = PostgresModelCallRepository::new(
         scheduler_pool.clone(),

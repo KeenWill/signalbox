@@ -13,7 +13,9 @@ verified against this PR (`agent/web-blob-delivery`). The fleet-attention
 snapshot and monitor stream are verified against this PR
 (`agent/web-attention-projections`). The bounded session catalog route and its
 loopback authority placement are verified against this PR
-(`agent/web-session-catalog-follow`). The bounded lexical-search route and
+(`agent/web-session-catalog-follow`). The bounded live-session snapshot and
+monitor-backed follow routes are verified against this PR
+(`agent/web-session-catalog-follow-live`). The bounded lexical-search route and
 generated DTOs are verified against this PR (`agent/web-search-usage`). The
 dedicated browser usage/cost routes and generated DTOs are verified against this
 PR (`agent/web-usage-http`). The repository-watch browser projection and
@@ -219,20 +221,21 @@ bearer-token, application-session, TLS, proxy, VPN, or ingress machinery. The
 listener therefore rejects non-loopback binds; any future remote deployment
 requires an explicit authentication and transport-security design first.
 Unauthenticated session reads — the session catalog, session descriptor, session
-timeline, bounded lexical search, bounded usage summary and usage-call detail,
-operator attention snapshot and its follow stream, and the blob descriptor and
-content routes — additionally require a loopback `Host` authority: `localhost`
-or an IPv4 or IPv6 loopback address, with an optional port. Another authority
-receives a structured `403 Forbidden` transport error with code
-`non_loopback_host_rejected` before session data, search results, usage and cost
-results, blob metadata, or blob bytes are read, and before a descriptor read may
-start image derivation work.
+timeline, live snapshot and follow stream, bounded lexical search, bounded usage
+summary and usage-call detail, operator attention snapshot and its follow
+stream, and the blob descriptor and content routes — additionally require a
+loopback `Host` authority: `localhost` or an IPv4 or IPv6 loopback address, with
+an optional port. Another authority receives a structured `403 Forbidden`
+transport error with code `non_loopback_host_rejected` before session data,
+search results, usage and cost results, blob metadata, or blob bytes are read,
+and before a descriptor read may start image derivation work.
 
 `GET /api/bootstrap` describes the production browser contract. It returns the
 exact contract family `signalbox.web-http`, version `2`, the `bounded_json`,
 `same_origin_json_mutations`, `ndjson_streaming`, `import_discovery`,
 `imported_continuations`, and `bounded_session_timeline` capabilities, the
-`bounded_session_timeline_detail` capability, the `immutable_blob_content`,
+`bounded_session_timeline_detail` and `bounded_session_live` capabilities, the
+32-turn live queue-preview ceiling, the `immutable_blob_content`,
 `blob_derivations`, and `image_derivatives` capabilities, the
 `bounded_lexical_search` and `bounded_usage_cost` capabilities, the effective
 65,536-byte JSON-body and NDJSON-item hard ceilings, the 256-item and
@@ -249,6 +252,9 @@ historical-window, and lexical-search route shapes and semantics are owned by
 [Sessions and the transcript](sessions-and-transcript.md#bounded-browser-session-timeline)
 and its
 [lexical-search section](sessions-and-transcript.md#bounded-browser-lexical-search).
+The open-workspace live snapshot, follow route, and resynchronization semantics
+are owned by
+[its live-session section](sessions-and-transcript.md#bounded-browser-live-session-projection).
 The descriptor, content, and download routes beneath `/api/blobs/{digest}` are
 the same-origin surface owned by
 [blob storage](blob-storage.md#browser-delivery-views-and-derivations).
