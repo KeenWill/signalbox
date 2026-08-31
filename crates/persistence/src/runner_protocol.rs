@@ -10,35 +10,39 @@ use std::{
     error::Error,
     fmt,
     num::NonZeroU64,
+    pin::Pin,
     sync::Arc,
 };
 
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_application::{
     AbandonLostRunnerOutcome, AbandonLostRunnerTransaction, ClassifyOperatorFailure,
+    ExecutableToolSnapshotEntry, ExecutableToolSnapshotSource, ExecutableToolSnapshotSourceError,
     InitialRunnerDispatchRequest, InitialRunnerDispatchTransaction, OperatorFailureClass,
     PinnedRunnerDispatchRequest, PinnedRunnerDispatchTransaction, PinnedRunnerLeaseOffer,
     ReplaceLostRunnerBeforePinOutcome, ReplaceLostRunnerBeforePinTransaction,
     RunnerLeaseClaimRequest, RunnerLeaseClaimTransaction, RunnerLeaseResultRequest,
     RunnerLeaseResultTransaction, RunnerReplacementProvisioningOutcome,
-    RunnerReplacementProvisioningStage, RunnerReplacementProvisioningTransaction,
+    RunnerReplacementProvisioningStage, RunnerReplacementProvisioningTransaction, ToolCatalog,
+    ToolDefinition, ToolInputSchema,
 };
 use signalbox_domain::{
     AbandonLostRunner, AbandonLostRunnerRejection, AbandonLostRunnerResult, AbandonedLostRunner,
     AbandonedRunnerPlacement, CanonicalCloneUrlDigest, CredentialDispatchAuthorization,
     CredentialProfileGrant, CredentialProfileGrantReconstitutionInput, CredentialProfileGrantState,
     CredentialProfileName, CredentialProfilePolicy, CredentialToolApproval, DurableCommandId,
-    EndedToolAttempt, LostPinnedRunnerPlacement, NormalizedToolArguments, PinnedRunnerPlacement,
-    ProvisionedWorkspace, ReplaceLostRunner, ReplaceLostRunnerBeforePinRejection,
-    ReplaceLostRunnerBeforePinResult, ReplacedLostRunnerBeforePin, RunnerAdvertisement,
-    RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog, RunnerClaimedAttemptReplacement,
+    EndedToolAttempt, InitialToolApproval, LostPinnedRunnerPlacement, NormalizedToolArguments,
+    PinnedRunnerPlacement, ProvisionedWorkspace, ReplaceLostRunner,
+    ReplaceLostRunnerBeforePinRejection, ReplaceLostRunnerBeforePinResult,
+    ReplacedLostRunnerBeforePin, RunnerAdvertisement, RunnerAuthenticationId,
+    RunnerCapabilityClass, RunnerCatalog, RunnerClaimedAttemptReplacement,
     RunnerCredentialGrantLineage, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId,
     RunnerEnrollmentReconstitutionInput, RunnerEnrollmentRequestId, RunnerEnrollmentState,
-    RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCompletion, RunnerLeaseCorrelation,
-    RunnerLeaseId, RunnerLeaseLoss, RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput,
-    RunnerLeaseRetryPreparation, RunnerLeaseState, RunnerLostBeforePin, RunnerPlacementLossSource,
-    RunnerPlacementReconstitutionHistory, RunnerPlacementRecoveryState,
-    RunnerPrePinReplacementHistory, RunnerRegistrationReconciliation,
+    RunnerExecutableTool, RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCompletion,
+    RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseLoss, RunnerLeaseOfferRequest,
+    RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerLeaseState,
+    RunnerLostBeforePin, RunnerPlacementLossSource, RunnerPlacementReconstitutionHistory,
+    RunnerPlacementRecoveryState, RunnerPrePinReplacementHistory, RunnerRegistrationReconciliation,
     RunnerReplacementProvisioningRejection, RunnerReplacementTarget,
     RunnerReplacementTargetUnavailableReason, RunnerRepositoryEntry, RunnerSandboxProfile,
     RunnerSelector, RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
@@ -931,6 +935,121 @@ pub struct RunnerProtocolStore {
     catalog: Arc<RunnerCatalog>,
 }
 
+/// PostgreSQL-backed session-aware executable-tool snapshot source.
+#[derive(Clone, Debug)]
+pub struct PostgresExecutableToolSnapshotSource {
+    store: RunnerProtocolStore,
+}
+
+impl PostgresExecutableToolSnapshotSource {
+    /// Uses the runner protocol store's exact durable placement and catalog.
+    pub const fn new(store: RunnerProtocolStore) -> Self {
+        Self { store }
+    }
+}
+
+#[derive(Debug)]
+enum PostgresExecutableToolSnapshotFailure {
+    Store(RunnerProtocolStoreError),
+    AmbiguousCapabilitySelection,
+    InvalidRunnerDefinition(ToolName),
+    IncompatibleDaemonDefinition(ToolName),
+}
+
+impl fmt::Display for PostgresExecutableToolSnapshotFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(_) => formatter.write_str("runner snapshot storage failed"),
+            Self::AmbiguousCapabilitySelection => {
+                formatter.write_str("runner snapshot selection is ambiguous")
+            }
+            Self::InvalidRunnerDefinition(tool) => {
+                write!(
+                    formatter,
+                    "runner snapshot definition for {} is invalid",
+                    tool.as_str()
+                )
+            }
+            Self::IncompatibleDaemonDefinition(tool) => {
+                write!(
+                    formatter,
+                    "runner and daemon definitions for {} disagree",
+                    tool.as_str()
+                )
+            }
+        }
+    }
+}
+
+impl Error for PostgresExecutableToolSnapshotFailure {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::AmbiguousCapabilitySelection
+            | Self::InvalidRunnerDefinition(_)
+            | Self::IncompatibleDaemonDefinition(_) => None,
+        }
+    }
+}
+
+impl ClassifyOperatorFailure for PostgresExecutableToolSnapshotFailure {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        match self {
+            Self::Store(error) => error.operator_failure_class(),
+            Self::AmbiguousCapabilitySelection
+            | Self::InvalidRunnerDefinition(_)
+            | Self::IncompatibleDaemonDefinition(_) => OperatorFailureClass::CallerOrHubBug,
+        }
+    }
+
+    fn operator_failure_cause_code(&self) -> &'static str {
+        match self {
+            Self::Store(error) => error.operator_failure_cause_code(),
+            Self::AmbiguousCapabilitySelection => "runner_snapshot_ambiguous_selection",
+            Self::InvalidRunnerDefinition(_) => "runner_snapshot_invalid_definition",
+            Self::IncompatibleDaemonDefinition(_) => "runner_snapshot_catalog_mismatch",
+        }
+    }
+}
+
+impl From<RunnerProtocolStoreError> for PostgresExecutableToolSnapshotFailure {
+    fn from(error: RunnerProtocolStoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
+impl From<sqlx::Error> for PostgresExecutableToolSnapshotFailure {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Store(RunnerProtocolStoreError::Database(error))
+    }
+}
+
+impl ExecutableToolSnapshotSource for PostgresExecutableToolSnapshotSource {
+    fn executable_tools<'a>(
+        &'a self,
+        session: SessionId,
+        daemon_catalog: &'a dyn ToolCatalog,
+        dangerous_tool_auto_approval: signalbox_domain::DangerousToolAutoApproval,
+    ) -> Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        Box<[ExecutableToolSnapshotEntry]>,
+                        ExecutableToolSnapshotSourceError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            self.store
+                .executable_tool_snapshot(session, daemon_catalog, dangerous_tool_auto_approval)
+                .await
+                .map_err(ExecutableToolSnapshotSourceError::new)
+        })
+    }
+}
+
 impl RunnerProtocolStore {
     /// Uses the supplied pool and runner catalog for durable protocol state.
     pub fn new(pool: PgPool, catalog: RunnerCatalog) -> Self {
@@ -938,6 +1057,174 @@ impl RunnerProtocolStore {
             pool,
             catalog: Arc::new(catalog),
         }
+    }
+
+    async fn executable_tool_snapshot(
+        &self,
+        session: SessionId,
+        daemon_catalog: &dyn ToolCatalog,
+        dangerous_tool_auto_approval: signalbox_domain::DangerousToolAutoApproval,
+    ) -> Result<Box<[ExecutableToolSnapshotEntry]>, PostgresExecutableToolSnapshotFailure> {
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let row = sqlx::query(
+            "SELECT record.*
+               FROM runner_current_session_placement AS current_placement
+               JOIN runner_session_placement_record AS record
+                 ON record.session_id = current_placement.session_id
+                AND record.event_ordinal = current_placement.event_ordinal
+              WHERE current_placement.session_id = $1",
+        )
+        .bind(session.into_uuid())
+        .fetch_optional(transaction.as_mut())
+        .await?;
+        let runner_tools = match row {
+            Some(row) => {
+                let stored = self
+                    .decode_stored_placement_in(&mut transaction, &row)
+                    .await?;
+                match stored.placement().state() {
+                    SessionRunnerPlacementState::RunnerLostBeforePin(_)
+                    | SessionRunnerPlacementState::RunnerLost(_) => {
+                        return Err(RunnerProtocolStoreError::Domain(
+                            RunnerDomainError::InvalidState,
+                        )
+                        .into());
+                    }
+                    SessionRunnerPlacementState::RunnerAbandoned(_) => Box::new([]),
+                    SessionRunnerPlacementState::Unpinned
+                    | SessionRunnerPlacementState::Pinned(_) => {
+                        let enrollment = self
+                            .executable_tool_enrollment_in(&mut transaction, &stored)
+                            .await?;
+                        match enrollment {
+                            Some(enrollment) => {
+                                let registration = self
+                                    .load_live_current_registration_in(&mut transaction, enrollment)
+                                    .await?;
+                                match registration {
+                                    Some(registration) => stored
+                                        .placement()
+                                        .runner_executable_tools(registration.registration())
+                                        .map_err(RunnerProtocolStoreError::Domain)?,
+                                    None => Box::new([]),
+                                }
+                            }
+                            None => Box::new([]),
+                        }
+                    }
+                }
+            }
+            None => Box::new([]),
+        };
+        transaction.commit().await?;
+        merge_executable_tool_snapshot(
+            self.catalog.as_ref(),
+            runner_tools,
+            daemon_catalog,
+            dangerous_tool_auto_approval,
+        )
+    }
+
+    async fn executable_tool_enrollment_in(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        stored: &StoredSessionRunnerPlacement,
+    ) -> Result<Option<RunnerEnrollmentId>, PostgresExecutableToolSnapshotFailure> {
+        if let SessionRunnerPlacementState::Pinned(_) = stored.placement().state() {
+            return Ok(stored
+                .registration()
+                .map(|registration| registration.registration().enrollment()));
+        }
+        let rows = match &stored.placement().request().selector {
+            RunnerSelector::Identity(runner) => {
+                sqlx::query(
+                    "SELECT enrollment.enrollment_id
+                       FROM runner_enrollment AS enrollment
+                       JOIN runner_current_registration AS current_registration
+                         ON current_registration.enrollment_id = enrollment.enrollment_id
+                       JOIN LATERAL (
+                            SELECT state_kind
+                              FROM runner_connection_event
+                             WHERE enrollment_id = enrollment.enrollment_id
+                             ORDER BY connection_epoch DESC, event_ordinal DESC
+                             LIMIT 1
+                       ) AS connection ON connection.state_kind = 'connected'
+                      WHERE enrollment.state_kind = 'active'
+                        AND enrollment.runner_id = $1
+                      ORDER BY enrollment.enrollment_id
+                      LIMIT 2",
+                )
+                .bind(runner.into_uuid())
+                .fetch_all(&mut **transaction)
+                .await?
+            }
+            RunnerSelector::CapabilityClass(class) => {
+                sqlx::query(
+                    "SELECT enrollment.enrollment_id
+                       FROM runner_enrollment AS enrollment
+                       JOIN runner_enrollment_allowed_class AS allowed_class
+                         ON allowed_class.enrollment_id = enrollment.enrollment_id
+                       JOIN runner_current_registration AS current_registration
+                         ON current_registration.enrollment_id = enrollment.enrollment_id
+                       JOIN LATERAL (
+                            SELECT state_kind
+                              FROM runner_connection_event
+                             WHERE enrollment_id = enrollment.enrollment_id
+                             ORDER BY connection_epoch DESC, event_ordinal DESC
+                             LIMIT 1
+                       ) AS connection ON connection.state_kind = 'connected'
+                      WHERE enrollment.state_kind = 'active'
+                        AND allowed_class.capability_class = $1
+                      ORDER BY enrollment.enrollment_id
+                      LIMIT 2",
+                )
+                .bind(class.as_str())
+                .fetch_all(&mut **transaction)
+                .await?
+            }
+        };
+        match rows.as_slice() {
+            [] => Ok(None),
+            [row] => Ok(Some(runner_enrollment_id(
+                row.decode_column("enrollment_id")?,
+            ))),
+            [_, _, ..] => Err(PostgresExecutableToolSnapshotFailure::AmbiguousCapabilitySelection),
+        }
+    }
+
+    async fn load_live_current_registration_in(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        enrollment_id: RunnerEnrollmentId,
+    ) -> Result<Option<StoredValidatedRunnerRegistration>, RunnerProtocolStoreError> {
+        let connection = load_connection_head_in(transaction.as_mut(), enrollment_id).await?;
+        if connection.map(RunnerConnectionSnapshot::state) != Some(RunnerConnectionState::Connected)
+        {
+            return Ok(None);
+        }
+        let enrollment = load_enrollment_in(transaction.as_mut(), enrollment_id)
+            .await?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalEnrollment)?;
+        if enrollment.state() != RunnerEnrollmentState::Active {
+            return Ok(None);
+        }
+        let revision: Option<Decimal> = sqlx::query_scalar(
+            "SELECT registration_revision
+               FROM runner_current_registration
+              WHERE enrollment_id = $1",
+        )
+        .bind(enrollment_id.into_uuid())
+        .fetch_optional(&mut **transaction)
+        .await?;
+        let revision = revision.ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+        load_registration_in(
+            transaction.as_mut(),
+            enrollment_id,
+            decode_registration_revision(revision)?,
+            Some(&enrollment),
+            &self.catalog,
+        )
+        .await
     }
 
     /// Allocates and durably records the next connection epoch for an enrollment.
@@ -5835,6 +6122,113 @@ impl RunnerProtocolStore {
             .into_reconstituted_loss(no_execution, retry_preparation)
             .map(Some)
             .map_err(RunnerProtocolStoreError::Domain)
+    }
+}
+
+fn merge_executable_tool_snapshot(
+    runner_catalog: &RunnerCatalog,
+    runner_tools: Box<[RunnerExecutableTool]>,
+    daemon_catalog: &dyn ToolCatalog,
+    dangerous_tool_auto_approval: signalbox_domain::DangerousToolAutoApproval,
+) -> Result<Box<[ExecutableToolSnapshotEntry]>, PostgresExecutableToolSnapshotFailure> {
+    let daemon_tools: BTreeMap<_, _> = daemon_catalog
+        .definitions()
+        .into_vec()
+        .into_iter()
+        .map(|definition| (definition.name().clone(), definition))
+        .collect();
+    let mut snapshot = BTreeMap::new();
+    for (name, definition) in &daemon_tools {
+        match runner_catalog.tool(name) {
+            Some(declaration) => {
+                validate_shared_tool_definition(definition, declaration)?;
+                if declaration.loci().allows_daemon() {
+                    snapshot.insert(
+                        name.clone(),
+                        ExecutableToolSnapshotEntry::daemon(
+                            definition.clone(),
+                            dangerous_tool_auto_approval,
+                        ),
+                    );
+                }
+            }
+            None => {
+                snapshot.insert(
+                    name.clone(),
+                    ExecutableToolSnapshotEntry::daemon(
+                        definition.clone(),
+                        dangerous_tool_auto_approval,
+                    ),
+                );
+            }
+        }
+    }
+    for runner_tool in runner_tools {
+        let declaration = runner_tool.declaration();
+        let daemon_available = daemon_tools.contains_key(declaration.name());
+        if declaration.loci().allows_daemon() && daemon_available {
+            continue;
+        }
+        let definition = application_tool_definition(declaration)?;
+        let approval = match runner_tool.approval() {
+            CredentialToolApproval::Automatic => InitialToolApproval::PolicyAuto,
+            CredentialToolApproval::SessionPolicy => InitialToolApproval::Confirm,
+        };
+        let entry =
+            ExecutableToolSnapshotEntry::runner(definition, runner_tool.locus().clone(), approval)
+                .ok_or_else(|| {
+                    PostgresExecutableToolSnapshotFailure::InvalidRunnerDefinition(
+                        declaration.name().clone(),
+                    )
+                })?;
+        snapshot.insert(declaration.name().clone(), entry);
+    }
+    Ok(snapshot
+        .into_values()
+        .collect::<Vec<_>>()
+        .into_boxed_slice())
+}
+
+fn application_tool_definition(
+    declaration: &RunnerToolDeclaration,
+) -> Result<ToolDefinition, PostgresExecutableToolSnapshotFailure> {
+    let schema = ToolInputSchema::try_new(declaration.model().input_schema().as_str().to_owned())
+        .map_err(|_| {
+        PostgresExecutableToolSnapshotFailure::InvalidRunnerDefinition(declaration.name().clone())
+    })?;
+    let effect = match declaration.effect() {
+        RunnerToolEffectClass::Pure => ToolEffectClass::EffectFree,
+        RunnerToolEffectClass::Idempotent | RunnerToolEffectClass::SideEffecting => {
+            ToolEffectClass::ExternalEffect
+        }
+    };
+    Ok(ToolDefinition::new(
+        declaration.name().clone(),
+        declaration.model().description().to_owned(),
+        schema,
+        declaration.permission(),
+        effect,
+    ))
+}
+
+fn validate_shared_tool_definition(
+    daemon: &ToolDefinition,
+    runner: &RunnerToolDeclaration,
+) -> Result<(), PostgresExecutableToolSnapshotFailure> {
+    let expected = application_tool_definition(runner)?;
+    if daemon.name() == expected.name()
+        && daemon.description() == expected.description()
+        && daemon.input_schema() == expected.input_schema()
+        && daemon.permission_default() == expected.permission_default()
+        && daemon.effect_class() == expected.effect_class()
+    {
+        Ok(())
+    } else {
+        Err(
+            PostgresExecutableToolSnapshotFailure::IncompatibleDaemonDefinition(
+                runner.name().clone(),
+            ),
+        )
     }
 }
 

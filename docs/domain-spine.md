@@ -9011,6 +9011,8 @@ impl RunnerCatalog {
         workspaces: impl IntoIterator<Item = WorkspaceCapability>,
         sandboxes: impl IntoIterator<Item = RunnerSandboxProfile>,
     ) -> Result<Self, RunnerDomainError>;
+    pub fn tool(&self, tool: &ToolName) -> Option<&RunnerToolDeclaration>;
+    pub fn tools(&self) -> impl Iterator<Item = &RunnerToolDeclaration>;
 }
 pub struct RunnerAdvertisement { /* private */ }
 impl RunnerAdvertisement {
@@ -9494,6 +9496,10 @@ pub enum SessionRunnerPlacementState {
     RunnerLost(LostPinnedRunnerPlacement),
     RunnerAbandoned(AbandonedRunnerPlacement),
 }
+pub struct RunnerExecutableTool { /* private */ }
+impl RunnerExecutableTool {
+    // accessors: declaration(), locus(), approval()
+}
 pub struct SessionRunnerPlacement { /* private */ }
 pub enum RunnerPlacementReconstitutionHistory {
     Initial,
@@ -9514,6 +9520,10 @@ impl SessionRunnerPlacement {
         session: SessionId,
         request: SessionRunnerPlacementRequest,
     ) -> Self;
+    pub fn runner_executable_tools(
+        &self,
+        registration: &ValidatedRunnerRegistration,
+    ) -> Result<Box<[RunnerExecutableTool]>, RunnerDomainError>;
     pub fn pin_and_offer_lease(
         self,
         enrollment: &RunnerEnrollment,
@@ -11129,9 +11139,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: goal_command                               | 5                     |
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
-| domain: runner                                     | 93                    |
+| domain: runner                                     | 94                    |
 | domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **797 (+12 free fn)** |
+| **signalbox-domain total**                         | **798 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |

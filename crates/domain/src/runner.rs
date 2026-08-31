@@ -1177,6 +1177,16 @@ impl RunnerCatalog {
             sandboxes: checked_sandboxes,
         })
     }
+
+    /// Returns the daemon-authoritative declaration for one tool, when present.
+    pub fn tool(&self, tool: &ToolName) -> Option<&RunnerToolDeclaration> {
+        self.tools.get(tool)
+    }
+
+    /// Iterates daemon-authoritative declarations in canonical tool-name order.
+    pub fn tools(&self) -> impl Iterator<Item = &RunnerToolDeclaration> {
+        self.tools.values()
+    }
 }
 
 /// Availability-only runner advertisement.
@@ -3203,6 +3213,31 @@ pub struct SessionRunnerPlacement {
     state: SessionRunnerPlacementState,
 }
 
+/// One runner-executable declaration frozen for model preparation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerExecutableTool {
+    declaration: RunnerToolDeclaration,
+    locus: SelectedToolExecutionLocus,
+    approval: CredentialToolApproval,
+}
+
+impl RunnerExecutableTool {
+    /// Returns the daemon-authoritative runner declaration.
+    pub const fn declaration(&self) -> &RunnerToolDeclaration {
+        &self.declaration
+    }
+
+    /// Returns the exact locus frozen for a resulting tool request.
+    pub const fn locus(&self) -> &SelectedToolExecutionLocus {
+        &self.locus
+    }
+
+    /// Returns the placement-derived approval policy for this tool.
+    pub const fn approval(&self) -> CredentialToolApproval {
+        self.approval
+    }
+}
+
 impl SessionRunnerPlacement {
     /// Creates an unpinned placement for the session request.
     pub const fn new(session: SessionId, request: SessionRunnerPlacementRequest) -> Self {
@@ -3232,6 +3267,74 @@ impl SessionRunnerPlacement {
     /// Returns the complete placement request.
     pub const fn request(&self) -> &SessionRunnerPlacementRequest {
         &self.request
+    }
+
+    /// Derives the runner-executable tool snapshot from current availability.
+    ///
+    /// An unavailable registration contributes no runner tools. Lost placement
+    /// states fail closed because their active turn must first cross the
+    /// explicit recovery boundary; abandonment intentionally exposes none.
+    pub fn runner_executable_tools(
+        &self,
+        registration: &ValidatedRunnerRegistration,
+    ) -> Result<Box<[RunnerExecutableTool]>, RunnerDomainError> {
+        let (pinned_tools, locus) = match &self.state {
+            SessionRunnerPlacementState::Unpinned => {
+                if validate_placement_request(&self.request, registration).is_err() {
+                    return Ok(Box::new([]));
+                }
+                let locus = match &self.request.selector {
+                    RunnerSelector::Identity(_) => SelectedToolExecutionLocus::ExactRunner {
+                        runner: registration.runner,
+                        registration_revision: registration.revision,
+                    },
+                    RunnerSelector::CapabilityClass(class) => {
+                        SelectedToolExecutionLocus::RunnerCapabilityClass {
+                            class: class.clone(),
+                        }
+                    }
+                };
+                (None, locus)
+            }
+            SessionRunnerPlacementState::Pinned(pinned) => {
+                if !registration.is_current()
+                    || !registration_preserves_snapshot(&self.request, pinned, registration)
+                {
+                    return Ok(Box::new([]));
+                }
+                (
+                    Some(&pinned.tools),
+                    SelectedToolExecutionLocus::ExactRunner {
+                        runner: registration.runner,
+                        registration_revision: registration.revision,
+                    },
+                )
+            }
+            SessionRunnerPlacementState::RunnerLostBeforePin(_)
+            | SessionRunnerPlacementState::RunnerLost(_) => {
+                return Err(RunnerDomainError::InvalidState);
+            }
+            SessionRunnerPlacementState::RunnerAbandoned(_) => return Ok(Box::new([])),
+        };
+        Ok(registration
+            .tools
+            .values()
+            .filter(|declaration| declaration.loci.runner_selector().is_some())
+            .filter(|declaration| {
+                pinned_tools.is_none_or(|tools| tools.contains(declaration.name()))
+            })
+            .map(|declaration| RunnerExecutableTool {
+                declaration: declaration.clone(),
+                locus: locus.clone(),
+                approval: resolve_runner_approval(
+                    declaration.effect,
+                    self.request.sandbox,
+                    &self.request.permission_overrides,
+                    declaration.name(),
+                ),
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice())
     }
 
     /// Pins the selected runner and emits its first fenced lease offer.
@@ -6358,6 +6461,69 @@ mod tests {
 
         assert_eq!(declaration.permission(), ToolPermissionDefault::Confirm);
         assert_eq!(declaration.effect(), RunnerToolEffectClass::SideEffecting);
+    }
+
+    /// S31 / INV-043: an unpinned capability placement freezes the class while
+    /// deriving approval only from its sandbox and exact overrides.
+    #[test]
+    fn s31_inv043_unpinned_runner_snapshot_freezes_class_and_pair_policy() {
+        let registration = registration();
+        let placement =
+            SessionRunnerPlacement::new(session_id(SESSION), profileless_placement_request());
+
+        let tools = placement
+            .runner_executable_tools(&registration)
+            .expect("current matching availability produces a runner snapshot");
+
+        assert_eq!(tools.len(), 3);
+        assert_eq!(tools[0].declaration().name(), &tool("deploy"));
+        assert_eq!(
+            tools[0].locus(),
+            &SelectedToolExecutionLocus::RunnerCapabilityClass { class: class() }
+        );
+        assert_eq!(tools[0].approval(), CredentialToolApproval::SessionPolicy);
+        assert_eq!(tools[1].declaration().name(), &tool("inspect"));
+        assert_eq!(tools[1].approval(), CredentialToolApproval::Automatic);
+        assert_eq!(tools[2].declaration().name(), &tool("sync"));
+        assert_eq!(tools[2].approval(), CredentialToolApproval::SessionPolicy);
+    }
+
+    /// S31 / INV-043: pinning replaces a class locus with the exact current
+    /// runner registration while retaining only the frozen pin inventory.
+    #[test]
+    fn s31_inv043_pinned_runner_snapshot_freezes_current_exact_registration() {
+        let (registration, pin) = pinned("readonly");
+
+        let tools = pin
+            .placement
+            .runner_executable_tools(&registration)
+            .expect("the current pin registration produces its frozen snapshot");
+
+        assert_eq!(tools.len(), 3);
+        assert_eq!(tools[1].declaration().name(), &tool("inspect"));
+        assert_eq!(
+            tools[1].locus(),
+            &SelectedToolExecutionLocus::ExactRunner {
+                runner: registration.runner(),
+                registration_revision: registration.revision(),
+            }
+        );
+    }
+
+    /// S32 / INV-044: lost authority cannot prepare another runner-visible
+    /// model snapshot before the explicit recovery transition completes.
+    #[test]
+    fn s32_inv044_lost_runner_snapshot_fails_closed() {
+        let (registration, pin) = pinned("readonly");
+        let lost = pin
+            .placement
+            .mark_runner_lost()
+            .expect("the fixture placement is pinned");
+
+        assert_eq!(
+            lost.runner_executable_tools(&registration),
+            Err(RunnerDomainError::InvalidState)
+        );
     }
 
     #[test]
