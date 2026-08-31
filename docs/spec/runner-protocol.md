@@ -78,17 +78,19 @@ sandbox composition are re-verified through this PR
 emission, and post-acknowledgement lease journaling for that generic slice are
 re-verified through this PR (`agent/runner-live-lease-admission`). The
 proof-only runner catalog configuration is re-verified through this PR
-(`agent/runner-execution-proof-catalog`). The placement loss-source, pre-pin
-replacement and abandonment state shapes, and append-only reconstitution-history
-contract are re-verified through this PR (`agent/runner-placement-loss-domain`).
-It owns logical runner enrollment, daemon-authoritative catalog validation,
-runner leases, the independent session-composition axes, session placement and
-affinity, credential-profile grants, and workspace requirements. The tool
-registry's common declarations remain owned by [tool loop](tool-loop.md);
-session transcript and frontier mechanics remain owned by
-[sessions and transcript](sessions-and-transcript.md); physical tool attempts
-remain owned by [tool loop](tool-loop.md). Invariant tags cite
-[the invariant test index](../invariants.md).
+(`agent/runner-execution-proof-catalog`). The profileless lease admission
+guard's exact `WorkspaceRestricted` policy-auto handling is re-verified through
+this PR (`agent/runner-profileless-lease-approval`). The placement loss-source,
+pre-pin replacement and abandonment state shapes, and append-only
+reconstitution-history contract are re-verified through this PR
+(`agent/runner-placement-loss-domain`). It owns logical runner enrollment,
+daemon-authoritative catalog validation, runner leases, the independent
+session-composition axes, session placement and affinity, credential-profile
+grants, and workspace requirements. The tool registry's common declarations
+remain owned by [tool loop](tool-loop.md); session transcript and frontier
+mechanics remain owned by [sessions and transcript](sessions-and-transcript.md);
+physical tool attempts remain owned by [tool loop](tool-loop.md). Invariant tags
+cite [the invariant test index](../invariants.md).
 
 The typed `ReplaceLostRunner`, `RunnerReplacementTarget`, and
 `AbandonLostRunner` domain command payloads are verified against this PR
