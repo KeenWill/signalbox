@@ -84,8 +84,11 @@ retirement of an exact pending release is verified against this PR
 routing of one release-scoped `workspace_cleanup_failed` frame through durable
 admission, followed by exact `operation_failure_recorded` projection, is
 verified against this PR (`agent/daemon-runner-cleanup-failure-routing`).
-Established-connection routing of those inbound claim and result frames through
-the durable transactions before acknowledgement is re-verified through this PR
+Authenticated resume classification and atomic runner-journal retirement of an
+exact retained workspace-cleanup failure pair are verified against this PR
+(`agent/runner-workspace-cleanup-failure-resume`). Established-connection
+routing of those inbound claim and result frames through the durable
+transactions before acknowledgement is re-verified through this PR
 (`agent/runner-runtime-lease-operations`). Durable authorization followed by
 best-effort `lease_offer` projection and handoff is re-verified through this PR
 (`agent/runner-lease-offer-dispatcher`). The corrected reconstitution mismatch
@@ -871,8 +874,7 @@ initiates one on an ordinary enrolled connection; the only initiating send is
 the authenticated resume redelivery above.
 
 **Committed unimplemented functionality.** No present repository-backed
-filesystem producer creates ready evidence or begins or advances a release, and
-resume of a retained workspace-cleanup failure remains unsupported. This
+filesystem producer creates ready evidence or begins or advances a release. This
 boundary supplies neither repository provisioning, repository cleanup, nor a
 workstation tool inventory.
 
@@ -1748,7 +1750,8 @@ before both the availability probe and dispatch, recreates standard usr-merge
 aliases only when their targets are inside the configured mounts, and derives
 `PATH` only from configured mounts. The proof-only generic exec-family runner
 composes that constructor and advertises `WorkspaceRestricted`. Resource limits
-remain separate work, with first-release resource limits still owner-gated in
+remain separate work, with first-release resource limits still awaiting a user
+decision in
 [open questions](../open-questions.md#identity-credentials-and-resource-governance).
 
 Confinement is defined over that writable root, which need not be a repository.
