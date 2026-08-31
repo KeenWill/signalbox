@@ -2571,8 +2571,11 @@ fn workspace_ready_receipt(ready: &WorkspaceReady) -> Option<RunnerWorkspaceRead
             revision: WorkspaceRevision::try_new(revision.clone()).ok()?,
         },
         WireWorkspaceRecovery::Branch { name, revision } => WorkspaceRecovery::Branch {
-            name: WorkspaceBranchName::try_new(name.clone()).ok()?,
+            name: WorkspaceBranchName::try_new(name.as_str().to_owned()).ok()?,
             revision: WorkspaceRevision::try_new(revision.clone()).ok()?,
+        },
+        WireWorkspaceRecovery::UnbornBranch { name } => WorkspaceRecovery::UnbornBranch {
+            name: WorkspaceBranchName::try_new(name.as_str().to_owned()).ok()?,
         },
     };
     Some(RunnerWorkspaceReadyReceipt::new(
@@ -3880,6 +3883,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn workspace_ready_receipt_preserves_an_unborn_branch() {
+        let mut ready = repository_workspace_ready();
+        ready.ready.manifest.recovery = Some(WireWorkspaceRecovery::UnbornBranch {
+            name: signalbox_runner_wire::BranchName::try_new(workspace_branch_name())
+                .expect("the fixture wire branch name is checked"),
+        });
+        ready.ready.manifest_digest =
+            signalbox_runner_wire::workspace_manifest_digest(&ready.ready.manifest)
+                .expect("the unborn ready manifest has a canonical digest");
+        let receipt = workspace_ready_receipt(&ready)
+            .expect("the unborn ready manifest projects into a domain receipt");
+        let expected = WorkspaceRecovery::UnbornBranch {
+            name: WorkspaceBranchName::try_new(workspace_branch_name())
+                .expect("the fixture branch name is checked"),
+        };
+
+        assert_eq!(receipt.recovery(), &expected);
+    }
+
     #[tokio::test]
     async fn s32_inv044_unavailable_workspace_ready_transaction_emits_no_acknowledgement() {
         let rejection = admit_workspace_ready(
@@ -4174,6 +4197,10 @@ mod tests {
 
     fn workspace_revision_text() -> String {
         "a".repeat(40)
+    }
+
+    fn workspace_branch_name() -> String {
+        "main".to_owned()
     }
 
     fn clone_url_digest_text() -> String {
