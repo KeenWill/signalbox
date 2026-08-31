@@ -52,11 +52,12 @@ use sqlx::{
 
 use crate::lock_inventory::{
     ABANDON_LOST_RUNNER_SCHEDULER, PROMOTE_PENDING_RUNNER_CONNECTION,
-    REPLACE_LOST_RUNNER_ENROLLMENT_BY_RUNNER, REPLACE_LOST_RUNNER_SCHEDULER,
-    RUNNER_CONNECTION_LOSS_HEAD, RUNNER_CONNECTION_LOSS_PROPAGATION, RUNNER_ENROLLMENT,
-    RUNNER_GRANT, RUNNER_LEASE_ENROLLMENT_AUTHORITY, RUNNER_LEASE_GRANT_AUTHORITY,
-    RUNNER_LEASE_HEAD, RUNNER_LEASE_PLACEMENT, RUNNER_PLACEMENT_CONNECTION_AUTHORITY,
-    RUNNER_PLACEMENT_CURRENT_LOSS, RUNNER_PLACEMENT_ENROLLMENT_BY_RUNNER, RUNNER_PLACEMENT_HEAD,
+    PROMOTE_PENDING_RUNNER_ENROLLMENTS, REPLACE_LOST_RUNNER_ENROLLMENT_BY_RUNNER,
+    REPLACE_LOST_RUNNER_SCHEDULER, RUNNER_CONNECTION_LOSS_HEAD, RUNNER_CONNECTION_LOSS_PROPAGATION,
+    RUNNER_ENROLLMENT, RUNNER_GRANT, RUNNER_LEASE_ENROLLMENT_AUTHORITY,
+    RUNNER_LEASE_GRANT_AUTHORITY, RUNNER_LEASE_HEAD, RUNNER_LEASE_PLACEMENT,
+    RUNNER_PLACEMENT_CONNECTION_AUTHORITY, RUNNER_PLACEMENT_CURRENT_LOSS,
+    RUNNER_PLACEMENT_ENROLLMENT_BY_RUNNER, RUNNER_PLACEMENT_HEAD,
     RUNNER_PRISTINE_ACTIVE_ENROLLMENTS, RUNNER_PRISTINE_PENDING_ENROLLMENTS,
     RUNNER_REGISTRATION_HEAD, RUNNER_REGISTRATION_RECONCILIATION,
     RUNNER_REGISTRATION_RECONCILIATION_STATE, RUNNER_RETRY_REPLACEMENT_SCHEDULER,
@@ -2405,11 +2406,14 @@ impl RunnerProtocolStore {
         &self,
         command: ReplaceLostRunner,
     ) -> Result<ReplaceLostRunnerBeforePinOutcome, RunnerProtocolStoreError> {
-        let RunnerReplacementTarget::Runner(target_runner) = command.replacement() else {
+        if matches!(
+            command.replacement(),
+            RunnerReplacementTarget::SameRunnerReenrollment(_)
+        ) {
             return Err(RunnerProtocolStoreError::Domain(
                 RunnerDomainError::InvalidState,
             ));
-        };
+        }
         if command.command().as_uuid().is_nil() || command.command().as_uuid().is_max() {
             return Err(RunnerProtocolStoreError::Domain(
                 RunnerDomainError::InvalidState,
@@ -2476,9 +2480,21 @@ impl RunnerProtocolStore {
             if scheduler_session != Some(command.session().into_uuid()) {
                 return Err(RunnerProtocolCorruption::CrossWiredReference.into());
             }
-            let target_authority = self
-                .lock_direct_replacement_target(&mut transaction, target_runner)
-                .await?;
+            let target_authority = match command.replacement() {
+                RunnerReplacementTarget::Runner(runner) => {
+                    self.lock_direct_replacement_target(&mut transaction, runner)
+                        .await?
+                }
+                RunnerReplacementTarget::PendingEnrollment(request) => {
+                    self.lock_pending_replacement_target(&mut transaction, request)
+                        .await?
+                }
+                RunnerReplacementTarget::SameRunnerReenrollment(_) => {
+                    return Err(RunnerProtocolStoreError::Domain(
+                        RunnerDomainError::InvalidState,
+                    ));
+                }
+            };
             let prior = sqlx::query(RUNNER_PLACEMENT_HEAD)
                 .bind(command.session().into_uuid())
                 .fetch_optional(&mut *transaction)
@@ -2551,20 +2567,37 @@ impl RunnerProtocolStore {
                                         .ok_or(RunnerProtocolCorruption::CrossWiredReference)?,
                                 },
                             ),
-                            Some(lost_runner) if lost_runner == target_runner => {
+                            Some(lost_runner)
+                                if target_authority.predecessor_runner().is_some()
+                                    && target_authority.predecessor_runner()
+                                        != Some(lost_runner) =>
+                            {
                                 evidence.prior_runner = Some(lost_runner);
-                                evidence.new_runner = Some(target_runner);
+                                evidence.new_runner = target_authority.runner();
+                                ReplaceLostRunnerBeforePinResult::Rejected(
+                                    ReplaceLostRunnerBeforePinRejection::ReplacementTargetUnavailable {
+                                        session: command.session(),
+                                        target: command.replacement(),
+                                        reason: RunnerReplacementTargetUnavailableReason::PendingRequestMismatch,
+                                    },
+                                )
+                            }
+                            Some(lost_runner) if target_authority.runner() == Some(lost_runner) => {
+                                evidence.prior_runner = Some(lost_runner);
+                                evidence.new_runner = Some(lost_runner);
                                 ReplaceLostRunnerBeforePinResult::Rejected(
                                     ReplaceLostRunnerBeforePinRejection::ReplacementSameRunner {
                                         session: command.session(),
-                                        runner: target_runner,
+                                        runner: lost_runner,
                                     },
                                 )
                             }
                             Some(lost_runner) => match target_authority {
-                                DirectReplacementTargetAuthority::Unavailable(reason) => {
+                                ReplacementTargetAuthority::Unavailable {
+                                    reason, runner, ..
+                                } => {
                                     evidence.prior_runner = Some(lost_runner);
-                                    evidence.new_runner = Some(target_runner);
+                                    evidence.new_runner = runner;
                                     ReplaceLostRunnerBeforePinResult::Rejected(
                                         ReplaceLostRunnerBeforePinRejection::ReplacementTargetUnavailable {
                                             session: command.session(),
@@ -2573,7 +2606,8 @@ impl RunnerProtocolStore {
                                         },
                                     )
                                 }
-                                DirectReplacementTargetAuthority::Current(target_authority) => {
+                                ReplacementTargetAuthority::Current(target_authority) => {
+                                    let target_runner = target_authority.runner;
                                     let registration = &target_authority.registration;
                                     let mut replacement_request = placement.request().clone();
                                     replacement_request.selector =
@@ -2598,6 +2632,15 @@ impl RunnerProtocolStore {
                                             return Err(RunnerProtocolStoreError::Domain(error));
                                         }
                                         Ok(replacement) => {
+                                            if let Some(activation) =
+                                                target_authority.pending_activation.as_ref()
+                                            {
+                                                activate_pending_replacement_target(
+                                                    transaction.as_mut(),
+                                                    activation,
+                                                )
+                                                .await?;
+                                            }
                                             let next_event_ordinal =
                                                 current_event_ordinal.checked_add(1).ok_or(
                                                     RunnerProtocolCorruption::GenerationExhausted,
@@ -2724,7 +2767,7 @@ impl RunnerProtocolStore {
         &self,
         transaction: &mut Transaction<'_, Postgres>,
         runner: RunnerId,
-    ) -> Result<DirectReplacementTargetAuthority, RunnerProtocolStoreError> {
+    ) -> Result<ReplacementTargetAuthority, RunnerProtocolStoreError> {
         let rows = sqlx::query(REPLACE_LOST_RUNNER_ENROLLMENT_BY_RUNNER)
             .bind(runner.into_uuid())
             .fetch_all(&mut **transaction)
@@ -2743,9 +2786,11 @@ impl RunnerProtocolStore {
             .filter_map(|(enrollment, state)| (state == "active").then_some(enrollment))
             .collect();
         let [enrollment_uuid] = active.as_slice() else {
-            return Ok(DirectReplacementTargetAuthority::Unavailable(
-                RunnerReplacementTargetUnavailableReason::NotCurrent,
-            ));
+            return Ok(ReplacementTargetAuthority::Unavailable {
+                reason: RunnerReplacementTargetUnavailableReason::NotCurrent,
+                runner: Some(runner),
+                predecessor_runner: None,
+            });
         };
         let enrollment = RunnerEnrollmentId::from_uuid(*enrollment_uuid);
         let connection = sqlx::query(PROMOTE_PENDING_RUNNER_CONNECTION)
@@ -2768,14 +2813,18 @@ impl RunnerProtocolStore {
             .transpose()?;
         let Some((connection_epoch, connection_event_ordinal, connection_state)) = connection
         else {
-            return Ok(DirectReplacementTargetAuthority::Unavailable(
-                RunnerReplacementTargetUnavailableReason::NotConnected,
-            ));
+            return Ok(ReplacementTargetAuthority::Unavailable {
+                reason: RunnerReplacementTargetUnavailableReason::NotConnected,
+                runner: Some(runner),
+                predecessor_runner: None,
+            });
         };
         if connection_state != RunnerConnectionState::Connected {
-            return Ok(DirectReplacementTargetAuthority::Unavailable(
-                RunnerReplacementTargetUnavailableReason::NotConnected,
-            ));
+            return Ok(ReplacementTargetAuthority::Unavailable {
+                reason: RunnerReplacementTargetUnavailableReason::NotConnected,
+                runner: Some(runner),
+                predecessor_runner: None,
+            });
         }
         let revision: Option<Decimal> = sqlx::query_scalar(RUNNER_REGISTRATION_HEAD)
             .bind(enrollment.into_uuid())
@@ -2797,13 +2846,159 @@ impl RunnerProtocolStore {
         )
         .await?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
-        Ok(DirectReplacementTargetAuthority::Current(Box::new(
-            DirectReplacementTargetEvidence {
+        Ok(ReplacementTargetAuthority::Current(Box::new(
+            ReplacementTargetEvidence {
+                runner,
                 enrollment,
                 registration_revision: revision,
                 connection_epoch,
                 connection_event_ordinal,
                 registration,
+                pending_activation: None,
+            },
+        )))
+    }
+
+    async fn lock_pending_replacement_target(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        request: RunnerEnrollmentRequestId,
+    ) -> Result<ReplacementTargetAuthority, RunnerProtocolStoreError> {
+        // The temporary deployment singleton makes pending selection and
+        // activation one serial decision without encoding singleton identity in
+        // the reusable domain or wire contracts.
+        sqlx::query("LOCK TABLE runner_enrollment IN SHARE ROW EXCLUSIVE MODE")
+            .execute(&mut **transaction)
+            .await?;
+        let relation = sqlx::query(
+            "SELECT pending.enrollment_id, pending.predecessor_enrollment_id,
+                    pending.predecessor_loss_epoch
+               FROM runner_pending_enrollment AS pending
+              WHERE pending.request_id = $1",
+        )
+        .bind(request.into_uuid())
+        .fetch_optional(&mut **transaction)
+        .await?;
+        let Some(relation) = relation else {
+            return Ok(ReplacementTargetAuthority::Unavailable {
+                reason: RunnerReplacementTargetUnavailableReason::PendingRequestMismatch,
+                runner: None,
+                predecessor_runner: None,
+            });
+        };
+        let candidate = runner_enrollment_id(relation.decode_column("enrollment_id")?);
+        let predecessor =
+            runner_enrollment_id(relation.decode_column("predecessor_enrollment_id")?);
+        let predecessor_loss_epoch = RunnerConnectionLossEpoch::try_from_u64(decode_u64(
+            relation.decode_column("predecessor_loss_epoch")?,
+        )?)
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        let enrollment_ids = [candidate.into_uuid(), predecessor.into_uuid()];
+        let rows = sqlx::query(PROMOTE_PENDING_RUNNER_ENROLLMENTS)
+            .bind(enrollment_ids.as_slice())
+            .fetch_all(&mut **transaction)
+            .await?;
+        if rows.len() != 2 {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        let mut enrollments = rows
+            .into_iter()
+            .map(decode_replacement_enrollment_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        let candidate_position = enrollments
+            .iter()
+            .position(|row| row.enrollment == candidate)
+            .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
+        let candidate_row = enrollments.remove(candidate_position);
+        let predecessor_row = enrollments
+            .pop()
+            .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
+        if candidate_row.state != RunnerEnrollmentState::Pending {
+            return Ok(ReplacementTargetAuthority::Unavailable {
+                reason: RunnerReplacementTargetUnavailableReason::PendingRequestMismatch,
+                runner: Some(candidate_row.runner),
+                predecessor_runner: Some(predecessor_row.runner),
+            });
+        }
+        if candidate_row.revision != 1
+            || predecessor_row.enrollment != predecessor
+            || predecessor_row.state != RunnerEnrollmentState::Active
+            || !matches!(predecessor_row.revision, 1 | 2)
+        {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        let source_is_loss: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1
+                  FROM runner_connection_loss_epoch AS loss
+                  JOIN runner_connection_event AS source
+                    ON source.enrollment_id = loss.enrollment_id
+                   AND source.connection_epoch = loss.connection_epoch
+                   AND source.event_ordinal = loss.connection_event_ordinal
+                 WHERE loss.enrollment_id = $1
+                   AND loss.loss_epoch = $2
+                   AND source.state_kind = 'lost'
+            )",
+        )
+        .bind(predecessor.into_uuid())
+        .bind(Decimal::from(predecessor_loss_epoch.get()))
+        .fetch_one(&mut **transaction)
+        .await?;
+        if !source_is_loss {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        let connection = sqlx::query(PROMOTE_PENDING_RUNNER_CONNECTION)
+            .bind(candidate.into_uuid())
+            .fetch_optional(&mut **transaction)
+            .await?;
+        let Some(connection) = connection else {
+            return Ok(ReplacementTargetAuthority::Unavailable {
+                reason: RunnerReplacementTargetUnavailableReason::PendingRequestDisconnected,
+                runner: Some(candidate_row.runner),
+                predecessor_runner: Some(predecessor_row.runner),
+            });
+        };
+        let state: String = connection.decode_column("state_kind")?;
+        if runner_connection_state_from_str(&state)
+            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?
+            != RunnerConnectionState::Connected
+        {
+            return Ok(ReplacementTargetAuthority::Unavailable {
+                reason: RunnerReplacementTargetUnavailableReason::PendingRequestDisconnected,
+                runner: Some(candidate_row.runner),
+                predecessor_runner: Some(predecessor_row.runner),
+            });
+        }
+        let connection_epoch = RunnerConnectionEpoch::try_from_u64(decode_u64(
+            connection.decode_column("connection_epoch")?,
+        )?)
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        let connection_event_ordinal =
+            decode_u64(connection.decode_column("connection_event_ordinal")?)?;
+        let receipt =
+            load_enrollment_request_receipt_in(transaction.as_mut(), request, &self.catalog)
+                .await?
+                .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
+        if receipt.authority() != RunnerEnrollmentAuthority::ReplacementPending
+            || receipt.enrollment().enrollment() != candidate
+            || receipt.enrollment().runner() != candidate_row.runner
+        {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        Ok(ReplacementTargetAuthority::Current(Box::new(
+            ReplacementTargetEvidence {
+                runner: candidate_row.runner,
+                enrollment: candidate,
+                registration_revision: receipt.registration().revision(),
+                connection_epoch,
+                connection_event_ordinal,
+                registration: receipt.registration().clone(),
+                pending_activation: Some(PendingReplacementActivation {
+                    request,
+                    candidate: candidate_row,
+                    predecessor: predecessor_row,
+                    predecessor_loss_epoch,
+                }),
             },
         )))
     }
@@ -4452,17 +4647,198 @@ impl ReplaceLostRunnerBeforePinTransaction for RunnerProtocolStore {
     }
 }
 
-enum DirectReplacementTargetAuthority {
-    Current(Box<DirectReplacementTargetEvidence>),
-    Unavailable(RunnerReplacementTargetUnavailableReason),
+enum ReplacementTargetAuthority {
+    Current(Box<ReplacementTargetEvidence>),
+    Unavailable {
+        reason: RunnerReplacementTargetUnavailableReason,
+        runner: Option<RunnerId>,
+        predecessor_runner: Option<RunnerId>,
+    },
 }
 
-struct DirectReplacementTargetEvidence {
+impl ReplacementTargetAuthority {
+    const fn runner(&self) -> Option<RunnerId> {
+        match self {
+            Self::Current(evidence) => Some(evidence.runner),
+            Self::Unavailable { runner, .. } => *runner,
+        }
+    }
+
+    const fn predecessor_runner(&self) -> Option<RunnerId> {
+        match self {
+            Self::Current(evidence) => evidence.predecessor_runner(),
+            Self::Unavailable {
+                predecessor_runner, ..
+            } => *predecessor_runner,
+        }
+    }
+}
+
+struct ReplacementTargetEvidence {
+    runner: RunnerId,
     enrollment: RunnerEnrollmentId,
     registration_revision: RunnerRegistrationRevision,
     connection_epoch: RunnerConnectionEpoch,
     connection_event_ordinal: u64,
     registration: StoredValidatedRunnerRegistration,
+    pending_activation: Option<PendingReplacementActivation>,
+}
+
+impl ReplacementTargetEvidence {
+    const fn predecessor_runner(&self) -> Option<RunnerId> {
+        match &self.pending_activation {
+            Some(activation) => Some(activation.predecessor.runner),
+            None => None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ReplacementEnrollmentRow {
+    enrollment: RunnerEnrollmentId,
+    runner: RunnerId,
+    authentication: Uuid,
+    allowed_class_count: Decimal,
+    revision: u64,
+    state: RunnerEnrollmentState,
+}
+
+struct PendingReplacementActivation {
+    request: RunnerEnrollmentRequestId,
+    candidate: ReplacementEnrollmentRow,
+    predecessor: ReplacementEnrollmentRow,
+    predecessor_loss_epoch: RunnerConnectionLossEpoch,
+}
+
+fn decode_replacement_enrollment_row(
+    row: PgRow,
+) -> Result<ReplacementEnrollmentRow, RunnerProtocolStoreError> {
+    Ok(ReplacementEnrollmentRow {
+        enrollment: runner_enrollment_id(row.decode_column("enrollment_id")?),
+        runner: runner_id(row.decode_column("runner_id")?),
+        authentication: row.decode_column("authentication_reference_id")?,
+        allowed_class_count: row.decode_column("allowed_class_count")?,
+        revision: decode_u64(row.decode_column("revision")?)?,
+        state: runner_enrollment_state_from_str(&row.decode_column::<String>("state_kind")?)
+            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?,
+    })
+}
+
+async fn activate_pending_replacement_target(
+    connection: &mut PgConnection,
+    activation: &PendingReplacementActivation,
+) -> Result<(), RunnerProtocolStoreError> {
+    let relation_is_current: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM runner_pending_enrollment AS pending
+              JOIN runner_connection_loss_epoch AS loss
+                ON loss.enrollment_id = pending.predecessor_enrollment_id
+               AND loss.loss_epoch = pending.predecessor_loss_epoch
+             WHERE pending.request_id = $1
+               AND pending.enrollment_id = $2
+               AND pending.predecessor_enrollment_id = $3
+               AND pending.predecessor_loss_epoch = $4
+        )",
+    )
+    .bind(activation.request.into_uuid())
+    .bind(activation.candidate.enrollment.into_uuid())
+    .bind(activation.predecessor.enrollment.into_uuid())
+    .bind(Decimal::from(activation.predecessor_loss_epoch.get()))
+    .fetch_one(&mut *connection)
+    .await?;
+    if !relation_is_current {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    let predecessor_revision = activation
+        .predecessor
+        .revision
+        .checked_add(1)
+        .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
+    append_replacement_enrollment_audit(
+        connection,
+        &activation.predecessor,
+        predecessor_revision,
+        RunnerEnrollmentState::Revoked,
+    )
+    .await?;
+    append_replacement_enrollment_audit(
+        connection,
+        &activation.candidate,
+        2,
+        RunnerEnrollmentState::Active,
+    )
+    .await?;
+    let predecessor_updated = sqlx::query(
+        "UPDATE runner_enrollment
+            SET revision = $2, state_kind = $4
+          WHERE enrollment_id = $1 AND revision = $3 AND state_kind = $5",
+    )
+    .bind(activation.predecessor.enrollment.into_uuid())
+    .bind(Decimal::from(predecessor_revision))
+    .bind(Decimal::from(activation.predecessor.revision))
+    .bind(runner_enrollment_state_to_str(
+        RunnerEnrollmentState::Revoked,
+    ))
+    .bind(runner_enrollment_state_to_str(
+        RunnerEnrollmentState::Active,
+    ))
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    let candidate_updated = sqlx::query(
+        "UPDATE runner_enrollment
+            SET revision = 2, state_kind = $2
+          WHERE enrollment_id = $1 AND revision = 1 AND state_kind = $3",
+    )
+    .bind(activation.candidate.enrollment.into_uuid())
+    .bind(runner_enrollment_state_to_str(
+        RunnerEnrollmentState::Active,
+    ))
+    .bind(runner_enrollment_state_to_str(
+        RunnerEnrollmentState::Pending,
+    ))
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    if predecessor_updated != 1 || candidate_updated != 1 {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    Ok(())
+}
+
+async fn append_replacement_enrollment_audit(
+    connection: &mut PgConnection,
+    enrollment: &ReplacementEnrollmentRow,
+    revision: u64,
+    state: RunnerEnrollmentState,
+) -> Result<(), RunnerProtocolStoreError> {
+    sqlx::query(
+        "INSERT INTO runner_enrollment_audit
+            (enrollment_id, revision, runner_id, authentication_reference_id,
+             allowed_class_count, state_kind)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(enrollment.enrollment.into_uuid())
+    .bind(Decimal::from(revision))
+    .bind(enrollment.runner.into_uuid())
+    .bind(enrollment.authentication)
+    .bind(enrollment.allowed_class_count)
+    .bind(runner_enrollment_state_to_str(state))
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_enrollment_audit_allowed_class
+            (enrollment_id, revision, capability_class)
+         SELECT enrollment_id, $2, capability_class
+           FROM runner_enrollment_allowed_class
+          WHERE enrollment_id = $1",
+    )
+    .bind(enrollment.enrollment.into_uuid())
+    .bind(Decimal::from(revision))
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
 }
 
 #[derive(Default)]

@@ -35,11 +35,13 @@ verified against this PR (`agent/runner-abandonment-process`). The closed
 pre-pin replacement result and rejection payloads, application transaction
 boundary, and atomic PostgreSQL transaction for a different exact live runner
 are verified against this PR (`agent/runner-pre-pin-replacement`).
+Pending-enrollment activation inside that pre-pin replacement transaction is
+verified against this PR (`agent/runner-pending-pre-pin-replacement`).
 
-**Committed unimplemented functionality.** No current adapter handles a
-pending-enrollment target, same-runner re-enrollment, pinned replacement
-staging, or the replacement process request. Future adapters must preserve the
-closed constraints below for those slices.
+**Committed unimplemented functionality.** No current adapter handles
+same-runner re-enrollment, pinned replacement staging, or the replacement
+process request. Future adapters must preserve the closed constraints below for
+those slices.
 
 Pending enrollment admission was verified against the parent slice
 (`agent/runner-pending-successor-promotion`); its deployment-scoped activation
@@ -628,10 +630,16 @@ one pending request may exist in the temporary version-one deployment, and equal
 replay returns its original identities, registration, advertisement, and
 authority while opening a fresh connection epoch.
 
-**Committed unimplemented functionality.** No present pending enrollment can
-perform the one future user-command-bound workspace operation or be consumed by
-a session replacement. Same-runner recovery and pinned replacement staging are
-also unimplemented; no present daemon or runner command surface provides them.
+A pending enrollment can be consumed by the implemented pre-pin replacement
+transaction: the exact selected request must still own the provisioning-only
+candidate, that candidate must be connected and advertise every retained
+placement axis, and the same commit activates it, revokes its predecessor,
+installs the unpinned successor placement, and records the terminal command
+result. It performs no workspace operation. **Committed unimplemented
+functionality.** No present pending enrollment can perform the future
+user-command-bound workspace operation required by a pinned replacement.
+Same-runner recovery and pinned replacement staging are also unimplemented; no
+present daemon or runner command surface provides them.
 
 Loss triggered by re-registration has its own recovery. When a live runner stops
 advertising a capability that a pinned placement requires, the
