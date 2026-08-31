@@ -46,11 +46,13 @@ best-effort `lease_offer` projection and handoff is re-verified through this PR
 contract was re-verified through PR #322 (`agent/docs-discipline`; pinned and
 pinned-loss request mismatches). Private storage of the one retained lease
 and its monotonic fsynced phases is re-verified through this PR
-(`agent/runner-operation-journal`). The placement loss-source, pre-pin
-replacement and abandonment state shapes, and append-only reconstitution-history
-contract are re-verified through this PR (`agent/runner-placement-loss-domain`).
-It owns logical runner enrollment, daemon-authoritative catalog validation,
-runner leases, the independent session-composition axes, session placement and
+(`agent/runner-operation-journal`). Matching terminal-result retention and
+atomic acknowledgement clearing are re-verified through this PR
+(`agent/runner-result-journal`). The placement loss-source, pre-pin replacement
+and abandonment state shapes, and append-only reconstitution-history contract
+are re-verified through this PR (`agent/runner-placement-loss-domain`). It owns
+logical runner enrollment, daemon-authoritative catalog validation, runner
+leases, the independent session-composition axes, session placement and
 affinity, credential-profile grants, and workspace requirements. The tool
 registry's common declarations remain owned by [tool loop](tool-loop.md);
 session transcript and frontier mechanics remain owned by
@@ -659,10 +661,13 @@ progress, then gives its epoch-qualified shutdown write five seconds from the
 next clean frame boundary; expiry exits with typed failure and leaves the hub to
 record transport or heartbeat loss rather than presenting the runner as healthy.
 
-The runner's owner-private state root stores at most one retained lease and
-advances it monotonically through the three fsynced phases below. It rejects
-unsupported inventory slots and journals belonging to another enrolled runner.
-No live protocol path populates or sends this stored inventory.
+The runner's owner-private state root stores at most one retained lease,
+advances it monotonically through the three fsynced phases below, and retains
+one matching bounded terminal envelope only after execution may have started. An
+exact `result_recorded` acknowledgement atomically frees both slots. The root
+rejects the remaining unsupported inventory slots, cross-wired correlations, and
+journals belonging to another enrolled runner. No live protocol path populates
+or sends this stored inventory.
 
 **Committed unimplemented functionality.** No present runner sends a nonempty
 reconnect inventory. Future execution support repeats resume and advertisement,
@@ -793,7 +798,7 @@ selected runner authority, and placement in the runner lock order, authenticates
 either a distinct live successor or the registration-loss-only same-runner
 exception, and returns the original durable stage on equal replay. A
 workspace-free placement returns `NotApplicable` without claiming the command,
-so its later transaction remains the sole terminal transaction. The runner
+so its later transaction remains the sole terminal authority. The runner
 provisions and spools `workspace_ready` under that limited authority. Only a later
 transaction can activate the pending enrollment: it rechecks the lost
 predecessor and connected candidate, consumes the exact workspace receipt,

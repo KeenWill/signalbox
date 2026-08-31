@@ -16,7 +16,7 @@ use rustix::{
 use serde::{Deserialize, Serialize};
 use signalbox_runner_wire::{
     CanonicalUuid, Digest, LeaseCorrelation, LeasePhase, LeasePhaseKind, MAX_FRAME_BYTES,
-    PositiveU64, ReconnectInventory,
+    PositiveU64, ReconnectInventory, RetainedResult,
 };
 use uuid::Uuid;
 
@@ -576,6 +576,59 @@ impl RunnerStateRoot {
         Ok(())
     }
 
+    /// Atomically retains terminal evidence until its exact durable acknowledgement.
+    pub fn record_terminal_result(
+        &mut self,
+        result: RetainedResult,
+    ) -> Result<(), RunnerStateError> {
+        self.validate_current_lease_correlation(&result.correlation)?;
+        let lease = self
+            .inventory
+            .lease
+            .as_ref()
+            .ok_or(RunnerStateError::InvalidTransition)?;
+        if lease.phase != LeasePhaseKind::ExecutionMayHaveStarted {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        if lease.correlation != result.correlation {
+            return Err(RunnerStateError::OperationCorrelationMismatch);
+        }
+        match self.inventory.result.as_ref() {
+            None => {}
+            Some(current) if current == &result => return Ok(()),
+            Some(_) => return Err(RunnerStateError::OperationCorrelationMismatch),
+        }
+        let mut inventory = self.inventory.clone();
+        inventory.result = Some(result);
+        write_operation_journal(&self.directory, &inventory)?;
+        self.inventory = inventory;
+        Ok(())
+    }
+
+    /// Atomically releases the exact lease and result after daemon recording.
+    pub fn acknowledge_terminal_result(
+        &mut self,
+        correlation: &LeaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        match (
+            self.inventory.lease.as_ref(),
+            self.inventory.result.as_ref(),
+        ) {
+            (Some(lease), Some(result))
+                if lease.correlation == *correlation && result.correlation == *correlation => {}
+            (Some(_), Some(_)) => {
+                return Err(RunnerStateError::OperationCorrelationMismatch);
+            }
+            (None, None) | (Some(_), None) | (None, Some(_)) => {
+                return Err(RunnerStateError::InvalidTransition);
+            }
+        }
+        let inventory = ReconnectInventory::default();
+        write_operation_journal(&self.directory, &inventory)?;
+        self.inventory = inventory;
+        Ok(())
+    }
+
     fn validate_current_lease_correlation(
         &self,
         correlation: &LeaseCorrelation,
@@ -598,18 +651,34 @@ fn validate_operation_journal_runner(
     state: &RunnerState,
     inventory: &ReconnectInventory,
 ) -> Result<(), RunnerStateError> {
-    match (state.receipt(), inventory.lease.as_ref()) {
-        (_, None) => Ok(()),
-        (Some(receipt), Some(lease)) if lease.correlation.runner_id == receipt.runner_id() => {
-            Ok(())
+    let receipt = state.receipt();
+    let lease_owned = match (receipt, inventory.lease.as_ref()) {
+        (_, None) => true,
+        (Some(receipt), Some(lease)) => lease.correlation.runner_id == receipt.runner_id(),
+        (None, Some(_)) => false,
+    };
+    let result_owned = match (receipt, inventory.result.as_ref()) {
+        (_, None) => true,
+        (Some(receipt), Some(result)) => result.correlation.runner_id == receipt.runner_id(),
+        (None, Some(_)) => false,
+    };
+    let result_matches_lease = match (inventory.lease.as_ref(), inventory.result.as_ref()) {
+        (_, None) => true,
+        (Some(lease), Some(result)) => {
+            lease.phase == LeasePhaseKind::ExecutionMayHaveStarted
+                && lease.correlation == result.correlation
         }
-        (None | Some(_), Some(_)) => Err(RunnerStateError::CorruptOperationJournal),
+        (None, Some(_)) => false,
+    };
+    if lease_owned && result_owned && result_matches_lease {
+        Ok(())
+    } else {
+        Err(RunnerStateError::CorruptOperationJournal)
     }
 }
 
 fn operation_journal_has_only_supported_slots(inventory: &ReconnectInventory) -> bool {
-    inventory.result.is_none()
-        && inventory.workspace_operation.is_none()
+    inventory.workspace_operation.is_none()
         && inventory.operation_failure.is_none()
         && inventory.leak_page.is_none()
 }
@@ -834,8 +903,8 @@ fn rustix_error(error: rustix::io::Errno) -> io::Error {
 #[cfg(test)]
 mod tests {
     use signalbox_runner_wire::{
-        Advertisement, RetainedResult, SandboxProfile, TerminalResult, WireToolName,
-        WorkingDirectory, advertisement_digest,
+        Advertisement, ExecutionErrorKind, ReleaseCorrelation, ReleasePhase, SandboxProfile,
+        TerminalResult, WireToolName, WorkingDirectory, WorkspaceOperation, advertisement_digest,
     };
     use tempfile::TempDir;
 
@@ -855,6 +924,7 @@ mod tests {
     const ARBITRARY_ATTEMPT_UUID: u128 = 0x800;
     const ARBITRARY_ISSUING_ATTEMPT_UUID: u128 = 0x900;
     const ARBITRARY_OTHER_RUNNER_UUID: u128 = 0xa00;
+    const ARBITRARY_MANIFEST_UUID: u128 = 0xb00;
     const INITIAL_REGISTRATION_REVISION: u64 = 1;
     const SUCCESSOR_REGISTRATION_REVISION: u64 = 2;
 
@@ -944,6 +1014,24 @@ mod tests {
             lease: Some(lease),
             ..ReconnectInventory::default()
         }
+    }
+
+    fn retained_result(result: TerminalResult) -> RetainedResult {
+        RetainedResult {
+            correlation: lease_correlation(),
+            result,
+        }
+    }
+
+    fn started_root(parent: &TempDir) -> RunnerStateRoot {
+        let mut root = enrolled_root(parent);
+        root.record_lease_phase(lease_phase(LeasePhaseKind::WaitingDispatch))
+            .expect("the waiting-dispatch predecessor is durable");
+        root.record_lease_phase(lease_phase(LeasePhaseKind::DispatchReceived))
+            .expect("the dispatch-received predecessor is durable");
+        root.record_lease_phase(lease_phase(LeasePhaseKind::ExecutionMayHaveStarted))
+            .expect("the execution-possible predecessor is durable");
+        root
     }
 
     fn replace_operation_journal(path: &Path, inventory: ReconnectInventory) {
@@ -1126,6 +1214,142 @@ mod tests {
         assert_eq!(root.reconnect_inventory(), &ReconnectInventory::default());
     }
 
+    /// INV-011 / INV-024: successful terminal evidence survives restart beside
+    /// its exact execution-possible lease correlation.
+    #[test]
+    fn inv011_inv024_successful_terminal_result_survives_reopen() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = started_root(&parent);
+        let result = retained_result(TerminalResult::Success {
+            text: String::from("completed"),
+        });
+        root.record_terminal_result(result.clone())
+            .expect("the successful result is durable");
+        drop(root);
+
+        let reopened = RunnerStateRoot::open(&path).expect("the private state root reopens");
+
+        assert_eq!(reopened.reconnect_inventory().result, Some(result));
+        assert_eq!(
+            reopened.reconnect_inventory().lease,
+            Some(lease_phase(LeasePhaseKind::ExecutionMayHaveStarted))
+        );
+    }
+
+    /// INV-011 / INV-024: known terminal failure evidence survives restart
+    /// without widening its closed failure category.
+    #[test]
+    fn inv011_inv024_known_failure_terminal_result_survives_reopen() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = started_root(&parent);
+        let result = retained_result(TerminalResult::KnownFailure {
+            error_kind: ExecutionErrorKind::ExecutionFailed,
+            detail: Some(String::from("synthetic failure")),
+        });
+        root.record_terminal_result(result.clone())
+            .expect("the known failure is durable");
+        drop(root);
+
+        let reopened = RunnerStateRoot::open(&path).expect("the private state root reopens");
+
+        assert_eq!(reopened.reconnect_inventory().result, Some(result));
+    }
+
+    /// INV-011 / INV-024: ambiguous terminal evidence survives restart exactly.
+    #[test]
+    fn inv011_inv024_ambiguous_terminal_result_survives_reopen() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = started_root(&parent);
+        let result = retained_result(TerminalResult::Ambiguous);
+        root.record_terminal_result(result.clone())
+            .expect("the ambiguous result is durable");
+        drop(root);
+
+        let reopened = RunnerStateRoot::open(&path).expect("the private state root reopens");
+
+        assert_eq!(reopened.reconnect_inventory().result, Some(result));
+    }
+
+    #[test]
+    fn terminal_result_requires_the_execution_possible_phase() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut root = enrolled_root(&parent);
+        root.record_lease_phase(lease_phase(LeasePhaseKind::WaitingDispatch))
+            .expect("the waiting-dispatch phase is durable");
+
+        let error = root
+            .record_terminal_result(retained_result(TerminalResult::Ambiguous))
+            .expect_err("terminal evidence cannot precede the executor gate");
+
+        assert!(matches!(error, RunnerStateError::InvalidTransition));
+        assert_eq!(root.reconnect_inventory().result, None);
+    }
+
+    #[test]
+    fn terminal_result_rejects_another_lease_correlation() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut root = started_root(&parent);
+        let mut foreign = retained_result(TerminalResult::Ambiguous);
+        foreign.correlation.lease_id =
+            CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_OTHER_LEASE_UUID));
+
+        let error = root
+            .record_terminal_result(foreign)
+            .expect_err("another lease cannot occupy the terminal-result slot");
+
+        assert!(matches!(
+            error,
+            RunnerStateError::OperationCorrelationMismatch
+        ));
+        assert_eq!(root.reconnect_inventory().result, None);
+    }
+
+    /// INV-011 / INV-024: daemon recording frees the result and its lease in
+    /// one durable journal replacement.
+    #[test]
+    fn inv011_inv024_result_acknowledgement_clears_both_slots_across_reopen() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = started_root(&parent);
+        root.record_terminal_result(retained_result(TerminalResult::Ambiguous))
+            .expect("the terminal evidence is durable");
+
+        root.acknowledge_terminal_result(&lease_correlation())
+            .expect("the exact recorded acknowledgement releases both slots");
+        drop(root);
+
+        let reopened = RunnerStateRoot::open(&path).expect("the private state root reopens");
+
+        assert_eq!(
+            reopened.reconnect_inventory(),
+            &ReconnectInventory::default()
+        );
+    }
+
+    #[test]
+    fn result_acknowledgement_rejects_another_correlation() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut root = started_root(&parent);
+        let result = retained_result(TerminalResult::Ambiguous);
+        root.record_terminal_result(result.clone())
+            .expect("the terminal evidence is durable");
+        let mut foreign = lease_correlation();
+        foreign.lease_id = CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_OTHER_LEASE_UUID));
+
+        let error = root
+            .acknowledge_terminal_result(&foreign)
+            .expect_err("another lease cannot clear retained evidence");
+
+        assert!(matches!(
+            error,
+            RunnerStateError::OperationCorrelationMismatch
+        ));
+        assert_eq!(root.reconnect_inventory().result, Some(result));
+    }
+
     #[test]
     fn second_process_cannot_share_state_root_lock() {
         let parent = TempDir::new().expect("a temporary parent is available");
@@ -1276,9 +1500,14 @@ mod tests {
             .expect("the operation journal is created");
         drop(root);
         let unsupported = ReconnectInventory {
-            result: Some(RetainedResult {
-                correlation: lease_correlation(),
-                result: TerminalResult::Ambiguous,
+            workspace_operation: Some(WorkspaceOperation::Release {
+                correlation: ReleaseCorrelation {
+                    session_id: CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_SESSION_UUID)),
+                    placement_revision: positive(1),
+                    runner_id: CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_RUNNER_UUID)),
+                    manifest_id: CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_MANIFEST_UUID)),
+                },
+                phase: ReleasePhase::ReleaseAccepted,
             }),
             ..ReconnectInventory::default()
         };
@@ -1286,6 +1515,28 @@ mod tests {
 
         let error = RunnerStateRoot::open(&path)
             .expect_err("an unauthored operation-journal slot fails closed");
+
+        assert!(matches!(error, RunnerStateError::CorruptOperationJournal));
+    }
+
+    #[test]
+    fn cross_wired_terminal_result_journal_fails_closed() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let root = started_root(&parent);
+        drop(root);
+        let mut result = retained_result(TerminalResult::Ambiguous);
+        result.correlation.lease_id =
+            CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_OTHER_LEASE_UUID));
+        let cross_wired = ReconnectInventory {
+            lease: Some(lease_phase(LeasePhaseKind::ExecutionMayHaveStarted)),
+            result: Some(result),
+            ..ReconnectInventory::default()
+        };
+        replace_operation_journal(&path, cross_wired);
+
+        let error =
+            RunnerStateRoot::open(&path).expect_err("a result from another lease fails closed");
 
         assert!(matches!(error, RunnerStateError::CorruptOperationJournal));
     }
