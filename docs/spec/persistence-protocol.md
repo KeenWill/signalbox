@@ -41,7 +41,9 @@ request-locus fence are verified against this PR
 (`agent/runner-initial-dispatch-transaction`). Durable lease-claim admission is
 verified against this PR (`agent/runner-lease-claim-transaction`). Atomic
 claimed-lease and physical-attempt result admission is verified against this PR
-(`agent/runner-lease-result-transaction`). Canonical normalized arguments joined
+(`agent/runner-lease-result-transaction`). Authenticated pre-resume admission of
+retained terminal evidence is verified against this PR
+(`agent/daemon-retained-result-resume`). Canonical normalized arguments joined
 through every lease's exact tool request are verified against this PR
 (`agent/runner-lease-argument-binding`). The closed selected executable locus on
 every durable tool request is verified against this PR
@@ -1146,12 +1148,18 @@ Locks per transaction, in acquisition order:
   together. Duplicate, stale, or cross-wired evidence advances neither
   aggregate. Ambiguous external-effect evidence also ends the issuing turn
   attempt and enters the exact `awaiting_tool_recovery` wait in that
-  transaction. The generic lease-projection writer refuses to originate a
-  claimed or completed state. **Committed unimplemented functionality.** No
-  present transaction performs an initial dispatch that consumes a
-  runner-default-directory or workspace receipt. That extension must store pin,
-  grant, `InFlight` attempt, and offered lease together under the same lock
-  order.
+  transaction. Authenticated retained-result admission takes the same scheduler
+  lock before it verifies the immutable enrollment request, all issued
+  identities, a non-revoked enrollment, and the caller's prior registration
+  revision against the current advertisement. It then invokes that same result
+  boundary before any later registration change or availability reconciliation
+  can consume the attempt. An exact completed-result replay is read-only. No
+  present daemon resume path invokes this retained-result transaction. The
+  generic lease-projection writer refuses to originate a claimed or completed
+  state. **Committed unimplemented functionality.** No present transaction
+  performs an initial dispatch that consumes a runner-default-directory or
+  workspace receipt. That extension must store pin, grant, `InFlight` attempt,
+  and offered lease together under the same lock order.
 
 - **Runner loss**: one short transaction locks only the current connection/loss
   head, advances a positive durable loss epoch, and thereby makes every trigger
