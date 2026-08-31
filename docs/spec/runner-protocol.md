@@ -28,7 +28,9 @@ lease facts into `lease_offer`, `lease_claimed`, `dispatch`, and
 `result`, is re-verified through this PR (`agent/runner-dispatch-wire-adapter`).
 Established-connection routing of those inbound claim and result frames through
 the durable transactions before acknowledgement is re-verified through this PR
-(`agent/runner-runtime-lease-operations`). The corrected reconstitution mismatch
+(`agent/runner-runtime-lease-operations`). Durable authorization followed by
+best-effort `lease_offer` projection and handoff is re-verified through this PR
+(`agent/runner-lease-offer-dispatcher`). The corrected reconstitution mismatch
 contract was re-verified through PR #322 (`agent/docs-discipline`; pinned and
 pinned-loss request mismatches). The placement loss-source, pre-pin replacement
 and abandonment state shapes, and append-only reconstitution-history contract
@@ -230,16 +232,19 @@ correlation, and uses a one-frame handoff queue; durable journals, not this
 queue, own retry. Before writing a dequeued frame, the task rechecks that the
 exact durable connection epoch is current. Heartbeat deadlines take priority
 over outbound queue work. Dropping the socket task retires only that exact
-route. No production operation producer currently calls the broker, and inbound
-workspace and operation-failure frames remain unimplemented and fail closed.
-Inbound `lease_claim` and `result` instead take the durable boundaries described
-under [runner leases](#effect-classes-and-runner-leases).
+route. The lease-offer dispatcher is the first production-capable operation
+producer: it accepts only the atomic pinned-dispatch request, projects the
+returned canonical offered lease, resolves the then-current connected route, and
+hands the frame to the broker. No daemon composition constructs it and no
+tool-loop locus invokes it yet. Inbound workspace and operation-failure frames
+remain unimplemented and fail closed. Inbound `lease_claim` and `result` instead
+take the durable boundaries described under
+[runner leases](#effect-classes-and-runner-leases).
 
-**Committed unimplemented functionality.** No present durable producer initiates
-the following lease/dispatch state machine, and no runner surface serves it. The
-outbound broker transports caller-constructed closed frames but supplies no
-authority to construct an initial offer. The established daemon connection does
-already implement the durable claim and result boundaries in steps 2 and 4. The
+**Committed unimplemented functionality.** No present tool-loop locus invokes
+the durable offer producer, and no runner surface serves the following
+lease/dispatch state machine. The established daemon connection does already
+implement the durable claim and result boundaries in steps 2 and 4. The
 remaining surfaces stay compatible with the complete state machine:
 
 1. The daemon sends `lease_offer` with the complete lease correlation and
@@ -1071,6 +1076,18 @@ the canonical active tool batch, then commits lease completion and terminal
 attempt evidence together. Duplicate or cross-wired evidence advances neither
 aggregate; ambiguous external-effect evidence enters the exact tool-recovery
 wait in the same transaction. Generic projection cannot originate completion.
+The daemon lease-offer dispatcher invokes the pinned-dispatch transaction before
+projecting or handing off any frame. Authorization refusal therefore emits no
+offer. A returned lease cross-wired to another session, turn, attempt, or frozen
+registration also emits no frame and is retained as an authority invariant
+failure. Once authorization commits, projection, current-route lookup, absence
+of a live connection, queue backpressure, and process-local transport failure
+are all delivery observations rather than rollback claims: the outcome retains
+the canonical offered lease for a later durable recovery surface. No present
+redelivery scan consumes that retained outcome. The route is resolved after
+commit so a replaced physical connection can receive the still-valid offer; the
+connection task rechecks its exact epoch again before writing.
+
 The established daemon connection accepts those two runner frames only when the
 complete correlation names the runner admitted by its handshake and that exact
 physical connection is still current. It routes `lease_claim` through the claim

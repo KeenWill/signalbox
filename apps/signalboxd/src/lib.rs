@@ -49,6 +49,7 @@ mod process_runtime;
 mod repo_watch_runtime;
 mod review_orchestration_runtime;
 pub mod runner_connection_broker;
+pub mod runner_dispatch;
 pub mod runner_dispatch_wire;
 pub mod runner_protocol_runtime;
 mod session_delegation;
