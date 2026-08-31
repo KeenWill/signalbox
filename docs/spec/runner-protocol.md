@@ -117,19 +117,23 @@ atomic staging transaction is verified against this PR
 workspace-free pinned-replacement transaction is verified against this PR
 (`agent/runner-pinned-replacement-transaction`). Its crash-retained
 placement-boundary identities are verified against this PR
-(`agent/runner-replacement-boundary-identity`).
+(`agent/runner-replacement-boundary-identity`). The registration-loss-only
+same-runner completion of a workspace-free stage is verified against this PR
+(`agent/runner-same-runner-replacement-finalization`).
 
-The persistence adapter consumes the checked same-runner transition only while
-staging a pinned repository workspace. It completes the narrower workspace-free,
-credential-free, exact-directory replacement for a direct distinct active runner
-only when the session has no active turn and no earlier nonempty semantic
-frontier. The workspace-free stage retains the generated placement-entry and
-frontier identities, so retry or restart cannot choose a different transcript
-boundary before terminal completion. **Committed unimplemented functionality.**
-No current adapter completes the repository-backed, pending-enrollment,
-same-runner, active-turn, or prefix-extending pinned-replacement cases or
-handles the replacement process request. Future adapters must preserve the
-closed constraints below for those slices.
+The persistence adapter consumes the checked same-runner transition while
+staging a pinned repository workspace and while completing the narrower
+workspace-free, credential-free, exact-directory replacement. The latter admits
+either a direct distinct active runner or the registration-loss-only same-runner
+target. It completes at an empty frontier root, or after an in-flight model call
+commits the exact observation frontier that the relocation extends. The
+workspace-free stage retains the generated placement-entry and frontier
+identities, so retry or restart cannot choose a different transcript boundary
+before terminal completion. **Committed unimplemented functionality.** No
+current adapter completes the repository-backed, pending-enrollment, or earlier
+prefix without an in-flight observation, and no adapter handles the replacement
+process request. Future adapters must preserve the closed constraints below for
+those slices.
 
 Pending enrollment admission was verified against the parent slice
 (`agent/runner-pending-successor-promotion`); its deployment-scoped activation
@@ -849,8 +853,9 @@ user-command-bound workspace operation required by a pinned replacement. Pinned
 replacement staging is implemented at the application and persistence boundary
 for a distinct active runner, an exact pending enrollment, or the
 registration-loss-only same-runner exception. No present daemon or runner
-command surface invokes it. The workspace-free direct-distinct frontier-root
-subset completes in persistence; the remaining pinned-replacement cases do not.
+command surface invokes it. The workspace-free direct-distinct and checked
+same-runner subsets complete in persistence at the committed frontier root or
+model-observation boundary; the remaining pinned-replacement cases do not.
 
 Loss triggered by re-registration has its own recovery. When a live runner stops
 advertising a capability that a pinned placement requires, the
@@ -877,9 +882,11 @@ registration satisfies the complete successor request. The ordinary replacement
 transition still refuses the same runner, so a reconstituted registration-loss
 label alone is not recovery authority. The pinned repository-workspace staging
 transaction supplies those checked registrations and accepts the same runner
-only through the explicit reenrollment target. **Committed unimplemented
-functionality.** No daemon adapter yet invokes that transaction or installs the
-resulting pinned replacement.
+only through the explicit reenrollment target. The workspace-free terminal
+transaction now consumes that proof and installs the pinned successor. No daemon
+process adapter yet invokes the user replacement command. **Committed
+unimplemented functionality.** The repository-backed same-runner terminal
+transaction remains absent.
 
 A pending successor may also be promoted with no lost session placement
 involved. The implemented `promote_pending_runner` transaction is the
