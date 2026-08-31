@@ -12,6 +12,8 @@ import {
   decodeWebImportListPage,
   decodeWebSearchPage,
   decodeWebSessionCatalogSnapshot,
+  decodeWebSessionLiveSnapshot,
+  decodeWebSessionLiveStreamEvent,
   decodeWebSessionTimelineDescriptor,
   decodeWebSessionTimelineDetailPage,
   decodeWebSessionTimelineWindow,
@@ -97,6 +99,10 @@ function turnLifecycleDetailPage() {
     projected_body_bytes: 128,
     continuation: null,
   };
+}
+
+function thirtyThreeQueuedTurnIds() {
+  return Array.from({ length: 33 }, (_, index) => `${index}`);
 }
 
 function searchPage() {
@@ -204,6 +210,7 @@ test("generated bootstrap decoder rejects another contract version", () => {
           import_discovery: true,
           imported_continuations: true,
           bounded_session_timeline: true,
+          bounded_session_live: true,
         },
         limits: {
           max_json_body_bytes: 65536,
@@ -215,6 +222,7 @@ test("generated bootstrap decoder rejects another contract version", () => {
           max_search_snippet_bytes: 512,
           max_timeline_window_items: 256,
           max_timeline_window_bytes: 65536,
+          max_session_live_queued_turns: 32,
           max_usage_aggregate_groups: 256,
           max_usage_call_page_items: 100,
         },
@@ -233,6 +241,7 @@ test("generated bootstrap decoder rejects a disabled required capability", () =>
           bounded_lexical_search: true,
           bounded_session_timeline: true,
           bounded_session_timeline_detail: true,
+          bounded_session_live: true,
           bounded_usage_cost: true,
           same_origin_json_mutations: true,
           ndjson_streaming: true,
@@ -252,6 +261,7 @@ test("generated bootstrap decoder rejects a disabled required capability", () =>
           max_timeline_detail_bytes: 65536,
           max_timeline_window_items: 256,
           max_timeline_window_bytes: 65536,
+          max_session_live_queued_turns: 32,
           max_usage_aggregate_groups: 256,
           max_usage_call_page_items: 100,
         },
@@ -1273,6 +1283,7 @@ test("generated bootstrap decoder rejects incompatible limits", () => {
           imported_continuations: true,
           bounded_session_timeline: true,
           bounded_session_timeline_detail: true,
+          bounded_session_live: true,
         },
         limits: {
           max_json_body_bytes: 1,
@@ -1284,12 +1295,357 @@ test("generated bootstrap decoder rejects incompatible limits", () => {
           max_timeline_detail_bytes: 65536,
           max_timeline_window_items: 256,
           max_timeline_window_bytes: 65536,
+          max_session_live_queued_turns: 32,
           max_usage_aggregate_groups: 256,
           max_usage_call_page_items: 100,
         },
       }),
     /incompatible web contract/,
   );
+});
+
+test("generated live decoder bounds retained queued turns", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: null,
+        queued_turn_count: "33",
+        queued_turn_ids: thirtyThreeQueuedTurnIds(),
+        reconciliation: null,
+        runner: null,
+      }),
+    /at most 32 items/,
+  );
+});
+
+test("generated live decoder requires a positive observation cursor", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "0",
+        active: null,
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: null,
+      }),
+    /matching/,
+  );
+});
+
+test("generated live decoder correlates queued preview with its count", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: null,
+        queued_turn_count: "0",
+        queued_turn_ids: ["00000000-0000-0000-0000-000000000992"],
+        reconciliation: null,
+        runner: null,
+      }),
+    /exactly 0 IDs for queued_turn_count/,
+  );
+});
+
+test("generated live decoder rejects duplicate queued turn identities", () => {
+  const duplicate = "00000000-0000-0000-0000-000000000992";
+
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: null,
+        queued_turn_count: "2",
+        queued_turn_ids: [duplicate, duplicate],
+        reconciliation: null,
+        runner: null,
+      }),
+    /unique turn IDs/,
+  );
+});
+
+test("generated live decoder rejects queued identities occupying current state", () => {
+  const occupiedTurn = "00000000-0000-0000-0000-000000000992";
+
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: {
+          turn_id: occupiedTurn,
+          state: { kind: "running", model_call_id: null },
+        },
+        queued_turn_count: "1",
+        queued_turn_ids: [occupiedTurn],
+        reconciliation: null,
+        runner: null,
+      }),
+    /disjoint from active and reconciliation turn IDs/,
+  );
+});
+
+test("generated live decoder validates identities", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "not-a-uuid",
+        observed_through: "7",
+        active: null,
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: null,
+      }),
+    /matching/,
+  );
+});
+
+test("generated live decoder rejects simultaneous active and reconciliation states", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: {
+          turn_id: "00000000-0000-0000-0000-000000000992",
+          state: { kind: "running", model_call_id: null },
+        },
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: {
+          kind: "model_call",
+          turn_id: "00000000-0000-0000-0000-000000000992",
+          model_call_id: "00000000-0000-0000-0000-000000000993",
+        },
+        runner: null,
+      }),
+    /absent while an active turn is present/,
+  );
+});
+
+test("generated live decoder requires explicit nullable state fields", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+      }),
+    /must be present/,
+  );
+  const explicit = decodeWebSessionLiveSnapshot({
+    session_id: "00000000-0000-0000-0000-000000000991",
+    observed_through: "7",
+    active: null,
+    queued_turn_count: "0",
+    queued_turn_ids: [],
+    reconciliation: null,
+    runner: null,
+  });
+  assert.equal(explicit.active, null);
+  assert.equal(explicit.reconciliation, null);
+  assert.equal(explicit.runner, null);
+});
+
+test("generated live decoder requires an explicit running model call", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: {
+          turn_id: "00000000-0000-0000-0000-000000000992",
+          state: { kind: "running" },
+        },
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: null,
+      }),
+    /one recognized variant/,
+  );
+  const idle = decodeWebSessionLiveSnapshot({
+    session_id: "00000000-0000-0000-0000-000000000991",
+    observed_through: "7",
+    active: {
+      turn_id: "00000000-0000-0000-0000-000000000992",
+      state: { kind: "running", model_call_id: null },
+    },
+    queued_turn_count: "0",
+    queued_turn_ids: [],
+    reconciliation: null,
+    runner: null,
+  });
+  assert.equal(idle.active.state.model_call_id, null);
+});
+
+test("generated live decoder rejects malformed runner correlations", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: null,
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: { state: "pinned", placement_revision: "1" },
+      }),
+    /one recognized variant/,
+  );
+});
+
+test("generated live decoder requires positive placement revisions", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: null,
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: { state: "unpinned", placement_revision: "0" },
+      }),
+    /one recognized variant/,
+  );
+});
+
+test("generated live decoder rejects self-referential child waits", () => {
+  const sessionId = "00000000-0000-0000-0000-000000000991";
+
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: sessionId,
+        observed_through: "7",
+        active: {
+          turn_id: "00000000-0000-0000-0000-000000000992",
+          state: {
+            kind: "awaiting_child",
+            tool_request_id: "00000000-0000-0000-0000-000000000993",
+            child_session_id: sessionId,
+          },
+        },
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: null,
+      }),
+    /different from the parent session ID/,
+  );
+});
+
+test("generated live decoder correlates runner recovery with placement", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: {
+          turn_id: "00000000-0000-0000-0000-000000000992",
+          state: {
+            kind: "awaiting_runner_recovery",
+            runner_id: "00000000-0000-0000-0000-000000000993",
+            placement_revision: "4",
+          },
+        },
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: {
+          state: "runner_lost",
+          runner_id: "00000000-0000-0000-0000-000000000994",
+          placement_revision: "4",
+        },
+      }),
+    /runner placement required by awaiting_runner_recovery/,
+  );
+});
+
+test("generated live stream decoder rejects variant-only extra fields", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveStreamEvent({
+        kind: "provider_text_delta",
+        turn_id: "00000000-0000-0000-0000-000000000992",
+        model_call_id: "00000000-0000-0000-0000-000000000993",
+        part_index: 0,
+        content: "draft",
+        cursor: "8",
+      }),
+    /one recognized variant/,
+  );
+});
+
+test("generated live stream decoder correlates durable cursor and address", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveStreamEvent({
+        kind: "durable",
+        cursor: "8",
+        address: { event_sequence: "9" },
+        event_kind: "turn_activated",
+      }),
+    /equal to cursor/,
+  );
+});
+
+test("generated live stream decoder bounds provider text fragments", () => {
+  const admitted = decodeWebSessionLiveStreamEvent({
+    kind: "provider_text_delta",
+    turn_id: "00000000-0000-0000-0000-000000000992",
+    model_call_id: "00000000-0000-0000-0000-000000000993",
+    part_index: 0,
+    content: "x".repeat(8192),
+  });
+  assert.equal(admitted.content.length, 8192);
+  assert.throws(
+    () =>
+      decodeWebSessionLiveStreamEvent({
+        kind: "provider_text_delta",
+        turn_id: "00000000-0000-0000-0000-000000000992",
+        model_call_id: "00000000-0000-0000-0000-000000000993",
+        part_index: 0,
+        content: "x".repeat(8193),
+      }),
+    /at most 8192 UTF-8 bytes/,
+  );
+  assert.throws(
+    () =>
+      decodeWebSessionLiveStreamEvent({
+        kind: "provider_text_delta",
+        turn_id: "00000000-0000-0000-0000-000000000992",
+        model_call_id: "00000000-0000-0000-0000-000000000993",
+        part_index: 0,
+        content: "\u{20AC}".repeat(2731),
+      }),
+    /at most 8192 UTF-8 bytes/,
+  );
+});
+
+test("generated live stream decoder requires a positive resynchronization cursor", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveStreamEvent({
+        kind: "resync_required",
+        cursor: "0",
+      }),
+    /one recognized variant/,
+  );
+  const resync = decodeWebSessionLiveStreamEvent({
+    kind: "resync_required",
+    cursor: "7",
+  });
+  assert.equal(resync.cursor, "7");
 });
 
 test("generated error decoder preserves the transport application boundary", () => {

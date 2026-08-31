@@ -138,7 +138,7 @@ env:
 jobs:
   eligibility:
     name: Tool eval eligibility
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     timeout-minutes: 5
     outputs:
       allowed: ${{ steps.eligibility.outputs.allowed }}
