@@ -15,10 +15,11 @@ use std::{
 use crate::{
     ApprovedToolRequest, AuthorizedToolAttempt, DurableCommandId, EndedToolAttempt,
     NormalizedToolArguments, RunnerAuthenticationId, RunnerEnrollmentId, RunnerEnrollmentRequestId,
-    RunnerId, RunnerLeaseId, SessionId, ToolArgumentsKind, ToolAttemptDispatchCorrelation,
-    ToolAttemptId, ToolAttemptObservation, ToolAttemptTransitionFailure, ToolBatch,
-    ToolBatchExecutionFailure, ToolDecisionSource, ToolEffectClass, ToolName,
-    ToolPermissionDefault, TurnId, WorkspaceManifestId, WorkspaceProvisioningAuthorizationId,
+    RunnerId, RunnerLeaseId, SelectedToolExecutionLocus, SessionId, ToolArgumentsKind,
+    ToolAttemptDispatchCorrelation, ToolAttemptId, ToolAttemptObservation,
+    ToolAttemptTransitionFailure, ToolBatch, ToolBatchExecutionFailure, ToolDecisionSource,
+    ToolEffectClass, ToolName, ToolPermissionDefault, TurnId, WorkspaceManifestId,
+    WorkspaceProvisioningAuthorizationId,
 };
 
 /// Exact user-selected successor for one lost session placement.
@@ -3300,6 +3301,7 @@ impl SessionRunnerPlacement {
             &offer.tool,
             dispatch.effect,
             dispatch.approval,
+            registration,
             authorization,
         )?;
         if retry_evidence.is_some() {
@@ -3353,6 +3355,7 @@ impl SessionRunnerPlacement {
             &lost.tool,
             dispatch.effect,
             dispatch.approval,
+            registration,
             authorization,
         )?;
         if lost.arguments != arguments {
@@ -4065,6 +4068,7 @@ fn validate_authorized_attempt(
     tool: &ToolName,
     effect: RunnerToolEffectClass,
     approval: CredentialToolApproval,
+    registration: &ValidatedRunnerRegistration,
     authorization: RunnerToolAttemptAuthorization,
 ) -> Result<
     (
@@ -4078,6 +4082,16 @@ fn validate_authorized_attempt(
     let arguments = approved.request().arguments().clone();
     let (attempt, correlation) = authorized.into_parts();
     let expected_effect = tool_effect_class(effect);
+    let locus_matches = match approved.request().execution_locus() {
+        SelectedToolExecutionLocus::Daemon => false,
+        SelectedToolExecutionLocus::ExactRunner {
+            runner,
+            registration_revision,
+        } => *runner == registration.runner && *registration_revision == registration.revision,
+        SelectedToolExecutionLocus::RunnerCapabilityClass { class } => {
+            registration.classes.contains(class)
+        }
+    };
     if approved.request().name() != tool
         || approved.request().id() != correlation.request()
         || approved.request().session() != session
@@ -4085,6 +4099,7 @@ fn validate_authorized_attempt(
         || attempt.session() != session
         || attempt.effect_class() != expected_effect
         || attempt.attempt() != correlation.attempt()
+        || !locus_matches
         || approved.approval().source() == ToolDecisionSource::SessionBlanket
         || (approval == CredentialToolApproval::SessionPolicy
             && approved.approval().source() != ToolDecisionSource::UserCommand)
@@ -5138,6 +5153,7 @@ mod tests {
             NormalizedToolArguments::try_from_provider_text(String::from("{}"))
                 .expect("fixture arguments are canonical"),
         )
+        .with_execution_locus(SelectedToolExecutionLocus::RunnerCapabilityClass { class: class() })
         .into_request()
     }
 
@@ -5269,6 +5285,38 @@ mod tests {
         let approved = approved_request(tool_name);
         let authorized = approved
             .prepare_attempt(attempt, turn_attempt_id(0x7b00), effect)
+            .authorize()
+            .expect("the prepared fixture attempt authorizes once");
+        RunnerToolAttemptAuthorization::try_new(approved, authorized)
+            .expect("the approved request binds the authorized attempt")
+    }
+
+    fn inspect_authorized_at_locus(
+        locus: SelectedToolExecutionLocus,
+    ) -> RunnerToolAttemptAuthorization {
+        let request = ToolRequestReconstitutionInput::new(
+            tool_request_id(0x7700),
+            session_id(SESSION),
+            turn_id(0x7800),
+            model_call_id(0x7900),
+            ToolRequestOrdinal::from_u32(0),
+            tool("inspect"),
+            NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                .expect("fixture arguments are canonical"),
+        )
+        .with_execution_locus(locus)
+        .into_request();
+        let approval = ToolApprovalResolutionReconstitutionInput::policy_auto(request.id())
+            .reconstitute()
+            .expect("the fixture registry policy approves");
+        let approved = ApprovedToolRequest::try_from_resolution(request, approval)
+            .expect("the fixture approval matches its request");
+        let authorized = approved
+            .prepare_attempt(
+                tool_attempt_id(RETRY_ATTEMPT),
+                turn_attempt_id(0x7b00),
+                ToolEffectClass::EffectFree,
+            )
             .authorize()
             .expect("the prepared fixture attempt authorizes once");
         RunnerToolAttemptAuthorization::try_new(approved, authorized)
@@ -7124,6 +7172,42 @@ mod tests {
                     tool_attempt_id(RETRY_ATTEMPT),
                     RunnerToolEffectClass::SideEffecting,
                 ),
+                lease_offer_request("inspect"),
+            ),
+            Err(RunnerDomainError::CorrelationMismatch)
+        );
+    }
+
+    #[test]
+    fn s31_inv043_runner_lease_rejects_a_daemon_selected_request() {
+        let (registration, pin) = pinned("readonly");
+
+        assert_eq!(
+            pin.placement.offer_lease(
+                &enrollment_for_registration(&registration),
+                &registration,
+                pin.grant.as_ref(),
+                inspect_authorized_at_locus(SelectedToolExecutionLocus::Daemon),
+                lease_offer_request("inspect"),
+            ),
+            Err(RunnerDomainError::CorrelationMismatch)
+        );
+    }
+
+    #[test]
+    fn s31_inv043_runner_lease_rejects_a_foreign_exact_locus() {
+        let (registration, pin) = pinned("readonly");
+        let foreign = SelectedToolExecutionLocus::ExactRunner {
+            runner: runner_id(REPLACEMENT_RUNNER),
+            registration_revision: registration.revision,
+        };
+
+        assert_eq!(
+            pin.placement.offer_lease(
+                &enrollment_for_registration(&registration),
+                &registration,
+                pin.grant.as_ref(),
+                inspect_authorized_at_locus(foreign),
                 lease_offer_request("inspect"),
             ),
             Err(RunnerDomainError::CorrelationMismatch)

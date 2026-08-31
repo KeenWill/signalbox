@@ -11,8 +11,9 @@ use std::{error::Error, num::NonZeroU64, time::Duration};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_application::{
     AbandonLostRunnerOutcome, ImportedConversationConverter, ImportedConversationStore,
-    PinnedRunnerDispatchRequest, PromotePendingRunnerOutcome, ReplaceLostRunnerBeforePinOutcome,
-    RunnerLeaseClaimRequest, RunnerLeaseResultRequest, RunnerReplacementProvisioningOutcome,
+    InitialRunnerDispatchRequest, PinnedRunnerDispatchRequest, PromotePendingRunnerOutcome,
+    ReplaceLostRunnerBeforePinOutcome, RunnerLeaseClaimRequest, RunnerLeaseResultRequest,
+    RunnerReplacementProvisioningOutcome,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
@@ -723,6 +724,7 @@ fn approved_request_for_session(
         NormalizedToolArguments::try_from_provider_text(String::from("{}"))
             .expect("the fixture arguments are canonical"),
     )
+    .with_execution_locus(SelectedToolExecutionLocus::RunnerCapabilityClass { class: class() })
     .into_request();
     let approval = ToolApprovalResolutionReconstitutionInput::policy_auto(request.id())
         .reconstitute()
@@ -742,6 +744,7 @@ fn confirmed_approved_request(facts: PhysicalAttemptFacts) -> ApprovedToolReques
         NormalizedToolArguments::try_from_provider_text(String::from("{}"))
             .expect("the fixture arguments are canonical"),
     )
+    .with_execution_locus(SelectedToolExecutionLocus::RunnerCapabilityClass { class: class() })
     .into_request();
     let command = DecideToolRequest::try_new(
         DurableCommandId::from_uuid(uuid(facts.request + (RELATED_IDENTITY_OFFSET * 4))),
@@ -1843,6 +1846,92 @@ async fn stored_active_pin_fixture_with_authorization(
     ))
 }
 
+async fn stored_initial_dispatch_fixture(
+    pool: &PgPool,
+    working_directory: WorkingDirectorySelection,
+    credential_profile: Option<CredentialProfileName>,
+) -> Result<
+    (
+        RunnerProtocolStore,
+        RunnerEnrollment,
+        StoredValidatedRunnerRegistration,
+        SessionRunnerPlacement,
+    ),
+    Box<dyn Error>,
+> {
+    let (session, turn, turn_attempt) = insert_running_turn(pool).await?;
+    let producing_call = ModelCallId::from_uuid(uuid(
+        INITIAL_PHYSICAL_ATTEMPT.turn + (RELATED_IDENTITY_OFFSET * 2),
+    ));
+    let boundary = ContextFrontierId::from_uuid(uuid(
+        INITIAL_PHYSICAL_ATTEMPT.turn + (RELATED_IDENTITY_OFFSET * 3),
+    ));
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'running'
+          WHERE turn_attempt_id = $1 AND state_kind = 'prepared'",
+    )
+    .bind(turn_attempt.into_uuid())
+    .execute(pool)
+    .await?;
+    attach_continuing_tool_round_projection(
+        pool,
+        session,
+        turn,
+        turn_attempt,
+        producing_call,
+        ToolRequestId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.request)),
+        boundary,
+    )
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_tool_round_call_id = $1
+          WHERE session_id = $2 AND turn_id = $3",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    insert_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    terminalize_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    append_prepared_pinned_dispatch_attempt(
+        pool,
+        expected_enrollment.runner(),
+        registration.registration().revision(),
+    )
+    .await?;
+    let placement = SessionRunnerPlacement::new(
+        session,
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::Identity(expected_enrollment.runner()),
+            working_directory,
+            credential_profile,
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            permission_overrides: no_permission_overrides(),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    Ok((store, expected_enrollment, registration, placement))
+}
+
 #[track_caller]
 fn pinned_fixture_state(pin: &SessionRunnerPin) -> PinnedRunnerPlacement {
     let SessionRunnerPlacementState::Pinned(pinned) = pin.placement.state() else {
@@ -2089,7 +2178,12 @@ async fn stored_claimed_pinned_dispatch_fixture_with_authorization(
         )
         .await?;
     terminalize_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
-    append_prepared_pinned_dispatch_attempt(pool).await?;
+    append_prepared_pinned_dispatch_attempt(
+        pool,
+        expected_enrollment.runner(),
+        registration.registration().revision(),
+    )
+    .await?;
     set_fixture_physical_attempt_effect(
         pool,
         PINNED_DISPATCH_PHYSICAL_ATTEMPT,
@@ -2587,6 +2681,16 @@ async fn dispatch_next_outbox_event(
     dispatch_next_outbox_event_at(pool, 1).await
 }
 
+async fn dispatch_initial_pin_outbox_event(
+    pool: &PgPool,
+) -> Result<DispatchedOutboxEvent, Box<dyn Error>> {
+    dispatch_next_outbox_event_at(pool, 1).await?;
+    dispatch_next_outbox_event_at(pool, 2).await?;
+    dispatch_next_outbox_event_at(pool, 3).await?;
+    dispatch_next_outbox_event_at(pool, 4).await?;
+    dispatch_next_outbox_event_at(pool, 5).await
+}
+
 async fn dispatch_next_outbox_event_at(
     pool: &PgPool,
     expected_sequence: u64,
@@ -2719,7 +2823,11 @@ async fn insert_physical_attempt_for(
     Ok(())
 }
 
-async fn append_prepared_pinned_dispatch_attempt(pool: &PgPool) -> Result<(), sqlx::Error> {
+async fn append_prepared_pinned_dispatch_attempt(
+    pool: &PgPool,
+    runner: RunnerId,
+    registration_revision: RunnerGeneration,
+) -> Result<(), sqlx::Error> {
     let (session, producing_call, prior_attempt, boundary, boundary_count): (
         Uuid,
         Uuid,
@@ -2810,13 +2918,18 @@ async fn append_prepared_pinned_dispatch_attempt(pool: &PgPool) -> Result<(), sq
     sqlx::query(
         "INSERT INTO tool_request
             (request_id, session_id, turn_id, producing_model_call_id,
-             request_ordinal, tool_name, arguments_kind, arguments_text)
-         VALUES ($1, $2, $3, $4, 1, 'inspect', 'json', '{}')",
+             request_ordinal, tool_name, arguments_kind, arguments_text,
+             execution_locus_kind, execution_runner_id,
+             execution_registration_revision)
+         VALUES ($1, $2, $3, $4, 1, 'inspect', 'json', '{}',
+                 'exact_runner', $5, $6)",
     )
     .bind(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.request))
     .bind(session)
     .bind(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.turn))
     .bind(producing_call)
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(registration_revision.get()))
     .execute(&mut *transaction)
     .await?;
     sqlx::query(
@@ -17990,6 +18103,247 @@ async fn s31_inv043_initial_lease_rejects_cross_wired_dispatch_fence() -> Result
     Ok(())
 }
 
+/// INV-043: an exact-directory, workspace-free initial dispatch pins the
+/// placement, authorizes its physical attempt, and offers its lease atomically.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_initial_dispatch_atomically_pins_attempt_and_lease()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let expected_directory = exact_runner_directory();
+    let (store, expected_enrollment, registration, placement) = stored_initial_dispatch_fixture(
+        &pool,
+        WorkingDirectorySelection::Exact(expected_directory.clone()),
+        None,
+    )
+    .await?;
+    let request = InitialRunnerDispatchRequest::new(
+        placement.session(),
+        TurnId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.turn)),
+        ToolAttemptId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt)),
+        expected_enrollment.runner(),
+        registration.registration().revision(),
+    );
+    let expected_arguments = approved_request(PINNED_DISPATCH_PHYSICAL_ATTEMPT)
+        .request()
+        .arguments()
+        .clone();
+    let lease = RunnerLeaseId::from_uuid(uuid(LEASE + 6));
+    let offered = store.authorize_initial_dispatch(request, lease).await?;
+    let loaded_placement = store
+        .load_placement(placement.session())
+        .await?
+        .expect("the transaction installs its pinned placement");
+    let loaded_lease = store
+        .load_lease(lease, RunnerGeneration::one())
+        .await?
+        .expect("the transaction installs its offered lease");
+    let attempt_state: String =
+        sqlx::query_scalar("SELECT state_kind FROM tool_attempt WHERE attempt_id = $1")
+            .bind(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt))
+            .fetch_one(&pool)
+            .await?;
+    let event = dispatch_initial_pin_outbox_event(&pool).await?;
+
+    assert_eq!(offered.enrollment(), expected_enrollment.enrollment());
+    assert_eq!(offered.lease().state(), RunnerLeaseState::Offered);
+    assert_eq!(offered.lease().arguments(), &expected_arguments);
+    assert_eq!(
+        offered.lease().correlation().runner,
+        expected_enrollment.runner()
+    );
+    assert_eq!(
+        offered.lease().correlation().registration_revision,
+        registration.registration().revision()
+    );
+    assert_eq!(
+        offered.lease().correlation().placement_revision,
+        placement.revision()
+    );
+    assert_eq!(
+        offered.lease().correlation().working_directory,
+        expected_directory
+    );
+    assert_eq!(loaded_placement.placement().request(), placement.request());
+    assert_eq!(loaded_placement.registration(), Some(&registration));
+    assert_eq!(loaded_placement.grant(), None);
+    assert_eq!(&loaded_lease, offered.lease());
+    assert_eq!(attempt_state, "in_flight");
+    assert_eq!(event.session(), placement.session());
+    assert_eq!(
+        event.kind(),
+        &DispatchedOutboxEventKind::RunnerStateTransition {
+            runner: expected_enrollment.runner(),
+            placement_revision: placement.revision(),
+            sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            working_directory: Some(expected_directory),
+            state: DispatchedRunnerState::Pinned,
+        }
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-043 / INV-045: the initial transaction stores a selected credential
+/// grant and binds the first lease to that exact authorization.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv045_initial_dispatch_round_trips_credential_grant()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let expected_profile = profile();
+    let (store, expected_enrollment, registration, placement) = stored_initial_dispatch_fixture(
+        &pool,
+        WorkingDirectorySelection::Exact(exact_runner_directory()),
+        Some(expected_profile.clone()),
+    )
+    .await?;
+    let request = InitialRunnerDispatchRequest::new(
+        placement.session(),
+        TurnId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.turn)),
+        ToolAttemptId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt)),
+        expected_enrollment.runner(),
+        registration.registration().revision(),
+    );
+    let lease = RunnerLeaseId::from_uuid(uuid(LEASE + 7));
+    let offered = store.authorize_initial_dispatch(request, lease).await?;
+    let loaded_placement = store
+        .load_placement(placement.session())
+        .await?
+        .expect("the transaction installs its credential-bearing pin");
+    let loaded_lease = store
+        .load_lease(lease, RunnerGeneration::one())
+        .await?
+        .expect("the credential-bearing offer round-trips");
+    let grant = loaded_placement
+        .grant()
+        .expect("the selected profile creates an initial credential grant");
+    let authorization = offered
+        .lease()
+        .credential_authorization()
+        .expect("the first lease carries the selected credential authorization");
+
+    assert_eq!(grant.session(), placement.session());
+    assert_eq!(grant.runner(), expected_enrollment.runner());
+    assert_eq!(grant.profile(), &expected_profile);
+    assert_eq!(authorization.session, placement.session());
+    assert_eq!(authorization.runner, expected_enrollment.runner());
+    assert_eq!(authorization.profile, expected_profile);
+    assert_eq!(&loaded_lease, offered.lease());
+    drop(pool);
+    Ok(())
+}
+
+/// INV-043: a runner-default initial placement has no authenticated working
+/// directory, so refusal leaves its placement, attempt, and lease untouched.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_initial_dispatch_rejects_runner_default_atomically()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, placement) =
+        stored_initial_dispatch_fixture(&pool, WorkingDirectorySelection::RunnerDefault, None)
+            .await?;
+    let request = InitialRunnerDispatchRequest::new(
+        placement.session(),
+        TurnId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.turn)),
+        ToolAttemptId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt)),
+        expected_enrollment.runner(),
+        registration.registration().revision(),
+    );
+    let lease = RunnerLeaseId::from_uuid(uuid(LEASE + 6));
+    let rejected = store
+        .authorize_initial_dispatch(request, lease)
+        .await
+        .expect_err("runner-default dispatch lacks an authenticated working directory");
+    let loaded_placement = store
+        .load_placement(placement.session())
+        .await?
+        .expect("the rejected dispatch retains its unpinned placement");
+    let attempt_state: String =
+        sqlx::query_scalar("SELECT state_kind FROM tool_attempt WHERE attempt_id = $1")
+            .bind(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt))
+            .fetch_one(&pool)
+            .await?;
+    let lease_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM runner_lease_generation WHERE lease_id = $1")
+            .bind(lease.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+
+    assert_store_domain_error(rejected, RunnerDomainError::InvalidState);
+    assert_eq!(loaded_placement.placement(), &placement);
+    assert_eq!(loaded_placement.registration(), None);
+    assert_eq!(attempt_state, "prepared");
+    assert_eq!(lease_count, 0);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-043: a daemon-selected durable request cannot be substituted into the
+/// runner transaction, and rejection rolls back every proposed effect.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_initial_dispatch_rejects_daemon_request_locus_atomically()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, placement) = stored_initial_dispatch_fixture(
+        &pool,
+        WorkingDirectorySelection::Exact(exact_runner_directory()),
+        None,
+    )
+    .await?;
+    sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER tool_request_is_append_only")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_request
+            SET execution_locus_kind = 'daemon',
+                execution_runner_id = NULL,
+                execution_registration_revision = NULL
+          WHERE request_id = $1",
+    )
+    .bind(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.request))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_request ENABLE TRIGGER tool_request_is_append_only")
+        .execute(&pool)
+        .await?;
+    let request = InitialRunnerDispatchRequest::new(
+        placement.session(),
+        TurnId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.turn)),
+        ToolAttemptId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt)),
+        expected_enrollment.runner(),
+        registration.registration().revision(),
+    );
+    let lease = RunnerLeaseId::from_uuid(uuid(LEASE + 6));
+    let rejected = store
+        .authorize_initial_dispatch(request, lease)
+        .await
+        .expect_err("a daemon-selected request cannot authorize runner execution");
+    let loaded_placement = store
+        .load_placement(placement.session())
+        .await?
+        .expect("the rejected dispatch retains its unpinned placement");
+    let attempt_state: String =
+        sqlx::query_scalar("SELECT state_kind FROM tool_attempt WHERE attempt_id = $1")
+            .bind(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt))
+            .fetch_one(&pool)
+            .await?;
+    let lease_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM runner_lease_generation WHERE lease_id = $1")
+            .bind(lease.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+
+    assert_store_domain_error(rejected, RunnerDomainError::CorrelationMismatch);
+    assert_eq!(loaded_placement.placement(), &placement);
+    assert_eq!(attempt_state, "prepared");
+    assert_eq!(lease_count, 0);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-021 / INV-043: the durable lease projection must use the immutable
 /// normalized arguments joined through its exact physical request.
 #[tokio::test]
@@ -18026,7 +18380,12 @@ async fn s31_inv043_pinned_dispatch_atomically_authorizes_attempt_and_lease()
         )
         .await?;
     terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
-    append_prepared_pinned_dispatch_attempt(&pool).await?;
+    append_prepared_pinned_dispatch_attempt(
+        &pool,
+        expected_enrollment.runner(),
+        registration.registration().revision(),
+    )
+    .await?;
     let request = PinnedRunnerDispatchRequest::new(
         pin.placement.session(),
         TurnId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.turn)),
@@ -18076,7 +18435,12 @@ async fn s31_inv043_pinned_dispatch_rejects_stale_registration_atomically()
         )
         .await?;
     terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
-    append_prepared_pinned_dispatch_attempt(&pool).await?;
+    append_prepared_pinned_dispatch_attempt(
+        &pool,
+        expected_enrollment.runner(),
+        registration.registration().revision(),
+    )
+    .await?;
     store
         .register(&expected_enrollment, advertisement())
         .await?;
@@ -18410,7 +18774,7 @@ async fn s31_inv021_inv043_generic_lease_store_rejects_completed_state()
 async fn s31_inv043_pinned_dispatch_rejects_an_unknown_exact_runner_atomically()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let (store, _expected_enrollment, registration, pin, _) =
+    let (store, expected_enrollment, registration, pin, _) =
         stored_active_pin_fixture_with_authorization(
             &pool,
             authorized,
@@ -18420,7 +18784,12 @@ async fn s31_inv043_pinned_dispatch_rejects_an_unknown_exact_runner_atomically()
         )
         .await?;
     terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
-    append_prepared_pinned_dispatch_attempt(&pool).await?;
+    append_prepared_pinned_dispatch_attempt(
+        &pool,
+        expected_enrollment.runner(),
+        registration.registration().revision(),
+    )
+    .await?;
     let request = PinnedRunnerDispatchRequest::new(
         pin.placement.session(),
         TurnId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.turn)),
@@ -18471,7 +18840,12 @@ async fn s31_inv007_inv043_pinned_dispatch_rolls_back_attempt_when_lease_is_reje
         )
         .await?;
     terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
-    append_prepared_pinned_dispatch_attempt(&pool).await?;
+    append_prepared_pinned_dispatch_attempt(
+        &pool,
+        expected_enrollment.runner(),
+        registration.registration().revision(),
+    )
+    .await?;
     let request = PinnedRunnerDispatchRequest::new(
         pin.placement.session(),
         TurnId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.turn)),
