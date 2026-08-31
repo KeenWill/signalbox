@@ -4181,6 +4181,13 @@ struct PreparedCompletePoll {
 struct TargetedPullRequest {
     number: PullRequestNumber,
     expected_head: Option<CommitSha>,
+    scope: TargetedPullRequestScope,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TargetedPullRequestScope {
+    Full,
+    CheckRollup,
 }
 
 /// One targeted refresh that has been fetched and derived but not committed.
@@ -4468,13 +4475,14 @@ fn targeted_pull_requests(
     for refresh in refreshes {
         match refresh {
             RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request } => {
-                insert_targeted_pull_request(&mut targets, *pull_request, None)?;
+                insert_targeted_pull_request(
+                    &mut targets,
+                    *pull_request,
+                    None,
+                    TargetedPullRequestScope::Full,
+                )?;
             }
             RepoWatchTargetedRefreshV1::Mergeability {
-                pull_request,
-                expected_head,
-            }
-            | RepoWatchTargetedRefreshV1::CheckRollup {
                 pull_request,
                 expected_head,
             } => {
@@ -4482,6 +4490,18 @@ fn targeted_pull_requests(
                     &mut targets,
                     *pull_request,
                     Some(expected_head.clone()),
+                    TargetedPullRequestScope::Full,
+                )?;
+            }
+            RepoWatchTargetedRefreshV1::CheckRollup {
+                pull_request,
+                expected_head,
+            } => {
+                insert_targeted_pull_request(
+                    &mut targets,
+                    *pull_request,
+                    Some(expected_head.clone()),
+                    TargetedPullRequestScope::CheckRollup,
                 )?;
             }
             RepoWatchTargetedRefreshV1::CheckRollupForCommit { head } => {
@@ -4491,6 +4511,7 @@ fn targeted_pull_requests(
                             &mut targets,
                             pull_request.context().number(),
                             Some(head.clone()),
+                            TargetedPullRequestScope::CheckRollup,
                         )?;
                     }
                 }
@@ -4500,6 +4521,7 @@ fn targeted_pull_requests(
                             &mut targets,
                             baseline.number(),
                             Some(head.clone()),
+                            TargetedPullRequestScope::CheckRollup,
                         )?;
                     }
                 }
@@ -4530,16 +4552,21 @@ fn insert_targeted_pull_request(
     targets: &mut BTreeMap<u64, TargetedPullRequest>,
     number: PullRequestNumber,
     expected_head: Option<CommitSha>,
+    scope: TargetedPullRequestScope,
 ) -> Result<(), RepositoryWatchAttemptError> {
     match targets.entry(number.get()) {
         std::collections::btree_map::Entry::Vacant(entry) => {
             entry.insert(TargetedPullRequest {
                 number,
                 expected_head,
+                scope,
             });
         }
         std::collections::btree_map::Entry::Occupied(mut entry) => {
             let retained = entry.get_mut();
+            if scope == TargetedPullRequestScope::Full {
+                retained.scope = TargetedPullRequestScope::Full;
+            }
             match (&retained.expected_head, expected_head) {
                 (None, Some(expected)) => retained.expected_head = Some(expected),
                 (Some(retained), Some(expected)) if retained != &expected => {
@@ -5474,13 +5501,36 @@ impl GitHubRepositoryPoller {
                 .position(|pull_request| pull_request.context().number() == target.number);
             let retained = retained_index.map(|index| state.pull_requests[index].clone());
             self.forget_pull_request(target.number.get());
-            let fetched = self
-                .fetch_pull_request(target.number.get(), retained.as_ref())
-                .await?;
+            let fetched = match (target.scope, retained.as_ref()) {
+                (TargetedPullRequestScope::CheckRollup, Some(retained)) => {
+                    let expected_head = target
+                        .expected_head
+                        .as_ref()
+                        .ok_or(RepositoryWatchAttemptError::Normalization)?;
+                    let Some(fetched) = self
+                        .fetch_pull_request_check_rollup(
+                            target.number.get(),
+                            expected_head,
+                            retained,
+                        )
+                        .await?
+                    else {
+                        superseded_targets.push(target.number);
+                        continue;
+                    };
+                    fetched
+                }
+                (TargetedPullRequestScope::Full, _)
+                | (TargetedPullRequestScope::CheckRollup, None) => {
+                    self.fetch_pull_request(target.number.get(), retained.as_ref())
+                        .await?
+                        .state
+                }
+            };
             if target
                 .expected_head
                 .as_ref()
-                .is_some_and(|expected| fetched.state.context().head_sha() != expected)
+                .is_some_and(|expected| fetched.context().head_sha() != expected)
             {
                 // The provider has already moved past the head this target
                 // expected. A multi-target refresh keeps reconciling the
@@ -5495,8 +5545,8 @@ impl GitHubRepositoryPoller {
                 continue;
             }
             match retained_index {
-                Some(index) => state.pull_requests[index] = fetched.state,
-                None => state.pull_requests.push(fetched.state),
+                Some(index) => state.pull_requests[index] = fetched,
+                None => state.pull_requests.push(fetched),
             }
         }
         if superseded_targets.len() == targets.len() {
@@ -5976,6 +6026,56 @@ impl GitHubRepositoryPoller {
             settlement,
             convergence_evidence,
         })
+    }
+
+    /// Refreshes the only canonical facts a check delivery cannot carry.
+    ///
+    /// A full pull-request hydration also reads every review, thread, comment,
+    /// and reaction. Those resources are unrelated to a commit's check rollup,
+    /// and old pull requests can make that read larger than the entire webhook
+    /// drain deadline. The detail request retains the provider head guard while
+    /// the committed observation preserves every non-check fact it already
+    /// owns.
+    async fn fetch_pull_request_check_rollup(
+        &self,
+        number: u64,
+        expected_head: &CommitSha,
+        previous_pull_request: &RepoWatchPullRequestState,
+    ) -> Result<Option<RepoWatchPullRequestState>, RepositoryWatchAttemptError> {
+        let number_text = number.to_string();
+        let detail: PullResponse = self
+            .conditional_json(
+                "pull",
+                Method::GET,
+                self.repository_url(&["pulls", &number_text], &[])?,
+                None,
+            )
+            .await?;
+        if detail.number != number {
+            return Err(RepositoryWatchAttemptError::InvalidResponse);
+        }
+        let provider_head = CommitSha::try_new(detail.head.sha)
+            .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+        if &provider_head != expected_head {
+            return Ok(None);
+        }
+        let (completed_check_suites, check_suite_ids) =
+            self.fetch_check_suites(expected_head).await?;
+        let (completed_check_runs, _) = self
+            .fetch_check_runs(expected_head, &check_suite_ids)
+            .await?;
+        RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
+            context: previous_pull_request.context().clone(),
+            lifecycle: previous_pull_request.lifecycle(),
+            mergeable_state: previous_pull_request.mergeable_state(),
+            completed_check_suites,
+            completed_check_runs,
+            reviews: previous_pull_request.reviews().to_vec(),
+            threads: previous_pull_request.threads().to_vec(),
+            reactions: previous_pull_request.reactions().to_vec(),
+        })
+        .map(Some)
+        .map_err(|_| RepositoryWatchAttemptError::Normalization)
     }
 
     async fn fetch_check_suites(
@@ -8409,7 +8509,7 @@ mod tests {
         RepositoryWatchChildExit, RepositoryWatchRuntimeConstructionError,
         RepositoryWatchRuntimeError, RepositoryWatchTask, RepositoryWatchWake, ResourceKey,
         ReviewState, StatusCode, TargetedPollOutcome, TargetedPullRequest,
-        TargetedRefreshSettlement, Url, UuidV7RepoWatchEventIdGenerator,
+        TargetedPullRequestScope, TargetedRefreshSettlement, Url, UuidV7RepoWatchEventIdGenerator,
         WEBHOOK_CURSOR_SIZING_TIMEOUT, WEBHOOK_DRAIN_ATTEMPT_TIMEOUT,
         WEBHOOK_DRAIN_MAX_ATTEMPT_TIMEOUT, WEBHOOK_DRAIN_RETRY_DELAY,
         WEBHOOK_DRAIN_RETRY_MAX_DELAY, WEBHOOK_DRAIN_TIMEOUT_PAYLOAD_QUANTUM_BYTES,
@@ -10218,6 +10318,16 @@ mod tests {
             .collect()
     }
 
+    fn check_rollup_responses() -> Vec<ScriptedResponse> {
+        complete_pull_request_responses()
+            .into_iter()
+            // Check-rollup refreshes read only pull detail, check suites, and
+            // check runs; the next full-hydration response is deliberately not
+            // available, so an accidental review request fails this fixture.
+            .take(3)
+            .collect()
+    }
+
     /// Descends as the pull number ascends, so an implementation that
     /// accidentally orders fetched pull requests by head identity or head
     /// branch reverses the expected number order instead of matching it.
@@ -10703,6 +10813,7 @@ mod tests {
             expected_head: Some(
                 CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture head SHA is canonical"),
             ),
+            scope: TargetedPullRequestScope::Full,
         };
 
         let refreshed = fixture
@@ -10751,6 +10862,7 @@ mod tests {
             expected_head: Some(
                 CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture head SHA is canonical"),
             ),
+            scope: TargetedPullRequestScope::Full,
         };
 
         fixture
@@ -10766,6 +10878,37 @@ mod tests {
                 .freshness()
                 .contains_key(&UNTOUCHED_PULL_NUMBER),
             "targeted refresh without survivors preserves untouched freshness"
+        );
+    }
+
+    #[tokio::test]
+    async fn targeted_check_rollup_uses_only_check_resources() {
+        let previous = complete_typed_observation().await;
+        let server = ScriptedServer::start(check_rollup_responses()).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let target = TargetedPullRequest {
+            number: PullRequestNumber::new(
+                NonZeroU64::new(PULL_NUMBER).expect("fixture pull-request number is positive"),
+            ),
+            expected_head: Some(
+                CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture head SHA is canonical"),
+            ),
+            scope: TargetedPullRequestScope::CheckRollup,
+        };
+
+        let refreshed = fixture
+            .poller
+            .poll_targeted_pull_requests_against_cursor(&previous, &[target])
+            .await
+            .expect("targeted check refresh succeeds");
+
+        server.finish().await;
+        assert_eq!(
+            refreshed,
+            TargetedPollOutcome::Observation {
+                observation: previous,
+                superseded_targets: Vec::new(),
+            }
         );
     }
 
@@ -10909,6 +11052,7 @@ mod tests {
                 CommitSha::try_new(String::from("beefbeefbeefbeefbeefbeefbeefbeefbeefbeef"))
                     .expect("fixture head SHA is canonical"),
             ),
+            scope: TargetedPullRequestScope::Full,
         };
 
         let refreshed = fixture
@@ -10945,6 +11089,7 @@ mod tests {
             vec![TargetedPullRequest {
                 number: pull_request,
                 expected_head: Some(expected_head),
+                scope: TargetedPullRequestScope::Full,
             }]
         );
     }
@@ -10997,6 +11142,7 @@ mod tests {
             vec![TargetedPullRequest {
                 number: baseline.number(),
                 expected_head: Some(baseline.head_sha().clone()),
+                scope: TargetedPullRequestScope::CheckRollup,
             }]
         );
     }
