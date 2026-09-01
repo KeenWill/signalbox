@@ -171,7 +171,9 @@ jobs:
     # replaces the pending one when a third arrives, regardless of
     # cancel-in-progress — failing a required check that never tested its own
     # head. The workflow-level group above already releases a run's slot only
-    # when a newer push supersedes the *same* ref. A concurrent real exchange
+    # when the *same* ref is superseded — a pull-request run by a newer update
+    # to its pull request, a non-main dispatch by a newer dispatch on that
+    # ref; main pushes never cancel. A concurrent real exchange
     # costs a small fraction of a cent; required-check integrity is worth more
     # than serializing that spend.
     runs-on: signalbox

@@ -741,12 +741,14 @@ comparisons above.
 
 The workflow's own concurrency is a single group keyed to the pull request ref
 (the run id for any other event on `main`; a per-event-and-ref group, canceling
-superseded runs, for a manual dispatch on any other ref), so a run superseded
-only by a newer push to the same ref releases its slot, exactly as the Codex
-smoke's own workflow-level group does. There is deliberately no additional
-job-level group serializing the live exchange itself: a fixed inner group shared
-across every ref — which an earlier revision of this workflow carried — lets an
-unrelated smoke-required run evict this job's queued slot even though
+superseded runs, for a manual dispatch on any other ref), so a slot is released
+only when the same ref is superseded: a pull-request run by a newer update to
+its pull request, a non-main dispatch by a newer dispatch on that ref — never a
+push to `main`, which keeps every run. The Codex smoke's own workflow-level
+group behaves identically. There is deliberately no additional job-level group
+serializing the live exchange itself: a fixed inner group shared across every
+ref — which an earlier revision of this workflow carried — lets an unrelated
+smoke-required run evict this job's queued slot even though
 `cancel-in-progress: false` does not protect it, because GitHub keeps at most
 one running and one pending member per concurrency group and replaces the
 pending one when a third arrives. That would fail a required check that never
