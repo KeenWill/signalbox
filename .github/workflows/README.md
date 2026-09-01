@@ -19,7 +19,8 @@ Both self-hosted scale sets are defined in `KeenWill/mono` under
 
 ## The routing rule
 
-Merge-gating self-hosted Linux jobs use one canonical expression:
+Self-hosted-eligible Linux jobs — merge-gating or report-only — use one
+canonical expression, unless pinned in the sections below:
 
 ```yaml
 runs-on: ${{ github.event_name == 'pull_request'
@@ -47,14 +48,16 @@ so shards cannot drift from each other.
 
 ## Jobs pinned to a self-hosted pool
 
-The report-only smoke and eval workflows hard-code their pool instead of
-carrying the expression, each with its own (weaker) gate:
+The smoke and eval workflows hard-code their pool instead of carrying the
+expression, each with its own (weaker) gate. The provider smokes merge-gate the
+pull requests they apply to — each `required` aggregate is a binding check —
+while the tool-eval and tool-smoke jobs are report-only:
 
-| Jobs                                                                                                           | Pool                             | Gate on proposed code                                                                                                                                                                |
-| -------------------------------------------------------------------------------------------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `anthropic-smoke.yml`, `claude-smoke.yml`, `codex-smoke.yml`, `openai-smoke.yml` — `gate`, `smoke`, `required` | `signalbox`                      | `smoke` skips fork pull requests (same-repo check only), so bot-authored same-repo pull requests still run here; `gate` checks out the head for path inspection without executing it |
-| `tool-evals.yml` — `eligibility`, and the git/workspace/web `eval` families                                    | `signalbox` / `signalbox-docker` | `eval` skips fork pull requests and Dependabot                                                                                                                                       |
-| `tool-smokes.yml` — `live-smokes`, `web-smoke`                                                                 | `signalbox`                      | none today: a fork pull request touching its paths executes there (#1461 tracks closing this)                                                                                        |
+| Jobs                                                                                                           | Pool                             | Gate on proposed code                                                                                                                                                                                |
+| -------------------------------------------------------------------------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `anthropic-smoke.yml`, `claude-smoke.yml`, `codex-smoke.yml`, `openai-smoke.yml` — `gate`, `smoke`, `required` | `signalbox`                      | `smoke` skips fork pull requests (same-repo check only), so bot-authored same-repo pull requests still run here; `gate` checks out the head for path inspection without executing it                 |
+| `tool-evals.yml` — `eligibility`, and the git/workspace/web `eval` families                                    | `signalbox` / `signalbox-docker` | `eval` skips fork pull requests; it skips Dependabot only by `github.actor`, so a human rerunning or reopening a bot pull request masks the bot — the author-not-actor warning above applies (#1461) |
+| `tool-smokes.yml` — `live-smokes`, `web-smoke`                                                                 | `signalbox`                      | none today: a fork pull request touching its paths executes there (#1461 tracks closing this)                                                                                                        |
 
 ## Jobs pinned to GitHub-hosted runners
 
