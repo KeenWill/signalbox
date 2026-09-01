@@ -183,8 +183,9 @@ MARKED_START = ".with_labels(disposable_test_container_labels())"
 CHAIN_LINE_LIMIT = 40
 
 # Re-verified against the head; a scan that silently matched nothing would
-# otherwise satisfy the marking test with no evidence at all.
-CONTAINER_START_SITES = 43
+# otherwise satisfy the marking test with no evidence at all. The migration
+# reset removed five chain-walking test files that each started a container.
+CONTAINER_START_SITES = 38
 
 
 def container_start_sites() -> tuple[list[str], list[str]]:
