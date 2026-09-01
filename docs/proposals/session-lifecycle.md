@@ -1,13 +1,16 @@
 # Session lifecycle
 
 **Proposed for owner decision; design only.** Nothing on this page is
-implemented. Every paragraph is marked **Proposed behavior** and describes what
-the daemon must do once this specification is ratified. Citations point at the
-written record: the 2026-09-01 live-DB census (census §N), the failure taxonomy
-of 750 deduped incidents in 47 classes (taxonomy §N or class letter), the
-ownership decision brief (brief §N), the seam study (study B §N), the compaction
-study (study C §N), and the owner-intent addendum (intent item N). Owner rulings
-cited here are binding and are not re-argued.
+implemented. Normative paragraphs are marked **Proposed behavior** and describe
+what the daemon must do once this specification is ratified; unmarked prose is
+context. Parenthetical citations — the 2026-09-01 live-DB census (census §N),
+the failure taxonomy of 750 deduped incidents in 47 classes (taxonomy §N or
+class letter), the ownership decision brief (brief §N), the seam study (study B
+§N), the compaction study (study C §N), and the owner-intent addendum (intent
+item N) — point at the owner's own private working records. Under the
+public-source rule (AGENTS.md) they are provenance notes, never normative
+sources: every normative statement is stated in full on this page and stands
+without them. Owner rulings restated here are binding and are not re-argued.
 
 This specification changes when capabilities land, not which capabilities exist:
 reliability work lands first, and no wanted feature is removed (intent item 1).
@@ -28,7 +31,7 @@ on any lifecycle row, so none of this was visible without hand-written SQL
 (census §6.1, §6.2). The owner's target: less than 10% of dispatched sessions
 failing to reach their finish point, then 2–5% (intent item 2).
 
-Three rules apply to every section below.
+Two rules apply to every section below.
 
 **Proposed behavior.** Lifecycle state, deadlines, budgets, and recovery live in
 daemon core. No module implements or re-implements any of them (intent item 8;
@@ -39,14 +42,11 @@ requests a core change.
 budgets, dispatch deadlines, watchdog bounds, payload budgets, retry backoffs —
 is defined in config or the database, never hardcoded (intent item 17). Values
 named in this text are example defaults. Config may set any such bound to none,
-meaning unbounded. The only hardcoded limits permitted are guards against
+meaning unbounded; §1 defines how an unbounded deadline satisfies the
+owned-session invariant. The only hardcoded limits permitted are guards against
 algorithmic explosion — unbounded loops, unbounded recursion, unbounded queue
 growth (intent item 17). A new lifecycle limit is a product decision; it is
 surfaced to the owner before it ships (intent item 18).
-
-**Proposed behavior.** This specification never says "fleet." It names the
-population it means: the owned-session population, the dispatched sessions of
-one module, or all sessions the daemon holds (intent item 25).
 
 ## 1. Session state machine
 
@@ -57,7 +57,7 @@ session state exists (census §6.1); the nearest thing is the web queue's derive
 `AttentionState` classifier. Once the column lands, the classifier becomes a
 projection of these states plus turn phase — never an independent machine.
 
-```
+```text
 CREATED ─┬─→ DISPATCHED ─→ ACTIVE
          └─→ TERMINAL{retired}                     (held start-gate expiry, §10)
 DISPATCHED ─→ TERMINAL{retired}                    (dispatch-deadline expiry, §10)
@@ -102,7 +102,11 @@ goal-validity recheck at a config-sourced interval, transitioning to
 **Proposed behavior.** Invariant for owned sessions: every non-terminal state of
 an owned session carries exactly one armed deadline whose expiry is a defined
 transition (brief §4.1). "No armed deadline on a non-terminal owned session" is
-a detectable invariant violation.
+a detectable invariant violation. A deadline whose governing bound is configured
+none satisfies the invariant explicitly, not silently: the deadline record
+exists and is marked unbounded — a deliberate, journaled configuration choice —
+and §12's alarm never counts it. Only a missing deadline record is the
+violation.
 
 **Proposed behavior.** `parked` is the single state in which an owned session
 may wait on a human. It carries a machine-readable cause and an owner. The
@@ -149,10 +153,16 @@ recovery as normative behavior:
   declared terminal outcome (§6) — so an unverified achieve claim is not
   recordable. Recovery: none; slots and worktrees are released.
 - `failed_retryable{cause}` — provider transient, quota, overload,
-  infrastructure blip. Recovery: budgeted backoff; quota causes trigger
-  credential-pool rotation. (Today no quota trigger is wired to the pool
-  machinery: 1,552 `quota_exhausted` calls and zero credential-pool actions —
-  census §3a; taxonomy G1.) Each retry charges the cycle budget (§9).
+  infrastructure blip. A retryable failure on a live owned session does not
+  terminalize it: the session passes through `recovering` or `blocked` (§1)
+  while budgeted retries run, and `failed_retryable` is recorded only when the
+  session closes with the retryable cause standing — retry budget exhausted, or
+  a park closed as failed. Recovery at the point of failure: budgeted backoff;
+  quota causes trigger credential-pool rotation. (Today no quota trigger is
+  wired to the pool machinery: 1,552 `quota_exhausted` calls and zero
+  credential-pool actions — census §3a; taxonomy G1.) Retries charge the cycle
+  budget only under §9's fault attribution: a provider transient, quota
+  exhaustion, or infrastructure blip the session did not cause charges nothing.
 - `failed_structural{cause}` — the same input will fail again: compaction wall,
   broken toolchain, moderation block whose resume re-trips the same flag
   (taxonomy G8, C4). Recovery: never auto-resume. The session parks with the
@@ -166,8 +176,11 @@ recovery as normative behavior:
   was re-dispatched minutes later because the allowlist was not pruned).
   Stopping retires queued turns legally (§10).
 - `superseded{by}` — a newer session owns the work, or the goal itself is no
-  longer valid. Recovery: release everything; further escalations and
-  notifications are forbidden.
+  longer valid. `by` is optional: it names the successor when one exists — the
+  `supersede{successor}` command (§7) always names one — and is empty exactly
+  when the validity recheck (§1) finds the work gone with nothing replacing it.
+  Recovery: release everything; further escalations and notifications are
+  forbidden.
 - `abandoned` — an operator writes off a parked session. Recovery: cleanup
   obligations for worktrees, containers, and slots (taxonomy G5, G7 debris).
 - `retired` — the session never did the work and never will: dispatch deadline
@@ -194,15 +207,20 @@ process-local ledgers. A daemon restart today resets every staleness clock
 exactly when restarts are the leading creator of stuck sessions (taxonomy §3;
 B1).
 
-**Proposed behavior.** `web_usage_call_projection.recorded_at` is fixed: all
-149,773 backfilled rows carry migration-day stamps, not event times (census §0;
-intent item 22). Backfilled rows receive their real times where derivable — the
-UUIDv7 identity carries the creation instant — and a null with an explicit
-backfill marker where not. The null requires relaxing the column's `NOT NULL`
-and representability CHECK. The same rule governs the new outbox `recorded_at`
-on a database that is not reset (§14): rows from before the change never receive
-a fabricated stamp — the constraint binds new rows only. A projection does not
-outlive the conversations it projects (intent item 22).
+**Proposed behavior.** `web_usage_call_projection.recorded_at` is fixed. The
+defect: today every one of the 149,773 backfilled rows carries a migration-day
+stamp, not its event time (census §0; intent item 22). The fix: backfilled rows
+receive their real times where derivable — the UUIDv7 identity carries the
+creation instant — and a null with an explicit backfill marker where not. The
+null requires relaxing the column's `NOT NULL` and representability CHECK, and
+the same change migrates the usage read surface: the projection reader decodes
+`recorded_at` as non-optional and paginates by a `(recorded_at, model_call_id)`
+keyset (`crates/persistence/src/usage.rs`), so marked rows get an explicit
+ordering and cursor rule — a null key never reaches an unmigrated reader. One
+rule is shared with the new outbox `recorded_at` on a database that is not reset
+(§14): rows from before a change never receive a fabricated stamp — the outbox
+`NOT NULL` constraint binds new rows only. A projection does not outlive the
+conversations it projects (intent item 22).
 
 ## 4. Mandatory cause classification
 
@@ -324,7 +342,7 @@ parked session.
 **Proposed behavior.** The existing goal-command operation named `supersede` —
 new goal generation within the same session — is unrelated to the session
 outcome `superseded{by}` and keeps its machinery unchanged. This specification
-calls it goal replacement and never uses `supersede` for it.
+calls it goal replacement.
 
 **Proposed behavior.** Core mints all identities. No module pre-allocates turn,
 input, or frontier identities inside its own transaction (study B §1: today's
@@ -354,10 +372,11 @@ owner can send a message at any point (intent item 10).
 
 **Proposed behavior.** An injection into any non-terminal state queues durably
 and is delivered at the next legal boundary. It is never rejected for state and
-never lost. The injector receives a durable `injection_settled` receipt
-(taxonomy §4.4). The enumerated violations this repairs: injections rejected
-while awaiting approval, rejected while awaiting recovery, silently dropped on
-resume, and swallowed by the composer (taxonomy §4.4).
+never silently lost: every accepted injection settles with a durable
+`injection_settled` receipt whose closed outcomes include `delivered` and
+`not_delivered` (taxonomy §4.4). The enumerated violations this repairs:
+injections rejected while awaiting approval, rejected while awaiting recovery,
+silently dropped on resume, and swallowed by the composer (taxonomy §4.4).
 
 **Proposed behavior.** Pending injections never block terminalization.
 Terminalization closes pending steering with a `not_delivered` receipt; pending
@@ -372,6 +391,11 @@ a block the session did not cause charges nothing (§9; intent item 18).
 **Proposed behavior.** Approval decisions are injections: durable, surviving
 turn boundaries, socket loss, and drains (taxonomy A4: 110 stuck approvals; A6:
 decision-channel failures, including drains removing the socket mid-decision).
+Durability changes the transport, not the correlation contract: a decision stays
+bound to the exact tool request it decides, as the existing `DecideToolRequest`
+contract already requires. A decision arriving after its request was decided, or
+after the turn moved past that request, settles `not_delivered` — it is never
+applied to a different request.
 
 **Proposed behavior.** The web UI exposes send-message on every live session
 (intent item 10).
@@ -441,9 +465,13 @@ retires the session (brief §4.10).
 
 **Proposed behavior.** The compaction funnel is fully queryable from durable
 state: requested, prepared, applied, failed, each stamped (§3), with input size
-and fit result on the failure path. Today the only durable compaction-failure
-trace is 23 `goal_execution_failure_recovery` rows, all with the single cause
-`context_compaction_input_does_not_fit` (census §3f).
+and fit result on the failure path. The funnel stages map onto §3's stamps
+one-to-one: `requested` is the accepted compaction command, `prepared` and
+`in_flight` are the call lifecycle, `applied` is the application row, and
+`failed` is a call reaching `terminal` with no application row — one
+classification per compaction, however it is queried. Today the only durable
+compaction-failure trace is 23 `goal_execution_failure_recovery` rows, all with
+the single cause `context_compaction_input_does_not_fit` (census §3f).
 
 **Proposed behavior.** Every compaction records whether it was vendor or custom,
 and on which adapter. The owner ruling covers all four adapters — codex_cli,
@@ -497,7 +525,8 @@ session that never terminalizes never enters any weekly cohort.
 `nonterminal_past_deadline` counts owned sessions whose armed deadline has
 expired without its transition firing, plus owned sessions holding no armed
 deadline at all — the §1 invariant violation, wired as an alarm with target
-zero. The 281-session class this specification opens with is visible here, not
+zero. A deadline explicitly configured unbounded (§1) is not counted; a missing
+one is. The 281-session class this specification opens with is visible here, not
 in the headline.
 
 **Proposed behavior.** The substrate-v0 gate requires
@@ -526,10 +555,13 @@ factor; the condition list and the factor live in config. A slow substrate
 therefore does not read as a dead session (taxonomy §2: eight healthy turns
 reaped during a 6.9 GB backup).
 
-**Proposed behavior.** Every deadline expiry is a transition, and the escalation
-target is `parked` — the single enumerable human-attention state (§1). No
-deadline expiry is a silent hold, and none terminalizes work whose operation may
-be live.
+**Proposed behavior.** Every deadline expiry is a transition. For a session past
+admission, the escalation target is `parked` — the single enumerable
+human-attention state (§1). The two admission deadlines are the exception: a
+held `start_gate` and the dispatch deadline on `dispatched` terminalize as
+`retired` (§10) — before first activity nothing live is guarded and no human
+attention is owed. No deadline expiry is a silent hold, and none terminalizes
+work whose operation may be live.
 
 **Proposed behavior.** No staleness machinery exists outside core. Modules and
 the future substrate subscribe to deadline events; they do not grow their own
@@ -557,10 +589,12 @@ with a template or a `commissioned_dispatch` row receive
 receive `interactive`; the census window holds zero `delegated` rows (census §1,
 §6.7).
 
-**Proposed behavior.** One-time closure under the new vocabulary: the 52
-stranded queued-turn sessions close as `terminal{retired}` via §10's legal
-disposition; the 229 zombies close as `terminal{retired}` with cause
-`dispatch_deadline_expired`, backfilled (census §2; brief §4.14).
+**Proposed behavior.** One-time closure under the new vocabulary: each of the 52
+stranded queued-turn sessions closes in one transaction — the queued turn
+terminalizes `retired` with a backfill-marked cause, and its session closes
+`terminal{retired}` — §10's legal disposition at both levels, leaving no
+non-terminal turn behind; the 229 zombies close as `terminal{retired}` with
+cause `dispatch_deadline_expired`, backfilled (census §2; brief §4.14).
 
 **Proposed behavior.** The dogfood DB never fences a good schema change (intent
 item 21). At most, an agent shoehorns old rows later.
@@ -572,15 +606,21 @@ collapse folds back in (intent item 23).
 
 ## 15. Dispatch payload budget
 
-**Proposed behavior.** Every session records the size of its initial payload at
-creation: token count as estimated for the target model, and byte count, stored
-durably on the session row (brief §3 fork 3; intent item 13). No dispatch path
-may skip this.
+**Proposed behavior.** Every dispatched session records the size of its initial
+payload at creation: token count as estimated for the target model, and byte
+count, stored durably on the session row (brief §3 fork 3; intent item 13). No
+dispatch path may skip this. An interactive session has no payload at creation
+(§1); it records the same measurements when its first input is accepted — that
+input is what the session was handed.
 
 **Proposed behavior.** Each dispatch template carries a config-sourced payload
 budget (intent item 17). A dispatch whose payload exceeds the budget is recorded
 as a typed dispatch defect attributed to the dispatching module — not as a
-session failure. The owner's reframe binds this section: frequent walls mean the
+session failure. The budget is an alarm threshold, not an admission gate:
+`create_session` is not rejected for it, and the session proceeds normally under
+§1 — a rejecting gate would be new guard machinery owing §13's written
+safety-backfire check. The defect record and §12's `wall_rate` carry the
+enforcement. The owner's reframe binds this section: frequent walls mean the
 payload was too large to begin with — judge passes and fixup briefs handed too
 many comments or too much commit diff history — not organic context growth
 (intent item 13). Payload sizing is fixed first; the wall path is the backstop.
