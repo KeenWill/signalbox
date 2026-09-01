@@ -57,7 +57,8 @@ ACTIVE ─┬─→ WAITING{kind, deadline, waker}   → ACTIVE | PARKED (deadli
         ├─→ RECOVERING{op, bound}            → ACTIVE | PARKED
         ├─→ BLOCKED{reason, cycle}           → ACTIVE | PARKED
         └─→ TERMINAL{outcome}
-PARKED{cause, owner, since} → ACTIVE (operator or coordinator action)
+PARKED{cause, owner, since} → ACTIVE | WAITING | RECOVERING
+                              (operator/coordinator action; the suspended phase's state, §1)
                             | TERMINAL{abandoned | failed_retryable | failed_structural
                                        | failed_unknown | superseded}
 any non-terminal state → TERMINAL{superseded | stopped}
@@ -82,7 +83,8 @@ escalate to `parked` — never a silent hold. This closes the 110 stuck approval
 and the 10 external-gate stalls: an expired approval escalates and survives turn
 boundaries instead of failing the turn (17 headless-escalation kills).
 
-**Proposed behavior.** `active` carries two obligations beyond a stall deadline.
+**Proposed behavior.** For an owned session, `active` carries two obligations
+beyond a stall deadline; an unmonitored conversation carries neither, per §6.
 First, a progress budget of model calls and wall-clock time: the budget
 decrements per model call and per elapsed interval, and resets when progress is
 recorded — a turn completing, or a goal event advancing the goal. Exhaustion of
@@ -181,7 +183,10 @@ behavior:
 - `stopped{actor, sticky}` — a human or rule stop. Sticky: re-dispatch is
   suppressed until the dispatch source is updated (a stopped goal was
   re-dispatched minutes later because the allowlist was not pruned). Stopping
-  retires queued turns legally (§10).
+  retires queued turns legally (§10) and settles a live turn as `cancelled` with
+  cause `stopped` in the same transaction, so the two machines move together
+  (§1); an in-flight operation is cancelled or disowned by the existing turn
+  cancellation machinery, never orphaned.
 - `superseded{by}` — a newer session owns the work, or the goal itself is no
   longer valid. `by` is optional: it names the successor when one exists — the
   `supersede{successor}` command (§7) always names one — and is empty exactly
@@ -317,9 +322,13 @@ be made prune-safe by a cursor: advancing it permits deleting history later
 reads still need, and never advancing it pins the floor. The timeline therefore
 becomes a durable projection in the same change that turns on pruning, its
 cursor advancing only behind projected rows. This floor and exemption are the
-ratified persistence-protocol amendment. Retention repeals only the append-only
-rule; the structural fix for outbox growth remains frontier normalization, the
-owner's standing 2026-08-23 ruling.
+ratified persistence-protocol amendment. The recorded open question on
+update-event retention and pruning (docs/open-questions.md) is decided in
+substance by that ruling; its formal closure — the owning-page spec diff — lands
+at the bottom of the implementing stack, per the foundation rule, so no page on
+`main` describes unimplemented pruning as implemented. Retention repeals only
+the append-only rule; the structural fix for outbox growth remains frontier
+normalization, the owner's standing 2026-08-23 ruling.
 
 ## 6. Provenance and ownership
 
@@ -355,25 +364,27 @@ the record.
 ## 7. Command surface
 
 **Proposed behavior.** The core command surface for session lifecycle is:
-`create_session{template, provenance, start_gate, ownership}`, `release_start`,
-`submit_input`, `goal{attach | resume_with_guidance | stop{sticky}}`, `adopt`,
-`release`. `adopt` declares the finish condition an owned session owes (§2) when
-the session does not already carry one; an adopt that would leave an owned
-session with no finish condition is rejected. `create_session` with owned
-ownership obeys the same rule: the finish condition comes from the template or
-an explicit command field, and a creation that would commit an owned session
-without one is rejected before any row exists. This specification adds five
-commands to that list so that every §2 outcome and every §1 transition is
-reachable; additions are product decisions, surfaced here rather than shipped
-silently. The five: `stop{actor, sticky}` at session level, because a goal-less
-owned session needs a stop path; `supersede{successor}`, the closure a
-respawning client issues against its predecessor; `abandon`, the operator
-write-off of a parked session; `close_failed`, the operator closure of a parked
-session as failed with its standing cause — `failed_retryable`,
-`failed_structural`, or `failed_unknown` (§2); and `resume`, the operator or
-coordinator transition of a parked session back to `active` where no goal
-applies — a parked goal session resumes through `goal{resume_with_guidance}`
-(§9).
+`create_session{template, provenance, start_gate, ownership, finish_condition}`,
+`release_start`, `submit_input`,
+`goal{attach | resume_with_guidance | stop{sticky}}`, `adopt`, `release`.
+`adopt` declares the finish condition an owned session owes (§2) when the
+session does not already carry one; an adopt that would leave an owned session
+with no finish condition is rejected. `create_session` with owned ownership
+obeys the same rule: the finish condition comes from the template or an explicit
+command field, and a creation that would commit an owned session without one is
+rejected before any row exists. This specification adds five commands to that
+list so that every §2 outcome and every §1 transition is reachable; additions
+are product decisions, surfaced here rather than shipped silently. The five:
+`stop{actor, sticky}` at session level, because a goal-less owned session needs
+a stop path; `supersede{successor}`, the closure a respawning client issues
+against its predecessor; `abandon`, the operator write-off of a parked session;
+`close_failed`, the operator closure of a parked session as failed with its
+standing cause — `failed_retryable`, `failed_structural`, or `failed_unknown`
+(§2); and `resume`, the operator or coordinator transition of a parked session
+back to the state §1's mapping derives from its suspended turn's phase —
+`active`, `waiting`, or `recovering`; `active` when no turn was suspended —
+where no goal applies. A parked goal session resumes through
+`goal{resume_with_guidance}` (§9).
 
 **Proposed behavior.** The existing goal-command operation named `supersede` —
 new goal generation within the same session — is unrelated to the session
@@ -486,7 +497,7 @@ sessions that were created, never ran a turn, and sat idle forever with a
 lifespan of 0.0 hours.
 
 **Proposed behavior.** A held `start_gate` carries its own deadline; expiry
-retires the session.
+retires the session with typed cause `start_gate_deadline_expired`.
 
 **Proposed behavior.** An owned session in `created` with no held start gate —
 an owned interactive creation — carries the same admission obligation: a
@@ -620,7 +631,11 @@ receive states by derived backfill: state computed from the highest-position
 turn joined with the last goal event — the two derivations merged. Where the two
 disagree (496 sessions pair a completed last turn with a blocked goal), the goal
 event governs, because the goal record is the finish signal. Every derived state
-is stamped with a backfill marker.
+is stamped with a backfill marker. A historical goal ending `achieved` backfills
+as `achieved_verified` only under that marker: the migration re-runs no finish
+check — sessions have been declared achieved on non-converged heads (§2) — so
+the marker means declared, not re-verified, and marked rows never enter §12's
+weekly cohorts. No fabricated success reaches the headline.
 
 **Proposed behavior.** Provenance backfills under the same conditional: sessions
 with a template or a `commissioned_dispatch` row receive
@@ -637,7 +652,10 @@ stranded queued-turn sessions closes in one transaction — the queued turn
 terminalizes `retired` with a backfill-marked cause, and its session closes
 `terminal{retired}` — §10's legal disposition at both levels, leaving no
 non-terminal turn behind; the 229 zombies close as `terminal{retired}` with
-cause `dispatch_deadline_expired`, backfilled.
+cause `dispatch_deadline_expired`, backfilled. The two cohorts are disjoint by
+construction — the 281 stuck sessions partition exactly into 52 with a queued
+turn and 229 with no turn at all — so the closure predicates are mutually
+exclusive and each session receives exactly one idempotent terminal update.
 
 **Proposed behavior.** The dogfood DB never fences a good schema change. At
 most, an agent shoehorns old rows later.
