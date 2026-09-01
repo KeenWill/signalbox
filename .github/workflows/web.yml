@@ -11,6 +11,12 @@ on:
       - "clients/web/**"
       - ".github/workflows/web.yml"
 
+concurrency:
+  group: >-
+    web-${{ github.event_name == 'pull_request' && format('pr-{0}', github.ref)
+    || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 

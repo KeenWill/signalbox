@@ -315,6 +315,10 @@ manifest instead of restating it, and the docs-consistency check fails when the
 manifest, the workflow, and the command documented above disagree. Change a
 suite there, not in the workflow.
 
+[`.github/workflows/README.md`](.github/workflows/README.md) owns the CI
+runner-routing contract: which runner every workflow job uses, and why. Change a
+job's `runs-on` and that file in the same pull request.
+
 Size validation to the change. A documentation-only change runs the
 documentation bar below; a change to code, tests, dependency manifests,
 generated contracts, or any other semantic surface runs the complete bar. CI is

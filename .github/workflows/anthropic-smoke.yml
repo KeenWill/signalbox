@@ -50,15 +50,19 @@ on:
     - cron: "0 13 * * *"
     - cron: "0 1 * * *"
 
-# Superseded pull-request runs release their slots against the public
-# concurrency cap. Every other event takes a group of its own: sharing one
-# group would let a third run cancel a second still pending behind the first,
-# which `cancel-in-progress: false` does not prevent.
+# Superseded runs release their slots against the public concurrency cap:
+# pull-request runs group per PR, and other non-main runs group per
+# event+ref (today only workflow_dispatch reaches that arm — every push
+# trigger in this repo is filtered to main). Main runs each take a group
+# of their own and are never canceled: sharing one group would let a third
+# run cancel a second still pending behind the first, which
+# `cancel-in-progress: false` does not prevent.
 concurrency:
   group: >-
-    anthropic-smoke-${{ github.event_name == 'pull_request'
-    && github.ref || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    anthropic-smoke-${{ github.event_name == 'pull_request' && format('pr-{0}', github.ref)
+    || github.ref == 'refs/heads/main' && github.run_id
+    || format('{0}-{1}', github.event_name, github.ref) }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions: {}
 
@@ -143,7 +147,9 @@ jobs:
     # replaces the pending one when a third arrives, regardless of
     # cancel-in-progress — failing a required check that never tested its own
     # head. The workflow-level group above already releases a run's slot only
-    # when a newer push supersedes the *same* ref. A concurrent real exchange
+    # when the *same* ref is superseded — a pull-request run by a newer update
+    # to its pull request, a non-main dispatch by a newer dispatch on that
+    # ref; main pushes never cancel. A concurrent real exchange
     # costs a small fraction of a cent; required-check integrity is worth more
     # than serializing that spend.
     runs-on: signalbox
