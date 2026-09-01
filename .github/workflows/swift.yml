@@ -220,6 +220,11 @@ jobs:
       # overwrite the one the coverage report reads.
       - name: Run native snapshot suite (report only)
         id: snapshots
+        # Skipped while Swift client work is shelved: this second test pass
+        # exists only to check goldens nobody is updating right now. The
+        # goldens stay in-repo; delete the `if` line below to re-enable when
+        # Swift work resumes.
+        if: ${{ false }}
         continue-on-error: true
         # Not test-xcode.sh with a suite named here: test-snapshots.sh takes
         # both the suite and the simulator from scripts/lib/snapshots.sh, which
