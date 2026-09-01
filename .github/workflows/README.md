@@ -13,9 +13,7 @@ the same pull request.
 | `ubuntu-latest`    | GitHub-hosted                                       | Untrusted code, and jobs the runner image cannot serve (below) |
 | `macos-latest`     | GitHub-hosted                                       | All macOS jobs (no self-hosted Macs exist)                     |
 
-Both self-hosted scale sets are defined in `KeenWill/mono` under
-`infrastructure/kubernetes/apps/github-arc-signalbox` and
-`…/github-arc-signalbox-docker`; this repository only selects labels.
+Both self-hosted scale sets are managed outside of this repo.
 
 ## The routing rule
 
@@ -64,7 +62,7 @@ while the tool-eval and tool-smoke jobs are report-only:
 
 The runner image has no `sudo` (pods run with `no-new-privileges`), no Nix, no
 `gh` CLI, and no Playwright system dependencies. Jobs needing any of those stay
-hosted:
+hosted for now, although this may change over time.
 
 | Job                                               | Why                                                   |
 | ------------------------------------------------- | ----------------------------------------------------- |
@@ -76,11 +74,3 @@ hosted:
 | `coverage.yml` `publish-comment`                  | `gh` CLI                                              |
 | `swift.yml` `publish-native-coverage-comment`     | `gh` CLI                                              |
 | `swift.yml` `swift-validate`, `swift-real-daemon` | macOS                                                 |
-
-Baking a dependency into the runner image (in mono) is what moves a
-dependency-blocked Linux job off this list — swap its `runs-on` to the canonical
-expression and delete its row here in the same pull request, once the job's
-operating-system, privilege, and tool needs are all actually served. Two rows
-cannot move that way: the macOS jobs stay until a self-hosted Mac pool exists,
-and `workspace-tests` needs privileged cgroup delegation, which no image bake
-grants an ARC pod.
