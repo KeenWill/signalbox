@@ -272,9 +272,13 @@ ALLOWLIST = (
         # identities the rename deliberately left alone; the baseline
         # reproduces the schema exactly, so it reproduces their spelling. The
         # 21 chain files this allowance used to name died with the chain
-        # (docs/proposals/migration-reset.md).
+        # (docs/proposals/migration-reset.md); the spellings now live in the
+        # review and blobs-and-web files of the split baseline.
         "immutable applied migration vocabulary",
-        re.compile(r"^crates/persistence/migrations/202609010000_baseline[.]sql$"),
+        re.compile(
+            r"^crates/persistence/migrations/"
+            r"(?:202609010010_review|202609010011_blobs_and_web)[.]sql$"
+        ),
         re.compile(
             r"(?<![A-Za-z0-9_])(?:"
             r"imported_conversation_raw_record_owner_fk|"

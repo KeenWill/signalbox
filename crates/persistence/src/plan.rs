@@ -1683,9 +1683,9 @@ mod tests {
     };
     use signalbox_tools_plan::PlanEntryId;
 
-    /// The one baseline migration, which carries the session-plan functions the
-    /// retired `202608020011_session_plan.sql` introduced.
-    const BASELINE_MIGRATION: &str = include_str!("../migrations/202609010000_baseline.sql");
+    /// The sessions file of the baseline, which carries the session-plan
+    /// functions the retired `202608020011_session_plan.sql` introduced.
+    const BASELINE_MIGRATION: &str = include_str!("../migrations/202609010001_sessions.sql");
 
     #[test]
     fn ordinary_read_uses_only_bounded_direct_dependencies() {

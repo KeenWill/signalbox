@@ -68,16 +68,22 @@ drop those tables by forward migration.
 On a clean database, apply the full existing chain, then emit the schema:
 
 ```
-pg_dump --schema-only --no-owner --no-privileges > <version>_baseline.sql
+pg_dump --schema-only --no-owner --no-privileges > baseline-dump.sql
 ```
 
 Hand-clean the dump (drop `pg_dump` preamble noise, keep extension statements,
-preserve comment blocks worth keeping), and commit it as the single migration in
-an emptied `crates/persistence/migrations/`. The old chain moves nowhere — git
+preserve comment blocks worth keeping), split it into a few per-domain schema
+files (owner ruling, 2026-09-01: roughly one file per domain, ordered so sqlx
+can apply them by filename, with foreign keys that would point forward across
+files collected in a final file), and commit those as the only migrations in an
+emptied `crates/persistence/migrations/`. The old chain moves nowhere — git
 history is its archive.
 
-The baseline version number restarts the clock: `202609010000_baseline.sql`
-(timestamp format retained — sqlx expects it and tooling reads it).
+The baseline version numbers restart the clock — `202609010000_core.sql`
+through `202609010014_cross_domain_foreign_keys.sql`, one consecutive prefix
+run (timestamp format retained — sqlx expects it and tooling reads it). The
+files are one schema and only apply as a whole; the fence boundary
+(`HUB_FENCE_MIGRATION_VERSION`) names the last of them.
 
 ### 2. Prove equivalence
 
@@ -101,8 +107,8 @@ that is scratch tooling, not a repo commitment.
 1. Stop the daemon (watchdog paused first).
 2. Full safety dump (`pg_dump -Fc`) — belt and braces only; the procedure never
    needs it.
-3. In one transaction: truncate `_sqlx_migrations`, insert the baseline row with
-   the checksum sqlx computed for the new file.
+3. In one transaction: truncate `_sqlx_migrations`, insert one row per baseline
+   file with the checksums sqlx computed for the new files.
 4. Deploy the daemon binary built from the reset branch.
 5. Verify: daemon boots, sessions list intact (spot-check counts against
    pre-cutover numbers for sessions, turns, conversations), new turn

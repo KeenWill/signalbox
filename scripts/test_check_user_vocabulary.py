@@ -78,7 +78,7 @@ def main() -> int:
             / "crates"
             / "persistence"
             / "migrations"
-            / "202609010000_baseline.sql"
+            / "202609010011_blobs_and_web.sql"
         )
         future_migration = (
             root
@@ -334,7 +334,7 @@ def main() -> int:
             "crates/tools-code-host/src/code_host/review_slog/example.rs",
             "crates/tools-github/src/lib.rs",
             "apps/signalboxd/tests/offline_tool_loop.rs",
-            "crates/persistence/migrations/202609010000_baseline.sql",
+            "crates/persistence/migrations/202609010011_blobs_and_web.sql",
             "crates/persistence/migrations/202608020009_user_vocabulary.sql",
             "clients/native/Sources/SignalboxClient/SessionSynchronization.swift",
             "clients/native/Tests/SignalboxAppTests/ViewModelTests.swift",
@@ -421,7 +421,7 @@ def main() -> int:
             'crates/persistence/src/mapping.rs:1: const DECISION_SOURCE: &str '
             '= "owner_command";',
             *expected_diagnostics(
-                "crates/persistence/migrations/202609010000_baseline.sql",
+                "crates/persistence/migrations/202609010011_blobs_and_web.sql",
                 frozen_migration_lines,
                 frozen_migration_lines[1:],
             ),
