@@ -9,6 +9,11 @@ const DEEP_MEMBER_COUNT: i32 = 1_200;
 const PREFIX_MEMBER_COUNT: i32 = 900;
 const OBSOLETE_COMPACTION_COUNT: i32 = 256;
 
+/// Boundedness guard on the deep-frontier probes: a starvation allowance for a
+/// loaded CI host, not a budget under test. Both probe phases enforce the same
+/// guard so their boundedness claims cannot drift apart.
+const BOUNDED_PROBE_STATEMENT_TIMEOUT: &str = "SET statement_timeout = '10s'";
+
 async fn insert_deep_frontier_fixture(
     pool: &PgPool,
 ) -> Result<(Uuid, Uuid, Uuid, Uuid, Uuid), sqlx::Error> {
@@ -279,7 +284,7 @@ async fn deep_frontier_prefix_validation_is_bounded_and_exact() -> Result<(), Bo
     )
     .fetch_one(&mut *connection)
     .await?;
-    sqlx::query("SET statement_timeout = '10s'")
+    sqlx::query(BOUNDED_PROBE_STATEMENT_TIMEOUT)
         .execute(&mut *connection)
         .await?;
 
@@ -378,7 +383,7 @@ async fn deep_frontier_prefix_validation_is_bounded_and_exact() -> Result<(), Bo
     sqlx::raw_sql("ALTER TABLE context_compaction ENABLE TRIGGER ALL;")
         .execute(&mut *connection)
         .await?;
-    sqlx::query("SET statement_timeout = '10s'")
+    sqlx::query(BOUNDED_PROBE_STATEMENT_TIMEOUT)
         .execute(&mut *connection)
         .await?;
     let effective_after_obsolete_chain: Uuid = sqlx::query_scalar(
