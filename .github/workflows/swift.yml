@@ -210,7 +210,8 @@ jobs:
           echo "exported=true" >> "$GITHUB_OUTPUT"
       # Report only, exactly as native coverage was rolled out: it never fails
       # the job. Promoting the suite to a merge gate is deleting the
-      # `continue-on-error` line and the skip above.
+      # `continue-on-error` line, the skip above, and the `if` guard below
+      # that currently disables the pass entirely.
       #
       # A second test pass, not a second job or a second build: the derived data
       # already holds the build this step reuses, which is also why it sets
