@@ -43,11 +43,19 @@ limit is a product decision; it is surfaced to the owner before it ships.
 ## 1. Session state machine
 
 **Proposed behavior.** Every session is in exactly one of eight states, stored
-as a durable core-owned column: `created`, `dispatched`, `active`, `waiting`,
-`recovering`, `blocked`, `parked`, `terminal`. Today no durable session state
-exists; the nearest thing is the web queue's derived `AttentionState`
-classifier. Once the column lands, the classifier becomes a projection of these
-states plus turn phase — never an independent machine.
+as a durable core-owned column. Physically the lifecycle columns — state,
+`ended_at`, the ownership bit, the payload measurements — land in a mutable
+core-owned lifecycle satellite of the session row, the pattern every mutable
+per-session value follows today; the committed append-only guard on `session`
+itself is untouched, and prose here that says "the session row" means that
+satellite. The satellite takes a declared place in the committed lock order — in
+the session-then-scheduler prefix, never acquired after the scheduler row — and
+the implementing change amends the lock inventory. The states: `created`,
+`dispatched`, `active`, `waiting`, `recovering`, `blocked`, `parked`,
+`terminal`. Today no durable session state exists; the nearest thing is the web
+queue's derived `AttentionState` classifier. Once the column lands, the
+classifier becomes a projection of these states plus turn phase — never an
+independent machine.
 
 ```text
 CREATED ─┬─→ DISPATCHED ─→ ACTIVE
@@ -69,9 +77,12 @@ escalation §13 requires, and the park closures §2 defines. A module-dispatched
 session enters `dispatched`. An interactive session's first accepted input also
 moves it to `dispatched`, not `active`: the accepted turn is queued and
 activated by the unchanged scheduler contract, and only turn activation makes
-the session `active` — so the dispatch deadline covers a queued interactive turn
-that never activates. A queued successor turn inside a live session never
-re-enters `dispatched`; the active stall deadline covers it.
+the session `active` — so for an owned session the dispatch deadline covers a
+queued interactive turn that never activates. Deadlines are owned-session
+obligations everywhere in this specification: the states describe, ownership
+governs, and no state arms any deadline on an unmonitored session (§6). A queued
+successor turn inside a live session never re-enters `dispatched`; the active
+stall deadline covers it.
 
 **Proposed behavior.** `created` and `dispatched` are distinct from `active`
 because 229 sessions died between creation and first turn and 52 died with a
@@ -85,7 +96,11 @@ designated waker. The closed kind vocabulary is `approval{decider}`,
 `pipeline{backlog}`, `scheduler{fault}`. Deadline expiry is a transition —
 escalate to `parked` — never a silent hold. This closes the 110 stuck approvals
 and the 10 external-gate stalls: an expired approval escalates and survives turn
-boundaries instead of failing the turn (17 headless-escalation kills).
+boundaries instead of failing the turn (17 headless-escalation kills). Where a
+module's redispatch owns the retry — the unattended repo-watch escalation fails
+its turn today precisely because a fresh dispatch supersedes it — the redispatch
+closes the parked predecessor as `superseded{by}`, so survival never duplicates
+pursuit.
 
 **Proposed behavior.** For an owned session, `active` carries two obligations
 beyond a stall deadline; an unmonitored conversation carries neither, per §6.
@@ -95,11 +110,15 @@ recorded — a turn completing, or a goal event advancing the goal. Exhaustion o
 either component is a transition to `parked` with cause
 `progress_budget_exhausted` — never a silent hold, and never a terminalization
 of possibly-live work (§13). Second, a goal-validity recheck at a config-sourced
-interval, transitioning to `terminal{superseded}` when the work is gone; the
-same transaction settles any live turn as `cancelled` with cause `superseded`,
-so this transition never leaves the §1 turn-to-session mapping in disagreement.
-Runaways were loud, not silent: 200+ model calls against an already-merged
-branch, one four-day session.
+interval, transitioning to `terminal{superseded}` when the work is gone. The
+transition settles any live turn first, through the committed machinery — an
+applied interrupt is the only cancellation authority, an issued provider call
+resolves through its durable cancellation state, and a possibly-executed
+operation terminalizes `reconciliation_required`, never `cancelled`, because
+cancellation must not erase ambiguity evidence — and the session records
+terminal only once the turn settles, so the turn-to-session mapping never
+disagrees. Runaways were loud, not silent: 200+ model calls against an
+already-merged branch, one four-day session.
 
 **Proposed behavior.** Invariant for owned sessions: every non-terminal state of
 an owned session carries exactly one armed deadline whose expiry is a defined
@@ -118,8 +137,9 @@ transition re-raises the operator alert and re-arms — it never moves the sessi
 and never terminalizes it. Because the re-alert is the deadline's defined
 transition, a parked session on schedule never trips §12's
 `nonterminal_past_deadline`. The re-alert is observable without widening §5's
-closed vocabulary: it emits `session_state_changed` with the state unchanged and
-a typed re-notification payload.
+closed vocabulary: it rides the deadline re-arm — a real row change, so the
+outbox's no-event-without-a-write rule holds — emitting `session_state_changed`
+with the state unchanged and a typed re-notification payload.
 
 **Proposed behavior.** The turn machine (`queued / active / terminal`, with the
 `awaiting_*` phases) persists unchanged beneath the session machine, and the
@@ -132,11 +152,13 @@ never disagree. The mapping: a turn in `running` ⇒ `active`;
 turn ⇒ `blocked`. `parked` is the one session state that overrides the mapping:
 parking suspends a live turn in place — the turn keeps its phase, and no model
 call, tool execution, or delivery proceeds while the session is parked — and
-terminalizes nothing (§13). Leaving `parked` re-enters the state the mapping
-gives for the suspended turn's phase. The mapping therefore governs every
-non-parked session; a deadline expiry or budget exhaustion that parks mid-turn
-uses this suspension, which is how an expired approval survives without failing
-its turn (the waiting rule above).
+terminalizes nothing (§13). The eligibility sweep and the liveness watchdog gain
+the parked conjunct in the same change: a parked session's rows are neither
+sweep candidates nor watchdog candidates until it leaves `parked`. Leaving
+`parked` re-enters the state the mapping gives for the suspended turn's phase.
+The mapping therefore governs every non-parked session; a deadline expiry or
+budget exhaustion that parks mid-turn uses this suspension, which is how an
+expired approval survives without failing its turn (the waiting rule above).
 
 **Proposed behavior.** Module machinery that parks its own targets today —
 `convergence_sweep_target` rows in `parked`, repo-watch external obligations
@@ -154,8 +176,12 @@ incomplete.
 `retired`. A structural failure, an unknown failure, or an exhausted retry
 budget on a live owned session parks the session (§1) rather than terminalizing
 it, with the typed cause attached. Every parked closure — `supersede`,
-`abandon`, `close_failed`, `stop` alike — settles a suspended turn in the same
-transaction, `cancelled` with the closure's outcome as its cause, so no terminal
+`abandon`, `close_failed`, `stop` alike — first settles a suspended turn through
+the committed machinery: an applied interrupt is the only cancellation
+authority, an approval wait is denied before interruption as that machinery
+requires, and a possibly-executed operation terminalizes
+`reconciliation_required`, never `cancelled` — ambiguity evidence is never
+erased. The session records terminal only after the turn settles, so no terminal
 session leaves a non-terminal turn behind (§1). The park then closes with the
 outcome that matches its resolution: `superseded{by}` when a fresh respawn takes
 the work; `abandoned` on operator write-off; `failed_retryable{cause}`,
@@ -169,7 +195,11 @@ behavior:
   with no external gate, the finish condition declared at creation or
   goal-attach. Every owned session declares one — owned means driven to a
   declared terminal outcome (§6) — so an unverified achieve claim is not
-  recordable. Recovery: none; slots and worktrees are released.
+  recordable. The finish check gates the goal event itself: a failing check
+  commits no `achieved` event — the scheduler appends
+  `blocked{execution_failure}` with the check result as its need text instead —
+  so the goal stays resumable under the goal contract, which admits resume only
+  from blocked. Recovery: none; slots and worktrees are released.
 - `failed_retryable{cause}` — provider transient, quota, overload,
   infrastructure blip. A retryable failure on a live owned session does not
   terminalize it: the session passes through `recovering` or `blocked` (§1)
@@ -192,10 +222,11 @@ behavior:
 - `stopped{actor, sticky}` — a human or rule stop. Sticky: re-dispatch is
   suppressed until the dispatch source is updated (a stopped goal was
   re-dispatched minutes later because the allowlist was not pruned). Stopping
-  retires queued turns legally (§10) and settles a live turn as `cancelled` with
-  cause `stopped` in the same transaction, so the two machines move together
-  (§1); an in-flight operation is cancelled or disowned by the existing turn
-  cancellation machinery, never orphaned.
+  retires queued turns legally (§10) and settles a live turn through the
+  committed interrupt machinery — no standalone cancellation authority is
+  minted, an issued call resolves through its durable cancellation state, and
+  live ambiguity terminalizes `reconciliation_required` — with the session
+  recording terminal only after the turn settles (§1); nothing is orphaned.
 - `superseded{by}` — a newer session owns the work, or the goal itself is no
   longer valid. `by` is optional: it names the successor when one exists — the
   `supersede{successor}` command (§7) always names one — and is empty exactly
@@ -232,9 +263,15 @@ the command's acceptance as a durable `requested_at` —
 stands in for it — then the call's `prepared`, `in_flight`, and `terminal`
 transitions, and the application row written at apply time.
 
-**Proposed behavior.** Watchdog clocks read durable timestamps, never
-process-local ledgers. A daemon restart today resets every staleness clock
-exactly when restarts are the leading creator of stuck sessions.
+**Proposed behavior.** Watchdog state survives restarts: staleness evidence is
+durable, never a process-local ledger. The committed watchdog decides staleness
+by repeated observation, deliberately storing no clock — sound under clock
+adjustment, but its observation ledger is process-local, and a daemon restart
+resets every staleness clock exactly when restarts are the leading creator of
+stuck sessions. This proposal keeps the repeated-observation structure and its
+clock-skew argument — ordering authority stays with commit-ordered sequences,
+and no wall-clock comparison alone ends work — and makes the observations
+durable, so a restart costs nothing instead of one more bound per wedge.
 
 **Proposed behavior.** `web_usage_call_projection.recorded_at` is fixed. The
 defect: today every one of the 149,773 backfilled rows carries a migration-day
@@ -244,28 +281,35 @@ terminal statement time (docs/spec/usage-evidence.md), and the UUIDv7 creation
 instant is not that time: substituting it would shift usage into earlier ranges
 and reorder newest-first pages — and a null with an explicit backfill marker
 where no terminal time is derivable. The null requires relaxing the column's
-`NOT NULL` and representability CHECK, and the same change migrates the usage
-read surface: the projection reader decodes `recorded_at` as non-optional and
-paginates by a `(recorded_at, model_call_id)` keyset
-(`crates/persistence/src/usage.rs`), so marked rows get an explicit ordering and
-cursor rule — deterministic order, no marked row ever silently dropped by
-pagination, and no null key reaching an unmigrated reader. One rule is shared
-with the new outbox `recorded_at` on a database that is not reset (§14): rows
-from before a change never receive a fabricated stamp. A `NOT NULL` column
-constraint cannot exempt existing rows, so on that path the outbox column lands
-nullable with new-row enforcement — a CHECK constraint added `NOT VALID`, which
-PostgreSQL enforces on newly inserted and updated rows only; on a reset database
-the column is `NOT NULL` outright. A projection does not outlive the
+`NOT NULL` and representability CHECK, and — an explicit contract change under
+the owner's `recorded_at` ruling — a one-time amendment of the projection's
+append-only guard for exactly this correction; the guard closes again behind it.
+The same change migrates the usage read surface: the projection reader decodes
+`recorded_at` as non-optional and paginates by a `(recorded_at, model_call_id)`
+keyset (`crates/persistence/src/usage.rs`), so marked rows get an explicit
+ordering and cursor rule — a null key never enters the lexicographic row-value
+comparison, the marked rows order deterministically after it, and no marked row
+is ever silently dropped by pagination or reaches an unmigrated reader. One rule
+is shared with the new outbox `recorded_at` on a database that is not reset
+(§14): rows from before a change never receive a fabricated stamp. A `NOT NULL`
+column constraint cannot exempt existing rows, so on that path the outbox column
+lands nullable with new-row enforcement — a CHECK constraint added `NOT VALID`,
+which PostgreSQL enforces on newly inserted and updated rows only; on a reset
+database the column is `NOT NULL` outright. A projection does not outlive the
 conversations it projects.
 
 ## 4. Mandatory cause classification
 
 **Proposed behavior.** Every turn that reaches `terminal` records a non-null
 typed cause. The vocabulary is closed and includes `context_headroom_exhausted`
-and `context_compaction_wall`. Today 4,251 of 8,462 failed turns (50.2%) carry
-no classified cause: 2,850 have only a bare `known_failure` attempt disposition,
-1,273 model-call failures have a null provider cause, and 128 are `lost`. 898
-attempts ended `lost` with zero runner-loss records to explain them.
+and `context_compaction_wall`. On a non-reset database the constraint binds new
+terminalizations only (the §3 pattern); historical causeless turns receive the
+backfill-marked `unclassified_historical` cause, which sits in the catch-all set
+and never counts toward cause-completeness. Today 4,251 of 8,462 failed turns
+(50.2%) carry no classified cause: 2,850 have only a bare `known_failure`
+attempt disposition, 1,273 model-call failures have a null provider cause, and
+128 are `lost`. 898 attempts ended `lost` with zero runner-loss records to
+explain them.
 
 **Proposed behavior.** The two guard closures that today exist only as log lines
 — `reported_usage_context_compaction_exhausted` and
@@ -275,10 +319,10 @@ walls — become durable typed causes.
 **Proposed behavior.** Cause-completeness is an acceptance criterion of this
 specification itself, measured as §12 defines it. Presence of a typed cause is
 100% by construction under this section's mandate, so the criterion is
-usability: at least 99% of terminal turns and more than 90% of terminal model
-calls carry a cause outside the catch-all set. Today 66.4% of `known_failed`
-model calls carry no usable cause — 2,366 `unrecognized` plus 1,273 with none at
-all, of 5,484.
+usability: at least 99% of terminal turns, and more than 90% of `known_failed`
+model calls — the one disposition that admits a provider cause — carry a cause
+outside the catch-all set. Today 66.4% of `known_failed` model calls carry no
+usable cause — 2,366 `unrecognized` plus 1,273 with none at all, of 5,484.
 
 ## 5. Lifecycle event vocabulary
 
@@ -289,26 +333,33 @@ outbox: `session_created`, `session_state_changed`, `session_terminal`,
 `session_ownership_changed`. Every event carries `recorded_at` from the header,
 and a session reference where one exists.
 
-**Proposed behavior.** Each of the sixteen existing outbox kinds gets an
+**Proposed behavior.** Each of the seventeen existing outbox kinds gets an
 explicit disposition; the vocabulary is never doubled. `session_created` evolves
 in place: a new `storage_version` carries the typed provenance payload.
-`turn_terminal` replaces the five per-disposition turn kinds (`turn_completed`,
-`turn_failed`, `turn_refused`, `turn_cancelled`, `turn_reconciliation_required`)
-and subsumes `goal_turn_retired` as `turn_terminal{disposition: retired}`. The
-consumers that decode the old kinds — the session-timeline projection, the
-operator-attention triggers, the process-protocol decoders — migrate in the same
-change. The remaining kinds (`model_call_transition`, `tool_batch_transition`,
-`tool_approval_decided`, `input_accepted`, `turn_activated`,
-`turn_model_settings_resolved`, `session_model_settings_changed`,
-`context_compacted`, `runner_state_transition`) stay as core-internal events:
-still on the outbox, not part of the module-facing vocabulary, unavailable
-across the seam. The second header family, `delegation_outbox_event`, shares one
-gap-free global sequence with `outbox_event`, and today's dispatcher walks both
-behind the singleton delivery row. Replacing that singleton (below) therefore
-cannot leave delegation delivery untouched: the delegation consumer becomes a
-named consumer with its own cursor over the shared sequence, its delivery
-contract preserved. Its event vocabulary and payload contract stay out of this
-specification's scope.
+`turn_terminal` replaces the six per-disposition turn kinds (`turn_completed`,
+`turn_failed`, `turn_refused`, `turn_cancelled`, `turn_reconciliation_required`,
+and `turn_tool_reconciliation_required`, whose distinct tool-attempt payload the
+typed disposition keeps) and subsumes `goal_turn_retired` as
+`turn_terminal{disposition: retired}`. The turn-progress frontier keeps its
+exclusion by disposition: `turn_terminal{retired}` is not turn progress —
+retiring queued work happens to a session while its active turn sits still — and
+the frontier's partial index migrates to a disposition-aware predicate in the
+same change. The consumers that decode the old kinds — the session-timeline
+projection, the operator-attention triggers, the process-protocol decoders —
+migrate in the same change. The remaining kinds (`model_call_transition`,
+`tool_batch_transition`, `tool_approval_decided`, `input_accepted`,
+`turn_activated`, `turn_model_settings_resolved`,
+`session_model_settings_changed`, `context_compacted`,
+`runner_state_transition`) stay as core-internal events: still on the outbox,
+not part of the module-facing vocabulary, unavailable across the module seam —
+the process protocol's wire fan-out keeps decoding every one of them unchanged;
+clients lose nothing. The second header family, `delegation_outbox_event`,
+shares one gap-free global sequence with `outbox_event`, and today's dispatcher
+walks both behind the singleton delivery row. Replacing that singleton (below)
+therefore cannot leave delegation delivery untouched: the delegation consumer
+becomes a named consumer with its own cursor over the shared sequence, its
+delivery contract preserved. Its event vocabulary and payload contract stay out
+of this specification's scope.
 
 **Proposed behavior.** The vocabulary is closed, core-owned, and versioned per
 kind. A new kind lands only as a core specification change plus migration. If a
@@ -322,8 +373,16 @@ nullable for exactly this kind.
 
 **Proposed behavior.** Delivery uses per-consumer cursors:
 `outbox_consumer_cursor (consumer_name, delivered_through, updated_at)` replaces
-the singleton delivery row. Rows below `min(delivered_through)` and older than
-the config-sourced retention window are prunable. Pruning is a real schema
+the singleton delivery row. The consumer set is an authoritative registry, not
+whatever rows exist: the migration that introduces a consumer preregisters its
+cursor row in the same transaction — as the singleton it replaces was seeded in
+its own migration — and the floor is computed over the registry, so a required
+consumer that has not yet read cannot be outrun. Cursors partition bookkeeping,
+not ordering: each named consumer is one ordered reader of the one shared
+sequence, the process-protocol dispatcher remains the single wire fan-out with
+its follower contract and monotone cursor presentation untouched, and the
+one-active-daemon rule stands. Rows below `min(delivered_through)` and older
+than the config-sourced retention window are prunable. Pruning is a real schema
 change, not a policy toggle: the outbox's append-only DELETE trigger is amended
 to permit deletion below the floor, and the typed per-kind record tables that
 reference the header are deleted with it. The TRUNCATE rejection stays:
@@ -358,7 +417,10 @@ frontier normalization, the owner's standing 2026-08-23 ruling.
 vocabulary is `user_initiated | delegated`, and in the measured window every one
 of the 5,851 sessions is `user_initiated` — including all machine-dispatched
 ones. Only the soft `template_name` string separates 99.7% machine work from 19
-interactive sessions. §14 defines the backfill mapping onto the new vocabulary.
+interactive sessions. The committed imported-frontier creation family records
+`interactive` with its import reference in the payload — the import is a
+user-initiated act, and the vocabulary stays closed. §14 defines the backfill
+mapping onto the new vocabulary.
 
 **Proposed behavior.** Every session carries an explicit owned-or-unmonitored
 bit, set at creation and flippable both ways as a journaled adopt or release
@@ -370,32 +432,47 @@ Unmonitored sessions are excluded from occupancy accounting. `release` never
 interrupts a live operation: a running turn completes to its boundary under the
 resources already held, and the slot releases at that boundary; the flip drops
 the forward-looking obligations — deadlines, watchdogs, auto-resume —
-immediately (§13).
+immediately, disarming every deadline without changing state (§13). `release` on
+a `parked` session is rejected: `parked` is an owned-only state (§1), so the
+park is closed or resumed first.
 
 **Proposed behavior.** Every command and every state transition records its
 actor from the closed vocabulary `core`, `operator`, `module{name}`, `watchdog`.
-This extends the existing domain `Actor` (`User`, `Model{turn}`, `Recovery`,
-`Tool{request}`) rather than paralleling it: `module{name}` and `watchdog` are
-added, `User` surfaces as `operator`, the recovery scan as `watchdog`, and
-model- and tool-initiated agency surfaces as `core` with its turn- and
-request-precise attribution kept in the payload. Today manual operator
-workarounds — the crutch layer — are indistinguishable from daemon actions in
-the record.
+This classifies the existing domain `Actor` (`User`, `Model{turn}`, `Recovery`,
+`Tool{request}`) rather than replacing it: the domain algebra, its total wire
+projection, and its replay-equality contract are untouched — every command keeps
+its exact domain actor. The lifecycle record derives its classification from
+that actor: `User` reads as `operator`, the recovery scan as `watchdog`, model-
+and tool-initiated agency as `core` with the exact turn and request identity
+kept in the payload, and module-issued commands as `module{name}`. The committed
+program-issuance arm is preserved untouched: the vocabulary stays extensible to
+the verified program-run actor the identity contract commits — a run-scoped
+reference, not `module{name}` — which lands with the program substrate. Today
+manual operator workarounds — the crutch layer — are indistinguishable from
+daemon actions in the record.
 
 ## 7. Command surface
 
 **Proposed behavior.** The core command surface for session lifecycle is:
-`create_session{template, provenance, start_gate, ownership, finish_condition}`,
+`create_session{template, provenance, start_gate, ownership, finish_condition, payload}`,
 `release_start`, `submit_input`,
 `goal{attach | resume_with_guidance | stop{sticky}}`, `adopt`, `release`.
-`adopt` declares the finish condition an owned session owes (§2) when the
-session does not already carry one; an adopt that would leave an owned session
-with no finish condition is rejected. `create_session` with owned ownership
-obeys the same rule: the finish condition comes from the template or an explicit
-command field, and a creation that would commit an owned session without one is
-rejected before any row exists. This specification adds five commands to that
-list so that every §2 outcome and every §1 transition is reachable; additions
-are product decisions, surfaced here rather than shipped silently. The five:
+`payload` is the dispatch content whose measurements §15 records at creation:
+module dispatch supplies it atomically in the creation command, as the
+commissioning path does today, so a `dispatched` session never precedes its
+recorded payload; an interactive creation omits it and is measured at first
+input (§15). `adopt` declares the finish condition an owned session owes (§2)
+when the session does not already carry one; an adopt that would leave an owned
+session with no finish condition is rejected. `create_session` with owned
+ownership obeys the same rule: the finish condition comes from the template or
+an explicit command field, and a creation that would commit an owned session
+without one is rejected before any row exists. This specification adds five
+commands to that list so that every §2 outcome and every §1 transition is
+reachable; additions are product decisions, surfaced here rather than shipped
+silently. Every stop — goal, turn, and session level — carries the committed
+`descendant_scope` member as durable intent, unchanged, and the session-level
+closures record the same cascade provenance the goal and turn stops record
+today, so a delegated child is never silently orphaned. The five:
 `stop{actor, sticky}` at session level, because a goal-less owned session needs
 a stop path; `supersede{successor}`, the closure a respawning client issues
 against its predecessor; `abandon`, the operator write-off of a parked session;
@@ -412,14 +489,21 @@ new goal generation within the same session — is unrelated to the session
 outcome `superseded{by}` and keeps its machinery unchanged. This specification
 calls it goal replacement.
 
-**Proposed behavior.** Core mints all identities. No module pre-allocates turn,
-input, or frontier identities inside its own transaction (today's dispatch
-pre-mints four core identities — a turn, an accepted input, a cancellation
-entry, and a cancellation frontier).
+**Proposed behavior.** Core mints all lifecycle identities. No module
+pre-allocates turn, input, or frontier identities inside its own transaction
+(today's dispatch pre-mints four core identities — a turn, an accepted input, a
+cancellation entry, and a cancellation frontier). Caller-minted
+`DurableCommandId`s are untouched: retransmitting under the same command
+identity is the caller's idempotent retry path under the commands contract, and
+that path requires the identity to exist before submission.
 
-**Proposed behavior.** Every command settles asynchronously as a
-`command_settled` receipt carrying applied-or-rejected with a closed rejection
-kind (§5).
+**Proposed behavior.** Every claimed command settles as a `command_settled`
+receipt carrying applied-or-rejected with a closed rejection kind (§5).
+Pre-claim admission errors keep their committed synchronous error path and
+record nothing. The validations this proposal adds to session creation are
+authoritative recorded rejections: the create-session family gains a
+recorded-rejection result — an explicit change from its committed
+applied-results-only record, made here rather than silently.
 
 **Proposed behavior.** `start_gate` is a core concept; the module-owned
 dispatch-lease tables — `repo_watch_dispatch_start_lease` with its `_expiration`
@@ -442,14 +526,24 @@ owner can send a message at any point.
 **Proposed behavior.** An injection into any non-terminal state queues durably
 and is delivered at the next legal boundary. It is never rejected for state and
 never silently lost: every accepted injection settles with a durable
-`injection_settled` receipt whose closed outcomes include `delivered` and
-`not_delivered`. The enumerated violations this repairs: injections rejected
-while awaiting approval, rejected while awaiting recovery, silently dropped on
-resume, and swallowed by the composer.
+`injection_settled` receipt whose closed outcomes include `delivered`,
+`not_delivered`, and `rejected{kind}`. State means the session's lifecycle state
+— the committed correlation contracts stand untouched: an injection that names
+an exact turn or defaults version keeps its typed mismatch rejection, settling
+`rejected` rather than retargeting, and a correlation mismatch is not a state
+rejection. The enumerated violations this repairs: injections rejected while
+awaiting approval, rejected while awaiting recovery, silently dropped on resume,
+and swallowed by the composer.
 
-**Proposed behavior.** Pending injections never block terminalization.
-Terminalization closes pending steering with a `not_delivered` receipt; pending
-steering never refuses terminalization.
+**Proposed behavior.** Pending injections never block terminalization. A turn
+boundary is delivery, not loss: the committed reclassification of pending
+steering into the successor origin turn stands and settles the injection
+`delivered`. Session terminalization — where no successor turn can exist —
+closes pending steering with a `not_delivered` receipt; pending steering never
+refuses it. That closure is a third pending-steering disposition added to the
+committed two (consumed, reclassified): the pending-steering guard is amended
+for it in the implementing change, explicitly — the schema today forbids any
+drop.
 
 **Proposed behavior.** Injecting into an unmonitored session creates no
 obligations. Injecting into an owned session resets no budget and no deadline.
@@ -475,19 +569,23 @@ charging rules. Only failures the session caused charge the budget; failures
 attributed to infrastructure, restarts, or provider transients do not. The
 budget replenishes on successful turns. Budget magnitude is config-sourced.
 Fault attribution governs every charge, §8's `resume_with_guidance` included.
-This closes the defect in both directions at once. Today exempt classes charge
-nothing and cycle forever: one session ran 187 blocked-resumed cycles, and 43
-sessions ran more than 50. Meanwhile 5,296 of 5,566 goal sessions (95%) were
-never resumed at all.
+This closes the defect in both directions at once. In the measured window —
+before the landed goal-mode limits — exempt classes charged nothing and cycled
+unchecked: one session ran 187 blocked-resumed cycles, and 43 sessions ran more
+than 50. Meanwhile 5,296 of 5,566 goal sessions (95%) were never resumed at all.
 
 **Proposed behavior.** Every resume journals its guidance and its actor, so
 automatic and operator resumes are distinguishable in the durable record. All
 5,590 resumes in the measured window look identical. Goal-mode code landed since
 gives automatic resumes a domain-separated derived identity and journaled
 guidance text. It already carries a config-sourced attempt budget whose
-infrastructure retries charge nothing. This section generalizes that landed
+infrastructure retries charge nothing, and, independently, the committed
+lifetime attempt ceiling that counts every attempt whatever its fault
+attribution — the limit that ends a run whose every failure is exempt. Both
+stay: a run ends at whichever limit it reaches first, read by the same operator
+projection, exactly as committed. This section generalizes the landed charging
 asymmetry to core lifecycle governance and adds the durable actor record and
-success replenishment.
+success replenishment; it adds no third number and deletes neither limit.
 
 **Proposed behavior.** Budget exhaustion transitions the goal's session from
 `blocked` to `parked`, where the owner sees it. Exhaustion is never a silent
@@ -511,10 +609,14 @@ and is improved later behind evals.
 Today `goal_turn_retired` is published but the turn vocabulary cannot express
 it. All 52 non-terminal turns in the database are exactly this shape, and every
 published retirement is such a turn — the match holds in both directions. Adding
-`retired` closes all 52.
+`retired` closes all 52. A turn terminal with disposition `retired` contributes
+no terminal frontier and stays excluded from queue predecessor selection,
+exactly as retired queued work is excluded today: the disposition changes the
+vocabulary, never the lineage rules.
 
-**Proposed behavior.** Every dispatched session carries a dispatch deadline on
-the `dispatched` to `active` transition, config-sourced. Expiry retires the
+**Proposed behavior.** Every owned dispatched session carries a dispatch
+deadline on the `dispatched` to `active` transition, config-sourced; an
+unmonitored session in `dispatched` carries none (§1, §6). Expiry retires the
 session with cause `dispatch_deadline_expired`, and any queued turn retires with
 it in the same transaction — the machines move together (§1). This closes the
 229 zombie sessions that were created, never ran a turn, and sat idle forever
@@ -571,9 +673,13 @@ program behind it.
   `terminal` in a calendar week that were owned at any point in their life —
   membership follows the journaled ownership record (§6), so releasing a
   troubled session never removes it from the gate. Denominator: the cohort minus
-  `stopped` and `superseded` (withdrawn or moved work is not failure).
-  Numerator: `failed_retryable`, `failed_structural`, `failed_unknown`,
-  `abandoned`, and `retired`. Target: below 10%, then 2–5%. Today's equivalent
+  `stopped` and minus only the supersessions that closed no failure — withdrawn
+  or moved work is not failure, but a `superseded{by}` that closes a park
+  holding a failure cause is failure-driven and stays in both denominator and
+  numerator under its standing cause; otherwise every failure recovered by
+  respawn-fresh would vanish from the gate. Numerator: `failed_retryable`,
+  `failed_structural`, `failed_unknown`, `abandoned`, `retired`, and
+  failure-driven supersessions. Target: below 10%, then 2–5%. Today's equivalent
   is inverted: 1.8% of sessions ever achieved and 38.7% of turns failed.
 - `overflow_incidence` — fraction of the full weekly terminal cohort, before the
   stopped/superseded trim, recording cause `context_headroom_exhausted` on any
@@ -592,8 +698,10 @@ program behind it.
 - `cause_completeness` — terminal turns whose typed cause is usable — outside
   the catch-all set: `unrecognized`, absent, or a bare unknown bucket — over all
   terminal turns (target at least 99%; bare presence is 100% by §4's mandate),
-  and terminal model calls with a usable cause over all terminal model calls
-  (target above 90%) (§4).
+  and, for model calls, usable causes over the calls whose disposition admits a
+  cause — `known_failed`, the only disposition the schema allows a provider
+  cause on — never over all terminal calls, most of which complete (target above
+  90%) (§4).
 
 **Proposed behavior.** One companion alarm guards the headline's blind spot: a
 session that never terminalizes never enters any weekly cohort.
@@ -623,15 +731,23 @@ guarded operation may still be live. The measured record demands it: 100 of 777
 incident reports (12.9%) are root-caused safety-backfire. The window's worst
 population-wide outages were caused by protection machinery: a 1-second
 reconciliation bound terminalizing live 10-minute model calls, and a restart
-chain parking all 24 commissioned sessions at once.
+chain parking all 24 commissioned sessions at once. Turn-level failure
+terminalization that arms goal recovery — the liveness pass ending a provably
+wedged turn as failed, blocking its goal with `execution_failure` — is not
+session terminalization and stays: this section governs session disposition, not
+the committed turn watchdog's disposition of dead work.
 
 **Proposed behavior.** Recovery bounds are sized per operation class and are
 config-sourced. A single bound applied across operation classes is what produced
-the 1-second-versus-10-minute backfire. While a declared slow-substrate
-condition is active — a running backup, a restart in progress, a detected lock
-convoy — staleness bounds multiply by a config-sourced factor; the condition
-list and the factor live in config. A slow substrate therefore does not read as
-a dead session (eight healthy turns reaped during a 6.9 GB backup).
+the 1-second-versus-10-minute backfire. Where a budget is closed today by a
+schema CHECK — the five-attempt ceilings on recovery and reconciliation budgets
+— the ceiling moves to a config-sourced value by an explicit schema amendment in
+the implementing change, under the config-first ruling; it is never silently
+exceeded and never silently kept. While a declared slow-substrate condition is
+active — a running backup, a restart in progress, a detected lock convoy —
+staleness bounds multiply by a config-sourced factor; the condition list and the
+factor live in config. A slow substrate therefore does not read as a dead
+session (eight healthy turns reaped during a 6.9 GB backup).
 
 **Proposed behavior.** Every deadline expiry is a transition. For a session past
 admission, the escalation target is `parked` — the single enumerable
@@ -664,14 +780,16 @@ the marker means declared, not re-verified, and marked rows never enter §12's
 weekly cohorts. No fabricated success reaches the headline.
 
 **Proposed behavior.** Provenance backfills under the same conditional: sessions
-with a template or a `commissioned_dispatch` row receive
-`module_dispatched{repo_watch, dispatch_ref}`; the 19 template-less sessions
-receive `interactive`; the window holds zero `delegated` rows. Ownership
-backfills as unmonitored for every pre-existing session: the daemon assumes no
-retroactive liveness obligation, so no deadline is armed on any backfilled row
-and §1's invariant binds only sessions owned after cutover. A module re-adopts
-any dispatch it still owns through `adopt` (§7), which arms deadlines by the
-normal path.
+with a `commissioned_dispatch` row receive
+`module_dispatched{repo_watch, dispatch_ref}` — the dispatch row is the module
+proof and supplies the ref. Sessions without one receive `interactive` per their
+recorded user-initiated creation path, template-created included: template use
+is not module proof, since template creation is itself a user-initiated command.
+The window holds zero `delegated` rows. Ownership backfills as unmonitored for
+every pre-existing session: the daemon assumes no retroactive liveness
+obligation, so no deadline is armed on any backfilled row and §1's invariant
+binds only sessions owned after cutover. A module re-adopts any dispatch it
+still owns through `adopt` (§7), which arms deadlines by the normal path.
 
 **Proposed behavior.** One-time closure under the new vocabulary: each of the 52
 stranded queued-turn sessions closes in one transaction — the queued turn
@@ -689,7 +807,10 @@ most, an agent shoehorns old rows later.
 **Proposed behavior.** Lifecycle DDL lands as layered statements in the clean
 per-domain schema files — sessions, goals, outbox — split by purpose, never
 chronologically. Forward changes are small separate migrations that the next
-collapse folds back in.
+collapse folds back in. A collapse is a deliberate chain reset under the owner's
+rule-now-reset-later ruling: the forward-only immutability rule governs between
+collapses, and each collapse is its own sanctioned one-time rewrite, exactly as
+the 2026-09-01 fifteen-file baseline was.
 
 ## 15. Dispatch payload budget
 
