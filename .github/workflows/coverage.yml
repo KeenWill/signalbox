@@ -40,10 +40,13 @@ on:
       - ".github/workflows/coverage.yml"
   workflow_dispatch:
 
-# Superseded pull-request runs release their slots against the public
-# concurrency cap. Every other event takes a group of its own: sharing one
-# group would let a third run cancel a second still pending behind the first,
-# which `cancel-in-progress: false` does not prevent.
+# Superseded runs release their slots against the public concurrency cap:
+# pull-request runs group per PR, and other non-main runs group per
+# event+ref (today only workflow_dispatch reaches that arm — every push
+# trigger in this repo is filtered to main). Main runs each take a group
+# of their own and are never canceled: sharing one group would let a third
+# run cancel a second still pending behind the first, which
+# `cancel-in-progress: false` does not prevent.
 concurrency:
   group: >-
     coverage-${{ github.event_name == 'pull_request' && format('pr-{0}', github.ref)
