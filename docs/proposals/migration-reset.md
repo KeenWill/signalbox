@@ -55,11 +55,12 @@ Owner ruling, 2026-09-01: **dogfood session and conversation data must survive;
 repo-watch data is disposable.**
 
 The design over-satisfies this: because the baseline equals the current schema,
-the dogfood database is never dumped, restored, or transformed. The only
-mutation is to migration *bookkeeping* (`_sqlx_migrations`). All data —
-sessions, conversations, and incidentally repo-watch — survives in place.
-"Disposable" becomes relevant only in the later repo-watch campaign, which may
-drop those tables by forward migration.
+the dogfood database is never dump-and-restored or transformed — the only dump
+anywhere in the procedure is §3's precautionary safety copy, which nothing
+consumes. The only mutation is to migration *bookkeeping* (`_sqlx_migrations`).
+All data — sessions, conversations, and incidentally repo-watch — survives in
+place. "Disposable" becomes relevant only in the later repo-watch campaign,
+which may drop those tables by forward migration.
 
 ## Design
 
@@ -67,7 +68,7 @@ drop those tables by forward migration.
 
 On a clean database, apply the full existing chain, then emit the schema:
 
-```
+```shell
 pg_dump --schema-only --no-owner --no-privileges > <version>_baseline.sql
 ```
 
@@ -126,8 +127,10 @@ that is scratch tooling, not a repo commitment.
 1. Stop the daemon (watchdog paused first).
 2. Full safety dump (`pg_dump -Fc`) — belt and braces only; the procedure never
    needs it.
-3. In one transaction: truncate `_sqlx_migrations`, insert the baseline row with
-   the checksum sqlx computed for the new file.
+3. In one transaction, with the table qualified to the daemon's configured
+   migration schema (an operator session's `search_path` is not the daemon's):
+   truncate `_sqlx_migrations`, insert the baseline row with the checksum sqlx
+   computed for the new file.
 4. Deploy the daemon binary built from the reset branch.
 5. Verify: daemon boots, sessions list intact (spot-check counts against
    pre-cutover numbers for sessions, turns, conversations), new turn
@@ -135,8 +138,8 @@ that is scratch tooling, not a repo commitment.
 6. Resume watchdog.
 
 Rollback at any step before a post-reset forward migration lands: restore the
-old `_sqlx_migrations` rows (kept in the safety dump) and redeploy the previous
-binary. Nothing else changed.
+old `_sqlx_migrations` rows (kept in the safety dump; same qualified table) and
+redeploy the previous binary. Nothing else changed.
 
 ### 4. Delete the compat surface — precisely scoped
 
@@ -184,12 +187,13 @@ over-claiming here:
 ### 5. Rules after the reset
 
 - **Forward-only immutability stands.** An applied migration is still never
-  edited; fixes are new migrations. What died is the requirement that a fresh
-  database be able to replay pre-alpha history forever.
+  edited; fixes are new migrations — `docs/spec/persistence-protocol.md` owns
+  this rule, and this page only points at it. What died is the requirement that
+  a fresh database be able to replay pre-alpha history forever.
 - **Version allocation:** timestamp prefixes continue, with the existing
-  uniqueness check retained (it is small and earns its keep). The
-  supersession-naming ceremony is retired — a new migration is just a new
-  migration.
+  uniqueness check (`scripts/check_migration_versions.py`, the owner of that
+  rule) retained — it is small and earns its keep. The supersession-naming
+  ceremony is retired — a new migration is just a new migration.
 - **Future resets stay cheap** while there is one deployment and no release:
   this document is the template, and repeating it is expected rather than
   exceptional. That era ends at the freeze condition in
