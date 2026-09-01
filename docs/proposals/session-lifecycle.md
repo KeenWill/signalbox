@@ -66,8 +66,12 @@ any non-terminal state → TERMINAL{superseded | stopped}
 
 The diagram carries the `retired` expiries §10 defines, the WAITING deadline
 escalation §13 requires, and the park closures §2 defines. A module-dispatched
-session enters `dispatched`; an interactive session passes from `created`
-directly to `active` on its first accepted input.
+session enters `dispatched`. An interactive session's first accepted input also
+moves it to `dispatched`, not `active`: the accepted turn is queued and
+activated by the unchanged scheduler contract, and only turn activation makes
+the session `active` — so the dispatch deadline covers a queued interactive turn
+that never activates. A queued successor turn inside a live session never
+re-enters `dispatched`; the active stall deadline covers it.
 
 **Proposed behavior.** `created` and `dispatched` are distinct from `active`
 because 229 sessions died between creation and first turn and 52 died with a
@@ -113,7 +117,9 @@ armed deadline is a config-sourced re-notification interval: its defined expiry
 transition re-raises the operator alert and re-arms — it never moves the session
 and never terminalizes it. Because the re-alert is the deadline's defined
 transition, a parked session on schedule never trips §12's
-`nonterminal_past_deadline`.
+`nonterminal_past_deadline`. The re-alert is observable without widening §5's
+closed vocabulary: it emits `session_state_changed` with the state unchanged and
+a typed re-notification payload.
 
 **Proposed behavior.** The turn machine (`queued / active / terminal`, with the
 `awaiting_*` phases) persists unchanged beneath the session machine, and the
@@ -147,9 +153,12 @@ incomplete.
 `failed_unknown`, `stopped{actor, sticky}`, `superseded{by}`, `abandoned`,
 `retired`. A structural failure, an unknown failure, or an exhausted retry
 budget on a live owned session parks the session (§1) rather than terminalizing
-it, with the typed cause attached. The park then closes with the outcome that
-matches its resolution: `superseded{by}` when a fresh respawn takes the work;
-`abandoned` on operator write-off; `failed_retryable{cause}`,
+it, with the typed cause attached. Every parked closure — `supersede`,
+`abandon`, `close_failed`, `stop` alike — settles a suspended turn in the same
+transaction, `cancelled` with the closure's outcome as its cause, so no terminal
+session leaves a non-terminal turn behind (§1). The park then closes with the
+outcome that matches its resolution: `superseded{by}` when a fresh respawn takes
+the work; `abandoned` on operator write-off; `failed_retryable{cause}`,
 `failed_structural{cause}`, or `failed_unknown` when it closes as failed with
 the cause standing. Each outcome carries its warranted recovery as normative
 behavior:
@@ -208,11 +217,14 @@ behavior:
 the form this section's final rule defines). The session row carries
 `created_at` and `ended_at`. Every lifecycle row — `turn_lifecycle`,
 `turn_attempt`, `model_call`, `tool_attempt`, `goal_event` — is stamped at write
-time. Today none of those five tables carries a timestamp. The only clocks near
-a session are command claim times (`durable_command.claimed_at`), a handful of
-side journals, and creation instants derivable from UUIDv7 identities. Turn
-duration, queue wait, and every rate are therefore unanswerable from the
-lifecycle rows themselves.
+time. On a non-reset database the five columns follow the same migration rule as
+the outbox header (this section's final rule): nullable with new-row
+enforcement, historical rows backfilled only where a real time is derivable and
+null with the backfill marker otherwise — never fabricated. Today none of those
+five tables carries a timestamp. The only clocks near a session are command
+claim times (`durable_command.claimed_at`), a handful of side journals, and
+creation instants derivable from UUIDv7 identities. Turn duration, queue wait,
+and every rate are therefore unanswerable from the lifecycle rows themselves.
 
 **Proposed behavior.** The compaction call lifecycle is stamped at each step:
 the command's acceptance as a durable `requested_at` —
@@ -226,12 +238,15 @@ exactly when restarts are the leading creator of stuck sessions.
 
 **Proposed behavior.** `web_usage_call_projection.recorded_at` is fixed. The
 defect: today every one of the 149,773 backfilled rows carries a migration-day
-stamp, not its event time. The fix: backfilled rows receive their real times
-where derivable — the UUIDv7 identity carries the creation instant — and a null
-with an explicit backfill marker where not. The null requires relaxing the
-column's `NOT NULL` and representability CHECK, and the same change migrates the
-usage read surface: the projection reader decodes `recorded_at` as non-optional
-and paginates by a `(recorded_at, model_call_id)` keyset
+stamp, not its event time. The fix: backfilled rows receive a real time only
+where a terminal-time value is derivable — `recorded_at` is defined as the
+terminal statement time (docs/spec/usage-evidence.md), and the UUIDv7 creation
+instant is not that time: substituting it would shift usage into earlier ranges
+and reorder newest-first pages — and a null with an explicit backfill marker
+where no terminal time is derivable. The null requires relaxing the column's
+`NOT NULL` and representability CHECK, and the same change migrates the usage
+read surface: the projection reader decodes `recorded_at` as non-optional and
+paginates by a `(recorded_at, model_call_id)` keyset
 (`crates/persistence/src/usage.rs`), so marked rows get an explicit ordering and
 cursor rule — deterministic order, no marked row ever silently dropped by
 pagination, and no null key reaching an unmigrated reader. One rule is shared
@@ -321,10 +336,15 @@ the derived-state retention exemption. A consumer that reads raw rows on demand
 be made prune-safe by a cursor: advancing it permits deleting history later
 reads still need, and never advancing it pins the floor. The timeline therefore
 becomes a durable projection in the same change that turns on pruning, its
-cursor advancing only behind projected rows. This floor and exemption carry an
-owner ruling (2026-09-01); the persistence-protocol page itself is amended by
-the owning-page spec diff described below, not by this proposal. The recorded
-open question on update-event retention and pruning (docs/open-questions.md) is
+cursor advancing only behind projected rows. Nor is the timeline the only such
+reader — delegation reconstitution, child-result admission, and artifact-address
+search all join raw headers today — so the rule is generic: before the floor
+first advances, every raw reader of either header family holds a durable
+projection, a named exemption, or reads bounded to the retention window, and the
+implementing change enumerates them. This floor and exemption carry an owner
+ruling (2026-09-01); the persistence-protocol page itself is amended by the
+owning-page spec diff described below, not by this proposal. The recorded open
+question on update-event retention and pruning (docs/open-questions.md) is
 decided in substance by that ruling; its formal closure — the owning-page spec
 diff — lands at the bottom of the implementing stack, per the foundation rule,
 so no page on `main` describes unimplemented pruning as implemented. Retention
@@ -405,7 +425,9 @@ kind (§5).
 dispatch-lease tables — `repo_watch_dispatch_start_lease` with its `_expiration`
 and `_quarantine` companions — die. The scheduler's four-table reach-around dies
 with them. A session created with a held start gate stays in `created` until
-`release_start` or gate expiry; expiry retires it (§10).
+`release_start` or gate expiry; expiry retires it (§10). A held gate requires
+owned ownership: `create_session` combining a held gate with unmonitored
+ownership is rejected, because an unmonitored session carries no deadline (§6).
 
 **Proposed behavior.** Ownership is advisory: an owner module observes events
 and issues commands like any other client; it never sits between core and the
@@ -493,9 +515,10 @@ published retirement is such a turn — the match holds in both directions. Addi
 
 **Proposed behavior.** Every dispatched session carries a dispatch deadline on
 the `dispatched` to `active` transition, config-sourced. Expiry retires the
-session with cause `dispatch_deadline_expired`. This closes the 229 zombie
-sessions that were created, never ran a turn, and sat idle forever with a
-lifespan of 0.0 hours.
+session with cause `dispatch_deadline_expired`, and any queued turn retires with
+it in the same transaction — the machines move together (§1). This closes the
+229 zombie sessions that were created, never ran a turn, and sat idle forever
+with a lifespan of 0.0 hours.
 
 **Proposed behavior.** A held `start_gate` carries its own deadline; expiry
 retires the session with typed cause `start_gate_deadline_expired`.
@@ -544,8 +567,10 @@ threshold or rarer. Their handling is §2's park-and-respawn with cause
 proxies. They are the acceptance gate for this specification and the reliability
 program behind it.
 
-- `session_completion_failure_rate` — the headline. Cohort: owned sessions
-  reaching `terminal` in a calendar week. Denominator: the cohort minus
+- `session_completion_failure_rate` — the headline. Cohort: sessions reaching
+  `terminal` in a calendar week that were owned at any point in their life —
+  membership follows the journaled ownership record (§6), so releasing a
+  troubled session never removes it from the gate. Denominator: the cohort minus
   `stopped` and `superseded` (withdrawn or moved work is not failure).
   Numerator: `failed_retryable`, `failed_structural`, `failed_unknown`,
   `abandoned`, and `retired`. Target: below 10%, then 2–5%. Today's equivalent
