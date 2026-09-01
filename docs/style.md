@@ -213,14 +213,12 @@ the persistence crate's own tests, not the daemon at runtime.
 
 ### Durable and wire shapes change with their registries
 
-A migration that drops and re-adds an existing named constraint carries, above
-the `DROP CONSTRAINT`, a comment naming the migration whose definition it
-supersedes; without it the constraint's current shape is knowable only by
-folding the whole migration set in order. Migration filenames sort identically
-under lexical and numeric ordering, and the ordering prefix is chosen at merge
-time, not at authoring time — the prefix is load-bearing policy, because a file
-that sorts earlier than the definition it supersedes silently re-issues the
-older text.
+Migration filenames sort identically under lexical and numeric ordering, and the
+ordering prefix is chosen at merge time, not at authoring time — the prefix is
+load-bearing policy, because a file that sorts earlier than the definition it
+replaces silently re-issues the older text. The supersession-naming ceremony
+that once accompanied a re-added constraint is retired with the migration reset:
+a new migration is just a new migration.
 
 Every `command_kind` spelling a durable `CHECK` constraint admits gains its
 registry variant, its join, and its presence entry in the same commit as the
@@ -438,34 +436,26 @@ the lint can be enabled at `deny`.
 
 ### The style-rule checker
 
-`scripts/check_style_rules.py` decides the conventions above that a text scan
-can decide without type resolution. It runs in CI as a report-only step: it
-prints a per-rule count table and its findings, and cannot fail the workflow.
-Promotion to a blocking gate is a separate, deliberate step, taken per rule once
-that rule's count reaches zero — never as a side effect of a change that merely
-reduces a count. A promoted rule gets a step of its own that runs the checker
-under `--rule`, so it blocks on itself alone; the report-only step keeps running
-every rule, because deleting its tolerance would gate on the rules still being
-burned down. Until then the counts are a burndown baseline and review is still
-what enforces the conventions.
+`scripts/check_style_rules.py` decides the three conventions below that a text
+scan decides without type resolution and that the tree already satisfies. It
+runs in CI as a blocking step: any finding fails the workflow, so the step can
+only fail on a regression. A rule joins it only once the tree it scans is at
+zero — never as a side effect of a change that merely reduces a count.
+
+The checker previously carried thirteen rules report-only, with about a thousand
+findings it could never act on. The 2026-09-01 owner ruling burned the three
+near-zero rules to zero, made them blocking, and dropped the other ten: a
+permanently red report gates nothing. The conventions those rules restated are
+unchanged — only their mechanical scan is gone, and review enforces them like
+the rest of this guide.
 
 Each rule below names the convention it decides:
 
-| Rule  | Convention it decides                                                                  |
-| ----- | -------------------------------------------------------------------------------------- |
-| SR-1  | every file states what it owns (Rust `//!`, Swift `///`)                               |
-| SR-2  | comments state constraints, not process artifacts                                      |
-| SR-3  | one spelling per name per file                                                         |
-| SR-4  | public `*Error`/`*Failure`/`*Defect`/`*Exceeded` types implement `Display` and `Error` |
-| SR-5  | no `bool` in a public field or parameter of the domain and application crates          |
-| SR-6  | no row decoded as an anonymous tuple                                                   |
-| SR-7  | a stored version is compared against a named threshold, not the writer's version       |
-| SR-8  | no production code under `apps/` names a table in SQL                                  |
-| SR-9  | a superseding migration names what it supersedes, and filenames sort one way           |
-| SR-10 | no two adjacent parameters of a public function share a type                           |
-| SR-11 | no function body exceeds 400 lines                                                     |
-| SR-12 | every clap argument and `ValueEnum` variant carries a doc comment                      |
-| SR-13 | no proc-macro diagnostic is spanned on the macro call site                             |
+| Rule  | Convention it decides                                             |
+| ----- | ----------------------------------------------------------------- |
+| SR-8  | no production code under `apps/` names a table in SQL             |
+| SR-12 | every clap argument and `ValueEnum` variant carries a doc comment |
+| SR-13 | no proc-macro diagnostic is spanned on the macro call site        |
 
 The remaining conventions stay judgment-only, and the reason is the same in
 every case: the fact they turn on is not in the text. Whether a bound or durable

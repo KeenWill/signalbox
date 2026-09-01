@@ -415,6 +415,68 @@ impl ReviewWorkflowStore {
         Ok(pass)
     }
 
+    /// Loads the session and originating turn recorded for one accepted input.
+    ///
+    /// A review run is authorized against the input that produced the turn it
+    /// reviews, and this is the projection that check reads.
+    pub async fn load_accepted_input_origin(
+        &self,
+        accepted_input: AcceptedInputId,
+    ) -> Result<Option<ReviewAcceptedInputOrigin>, ReviewWorkflowStoreError> {
+        let row = sqlx::query(
+            "SELECT session_id, origin_turn_id
+               FROM accepted_input
+              WHERE accepted_input_id = $1",
+        )
+        .bind(accepted_input.into_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let session: Uuid = row.try_get("session_id")?;
+        let origin_turn: Option<Uuid> = row.try_get("origin_turn_id")?;
+        Ok(Some(ReviewAcceptedInputOrigin {
+            session: session_id(session),
+            origin_turn: origin_turn.map(turn_id),
+        }))
+    }
+
+    /// Loads the durable lifecycle position recorded for one turn.
+    ///
+    /// A pass attributes its outcome to a turn, and every fact that
+    /// attribution turns on — the owning session, the originating input, the
+    /// lifecycle state and its terminal frontier — is decoded here rather than
+    /// read column by column outside this crate.
+    pub async fn load_turn_lifecycle(
+        &self,
+        turn: TurnId,
+    ) -> Result<Option<ReviewTurnLifecycle>, ReviewWorkflowStoreError> {
+        let row = sqlx::query(
+            "SELECT session_id, origin_accepted_input_id, state_kind,
+                    terminal_disposition_kind, terminal_frontier_id
+               FROM turn_lifecycle
+              WHERE turn_id = $1",
+        )
+        .bind(turn.into_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let session: Uuid = row.try_get("session_id")?;
+        let accepted_input: Option<Uuid> = row.try_get("origin_accepted_input_id")?;
+        let state: String = row.try_get("state_kind")?;
+        let disposition: Option<String> = row.try_get("terminal_disposition_kind")?;
+        let frontier: Option<Uuid> = row.try_get("terminal_frontier_id")?;
+        Ok(Some(ReviewTurnLifecycle {
+            session: session_id(session),
+            accepted_input: accepted_input.map(accepted_input_id),
+            state: decode_turn_lifecycle_state(&state, disposition.as_deref())?,
+            terminal_frontier: frontier.map(context_frontier_id),
+        }))
+    }
+
     /// Applies one pass transition and its matching run projection atomically.
     pub async fn transition_run_and_pass(
         &self,
@@ -3402,6 +3464,24 @@ fn decode_turn_outcome(
     }
 }
 
+fn decode_turn_lifecycle_state(
+    state: &str,
+    disposition: Option<&str>,
+) -> Result<ReviewTurnLifecycleState, ReviewWorkflowStoreError> {
+    match (state, disposition) {
+        ("queued", None) => Ok(ReviewTurnLifecycleState::Queued),
+        ("active", None) => Ok(ReviewTurnLifecycleState::Active),
+        ("terminal", Some(_)) => Ok(ReviewTurnLifecycleState::Terminal(decode_turn_outcome(
+            state,
+            disposition,
+        )?)),
+        _ => Err(corruption(
+            "turn_lifecycle",
+            format!("invalid turn lifecycle state {state}/{disposition:?}"),
+        )),
+    }
+}
+
 fn decode_finding_proposal(
     row: &PgRow,
     producing_pass: ReviewPassEvidence,
@@ -4913,6 +4993,67 @@ fn context_frontier_id(value: Uuid) -> ContextFrontierId {
 
 pub(crate) fn corruption(aggregate: &'static str, detail: String) -> ReviewWorkflowStoreError {
     ReviewWorkflowStoreError::Corruption(ReviewWorkflowCorruption { aggregate, detail })
+}
+
+/// The session and originating turn one accepted input records.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReviewAcceptedInputOrigin {
+    session: SessionId,
+    origin_turn: Option<TurnId>,
+}
+
+impl ReviewAcceptedInputOrigin {
+    /// The session the input was accepted into.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// The turn the input originated, absent while it originated none.
+    pub const fn origin_turn(&self) -> Option<TurnId> {
+        self.origin_turn
+    }
+}
+
+/// The lifecycle position one turn row records.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReviewTurnLifecycleState {
+    /// Accepted, with no attempt started.
+    Queued,
+    /// Started, with no terminal disposition recorded.
+    Active,
+    /// Finished under the recorded disposition.
+    Terminal(ReviewPassTurnOutcome),
+}
+
+/// One turn's durable lifecycle facts, as a review pass reads them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReviewTurnLifecycle {
+    session: SessionId,
+    accepted_input: Option<AcceptedInputId>,
+    state: ReviewTurnLifecycleState,
+    terminal_frontier: Option<ContextFrontierId>,
+}
+
+impl ReviewTurnLifecycle {
+    /// The session the turn runs in.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// The input the turn originated from, absent for a delegated turn.
+    pub const fn accepted_input(&self) -> Option<AcceptedInputId> {
+        self.accepted_input
+    }
+
+    /// The lifecycle position the row records.
+    pub const fn state(&self) -> ReviewTurnLifecycleState {
+        self.state
+    }
+
+    /// The frontier the turn ended on, absent until it is terminal.
+    pub const fn terminal_frontier(&self) -> Option<ContextFrontierId> {
+        self.terminal_frontier
+    }
 }
 
 /// First reservation outcome.
