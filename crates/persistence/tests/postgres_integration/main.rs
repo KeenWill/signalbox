@@ -110,7 +110,7 @@ use signalbox_domain::{
     TurnConfigurationProvenance, TurnId, UserContent, UserContentPart,
 };
 use signalbox_persistence::{
-    MIGRATOR, ModelCredentialFamilyCatalog,
+    ModelCredentialFamilyCatalog,
     approval_judge::{
         AuthorizeApprovalJudgeOutcome, AuthorizedApprovalJudge, CompleteApprovalJudgeOutcome,
         FailedApprovalJudgeDisposition, PrepareApprovalJudgeOutcome, PreparedApprovalJudge,
@@ -192,7 +192,7 @@ use signalbox_tools_plan::{
     PlanEvent, PlanEventDraft, PlanEventKind, PlanEventProvenance, PlanPageCompleteness,
     PlanReadRequest, PlanReadiness, PlanStatus, PlanText,
 };
-use sqlx::{PgConnection, PgPool, Row, migrate::Migrate, postgres::PgPoolOptions, types::Uuid};
+use sqlx::{PgConnection, PgPool, Row, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
@@ -1645,14 +1645,6 @@ struct AutomaticApprovalEventState {
 }
 
 #[derive(Debug, PartialEq, sqlx::FromRow)]
-struct ApprovalDecisionEventBackfillState {
-    request_id: Uuid,
-    turn_id: Uuid,
-    session_id: Uuid,
-    event_kind: String,
-}
-
-#[derive(Debug, PartialEq, sqlx::FromRow)]
 struct AppliedApprovalJudgeProjection {
     judge_state: String,
     recommendation: String,
@@ -1891,163 +1883,6 @@ async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, Stri
         .await?;
 
     Ok((container, pool, database_url))
-}
-
-async fn apply_migrations_before(pool: &PgPool, exclusive_version: i64) -> Result<(), sqlx::Error> {
-    let mut connection = pool.acquire().await?;
-    connection
-        .ensure_migrations_table("_sqlx_migrations")
-        .await?;
-    for migration in MIGRATOR
-        .iter()
-        .take_while(|migration| migration.version < exclusive_version)
-    {
-        connection.apply("_sqlx_migrations", migration).await?;
-    }
-    Ok(())
-}
-
-async fn postgres_before_approval_migration()
--> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
-    let (container, pool, database_url) = unmigrated_postgres().await?;
-    let mut connection = pool.acquire().await?;
-    connection
-        .ensure_migrations_table("_sqlx_migrations")
-        .await?;
-    for migration in MIGRATOR
-        .iter()
-        .take_while(|migration| migration.version < 202608020015)
-    {
-        connection.apply("_sqlx_migrations", migration).await?;
-    }
-    drop(connection);
-    Ok((container, pool, database_url))
-}
-
-async fn postgres_before_approval_event_migration()
--> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
-    let (container, pool, database_url) = unmigrated_postgres().await?;
-    let mut connection = pool.acquire().await?;
-    connection
-        .ensure_migrations_table("_sqlx_migrations")
-        .await?;
-    for migration in MIGRATOR
-        .iter()
-        .take_while(|migration| migration.version < 202608030001)
-    {
-        connection.apply("_sqlx_migrations", migration).await?;
-    }
-    drop(connection);
-    Ok((container, pool, database_url))
-}
-
-/// The attention journal migration, whose backfill the fixture below stages.
-const OPERATOR_ATTENTION_CHANGE_MIGRATION_VERSION: i64 = 202608250800;
-/// The catalog activity substrate depends on the attention journal and is also
-/// withheld while staging the journal's historical backfill fixture.
-const SESSION_CATALOG_ACTIVITY_MIGRATION_VERSION: i64 = 202608260003;
-
-/// Stages the database an existing installation carries when the attention
-/// journal ships: every independent migration applied, the journal and its
-/// later catalog substrate not.
-///
-/// The staged database is written through current repository code, which
-/// requires the current schema, so the fixture withholds exactly the migration
-/// under test and its one dependent migration rather than every migration
-/// recorded after it.
-async fn postgres_before_attention_migration()
--> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
-    let (container, pool, database_url) = unmigrated_postgres().await?;
-    let mut connection = pool.acquire().await?;
-    connection
-        .ensure_migrations_table("_sqlx_migrations")
-        .await?;
-    for migration in MIGRATOR.iter().filter(|migration| {
-        migration.version != OPERATOR_ATTENTION_CHANGE_MIGRATION_VERSION
-            && migration.version != SESSION_CATALOG_ACTIVITY_MIGRATION_VERSION
-    }) {
-        connection.apply("_sqlx_migrations", migration).await?;
-    }
-    drop(connection);
-    Ok((container, pool, database_url))
-}
-
-/// `command_registry`'s inspection query names every registered durable
-/// command's typed table regardless of the database's migration state (see
-/// `crates/persistence/src/command_registry.rs`), so a "before" fixture used
-/// by any path that inspects a durable command must still carry every such
-/// table even though it otherwise predates the migration under test.
-/// `override_denied_tool_request_command` (added by `202608170006`, after
-/// this fixture's boundary) is the only registry table introduced between
-/// this boundary and that migration — no other `COMMAND_KIND_DEFINITIONS`
-/// table is created in `202608140001..202608170006` — so admitting that one
-/// migration alone satisfies the registry while every workspace-instruction
-/// table (created by `202608140001` itself) stays absent, preserving this
-/// fixture's "historical DB" premise.
-const OVERRIDE_DENIED_TOOL_REQUEST_COMMAND_MIGRATION_VERSION: i64 = 202608170006;
-
-async fn postgres_before_workspace_instruction_migration()
--> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
-    let (container, pool, database_url) = unmigrated_postgres().await?;
-    let mut connection = pool.acquire().await?;
-    connection
-        .ensure_migrations_table("_sqlx_migrations")
-        .await?;
-    for migration in MIGRATOR.iter().filter(|migration| {
-        migration.version < 202608140001
-            || migration.version == OVERRIDE_DENIED_TOOL_REQUEST_COMMAND_MIGRATION_VERSION
-    }) {
-        connection.apply("_sqlx_migrations", migration).await?;
-    }
-    drop(connection);
-    Ok((container, pool, database_url))
-}
-
-async fn apply_workspace_instruction_migration(pool: &PgPool) -> Result<(), Box<dyn Error>> {
-    let mut connection = pool.acquire().await?;
-    connection
-        .ensure_migrations_table("_sqlx_migrations")
-        .await?;
-    for migration in MIGRATOR.iter().filter(|migration| {
-        migration.version >= 202608140001
-            && migration.version != OVERRIDE_DENIED_TOOL_REQUEST_COMMAND_MIGRATION_VERSION
-    }) {
-        connection.apply("_sqlx_migrations", migration).await?;
-    }
-    Ok(())
-}
-
-async fn insert_pre_approval_tool_request(
-    pool: &PgPool,
-    request_seed: u128,
-) -> Result<Uuid, Box<dyn Error>> {
-    const SESSION_OFFSET: u128 = 1;
-    const TURN_OFFSET: u128 = 2;
-    const PRODUCING_CALL_OFFSET: u128 = 3;
-    let request = Uuid::from_u128(request_seed);
-    let mut connection = pool.acquire().await?;
-    sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER ALL")
-        .execute(&mut *connection)
-        .await?;
-    sqlx::query(
-        "INSERT INTO tool_request
-            (request_id, session_id, turn_id, producing_model_call_id,
-             request_ordinal, tool_name, arguments_kind, arguments_text)
-         VALUES ($1, $2, $3, $4, 0, $5, 'json', $6)",
-    )
-    .bind(request)
-    .bind(Uuid::from_u128(request_seed + SESSION_OFFSET))
-    .bind(Uuid::from_u128(request_seed + TURN_OFFSET))
-    .bind(Uuid::from_u128(request_seed + PRODUCING_CALL_OFFSET))
-    .bind(APPROVAL_TOOL_NAME)
-    .bind(APPROVAL_ARGUMENTS)
-    .execute(&mut *connection)
-    .await?;
-    sqlx::query("ALTER TABLE tool_request ENABLE TRIGGER ALL")
-        .execute(&mut *connection)
-        .await?;
-
-    Ok(request)
 }
 
 async fn insert_pending_compact_command(

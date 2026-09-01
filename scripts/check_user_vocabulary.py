@@ -268,95 +268,25 @@ ALLOWLIST = (
         ),
     ),
     Allowance(
+        # Four schema object names predate the rename and are load-bearing
+        # identities the rename deliberately left alone; the baseline
+        # reproduces the schema exactly, so it reproduces their spelling. The
+        # 21 chain files this allowance used to name died with the chain
+        # (docs/proposals/migration-reset.md); the spellings now live in the
+        # review and blobs-and-web files of the split baseline.
         "immutable applied migration vocabulary",
         re.compile(
-            r"^crates/persistence/migrations/(?:"
-            r"202607180001_create_session|"
-            r"202607180002_replace_session_defaults|"
-            r"202607180003_submit_input|"
-            r"202607180004_turn_lifecycle_storage|"
-            r"202607200001_bounded_user_content|"
-            r"202607220001_model_call_execution|"
-            r"202607220005_stop_requests|"
-            r"202607240001_conversation_import|"
-            r"202607240002_imported_session_seed|"
-            r"202607250001_tool_loop|"
-            r"202607260101_session_metadata|"
-            r"202607280002_review_workflow|"
-            r"202607280202_metadata_command_issuer|"
-            r"202607280302_review_workflow_commands|"
-            r"202607280303_session_system_prompt|"
-            r"202607280401_runner_protocol|"
-            r"202608020001_review_orchestration|"
-            r"202608020002_review_orchestration_command_recovery|"
-            r"202608020003_runner_wire_contract|"
-            r"202608020015_llm_delegated_tool_approval|"
-            r"202608020018_session_delegation"
-            r")[.]sql$"
-        ),
-        re.compile(
-            r"(?<![A-Za-z0-9_])(?:"
-            r"imported_conversation_raw_record_owner_fk|"
-            r"imported_transcript_entry_owner_fk|"
-            r"imported_transcript_entry_owner_identity_key|"
-            r"owner_command_id|owner_command|owner_initiated|"
-            r"owner_tool_approval_requires_command|"
-            r"review_pass_produced_finding_owner|"
-            r"tool_approval_decision_owner_command_fk|owner"
-            r")(?![A-Za-z0-9_])",
-            re.IGNORECASE,
-        ),
-    ),
-    Allowance(
-        # The migration that retires the stored spelling has to name it in
-        # order to rename it: it renames the column and the objects named
-        # after it, rewrites the stored values, and records which four
-        # record-ownership constraint names it deliberately leaves alone.
-        # Every other reference to these spellings is now a failure.
-        "storage vocabulary rename migration",
-        re.compile(
             r"^crates/persistence/migrations/"
-            r"202608110001_user_role_storage_vocabulary[.]sql$"
+            r"(?:202609010010_review|202609010011_blobs_and_web)[.]sql$"
         ),
         re.compile(
             r"(?<![A-Za-z0-9_])(?:"
             r"imported_conversation_raw_record_owner_fk|"
             r"imported_transcript_entry_owner_fk|"
             r"imported_transcript_entry_owner_identity_key|"
-            r"tool_approval_decision_owner_command_id_key|"
-            r"tool_approval_decision_owner_command_fk|"
-            r"owner_tool_approval_requires_command|"
-            r"review_pass_produced_finding_owner|"
-            r"owner_command_id|owner_command|owner_initiated|owner"
+            r"review_pass_produced_finding_owner"
             r")(?![A-Za-z0-9_])",
             re.IGNORECASE,
-        ),
-    ),
-    Allowance(
-        # Fixtures that seed a database standing at an earlier migration, so
-        # that a later migration can be exercised against real rows. The
-        # CHECK constraints in force at that point admit only the retired
-        # spelling, so writing the current one fails with `23514` before the
-        # migration under test ever runs. This is not compatibility with the
-        # retired vocabulary: it is the evidence that the rename upgrades data
-        # that was written before it, and every one of these lines is inside a
-        # test whose pool is deliberately held short of the rename.
-        "pre-rename migration fixtures",
-        re.compile(
-            r"^crates/persistence/tests/(?:conversation_import_postgres|"
-            r"runner_protocol_postgres|"
-            r"postgres_integration/(?:approval_decisions|"
-            r"model_call_execution_and_recovery))[.]rs$"
-        ),
-        re.compile(
-            r'^const RETIRED_CREATION_CAUSE: &str = "owner_initiated";$|'
-            r'^\s*"owner_initiated",$|'
-            r"^\s*\(request_id, decision_kind, decision_source, "
-            r"owner_command_id\)$|"
-            r"^\s*VALUES \(\$1, 'approve', 'owner_command', \$2\)\",$|"
-            r"^\s*'owner_initiated', 'none'\);$|"
-            r"^\s*'create_session', 1, 'owner_initiated', 'none', 1,$|"
-            r"^\s*'owner', NULL, NULL, 'text', 'queued before migration',$"
         ),
     ),
     Allowance(

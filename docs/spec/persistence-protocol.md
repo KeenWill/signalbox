@@ -188,34 +188,48 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — one hundred fourty files, `202607180001`
-through `202608251300` — embedded by `sqlx::migrate!` as the static `MIGRATOR`
-and applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations`
-ledger records applied files with checksums (the integration tests read the
-ledger directly); serialization of concurrent migration runs is SQLx dependency
-behavior, relied on but not demonstrated in this repo. `.gitattributes` pins
-migration files to LF so checksums do not vary by platform, and a build script
-re-embeds the set whenever a file changes. The production binary holds the
-singleton daemon guard and fences the prior pool generation, then runs `migrate`
-as its first schema phase, followed by the startup scan and runtime (INV-034).
-The fence migration's first installation is the sole case without a prior fenced
-pool, because no earlier schema can have admitted one. Why: checksummed
-forward-only files make every schema change a reviewed, immutable artifact, so a
-deployed database's history is never silently edited.
+`crates/persistence/migrations/` — fifteen files, `202609010000` through
+`202609010014`, the per-domain baseline that the 2026-09 chain collapse
+regenerated from the retired 149-file pre-alpha chain
+(`docs/proposals/migration-reset.md`) — embedded by `sqlx::migrate!` as the
+static `MIGRATOR` and applied through one `migrate(pool)` operation. The
+baseline files are one schema split by domain and apply only as a whole, in
+filename order; `HUB_FENCE_MIGRATION_VERSION` names the last of them. Migration
+versions below `202609010000` cited elsewhere in this document name files of the
+retired chain — git history is their archive, and the baseline reproduces their
+surviving effects byte-for-byte. SQLx's `_sqlx_migrations` ledger records
+applied files with checksums (the integration tests read the ledger directly);
+serialization of concurrent migration runs is SQLx dependency behavior, relied
+on but not demonstrated in this repo. `.gitattributes` pins migration files to
+LF so checksums do not vary by platform, and a build script re-embeds the set
+whenever a file changes. The production binary holds the singleton daemon guard
+and fences the prior pool generation, then runs `migrate` as its first schema
+phase, followed by the startup scan and runtime (INV-034). The fence migration's
+first installation is the sole case without a prior fenced pool, because no
+earlier schema can have admitted one. Why: checksummed forward-only files make
+every schema change a reviewed, immutable artifact, so a deployed database's
+history is never silently edited.
 
 A migration becomes immutable as soon as its version is recorded in the
 `_sqlx_migrations` table of any database whose history must remain continuous:
 every deployed database, and every recording once the migration's pull request
 merges. Correct an already-recorded migration with a new forward migration;
-never edit, replace, or renumber the recorded migration file. The sole exception
-is a pre-merge recording by a rehearsal installation when the recorded form
+never edit, replace, or renumber the recorded migration file. Two exceptions
+exist. A pre-merge recording by a rehearsal installation when the recorded form
 cannot merge — a form that fails validation on fresh databases has no correct
 forward continuation, so the file is corrected before merge and the rehearsal
 installation's ledger row is corrected at its next deployment as a documented
-step, never silently. Why: the rule exists so no database's history is silently
-edited, and a documented rehearsal-ledger correction preserves that while a
-frozen unmergeable file would instead freeze a defect into every future
-installation.
+step, never silently. And the chain collapse that
+`docs/proposals/migration-reset.md` reconciles with this rule: while there is
+exactly one deployment and no release, the whole recorded set may be replaced by
+a regenerated baseline proved schema-equivalent, cutting the deployed database
+over by truncating `_sqlx_migrations` and inserting one row per baseline file in
+one transaction — bookkeeping only, no schema or data mutation. Why: the rule
+exists so no database's history is silently edited; a documented
+rehearsal-ledger correction preserves that while a frozen unmergeable file would
+instead freeze a defect into every future installation, and a collapse replaces
+the ledger loudly, with equivalence proofs, under the ruling that document
+records.
 
 Every function reachable from a table constraint or index expression pins its
 search path in its catalogue definition, rendered through `current_schema` so
@@ -223,17 +237,18 @@ installations whose migrations run outside the default schema keep the
 `202607310102` pattern. `pg_restore` replays a logical backup under an empty
 search path and evaluates check constraints while copying table data, so an
 unpinned body that names another user function unqualified resolves in normal
-operation and fails only during restore; `202608200001` retrofits the pin onto
-the check-reachable set the earlier migrations create, and the
-`search_path_postgres` catalogue test (INV-070) derives the reachable set from
-the dependency catalogue — including functions reached only through a
-user-defined operator — then closes transitively over lexically call-shaped body
-references. Quoted identifiers and comments between a function name and its
-opening parenthesis remain calls; names inside comments or strings and bare
-aliases do not. The test fails on any unpinned member or on empty discovery, so
-a future migration cannot reintroduce the gap. Why: a backup that cannot restore
-is a silent failure that surfaces only during recovery, so restorability is part
-of the schema's contract rather than an operational afterthought.
+operation and fails only during restore; the baseline carries the pin on the
+whole check-reachable set (the retired `202608200001` retrofitted it onto the
+chain's), and the `search_path_postgres` catalogue test (INV-070) derives the
+reachable set from the dependency catalogue — including functions reached only
+through a user-defined operator — then closes transitively over lexically
+call-shaped body references. Quoted identifiers and comments between a function
+name and its opening parenthesis remain calls; names inside comments or strings
+and bare aliases do not. The test fails on any unpinned member or on empty
+discovery, so a future migration cannot reintroduce the gap. Why: a backup that
+cannot restore is a silent failure that surfaces only during recovery, so
+restorability is part of the schema's contract rather than an operational
+afterthought.
 
 Prefix reservation across concurrent stacks: the bottom pull request of any
 stack that will add migrations declares a reserved prefix block — a date plus a
