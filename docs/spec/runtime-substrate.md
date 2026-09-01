@@ -56,7 +56,10 @@ smoke through PR `#466` (`agent/openai-api-smoke`). The cross-adapter
 this PR (`agent/typed-loss-cause`), against every streamed and buffered loss
 path in the four adapters. A credential-suppressed proposal's participation in
 the structured-output multiplicity guard and in the Claude CLI named tool choice
-is verified against this PR (`agent/fix-client-tools-judge`). This page covers
+is verified against this PR (`agent/fix-client-tools-judge`). The smoke
+workflows' concurrency grouping — pull-request supersession, unique run-id
+groups on `main`, per-event-and-ref supersession for non-main dispatches — is
+verified against this PR (`agent/ci-cancel-superseded-pushes`). This page covers
 the provider-neutral operation, observation, and evidence vocabulary; SSE
 framing; structured-output and tool decode; `ScriptedModel`; the four provider
 adapters; and their credential boundaries. Layer-2 authorization and evidence
@@ -721,10 +724,12 @@ workflow as a provider-drift canary between adapter-touching pull requests,
 spending one more real, paid exchange per run. A scheduled trigger is not a
 `pull_request` event, so the eligibility gate's non-`pull_request` branch marks
 it required unconditionally — the same branch a manual dispatch or a qualifying
-push takes — and the workflow-level concurrency group already falls back to the
-run id for a non-`pull_request` event, so each scheduled run keeps its own slot.
-GitHub only fires `schedule` events from a repository's default branch, so the
-schedule takes effect only once a change lands on `main`.
+push takes — and the workflow-level concurrency group falls back to the run id
+for a non-`pull_request` event on `main`, so each scheduled run keeps its own
+slot; a manual dispatch on a non-main ref instead shares a per-event-and-ref
+group that cancels superseded runs. GitHub only fires `schedule` events from a
+repository's default branch, so the schedule takes effect only once a change
+lands on `main`.
 
 The `anthropic-smoke` and `openai-smoke` environments are configured for all
 branches, for the same reason the `codex-smoke` environment is: GitHub evaluates
@@ -735,9 +740,12 @@ order, by GitHub secret withholding and the three explicit repository-name
 comparisons above.
 
 The workflow's own concurrency is a single group keyed to the pull request ref
-(or the run id for every other event), so a run superseded only by a newer push
-to the same ref releases its slot, exactly as the Codex smoke's own
-workflow-level group does. There is deliberately no additional job-level group
+(the run id for any other event on `main`; a per-event-and-ref group, canceling
+superseded runs, for a manual dispatch on any other ref), so a slot is released
+only when the same ref is superseded: a pull-request run by a newer update to
+its pull request, a non-main dispatch by a newer dispatch on that ref — never a
+push to `main`, which keeps every run. The Codex smoke's own workflow-level
+group behaves identically. There is deliberately no additional job-level group
 serializing the live exchange itself: a fixed inner group shared across every
 ref — which an earlier revision of this workflow carried — lets an unrelated
 smoke-required run evict this job's queued slot even though
