@@ -33,10 +33,11 @@ runs-on: ${{ github.event_name == 'pull_request'
 - In jobs carrying this expression, same-repo pull requests from people take the
   self-hosted arm, as does every non-`pull_request` event the workflow accepts
   (pushes to `main`, schedules, dispatches).
-- Fork pull requests and bot-authored pull requests (Dependabot, Renovate) take
-  the hosted arm. That is the whole enforced condition: nothing inspects who
-  pushed a commit, and the pinned jobs in the next section enforce weaker gates
-  or none.
+- Fork pull requests, and pull requests authored by exactly the two matched bot
+  accounts (`dependabot[bot]`, `renovate[bot]`), take the hosted arm. That is
+  the whole enforced condition: no other bot identity is excluded, nothing
+  inspects who pushed a commit, and the pinned jobs in the next section enforce
+  weaker gates or none.
 - The bot check keys on the **pull request author**
   (`github.event.pull_request.user.login`), never `github.actor`: a human
   reopening or re-running a bot pull request would otherwise mask the bot and
