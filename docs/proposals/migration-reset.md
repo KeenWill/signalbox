@@ -55,11 +55,12 @@ Owner ruling, 2026-09-01: **dogfood session and conversation data must survive;
 repo-watch data is disposable.**
 
 The design over-satisfies this: because the baseline equals the current schema,
-the dogfood database is never dumped, restored, or transformed. The only
-mutation is to migration *bookkeeping* (`_sqlx_migrations`). All data —
-sessions, conversations, and incidentally repo-watch — survives in place.
-"Disposable" becomes relevant only in the later repo-watch campaign, which may
-drop those tables by forward migration.
+the dogfood database is never dump-and-restored or transformed — the only dump
+anywhere in the procedure is §3's precautionary safety copy, which nothing
+consumes. The only mutation is to migration *bookkeeping* (`_sqlx_migrations`).
+All data — sessions, conversations, and incidentally repo-watch — survives in
+place. "Disposable" becomes relevant only in the later repo-watch campaign,
+which may drop those tables by forward migration.
 
 ## Design
 
@@ -67,22 +68,43 @@ drop those tables by forward migration.
 
 On a clean database, apply the full existing chain, then emit the schema:
 
-```
+```shell
 pg_dump --schema-only --no-owner --no-privileges > baseline-dump.sql
 ```
 
-Hand-clean the dump (drop `pg_dump` preamble noise, keep extension statements,
-preserve comment blocks worth keeping), split it into a few per-domain schema
-files (owner ruling, 2026-09-01: roughly one file per domain, ordered so sqlx
-can apply them by filename, with foreign keys that would point forward across
-files collected in a final file), and commit those as the only migrations in an
-emptied `crates/persistence/migrations/`. The old chain moves nowhere — git
-history is its archive.
+Hand-clean the dump into a valid migration. Three of these steps are correctness
+requirements the equivalence checks below must catch if skipped, not cosmetics:
 
-The baseline version numbers restart the clock — `202609010000_core.sql`
-through `202609010014_cross_domain_foreign_keys.sql`, one consecutive prefix
-run (timestamp format retained — sqlx expects it and tooling reads it). The
-files are one schema and only apply as a whole; the fence boundary
+- Drop `pg_dump` preamble noise; keep extension statements and comment blocks
+  worth keeping.
+- **Drop `_sqlx_migrations` entirely** (or dump with
+  `--exclude-table=_sqlx_migrations`). SQLx's migrator creates that table itself
+  before applying the first pending migration (`crates/persistence/src/lib.rs`,
+  `MIGRATOR.run`), so a baseline that recreates it fails on every fresh apply.
+- **Neutralize schema qualifications.** The dump pins an empty `search_path` and
+  hard-qualifies objects with the source database's schema, while the chain it
+  replaces creates unqualified objects in the connection's `current_schema()` —
+  `crates/persistence/tests/approval_judge_eval_postgres.rs` proves migration
+  into a configured schema. The baseline stays unqualified.
+- **Re-add the seed rows.** `--schema-only` discards required data the old chain
+  installs: the `outbox_sequence_state`, `outbox_delivery_state`, and
+  `hub_fence_state` singletons and both automatic-reconciliation cursors. A
+  schema-perfect baseline without them fails daemon startup (`hub_fence.rs`
+  treats the missing singleton as corruption). Carry those `INSERT`s into the
+  baseline from the migrations that own them.
+
+Split the cleaned dump into a few per-domain schema files (owner ruling,
+2026-09-01: roughly one file per domain, ordered so sqlx can apply them by
+filename, with foreign keys that would point forward across files collected in a
+final file), and commit those as the only migrations in an emptied
+`crates/persistence/migrations/` — emptied and repopulated in the same reset
+commit, so no tree ever carries both chains (§4). The old chain moves nowhere —
+git history is its archive.
+
+The baseline version numbers restart the clock — `202609010000_core.sql` through
+`202609010014_cross_domain_foreign_keys.sql`, one consecutive prefix run
+(timestamp format retained — sqlx expects it and tooling reads it). The files
+are one schema and only apply as a whole; the fence boundary
 (`HUB_FENCE_MIGRATION_VERSION`) names the last of them.
 
 ### 2. Prove equivalence
@@ -92,7 +114,11 @@ confirmations — no CI wiring, no ceremony that outlives the PR:
 
 - **Fresh-apply equivalence:** schema-dump a database built by the old chain and
   one built by the baseline; the diff must be empty (modulo `_sqlx_migrations`
-  contents).
+  contents). Run it twice — once on the default schema and once with the role's
+  `search_path` pointing at a configured schema, the shape
+  `crates/persistence/tests/approval_judge_eval_postgres.rs` stages — and dump
+  the seed-row tables with data, so the singletons and cursors are compared and
+  not only their DDL.
 - **Live equivalence:** schema-dump the dogfood database and diff against the
   baseline-built schema. Any drift found here is a real, latent bug today (a
   hand-applied hotfix or failed migration) and must be resolved before cutover,
@@ -107,8 +133,10 @@ that is scratch tooling, not a repo commitment.
 1. Stop the daemon (watchdog paused first).
 2. Full safety dump (`pg_dump -Fc`) — belt and braces only; the procedure never
    needs it.
-3. In one transaction: truncate `_sqlx_migrations`, insert one row per baseline
-   file with the checksums sqlx computed for the new files.
+3. In one transaction, with the table qualified to the daemon's configured
+   migration schema (an operator session's `search_path` is not the daemon's):
+   truncate `_sqlx_migrations`, insert one row per baseline file with the
+   checksums sqlx computed for the new files.
 4. Deploy the daemon binary built from the reset branch.
 5. Verify: daemon boots, sessions list intact (spot-check counts against
    pre-cutover numbers for sessions, turns, conversations), new turn
@@ -116,20 +144,30 @@ that is scratch tooling, not a repo commitment.
 6. Resume watchdog.
 
 Rollback at any step before a post-reset forward migration lands: restore the
-old `_sqlx_migrations` rows (kept in the safety dump) and redeploy the previous
-binary. Nothing else changed.
+old `_sqlx_migrations` rows (kept in the safety dump; same qualified table) and
+redeploy the previous binary. Nothing else changed.
 
 ### 4. Delete the compat surface — precisely scoped
 
-After the baseline merges, what goes (separate small PRs, each showing the
+Two removals cannot wait for follow-ups and ride in the reset PR itself:
+
+- the 149 old migration files go in the same commit that adds the baseline (§1's
+  emptied directory): a tree carrying both chains would apply the old chain and
+  then the higher-versioned baseline on a fresh database, colliding on every
+  `CREATE`;
+- the persistence-protocol migration prose changes in the reset PR, never in a
+  post-merge cleanup — the living-specification rule updates an owning
+  `docs/spec/` page in the same pull request as the behavior it describes, and
+  that edit is also where §3's `_sqlx_migrations` truncation is recorded as the
+  owner-reconciled exception to the 2026-08-15 immutability ruling.
+
+After the baseline merges, what goes next (separate small PRs, each showing the
 surviving callers are none rather than asserting it):
 
-- the 149 old migration files (git history is their archive);
 - **~3,000–3,500 lines of Rust tests that stage historical database shapes** to
   walk the chain;
 - the SR-9 supersession-naming checker and its ceremony (~150 lines of Python
-  plus the rule);
-- persistence-protocol prose documenting cross-version chain walking.
+  plus the rule).
 
 What explicitly does NOT go — the inventory caught my earlier draft
 over-claiming here:
@@ -137,8 +175,11 @@ over-claiming here:
 - **Production decode paths for stored row shapes (~1,200 lines):** because the
   data survives in place, `storage_version` thresholds, the legacy repo-watch
   cursor JSONB reader, `ClaudeCodeSessionJsonlV1` (a stored shape, despite its
-  name), and kin still read rows that exist. They die only when a later campaign
-  rewrites those rows — or at the second collapse — never as part of this reset.
+  name), and kin still read rows that exist. They die only when an authorized
+  migration rewrites every row they decode — never as part of this reset, and
+  not automatically at the second collapse either: a collapse changes
+  bookkeeping, not rows, so a reader retires there only if the intervening
+  campaigns have already rewritten its rows.
 - **`lock_inventory.rs` and its pinned CI hash** — deadlock-ordering machinery,
   not migration machinery.
 - **The `search_path` pinning effect** of migration `202608200001`: the file
@@ -152,15 +193,20 @@ over-claiming here:
 ### 5. Rules after the reset
 
 - **Forward-only immutability stands.** An applied migration is still never
-  edited; fixes are new migrations. What died is the requirement to keep
-  pre-alpha history applyable forever.
+  edited; fixes are new migrations — `docs/spec/persistence-protocol.md` owns
+  this rule, and this page only points at it. What died is the requirement that
+  a fresh database be able to replay pre-alpha history forever.
 - **Version allocation:** timestamp prefixes continue, with the existing
-  uniqueness check retained (it is small and earns its keep). The
-  supersession-naming ceremony is retired — a new migration is just a new
-  migration.
+  uniqueness check (`scripts/check_migration_versions.py`, the owner of that
+  rule) retained — it is small and earns its keep. The supersession-naming
+  ceremony is retired — a new migration is just a new migration.
 - **Future resets stay cheap** while there is one deployment and no release:
   this document is the template, and repeating it is expected rather than
-  exceptional. The first external installation ends that era.
+  exceptional. That era ends at the freeze condition in
+  `docs/spec/process-protocol.md` — the first durable deployment, a client that
+  cannot be rebuilt at will — which an owner-operated remote daemon or installed
+  app triggers just as surely as an external installation; from then on
+  compatibility policy is decided explicitly.
 
 ## Sequencing
 
