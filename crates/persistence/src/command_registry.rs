@@ -304,8 +304,11 @@ mod tests {
     };
 
     fn database_admitted_command_kinds() -> BTreeSet<String> {
-        const CONSTRAINT: &str = "ADD CONSTRAINT durable_command_kind_closed";
-        const KIND_LIST: &str = "command_kind IN (";
+        // The baseline renders the constraint the way `pg_dump` deparses it:
+        // inline in `CREATE TABLE` and with an `= ANY (ARRAY[...])` list rather
+        // than the `IN (...)` the retired chain spelled by hand.
+        const CONSTRAINT: &str = "CONSTRAINT durable_command_kind_closed";
+        const KIND_LIST: &str = "command_kind = ANY (ARRAY[";
         let definition = crate::MIGRATOR
             .iter()
             .filter_map(|migration| {
@@ -319,10 +322,10 @@ mod tests {
             .expect("one migration defines the durable command kind constraint");
         let list = definition
             .split_once(KIND_LIST)
-            .expect("the current command-kind constraint has an IN list")
+            .expect("the current command-kind constraint has an admitted-kind list")
             .1
             .split_once(')')
-            .expect("the current command-kind IN list is closed")
+            .expect("the current command-kind list is closed")
             .0;
         list.split('\'')
             .skip(1)

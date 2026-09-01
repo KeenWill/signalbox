@@ -18,7 +18,6 @@ use signalbox_domain::{
     SessionMetadataContent, ToolRequestId, TranscriptAncestry,
 };
 use signalbox_persistence::{
-    MIGRATOR,
     create_session::CreateSessionRepository,
     disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
@@ -27,7 +26,7 @@ use signalbox_persistence::{
         SessionMetadataRepository, SessionMetadataRepositoryError,
     },
 };
-use sqlx::{PgPool, migrate::Migrate, postgres::PgPoolOptions, types::Uuid};
+use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
@@ -71,40 +70,6 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .connect_with(local_test_connection_options(&database_url)?)
         .await?;
     migrate(&pool).await?;
-    Ok((container, pool))
-}
-
-async fn postgres_before_metadata_issuer()
--> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
-    let container = Postgres::default()
-        .with_db_name(DATABASE_NAME)
-        .with_user(DATABASE_USER)
-        .with_password(DATABASE_PASSWORD)
-        .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
-        .with_tag(POSTGRES_IMAGE_TAG)
-        .with_labels(disposable_test_container_labels())
-        .start()
-        .await?;
-    let host = container.get_host().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let database_url =
-        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
-    let pool = PgPoolOptions::new()
-        .max_connections(8)
-        .connect_with(local_test_connection_options(&database_url)?)
-        .await?;
-    let mut connection = pool.acquire().await?;
-    connection
-        .ensure_migrations_table("_sqlx_migrations")
-        .await?;
-    for migration in MIGRATOR
-        .iter()
-        .take_while(|migration| migration.version < 202607280202)
-    {
-        connection.apply("_sqlx_migrations", migration).await?;
-    }
-    drop(connection);
     Ok((container, pool))
 }
 
@@ -155,62 +120,6 @@ fn replacement(
     content: SessionMetadataContent,
 ) -> ReplaceSessionMetadata {
     ReplaceSessionMetadata::new(command(command_value), session(session_value), content)
-}
-
-/// INV-012: the issuer-evidence migration preserves the fixed user agency of
-/// legacy metadata receipts even when their actor projection was corrupted.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_metadata_issuer_migration_preserves_legacy_user_agency()
--> Result<(), Box<dyn Error>> {
-    let (container, pool) = postgres_before_metadata_issuer().await?;
-    let command_id = Uuid::from_u128(0x901);
-    let session_id = Uuid::from_u128(0x701);
-    let tool_request_id = Uuid::from_u128(0xa01);
-    let actor_kind = "tool";
-    let expected_issuer = ("user".to_owned(), None);
-    let mut transaction = pool.begin().await?;
-    sqlx::query(
-        "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'replace_session_metadata', 1, statement_timestamp())",
-    )
-    .bind(command_id)
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        "INSERT INTO replace_session_metadata_command
-            (command_id, command_kind, storage_version, session_id,
-             actor_kind, actor_tool_request_id, replacement_archived,
-             result_kind, rejection_kind, result_session_id)
-         VALUES
-            ($1, 'replace_session_metadata', 1, $2,
-             $3, $4, false,
-             'rejected', 'session_not_found', $2)",
-    )
-    .bind(command_id)
-    .bind(session_id)
-    .bind(actor_kind)
-    .bind(tool_request_id)
-    .execute(&mut *transaction)
-    .await?;
-    transaction.commit().await?;
-
-    migrate(&pool).await?;
-
-    let issuer: (String, Option<Uuid>) = sqlx::query_as(
-        "SELECT issuer_kind, issuer_tool_request_id
-           FROM replace_session_metadata_command
-          WHERE command_id = $1",
-    )
-    .bind(command_id)
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(issuer, expected_issuer);
-
-    pool.close().await;
-    drop(container);
-    Ok(())
 }
 
 async fn collect_page(

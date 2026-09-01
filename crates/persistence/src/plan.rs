@@ -1683,8 +1683,9 @@ mod tests {
     };
     use signalbox_tools_plan::PlanEntryId;
 
-    const SESSION_PLAN_MIGRATION: &str =
-        include_str!("../migrations/202608020011_session_plan.sql");
+    /// The one baseline migration, which carries the session-plan functions the
+    /// retired `202608020011_session_plan.sql` introduced.
+    const BASELINE_MIGRATION: &str = include_str!("../migrations/202609010000_baseline.sql");
 
     #[test]
     fn ordinary_read_uses_only_bounded_direct_dependencies() {
@@ -1754,16 +1755,16 @@ mod tests {
 
     #[test]
     fn append_cycle_checks_use_one_linear_session_local_worklist() {
-        assert!(SESSION_PLAN_MIGRATION.contains("session_plan_event_advances_projection"));
-        assert!(!SESSION_PLAN_MIGRATION.contains("session_plan_dependency_cycle_exists"));
-        assert!(!SESSION_PLAN_MIGRATION.contains("array_append"));
-        assert!(!SESSION_PLAN_MIGRATION.contains("trim_array"));
-        assert!(SESSION_PLAN_MIGRATION.contains("pg_temp.session_plan_dependency_visit"));
-        assert!(SESSION_PLAN_MIGRATION.contains("pg_temp.session_plan_dependency_stack"));
-        assert!(SESSION_PLAN_MIGRATION.contains("session_plan_event_has_valid_shape(creation)"));
-        assert!(SESSION_PLAN_MIGRATION.contains("session_plan_event_has_authority(creation)"));
-        assert!(SESSION_PLAN_MIGRATION.contains("count(DISTINCT edge.dependency_ordinal)"));
-        assert!(!SESSION_PLAN_MIGRATION.contains("dependency_path(origin, node)"));
+        assert!(BASELINE_MIGRATION.contains("session_plan_event_advances_projection"));
+        assert!(!BASELINE_MIGRATION.contains("session_plan_dependency_cycle_exists"));
+        assert!(!BASELINE_MIGRATION.contains("array_append"));
+        assert!(!BASELINE_MIGRATION.contains("trim_array"));
+        assert!(BASELINE_MIGRATION.contains("pg_temp.session_plan_dependency_visit"));
+        assert!(BASELINE_MIGRATION.contains("pg_temp.session_plan_dependency_stack"));
+        assert!(BASELINE_MIGRATION.contains("session_plan_event_has_valid_shape(creation)"));
+        assert!(BASELINE_MIGRATION.contains("session_plan_event_has_authority(creation)"));
+        assert!(BASELINE_MIGRATION.contains("count(DISTINCT edge.dependency_ordinal)"));
+        assert!(!BASELINE_MIGRATION.contains("dependency_path(origin, node)"));
     }
 
     #[test]
@@ -1812,11 +1813,11 @@ mod tests {
         let expected_component_guard =
             format!("IF dependency_count > {MAX_PLAN_DEPENDENCIES_PER_ENTRY} THEN");
         assert_eq!(
-            SESSION_PLAN_MIGRATION.matches(&expected_guard).count(),
+            BASELINE_MIGRATION.matches(&expected_guard).count(),
             DEPENDENCY_LIMIT_GUARD_COUNT
         );
         assert_eq!(
-            SESSION_PLAN_MIGRATION
+            BASELINE_MIGRATION
                 .matches(&expected_component_guard)
                 .count(),
             COMPONENT_LIMIT_GUARD_COUNT

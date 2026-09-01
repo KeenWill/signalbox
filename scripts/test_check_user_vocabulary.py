@@ -78,7 +78,7 @@ def main() -> int:
             / "crates"
             / "persistence"
             / "migrations"
-            / "202607180001_create_session.sql"
+            / "202609010000_baseline.sql"
         )
         future_migration = (
             root
@@ -164,7 +164,7 @@ def main() -> int:
             "CHECK (actor_kind = 'owner');",
         )
         frozen_migration_lines = (
-            "CHECK (cause = 'owner_initiated');",
+            "ADD CONSTRAINT imported_transcript_entry_owner_fk FOREIGN KEY (id);",
             "human_owner TEXT;",
         )
         native_lines = (
@@ -334,7 +334,7 @@ def main() -> int:
             "crates/tools-code-host/src/code_host/review_slog/example.rs",
             "crates/tools-github/src/lib.rs",
             "apps/signalboxd/tests/offline_tool_loop.rs",
-            "crates/persistence/migrations/202607180001_create_session.sql",
+            "crates/persistence/migrations/202609010000_baseline.sql",
             "crates/persistence/migrations/202608020009_user_vocabulary.sql",
             "clients/native/Sources/SignalboxClient/SessionSynchronization.swift",
             "clients/native/Tests/SignalboxAppTests/ViewModelTests.swift",
@@ -421,7 +421,7 @@ def main() -> int:
             'crates/persistence/src/mapping.rs:1: const DECISION_SOURCE: &str '
             '= "owner_command";',
             *expected_diagnostics(
-                "crates/persistence/migrations/202607180001_create_session.sql",
+                "crates/persistence/migrations/202609010000_baseline.sql",
                 frozen_migration_lines,
                 frozen_migration_lines[1:],
             ),
@@ -491,7 +491,9 @@ def main() -> int:
             encoding="utf-8",
         )
         frozen_migration.write_text(
-            "CHECK (cause = 'owner_initiated');\n", encoding="utf-8"
+            "ADD CONSTRAINT imported_transcript_entry_owner_fk"
+            " FOREIGN KEY (id);\n",
+            encoding="utf-8",
         )
         domain_record.write_text(
             'let user_id = "human who approves tools";\n', encoding="utf-8"
