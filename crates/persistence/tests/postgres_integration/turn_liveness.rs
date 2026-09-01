@@ -10,10 +10,18 @@ use signalbox_persistence::turn_liveness::{
     PostgresTurnLivenessRepository, TurnLivenessPersistenceBounds,
 };
 
+/// Starvation allowance for an uncontended pool checkout: generous, not a
+/// behavior under test. On a saturated CI node a checkout can take tens of
+/// milliseconds; a starved checkout must not preempt the lock refusal these
+/// tests assert on.
+const POOL_ACQUIRE_ALLOWANCE: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn terminalization_bounds() -> TurnLivenessPersistenceBounds {
+    // The lock budgets stay tiny: a lock_timeout only trips while genuinely
+    // blocked, so they are insensitive to how loaded the host is.
     TurnLivenessPersistenceBounds::new(
         Some(std::time::Duration::from_millis(7)),
-        Some(std::time::Duration::from_millis(11)),
+        Some(POOL_ACQUIRE_ALLOWANCE),
         Some(std::time::Duration::from_millis(13)),
     )
 }
