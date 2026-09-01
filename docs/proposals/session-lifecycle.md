@@ -321,14 +321,15 @@ the derived-state retention exemption. A consumer that reads raw rows on demand
 be made prune-safe by a cursor: advancing it permits deleting history later
 reads still need, and never advancing it pins the floor. The timeline therefore
 becomes a durable projection in the same change that turns on pruning, its
-cursor advancing only behind projected rows. This floor and exemption are the
-ratified persistence-protocol amendment. The recorded open question on
-update-event retention and pruning (docs/open-questions.md) is decided in
-substance by that ruling; its formal closure — the owning-page spec diff — lands
-at the bottom of the implementing stack, per the foundation rule, so no page on
-`main` describes unimplemented pruning as implemented. Retention repeals only
-the append-only rule; the structural fix for outbox growth remains frontier
-normalization, the owner's standing 2026-08-23 ruling.
+cursor advancing only behind projected rows. This floor and exemption carry an
+owner ruling (2026-09-01); the persistence-protocol page itself is amended by
+the owning-page spec diff described below, not by this proposal. The recorded
+open question on update-event retention and pruning (docs/open-questions.md) is
+decided in substance by that ruling; its formal closure — the owning-page spec
+diff — lands at the bottom of the implementing stack, per the foundation rule,
+so no page on `main` describes unimplemented pruning as implemented. Retention
+repeals only the append-only rule; the structural fix for outbox growth remains
+frontier normalization, the owner's standing 2026-08-23 ruling.
 
 ## 6. Provenance and ownership
 
