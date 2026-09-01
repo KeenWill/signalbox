@@ -104,12 +104,12 @@ jobs:
   # procedural macro executes while the key is readable.
   web-smoke:
     name: Web search live smoke (report only)
-    # Skipped while the Brave account is unfunded: every invocation burns a
-    # runner slot to reach ProviderRejected, which proves nothing the last
-    # forty runs did not. Delete the `if` line below to re-enable once the
-    # account holds credits; the triggers above are untouched, so coverage
-    # resumes with no further edits. Consider narrowing the pull_request
-    # trigger to crates/tools-web/** at that point.
+    # Skipped: every recent invocation has terminated at ProviderRejected
+    # before exercising anything, so each run burns a runner slot to prove
+    # nothing the last forty runs did not. Delete the `if` line below to
+    # re-enable once the provider credential is serviceable again; the
+    # triggers above are untouched, so coverage resumes with no further
+    # edits.
     if: ${{ false }}
     continue-on-error: true
     permissions:

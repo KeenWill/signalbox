@@ -98,8 +98,9 @@ sheet content is also snapshotted alone on its own canvas.
 
 The canonical record and verification entry points are the two scripts below:
 `scripts/record-snapshots.sh` and `scripts/test-snapshots.sh` take the suite and
-the simulator from `scripts/lib/snapshots.sh`, which is what CI runs, while a
-bare `scripts/test-xcode.sh` resolves whichever compatible phone is booted.
+the simulator from `scripts/lib/snapshots.sh`, which is what CI's snapshot step
+runs, while a bare `scripts/test-xcode.sh` resolves whichever compatible phone
+is booted.
 The phone-canvas goldens are byte-identical across the iPhone simulator models
 on which they were checked. The two iPad canvases and the sheet canvas are wider
 than the host phone's screen, so the window's corner mask and glass materials
@@ -114,8 +115,11 @@ its environment value from that as read-only — so a run on a simulator with it
 switched on stops and names the setting instead of comparing against references
 recorded without it.
 
-The suite runs as a report-only step in CI, which uploads the reference, the
-failed rendering, and their difference as an artifact when a comparison fails.
+In CI the suite is a report-only step that uploads the reference, the failed
+rendering, and their difference as an artifact when a comparison fails; the
+step is currently skipped while Swift client work is shelved, so no CI run
+checks these goldens or uploads diffs until the `if` in
+`.github/workflows/swift.yml` is deleted.
 Re-record the goldens after an intended visual change. Reviewing what you are
 about to bless is
 [rule 11](../../docs/agents/testing-style.md#expect-tests), which owns that
