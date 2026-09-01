@@ -59,7 +59,7 @@ projection of these states plus turn phase — never an independent machine.
 
 ```text
 CREATED ─┬─→ DISPATCHED ─→ ACTIVE
-         └─→ TERMINAL{retired}                     (held start-gate expiry, §10)
+         └─→ TERMINAL{retired}                     (admission expiry, §10)
 DISPATCHED ─→ TERMINAL{retired}                    (dispatch-deadline expiry, §10)
 ACTIVE ─┬─→ WAITING{kind, deadline, waker}   → ACTIVE | PARKED (deadline expiry)
         ├─→ RECOVERING{op, bound}            → ACTIVE | PARKED
@@ -93,11 +93,15 @@ turn (taxonomy A5, 17 headless-escalation kills).
 **Proposed behavior.** `active` carries two obligations beyond a stall deadline.
 First, a progress budget of model calls and wall-clock time: the budget
 decrements per model call and per elapsed interval, and resets when progress is
-recorded — a turn completing, or a goal event advancing the goal. Second, a
-goal-validity recheck at a config-sourced interval, transitioning to
-`terminal{superseded}` when the work is gone. Runaways were loud, not silent:
-200+ model calls against an already-merged branch, one four-day session
-(taxonomy D4).
+recorded — a turn completing, or a goal event advancing the goal. Exhaustion of
+either component is a transition to `parked` with cause
+`progress_budget_exhausted` — never a silent hold, and never a terminalization
+of possibly-live work (§13). Second, a goal-validity recheck at a config-sourced
+interval, transitioning to `terminal{superseded}` when the work is gone; the
+same transaction settles any live turn as `cancelled` with cause `superseded`,
+so this transition never leaves the §1 turn-to-session mapping in disagreement.
+Runaways were loud, not silent: 200+ model calls against an already-merged
+branch, one four-day session (taxonomy D4).
 
 **Proposed behavior.** Invariant for owned sessions: every non-terminal state of
 an owned session carries exactly one armed deadline whose expiry is a defined
@@ -183,14 +187,18 @@ recovery as normative behavior:
   forbidden.
 - `abandoned` — an operator writes off a parked session. Recovery: cleanup
   obligations for worktrees, containers, and slots (taxonomy G5, G7 debris).
-- `retired` — the session never did the work and never will: dispatch deadline
-  expiry, held start gate expiry, or goal-turn retirement (§10).
+- `retired` — the session never did the work and never will: admission expiry
+  (held start gate, first-input deadline, or dispatch deadline — §10), or the
+  one-time closure of stranded queued-turn sessions (§14). A goal turn retired
+  during goal replacement (§7) is a turn disposition only; it never retires a
+  live session.
 
 ## 3. Timestamps
 
 **Proposed behavior.** The outbox header carries
-`recorded_at timestamptz NOT NULL` (study B §2.1). The session row carries
-`created_at` and `ended_at`. Every lifecycle row — `turn_lifecycle`,
+`recorded_at timestamptz NOT NULL` (study B §2.1; on a non-reset database the
+constraint takes the form this section's final rule defines). The session row
+carries `created_at` and `ended_at`. Every lifecycle row — `turn_lifecycle`,
 `turn_attempt`, `model_call`, `tool_attempt`, `goal_event` — is stamped at write
 time. Today none of those five tables carries a timestamp. The only clocks near
 a session are command claim times (`durable_command.claimed_at`), a handful of
@@ -199,8 +207,10 @@ duration, queue wait, and every rate are therefore unanswerable from the
 lifecycle rows themselves (census §6.2).
 
 **Proposed behavior.** The compaction call lifecycle is stamped at each step:
-the call's `prepared`, `in_flight`, and `terminal` transitions, and the
-application row written at apply time (brief §4.3).
+the command's acceptance as a durable `requested_at` —
+`durable_command.claimed_at` is non-semantic operational metadata and never
+stands in for it — then the call's `prepared`, `in_flight`, and `terminal`
+transitions, and the application row written at apply time (brief §4.3).
 
 **Proposed behavior.** Watchdog clocks read durable timestamps, never
 process-local ledgers. A daemon restart today resets every staleness clock
@@ -216,10 +226,14 @@ null requires relaxing the column's `NOT NULL` and representability CHECK, and
 the same change migrates the usage read surface: the projection reader decodes
 `recorded_at` as non-optional and paginates by a `(recorded_at, model_call_id)`
 keyset (`crates/persistence/src/usage.rs`), so marked rows get an explicit
-ordering and cursor rule — a null key never reaches an unmigrated reader. One
-rule is shared with the new outbox `recorded_at` on a database that is not reset
-(§14): rows from before a change never receive a fabricated stamp — the outbox
-`NOT NULL` constraint binds new rows only. A projection does not outlive the
+ordering and cursor rule — deterministic order, no marked row ever silently
+dropped by pagination, and no null key reaching an unmigrated reader. One rule
+is shared with the new outbox `recorded_at` on a database that is not reset
+(§14): rows from before a change never receive a fabricated stamp. A `NOT NULL`
+column constraint cannot exempt existing rows, so on that path the outbox column
+lands nullable with new-row enforcement — a CHECK constraint added `NOT VALID`,
+which PostgreSQL enforces on newly inserted and updated rows only; on a reset
+database the column is `NOT NULL` outright. A projection does not outlive the
 conversations it projects (intent item 22).
 
 ## 4. Mandatory cause classification
@@ -267,9 +281,13 @@ change. The remaining kinds (`model_call_transition`, `tool_batch_transition`,
 `turn_model_settings_resolved`, `session_model_settings_changed`,
 `context_compacted`, `runner_state_transition`) stay as core-internal events:
 still on the outbox, not part of the module-facing vocabulary, unavailable
-across the seam (study B §2.2: deliberately not in v1). The second outbox,
-`delegation_outbox_event`, is outside this specification's scope and keeps its
-current contract; folding it under consumer cursors is a separate decision.
+across the seam (study B §2.2: deliberately not in v1). The second header
+family, `delegation_outbox_event`, shares one gap-free global sequence with
+`outbox_event`, and today's dispatcher walks both behind the singleton delivery
+row. Replacing that singleton (below) therefore cannot leave delegation delivery
+untouched: the delegation consumer becomes a named consumer with its own cursor
+over the shared sequence, its delivery contract preserved. Its event vocabulary
+and payload contract stay out of this specification's scope.
 
 **Proposed behavior.** The vocabulary is closed, core-owned, and versioned per
 kind. A new kind lands only as a core specification change plus migration. If a
@@ -289,13 +307,18 @@ and older than the config-sourced retention window are prunable. Pruning is a
 real schema change, not a policy toggle: the outbox's append-only DELETE and
 TRUNCATE triggers are amended to permit deletion below the floor, and the typed
 per-kind record tables that reference the header are deleted with it. Consumers
-that project durable state from outbox rows — the session timeline reads
-`outbox_event` directly — hold cursors of their own, so the floor never passes
-an unprojected row. That is the derived-state retention exemption. This floor
-and exemption are the ratified persistence-protocol amendment (brief §3 fork 1).
-Retention repeals only the append-only rule; the structural fix for outbox
-growth remains frontier normalization, the owner's standing 2026-08-23 ruling
-(intent item 19; brief §1).
+that project durable state from outbox rows hold cursors of their own, advanced
+only past rows whose derived state is durably written, so the floor never passes
+an unprojected row. That is the derived-state retention exemption. A consumer
+that reads raw rows on demand — the session timeline queries the per-kind event
+tables directly today — cannot be made prune-safe by a cursor: advancing it
+permits deleting history later reads still need, and never advancing it pins the
+floor. The timeline therefore becomes a durable projection in the same change
+that turns on pruning, its cursor advancing only behind projected rows. This
+floor and exemption are the ratified persistence-protocol amendment (brief §3
+fork 1). Retention repeals only the append-only rule; the structural fix for
+outbox growth remains frontier normalization, the owner's standing 2026-08-23
+ruling (intent item 19; brief §1).
 
 ## 6. Provenance and ownership
 
@@ -331,13 +354,20 @@ the record (taxonomy §5).
 **Proposed behavior.** The core command surface for session lifecycle is:
 `create_session{template, provenance, start_gate, ownership}`, `release_start`,
 `submit_input`, `goal{attach | resume_with_guidance | stop{sticky}}`, `adopt`,
-`release` (study B §3; brief §4.7). This specification adds three commands to
-that list so that every §2 outcome is reachable; additions are product
-decisions, surfaced here rather than shipped silently (intent item 18). The
-three: `stop{actor, sticky}` at session level, because a goal-less owned session
-needs a stop path; `supersede{successor}`, the closure a respawning client
-issues against its predecessor; and `abandon`, the operator write-off of a
-parked session.
+`release` (study B §3; brief §4.7). `adopt` declares the finish condition an
+owned session owes (§2) when the session does not already carry one; an adopt
+that would leave an owned session with no finish condition is rejected. This
+specification adds five commands to that list so that every §2 outcome and every
+§1 transition is reachable; additions are product decisions, surfaced here
+rather than shipped silently (intent item 18). The five: `stop{actor, sticky}`
+at session level, because a goal-less owned session needs a stop path;
+`supersede{successor}`, the closure a respawning client issues against its
+predecessor; `abandon`, the operator write-off of a parked session;
+`close_failed`, the operator closure of a parked session as `failed_structural`
+or `failed_unknown` with its standing cause (§2); and `resume`, the operator or
+coordinator transition of a parked session back to `active` where no goal
+applies — a parked goal session resumes through `goal{resume_with_guidance}`
+(§9).
 
 **Proposed behavior.** The existing goal-command operation named `supersede` —
 new goal generation within the same session — is unrelated to the session
@@ -457,6 +487,13 @@ lifespan of 0.0 hours (census §2).
 **Proposed behavior.** A held `start_gate` carries its own deadline; expiry
 retires the session (brief §4.10).
 
+**Proposed behavior.** An owned session in `created` with no held start gate —
+an owned interactive creation — carries the same admission obligation: a
+config-sourced first-input deadline armed at creation, whose expiry retires the
+session. This completes §1's invariant for the one owned state the other two
+admission deadlines do not cover. An unmonitored interactive session carries no
+deadline (§6).
+
 ## 11. Compaction observability
 
 **Proposed behavior.** Every successor turn created after a compaction records
@@ -510,10 +547,12 @@ the reliability program behind it.
   observation this measures: a session that starts small and grows into the wall
   through real work almost always succeeds (intent item 13).
 - `wall_rate` — fraction of sessions dispatched in the calendar week recording
-  cause `context_compaction_wall`. Alarm threshold: 0.1%, config-sourced; the
-  owner's expected steady state is 1 in 1,000 or rarer, possibly 1 in 10,000
-  (intent item 13). A breached wall rate is a dispatch bug (§15), not a
-  lifecycle statistic.
+  cause `context_compaction_wall`. The rate counts every wall, organic growth
+  included: the owner's threshold is for walls of any kind, and the recorded
+  initial payloads (§15) attribute a breach when the alarm fires. Alarm
+  threshold: 0.1%, config-sourced; the owner's expected steady state is 1 in
+  1,000 or rarer, possibly 1 in 10,000 (intent item 13). A breached wall rate is
+  a dispatch bug (§15), not a lifecycle statistic.
 - `cause_completeness` — terminal turns whose typed cause is usable — outside
   the catch-all set: `unrecognized`, absent, or a bare unknown bucket — over all
   terminal turns (target at least 99%; bare presence is 100% by §4's mandate),
@@ -527,7 +566,11 @@ expired without its transition firing, plus owned sessions holding no armed
 deadline at all — the §1 invariant violation, wired as an alarm with target
 zero. A deadline explicitly configured unbounded (§1) is not counted; a missing
 one is. The 281-session class this specification opens with is visible here, not
-in the headline.
+in the headline. A second companion alarm delivers §2's promised
+`failed_unknown` watch: the share of `failed_unknown` in the weekly terminal
+cohort, over the headline's denominator, with a config-sourced threshold — a
+rising unknown rate is a classification regression even while the headline holds
+(§2, §4).
 
 **Proposed behavior.** The substrate-v0 gate requires
 `session_completion_failure_rate` below the intent-item-2 target of 10%,
@@ -557,11 +600,11 @@ reaped during a 6.9 GB backup).
 
 **Proposed behavior.** Every deadline expiry is a transition. For a session past
 admission, the escalation target is `parked` — the single enumerable
-human-attention state (§1). The two admission deadlines are the exception: a
-held `start_gate` and the dispatch deadline on `dispatched` terminalize as
-`retired` (§10) — before first activity nothing live is guarded and no human
-attention is owed. No deadline expiry is a silent hold, and none terminalizes
-work whose operation may be live.
+human-attention state (§1). The admission deadlines are the exception: a held
+`start_gate`, an owned ungated `created` session's first-input deadline, and the
+dispatch deadline on `dispatched` terminalize as `retired` (§10) — before first
+activity nothing live is guarded and no human attention is owed. No deadline
+expiry is a silent hold, and none terminalizes work whose operation may be live.
 
 **Proposed behavior.** No staleness machinery exists outside core. Modules and
 the future substrate subscribe to deadline events; they do not grow their own
@@ -628,8 +671,10 @@ many comments or too much commit diff history — not organic context growth
 **Proposed behavior.** `wall_rate` (§12) is wired as a dispatch-bug alarm: a
 rate above §12's threshold pages the dispatch layer's owner with the offending
 templates and their recorded payload sizes. Sessions that start around 10% full
-and hit the wall through real work almost always succeed and are not the alarm's
-subject (intent item 13).
+and hit the wall through real work almost always succeed; they count in the rate
+(§12), and the recorded initial payloads are what separate dispatch-defect walls
+from those rare organic ones when the alarm fires — the page's subject is the
+oversized dispatches (intent item 13).
 
 **Proposed behavior.** When a wall still occurs, the session parks with cause
 `context_compaction_wall`. The backstop is respawn-fresh, which closes the park
