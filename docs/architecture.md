@@ -4,8 +4,7 @@ This document records current high-level boundaries, not an implemented system
 or final API. Accepted names are defined in the [glossary](glossary.md);
 unresolved choices remain in [open questions](open-questions.md). Implemented
 behavior and the accepted decisions behind it are specified in the
-[living specification](spec/README.md), whose index maps each retired design
-record to its destination page.
+[living specification](spec/README.md).
 
 ## Component view
 

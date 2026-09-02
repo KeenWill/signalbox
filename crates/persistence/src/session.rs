@@ -316,6 +316,8 @@ fn decode_complete(
         validate_imported_creation_provenance(
             required(&row, "stored_cause")?,
             row.try_get("stored_spawning_request_id")?,
+            row.try_get("stored_dispatching_module")?,
+            row.try_get("stored_dispatch_ref")?,
         )?;
         if row
             .try_get::<Option<String>, _>("stored_template_name")?
@@ -713,6 +715,8 @@ fn decode_module_dispatch(
 fn validate_imported_creation_provenance(
     cause: String,
     spawning_request: Option<Uuid>,
+    dispatching_module: Option<String>,
+    dispatch_ref: Option<Uuid>,
 ) -> Result<(), SessionRepositoryError> {
     let Some(cause_kind) = session_creation_cause_from_str(&cause) else {
         return Err(SessionCorruption::Unsupported {
@@ -721,12 +725,19 @@ fn validate_imported_creation_provenance(
         }
         .into());
     };
-    match (cause_kind, spawning_request) {
-        (SessionCreationCauseStorageKind::Interactive, None) => Ok(()),
+    match (
+        cause_kind,
+        spawning_request,
+        dispatching_module,
+        dispatch_ref,
+    ) {
+        (SessionCreationCauseStorageKind::Interactive, None, None, None) => Ok(()),
         (
             SessionCreationCauseStorageKind::Interactive
             | SessionCreationCauseStorageKind::Delegated
             | SessionCreationCauseStorageKind::ModuleDispatched,
+            _,
+            _,
             _,
         ) => Err(SessionCorruption::Inconsistent("creation cause provenance").into()),
     }
@@ -900,6 +911,8 @@ mod tests {
                 &SessionCreationCause::Interactive,
             )),
             Some(spawning_request()),
+            None,
+            None,
         )
         .expect_err("imported interactive provenance cannot carry a spawning request");
 

@@ -4,7 +4,8 @@
 #
 # Both are spelled once, here, because recording and verifying have to agree
 # and they run from different places: scripts/record-snapshots.sh writes the references,
-# scripts/test-snapshots.sh checks them, and CI runs the second. A suite
+# scripts/test-snapshots.sh checks them, and CI's snapshot step — currently
+# skipped while Swift client work is shelved — runs the second. A suite
 # identifier or a device spelled separately in each would drift the moment one
 # of them changed.
 

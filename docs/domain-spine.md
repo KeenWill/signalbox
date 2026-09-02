@@ -6042,6 +6042,10 @@ pub enum SessionParkCause {
     ModulePark,
 }
 
+impl SessionParkCause {
+    pub const fn admits_standing(self, standing: Option<SessionFailureCause>) -> bool;
+}
+
 pub enum SessionParkResponder {
     Operator,
     Module { module: DispatchingModule },
@@ -6129,6 +6133,7 @@ impl SessionLifecycleState {
 pub struct SessionLifecycleTransitionError { /* private */ }
 impl SessionLifecycleTransitionError {
     // accessors: from(), to()
+    // + Display + Error
 }
 
 pub enum SessionDeadlineExpiry {

@@ -1553,10 +1553,19 @@ async fn run_hub(
         )),
         configured => Ok(configured),
     };
+    // `"none"` is the spelling for no gate, so a zero window is a typo that
+    // would leave the gate `indeterminate` forever without saying so.
+    let configured_gate_weeks = match configured_u64("session_gate_weeks") {
+        Some(0) => Err(erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static("configured_gate_weeks_is_zero"),
+        )),
+        configured => Ok(configured),
+    };
     let lifecycle_metric_bounds = LifecycleMetricBounds {
         deadline_processing_grace: configured_duration("session_deadline_processing_grace"),
         wall_cohort_maturation: configured_duration("session_wall_cohort_maturation"),
-        gate_weeks: configured_u64("session_gate_weeks"),
+        gate_weeks: configured_gate_weeks?,
         completion_failure_rate_threshold_ppm: configured_ppm(
             "session_completion_failure_rate_threshold_ppm",
         )?,

@@ -5,11 +5,13 @@
 
 --
 -- §12's denominator keeps a supersession that closed a park holding a failure
--- cause, so the standing cause must survive terminalization. The clause widens
--- by exactly the terminal state; a non-terminal, non-parked state still cannot
+-- cause, so the standing cause must outlive the park that raised it: through
+-- terminalization, and through the resume a committed closure survives between
+-- its decision and the turn's boundary. A state that owes neither still cannot
 -- carry one.
 --
 
+-- Supersedes the definition in `202609020002_session_lifecycle_satellite.sql`.
 ALTER TABLE session_lifecycle
     DROP CONSTRAINT session_lifecycle_parked_shape;
 
@@ -26,7 +28,8 @@ ALTER TABLE session_lifecycle
         ])))
         AND ((parked_standing_cause_kind IS NULL)
              OR (parked_cause IS NOT NULL)
-             OR (state_kind = 'terminal'::text))
+             OR (state_kind = 'terminal'::text)
+             OR (pending_terminal_outcome_kind IS NOT NULL))
     );
 
 --
@@ -156,6 +159,10 @@ SELECT lifecycle.session_id,
              FROM session_ownership_event AS journal
             WHERE journal.session_id = lifecycle.session_id
               AND journal.owned_after
+              -- Owned "at any point in their life", so an adoption recorded
+              -- after the closure would write a session into a week that had
+              -- already been reported without it.
+              AND journal.recorded_at <= lifecycle.ended_at
        );
 
 --
@@ -408,6 +415,7 @@ SELECT lifecycle.session_id,
 -- every follower back for the whole catalog, which a park is not.
 --
 
+-- Supersedes the definition in `202609010013_operator_attention.sql`.
 ALTER TABLE operator_attention_change
     DROP CONSTRAINT operator_attention_change_fact_kind_check;
 

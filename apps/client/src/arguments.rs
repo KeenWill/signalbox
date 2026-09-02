@@ -501,6 +501,7 @@ struct BlobReadArguments {
     /// Zero-based byte offset.
     #[arg(long = "offset", value_name = "DECIMAL")]
     offset_bytes: u64,
+    /// Positive byte count of the range to read; `help` states the ceiling.
     #[arg(
         long = "length",
         value_name = "DECIMAL",
