@@ -2371,3 +2371,227 @@ async fn a_settlement_records_the_actor_that_decided() -> Result<(), Box<dyn Err
     drop(container);
     Ok(())
 }
+
+/// §1/§2: a turn the delegation cascade already terminated logically is not
+/// live work. The parent's stop released its runtime slot and wrote the
+/// terminal proof while the child turn's `state_kind` stayed put by design, so
+/// reading `state_kind` alone would leave the child session unclosable.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_logically_terminated_child_turn_does_not_hold_its_session_open()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(52);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(52))
+        .await?;
+    activate_first_turn(&pool, session, 52).await?;
+
+    // Stands in for the delegation cascade: the flag is admitted only on a
+    // delegated turn, and building a real parent-and-child spawn is not what
+    // this proves.
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET origin_kind = 'delegation', origin_accepted_input_id = NULL,
+                delegation_runtime_terminal = true
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    let terminal = SessionLifecycleRepository::new(pool.clone())
+        .close(
+            session,
+            SessionTerminalOutcome::FailedUnknown,
+            LifecycleActor::Watchdog,
+        )
+        .await?;
+
+    assert_eq!(
+        terminal,
+        SessionLifecycleState::Terminal {
+            outcome: SessionTerminalOutcome::FailedUnknown,
+        }
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// §2: a handoff has to be settleable. An achievement or a stop is the goal
+/// contract's own event to write, so a closure naming one over an open
+/// generation is refused — and a handoff committed anyway could never settle
+/// and could never be replaced, which is a session stuck by construction.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_unsettleable_handoff_is_never_committed() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    let session = creation_session(53);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(53))
+        .await?;
+    attach_goal(&pool, session, 53).await?;
+
+    let error = repository
+        .commit_pending_terminal(
+            session,
+            SessionTerminalOutcome::AchievedVerified,
+            LifecycleActor::Watchdog,
+        )
+        .await
+        .expect_err("the goal command settles an achievement, not a closure");
+    assert_eq!(
+        lifecycle_rejection(error),
+        SessionLifecycleRejection::GoalGenerationStillOpen
+    );
+
+    // The outcomes the goal contract does admit as closures still commit.
+    repository
+        .commit_pending_terminal(
+            session,
+            SessionTerminalOutcome::FailedUnknown,
+            LifecycleActor::Watchdog,
+        )
+        .await?;
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// §6: a goal event the user authored is the operator's, and the lifecycle
+/// transition it projects records that. Only a lift said so before, so an
+/// operator's stop or supersede read as daemon core in the durable history.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_user_authored_goal_event_projects_operator_provenance() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(54);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(54))
+        .await?;
+    attach_goal(&pool, session, 54).await?;
+    block_goal_by_statement(&pool, session, LIFECYCLE_SEED + 54 + 0xc00).await?;
+    assert!(matches!(
+        SessionLifecycleRepository::new(pool.clone())
+            .load(session)
+            .await?
+            .expect("the session keeps its lifecycle row")
+            .state(),
+        SessionLifecycleState::Blocked { .. }
+    ));
+
+    GoalRepository::new(pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 54 + 0xd00)),
+                session,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+
+    let record = SessionLifecycleRepository::new(pool.clone())
+        .load(session)
+        .await?
+        .expect("the session keeps its lifecycle row");
+    assert_eq!(record.actor(), LifecycleActor::Operator);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// §1/§2: the standing evidence a park carries is the evidence its cause
+/// names. A closure reads that evidence to classify the outcome, so a pair
+/// that contradicts itself would close under a classification the park never
+/// supported.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_park_carries_the_standing_evidence_its_cause_names() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    let session = creation_session(55);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(55))
+        .await?;
+    activate_first_turn(&pool, session, 55).await?;
+
+    let bare = repository
+        .park(
+            session,
+            SessionParkCause::RetryBudgetExhausted,
+            SessionParkResponder::Operator,
+            None,
+            LifecycleActor::Watchdog,
+        )
+        .await
+        .expect_err("an exhaustion cannot say what it exhausted retries on");
+    assert_eq!(
+        lifecycle_rejection(bare),
+        SessionLifecycleRejection::ParkStandingMismatch
+    );
+
+    let contradicted = repository
+        .park(
+            session,
+            SessionParkCause::OperatorHold,
+            SessionParkResponder::Operator,
+            Some(SessionFailureCause::Structural(
+                SessionStructuralCause::BrokenToolchain,
+            )),
+            LifecycleActor::Operator,
+        )
+        .await
+        .expect_err("an operator hold stands on no failure");
+    assert_eq!(
+        lifecycle_rejection(contradicted),
+        SessionLifecycleRejection::ParkStandingMismatch
+    );
+
+    let crossed = repository
+        .park(
+            session,
+            SessionParkCause::RetryBudgetExhausted,
+            SessionParkResponder::Operator,
+            Some(SessionFailureCause::Structural(
+                SessionStructuralCause::BrokenToolchain,
+            )),
+            LifecycleActor::Watchdog,
+        )
+        .await
+        .expect_err("a retry exhaustion does not stand on a structural cause");
+    assert_eq!(
+        lifecycle_rejection(crossed),
+        SessionLifecycleRejection::ParkStandingMismatch
+    );
+
+    repository
+        .park(
+            session,
+            SessionParkCause::RetryBudgetExhausted,
+            SessionParkResponder::Operator,
+            Some(SessionFailureCause::Retryable(
+                SessionRetryableCause::ProviderOverloaded,
+            )),
+            LifecycleActor::Watchdog,
+        )
+        .await?;
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

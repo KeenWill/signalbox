@@ -105,6 +105,9 @@ pub enum SessionLifecycleRejection {
     /// `abandoned` is an operator's write-off of a parked session (§2), so no
     /// other classification and no other state records one.
     AbandonRequiresParkedOperator,
+    /// The park carries standing evidence its own cause does not name, or an
+    /// exhaustion carries none at all.
+    ParkStandingMismatch,
 }
 
 impl fmt::Display for SessionLifecycleRejection {
@@ -124,6 +127,9 @@ impl fmt::Display for SessionLifecycleRejection {
             }
             Self::StandingCauseMismatch => "the closure cause is not the park's standing cause",
             Self::AbandonRequiresParkedOperator => "only an operator writes off a parked session",
+            Self::ParkStandingMismatch => {
+                "the park's standing evidence is not what its cause names"
+            }
         };
         formatter.write_str(detail)
     }
@@ -383,6 +389,9 @@ impl SessionLifecycleRepository {
         if held.ownership == SessionOwnership::Unmonitored {
             return Err(reject(transaction, SessionLifecycleRejection::ParkWhileUnmonitored).await);
         }
+        if !cause.admits_standing(standing) {
+            return Err(reject(transaction, SessionLifecycleRejection::ParkStandingMismatch).await);
+        }
         let parked = SessionLifecycleState::Parked {
             cause,
             responder,
@@ -492,6 +501,13 @@ impl SessionLifecycleRepository {
                 SessionLifecycleRejection::AbandonRequiresParkedOperator,
             )
             .await);
+        }
+        // The handoff has to be settleable. A closure the goal contract settles
+        // itself -- a verified achievement, a stop -- is refused while the
+        // generation is open, and a handoff committed anyway can never settle
+        // and can never be replaced.
+        if let Some(rejection) = goal_admits_outcome(&mut transaction, session, outcome).await? {
+            return Err(reject(transaction, rejection).await);
         }
         match held.pending_terminal {
             Some(committed) if committed == outcome => {
@@ -726,6 +742,26 @@ pub(crate) async fn close_in_transaction(
     write_state(connection, &held, terminal, actor).await?;
     record_cleanup_obligation(connection, session, outcome).await?;
     Ok(terminal)
+}
+
+/// Returns the rejection a closure with this outcome would take from the
+/// session's goal, if any.
+async fn goal_admits_outcome(
+    connection: &mut PgConnection,
+    session: SessionId,
+    outcome: SessionTerminalOutcome,
+) -> Result<Option<SessionLifecycleRejection>, SessionLifecycleRepositoryError> {
+    let Some(goal) = goal::load_goal_from_connection(connection, session).await? else {
+        return Ok(None);
+    };
+    if !goal.current().state().is_open() {
+        return Ok((!closed_goal_agrees(goal.current().state(), outcome))
+            .then_some(SessionLifecycleRejection::GoalOutcomeMismatch));
+    }
+    Ok(outcome
+        .closure_outcome()
+        .is_none()
+        .then_some(SessionLifecycleRejection::GoalGenerationStillOpen))
 }
 
 async fn settle_goal(

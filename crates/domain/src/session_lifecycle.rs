@@ -274,6 +274,24 @@ pub enum SessionParkCause {
     ModulePark,
 }
 
+impl SessionParkCause {
+    /// Whether the standing evidence a park carries is what its cause names.
+    ///
+    /// A closure reads the standing evidence to classify the outcome (§2), so
+    /// a park holding evidence its own cause contradicts closes under a
+    /// classification the park never supported -- and an exhaustion holding no
+    /// evidence at all cannot say what it exhausted retries or structure on.
+    #[must_use]
+    pub const fn admits_standing(self, standing: Option<SessionFailureCause>) -> bool {
+        match (self, standing) {
+            (Self::RetryBudgetExhausted, Some(SessionFailureCause::Retryable(_)))
+            | (Self::StructuralFailure, Some(SessionFailureCause::Structural(_))) => true,
+            (Self::RetryBudgetExhausted | Self::StructuralFailure, _) => false,
+            (_, standing) => standing.is_none(),
+        }
+    }
+}
+
 /// Who must act on one park.
 ///
 /// §1's park carries a third member beside its cause and its instant: who is

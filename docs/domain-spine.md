@@ -6040,6 +6040,10 @@ pub enum SessionParkCause {
     ModulePark,
 }
 
+impl SessionParkCause {
+    pub const fn admits_standing(self, standing: Option<SessionFailureCause>) -> bool;
+}
+
 pub enum SessionParkResponder {
     Operator,
     Module { module: DispatchingModule },

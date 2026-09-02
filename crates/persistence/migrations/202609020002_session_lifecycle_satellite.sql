@@ -307,6 +307,31 @@ CREATE TABLE session_lifecycle (
                  AND (parked_since IS NULL)
                  AND (parked_standing_cause_kind IS NULL)))
         AND ((parked_standing_cause_kind IS NULL) OR (parked_cause IS NOT NULL))
+        -- The standing evidence is the evidence the cause names. A closure
+        -- reads it to classify the outcome, so a park holding evidence its own
+        -- cause contradicts -- or an exhaustion holding none at all -- closes
+        -- under a classification the park never supported.
+        AND ((parked_cause IS NULL)
+             OR ((parked_cause = 'retry_budget_exhausted'::text)
+                 AND (parked_standing_cause_kind = ANY (ARRAY[
+                    'provider_transient'::text,
+                    'provider_quota_exhausted'::text,
+                    'provider_overloaded'::text,
+                    'infrastructure_failure'::text,
+                    'retry_budget_exhausted'::text
+                 ])))
+             OR ((parked_cause = 'structural_failure'::text)
+                 AND (parked_standing_cause_kind = ANY (ARRAY[
+                    'context_compaction_wall'::text,
+                    'context_headroom_exhausted'::text,
+                    'broken_toolchain'::text,
+                    'moderation_block'::text
+                 ])))
+             OR ((parked_cause <> ALL (ARRAY[
+                    'retry_budget_exhausted'::text,
+                    'structural_failure'::text
+                 ]))
+                 AND (parked_standing_cause_kind IS NULL)))
     ),
 
     CONSTRAINT session_lifecycle_terminal_outcome_closed CHECK (
@@ -975,10 +1000,15 @@ BEGIN
     -- disposition that would let it reach `terminal` lands with the event
     -- vocabulary; requiring it here would make every closure of a dispatched
     -- goal session impossible.
+    -- Nor is a turn the delegation cascade already terminated logically: the
+    -- parent's stop released its runtime slot and wrote the terminal proof,
+    -- and its `state_kind` stays put by design. Reading it as live would leave
+    -- the child session unclosable forever.
     SELECT lifecycle.turn_id INTO live
       FROM turn_lifecycle AS lifecycle
      WHERE lifecycle.session_id = NEW.session_id
        AND lifecycle.state_kind <> 'terminal'
+       AND NOT lifecycle.delegation_runtime_terminal
        AND NOT EXISTS (
             SELECT 1
               FROM goal_turn_retired_outbox_event AS retired
@@ -1391,7 +1421,11 @@ CREATE TRIGGER session_lifecycle_arms_its_deadline
 -- scheduler prefix.
 --
 
-CREATE FUNCTION project_session_lifecycle(subject uuid, lifts_park boolean) RETURNS void
+CREATE FUNCTION project_session_lifecycle(
+    subject uuid,
+    lifts_park boolean,
+    operator_authored boolean DEFAULT false
+) RETURNS void
     LANGUAGE plpgsql
     AS $$
 DECLARE
@@ -1537,8 +1571,9 @@ BEGIN
     -- turn activating, a phase moving, a scheduler-authored block: those are
     -- daemon machinery that happens to concern a turn, and the reader takes a
     -- stored turn to mean the model acted. Only a model-declared goal event
-    -- carries one. A lift is the operator's own resume.
-    IF lifts_park THEN
+    -- carries one. A goal event the user authored -- a lift, a stop, a
+    -- supersede, a commission -- is the operator's, not daemon core's.
+    IF lifts_park OR operator_authored THEN
         actor := 'operator';
         goal_turn := NULL;
         goal_request := NULL;
@@ -1589,7 +1624,8 @@ CREATE FUNCTION project_session_lifecycle_from_goal() RETURNS trigger
 BEGIN
     PERFORM project_session_lifecycle(
         NEW.session_id,
-        NEW.event_kind = 'resumed'
+        NEW.event_kind = 'resumed',
+        NEW.user_command_id IS NOT NULL
     );
     RETURN NULL;
 END;
