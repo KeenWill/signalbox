@@ -200,9 +200,6 @@ fn verdict_contract() -> StructuredOutputContract {
 }
 
 /// The completion evidence a terminal report carries, or a failed assertion.
-///
-/// Rule 2 of `docs/agents/testing-style.md` keeps a test body straight-line,
-/// so the refutable destructure lives here rather than in the test.
 #[track_caller]
 fn completion_evidence(report: TerminalReport<String>) -> CompletionEvidence {
     match report.evidence {

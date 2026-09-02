@@ -17,14 +17,9 @@ pub(crate) fn raw_json_is_object(raw: &serde_json::value::RawValue) -> bool {
 
 /// Exact request accepted by `POST /v1/messages`.
 ///
-/// The struct carries no `temperature`, `top_p`, or `top_k` member and no
-/// top-level `thinking` member. The Claude generations this adapter targets
-/// reject every sampling control with a 400, and reject an explicit thinking
-/// configuration the same way; omitting the parameter is the accepted form, so
-/// there is no field for either to travel through. Replayed thinking travels
-/// as a content block inside `messages`, which is unaffected. Preparation
-/// refuses a caller-set sampling control before a request is built rather than
-/// dropping it here.
+/// No sampling member and no top-level `thinking` member: the provider answers
+/// either with a 400, and omitting the parameter is the accepted form.
+/// Replayed thinking travels as a content block inside `messages`.
 #[derive(Debug, Serialize)]
 pub(crate) struct MessagesRequest {
     pub model: String,
@@ -91,10 +86,8 @@ pub(crate) struct WireTool {
 /// The only `tool_choice` shape this adapter emits.
 ///
 /// The forced shapes — `{"type":"any"}` and `{"type":"tool","name":…}` — are
-/// unrepresentable here because the current Claude generation rejects both
-/// with a 400, on `/v1/messages` and on `/v1/messages/count_tokens` alike.
-/// `disable_parallel_tool_use` remains accepted alongside `auto` and still
-/// admits at most one call, which is what the exactly-one demands below need.
+/// unrepresentable because the provider answers both with a 400.
+/// `disable_parallel_tool_use` alongside `auto` still admits at most one call.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 pub(crate) enum WireToolChoice {

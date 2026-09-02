@@ -18,13 +18,10 @@ use crate::wire::{
 /// returned before a one-shot capability exists. Nothing has touched the
 /// network.
 ///
-/// A structured-output contract is realized as a declared tool the model is
-/// asked to call: the contract joins the declared tools, `tool_choice` is
-/// `auto` with parallel tool use disabled so at most one call returns, and the
-/// demand for exactly one contract value travels as a model-visible
-/// instruction. [`ModelOperation::validate`] reserves the contract name from
-/// ordinary tools before anything is sent, so a proposal under that name is
-/// unambiguously the contracted value.
+/// A structured-output contract joins the declared tools, `tool_choice` is
+/// `auto` with parallel tool use disabled, and the exactly-one demand travels
+/// as a model-visible instruction. [`ModelOperation::validate`] reserves the
+/// contract name from ordinary tools before anything is sent.
 #[cfg(test)]
 pub(crate) fn build_request<C>(
     operation: &ModelOperation<C>,
@@ -87,13 +84,8 @@ pub(crate) fn build_request_with_fast_mode<C>(
 
 /// Refuses a caller-set sampling control before any request is built.
 ///
-/// The Claude generations this adapter targets removed `temperature`,
-/// `top_p`, and `top_k` from the Messages API and answer a request carrying
-/// one with a 400. `ModelSettings` states these as provider-enforced request
-/// controls, so silently omitting a value the caller set would present a
-/// dropped demand as an honored one; the adapter refuses the operation
-/// instead, and the model/session-settings contract records that this adapter
-/// enforces no sampling control.
+/// The Messages API answers `temperature`, `top_p`, or `top_k` with a 400.
+/// Refusing keeps a dropped demand from reading as an honored one.
 fn validate_sampling_controls(settings: &ModelSettings) -> Result<(), PreparationFailure> {
     for (name, value) in [
         ("temperature", settings.temperature),
@@ -288,9 +280,8 @@ struct ToolPlan {
 impl ToolPlan {
     /// Joins the caller's system text with this plan's instruction.
     ///
-    /// The caller's text stays first and unmodified; the instruction follows
-    /// it, separated by a blank line, so the constraint the provider can no
-    /// longer enforce as a request control is the last thing stated.
+    /// The caller's text stays first and unmodified, the instruction follows
+    /// after a blank line.
     fn system_text(&self, caller_system: Option<&str>) -> Option<String> {
         match (caller_system, self.instruction.as_deref()) {
             (Some(system), Some(instruction)) => Some(format!("{system}\n\n{instruction}")),
@@ -303,14 +294,10 @@ impl ToolPlan {
 
 /// The instruction carrying a tool demand the provider dropped as a control.
 ///
-/// Anthropic removed forced tool choice from the current Claude generation:
-/// `tool_choice` `any` and `tool` both answer with a 400, on `/v1/messages`
-/// and on `/v1/messages/count_tokens`. The documented replacement is
-/// `{"type": "auto"}` together with an explicit instruction naming the tool
-/// the model is expected to call, which is what this text is. It is
-/// model-visible prompt text and not a transport control, which is why the
-/// runtime-substrate contract records these demands as advisory on this
-/// adapter.
+/// `tool_choice` `any` and `tool` answer with a 400 on `/v1/messages` and on
+/// `/v1/messages/count_tokens`. The documented replacement is `auto` plus an
+/// instruction naming the expected tool, which is this text: model-visible
+/// prompt text, not a transport control.
 fn tool_instruction(demand: &ToolDemand) -> String {
     match demand {
         ToolDemand::Contract { name } => format!(

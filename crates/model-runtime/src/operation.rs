@@ -70,11 +70,9 @@ pub enum DeliveryMode {
 
 /// How the provider may choose among the declared tools.
 ///
-/// Whether a choice binds the model as a transport control or only as an
-/// instruction is the selected adapter's property: an adapter whose provider
-/// offers no forced tool choice records that advisory exception in its owning
-/// section of the runtime-substrate contract, and a caller there treats a
-/// missing proposal as possible rather than impossible.
+/// Whether a choice binds as a transport control or only as an instruction is
+/// the selected adapter's property; an adapter that cannot force one records
+/// that advisory exception in the runtime-substrate contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolChoice {
     /// The model decides whether to call a declared tool.

@@ -18,8 +18,7 @@ use crate::tool::ToolName;
 /// Adapters realize the contract with provider mechanics — a forced tool call
 /// where the provider offers one, otherwise a declared tool asked for by
 /// instruction — so the request constrains the response without guaranteeing
-/// it; the decode side is provider independent and is what enforces the
-/// exactly-one contract below.
+/// it. The decode side is provider independent.
 #[derive(Debug, Clone)]
 pub struct StructuredOutputContract {
     /// The name the value is proposed under on the wire.
