@@ -137,7 +137,6 @@ use signalbox_persistence::{
         DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedReconciliationOperation,
         DispatchedRunnerState, DispatchedToolBatchState, DispatchedTurnTerminalDisposition,
         OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
-        OutboxRetention,
     },
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition,
@@ -367,7 +366,6 @@ pub struct ProcessRuntime {
     metrics: Option<TelemetryMetrics>,
     blob_store_registry: Option<Arc<BlobStoreRegistry>>,
     snapshot_reader_budget: Option<Arc<Semaphore>>,
-    outbox_retention_window: Option<Duration>,
 }
 
 #[derive(Clone, Debug)]
@@ -424,7 +422,6 @@ impl ProcessRuntime {
             metrics: None,
             blob_store_registry: None,
             snapshot_reader_budget,
-            outbox_retention_window: None,
             fanouts: ProcessFanouts {
                 durable: durable_updates,
                 streaming: streaming_updates,
@@ -476,13 +473,6 @@ impl ProcessRuntime {
         self
     }
 
-    /// Installs the configured outbox retention window; absent never prunes.
-    #[must_use]
-    pub const fn with_outbox_retention_window(mut self, window: Option<Duration>) -> Self {
-        self.outbox_retention_window = window;
-        self
-    }
-
     pub fn provider_text_delta_sink(&self) -> ProcessProviderTextDeltaSink {
         ProcessProviderTextDeltaSink {
             updates: self.fanouts.streaming.clone(),
@@ -519,7 +509,6 @@ impl ProcessRuntime {
             self.eligibility_nudge,
             fanouts,
             self.metrics,
-            self.outbox_retention_window,
             shutdown,
         );
         let result = tokio::try_join!(server, dispatcher);
@@ -556,12 +545,9 @@ async fn dispatch_updates(
     eligibility_nudge: InProcessEligibilityNudge,
     fanouts: ProcessFanouts,
     metrics: Option<TelemetryMetrics>,
-    outbox_retention_window: Option<Duration>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessRuntimeError> {
-    let retention = OutboxRetention::new(pool.clone());
     let dispatcher = OutboxDispatcher::new(pool);
-    let mut next_prune = Instant::now();
     let mut last_metric_sequence = None;
     loop {
         if shutdown_requested(&shutdown) {
@@ -595,19 +581,6 @@ async fn dispatch_updates(
         match outcome {
             OutboxDispatchOutcome::Delivered { .. } => {}
             OutboxDispatchOutcome::Idle => {
-                // Delivery is caught up, so this is where a pass can take the
-                // registry floor without racing one. A configured window is
-                // also the pass's own period: nothing ages into eligibility
-                // faster than that.
-                if let Some(window) = outbox_retention_window
-                    && Instant::now() >= next_prune
-                {
-                    retention
-                        .prune(window)
-                        .await
-                        .map_err(ProcessRuntimeError::Dispatch)?;
-                    next_prune = Instant::now() + window;
-                }
                 tokio::select! {
                     () = wait_for_shutdown(&mut shutdown) => return Ok(()),
                     () = sleep(OUTBOX_IDLE_POLL_INTERVAL) => {}

@@ -717,7 +717,7 @@ pub enum OutboxCorruption {
     MissingRetentionState,
     /// The locked retention row could not be advanced from its observed mark.
     RetentionStateChanged,
-    /// The delivered cursor exceeded the allocator cursor.
+    /// A consumer's cursor exceeded the allocator cursor.
     DeliveryBeyondAllocatedSequence,
     /// A committed header existed beyond the allocator cursor.
     EventBeyondAllocatedSequence,
@@ -763,7 +763,7 @@ impl fmt::Display for OutboxCorruption {
             Self::MissingRetentionState => "outbox retention state is missing",
             Self::RetentionStateChanged => "outbox retention state changed unexpectedly",
             Self::DeliveryBeyondAllocatedSequence => {
-                "outbox delivery state exceeds the allocated sequence"
+                "outbox consumer cursor exceeds the allocated sequence"
             }
             Self::EventBeyondAllocatedSequence => {
                 "outbox event header exceeds the allocated sequence"

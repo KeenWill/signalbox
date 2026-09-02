@@ -223,3 +223,5 @@ $$;
 
 DROP TABLE outbox_delivery_state;
 DROP FUNCTION require_next_outbox_delivery();
+
+RESET check_function_bodies;

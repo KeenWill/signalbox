@@ -144,3 +144,5 @@ BEGIN
     END LOOP;
 END;
 $$;
+
+RESET check_function_bodies;
