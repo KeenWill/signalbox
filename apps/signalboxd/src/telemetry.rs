@@ -1113,7 +1113,7 @@ impl TelemetryMetrics {
         .map_err(|_| metrics_error())?;
         let lifecycle_export_fresh = IntGauge::with_opts(Opts::new(
             "signalbox_session_lifecycle_export_fresh",
-            "Whether the latest lifecycle metric export succeeded; alerts gate on this.",
+            "Whether the latest lifecycle metric export succeeded.",
         ))
         .map_err(|_| metrics_error())?;
         let scheduler_occupancy = IntGauge::with_opts(Opts::new(
@@ -1198,8 +1198,8 @@ impl TelemetryMetrics {
     /// Publishes one §12 report onto the exported gauges.
     ///
     /// A rate with no population leaves its series where it was rather than
-    /// exporting a zero the durable columns do not claim. The alarm and the
-    /// gate are instantaneous and always publish.
+    /// exporting a zero the durable columns do not claim. The deadline count
+    /// is instantaneous and always publishes.
     pub(crate) fn observe_lifecycle_metrics(&self, report: &LifecycleMetricsReport) {
         self.lifecycle_nonterminal_past_deadline
             .set(clamp_gauge(report.nonterminal_past_deadline()));
@@ -1219,8 +1219,6 @@ impl TelemetryMetrics {
             "finish_given_overflow",
             report.latest_measured(LifecycleWeeklyMetrics::finish_given_overflow),
         );
-        // The same matured cohort the alarm reads: a gauge on an immature week
-        // would still be changing, and would disagree with its own alarm.
         self.set_rate(
             "wall_rate",
             report.latest_measured(LifecycleWeeklyMetrics::wall_rate),

@@ -936,10 +936,6 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
         NumericBoundKind::Duration,
     ),
     (
-        "session_deadline_processing_grace",
-        NumericBoundKind::Duration,
-    ),
-    (
         "session_lifecycle_metric_scan_interval",
         NumericBoundKind::Duration,
     ),
@@ -4735,7 +4731,6 @@ session_waiting_scheduler_deadline = "none"
 session_recovering_deadline = "none"
 session_blocked_deadline = "none"
 session_parked_renotify_interval = "none"
-session_deadline_processing_grace = "none"
 session_lifecycle_metric_scan_interval = "none"
 
 [[credential_profiles]]

@@ -1,11 +1,11 @@
-//! PostgreSQL adapter for the §12 lifecycle metrics, alarms, and gate.
+//! PostgreSQL adapter for the §12 lifecycle metrics.
 //!
 //! Nothing here computes a metric: the definitions are the views the
 //! `202609020003_lifecycle_metrics.sql` migration installs. The operator
 //! status surface and the Prometheus gauges read the same statements, so they
-//! cannot report two different numbers for the gate.
+//! cannot report two different numbers for one metric.
 
-use std::{error::Error, fmt, time::Duration};
+use std::{error::Error, fmt};
 
 use signalbox_domain::SessionId;
 use sqlx::{PgPool, Row, postgres::PgRow, types::Uuid, types::time::PrimitiveDateTime};
@@ -77,22 +77,6 @@ impl From<sqlx::Error> for LifecycleMetricsError {
 impl From<LifecycleMetricsCorruption> for LifecycleMetricsError {
     fn from(error: LifecycleMetricsCorruption) -> Self {
         Self::Corruption(error)
-    }
-}
-
-/// The deployment's configured §12 policy.
-///
-/// `None` is the bound configured `"none"`.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct LifecycleMetricBounds {
-    /// Processing latency past an expiry before a deadline counts (F8).
-    pub deadline_processing_grace: Option<Duration>,
-}
-
-impl LifecycleMetricBounds {
-    /// Returns each interval bound beside its durable spelling.
-    fn interval_rows(&self) -> [(&'static str, Option<Duration>); 1] {
-        [("deadline_processing_grace", self.deadline_processing_grace)]
     }
 }
 
@@ -254,15 +238,15 @@ impl LifecycleDeadlineViolation {
 
 /// One coherent §12 report.
 ///
-/// Carries the alarm as a count, not as rows: a widespread incident is exactly
-/// when a periodic reader must not build one object per stuck session. The
-/// rows stream through the operator-status snapshot's cursor instead.
+/// Carries the deadline violations as a count, not as rows: a widespread
+/// incident is exactly when a periodic reader must not build one object per
+/// stuck session. The rows stream through the operator-status snapshot's
+/// cursor instead.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LifecycleMetricsReport {
     weeks: Vec<LifecycleWeeklyMetrics>,
     current_week: PrimitiveDateTime,
     nonterminal_past_deadline: u64,
-    bounds: LifecycleMetricBounds,
 }
 
 impl LifecycleMetricsReport {
@@ -271,12 +255,7 @@ impl LifecycleMetricsReport {
         &self.weeks
     }
 
-    /// Returns the configured policy the report was computed under.
-    pub const fn bounds(&self) -> LifecycleMetricBounds {
-        self.bounds
-    }
-
-    /// Returns the `nonterminal_past_deadline` alarm value, target zero.
+    /// Returns the `nonterminal_past_deadline` count, target zero.
     pub const fn nonterminal_past_deadline(&self) -> u64 {
         self.nonterminal_past_deadline
     }
@@ -369,50 +348,21 @@ pub(crate) const DECLARE_DEADLINE_VIOLATIONS_CURSOR: &str = concat!(
     deadline_violations_sql!()
 );
 
-pub(crate) const SELECT_BOUNDS: &str = "SELECT bound_kind,
-       (EXTRACT(EPOCH FROM interval_bound) * 1000000)::bigint AS interval_microseconds
-  FROM session_lifecycle_metric_bound";
-
 impl LifecycleMetricsRepository {
     /// Uses the supplied pool for independent read-only snapshots.
     pub const fn new(pool: PgPool) -> Self {
         Self { pool }
     }
 
-    /// Writes the deployment's configured §12 policy where the views read it.
-    pub async fn apply_configured_bounds(
-        &self,
-        bounds: &LifecycleMetricBounds,
-    ) -> Result<(), LifecycleMetricsError> {
-        let mut transaction = self.pool.begin().await?;
-        for (kind, bound) in bounds.interval_rows() {
-            sqlx::query(
-                "UPDATE session_lifecycle_metric_bound
-                    SET interval_bound = $2, updated_at = statement_timestamp()
-                  WHERE bound_kind = $1",
-            )
-            .bind(kind)
-            .bind(bound)
-            .execute(&mut *transaction)
-            .await?;
-        }
-        transaction.commit().await?;
-        Ok(())
-    }
-
     /// Reads one coherent report over every §12 definition.
     ///
-    /// One repeatable-read snapshot, so a cohort and the alarm that guards it
+    /// One repeatable-read snapshot, so a cohort and the count beside it
     /// describe the same instant.
     pub async fn read(&self) -> Result<LifecycleMetricsReport, LifecycleMetricsError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .execute(&mut *transaction)
             .await?;
-        let bound_rows = sqlx::query(SELECT_BOUNDS)
-            .fetch_all(&mut *transaction)
-            .await?;
-        let bounds = decode_bounds(&bound_rows)?;
         let current_week = sqlx::query(SELECT_CURRENT_WEEK)
             .fetch_one(&mut *transaction)
             .await?
@@ -434,39 +384,8 @@ impl LifecycleMetricsRepository {
             weeks,
             current_week,
             nonterminal_past_deadline: counted(&nonterminal_past_deadline, "count")?,
-            bounds,
         })
     }
-}
-
-pub(crate) fn decode_bounds(
-    rows: &[PgRow],
-) -> Result<LifecycleMetricBounds, LifecycleMetricsError> {
-    // A missing row would read as the `none` default and silently drop the
-    // grace, which is the one failure a metric policy must not have.
-    if rows.len() != 1 {
-        return Err(LifecycleMetricsCorruption::Missing("metric bound row").into());
-    }
-    let mut bounds = LifecycleMetricBounds::default();
-    for row in rows {
-        let kind = row.try_get::<String, _>("bound_kind")?;
-        if kind != "deadline_processing_grace" {
-            return Err(LifecycleMetricsCorruption::Invalid("metric bound kind").into());
-        }
-        bounds.deadline_processing_grace = decode_interval(row)?;
-    }
-    Ok(bounds)
-}
-
-fn decode_interval(row: &PgRow) -> Result<Option<Duration>, LifecycleMetricsError> {
-    // Read as whole microseconds: an `interval`'s month component means a
-    // different number of seconds depending on when it is added, which is not
-    // a bound. The daemon writes these from `Duration`s, so it is always zero.
-    row.try_get::<Option<i64>, _>("interval_microseconds")?
-        .map(u64::try_from)
-        .transpose()
-        .map(|microseconds| microseconds.map(Duration::from_micros))
-        .map_err(|_| LifecycleMetricsCorruption::Invalid("metric bound interval").into())
 }
 
 pub(crate) fn decode_week(row: &PgRow) -> Result<LifecycleWeeklyMetrics, LifecycleMetricsError> {
@@ -526,7 +445,7 @@ pub(crate) fn decode_violation(
         Some(SessionLifecycleStateKind::Recovering) => LifecycleNonTerminalState::Recovering,
         Some(SessionLifecycleStateKind::Blocked) => LifecycleNonTerminalState::Blocked,
         Some(SessionLifecycleStateKind::Parked) => LifecycleNonTerminalState::Parked,
-        // A terminal session owes no deadline, so the alarm cannot name one.
+        // A terminal session owes no deadline, so the count cannot name one.
         Some(SessionLifecycleStateKind::Terminal) | None => {
             return Err(LifecycleMetricsCorruption::Invalid("session lifecycle state").into());
         }

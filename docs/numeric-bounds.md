@@ -11,8 +11,8 @@ to bound or size a fixture.
 The live-line merge adds one model-exchange policy to the original audit and the
 automatic-resume lifetime ceiling one goal policy; the liveness watchdog's
 single recovery-attempt constant now answers to two configured policies because
-its two consumers need different ceilings. The 138 rows partition as 36 guards,
-8 derived bounds, 80 configuration policies, 10 representation facts, and 4 test
+its two consumers need different ceilings. The 137 rows partition as 36 guards,
+8 derived bounds, 79 configuration policies, 10 representation facts, and 4 test
 fixtures. Source locations are maintained with the implementation slices that
 move or delete declarations.
 
@@ -153,7 +153,6 @@ bound in either root fails closed.
 | `config/signalboxd.example.toml`     | `SESSION_RECOVERING_DEADLINE`                     | config | `numeric_bounds.session_recovering_deadline`                                         |
 | `config/signalboxd.example.toml`     | `SESSION_BLOCKED_DEADLINE`                        | config | `numeric_bounds.session_blocked_deadline`                                            |
 | `config/signalboxd.example.toml`     | `SESSION_PARKED_RENOTIFY_INTERVAL`                | config | `numeric_bounds.session_parked_renotify_interval`                                    |
-| `config/signalboxd.example.toml`     | `SESSION_DEADLINE_PROCESSING_GRACE`               | config | `numeric_bounds.session_deadline_processing_grace`                                   |
 | `config/signalboxd.example.toml`     | `SESSION_LIFECYCLE_METRIC_SCAN_INTERVAL`          | config | `numeric_bounds.session_lifecycle_metric_scan_interval`                              |
 
 ## Representation facts

@@ -1,6 +1,6 @@
 --
--- Session lifecycle §12: the five metrics, the two companion alarms, and the
--- gate, as views over the durable columns §1–§6 landed.
+-- Session lifecycle §12: the five metrics and the counts beside them, as
+-- views over the durable columns §1–§6 landed.
 --
 
 --
@@ -33,40 +33,6 @@ ALTER TABLE session_lifecycle
     );
 
 --
--- Deployment policy, the arrangement §1's deadline bounds use: the daemon
--- writes its `[numeric_bounds]` policy here at startup and the view reads it.
--- A null bound is the `none` marker.
---
-
-CREATE TABLE session_lifecycle_metric_bound (
-    bound_kind text NOT NULL,
-    interval_bound interval,
-    updated_at timestamp with time zone DEFAULT statement_timestamp() NOT NULL,
-
-    CONSTRAINT session_lifecycle_metric_bound_pkey PRIMARY KEY (bound_kind),
-
-    CONSTRAINT session_lifecycle_metric_bound_kind_closed CHECK (
-        bound_kind = 'deadline_processing_grace'::text
-    ),
-
-    CONSTRAINT session_lifecycle_metric_bound_positive CHECK (
-        (interval_bound IS NULL) OR (interval_bound > '0'::interval)
-    )
-);
-
-INSERT INTO session_lifecycle_metric_bound (bound_kind)
-VALUES ('deadline_processing_grace');
-
-CREATE FUNCTION session_lifecycle_metric_interval(kind text) RETURNS interval
-    LANGUAGE sql
-    STABLE
-    AS $$
-    SELECT interval_bound
-      FROM session_lifecycle_metric_bound
-     WHERE bound_kind = kind;
-$$;
-
---
 -- Weeks are UTC weeks: `date_trunc` on a `timestamptz` answers in the reader's
 -- `TimeZone`, which would put one row in two different weeks.
 --
@@ -82,8 +48,8 @@ $$;
 --
 -- §12's terminal cohort. Membership follows the journaled ownership record
 -- rather than the current bit, so a release never removes a session from the
--- gate. The trim and the numerator are recorded per session here rather than
--- restated at every reader.
+-- cohort. The trim and the numerator are recorded per session here rather
+-- than restated at every reader.
 --
 
 CREATE VIEW session_lifecycle_terminal_cohort AS
@@ -319,11 +285,8 @@ SELECT weeks.week,
   LEFT JOIN call_causes ON call_causes.week = weeks.week;
 
 --
--- §12's first companion alarm, target zero. An unbounded deadline —
--- `expires_at` null — is never counted; a missing record always is. F8's
--- grace: an expiry counts only once the configured grace has also passed. A
--- grace configured `none` is unbounded like every other, so only the
--- missing-record half counts.
+-- §12's first companion count, target zero. An unbounded deadline —
+-- `expires_at` null — is never counted; a missing record always is.
 --
 
 CREATE VIEW session_lifecycle_deadline_violation AS
@@ -340,10 +303,7 @@ SELECT lifecycle.session_id,
    AND lifecycle.owned
    AND ((deadline.session_id IS NULL)
         OR ((deadline.expires_at IS NOT NULL)
-            AND (session_lifecycle_metric_interval('deadline_processing_grace') IS NOT NULL)
-            AND ((deadline.expires_at
-                  + session_lifecycle_metric_interval('deadline_processing_grace'))
-                 < clock_timestamp())));
+            AND (deadline.expires_at < clock_timestamp())));
 
 
 --

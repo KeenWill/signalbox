@@ -184,9 +184,6 @@ session_recovering_deadline = "1800s"
 session_blocked_deadline = "259200s"
 # Interval at which a parked session re-raises its operator alert.
 session_parked_renotify_interval = "86400s"
-# Processing latency allowed past an armed expiry before
-# `nonterminal_past_deadline` counts it; a missing record always counts.
-session_deadline_processing_grace = "120s"
 # How often the daemon refreshes the exported lifecycle-metric gauges.
 session_lifecycle_metric_scan_interval = "300s"
 

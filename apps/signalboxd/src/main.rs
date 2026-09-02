@@ -46,7 +46,6 @@ use signalbox_persistence::{
     blob::BlobCatalogRepository,
     convergence_sweep::PostgresConvergenceSweepStore,
     hub_fence::FENCED_POOL_MAX_CONNECTIONS,
-    lifecycle_metrics::{LifecycleMetricBounds, LifecycleMetricsRepository},
     migrate,
     model_execution::PostgresModelCallRepository,
     repo_watch_dispatch::{PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError},
@@ -1543,9 +1542,6 @@ async fn run_hub(
         blocked: configured_duration("session_blocked_deadline"),
         parked_renotify: configured_duration("session_parked_renotify_interval"),
     };
-    let lifecycle_metric_bounds = LifecycleMetricBounds {
-        deadline_processing_grace: configured_duration("session_deadline_processing_grace"),
-    };
     // A zero interval reaches `tokio::time::interval`, which refuses a zero
     // period by panicking; a spawned task's panic is a runtime defect that
     // stops the daemon. A configuration that means "never export" spells that
@@ -1858,19 +1854,6 @@ async fn run_hub(
                     erase_startup_cause(
                         RuntimePhase::Migration,
                         SanitizedStartupCause::Static("session_deadline_policy_failed"),
-                    )
-                })?;
-            // §12's thresholds and windows land beside the definitions that
-            // read them, for the same reason the deadline bounds do: a metric
-            // whose policy lives in the query is a metric two readers can
-            // disagree about.
-            LifecycleMetricsRepository::new(migration_pool.clone())
-                .apply_configured_bounds(&lifecycle_metric_bounds)
-                .await
-                .map_err(|_| {
-                    erase_startup_cause(
-                        RuntimePhase::Migration,
-                        SanitizedStartupCause::Static("lifecycle_metric_policy_failed"),
                     )
                 })?;
             tracing::info!(

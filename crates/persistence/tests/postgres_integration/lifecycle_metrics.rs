@@ -4,7 +4,7 @@
 //! denominator and cohort rules single out: a session released mid-life, a
 //! supersession that closed a failure and one that closed none, a stop, an
 //! unmonitored conversation, a wall on a session that outlives its dispatch
-//! week, an unbounded deadline, and an expiry inside the processing grace. The
+//! week, an unbounded deadline, and a deadline that has expired. The
 //! assertions are on the numbers.
 
 use std::time::Duration;
@@ -19,8 +19,8 @@ use signalbox_domain::{
 };
 use signalbox_persistence::{
     lifecycle_metrics::{
-        LifecycleDeadlineViolation, LifecycleMetricBounds, LifecycleMetricsRepository,
-        LifecycleNonTerminalState, LifecycleWeeklyMetrics,
+        LifecycleDeadlineViolation, LifecycleMetricsRepository, LifecycleNonTerminalState,
+        LifecycleWeeklyMetrics,
     },
     operator_status::{
         ProcessOperatorStatusCounts, ProcessOperatorStatusItem, ProcessOperatorStatusRepository,
@@ -266,17 +266,6 @@ async fn activate_first_turn(
     Ok(turn)
 }
 
-/// Installs one deployment policy for the metric bounds.
-async fn apply_metric_bounds(
-    pool: &PgPool,
-    bounds: LifecycleMetricBounds,
-) -> Result<(), Box<dyn Error>> {
-    LifecycleMetricsRepository::new(pool.clone())
-        .apply_configured_bounds(&bounds)
-        .await?;
-    Ok(())
-}
-
 /// Reads the one deadline violation the snapshot streams.
 ///
 /// The report carries the alarm as a count; the rows themselves reach an
@@ -320,7 +309,6 @@ fn latest_populated_week(weeks: &[LifecycleWeeklyMetrics]) -> LifecycleWeeklyMet
 async fn the_headline_counts_released_and_failure_driven_closures() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = SessionLifecycleRepository::new(pool.clone());
-    apply_metric_bounds(&pool, LifecycleMetricBounds::default()).await?;
 
     let released = owned_session(&pool, 0x10).await?;
     repository
@@ -440,7 +428,6 @@ async fn the_headline_counts_released_and_failure_driven_closures() -> Result<()
 async fn an_unbounded_deadline_is_exempt_and_a_missing_record_is_not() -> Result<(), Box<dyn Error>>
 {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    apply_metric_bounds(&pool, LifecycleMetricBounds::default()).await?;
     let session = owned_session(&pool, 0x70).await?;
 
     let exempt = LifecycleMetricsRepository::new(pool.clone()).read().await?;
@@ -460,20 +447,12 @@ async fn an_unbounded_deadline_is_exempt_and_a_missing_record_is_not() -> Result
     Ok(())
 }
 
-/// §12 finding F8: an expiry counts only once the configured processing grace
-/// has also passed, so ordinary timer and commit latency never trips the
-/// zero-target alarm.
+/// §12's first companion alarm counts an expiry, and only an expiry: a
+/// deadline still ahead of the clock is the ordinary case and never counts.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn an_expired_deadline_counts_only_past_the_processing_grace() -> Result<(), Box<dyn Error>> {
+async fn a_deadline_counts_once_it_expires_and_not_before() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    apply_metric_bounds(
-        &pool,
-        LifecycleMetricBounds {
-            deadline_processing_grace: Some(Duration::from_secs(120)),
-        },
-    )
-    .await?;
     SessionLifecycleRepository::new(pool.clone())
         .apply_configured_bounds(&SessionLifecycleNumericBounds {
             first_input: Some(Duration::from_secs(60)),
@@ -484,14 +463,14 @@ async fn an_expired_deadline_counts_only_past_the_processing_grace() -> Result<(
 
     sqlx::query(
         "UPDATE session_deadline
-            SET expires_at = clock_timestamp() - make_interval(secs => 30)
+            SET expires_at = clock_timestamp() + make_interval(secs => 300)
           WHERE session_id = $1",
     )
     .bind(session.into_uuid())
     .execute(&pool)
     .await?;
-    let inside_grace = LifecycleMetricsRepository::new(pool.clone()).read().await?;
-    assert_eq!(inside_grace.nonterminal_past_deadline(), 0);
+    let live = LifecycleMetricsRepository::new(pool.clone()).read().await?;
+    assert_eq!(live.nonterminal_past_deadline(), 0);
 
     sqlx::query(
         "UPDATE session_deadline
@@ -501,8 +480,8 @@ async fn an_expired_deadline_counts_only_past_the_processing_grace() -> Result<(
     .bind(session.into_uuid())
     .execute(&pool)
     .await?;
-    let past_grace = LifecycleMetricsRepository::new(pool.clone()).read().await?;
-    assert_eq!(past_grace.nonterminal_past_deadline(), 1);
+    let expired = LifecycleMetricsRepository::new(pool.clone()).read().await?;
+    assert_eq!(expired.nonterminal_past_deadline(), 1);
     let violation = one_deadline_violation(&pool).await?;
     assert_eq!(violation.deadline_kind(), Some("first_input"));
     assert!(
@@ -525,13 +504,6 @@ async fn an_expired_deadline_counts_only_past_the_processing_grace() -> Result<(
 async fn a_wall_attributes_to_its_dispatch_week_and_the_closure_to_its_own()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    apply_metric_bounds(
-        &pool,
-        LifecycleMetricBounds {
-            ..LifecycleMetricBounds::default()
-        },
-    )
-    .await?;
     let walled = owned_session(&pool, 0x90).await?;
     settled_turn_with_cause(&pool, walled, 0x90, "context_compaction_wall").await?;
     backdate_dispatch(&pool, walled, 3).await?;
@@ -581,7 +553,6 @@ async fn overflow_reads_the_untrimmed_cohort_and_its_finished_share() -> Result<
 {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = SessionLifecycleRepository::new(pool.clone());
-    apply_metric_bounds(&pool, LifecycleMetricBounds::default()).await?;
 
     let finished = owned_session(&pool, 0xb0).await?;
     settled_turn_with_cause(&pool, finished, 0xb0, "context_headroom_exhausted").await?;
@@ -642,7 +613,6 @@ async fn overflow_reads_the_untrimmed_cohort_and_its_finished_share() -> Result<
 async fn cause_completeness_measures_both_axes_outside_their_catch_alls()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    apply_metric_bounds(&pool, LifecycleMetricBounds::default()).await?;
 
     let classified = owned_session(&pool, 0xe0).await?;
     settled_turn_with_cause(&pool, classified, 0xe0, "model_call_failed").await?;
@@ -767,13 +737,6 @@ async fn drain_operator_status(
 async fn the_operator_status_snapshot_carries_the_metrics_and_the_alarm()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    apply_metric_bounds(
-        &pool,
-        LifecycleMetricBounds {
-            ..LifecycleMetricBounds::default()
-        },
-    )
-    .await?;
 
     let (empty_items, empty_counts) = drain_operator_status(&pool).await?;
     assert!(empty_items.is_empty());
@@ -839,7 +802,6 @@ async fn backdate_park(
 async fn a_parked_wall_is_counted_in_the_week_it_happened() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = SessionLifecycleRepository::new(pool.clone());
-    apply_metric_bounds(&pool, LifecycleMetricBounds::default()).await?;
 
     let walled = owned_session(&pool, 0x1700).await?;
     let turn = activate_first_turn(&pool, walled, 0x1700).await?;
@@ -936,7 +898,6 @@ fn one_wall_occurrence_week(weeks: &[LifecycleWeeklyMetrics]) -> PrimitiveDateTi
 async fn ownership_taken_after_the_closure_joins_no_cohort() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = SessionLifecycleRepository::new(pool.clone());
-    apply_metric_bounds(&pool, LifecycleMetricBounds::default()).await?;
 
     let conversation = unmonitored_session(&pool, 0x1800).await?;
     repository
@@ -1030,7 +991,6 @@ async fn adopt_by_statement(pool: &PgPool, session: SessionId) -> Result<(), sql
 async fn a_committed_supersession_keeps_its_cause_across_a_resume() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = SessionLifecycleRepository::new(pool.clone());
-    apply_metric_bounds(&pool, LifecycleMetricBounds::default()).await?;
 
     let respawned = owned_session(&pool, 0x1900).await?;
     let turn = activate_first_turn(&pool, respawned, 0x1900).await?;

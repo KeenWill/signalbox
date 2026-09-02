@@ -7443,7 +7443,7 @@ pub enum OperatorStatusLifecycleState {
 ///
 /// Every rate travels as its exact numerator and denominator rather than as a
 /// ratio, so a week with an empty population reports no rate at all instead of
-/// a zero that would flatter the gate, and a reader compares exact counts.
+/// a zero the durable columns do not claim, and a reader compares exact counts.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OperatorStatusLifecycleWeekMessage {
