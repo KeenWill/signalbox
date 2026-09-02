@@ -1121,15 +1121,21 @@ assistant content is admitted.
 
 The invocation excludes ambient settings, sessions, slash commands, browser
 integration, plugins, and built-in tools. `--tools` selects an empty built-in
-surface; `--disallowedTools` also names every built-in reported by isolated
-2.1.220 (`Task`, `Bash`, the `Cron*` tools, `DesignSync`, `Edit`, worktree,
-monitoring, notebook, notification, read/remote/report/scheduling/messaging,
-`Task*`, `ToolSearch`, web, workflow, and write); and `--allowedTools` contains
-only the qualified declared MCP names. `dontAsk` is used because no undeclared
-capability may become an interactive permission question. The initial event must
-also report no slash commands, skills, or plugins and must identify the pinned
-Claude Code version; any mismatch is stream-protocol boundary loss, not a
-relaxed invocation.
+surface; `--disallowedTools` also names every built-in the pinned executable
+reports or documents (`Task`, `Bash`, the `Cron*` tools, `DesignSync`, `Edit`,
+worktree, file search, cross-session discovery and messaging, agent-to-user
+messaging, monitoring, notebook, notification, shells and the code-running
+`REPL`, read/remote/report/scheduling/feedback, skill, `Task*`, `ToolSearch`,
+web, workflow, and write); and `--allowedTools` contains only the qualified
+declared MCP names. The cross-session and agent-to-user built-ins are denied
+because they address other Claude Code sessions on the host, or the user
+directly, rather than this adapter's own event stream. The inventory is the
+second of two independent controls, so it names built-ins this invocation could
+not otherwise reach. `dontAsk` is used because no undeclared capability may
+become an interactive permission question. The initial event must also report no
+slash commands, skills, or plugins and must identify the pinned Claude Code
+version; any mismatch is stream-protocol boundary loss, not a relaxed
+invocation.
 
 The pinned stream establishes correlation and reported-model evidence through
 `system/init`. Nonterminal `system/status`, `system/hook_started`,
