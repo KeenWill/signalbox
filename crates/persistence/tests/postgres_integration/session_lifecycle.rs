@@ -2013,3 +2013,78 @@ async fn a_live_session_cannot_hold_a_complete_terminal_outcome() -> Result<(), 
     drop(container);
     Ok(())
 }
+
+/// A committed handoff survives the transitions between the decision and the
+/// turn's boundary, and only the settlement it describes clears it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_park_between_decision_and_settlement_keeps_the_handoff() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    let session = creation_session(45);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(45))
+        .await?;
+    activate_first_turn(&pool, session, 45).await?;
+    let committed = SessionTerminalOutcome::Abandoned;
+    repository
+        .commit_pending_terminal(session, committed)
+        .await?;
+
+    repository
+        .park(
+            session,
+            SessionParkCause::OperatorHold,
+            SessionParkResponder::Operator,
+            None,
+            LifecycleActor::Operator,
+        )
+        .await?;
+
+    assert_eq!(
+        repository
+            .load(session)
+            .await?
+            .expect("the session keeps its lifecycle row")
+            .pending_terminal(),
+        Some(committed)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A closure naming a different outcome than the one already committed is
+/// refused: the committed decision is what started tearing the turn down.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_closure_cannot_override_a_committed_handoff() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    let session = creation_session(46);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(46))
+        .await?;
+    repository
+        .commit_pending_terminal(session, SessionTerminalOutcome::Abandoned)
+        .await?;
+
+    let error = repository
+        .close(
+            session,
+            SessionTerminalOutcome::FailedUnknown,
+            LifecycleActor::Operator,
+        )
+        .await
+        .expect_err("the committed decision is the one that settles");
+
+    assert_eq!(
+        lifecycle_rejection(error),
+        SessionLifecycleRejection::PendingTerminalConflict
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

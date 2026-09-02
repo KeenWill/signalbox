@@ -575,10 +575,12 @@ pub(crate) const fn creation_actor(cause: &SessionCreationCause) -> LifecycleAct
         SessionCreationCause::ModuleDispatched { dispatch } => LifecycleActor::Module {
             module: dispatch.module(),
         },
-        SessionCreationCause::Delegated { spawning_request } => LifecycleActor::Core {
-            agency: CoreAgency::Tool {
-                request: *spawning_request,
-            },
+        // The spawning request belongs to the parent session, and the actor
+        // identity is session-scoped; the child's own row already records that
+        // request as its creation provenance, so naming it here again would
+        // be a second, cross-session copy of one fact.
+        SessionCreationCause::Delegated { .. } => LifecycleActor::Core {
+            agency: CoreAgency::Daemon,
         },
     }
 }
@@ -620,6 +622,16 @@ pub(crate) async fn close_in_transaction(
     if !closure_carries_standing_cause(&held.state, outcome) {
         return Err(SessionLifecycleRepositoryError::Rejected(
             SessionLifecycleRejection::StandingCauseMismatch,
+        ));
+    }
+    // A committed handoff is the decision that started tearing the turn down,
+    // so the settlement records it rather than whatever the caller now names.
+    if held
+        .pending_terminal
+        .is_some_and(|committed| committed != outcome)
+    {
+        return Err(SessionLifecycleRepositoryError::Rejected(
+            SessionLifecycleRejection::PendingTerminalConflict,
         ));
     }
     settle_goal(connection, session, outcome, actor).await?;
@@ -852,10 +864,26 @@ async fn write_state(
                 terminal_cause_kind = $17,
                 terminal_stop_sticky = $18,
                 terminal_superseded_by = $19,
-                pending_terminal_outcome_kind = NULL,
-                pending_terminal_cause_kind = NULL,
-                pending_terminal_stop_sticky = NULL,
-                pending_terminal_superseded_by = NULL
+                -- The handoff is cleared by the settlement it describes and by
+                -- nothing else: a park or a resume between the decision and
+                -- the turn's boundary would otherwise erase what the closure
+                -- already committed to.
+                pending_terminal_outcome_kind = CASE
+                    WHEN $2::text = 'terminal' THEN NULL
+                    ELSE pending_terminal_outcome_kind
+                END,
+                pending_terminal_cause_kind = CASE
+                    WHEN $2::text = 'terminal' THEN NULL
+                    ELSE pending_terminal_cause_kind
+                END,
+                pending_terminal_stop_sticky = CASE
+                    WHEN $2::text = 'terminal' THEN NULL
+                    ELSE pending_terminal_stop_sticky
+                END,
+                pending_terminal_superseded_by = CASE
+                    WHEN $2::text = 'terminal' THEN NULL
+                    ELSE pending_terminal_superseded_by
+                END
           WHERE session_id = $1",
     )
     .bind(session_id_to_uuid(held.session))
