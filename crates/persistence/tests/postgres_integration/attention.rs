@@ -7,8 +7,9 @@ use signalbox_application::{
     max_attention_change_items, max_attention_snapshot_items,
 };
 use signalbox_domain::{
-    CoreAgency, LifecycleActor, ReplaceSessionMetadata, SessionLifecycleState,
-    SessionMetadataContent, SessionParkCause, SessionParkResponder,
+    CoreAgency, LifecycleActor, ModuleDispatch, ReplaceSessionMetadata, RepoWatchDispatchId,
+    SessionCreationProvenance, SessionLifecycleState, SessionMetadataContent, SessionParkCause,
+    SessionParkResponder,
 };
 use signalbox_persistence::attention::{
     AttentionCorruption, AttentionRepository, AttentionRepositoryError,
@@ -577,14 +578,22 @@ async fn the_attention_state_projects_the_durable_session_state() -> Result<(), 
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xa771_0000;
     let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
+    // Module-dispatched, so the session is owned: section 6 refuses to park an
+    // unmonitored conversation, and the park is what this test turns on.
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
-        .handle(prepared(
-            seed,
-            seed + 1,
-            ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(Uuid::from_u128(
-                seed + 2,
-            ))),
-        ))
+        .handle(
+            CreateSession::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed)),
+                SessionCreationProvenance::module_dispatched(ModuleDispatch::RepositoryWatch {
+                    dispatch: RepoWatchDispatchId::from_uuid(Uuid::from_u128(seed + 9)),
+                }),
+                SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+                    DirectModelSelection::from_uuid(Uuid::from_u128(seed + 2)),
+                )),
+            )
+            .prepare(session)
+            .expect("a module-dispatched creation without ancestry is preparable"),
+        )
         .await?;
     let attention = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS);
     let lifecycle = SessionLifecycleRepository::new(pool.clone());
