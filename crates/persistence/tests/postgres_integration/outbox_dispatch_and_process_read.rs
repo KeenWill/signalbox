@@ -3954,6 +3954,23 @@ async fn s24_outbox_prune_removes_child_and_header_below_the_floor() -> Result<(
         3
     );
 
+    // The timeline still indexes the pruned events, so a caller can name one.
+    // A detail read of that address reports no detail rather than corruption.
+    let pruned_address =
+        TimelineAddress::new(NonZeroU64::new(1).expect("the first sequence is nonzero"));
+    let detail_limits = TimelineDetailLimits::new(1, 256).expect("fixture limits are bounded");
+    assert!(
+        SessionTimelineRepository::new(pool.clone())
+            .read_item_details(
+                SessionId::from_uuid(first_session),
+                pruned_address,
+                None,
+                detail_limits,
+            )
+            .await?
+            .is_none()
+    );
+
     pool.close().await;
     drop(container);
     Ok(())

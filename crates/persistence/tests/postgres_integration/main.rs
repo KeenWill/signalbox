@@ -70,8 +70,9 @@ use signalbox_application::{
     SessionIdGenerator, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
     StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
     StartupScanSessionOutcome, SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputService, ToolAttemptAuthorizationOutcome, ToolAttemptAuthorizationStatus,
-    ToolCatalog, ToolDefinition, ToolInputSchema, ToolPreauthorization,
+    SubmitInputService, TimelineAddress, TimelineDetailLimits, ToolAttemptAuthorizationOutcome,
+    ToolAttemptAuthorizationStatus, ToolCatalog, ToolDefinition, ToolInputSchema,
+    ToolPreauthorization,
 };
 use signalbox_blob_store::{BlobObjectKey, BlobStoreName, ExpectedBlob};
 use signalbox_domain::{
@@ -180,6 +181,7 @@ use signalbox_persistence::{
         RecordDelegationWaitOutcome, RecordedDelegationMessage, RecordedDelegationWait,
         SessionDelegationCorruption, SessionDelegationRepository, SessionDelegationRepositoryError,
     },
+    session_timeline::SessionTimelineRepository,
     start_eligible_turn::{
         CommitActivationPreviewOutcome, StartEligibleTurnCorruption,
         StartEligibleTurnIdentityCollision, StartEligibleTurnRepository,

@@ -321,6 +321,14 @@ impl SessionTimelineRepository {
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             .execute(&mut *transaction)
             .await?;
+        // The timeline index outlives the events it indexes, so an item this
+        // caller can still see may name an address retention has removed. Read
+        // detail only above the mark, exactly as the turn and region address
+        // queries do.
+        if address_is_pruned(&mut transaction, address).await? {
+            transaction.commit().await?;
+            return Ok(None);
+        }
         let Some(event) = load_detail_event(
             &mut transaction,
             session,
@@ -593,6 +601,21 @@ SELECT event_sequence FROM session_timeline_item
                           WHERE singleton)
  ORDER BY event_sequence ASC LIMIT $4
 "#;
+
+/// Whether retention has already removed the event at one address.
+async fn address_is_pruned(
+    transaction: &mut Transaction<'_, Postgres>,
+    address: TimelineAddress,
+) -> Result<bool, SessionTimelineRepositoryError> {
+    sqlx::query_scalar(
+        "SELECT $1 <= (SELECT pruned_through FROM outbox_retention_state
+                        WHERE singleton)",
+    )
+    .bind(Decimal::from(address.sequence().get()))
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(Into::into)
+}
 
 async fn fetch_turn_addresses(
     transaction: &mut Transaction<'_, Postgres>,
