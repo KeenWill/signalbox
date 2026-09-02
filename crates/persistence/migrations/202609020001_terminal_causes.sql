@@ -1,19 +1,8 @@
 --
 -- Session lifecycle §4: mandatory cause classification on turn terminalization.
 --
--- Every turn that reaches `terminal` records exactly one typed cause from a
--- closed vocabulary; a non-terminal turn carries none. The unconstrained
--- dogfood-database reset is ratified, so no causeless terminal row survives to
--- be exempted and the shape constraint is validated rather than deferred — no
--- `unclassified_historical` spelling is owed.
---
--- `unclassified_failure` is the sole catch-all: §12 measures cause
--- completeness as the share of terminal turns carrying a cause outside that
--- set, so widening the catch-all silently weakens the acceptance criterion.
---
--- Every spelling below has a producing terminalization path except
--- `unclassified_failure`, which exists so a later path that genuinely cannot
--- classify has a legal spelling instead of a null.
+-- `unclassified_failure` is the only catch-all, and the only spelling with no
+-- producing terminalization path.
 --
 
 ALTER TABLE turn_lifecycle
@@ -53,21 +42,14 @@ ALTER TABLE turn_lifecycle
     );
 
 --
--- A cause belongs to exactly one disposition.
---
--- The vocabulary constraint above admits any spelling anywhere, so a writer
--- could pair `failed` with `completed` and satisfy both rules while recording a
--- turn that says two contradictory things about how it ended. The map below is
--- a total function from cause to disposition, so every admissible pair is
--- named once and no other pair exists. Enforcing it here rather than in one
--- caller's argument type is what makes it hold for every write path — the
--- repositories, the raw statements the tests write, and whatever later
--- lifecycle work adds.
+-- A cause belongs to exactly one disposition. The map is total, so a null
+-- disposition is rejected rather than leaving the check to evaluate null.
 --
 
 ALTER TABLE turn_lifecycle
     ADD CONSTRAINT turn_lifecycle_terminal_cause_matches_disposition CHECK (
         (terminal_cause_kind IS NULL)
+        OR ((terminal_disposition_kind IS NOT NULL) AND (FALSE
         OR ((terminal_disposition_kind = 'completed'::text)
             AND (terminal_cause_kind = 'completed'::text))
         OR ((terminal_disposition_kind = 'refused'::text)
@@ -97,5 +79,5 @@ ALTER TABLE turn_lifecycle
                 'reported_usage_context_compaction_exhausted'::text,
                 'reported_usage_context_still_exceeded'::text,
                 'unclassified_failure'::text
-            ])))
+            ])))))
     );

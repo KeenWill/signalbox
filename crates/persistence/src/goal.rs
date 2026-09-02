@@ -386,17 +386,21 @@ impl GoalRepository {
                 .await?;
         }
 
+        let session_exists = lock_session(&mut transaction, command.session()).await?;
+
         // An automatic resume names the block it answers; a park taken since is
         // the same "the lineage moved under us" case, and lifting it would undo
-        // an operator hold and schedule new model work. An operator's own
-        // resume names no expected head and still lifts the park.
-        if expected_head.is_some() && session_is_parked(&mut transaction, command.session()).await?
+        // an operator hold and schedule new model work. Read under the session
+        // lock, so a park cannot commit between the decision and the resume.
+        // An operator's own resume names no expected head and still lifts it.
+        if session_exists
+            && expected_head.is_some()
+            && !session_admits_automatic_resume(&mut transaction, command.session()).await?
         {
             transaction.rollback().await?;
             return Ok(GoalCommandHandlingOutcome::LineageMoved);
         }
 
-        let session_exists = lock_session(&mut transaction, command.session()).await?;
         let mut result = if !session_exists {
             GoalCommandResult::Rejected(GoalCommandRejection::SessionNotFound)
         } else {
@@ -667,6 +671,7 @@ impl GoalRepository {
                  ON lifecycle.session_id = event.session_id
                 AND lifecycle.owned
                 AND lifecycle.state_kind <> 'parked'
+                AND lifecycle.pending_terminal_outcome_kind IS NULL
               WHERE event.event_kind = 'blocked'
                 AND event.blocked_reason = 'execution_failure'
                 AND event.need = $1
@@ -997,18 +1002,25 @@ pub(crate) async fn record_execution_failure_recovery_cause(
     Ok(())
 }
 
-/// Whether the session is suspended in place.
-async fn session_is_parked(
+/// Whether the session still admits the automatic resume that named its block.
+///
+/// Both facts are read under the session lock the caller already holds: an
+/// in-memory timer armed before either changed would otherwise resume a
+/// conversation that has since been released, or lift a park that has since
+/// been taken.
+async fn session_admits_automatic_resume(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<bool, GoalRepositoryError> {
-    let parked: Option<bool> = sqlx::query_scalar(
-        "SELECT state_kind = 'parked' FROM session_lifecycle WHERE session_id = $1",
+    let admits: Option<bool> = sqlx::query_scalar(
+        "SELECT owned AND state_kind <> 'parked'
+                AND pending_terminal_outcome_kind IS NULL
+           FROM session_lifecycle WHERE session_id = $1",
     )
     .bind(session_id_to_uuid(session))
     .fetch_optional(&mut *connection)
     .await?;
-    Ok(parked.unwrap_or(false))
+    Ok(admits.unwrap_or(false))
 }
 
 fn recorded_scheduler_failure(goal: &Goal, turn: TurnId) -> Option<&GoalEvent> {
@@ -1681,9 +1693,10 @@ async fn insert_event(
             (session_id, event_ordinal, generation, event_kind, statement,
              blocked_reason, need, guidance, report, user_command_id,
              model_turn_id, model_tool_request_id, scheduler_turn_id,
-             session_outcome_kind, closure_actor_kind, closure_actor_module)
+             session_outcome_kind, closure_actor_kind, closure_actor_module,
+             closure_actor_turn_id, closure_actor_tool_request_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                 $14, $15, $16)",
+                 $14, $15, $16, $17, $18)",
     )
     .bind(session_id_to_uuid(session))
     .bind(Decimal::from(event.ordinal().get()))
@@ -1701,6 +1714,8 @@ async fn insert_event(
     .bind(encoded.session_outcome)
     .bind(encoded.closure_actor)
     .bind(encoded.closure_actor_module)
+    .bind(encoded.closure_actor_turn)
+    .bind(encoded.closure_actor_request)
     .execute(&mut *connection)
     .await?;
     Ok(())
@@ -1720,6 +1735,8 @@ struct EncodedEvent<'a> {
     session_outcome: Option<&'static str>,
     closure_actor: Option<&'static str>,
     closure_actor_module: Option<&'static str>,
+    closure_actor_turn: Option<Uuid>,
+    closure_actor_request: Option<Uuid>,
 }
 
 impl<'a> EncodedEvent<'a> {
@@ -1738,6 +1755,8 @@ impl<'a> EncodedEvent<'a> {
             session_outcome: None,
             closure_actor: None,
             closure_actor_module: None,
+            closure_actor_turn: None,
+            closure_actor_request: None,
         };
         match event.kind() {
             GoalEventKind::Commissioned {
@@ -1793,10 +1812,12 @@ impl<'a> EncodedEvent<'a> {
                 match provenance {
                     LifecycleActor::Core {
                         agency: CoreAgency::Model { turn },
-                    } => encoded.model_turn = Some(turn_id_to_uuid(*turn)),
+                    } => encoded.closure_actor_turn = Some(turn_id_to_uuid(*turn)),
                     LifecycleActor::Core {
                         agency: CoreAgency::Tool { request },
-                    } => encoded.model_tool_request = Some(tool_request_id_to_uuid(*request)),
+                    } => {
+                        encoded.closure_actor_request = Some(tool_request_id_to_uuid(*request));
+                    }
                     LifecycleActor::Module { module } => {
                         encoded.closure_actor_module = Some(dispatching_module_to_str(*module));
                     }
@@ -1820,7 +1841,8 @@ pub(crate) async fn load_goal_from_connection(
         "SELECT event_ordinal, generation, event_kind, statement,
                 blocked_reason, need, guidance, report, user_command_id,
                 model_turn_id, model_tool_request_id, scheduler_turn_id,
-                session_outcome_kind, closure_actor_kind, closure_actor_module
+                session_outcome_kind, closure_actor_kind, closure_actor_module,
+                closure_actor_turn_id, closure_actor_tool_request_id
            FROM goal_event
           WHERE session_id = $1
           ORDER BY event_ordinal",
@@ -1908,6 +1930,8 @@ fn decode_event(row: &sqlx::postgres::PgRow) -> Result<GoalEvent, GoalCorruption
     let session_outcome: Option<String> = column(row, "session_outcome_kind")?;
     let closure_actor: Option<String> = column(row, "closure_actor_kind")?;
     let closure_actor_module: Option<String> = column(row, "closure_actor_module")?;
+    let closure_actor_turn: Option<Uuid> = column(row, "closure_actor_turn_id")?;
+    let closure_actor_request: Option<Uuid> = column(row, "closure_actor_tool_request_id")?;
     let discriminator =
         goal_event_kind_from_str(&kind).ok_or_else(|| GoalCorruption::Unsupported {
             field: "event kind",
@@ -1997,8 +2021,8 @@ fn decode_event(row: &sqlx::postgres::PgRow) -> Result<GoalEvent, GoalCorruption
             provenance: decode_closure_actor(
                 required(closure_actor, "session closure actor")?,
                 closure_actor_module,
-                model_turn,
-                model_tool_request,
+                closure_actor_turn,
+                closure_actor_request,
             )?,
         },
     };

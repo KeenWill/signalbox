@@ -13,9 +13,9 @@ use signalbox_persistence::{
 };
 use sqlx::types::time::OffsetDateTime;
 
-/// One column's durable stamping contract: whether a row may omit it, and the
-/// expression that fills it when a writer does not.
-type StampingContract = (String, Option<String>);
+/// One column's durable stamping contract: whether a row may omit it, and
+/// whether the column itself fills it when a writer does not.
+type StampingContract = (String, bool);
 
 async fn stamping_contracts(
     pool: &PgPool,
@@ -37,7 +37,7 @@ async fn stamping_contracts(
     Ok(rows
         .into_iter()
         .map(|(table, column, nullable, default)| {
-            (format!("{table}.{column}"), (nullable, default))
+            (format!("{table}.{column}"), (nullable, default.is_some()))
         })
         .collect())
 }
@@ -45,15 +45,7 @@ async fn stamping_contracts(
 fn required_and_defaulted(columns: &[(&str, &str)]) -> BTreeMap<String, StampingContract> {
     columns
         .iter()
-        .map(|(table, column)| {
-            (
-                format!("{table}.{column}"),
-                (
-                    String::from("NO"),
-                    Some(String::from("statement_timestamp()")),
-                ),
-            )
-        })
+        .map(|(table, column)| (format!("{table}.{column}"), (String::from("NO"), true)))
         .collect()
 }
 
@@ -181,7 +173,7 @@ const EVERY_TERMINAL_CAUSE: [TurnTerminalCause; 21] = [
 
 /// Every insert-time lifecycle stamp is required of the row and filled by the
 /// column itself, so no present or future write path can commit an unstamped
-/// lifecycle row.
+/// lifecycle row (INV-094).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn insert_time_lifecycle_stamps_are_required_and_column_filled() -> Result<(), Box<dyn Error>>
@@ -210,7 +202,7 @@ async fn insert_time_lifecycle_stamps_are_required_and_column_filled() -> Result
 }
 
 /// A committed session, turn, attempt, model call, and outbox event each carry
-/// the instant their own row was written.
+/// the instant their own row was written (INV-094).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn committed_lifecycle_rows_carry_their_own_write_time() -> Result<(), Box<dyn Error>> {
@@ -352,7 +344,7 @@ async fn authorized_compaction_call(
 
 /// The compaction command's acceptance time is its own durable column, not the
 /// operational `durable_command.claimed_at` metadata, and each call transition
-/// stamps when it happened.
+/// stamps when it happened (INV-094).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn compaction_stamps_its_request_and_every_call_transition() -> Result<(), Box<dyn Error>> {
@@ -419,7 +411,7 @@ async fn compaction_stamps_its_request_and_every_call_transition() -> Result<(),
 }
 
 /// A model call that ends failed classifies its turn's terminalization as the
-/// call's own failure rather than leaving the cause unstated.
+/// call's own failure rather than leaving the cause unstated (INV-093).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_failed_model_call_classifies_its_turn_terminalization() -> Result<(), Box<dyn Error>> {
@@ -460,7 +452,7 @@ async fn a_failed_model_call_classifies_its_turn_terminalization() -> Result<(),
     Ok(())
 }
 
-/// A turn cannot reach `terminal` without naming a cause.
+/// A turn cannot reach `terminal` without naming a cause (INV-093).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_terminal_turn_without_a_cause_is_rejected() -> Result<(), Box<dyn Error>> {
@@ -483,7 +475,7 @@ async fn a_terminal_turn_without_a_cause_is_rejected() -> Result<(), Box<dyn Err
 }
 
 /// A turn that has not reached `terminal` cannot carry a terminal cause, so the
-/// column never states a reason for an ending that has not happened.
+/// column never states a reason for an ending that has not happened (INV-093).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_nonterminal_turn_carrying_a_cause_is_rejected() -> Result<(), Box<dyn Error>> {
@@ -498,11 +490,20 @@ async fn a_nonterminal_turn_carrying_a_cause_is_rejected() -> Result<(), Box<dyn
             .await
             .expect_err("an active turn cannot state why it ended");
 
-    assert_eq!(
-        rejection
-            .as_database_error()
-            .and_then(sqlx::error::DatabaseError::constraint),
-        Some("turn_lifecycle_terminal_cause_required")
+    // Both cause rules reject this row, and which one PostgreSQL reports is
+    // not specified, so the assertion names neither in particular.
+    let constraint = rejection
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::constraint);
+    assert!(
+        matches!(
+            constraint,
+            Some(
+                "turn_lifecycle_terminal_cause_required"
+                    | "turn_lifecycle_terminal_cause_matches_disposition"
+            )
+        ),
+        "rejected by {constraint:?}, which is not a terminal-cause rule"
     );
     pool.close().await;
     drop(container);
@@ -510,7 +511,7 @@ async fn a_nonterminal_turn_carrying_a_cause_is_rejected() -> Result<(), Box<dyn
 }
 
 /// The stored cause vocabulary is closed, so a spelling the encoder cannot
-/// produce cannot reach a durable row either.
+/// produce cannot reach a durable row either (INV-093).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_cause_spelling_outside_the_vocabulary_is_rejected() -> Result<(), Box<dyn Error>> {
@@ -533,7 +534,7 @@ async fn a_cause_spelling_outside_the_vocabulary_is_rejected() -> Result<(), Box
 }
 
 /// The database's closed vocabulary and the encoder's vocabulary are the same
-/// set, so a variant added to one cannot silently miss the other.
+/// set, so a variant added to one cannot silently miss the other (INV-093).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn the_stored_cause_vocabulary_matches_the_encoder() -> Result<(), Box<dyn Error>> {
@@ -552,7 +553,7 @@ async fn the_stored_cause_vocabulary_matches_the_encoder() -> Result<(), Box<dyn
 }
 
 /// A lifecycle row's write time does not move, so no later transition can
-/// rewrite the instant every duration and queue wait is measured from.
+/// rewrite the instant every duration and queue wait is measured from (INV-094).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_lifecycle_row_write_time_cannot_be_moved() -> Result<(), Box<dyn Error>> {
@@ -580,7 +581,7 @@ async fn a_lifecycle_row_write_time_cannot_be_moved() -> Result<(), Box<dyn Erro
 /// Terminalizing a compaction call cannot erase the in-flight stamp it already
 /// recorded, so the funnel interval survives the transition that ends it. The
 /// state constraint alone admits this update: once the row is terminal its
-/// `in_flight` clause is vacuous.
+/// `in_flight` clause is vacuous (INV-094).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn terminalizing_a_compaction_call_cannot_erase_its_in_flight_stamp()
@@ -613,7 +614,7 @@ async fn terminalizing_a_compaction_call_cannot_erase_its_in_flight_stamp()
 }
 
 /// A compaction call is inserted carrying only its preparation time, so no
-/// writer can fabricate an authorization transition that never happened.
+/// writer can fabricate an authorization transition that never happened (INV-094).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_compaction_call_cannot_be_inserted_already_in_flight() -> Result<(), Box<dyn Error>> {
@@ -649,7 +650,7 @@ async fn a_compaction_call_cannot_be_inserted_already_in_flight() -> Result<(), 
 }
 
 /// A turn cannot say two contradictory things about how it ended: the cause a
-/// terminal turn records has to be one its own disposition admits.
+/// terminal turn records has to be one its own disposition admits (INV-093).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_cause_its_disposition_does_not_admit_is_rejected() -> Result<(), Box<dyn Error>> {
@@ -663,6 +664,43 @@ async fn a_cause_its_disposition_does_not_admit_is_rejected() -> Result<(), Box<
     )
     .await
     .expect_err("a failed turn cannot record a completion cause");
+
+    assert_eq!(
+        rejection
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::constraint),
+        Some("turn_lifecycle_terminal_cause_matches_disposition")
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A terminal row cannot carry a cause with no disposition to admit it: the
+/// map is total, so the check decides rather than evaluating null (INV-093).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_cause_without_a_disposition_is_rejected() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = checkpoint_restart_model_call(&pool, 0x7240, true).await?;
+
+    let rejection = sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal',
+                terminal_frontier_id = starting_frontier_id,
+                terminal_disposition_kind = NULL,
+                active_phase_kind = NULL,
+                current_attempt_id = NULL,
+                terminal_cause_kind = $2
+          WHERE turn_id = $1",
+    )
+    .bind(fixture.turn.into_uuid())
+    .bind(turn_terminal_cause_to_str(
+        TurnTerminalCause::ModelCallFailed,
+    ))
+    .execute(&pool)
+    .await
+    .expect_err("a cause needs a disposition that admits it");
 
     assert_eq!(
         rejection

@@ -136,6 +136,15 @@ CREATE TABLE session_lifecycle (
     pending_terminal_stop_sticky boolean,
     pending_terminal_superseded_by uuid,
 
+    -- The actor that made the decision, kept with it. A settlement runs later,
+    -- possibly in another worker or after a restart, and the §6 provenance the
+    -- terminal row records is the deciding actor's -- not whichever caller
+    -- happened to observe the turn reach its boundary.
+    pending_terminal_actor_kind text,
+    pending_terminal_actor_module text,
+    pending_terminal_actor_turn_id uuid,
+    pending_terminal_actor_tool_request_id uuid,
+
     -- §15 dispatch payload measurements. T11 records them on every dispatch
     -- path; the columns land here because they are per-session mutable values.
     payload_token_count bigint,
@@ -298,6 +307,31 @@ CREATE TABLE session_lifecycle (
                  AND (parked_since IS NULL)
                  AND (parked_standing_cause_kind IS NULL)))
         AND ((parked_standing_cause_kind IS NULL) OR (parked_cause IS NOT NULL))
+        -- The standing evidence is the evidence the cause names. A closure
+        -- reads it to classify the outcome, so a park holding evidence its own
+        -- cause contradicts -- or an exhaustion holding none at all -- closes
+        -- under a classification the park never supported.
+        AND ((parked_cause IS NULL)
+             OR ((parked_cause = 'retry_budget_exhausted'::text)
+                 AND (parked_standing_cause_kind = ANY (ARRAY[
+                    'provider_transient'::text,
+                    'provider_quota_exhausted'::text,
+                    'provider_overloaded'::text,
+                    'infrastructure_failure'::text,
+                    'retry_budget_exhausted'::text
+                 ])))
+             OR ((parked_cause = 'structural_failure'::text)
+                 AND (parked_standing_cause_kind = ANY (ARRAY[
+                    'context_compaction_wall'::text,
+                    'context_headroom_exhausted'::text,
+                    'broken_toolchain'::text,
+                    'moderation_block'::text
+                 ])))
+             OR ((parked_cause <> ALL (ARRAY[
+                    'retry_budget_exhausted'::text,
+                    'structural_failure'::text
+                 ]))
+                 AND (parked_standing_cause_kind IS NULL)))
     ),
 
     CONSTRAINT session_lifecycle_terminal_outcome_closed CHECK (
@@ -412,7 +446,32 @@ CREATE TABLE session_lifecycle (
         AND ((pending_terminal_outcome_kind IS NOT NULL)
              OR ((pending_terminal_cause_kind IS NULL)
                  AND (pending_terminal_stop_sticky IS NULL)
-                 AND (pending_terminal_superseded_by IS NULL)))
+                 AND (pending_terminal_superseded_by IS NULL)
+                 AND (pending_terminal_actor_kind IS NULL)))
+        -- A committed handoff always names its actor, and the actor's shape is
+        -- the state actor's: one module name, or one acting identity, never
+        -- both and never a bare classification that owes one.
+        AND ((pending_terminal_outcome_kind IS NULL)
+             = (pending_terminal_actor_kind IS NULL))
+        AND ((pending_terminal_actor_kind IS NULL)
+             OR (pending_terminal_actor_kind = ANY (ARRAY[
+                    'core'::text,
+                    'operator'::text,
+                    'module'::text,
+                    'watchdog'::text
+                ])))
+        AND ((pending_terminal_actor_kind IS NOT DISTINCT FROM 'module'::text)
+             = (pending_terminal_actor_module IS NOT NULL))
+        AND ((pending_terminal_actor_module IS NULL)
+             OR (pending_terminal_actor_module = ANY (ARRAY[
+                    'repo_watch'::text,
+                    'commissioned_dispatch'::text
+                ])))
+        AND ((pending_terminal_actor_turn_id IS NULL)
+             OR (pending_terminal_actor_tool_request_id IS NULL))
+        AND ((pending_terminal_actor_kind IS NOT DISTINCT FROM 'core'::text)
+             OR ((pending_terminal_actor_turn_id IS NULL)
+                 AND (pending_terminal_actor_tool_request_id IS NULL)))
         AND ((pending_terminal_outcome_kind IS NULL)
              OR (pending_terminal_outcome_kind = ANY (ARRAY[
                     'achieved_verified'::text,
@@ -538,6 +597,24 @@ ALTER TABLE ONLY session_lifecycle
 ALTER TABLE ONLY session_lifecycle
     ADD CONSTRAINT session_lifecycle_actor_tool_request_fk
         FOREIGN KEY (actor_tool_request_id, session_id)
+        REFERENCES tool_request(request_id, session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
+
+-- The handoff's acting identity is scoped the same way: an identity belonging
+-- to another session loads back intact and then cannot settle, because the
+-- terminal write and the goal-closure trigger both reject it -- which strands
+-- the committed decision with no way to replace it.
+ALTER TABLE ONLY session_lifecycle
+    ADD CONSTRAINT session_lifecycle_pending_terminal_actor_turn_fk
+        FOREIGN KEY (pending_terminal_actor_turn_id, session_id)
+        REFERENCES turn_lifecycle(turn_id, session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE ONLY session_lifecycle
+    ADD CONSTRAINT session_lifecycle_pending_terminal_actor_request_fk
+        FOREIGN KEY (pending_terminal_actor_tool_request_id, session_id)
         REFERENCES tool_request(request_id, session_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED;
@@ -941,10 +1018,15 @@ BEGIN
     -- disposition that would let it reach `terminal` lands with the event
     -- vocabulary; requiring it here would make every closure of a dispatched
     -- goal session impossible.
+    -- Nor is a turn the delegation cascade already terminated logically: the
+    -- parent's stop released its runtime slot and wrote the terminal proof,
+    -- and its `state_kind` stays put by design. Reading it as live would leave
+    -- the child session unclosable forever.
     SELECT lifecycle.turn_id INTO live
       FROM turn_lifecycle AS lifecycle
      WHERE lifecycle.session_id = NEW.session_id
        AND lifecycle.state_kind <> 'terminal'
+       AND NOT lifecycle.delegation_runtime_terminal
        AND NOT EXISTS (
             SELECT 1
               FROM goal_turn_retired_outbox_event AS retired
@@ -1036,10 +1118,17 @@ CREATE CONSTRAINT TRIGGER session_terminal_settles_its_goal
 -- the session outcome and the §6 classification of the actor that closed it.
 --
 
+-- The closure's agency gets its own columns rather than reusing the model
+-- declaration's. `enforce_goal_model_declaration_request` validates every
+-- non-null `model_tool_request_id` as an achieved-or-blocked `goal_declare`
+-- request, and that column is globally unique, so a closure borrowing it would
+-- be rejected at commit or collide with the declaration that already used it.
 ALTER TABLE goal_event
     ADD COLUMN session_outcome_kind text,
     ADD COLUMN closure_actor_kind text,
-    ADD COLUMN closure_actor_module text;
+    ADD COLUMN closure_actor_module text,
+    ADD COLUMN closure_actor_turn_id uuid,
+    ADD COLUMN closure_actor_tool_request_id uuid;
 
 ALTER TABLE goal_event
     DROP CONSTRAINT goal_event_event_kind_check;
@@ -1081,11 +1170,20 @@ ALTER TABLE goal_event
         AND ((event_kind = 'session_closed'::text)
              OR ((session_outcome_kind IS NULL)
                  AND (closure_actor_kind IS NULL)
-                 AND (closure_actor_module IS NULL)))
+                 AND (closure_actor_module IS NULL)
+                 AND (closure_actor_turn_id IS NULL)
+                 AND (closure_actor_tool_request_id IS NULL)))
         AND ((closure_actor_module IS NULL) OR (closure_actor_module = ANY (ARRAY[
             'repo_watch'::text,
             'commissioned_dispatch'::text
         ])))
+        -- A core closure keeps at most one acting identity, and no other
+        -- classification keeps any: the reader rejects the combinations this
+        -- would otherwise let commit, leaving the goal unreadable.
+        AND ((closure_actor_turn_id IS NULL) OR (closure_actor_tool_request_id IS NULL))
+        AND ((closure_actor_kind = 'core'::text)
+             OR ((closure_actor_turn_id IS NULL)
+                 AND (closure_actor_tool_request_id IS NULL)))
     );
 
 --
@@ -1106,7 +1204,7 @@ ALTER TABLE goal_event
         OR ((event_kind = 'achieved'::text) AND (statement IS NULL) AND (blocked_reason IS NULL) AND (need IS NULL) AND (guidance IS NULL) AND (report IS NOT NULL) AND (user_command_id IS NULL) AND (model_turn_id IS NOT NULL) AND (model_tool_request_id IS NOT NULL) AND (scheduler_turn_id IS NULL))
         OR ((event_kind = 'user_stopped'::text) AND (statement IS NULL) AND (blocked_reason IS NULL) AND (need IS NULL) AND (guidance IS NULL) AND (report IS NULL) AND (user_command_id IS NOT NULL) AND (model_turn_id IS NULL) AND (model_tool_request_id IS NULL) AND (scheduler_turn_id IS NULL))
         OR ((event_kind = 'superseded'::text) AND (statement IS NOT NULL) AND (blocked_reason IS NULL) AND (need IS NULL) AND (guidance IS NULL) AND (report IS NULL) AND (user_command_id IS NOT NULL) AND (model_turn_id IS NULL) AND (model_tool_request_id IS NULL) AND (scheduler_turn_id IS NULL))
-        OR ((event_kind = 'session_closed'::text) AND (statement IS NULL) AND (blocked_reason IS NULL) AND (need IS NULL) AND (guidance IS NULL) AND (report IS NULL) AND (user_command_id IS NULL) AND (scheduler_turn_id IS NULL) AND ((model_turn_id IS NULL) OR (model_tool_request_id IS NULL)) AND ((closure_actor_kind = 'core'::text) OR ((model_turn_id IS NULL) AND (model_tool_request_id IS NULL)))))
+        OR ((event_kind = 'session_closed'::text) AND (statement IS NULL) AND (blocked_reason IS NULL) AND (need IS NULL) AND (guidance IS NULL) AND (report IS NULL) AND (user_command_id IS NULL) AND (scheduler_turn_id IS NULL) AND (model_turn_id IS NULL) AND (model_tool_request_id IS NULL)))
     );
 
 --
@@ -1115,11 +1213,48 @@ ALTER TABLE goal_event
 -- tool-only actor leaves null by construction.
 --
 
-ALTER TABLE ONLY goal_event
-    ADD CONSTRAINT goal_event_closure_tool_request_fk
-        FOREIGN KEY (model_tool_request_id, session_id)
-        REFERENCES tool_request(request_id, session_id)
-        ON UPDATE RESTRICT ON DELETE RESTRICT;
+CREATE FUNCTION require_goal_closure_actor_identity() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.event_kind <> 'session_closed' THEN
+        RETURN NULL;
+    END IF;
+
+    IF NEW.closure_actor_tool_request_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1
+          FROM tool_request AS request
+         WHERE request.request_id = NEW.closure_actor_tool_request_id
+           AND request.session_id = NEW.session_id
+    ) THEN
+        RAISE EXCEPTION
+            'session closure for % names tool request %, which is not its own',
+            NEW.session_id, NEW.closure_actor_tool_request_id
+            USING ERRCODE = '23503';
+    END IF;
+
+    IF NEW.closure_actor_turn_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1
+          FROM turn_lifecycle AS turn
+         WHERE turn.turn_id = NEW.closure_actor_turn_id
+           AND turn.session_id = NEW.session_id
+    ) THEN
+        RAISE EXCEPTION
+            'session closure for % names turn %, which is not its own',
+            NEW.session_id, NEW.closure_actor_turn_id
+            USING ERRCODE = '23503';
+    END IF;
+
+    RETURN NULL;
+END;
+$$;
+
+-- A trigger rather than a foreign key: the key would validate every historical
+-- `achieved` and `blocked` row, and this rule is about the closure kind alone.
+CREATE CONSTRAINT TRIGGER goal_event_closure_names_its_own_identity
+    AFTER INSERT ON goal_event
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION require_goal_closure_actor_identity();
 
 --
 -- Deployment policy for the armed deadlines.
@@ -1183,6 +1318,11 @@ SELECT kind, NULL
         'blocked',
         'parked_renotify'
        ]) AS kind;
+
+-- Losing a policy row silently turns a configured bound into `none`.
+CREATE TRIGGER session_lifecycle_bound_truncate_is_rejected
+    BEFORE TRUNCATE ON session_lifecycle_bound
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_session_lifecycle_table_truncate();
 
 --
 -- Arming. The satellite's state decides which deadline is armed, and the
@@ -1299,13 +1439,16 @@ CREATE TRIGGER session_lifecycle_arms_its_deadline
 -- scheduler prefix.
 --
 
-CREATE FUNCTION project_session_lifecycle(subject uuid, lifts_park boolean) RETURNS void
+CREATE FUNCTION project_session_lifecycle(
+    subject uuid,
+    lifts_park boolean,
+    operator_authored boolean DEFAULT false
+) RETURNS void
     LANGUAGE plpgsql
     AS $$
 DECLARE
     held session_lifecycle%ROWTYPE;
     live_phase text;
-    live_turn uuid;
     goal_turn uuid;
     goal_request uuid;
     actor text;
@@ -1347,8 +1490,8 @@ BEGIN
         RETURN;
     END IF;
 
-    SELECT live.active_phase_kind, live.turn_id, live.child_wait_request_id
-      INTO live_phase, live_turn, live_child_request
+    SELECT live.active_phase_kind, live.child_wait_request_id
+      INTO live_phase, live_child_request
       FROM turn_lifecycle AS live
      WHERE live.session_id = subject
        AND live.state_kind = 'active'
@@ -1360,8 +1503,7 @@ BEGIN
     -- outranks it, and this runs on every turn write.
     IF live_phase IS NULL THEN
         SELECT event.event_kind, event.blocked_reason, event.generation,
-               COALESCE(event.model_turn_id, event.scheduler_turn_id),
-               event.model_tool_request_id
+               event.model_turn_id, event.model_tool_request_id
           INTO goal_kind, goal_reason, goal_generation,
                goal_turn, goal_request
           FROM goal_event AS event
@@ -1438,22 +1580,41 @@ BEGIN
        AND held.blocked_reason IS NOT DISTINCT FROM next_blocked_reason
        AND held.blocked_cycle IS NOT DISTINCT FROM next_blocked_cycle
     THEN
+        -- The state did not move, but an `active` session reaching here did so
+        -- because a turn transitioned -- one terminalized, or a successor
+        -- activated -- and that is the progress the stall deadline measures.
+        -- Only the deadline re-arms: the session entered `active` when its
+        -- first turn started, and `state_entered_at` says so.
+        IF held.state_kind = 'active' AND held.owned THEN
+            UPDATE session_deadline AS armed
+               SET armed_at = statement_timestamp(),
+                   expires_at = CASE
+                       WHEN policy.bound IS NULL THEN NULL
+                       ELSE statement_timestamp() + policy.bound
+                   END
+              FROM session_lifecycle_bound AS policy
+             WHERE armed.session_id = subject
+               AND armed.deadline_kind = 'active_stall'
+               AND policy.deadline_kind = 'active_stall';
+        END IF;
         RETURN;
     END IF;
 
     -- A projected transition is core machinery, and the live turn is the
     -- agency behind it; the creating actor is not.
-    -- The agency is the live turn, or the goal event that decided the state
-    -- when no turn is live. A lift is the operator's own resume, so it keeps
-    -- that classification rather than reading as daemon machinery.
-    IF lifts_park THEN
+    -- The identity recorded here is model or tool agency and nothing else. A
+    -- turn activating, a phase moving, a scheduler-authored block: those are
+    -- daemon machinery that happens to concern a turn, and the reader takes a
+    -- stored turn to mean the model acted. Only a model-declared goal event
+    -- carries one. A goal event the user authored -- a lift, a stop, a
+    -- supersede, a commission -- is the operator's, not daemon core's.
+    IF lifts_park OR operator_authored THEN
         actor := 'operator';
         goal_turn := NULL;
         goal_request := NULL;
-        live_turn := NULL;
     ELSE
         actor := 'core';
-        IF live_turn IS NOT NULL THEN
+        IF live_phase IS NOT NULL THEN
             goal_turn := NULL;
             goal_request := NULL;
         END IF;
@@ -1464,9 +1625,9 @@ BEGIN
            state_entered_at = statement_timestamp(),
            actor_kind = actor,
            actor_module = NULL,
-           actor_turn_id = COALESCE(live_turn, goal_turn),
+           actor_turn_id = goal_turn,
            actor_tool_request_id = CASE
-               WHEN COALESCE(live_turn, goal_turn) IS NULL THEN goal_request
+               WHEN goal_turn IS NULL THEN goal_request
                ELSE NULL
            END,
            waiting_kind = next_waiting_kind,
@@ -1498,15 +1659,29 @@ CREATE FUNCTION project_session_lifecycle_from_goal() RETURNS trigger
 BEGIN
     PERFORM project_session_lifecycle(
         NEW.session_id,
-        NEW.event_kind = 'resumed'
+        NEW.event_kind = 'resumed',
+        NEW.user_command_id IS NOT NULL
     );
     RETURN NULL;
 END;
 $$;
 
-CREATE TRIGGER turn_lifecycle_projects_session_state
-    AFTER INSERT OR UPDATE ON turn_lifecycle
+-- Split, and the update arm fires only when a column the mapping reads moves.
+-- A turn write that advances attempt pointers, frontier identities, or tool
+-- round bookkeeping cannot change the session's state, and this trigger runs on
+-- every one of them.
+CREATE TRIGGER turn_lifecycle_projects_session_state_on_insert
+    AFTER INSERT ON turn_lifecycle
     FOR EACH ROW EXECUTE FUNCTION project_session_lifecycle_from_turn();
+
+CREATE TRIGGER turn_lifecycle_projects_session_state_on_update
+    AFTER UPDATE ON turn_lifecycle
+    FOR EACH ROW
+    WHEN (OLD.state_kind IS DISTINCT FROM NEW.state_kind
+          OR OLD.active_phase_kind IS DISTINCT FROM NEW.active_phase_kind
+          OR OLD.child_wait_request_id IS DISTINCT FROM NEW.child_wait_request_id
+          OR OLD.delegation_runtime_terminal IS DISTINCT FROM NEW.delegation_runtime_terminal)
+    EXECUTE FUNCTION project_session_lifecycle_from_turn();
 
 CREATE TRIGGER goal_event_projects_session_state
     AFTER INSERT ON goal_event
@@ -1565,6 +1740,10 @@ ALTER TABLE ONLY session_cleanup_obligation
     ADD CONSTRAINT session_cleanup_obligation_session_id_fkey
         FOREIGN KEY (session_id) REFERENCES session(session_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT;
+
+CREATE TRIGGER session_cleanup_obligation_truncate_is_rejected
+    BEFORE TRUNCATE ON session_cleanup_obligation
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_session_lifecycle_table_truncate();
 
 CREATE INDEX session_cleanup_obligation_outstanding
     ON session_cleanup_obligation (recorded_at, session_id)

@@ -72,7 +72,10 @@ companion pages. This page also owns the shared
 [operator failure taxonomy](#operator-failure-taxonomy) — defined in
 `crates/application` and consumed by signalboxd telemetry. The required
 model-exchange deployment policy and its unbounded spelling are verified against
-this PR (`agent/bounds-required-config-gate`).
+this PR (`agent/bounds-required-config-gate`). The Anthropic adapter's unforced
+tool choice, its instruction-carried tool demands, and its refusal of every
+sampling control are verified against this PR
+(`agent/anthropic-adapter-claude5`).
 
 ## Boundary and crate layout
 
@@ -446,15 +449,18 @@ Guarantees:
 ## Structured output and tool decode
 
 `StructuredOutputContract` (name, description, JSON Schema, generated from a
-Rust type via schemars or supplied explicitly) is realized as one forced
-tool/function proposal. The direct adapters use their native request tools. The
-Codex CLI adapter renders the contract into the stateless prompt and requires
-the final CLI agent message to satisfy an outer response schema whose one
-contract-named proposal carries the value. That is a request constraint, not a
-response guarantee: a nonconforming or malformed response can still carry zero
-or several proposals, and the provider-independent decode below is what enforces
-the exactly-one contract. Why: one decode path across adapters beats
-provider-specific output values that require caller-side transformation.
+Rust type via schemars or supplied explicitly) is realized as one tool/function
+proposal under the contract's reserved name. The direct adapters use their
+native request tools; the OpenAI adapter forces that proposal through
+`tool_choice`, the Anthropic adapter asks for it by instruction instead
+([Direct HTTP adapters](#direct-http-adapters)). The Codex CLI adapter renders
+the contract into the stateless prompt and requires the final CLI agent message
+to satisfy an outer response schema whose one contract-named proposal carries
+the value. In every case that is a request constraint, not a response guarantee:
+a nonconforming or malformed response can still carry zero or several proposals,
+and the provider-independent decode below is what enforces the exactly-one
+contract. Why: one decode path across adapters beats provider-specific output
+values that require caller-side transformation.
 
 `decode_structured` and `decode_structured_json` are pure functions over
 already-delivered response parts: exactly one proposal under the contract name
@@ -608,6 +614,17 @@ errors classified by native code.
 Usage is provider-stated only, never estimated; OpenAI's cache-read count comes
 from `prompt_tokens_details.cached_tokens` and no cache-creation count is
 fabricated.
+
+The Anthropic adapter emits no sampling control and no forced tool choice.
+`MessagesRequest` carries no `temperature`, `top_p`, or `top_k` field, and
+preparation and `validate_model_settings` refuse settings that set one rather
+than dropping it. `tool_choice` is emitted only as `{"type":"auto"}`, with
+`disable_parallel_tool_use` for the structured-output contract, and the demand
+travels as an adapter-authored instruction after the caller's system text.
+`ToolChoice::AnyTool`, `ToolChoice::Named`, and the contract are therefore
+advisory here — the capability-limited exception to the provider-enforced
+settings rule. No top-level `thinking` configuration object is emitted; replayed
+`thinking` and `redacted_thinking` content blocks are unaffected.
 
 Anthropic preflight input counting preserves the generation request's
 prompt/cache-affecting `output_config` and same-target `speed` fields. A mapped
@@ -1121,15 +1138,21 @@ assistant content is admitted.
 
 The invocation excludes ambient settings, sessions, slash commands, browser
 integration, plugins, and built-in tools. `--tools` selects an empty built-in
-surface; `--disallowedTools` also names every built-in reported by isolated
-2.1.220 (`Task`, `Bash`, the `Cron*` tools, `DesignSync`, `Edit`, worktree,
-monitoring, notebook, notification, read/remote/report/scheduling/messaging,
-`Task*`, `ToolSearch`, web, workflow, and write); and `--allowedTools` contains
-only the qualified declared MCP names. `dontAsk` is used because no undeclared
-capability may become an interactive permission question. The initial event must
-also report no slash commands, skills, or plugins and must identify the pinned
-Claude Code version; any mismatch is stream-protocol boundary loss, not a
-relaxed invocation.
+surface; `--disallowedTools` also names every built-in the pinned executable
+reports or documents (`Task`, `Bash`, the `Cron*` tools, `DesignSync`, `Edit`,
+worktree, file search, cross-session discovery and messaging, agent-to-user
+messaging, monitoring, notebook, notification, shells and the code-running
+`REPL`, read/remote/report/scheduling/feedback, skill, `Task*`, `ToolSearch`,
+web, workflow, and write); and `--allowedTools` contains only the qualified
+declared MCP names. The cross-session and agent-to-user built-ins are denied
+because they address other Claude Code sessions on the host, or the user
+directly, rather than this adapter's own event stream. The inventory is the
+second of two independent controls, so it names built-ins this invocation could
+not otherwise reach. `dontAsk` is used because no undeclared capability may
+become an interactive permission question. The initial event must also report no
+slash commands, skills, or plugins and must identify the pinned Claude Code
+version; any mismatch is stream-protocol boundary loss, not a relaxed
+invocation.
 
 The pinned stream establishes correlation and reported-model evidence through
 `system/init`. Nonterminal `system/status`, `system/hook_started`,

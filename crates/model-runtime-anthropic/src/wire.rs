@@ -15,6 +15,11 @@ pub(crate) fn raw_json_is_object(raw: &serde_json::value::RawValue) -> bool {
 
 // --- Request ---
 
+/// Exact request accepted by `POST /v1/messages`.
+///
+/// No sampling member and no top-level `thinking` member: the provider answers
+/// either with a 400, and omitting the parameter is the accepted form.
+/// Replayed thinking travels as a content block inside `messages`.
 #[derive(Debug, Serialize)]
 pub(crate) struct MessagesRequest {
     pub model: String,
@@ -24,10 +29,6 @@ pub(crate) struct MessagesRequest {
     pub system: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stop_sequences: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_config: Option<OutputConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -82,16 +83,16 @@ pub(crate) struct WireTool {
     pub input_schema: Box<serde_json::value::RawValue>,
 }
 
+/// The only `tool_choice` shape this adapter emits.
+///
+/// The forced shapes — `{"type":"any"}` and `{"type":"tool","name":…}` — are
+/// unrepresentable because the provider answers both with a 400.
+/// `disable_parallel_tool_use` alongside `auto` still admits at most one call.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 pub(crate) enum WireToolChoice {
     #[serde(rename = "auto")]
-    Auto,
-    #[serde(rename = "any")]
-    Any,
-    #[serde(rename = "tool")]
-    Tool {
-        name: String,
+    Auto {
         #[serde(skip_serializing_if = "Option::is_none")]
         disable_parallel_tool_use: Option<bool>,
     },

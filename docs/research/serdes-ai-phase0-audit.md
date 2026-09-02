@@ -1,8 +1,8 @@
 # SerdesAI Phase-0 audit
 
 > Dated research intake (2026-07-21). Record citations (ADR-NNNN) refer to the
-> retired ADR corpus; resolve them through the
-> [ADR mapping](../spec/README.md#adr-mapping). Current requirements live in the
+> retired ADR corpus, which lives only in git history and is not current
+> authority. Current requirements live in the
 > [living specification](../spec/README.md), which supersedes any requirement
 > stated here.
 
