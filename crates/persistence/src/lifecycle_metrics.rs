@@ -366,13 +366,27 @@ impl LifecycleMetricsReport {
             .find(|rate| rate.denominator() > 0)
     }
 
+    /// Returns the latest complete week whose wall cohort has matured.
+    ///
+    /// A cohort still inside its maturation window is not evaluable (F9), and
+    /// reading one would clear the alarm on a week that has not finished
+    /// happening.
+    pub fn latest_matured_wall_rate(&self) -> Option<LifecycleRate> {
+        self.weeks
+            .iter()
+            .rev()
+            .filter(|week| week.week_start < self.current_week)
+            .filter(|week| week.wall_cohort_matured)
+            .map(LifecycleWeeklyMetrics::wall_rate)
+            .find(|rate| rate.denominator() > 0)
+    }
+
     /// Returns whether the wall rate breached its configured threshold.
     ///
-    /// Absent when no threshold is configured or no complete week measures one.
+    /// Absent when no threshold is configured or no matured week measures one.
     pub fn wall_rate_breached(&self) -> Option<bool> {
         let threshold = self.bounds.wall_rate_threshold_ppm?;
-        self.latest_measured(LifecycleWeeklyMetrics::wall_rate)?
-            .breaches(threshold)
+        self.latest_matured_wall_rate()?.breaches(threshold)
     }
 
     /// Returns whether the `failed_unknown` share breached its threshold.
@@ -609,9 +623,19 @@ pub(crate) fn reported_week_limit(bounds: LifecycleMetricBounds) -> i64 {
     configured.max(MAX_REPORTED_WEEKS)
 }
 
+/// Every policy row the metric definitions read.
+// numeric-bound: not-a-bound - fixed size of the closed policy vocabulary
+const METRIC_BOUND_KINDS: usize = 6;
+
 pub(crate) fn decode_bounds(
     rows: &[PgRow],
 ) -> Result<LifecycleMetricBounds, LifecycleMetricsError> {
+    // A missing row would read as the `none` default and silently disable its
+    // alarm or its grace, which is the one failure a metric policy must not
+    // have.
+    if rows.len() != METRIC_BOUND_KINDS {
+        return Err(LifecycleMetricsCorruption::Missing("metric bound row").into());
+    }
     let mut bounds = LifecycleMetricBounds::default();
     for row in rows {
         let kind = row.try_get::<String, _>("bound_kind")?;

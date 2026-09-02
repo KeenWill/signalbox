@@ -8634,7 +8634,13 @@ fn validate_operator_status_message(message: &ServerMessage) -> Result<(), Frame
             // past has a record.
             item.deadline_missing == item.expired_for_seconds.is_none()
         }
-        OperatorStatusMessage::Start {} | OperatorStatusMessage::End(_) => true,
+        OperatorStatusMessage::End(item) => {
+            // The alarm is the gate's integrity condition, so `met` beside a
+            // violation is a pair the daemon cannot produce.
+            item.substrate_v0_gate != OperatorStatusLifecycleGate::Met
+                || item.lifecycle_deadline_violation_count.value() == 0
+        }
+        OperatorStatusMessage::Start {} => true,
     };
     if valid {
         Ok(())
@@ -8650,6 +8656,15 @@ fn validate_operator_status_message(message: &ServerMessage) -> Result<(), Frame
 fn operator_status_calendar_date_is_valid(value: &str) -> bool {
     let bytes = value.as_bytes();
     if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    // Integer parsing accepts a leading sign, so `+026-08-31` has the width
+    // without having the shape.
+    if !bytes
+        .iter()
+        .enumerate()
+        .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
+    {
         return false;
     }
     let Some(Ok(year)) = value.get(0..4).map(str::parse::<i64>) else {
@@ -10570,6 +10585,8 @@ mod tests {
         assert!(!operator_status_calendar_date_is_valid("2026-99-99"));
         assert!(!operator_status_calendar_date_is_valid("2026-02-29"));
         assert!(!operator_status_calendar_date_is_valid("2026-8-31"));
+        assert!(!operator_status_calendar_date_is_valid("+026-08-31"));
+        assert!(!operator_status_calendar_date_is_valid("2026-+8-31"));
         assert!(!operator_status_calendar_date_is_valid(
             "2026-08-31T00:00:00Z"
         ));

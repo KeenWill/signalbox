@@ -1084,7 +1084,10 @@ fn decode_goal_block(
 
 fn decode_activity_kind(value: &str) -> Result<AttentionActivityKind, AttentionRepositoryError> {
     match value {
-        "session" => Ok(AttentionActivityKind::Session),
+        // A lifecycle transition is activity on the session itself; it is a
+        // distinct journal kind only so it does not read as a membership
+        // change and send every follower back for the catalog.
+        "session" | "lifecycle" => Ok(AttentionActivityKind::Session),
         "turn" => Ok(AttentionActivityKind::Turn),
         "goal" => Ok(AttentionActivityKind::Goal),
         "approval_judge" => Ok(AttentionActivityKind::ApprovalJudge),

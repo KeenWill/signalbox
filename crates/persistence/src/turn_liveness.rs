@@ -570,12 +570,11 @@ impl QuiescentActiveTurnPage {
 /// still saw it would read a deliberately held turn as a stalled one and reap
 /// exactly the work an operator is holding.
 ///
-/// The ownership bit is deliberately not a second conjunct here. §6 gives an
-/// unmonitored session no watchdog, which would exclude conversations —
-/// dispatched work is owned and unaffected. What that leaves a conversation is
-/// a dead provider call's turn staying active forever, which also blocks the
-/// session's next input; this scan is what unwedges it. Withdrawing that is a
-/// product decision for the change that owns watchdog posture.
+/// Ownership is deliberately not a second conjunct. Turn-liveness recovery
+/// applies to every turn whoever owns the session; ownership governs lifecycle
+/// driving — retry, park, escalation, auto-resume — not liveness. A dead turn
+/// left active in a conversation would block its next input, and injection is
+/// available in every non-terminal state.
 const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
             active.turn_id,
             active.current_attempt_id,
@@ -652,12 +651,11 @@ const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
 /// still saw it would read a deliberately held turn as a stalled one and reap
 /// exactly the work an operator is holding.
 ///
-/// The ownership bit is deliberately not a second conjunct here. §6 gives an
-/// unmonitored session no watchdog, which would exclude conversations —
-/// dispatched work is owned and unaffected. What that leaves a conversation is
-/// a dead provider call's turn staying active forever, which also blocks the
-/// session's next input; this scan is what unwedges it. Withdrawing that is a
-/// product decision for the change that owns watchdog posture.
+/// Ownership is deliberately not a second conjunct. Turn-liveness recovery
+/// applies to every turn whoever owns the session; ownership governs lifecycle
+/// driving — retry, park, escalation, auto-resume — not liveness. A dead turn
+/// left active in a conversation would block its next input, and injection is
+/// available in every non-terminal state.
 const SLOT_HELD_ACTIVE_TURNS: &str = "SELECT active.session_id,
             active.turn_id,
             active.current_attempt_id,

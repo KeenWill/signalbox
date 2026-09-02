@@ -427,6 +427,13 @@ impl SessionLifecycleRepository {
             )
             .await);
         }
+        if !closure_carries_standing_cause(&held.state, outcome) {
+            return Err(reject(
+                transaction,
+                SessionLifecycleRejection::StandingCauseMismatch,
+            )
+            .await);
+        }
         match held.pending_terminal {
             Some(committed) if committed == outcome => {
                 return commit(transaction).await;
@@ -569,10 +576,12 @@ pub(crate) const fn creation_actor(cause: &SessionCreationCause) -> LifecycleAct
         SessionCreationCause::ModuleDispatched { dispatch } => LifecycleActor::Module {
             module: dispatch.module(),
         },
-        SessionCreationCause::Delegated { spawning_request } => LifecycleActor::Core {
-            agency: CoreAgency::Tool {
-                request: *spawning_request,
-            },
+        // The spawning request belongs to the parent session, and the actor
+        // identity is session-scoped; the child's own row already records that
+        // request as its creation provenance, so naming it here again would
+        // be a second, cross-session copy of one fact.
+        SessionCreationCause::Delegated { .. } => LifecycleActor::Core {
+            agency: CoreAgency::Daemon,
         },
     }
 }
@@ -581,8 +590,8 @@ pub(crate) const fn creation_actor(cause: &SessionCreationCause) -> LifecycleAct
 ///
 /// A dispatched or delegated session is work the daemon drives to a declared
 /// outcome. An interactive creation is a conversation: §6's unmonitored bit,
-/// which is what keeps a person's chat window out of deadlines, watchdogs, and
-/// occupancy accounting.
+/// which is what keeps a person's chat window out of deadlines, auto-resume,
+/// and occupancy accounting.
 pub(crate) const fn creation_ownership(cause: &SessionCreationCause) -> SessionOwnership {
     match cause {
         SessionCreationCause::Interactive => SessionOwnership::Unmonitored,
@@ -614,6 +623,16 @@ pub(crate) async fn close_in_transaction(
     if !closure_carries_standing_cause(&held.state, outcome) {
         return Err(SessionLifecycleRepositoryError::Rejected(
             SessionLifecycleRejection::StandingCauseMismatch,
+        ));
+    }
+    // A committed handoff is the decision that started tearing the turn down,
+    // so the settlement records it rather than whatever the caller now names.
+    if held
+        .pending_terminal
+        .is_some_and(|committed| committed != outcome)
+    {
+        return Err(SessionLifecycleRepositoryError::Rejected(
+            SessionLifecycleRejection::PendingTerminalConflict,
         ));
     }
     settle_goal(connection, session, outcome, actor).await?;
@@ -846,28 +865,50 @@ async fn write_state(
                 blocked_cycle = $12,
                 parked_cause = $13,
                 parked_responder = $14,
-                -- §12 keeps a supersession that closed a park holding a
-                -- failure cause, under that standing cause and dated from the
-                -- park. Both outlive the park; the park's shape stays false
-                -- for a terminal row because its cause and responder clear.
+                -- The park and closure instants come from the database
+                -- statement clock, like every other lifecycle stamp. §12 reads
+                -- both the standing cause and the instant it began after the
+                -- session closes — a supersession that closed a park holding a
+                -- failure cause counts under that cause — so terminalization
+                -- carries them forward instead of clearing them.
                 parked_since = CASE
-                    WHEN $2 = 'terminal' THEN session_lifecycle.parked_since
-                    ELSE $15
+                    WHEN $13::text IS NOT NULL THEN statement_timestamp()
+                    WHEN $16::text IS NOT NULL THEN session_lifecycle.parked_since
+                    ELSE NULL
                 END,
                 parked_standing_cause_kind = CASE
-                    WHEN $2 = 'terminal'
+                    WHEN $16::text IS NOT NULL
                         THEN session_lifecycle.parked_standing_cause_kind
-                    ELSE $16
+                    ELSE $15
                 END,
-                ended_at = $17,
-                terminal_outcome_kind = $18,
-                terminal_cause_kind = $19,
-                terminal_stop_sticky = $20,
-                terminal_superseded_by = $21,
-                pending_terminal_outcome_kind = NULL,
-                pending_terminal_cause_kind = NULL,
-                pending_terminal_stop_sticky = NULL,
-                pending_terminal_superseded_by = NULL
+                ended_at = CASE
+                    WHEN $16::text IS NULL THEN NULL
+                    ELSE statement_timestamp()
+                END,
+                terminal_outcome_kind = $16,
+                terminal_cause_kind = $17,
+                terminal_stop_sticky = $18,
+                terminal_superseded_by = $19,
+                -- The handoff is cleared by the settlement it describes and by
+                -- nothing else: a park or a resume between the decision and
+                -- the turn's boundary would otherwise erase what the closure
+                -- already committed to.
+                pending_terminal_outcome_kind = CASE
+                    WHEN $2::text = 'terminal' THEN NULL
+                    ELSE pending_terminal_outcome_kind
+                END,
+                pending_terminal_cause_kind = CASE
+                    WHEN $2::text = 'terminal' THEN NULL
+                    ELSE pending_terminal_cause_kind
+                END,
+                pending_terminal_stop_sticky = CASE
+                    WHEN $2::text = 'terminal' THEN NULL
+                    ELSE pending_terminal_stop_sticky
+                END,
+                pending_terminal_superseded_by = CASE
+                    WHEN $2::text = 'terminal' THEN NULL
+                    ELSE pending_terminal_superseded_by
+                END
           WHERE session_id = $1",
     )
     .bind(session_id_to_uuid(held.session))
@@ -884,9 +925,7 @@ async fn write_state(
     .bind(encoded.blocked_cycle)
     .bind(encoded.parked_cause)
     .bind(encoded.parked_responder)
-    .bind(encoded.parked_since)
     .bind(encoded.parked_standing)
-    .bind(encoded.ended)
     .bind(encoded.terminal.outcome)
     .bind(encoded.terminal.cause)
     .bind(encoded.terminal.sticky)
@@ -1034,16 +1073,13 @@ struct EncodedState {
     actor_request: Option<Uuid>,
     parked_cause: Option<&'static str>,
     parked_responder: Option<&'static str>,
-    parked_since: Option<sqlx::types::time::OffsetDateTime>,
     parked_standing: Option<&'static str>,
-    ended: Option<sqlx::types::time::OffsetDateTime>,
     terminal: EncodedTerminal,
 }
 
 impl EncodedState {
     fn from_state(state: SessionLifecycleState, actor: LifecycleActor) -> Self {
         let (actor_kind, actor_module, actor_turn, actor_request) = encode_actor(actor);
-        let now = sqlx::types::time::OffsetDateTime::now_utc();
         let mut encoded = Self {
             state: crate::mapping::session_lifecycle_state_to_str(&state),
             waiting_kind: None,
@@ -1058,9 +1094,7 @@ impl EncodedState {
             actor_request,
             parked_cause: None,
             parked_responder: None,
-            parked_since: None,
             parked_standing: None,
-            ended: None,
             terminal: EncodedTerminal::empty(),
         };
         match state {
@@ -1090,11 +1124,9 @@ impl EncodedState {
             } => {
                 encoded.parked_cause = Some(crate::mapping::session_park_cause_to_str(cause));
                 encoded.parked_responder = Some(park_responder_to_str(responder));
-                encoded.parked_since = Some(now);
                 encoded.parked_standing = standing.map(failure_cause_to_str);
             }
             SessionLifecycleState::Terminal { outcome } => {
-                encoded.ended = Some(now);
                 encoded.terminal = EncodedTerminal::from_outcome(outcome);
             }
             SessionLifecycleState::Created

@@ -676,8 +676,14 @@ async fn the_attention_state_projects_the_durable_session_state() -> Result<(), 
 
     // A park writes no turn, goal, runner, or metadata fact, so without the
     // lifecycle journal entry a follower would keep the state it last read.
+    // Its kind is not a membership change, so the follower is handed the one
+    // session rather than the whole catalog.
     let followed = attention.changes_after(active.cursor).await?;
-    assert!(matches!(followed, AttentionChanges::ResyncRequired { .. }));
+    let AttentionChanges::Updated { summaries, .. } = followed else {
+        panic!("a lifecycle transition is not a membership change");
+    };
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].session, session);
 
     pool.close().await;
     drop(container);

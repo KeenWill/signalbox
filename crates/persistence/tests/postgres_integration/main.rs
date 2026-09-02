@@ -491,7 +491,8 @@ async fn insert_raw_delegation(
     .bind(fixture.child.into_uuid())
     .execute(&mut *connection)
     .await?;
-    insert_raw_session_lifecycle(&mut *connection, fixture.child.into_uuid()).await?;
+    // Delegated creation is owned in production.
+    insert_raw_session_lifecycle(&mut *connection, fixture.child.into_uuid(), true).await?;
     sqlx::query("INSERT INTO session_scheduler(session_id) VALUES ($1)")
         .bind(fixture.child.into_uuid())
         .execute(&mut *connection)
@@ -2537,18 +2538,35 @@ async fn rewind_outbox_delivery_before(
 ///
 /// `session` carries a deferred foreign key to its satellite, so a fixture
 /// that inserts a session row by statement owes the same row a creation path
-/// writes. Unmonitored is the interactive default, and it is also what keeps
-/// the fixture out of the armed-deadline invariant it is not testing.
+/// writes — including the ownership its creation cause establishes, since an
+/// owned fixture that recorded itself unmonitored would run with a posture
+/// production never produces.
 async fn insert_raw_session_lifecycle(
     connection: &mut sqlx::PgConnection,
     session: Uuid,
+    owned: bool,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO session_lifecycle
             (session_id, state_kind, owned, actor_kind)
-         VALUES ($1, 'created', false, 'operator')",
+         VALUES ($1, 'created', $2, 'operator')",
     )
     .bind(session)
+    .bind(owned)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_ownership_event
+            (session_id, event_ordinal, transition_kind, owned_after, actor_kind)
+         VALUES ($1, 1, $2, $3, 'operator')",
+    )
+    .bind(session)
+    .bind(if owned {
+        "created_owned"
+    } else {
+        "created_unmonitored"
+    })
+    .bind(owned)
     .execute(&mut *connection)
     .await?;
     Ok(())
@@ -2593,7 +2611,7 @@ async fn insert_outbox_session_fixture_with_creation_cause(
     .bind(creation_cause)
     .execute(&mut *transaction)
     .await?;
-    insert_raw_session_lifecycle(&mut transaction, session).await?;
+    insert_raw_session_lifecycle(&mut transaction, session, false).await?;
     sqlx::query("INSERT INTO session_scheduler (session_id) VALUES ($1)")
         .bind(session)
         .execute(&mut *transaction)

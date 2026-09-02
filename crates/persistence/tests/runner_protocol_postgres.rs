@@ -1348,8 +1348,12 @@ async fn insert_session_for_with_creation_cause(
     session: Uuid,
     creation_cause: &str,
 ) -> Result<(), sqlx::Error> {
+    // One transaction: the lifecycle row, its ownership journal entry, and the
+    // deferred invariant that ties them together all belong to the same commit,
+    // which is how every production creation writes them.
+    let mut transaction = pool.begin().await?;
     sqlx::query("ALTER TABLE session DISABLE TRIGGER ALL")
-        .execute(pool)
+        .execute(&mut *transaction)
         .await?;
     sqlx::query(
         "INSERT INTO session (session_id, creation_cause, ancestry_kind)
@@ -1357,7 +1361,7 @@ async fn insert_session_for_with_creation_cause(
     )
     .bind(session)
     .bind(creation_cause)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
     sqlx::query(
         "INSERT INTO session_lifecycle
@@ -1365,11 +1369,20 @@ async fn insert_session_for_with_creation_cause(
          VALUES ($1, 'created', false, 'operator')",
     )
     .bind(session)
-    .execute(pool)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_ownership_event
+            (session_id, event_ordinal, transition_kind, owned_after, actor_kind)
+         VALUES ($1, 1, 'created_unmonitored', false, 'operator')",
+    )
+    .bind(session)
+    .execute(&mut *transaction)
     .await?;
     sqlx::query("ALTER TABLE session ENABLE TRIGGER ALL")
-        .execute(pool)
+        .execute(&mut *transaction)
         .await?;
+    transaction.commit().await?;
     sqlx::query(
         "INSERT INTO session_scheduler (session_id)
          VALUES ($1)
@@ -1442,6 +1455,15 @@ async fn insert_bounded_propagation_session_fixture(
         "INSERT INTO session_lifecycle
             (session_id, state_kind, owned, actor_kind)
          SELECT session_id, 'created', false, 'operator'
+           FROM unnest($1::uuid[]) AS fixture(session_id)",
+    )
+    .bind(&session_uuids)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_ownership_event
+            (session_id, event_ordinal, transition_kind, owned_after, actor_kind)
+         SELECT session_id, 1, 'created_unmonitored', false, 'operator'
            FROM unnest($1::uuid[]) AS fixture(session_id)",
     )
     .bind(&session_uuids)
