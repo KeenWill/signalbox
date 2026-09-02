@@ -174,14 +174,19 @@ impl LifecycleRate {
         Some(scaled as u64)
     }
 
-    /// Returns whether the rate is at or below a parts-per-million threshold.
+    /// Returns whether the rate is strictly below a parts-per-million threshold.
     ///
-    /// An empty population meets no threshold and breaches none: there is no
-    /// rate to compare, and the caller decides what an absent verdict means.
-    pub const fn within(self, threshold_ppm: u64) -> Option<bool> {
+    /// Strict, because §12 states the gate as the headline *below* its target
+    /// rather than at it, and an alarm threshold read the same way fires a
+    /// fraction earlier rather than a fraction later.
+    ///
+    /// An empty population is below no threshold and breaches none: there is
+    /// no rate to compare, and the caller decides what an absent verdict
+    /// means.
+    pub const fn below(self, threshold_ppm: u64) -> Option<bool> {
         match self.parts_per_million() {
             None => None,
-            Some(rate) => Some(rate <= threshold_ppm),
+            Some(rate) => Some(rate < threshold_ppm),
         }
     }
 }
@@ -422,7 +427,7 @@ pub fn gate_verdict(
     }
     if assessed
         .iter()
-        .all(|week| week.completion_failure.within(threshold) == Some(true))
+        .all(|week| week.completion_failure.below(threshold) == Some(true))
     {
         return LifecycleGateVerdict::Met;
     }
@@ -713,4 +718,126 @@ pub(crate) fn decode_violation(
 fn counted(row: &PgRow, field: &'static str) -> Result<u64, LifecycleMetricsError> {
     let value = row.try_get::<i64, _>(field)?;
     u64::try_from(value).map_err(|_| LifecycleMetricsCorruption::Invalid(field).into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::types::time::{Date, Time};
+
+    fn week(start_day: u16, numerator: u64, denominator: u64) -> LifecycleWeeklyMetrics {
+        let date = Date::from_ordinal_date(2026, start_day)
+            .expect("the fixture names a real ordinal date");
+        LifecycleWeeklyMetrics {
+            week_start: PrimitiveDateTime::new(date, Time::MIDNIGHT),
+            completion_failure: LifecycleRate::new(numerator, denominator),
+            failed_unknown_share: LifecycleRate::new(0, denominator),
+            overflow_incidence: LifecycleRate::new(0, denominator),
+            finish_given_overflow: LifecycleRate::new(0, 0),
+            wall_rate: LifecycleRate::new(0, 0),
+            wall_cohort_matured: true,
+            wall_occurrences: 0,
+            turn_cause_completeness: LifecycleRate::new(0, 0),
+            model_call_cause_completeness: LifecycleRate::new(0, 0),
+        }
+    }
+
+    const fn gate_policy(weeks: u64, threshold_ppm: u64) -> LifecycleMetricBounds {
+        LifecycleMetricBounds {
+            deadline_processing_grace: None,
+            wall_cohort_maturation: None,
+            gate_weeks: Some(weeks),
+            completion_failure_rate_threshold_ppm: Some(threshold_ppm),
+            wall_rate_threshold_ppm: None,
+            failed_unknown_share_threshold_ppm: None,
+        }
+    }
+
+    /// An empty population states nothing, and nothing is not zero.
+    #[test]
+    fn an_empty_population_reports_no_rate_and_no_verdict() {
+        let empty = LifecycleRate::new(0, 0);
+
+        assert_eq!(empty.parts_per_million(), None);
+        assert_eq!(empty.below(1), None);
+    }
+
+    /// §12 states the gate as the headline below its target, not at it.
+    #[test]
+    fn a_rate_exactly_at_its_threshold_is_not_below_it() {
+        let one_in_ten = LifecycleRate::new(1, 10);
+
+        assert_eq!(one_in_ten.parts_per_million(), Some(100_000));
+        assert_eq!(one_in_ten.below(100_000), Some(false));
+        assert_eq!(one_in_ten.below(100_001), Some(true));
+    }
+
+    /// The report never derives a rate it was not given the counts for, so a
+    /// truncating division cannot overstate one either.
+    #[test]
+    fn a_reported_rate_never_overstates_its_counts() {
+        let two_in_three = LifecycleRate::new(2, 3);
+
+        assert_eq!(two_in_three.parts_per_million(), Some(666_666));
+        assert_eq!(two_in_three.numerator(), 2);
+        assert_eq!(two_in_three.denominator(), 3);
+    }
+
+    /// A deployment that configured no gate window has no gate to fail.
+    #[test]
+    fn the_gate_is_indeterminate_without_a_configured_window() {
+        let verdict = gate_verdict(&[week(24, 0, 10)], 0, LifecycleMetricBounds::default());
+
+        assert_eq!(verdict, LifecycleGateVerdict::Indeterminate);
+    }
+
+    /// A week with no cohort members states nothing about the headline, so it
+    /// is skipped rather than counted as a pass: a gate consecutive quiet
+    /// weeks could satisfy would measure quiet, not reliability.
+    #[test]
+    fn an_empty_week_does_not_count_toward_the_gate_window() {
+        let quiet = gate_verdict(
+            &[week(17, 0, 0), week(24, 0, 10)],
+            0,
+            gate_policy(2, 100_000),
+        );
+        let populated = gate_verdict(
+            &[week(17, 0, 10), week(24, 0, 10)],
+            0,
+            gate_policy(2, 100_000),
+        );
+
+        assert_eq!(quiet, LifecycleGateVerdict::Indeterminate);
+        assert_eq!(populated, LifecycleGateVerdict::Met);
+    }
+
+    /// The companion alarm is the headline's integrity condition: a cohort
+    /// thinned by sessions stuck outside `terminal` passes nothing.
+    #[test]
+    fn a_live_integrity_alarm_fails_a_gate_the_headline_would_pass() {
+        let alarmed = gate_verdict(&[week(24, 0, 10)], 1, gate_policy(1, 100_000));
+        let silent = gate_verdict(&[week(24, 0, 10)], 0, gate_policy(1, 100_000));
+
+        assert_eq!(alarmed, LifecycleGateVerdict::NotMet);
+        assert_eq!(silent, LifecycleGateVerdict::Met);
+    }
+
+    /// Only the most recent weeks the window covers are graded, and one breach
+    /// among them ends the run.
+    #[test]
+    fn a_breach_inside_the_window_fails_the_gate() {
+        let breached = gate_verdict(
+            &[week(17, 2, 10), week(24, 0, 10)],
+            0,
+            gate_policy(2, 100_000),
+        );
+        let outside_window = gate_verdict(
+            &[week(17, 2, 10), week(24, 0, 10)],
+            0,
+            gate_policy(1, 100_000),
+        );
+
+        assert_eq!(breached, LifecycleGateVerdict::NotMet);
+        assert_eq!(outside_window, LifecycleGateVerdict::Met);
+    }
 }
