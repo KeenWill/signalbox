@@ -835,13 +835,23 @@ async fn write_state(
                 blocked_cycle = $12,
                 parked_cause = $13,
                 parked_responder = $14,
-                parked_since = $15,
-                parked_standing_cause_kind = $16,
-                ended_at = $17,
-                terminal_outcome_kind = $18,
-                terminal_cause_kind = $19,
-                terminal_stop_sticky = $20,
-                terminal_superseded_by = $21,
+                -- The park and closure instants come from the database
+                -- statement clock, like every other lifecycle stamp: an
+                -- application clock skewed against the database would place
+                -- them before the session's own creation.
+                parked_since = CASE
+                    WHEN $13::text IS NULL THEN NULL
+                    ELSE statement_timestamp()
+                END,
+                parked_standing_cause_kind = $15,
+                ended_at = CASE
+                    WHEN $16::text IS NULL THEN NULL
+                    ELSE statement_timestamp()
+                END,
+                terminal_outcome_kind = $16,
+                terminal_cause_kind = $17,
+                terminal_stop_sticky = $18,
+                terminal_superseded_by = $19,
                 pending_terminal_outcome_kind = NULL,
                 pending_terminal_cause_kind = NULL,
                 pending_terminal_stop_sticky = NULL,
@@ -862,9 +872,7 @@ async fn write_state(
     .bind(encoded.blocked_cycle)
     .bind(encoded.parked_cause)
     .bind(encoded.parked_responder)
-    .bind(encoded.parked_since)
     .bind(encoded.parked_standing)
-    .bind(encoded.ended)
     .bind(encoded.terminal.outcome)
     .bind(encoded.terminal.cause)
     .bind(encoded.terminal.sticky)
@@ -1012,16 +1020,13 @@ struct EncodedState {
     actor_request: Option<Uuid>,
     parked_cause: Option<&'static str>,
     parked_responder: Option<&'static str>,
-    parked_since: Option<sqlx::types::time::OffsetDateTime>,
     parked_standing: Option<&'static str>,
-    ended: Option<sqlx::types::time::OffsetDateTime>,
     terminal: EncodedTerminal,
 }
 
 impl EncodedState {
     fn from_state(state: SessionLifecycleState, actor: LifecycleActor) -> Self {
         let (actor_kind, actor_module, actor_turn, actor_request) = encode_actor(actor);
-        let now = sqlx::types::time::OffsetDateTime::now_utc();
         let mut encoded = Self {
             state: crate::mapping::session_lifecycle_state_to_str(&state),
             waiting_kind: None,
@@ -1036,9 +1041,7 @@ impl EncodedState {
             actor_request,
             parked_cause: None,
             parked_responder: None,
-            parked_since: None,
             parked_standing: None,
-            ended: None,
             terminal: EncodedTerminal::empty(),
         };
         match state {
@@ -1068,11 +1071,9 @@ impl EncodedState {
             } => {
                 encoded.parked_cause = Some(crate::mapping::session_park_cause_to_str(cause));
                 encoded.parked_responder = Some(park_responder_to_str(responder));
-                encoded.parked_since = Some(now);
                 encoded.parked_standing = standing.map(failure_cause_to_str);
             }
             SessionLifecycleState::Terminal { outcome } => {
-                encoded.ended = Some(now);
                 encoded.terminal = EncodedTerminal::from_outcome(outcome);
             }
             SessionLifecycleState::Created

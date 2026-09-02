@@ -1948,3 +1948,68 @@ async fn a_pending_cause_must_belong_to_its_outcome() -> Result<(), Box<dyn Erro
     drop(container);
     Ok(())
 }
+
+/// The ownership bit and its journal are one record. A flip written to only
+/// one of them would leave the cohort metric and the deadline machinery
+/// disagreeing about the same session.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn the_ownership_bit_cannot_move_without_its_journal() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(43);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(43))
+        .await?;
+
+    let error = sqlx::query("UPDATE session_lifecycle SET owned = false WHERE session_id = $1")
+        .bind(session.into_uuid())
+        .execute(&pool)
+        .await
+        .expect_err("the bit and its journal move together");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(DatabaseError::code)
+            .as_deref(),
+        Some("23514")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A live session cannot carry a complete terminal outcome. Both sides of an
+/// equivalence are false for a nonterminal row with an outcome and no
+/// `ended_at`, so each column is tied to the state instead.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_live_session_cannot_hold_a_complete_terminal_outcome() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(44);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(44))
+        .await?;
+
+    let error = sqlx::query(
+        "UPDATE session_lifecycle SET terminal_outcome_kind = 'failed_unknown'
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("an outcome belongs to a terminal row");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(DatabaseError::code)
+            .as_deref(),
+        Some("23514")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

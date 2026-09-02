@@ -359,6 +359,8 @@ CREATE TABLE session_lifecycle (
         AND ((terminal_outcome_kind IS NULL)
              OR ((terminal_outcome_kind = 'stopped'::text)
                  = (terminal_stop_sticky IS NOT NULL)))
+        AND ((state_kind = 'terminal'::text) = (ended_at IS NOT NULL))
+        AND ((state_kind = 'terminal'::text) = (terminal_outcome_kind IS NOT NULL))
         AND ((terminal_outcome_kind IS NOT NULL)
              OR ((terminal_stop_sticky IS NULL)
                  AND (terminal_superseded_by IS NULL)
@@ -500,6 +502,23 @@ ALTER TABLE ONLY session_lifecycle
 ALTER TABLE ONLY session
     ADD CONSTRAINT session_lifecycle_fk
         FOREIGN KEY (session_id) REFERENCES session_lifecycle(session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
+
+--
+-- A child wait names a child this session actually spawned. Without the key
+-- the subject is any UUID, and the loader rebuilds it into a wait on a
+-- relationship the delegation records do not have.
+--
+
+ALTER TABLE session_delegation
+    ADD CONSTRAINT session_delegation_parent_child_key
+        UNIQUE (parent_session_id, child_session_id);
+
+ALTER TABLE ONLY session_lifecycle
+    ADD CONSTRAINT session_lifecycle_waiting_child_fk
+        FOREIGN KEY (session_id, waiting_subject_session_id)
+        REFERENCES session_delegation(parent_session_id, child_session_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED;
 
@@ -671,6 +690,72 @@ ALTER TABLE ONLY session_ownership_event
         REFERENCES tool_request(request_id, session_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED;
+
+--
+-- The journal is contiguous from one and its head is the bit the rest of the
+-- daemon reads. §12's cohort membership follows this journal, so a gap or a
+-- flip recorded on only one of the two would make the metric and the
+-- deadline machinery disagree about the same session.
+--
+
+CREATE FUNCTION require_session_ownership_journal_agrees(subject uuid) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    events bigint;
+    highest bigint;
+    head boolean;
+    owned_now boolean;
+BEGIN
+    SELECT owned INTO owned_now FROM session_lifecycle WHERE session_id = subject;
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+
+    SELECT count(*), COALESCE(max(event_ordinal), 0)
+      INTO events, highest
+      FROM session_ownership_event
+     WHERE session_id = subject;
+
+    IF events <> highest THEN
+        RAISE EXCEPTION
+            'session % ownership journal has % events through ordinal %',
+            subject, events, highest
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT owned_after INTO head
+      FROM session_ownership_event
+     WHERE session_id = subject
+     ORDER BY event_ordinal DESC
+     LIMIT 1;
+
+    IF NOT FOUND OR head IS DISTINCT FROM owned_now THEN
+        RAISE EXCEPTION
+            'session % ownership bit does not match its journal head', subject
+            USING ERRCODE = '23514';
+    END IF;
+END;
+$$;
+
+CREATE FUNCTION require_session_ownership_journal() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    PERFORM require_session_ownership_journal_agrees(NEW.session_id);
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER session_ownership_event_agrees_with_its_bit
+    AFTER INSERT ON session_ownership_event
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION require_session_ownership_journal();
+
+CREATE CONSTRAINT TRIGGER session_lifecycle_agrees_with_its_journal
+    AFTER INSERT OR UPDATE ON session_lifecycle
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION require_session_ownership_journal();
 
 CREATE TRIGGER session_ownership_event_is_append_only
     BEFORE DELETE OR UPDATE ON session_ownership_event
@@ -897,12 +982,13 @@ CREATE FUNCTION require_terminal_session_settles_its_goal() RETURNS trigger
     AS $$
 DECLARE
     last_kind text;
+    last_outcome text;
 BEGIN
     IF NEW.state_kind <> 'terminal' THEN
         RETURN NULL;
     END IF;
 
-    SELECT event_kind INTO last_kind
+    SELECT event_kind, session_outcome_kind INTO last_kind, last_outcome
       FROM goal_event
      WHERE session_id = NEW.session_id
      ORDER BY event_ordinal DESC
@@ -916,6 +1002,22 @@ BEGIN
         RAISE EXCEPTION
             'terminal session % leaves its goal generation live at %',
             NEW.session_id, last_kind
+            USING ERRCODE = '23514';
+    END IF;
+
+    -- The two records describe one ending, so they must agree. Checking only
+    -- that the goal is settled admits an `abandoned` session over a goal that
+    -- recorded a retryable failure, and both rows reconstitute individually.
+    IF NOT (
+        (last_kind = 'achieved' AND NEW.terminal_outcome_kind = 'achieved_verified')
+        OR (last_kind = 'user_stopped' AND NEW.terminal_outcome_kind = 'stopped')
+        OR (last_kind = 'session_closed'
+            AND last_outcome = NEW.terminal_outcome_kind)
+    ) THEN
+        RAISE EXCEPTION
+            'terminal session % records % over a goal settled as %',
+            NEW.session_id, NEW.terminal_outcome_kind,
+            COALESCE(last_outcome, last_kind)
             USING ERRCODE = '23514';
     END IF;
 
