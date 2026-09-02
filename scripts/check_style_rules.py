@@ -128,8 +128,25 @@ def _strip_rust(text: str) -> str:
             index = end
             continue
         if char == "/" and index + 1 < length and text[index + 1] == "*":
-            end = text.find("*/", index + 2)
-            end = length if end == -1 else end + 2
+            # Rust block comments nest, so the first `*/` need not close the
+            # outer one. Stopping there would spill the rest of the comment
+            # into the code view, where a commented-out example reads as the
+            # very construct a rule forbids.
+            depth = 0
+            cursor = index
+            while cursor < length:
+                if text.startswith("/*", cursor):
+                    depth += 1
+                    cursor += 2
+                    continue
+                if text.startswith("*/", cursor):
+                    depth -= 1
+                    cursor += 2
+                    if depth == 0:
+                        break
+                    continue
+                cursor += 1
+            end = min(cursor, length)
             for position in range(index, end):
                 if code[position] != "\n":
                     code[position] = " "
@@ -263,9 +280,7 @@ CFG_TEST_MODULE = re.compile(
     r"#\[cfg\((?P<predicate>[^\]]*)\)\]"
     r"\s*(?:pub\s*(?:\([^)]*\))?\s+)?mod\s+[A-Za-z0-9_]+\s*\{"
 )
-QUOTED_VALUE = re.compile(r'"[^"]*"')
-NOT_TEST = re.compile(r"\bnot\s*\(\s*test\s*\)")
-BARE_TEST = re.compile(r"\btest\b")
+CFG_OPERATION = re.compile(r"([a-z_]+)\s*\((.*)\)\s*$", re.S)
 
 
 def check_app_sql_table_access(repository: Repository) -> Iterator[Finding]:
@@ -302,6 +317,17 @@ def check_app_sql_table_access(repository: Repository) -> Iterator[Finding]:
                 )
 
 
+# A raw string closes on its own hash count, so the closing delimiter repeats
+# the opening one exactly. Matching `"#*` independently would end the literal at
+# the first `"#` inside it — `querySelector("#status")` inside an `r##"..."##`
+# page, say — and hide everything after it from the rules that read literals.
+RUST_STRING_LITERAL = re.compile(
+    r'r(?P<hashes>#*)"(?:(?!"(?P=hashes))[\s\S])*"(?P=hashes)'
+    r'|"(?:\\.|[^"\\])*"',
+    re.S,
+)
+
+
 def _string_literals(source: Source) -> Iterator[tuple[int, str]]:
     """Yield each string literal in code, with the line it starts on.
 
@@ -312,7 +338,7 @@ def _string_literals(source: Source) -> Iterator[tuple[int, str]]:
     also sees.
     """
     text = source.text
-    for match in re.finditer(r'r#*"(?:[^"]|"(?!#))*"#*|"(?:\\.|[^"\\])*"', text, re.S):
+    for match in re.finditer(RUST_STRING_LITERAL, text):
         if source.code[match.start()] != text[match.start()]:
             continue
         yield text.count("\n", 0, match.start()) + 1, match.group()
@@ -332,15 +358,60 @@ def _inline_test_spans(code: str) -> list[tuple[int, int]]:
 
 
 def _selects_a_test_build(predicate: str) -> bool:
-    """Whether a `cfg` predicate holds only under `cargo test`.
+    """Whether a `cfg` predicate can hold only under `cargo test`.
 
-    A quoted value is dropped first, so a feature named `test` is not mistaken
-    for the `test` cfg, and `not(test)` is production code wearing the word.
+    Evaluated, not searched for the word: `any(test, feature = "x")` contains
+    `test` and still compiles in a production build with that feature on, so a
+    module exempted on it would hide production SQL from the rule. Only a
+    predicate every satisfying configuration of which sets `test` is exempt.
     """
-    bare = QUOTED_VALUE.sub("", predicate)
-    if NOT_TEST.search(bare):
+    return _requires_test(predicate)
+
+
+def _requires_test(predicate: str) -> bool:
+    """Whether every configuration satisfying a predicate sets `test`."""
+    predicate = predicate.strip()
+    if predicate == "test":
+        return True
+    match = CFG_OPERATION.match(predicate)
+    if match is None:
+        # A bare option — `unix`, `feature = "x"` — is not the `test` cfg.
         return False
-    return BARE_TEST.search(bare) is not None
+    operation, body = match.group(1), match.group(2)
+    operands = _cfg_operands(body)
+    if operation == "all":
+        # `all` holds only when every operand does, so one `test` is enough.
+        return any(_requires_test(operand) for operand in operands)
+    if operation == "any":
+        # `any` holds as soon as one operand does, so every branch must require
+        # `test` or some branch admits a production build.
+        return bool(operands) and all(_requires_test(operand) for operand in operands)
+    # `not(test)` is production code wearing the word, and no other operation
+    # narrows a configuration to test builds.
+    return False
+
+
+def _cfg_operands(body: str) -> list[str]:
+    """Split a `cfg` operation's body on its top-level commas."""
+    operands: list[str] = []
+    depth = 0
+    quoted = False
+    start = 0
+    for index, character in enumerate(body):
+        if quoted:
+            quoted = character != '"'
+        elif character == '"':
+            quoted = True
+        elif character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+        elif character == "," and depth == 0:
+            operands.append(body[start:index])
+            start = index + 1
+    if body[start:].strip():
+        operands.append(body[start:])
+    return operands
 
 
 def _matching_brace(text: str, opening: int) -> int | None:

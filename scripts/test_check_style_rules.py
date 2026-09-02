@@ -144,6 +144,41 @@ class AppSqlTableAccessTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("turn_lifecycle", result.stdout)
 
+    def test_sql_in_a_module_merely_permitting_test_reports(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "pub fn run() {}\n"
+            '#[cfg(any(test, feature = "direct_sql"))]\n'
+            "mod maybe_tests {\n"
+            '    const READ: &str = "SELECT id FROM turn_lifecycle";\n'
+            "}\n"
+        )
+
+        result = check(
+            "SR-8",
+            {APP: source, MIGRATION: "CREATE TABLE turn_lifecycle (id uuid);\n"},
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("turn_lifecycle", result.stdout)
+
+    def test_a_table_after_a_hash_quote_in_a_raw_string_reports(self) -> None:
+        source = (
+            "//! Owned.\n"
+            'const PAGE: &str = r##"<html>\n'
+            '  querySelector("#status")\n'
+            "  SELECT id FROM turn_lifecycle\n"
+            '"##;\n'
+        )
+
+        result = check(
+            "SR-8",
+            {APP: source, MIGRATION: "CREATE TABLE turn_lifecycle (id uuid);\n"},
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("turn_lifecycle", result.stdout)
+
     def test_app_calling_a_repository_method_passes(self) -> None:
         source = "//! Owned.\npub async fn read(store: &Store) {\n    store.turn(id).await;\n}\n"
 
@@ -402,6 +437,21 @@ class ProcMacroSpanTests(unittest.TestCase):
 
 class SourceScannerTests(unittest.TestCase):
     """The scanner every code-shaped rule reads through, checked directly."""
+
+    def test_a_nested_block_comment_is_not_code(self) -> None:
+        files = {
+            DERIVE_MANIFEST: PROC_MACRO_MANIFEST,
+            DERIVE_MODULE: (
+                "//! Owned.\n"
+                "/* Spanning a diagnostic on /* the */ call site is forbidden:\n"
+                '   syn::Error::new(Span::call_site(), "duplicate") */\n'
+                "pub fn expand() {}\n"
+            ),
+        }
+
+        result = check("SR-13", files)
+
+        self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_raw_string_contents_are_not_code(self) -> None:
         files = {
