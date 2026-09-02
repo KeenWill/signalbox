@@ -1622,9 +1622,22 @@ BEGIN
 END;
 $$;
 
-CREATE TRIGGER turn_lifecycle_projects_session_state
-    AFTER INSERT OR UPDATE ON turn_lifecycle
+-- Split, and the update arm fires only when a column the mapping reads moves.
+-- A turn write that advances attempt pointers, frontier identities, or tool
+-- round bookkeeping cannot change the session's state, and this trigger runs on
+-- every one of them.
+CREATE TRIGGER turn_lifecycle_projects_session_state_on_insert
+    AFTER INSERT ON turn_lifecycle
     FOR EACH ROW EXECUTE FUNCTION project_session_lifecycle_from_turn();
+
+CREATE TRIGGER turn_lifecycle_projects_session_state_on_update
+    AFTER UPDATE ON turn_lifecycle
+    FOR EACH ROW
+    WHEN (OLD.state_kind IS DISTINCT FROM NEW.state_kind
+          OR OLD.active_phase_kind IS DISTINCT FROM NEW.active_phase_kind
+          OR OLD.child_wait_request_id IS DISTINCT FROM NEW.child_wait_request_id
+          OR OLD.delegation_runtime_terminal IS DISTINCT FROM NEW.delegation_runtime_terminal)
+    EXECUTE FUNCTION project_session_lifecycle_from_turn();
 
 CREATE TRIGGER goal_event_projects_session_state
     AFTER INSERT ON goal_event
