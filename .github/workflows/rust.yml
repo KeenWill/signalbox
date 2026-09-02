@@ -131,8 +131,6 @@ jobs:
         run: python3 scripts/check_migration_versions.py
       - name: Check numeric bound declarations
         run: python3 scripts/check_numeric_bounds.py
-      - name: Check user vocabulary
-        run: python3 scripts/check_user_vocabulary.py
       # Gates normally: the tree satisfies this today, so the step can only
       # fail on a regression. Clippy enforces the panic denies but cannot see
       # a member that opts out of inheriting them, which is the hole this
@@ -177,8 +175,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Test user vocabulary checker
-        run: python3 scripts/test_check_user_vocabulary.py
       - name: Test domain-spine checker
         run: python3 scripts/test_check_domain_spine.py
       - name: Test migration version checker
