@@ -11,8 +11,8 @@ use crate::{
     lifecycle_metrics::{
         DECLARE_DEADLINE_VIOLATIONS_CURSOR, DECLARE_WEEKLY_METRICS_CURSOR,
         LifecycleDeadlineViolation, LifecycleGateVerdict, LifecycleMetricBounds,
-        LifecycleWeeklyMetrics, MAX_REPORTED_WEEKS, SELECT_BOUNDS, decode_bounds, decode_violation,
-        decode_week, gate_verdict,
+        LifecycleMetricsError, LifecycleWeeklyMetrics, MAX_REPORTED_WEEKS, SELECT_BOUNDS,
+        decode_bounds, decode_violation, decode_week, gate_verdict,
     },
     mapping::{
         RepoWatchSingletonScopeStorageKind, repo_watch_convergence_verdict_from_str,
@@ -433,7 +433,7 @@ impl ProcessOperatorStatusRepository {
                 .await
                 .map_err(ProcessOperatorStatusError::Database)?,
         )
-        .map_err(|_| ProcessOperatorStatusCorruption::Inconsistent("lifecycle metric bound"))?;
+        .map_err(|error| lifecycle_read_failure(error, "lifecycle metric bound"))?;
         Ok(ProcessOperatorStatusReader {
             transaction: Some(transaction),
             phase: ProcessOperatorStatusPhase::HeldSlots,
@@ -561,8 +561,8 @@ impl ProcessOperatorStatusReader {
                 ProcessOperatorStatusPhase::LifecycleWeeks => {
                     self.counts.lifecycle_weeks =
                         increment(self.counts.lifecycle_weeks, "lifecycle week count")?;
-                    let week = decode_week(&row).map_err(|_| {
-                        ProcessOperatorStatusCorruption::Inconsistent("lifecycle weekly metric")
+                    let week = decode_week(&row).map_err(|error| {
+                        lifecycle_read_failure(error, "lifecycle weekly metric")
                     })?;
                     self.weeks.push(week);
                     ProcessOperatorStatusItem::LifecycleWeek(week)
@@ -573,10 +573,8 @@ impl ProcessOperatorStatusReader {
                         "lifecycle deadline violation count",
                     )?;
                     ProcessOperatorStatusItem::LifecycleDeadlineViolation(
-                        decode_violation(&row).map_err(|_| {
-                            ProcessOperatorStatusCorruption::Inconsistent(
-                                "lifecycle deadline violation",
-                            )
+                        decode_violation(&row).map_err(|error| {
+                            lifecycle_read_failure(error, "lifecycle deadline violation")
                         })?,
                     )
                 }
@@ -603,6 +601,24 @@ impl ProcessOperatorStatusReader {
     /// read yet.
     pub const fn gate_verdict(&self) -> Option<LifecycleGateVerdict> {
         self.gate
+    }
+}
+
+/// Carries one lifecycle-metric read failure into this module's own class.
+///
+/// The two classes are not interchangeable here: a database failure answers
+/// the client `unavailable` and is worth retrying, while corruption answers an
+/// internal error and is not. Collapsing both into corruption would report a
+/// dropped connection as a durable defect.
+fn lifecycle_read_failure(
+    error: LifecycleMetricsError,
+    field: &'static str,
+) -> ProcessOperatorStatusError {
+    match error {
+        LifecycleMetricsError::Database(error) => ProcessOperatorStatusError::Database(error),
+        LifecycleMetricsError::Corruption(_) => {
+            ProcessOperatorStatusCorruption::Inconsistent(field).into()
+        }
     }
 }
 
