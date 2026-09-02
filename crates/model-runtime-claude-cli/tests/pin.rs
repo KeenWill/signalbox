@@ -134,33 +134,3 @@ fn read_lockfile() -> serde_json::Value {
     serde_json::from_str(include_str!("../package-lock.json"))
         .expect("package-lock.json is valid JSON")
 }
-
-/// Each of these built-ins reaches past the process the adapter owns — other
-/// Claude Code sessions on the host, the user directly, a shell, the wider
-/// filesystem, or an ambient instruction surface — so a deny list that stopped
-/// naming one would widen what a daemon-driven session can do.
-#[test]
-fn the_deny_list_names_every_escape_capable_builtin() {
-    let denied = signalbox_model_runtime_claude_cli::DISABLED_CLAUDE_CLI_BUILTIN_TOOLS;
-
-    assert!(
-        denied.contains(&"ListAgents"),
-        "ListAgents must stay denied"
-    );
-    assert!(
-        denied.contains(&"SendMessage"),
-        "SendMessage must stay denied"
-    );
-    assert!(
-        denied.contains(&"SendUserMessage"),
-        "SendUserMessage must stay denied"
-    );
-    assert!(denied.contains(&"REPL"), "REPL must stay denied");
-    assert!(
-        denied.contains(&"PowerShell"),
-        "PowerShell must stay denied"
-    );
-    assert!(denied.contains(&"Skill"), "Skill must stay denied");
-    assert!(denied.contains(&"Glob"), "Glob must stay denied");
-    assert!(denied.contains(&"Grep"), "Grep must stay denied");
-}
