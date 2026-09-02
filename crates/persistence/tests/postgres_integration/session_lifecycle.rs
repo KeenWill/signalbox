@@ -3,15 +3,16 @@
 //! provenance and ownership journal.
 
 use std::collections::BTreeSet;
+use std::num::NonZeroU64;
 use std::time::Duration;
 
 use crate::*;
 use signalbox_domain::{
-    CoreAgency, DescendantTerminationScope, GoalStatement, GoalUserAction, GoalUserCommand,
-    LifecycleActor, ModuleDispatch, RepoWatchDispatchId, SessionCreationProvenance,
-    SessionFailureCause, SessionLifecycleState, SessionOwnership, SessionParkCause,
-    SessionParkResponder, SessionRetirementCause, SessionStructuralCause, SessionTerminalOutcome,
-    StopStickiness,
+    CoreAgency, DescendantTerminationScope, GoalEventOrdinal, GoalStatement, GoalUserAction,
+    GoalUserCommand, LifecycleActor, ModuleDispatch, RepoWatchDispatchId,
+    SessionCreationProvenance, SessionFailureCause, SessionLifecycleState, SessionOwnership,
+    SessionParkCause, SessionParkResponder, SessionRetirementCause, SessionRetryableCause,
+    SessionStructuralCause, SessionTerminalOutcome, StopStickiness,
 };
 use signalbox_persistence::{
     session_lifecycle::{
@@ -1378,18 +1379,16 @@ async fn a_failed_closure_must_carry_the_parks_standing_cause() -> Result<(), Bo
 async fn the_ownership_journal_keeps_the_agency_behind_a_core_flip() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = creation_session(26);
-    let acting_request = ToolRequestId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 26 + 0xf00));
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(dispatched_creation(26))
         .await?;
+    let acting_turn = activate_first_turn(&pool, session, 26).await?;
 
     SessionLifecycleRepository::new(pool.clone())
         .release(
             session,
             LifecycleActor::Core {
-                agency: CoreAgency::Tool {
-                    request: acting_request,
-                },
+                agency: CoreAgency::Model { turn: acting_turn },
             },
         )
         .await?;
@@ -1406,7 +1405,7 @@ async fn the_ownership_journal_keeps_the_agency_behind_a_core_flip() -> Result<(
     .await?;
     assert_eq!(
         recorded,
-        (String::from("core"), None, Some(acting_request.into_uuid()))
+        (String::from("core"), Some(acting_turn.into_uuid()), None)
     );
 
     pool.close().await;
@@ -1717,6 +1716,373 @@ async fn a_pending_supersession_names_a_successor_settlement_can_record()
         SessionLifecycleRepositoryError::Database(_)
             | SessionLifecycleRepositoryError::CommitAmbiguous(_)
     ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// An automatic resume answers a recorded block; a park taken since is the
+/// same "the lineage moved" case, so lifting it would undo an operator hold
+/// and schedule fresh model work. An operator's own resume still lifts it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_automatic_resume_does_not_lift_a_park() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(36);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(36))
+        .await?;
+    attach_goal(&pool, session, 36).await?;
+    block_goal_by_statement(&pool, session, LIFECYCLE_SEED + 36 + 0xc00).await?;
+    park_by_statement(&pool, session).await?;
+
+    let outcome = GoalRepository::new(pool.clone())
+        .handle_expected_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 36 + 0xe00)),
+                session,
+                GoalUserAction::Resume(None),
+            ),
+            Some(GoalTurnCandidates::new(
+                AcceptedInputId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 36 + 0x1000)),
+                TurnId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 36 + 0x1100)),
+            )),
+            GoalEventOrdinal::new(NonZeroU64::new(2).expect("the blocked event is ordinal two")),
+            |_| None,
+        )
+        .await?;
+
+    assert_eq!(outcome, GoalCommandHandlingOutcome::LineageMoved);
+    assert!(
+        SessionLifecycleRepository::new(pool.clone())
+            .load(session)
+            .await?
+            .expect("the session keeps its lifecycle row")
+            .state()
+            .is_parked()
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The standing-cause gate runs before the handoff is persisted, so a decision
+/// settlement would refuse is never recorded in the first place.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_pending_closure_must_carry_the_parks_standing_cause() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    let session = creation_session(37);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(37))
+        .await?;
+    activate_first_turn(&pool, session, 37).await?;
+    repository
+        .park(
+            session,
+            SessionParkCause::RetryBudgetExhausted,
+            SessionParkResponder::Operator,
+            Some(SessionFailureCause::Retryable(
+                SessionRetryableCause::ProviderQuotaExhausted,
+            )),
+            LifecycleActor::Operator,
+        )
+        .await?;
+
+    let error = repository
+        .commit_pending_terminal(
+            session,
+            SessionTerminalOutcome::FailedStructural {
+                cause: SessionStructuralCause::BrokenToolchain,
+            },
+        )
+        .await
+        .expect_err("a handoff settlement would refuse is not recorded");
+
+    assert_eq!(
+        lifecycle_rejection(error),
+        SessionLifecycleRejection::StandingCauseMismatch
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A state-specific column is null outside its own state. Checking only
+/// whether the payload is complete lets a partial one survive on a state that
+/// then ignores it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_live_session_cannot_hold_another_states_payload() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(38);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(38))
+        .await?;
+
+    let error = sqlx::query(
+        "UPDATE session_lifecycle SET blocked_reason = 'user_input_required'
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a created session holds no blocked payload");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(DatabaseError::code)
+            .as_deref(),
+        Some("23514")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The recorded agency is this session's own: a turn from another session
+/// cannot be written as this one's actor.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_actor_identity_from_another_session_is_rejected() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let subject = creation_session(39);
+    let stranger = creation_session(40);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(39))
+        .await?;
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(40))
+        .await?;
+    let foreign_turn = activate_first_turn(&pool, stranger, 40).await?;
+
+    let error = sqlx::query(
+        "UPDATE session_lifecycle
+            SET actor_kind = 'core', actor_module = NULL, actor_turn_id = $2
+          WHERE session_id = $1",
+    )
+    .bind(subject.into_uuid())
+    .bind(foreign_turn.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("another session's turn is not this session's actor");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(DatabaseError::code)
+            .as_deref(),
+        Some("23503")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The armed-deadline table rejects truncation: the invariant triggers are
+/// row-level, so a truncation would disarm every deadline and fire none.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn the_armed_deadline_table_cannot_be_truncated() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(41))
+        .await?;
+
+    let error = sqlx::query("TRUNCATE session_deadline")
+        .execute(&pool)
+        .await
+        .expect_err("the armed deadlines cannot be truncated");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(DatabaseError::code)
+            .as_deref(),
+        Some("23514")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A committed handoff carries a cause its outcome admits, so settlement can
+/// always record what the closure decided.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_pending_cause_must_belong_to_its_outcome() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(42);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(42))
+        .await?;
+
+    let error = sqlx::query(
+        "UPDATE session_lifecycle
+            SET pending_terminal_outcome_kind = 'failed_retryable',
+                pending_terminal_cause_kind = 'broken_toolchain'
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a retryable outcome does not carry a structural cause");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(DatabaseError::code)
+            .as_deref(),
+        Some("23514")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The ownership bit and its journal are one record. A flip written to only
+/// one of them would leave the cohort metric and the deadline machinery
+/// disagreeing about the same session.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn the_ownership_bit_cannot_move_without_its_journal() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(43);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(43))
+        .await?;
+
+    let error = sqlx::query("UPDATE session_lifecycle SET owned = false WHERE session_id = $1")
+        .bind(session.into_uuid())
+        .execute(&pool)
+        .await
+        .expect_err("the bit and its journal move together");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(DatabaseError::code)
+            .as_deref(),
+        Some("23514")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A live session cannot carry a complete terminal outcome. Both sides of an
+/// equivalence are false for a nonterminal row with an outcome and no
+/// `ended_at`, so each column is tied to the state instead.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_live_session_cannot_hold_a_complete_terminal_outcome() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(44);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(44))
+        .await?;
+
+    let error = sqlx::query(
+        "UPDATE session_lifecycle SET terminal_outcome_kind = 'failed_unknown'
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("an outcome belongs to a terminal row");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(DatabaseError::code)
+            .as_deref(),
+        Some("23514")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A committed handoff survives the transitions between the decision and the
+/// turn's boundary, and only the settlement it describes clears it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_park_between_decision_and_settlement_keeps_the_handoff() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    let session = creation_session(45);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(45))
+        .await?;
+    activate_first_turn(&pool, session, 45).await?;
+    let committed = SessionTerminalOutcome::Abandoned;
+    repository
+        .commit_pending_terminal(session, committed)
+        .await?;
+
+    repository
+        .park(
+            session,
+            SessionParkCause::OperatorHold,
+            SessionParkResponder::Operator,
+            None,
+            LifecycleActor::Operator,
+        )
+        .await?;
+
+    assert_eq!(
+        repository
+            .load(session)
+            .await?
+            .expect("the session keeps its lifecycle row")
+            .pending_terminal(),
+        Some(committed)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A closure naming a different outcome than the one already committed is
+/// refused: the committed decision is what started tearing the turn down.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_closure_cannot_override_a_committed_handoff() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    let session = creation_session(46);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(46))
+        .await?;
+    repository
+        .commit_pending_terminal(session, SessionTerminalOutcome::Abandoned)
+        .await?;
+
+    let error = repository
+        .close(
+            session,
+            SessionTerminalOutcome::FailedUnknown,
+            LifecycleActor::Operator,
+        )
+        .await
+        .expect_err("the committed decision is the one that settles");
+
+    assert_eq!(
+        lifecycle_rejection(error),
+        SessionLifecycleRejection::PendingTerminalConflict
+    );
 
     pool.close().await;
     drop(container);

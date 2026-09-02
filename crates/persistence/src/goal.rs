@@ -386,6 +386,16 @@ impl GoalRepository {
                 .await?;
         }
 
+        // An automatic resume names the block it answers; a park taken since is
+        // the same "the lineage moved under us" case, and lifting it would undo
+        // an operator hold and schedule new model work. An operator's own
+        // resume names no expected head and still lifts the park.
+        if expected_head.is_some() && session_is_parked(&mut transaction, command.session()).await?
+        {
+            transaction.rollback().await?;
+            return Ok(GoalCommandHandlingOutcome::LineageMoved);
+        }
+
         let session_exists = lock_session(&mut transaction, command.session()).await?;
         let mut result = if !session_exists {
             GoalCommandResult::Rejected(GoalCommandRejection::SessionNotFound)
@@ -656,6 +666,7 @@ impl GoalRepository {
                JOIN session_lifecycle AS lifecycle
                  ON lifecycle.session_id = event.session_id
                 AND lifecycle.owned
+                AND lifecycle.state_kind <> 'parked'
               WHERE event.event_kind = 'blocked'
                 AND event.blocked_reason = 'execution_failure'
                 AND event.need = $1
@@ -984,6 +995,20 @@ pub(crate) async fn record_execution_failure_recovery_cause(
     .execute(&mut *connection)
     .await?;
     Ok(())
+}
+
+/// Whether the session is suspended in place.
+async fn session_is_parked(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<bool, GoalRepositoryError> {
+    let parked: Option<bool> = sqlx::query_scalar(
+        "SELECT state_kind = 'parked' FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?;
+    Ok(parked.unwrap_or(false))
 }
 
 fn recorded_scheduler_failure(goal: &Goal, turn: TurnId) -> Option<&GoalEvent> {

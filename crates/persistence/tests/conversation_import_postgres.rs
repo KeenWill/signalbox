@@ -372,6 +372,14 @@ async fn insert_imported_session_scaffolding_with_creation_cause(
     )
     .execute(&mut **transaction)
     .await?;
+    sqlx::query(
+        "INSERT INTO session_ownership_event
+            (session_id, event_ordinal, transition_kind, owned_after, actor_kind)
+         VALUES ('40000000-0000-4000-8000-000000000039', 1,
+                 'created_unmonitored', false, 'operator')",
+    )
+    .execute(&mut **transaction)
+    .await?;
     sqlx::raw_sql(
         "INSERT INTO session_scheduler (session_id)
          VALUES ('40000000-0000-4000-8000-000000000039');
