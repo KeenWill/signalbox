@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "verified_through": {"openai": "2026-08-24", "anthropic": "2026-09-01"},
+  "verified_through": {"openai": "2026-08-24", "anthropic": "2026-09-02"},
   "sources": [
     {
       "id": "oai-gpt35-launch-2023-03-01",
@@ -487,6 +487,15 @@
       "published": null,
       "retrieved": "2026-08-24",
       "evidence": "Public first-party evidence that Sonnet 5 became Claude Code's default and Opus 5 became its default Opus model."
+    },
+    {
+      "id": "anth-claude-code-changelog-2026-09-02",
+      "provider": "anthropic",
+      "title": "Claude Code changelog",
+      "url": "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md",
+      "published": null,
+      "retrieved": "2026-09-02",
+      "evidence": "The 2.1.257 entry adding Claude Fable 5.1 under the exact spelling claude-fable-5-1 and making it the default Fable model."
     }
   ],
   "models": [
@@ -677,6 +686,7 @@
     {"id":"anth-code-sonnet-alias","provider":"anthropic","commercial_channel":"claude_code_subscription","observed_identity":"sonnet","normalized_model":"anthropic:claude-4-family","window":{"precision":"exact_day","effective_from":"2025-05-22","effective_until":"2026-06-30","first_observed_new_rate":"2025-05-22","last_observed_old_rate":null},"quality":"family_only","confidence":"high","source_ids":["anth-model-ids-2026-08-24"],"limitations":["The alias follows the latest Sonnet and is not a dated model identity."]},
     {"id":"anth-code-sonnet5-alias","provider":"anthropic","commercial_channel":"claude_code_subscription","observed_identity":"sonnet","normalized_model":"anthropic:claude-5-family","window":{"precision":"exact_day","effective_from":"2026-06-30","effective_until":null,"first_observed_new_rate":"2026-06-30","last_observed_old_rate":"2026-06-29"},"quality":"family_only","confidence":"high","source_ids":["anth-sonnet5-2026-06-30","anth-model-ids-2026-08-24"],"limitations":["The alias follows the latest Sonnet and is not a dated model identity."]},
     {"id":"anth-code-opus-alias","provider":"anthropic","commercial_channel":"claude_code_subscription","observed_identity":"opus","normalized_model":"anthropic:claude-4-family","window":{"precision":"exact_day","effective_from":"2025-05-22","effective_until":"2026-07-24","first_observed_new_rate":"2025-05-22","last_observed_old_rate":null},"quality":"family_only","confidence":"high","source_ids":["anth-model-ids-2026-08-24","anth-claude-code-changelog-2026-08-24"],"limitations":["The alias follows a moving Opus target and is not a dated model identity."]},
+    {"id":"anth-code-exact-fable51","provider":"anthropic","commercial_channel":"claude_code_subscription","observed_identity":"claude-fable-5-1","normalized_model":"anthropic:claude-fable-5-1","window":{"precision":"observation_window","effective_from":null,"effective_until":null,"first_observed_new_rate":"2026-09-02","last_observed_old_rate":null},"quality":"exact","confidence":"high","source_ids":["anth-claude-code-changelog-2026-09-02","anth-fable51-2026-09-01"],"limitations":["The changelog names the release that added the spelling, not the day that release shipped, so the window opens at the retrieval rather than on an exact day."]},
     {"id":"anth-code-opus5-alias","provider":"anthropic","commercial_channel":"claude_code_subscription","observed_identity":"opus","normalized_model":"anthropic:claude-5-family","window":{"precision":"exact_day","effective_from":"2026-07-24","effective_until":null,"first_observed_new_rate":"2026-07-24","last_observed_old_rate":"2026-07-23"},"quality":"family_only","confidence":"high","source_ids":["anth-opus5-2026-07-24","anth-model-ids-2026-08-24","anth-claude-code-changelog-2026-08-24"],"limitations":["The alias follows a moving Opus target and is not a dated model identity."]}
   ],
   "research_gaps": [

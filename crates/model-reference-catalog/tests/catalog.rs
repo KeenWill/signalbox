@@ -513,8 +513,9 @@ fn fable_5_1_batch_lookup_resolves_the_published_batch_rates() {
 /// Auditing one provider's new launch says nothing about whether another
 /// provider's mutable price page still reads the way it did at its own
 /// retrieval, so the evidence horizon is per provider: the Anthropic horizon
-/// reaches the Fable 5.1 launch day while the OpenAI horizon stays where its
-/// own audit left it, and the same query date answers differently by provider.
+/// reaches its latest Anthropic retrieval while the OpenAI horizon stays where
+/// its own audit left it, and the same query date answers differently by
+/// provider.
 #[test]
 fn each_provider_keeps_its_own_evidence_horizon() {
     let catalog = bundled_catalog().unwrap();
@@ -536,7 +537,7 @@ fn each_provider_keeps_its_own_evidence_horizon() {
         )
         .unwrap();
 
-    assert_eq!(catalog.verified_through(Provider::Anthropic), "2026-09-01");
+    assert_eq!(catalog.verified_through(Provider::Anthropic), "2026-09-02");
     assert_eq!(catalog.verified_through(Provider::Openai), "2026-08-24");
     assert_eq!(
         anthropic.resolved_model_id(),
@@ -608,6 +609,39 @@ fn a_closed_record_still_answers_after_its_evidence_was_last_retrieved() {
     let rate_set = &resolution.price().unwrap().resolved_rate_sets().unwrap()[0];
 
     assert_eq!(rate_set.id, "oai-gpt4-launch");
+}
+
+/// Claude Code accepts the full model spelling, and the catalog records that
+/// identity rather than the `fable` alias the program also accepts: an alias
+/// tracks its family's latest model, so it cannot pin one. The alias therefore
+/// has no mapping at all and stays `Unknown` instead of resolving to whichever
+/// model it happened to point at.
+#[test]
+fn claude_code_records_the_full_fable_5_1_spelling_and_not_its_drifting_alias() {
+    let catalog = bundled_catalog().unwrap();
+
+    let full_spelling = catalog
+        .resolve(
+            Provider::Anthropic,
+            "claude-fable-5-1",
+            "2026-09-02",
+            CommercialChannel::ClaudeCodeSubscription,
+        )
+        .unwrap();
+    let alias = catalog
+        .resolve(
+            Provider::Anthropic,
+            "fable",
+            "2026-09-02",
+            CommercialChannel::ClaudeCodeSubscription,
+        )
+        .unwrap();
+
+    assert_eq!(
+        full_spelling.resolved_model_id(),
+        Some("anthropic:claude-fable-5-1")
+    );
+    assert_eq!(alias, ReferenceResolution::Unknown);
 }
 
 /// A source is admitted against its own provider's horizon, so extending one
