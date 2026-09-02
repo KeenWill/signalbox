@@ -23,6 +23,7 @@ use crate::{
         session_lifecycle_command_rejection_to_str, session_lifecycle_operation_to_str,
         session_retryable_cause_from_str, session_retryable_cause_to_str,
         session_structural_cause_from_str, session_structural_cause_to_str, turn_id_from_uuid,
+        turn_id_to_uuid,
     },
     outbox::{self, CommandSettlementOutbox, OutboxEvent},
     session_lifecycle::{
@@ -505,12 +506,29 @@ async fn insert_command_record(
             Some(session_lifecycle_command_rejection_to_str(rejection)),
         ),
     };
+    let (effect, live_turn) = match result {
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::Closed { .. }) => {
+            (Some("closed"), None)
+        }
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::ClosurePending {
+            live_turn,
+            ..
+        }) => (Some("closure_pending"), Some(turn_id_to_uuid(live_turn))),
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::Resumed { .. }) => {
+            (Some("resumed"), None)
+        }
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::OwnershipChanged) => {
+            (Some("ownership_changed"), None)
+        }
+        SessionLifecycleCommandResult::Rejected(_) => (None, None),
+    };
     sqlx::query(
         "INSERT INTO session_lifecycle_command
             (command_id, command_kind, storage_version, session_id, operation_kind,
              stop_sticky, descendant_scope, successor_session_id, failure_cause_kind,
-             finish_condition_kind, finish_condition, result_kind, rejection_kind)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+             finish_condition_kind, finish_condition, result_kind, rejection_kind,
+             applied_effect_kind, live_turn_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(SESSION_LIFECYCLE_KIND)
@@ -525,6 +543,8 @@ async fn insert_command_record(
     .bind(finish_statement)
     .bind(result_kind)
     .bind(rejection)
+    .bind(effect)
+    .bind(live_turn)
     .execute(&mut *connection)
     .await?;
     // A rejection naming a session that does not exist settles without one.
@@ -569,17 +589,20 @@ async fn existing_or_conflicting(
     }
     let result = match result {
         RecordedResult::Rejected(rejection) => SessionLifecycleCommandResult::Rejected(rejection),
-        RecordedResult::Applied => SessionLifecycleCommandResult::Applied(
-            replayed_application(connection, &recorded).await?,
+        RecordedResult::Applied(effect) => SessionLifecycleCommandResult::Applied(
+            replayed_application(connection, &recorded, effect).await?,
         ),
     };
     Ok(SessionLifecycleCommandHandlingOutcome::Recorded(result))
 }
 
-/// Rebuilds what an applied command did from the state it left behind.
+/// Replays the recorded effect; the outcome and state it carried are read
+/// from the satellite, which a closure fixes and a resume leaves to the
+/// mapping.
 async fn replayed_application(
     connection: &mut PgConnection,
     command: &SessionLifecycleCommand,
+    effect: RecordedEffect,
 ) -> Result<SessionLifecycleApplication, SessionLifecycleCommandRepositoryError> {
     let record = session_lifecycle::load_optional(connection, command.session())
         .await
@@ -587,41 +610,38 @@ async fn replayed_application(
         .ok_or(SessionLifecycleCommandRepositoryError::Corruption(
             "applied lifecycle command names no session",
         ))?;
-    Ok(match command.operation() {
-        SessionLifecycleOperation::Adopt { .. } | SessionLifecycleOperation::Release => {
-            SessionLifecycleApplication::OwnershipChanged
-        }
-        SessionLifecycleOperation::Resume => SessionLifecycleApplication::Resumed {
-            state: record.state(),
+    let outcome = || match (record.state(), record.pending_terminal()) {
+        (SessionLifecycleState::Terminal { outcome }, _) | (_, Some(outcome)) => Ok(outcome),
+        (_, None) => Err(SessionLifecycleCommandRepositoryError::Corruption(
+            "applied closure left no outcome",
+        )),
+    };
+    Ok(match effect {
+        RecordedEffect::Closed => SessionLifecycleApplication::Closed {
+            outcome: outcome()?,
         },
-        SessionLifecycleOperation::Stop { .. }
-        | SessionLifecycleOperation::Supersede { .. }
-        | SessionLifecycleOperation::Abandon
-        | SessionLifecycleOperation::CloseFailed { .. } => {
-            match (record.state(), record.pending_terminal()) {
-                (SessionLifecycleState::Terminal { outcome }, _) => {
-                    SessionLifecycleApplication::Closed { outcome }
-                }
-                (_, Some(outcome)) => {
-                    match live_active_turn(connection, command.session()).await? {
-                        Some(live_turn) => {
-                            SessionLifecycleApplication::ClosurePending { outcome, live_turn }
-                        }
-                        None => SessionLifecycleApplication::Closed { outcome },
-                    }
-                }
-                (_, None) => {
-                    return Err(SessionLifecycleCommandRepositoryError::Corruption(
-                        "applied closure left no outcome",
-                    ));
-                }
+        RecordedEffect::ClosurePending { live_turn } => {
+            SessionLifecycleApplication::ClosurePending {
+                outcome: outcome()?,
+                live_turn,
             }
         }
+        RecordedEffect::Resumed => SessionLifecycleApplication::Resumed {
+            state: record.state(),
+        },
+        RecordedEffect::OwnershipChanged => SessionLifecycleApplication::OwnershipChanged,
     })
 }
 
+enum RecordedEffect {
+    Closed,
+    ClosurePending { live_turn: TurnId },
+    Resumed,
+    OwnershipChanged,
+}
+
 enum RecordedResult {
-    Applied,
+    Applied(RecordedEffect),
     Rejected(SessionLifecycleCommandRejection),
 }
 
@@ -633,7 +653,8 @@ async fn load_recorded(
     let row = sqlx::query(
         "SELECT session_id, operation_kind, stop_sticky, descendant_scope,
                 successor_session_id, failure_cause_kind, finish_condition_kind,
-                finish_condition, result_kind, rejection_kind
+                finish_condition, result_kind, rejection_kind, applied_effect_kind,
+                live_turn_id
            FROM session_lifecycle_command
           WHERE command_id = $1",
     )
@@ -690,9 +711,27 @@ fn decode_recorded(
     }
     let result_kind: String = row.try_get("result_kind")?;
     let rejection: Option<String> = row.try_get("rejection_kind")?;
-    let result = match (result_kind.as_str(), rejection) {
-        ("applied", None) => RecordedResult::Applied,
-        ("rejected", Some(rejection)) => RecordedResult::Rejected(
+    let effect: Option<String> = row.try_get("applied_effect_kind")?;
+    let live_turn: Option<Uuid> = row.try_get("live_turn_id")?;
+    let result = match (
+        result_kind.as_str(),
+        rejection,
+        effect.as_deref(),
+        live_turn,
+    ) {
+        ("applied", None, Some("closed"), None) => RecordedResult::Applied(RecordedEffect::Closed),
+        ("applied", None, Some("closure_pending"), Some(live_turn)) => {
+            RecordedResult::Applied(RecordedEffect::ClosurePending {
+                live_turn: turn_id_from_uuid(live_turn),
+            })
+        }
+        ("applied", None, Some("resumed"), None) => {
+            RecordedResult::Applied(RecordedEffect::Resumed)
+        }
+        ("applied", None, Some("ownership_changed"), None) => {
+            RecordedResult::Applied(RecordedEffect::OwnershipChanged)
+        }
+        ("rejected", Some(rejection), None, None) => RecordedResult::Rejected(
             session_lifecycle_command_rejection_from_str(&rejection)
                 .ok_or(corrupt("rejection kind"))?,
         ),

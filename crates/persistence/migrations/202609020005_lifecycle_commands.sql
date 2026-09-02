@@ -1,62 +1,17 @@
 --
 -- Session lifecycle §7: the command surface, finish conditions, and the
 -- authenticated issuer on the durable-command envelope (§6).
---
--- Columns added to populated tables are backfilled from the evidence the
--- rows already carry before any constraint reads them.
---
 
 SET check_function_bodies = false;
 
 --
 -- §6: every command records the principal that issued it. A module principal
--- is stamped by the in-daemon module path that composed the command; the
--- backfill derives it from the dispatch records that name those commands and
--- reads every other claim as the operator's.
+-- is stamped by the in-daemon module path that composed the command.
 --
 
 ALTER TABLE durable_command
-    ADD COLUMN issuer_kind text,
+    ADD COLUMN issuer_kind text NOT NULL,
     ADD COLUMN issuer_module text;
-
-UPDATE durable_command AS command
-   SET issuer_kind = 'module', issuer_module = 'commissioned_dispatch'
-  FROM commissioned_dispatch AS dispatch
- WHERE dispatch.create_command_id = command.command_id;
-
-UPDATE durable_command AS command
-   SET issuer_kind = 'module', issuer_module = 'repo_watch'
- WHERE command.issuer_kind IS NULL
-   AND (
-        EXISTS (SELECT 1 FROM repo_watch_dispatch_action AS action
-                 WHERE action.create_command_id = command.command_id)
-        OR EXISTS (SELECT 1 FROM repo_watch_dispatch_delivery AS delivery
-                    WHERE delivery.submit_command_id = command.command_id)
-        OR EXISTS (SELECT 1 FROM repo_watch_dispatch_delivery_intent AS intent
-                    WHERE intent.submit_command_id = command.command_id)
-        OR EXISTS (SELECT 1 FROM repo_watch_dispatch_start_lease_expiration AS lease
-                    WHERE lease.goal_command_id = command.command_id)
-        OR EXISTS (SELECT 1 FROM repo_watch_lifecycle_cutoff_goal AS cutoff
-                    WHERE cutoff.goal_command_id = command.command_id)
-        OR EXISTS (SELECT 1 FROM repo_watch_convergence_cutoff_goal AS cutoff
-                    WHERE cutoff.goal_command_id = command.command_id)
-        OR EXISTS (SELECT 1 FROM convergence_sweep_target AS target
-                    WHERE target.pending_command_id = command.command_id)
-        -- The goal a dispatch attaches names the dispatched session.
-        OR EXISTS (SELECT 1 FROM goal_command AS goal
-                     JOIN repo_watch_dispatch_action AS action
-                       ON action.session_id = goal.session_id
-                    WHERE goal.command_id = command.command_id
-                      AND goal.operation_kind = 'attach'
-                      AND goal.result_event_ordinal = 1)
-       );
-
-UPDATE durable_command
-   SET issuer_kind = 'operator'
- WHERE issuer_kind IS NULL;
-
-ALTER TABLE durable_command
-    ALTER COLUMN issuer_kind SET NOT NULL;
 
 ALTER TABLE durable_command
     ADD CONSTRAINT durable_command_issuer_shape CHECK (
@@ -144,6 +99,8 @@ CREATE TABLE session_lifecycle_command (
     finish_condition text,
     result_kind text NOT NULL,
     rejection_kind text,
+    applied_effect_kind text,
+    live_turn_id uuid,
 
     CONSTRAINT session_lifecycle_command_pkey PRIMARY KEY (command_id),
     CONSTRAINT session_lifecycle_command_kind_closed
@@ -198,6 +155,11 @@ CREATE TABLE session_lifecycle_command (
     CONSTRAINT session_lifecycle_command_result_shape CHECK (
         (result_kind = ANY (ARRAY['applied'::text, 'rejected'::text]))
         AND ((result_kind = 'rejected'::text) = (rejection_kind IS NOT NULL))
+        AND ((result_kind = 'applied'::text) = (applied_effect_kind IS NOT NULL))
+        AND ((applied_effect_kind IS NULL) OR (applied_effect_kind = ANY (ARRAY[
+            'closed'::text, 'closure_pending'::text, 'resumed'::text, 'ownership_changed'::text
+        ])))
+        AND ((applied_effect_kind = 'closure_pending'::text) = (live_turn_id IS NOT NULL))
     ),
     CONSTRAINT session_lifecycle_command_rejection_closed CHECK (
         (rejection_kind IS NULL)
@@ -254,6 +216,9 @@ CREATE TABLE session_lifecycle_command (
         ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
     CONSTRAINT session_lifecycle_command_successor_fk
         FOREIGN KEY (successor_session_id) REFERENCES session (session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CONSTRAINT session_lifecycle_command_live_turn_fk
+        FOREIGN KEY (live_turn_id, session_id) REFERENCES turn_lifecycle (turn_id, session_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT
 );
 
@@ -307,32 +272,15 @@ $$;
 
 --
 -- §7 create_session: `start_gate`, `ownership`, `finish_condition`, and the
--- recorded rejection. Existing rows opened their gate, took the ownership
--- their cause implies, and — for dispatched work — declared the external
--- gate the dispatch serves.
+-- recorded rejection.
 --
 
 ALTER TABLE create_session_command
-    ADD COLUMN start_gate text,
-    ADD COLUMN ownership text,
+    ADD COLUMN start_gate text NOT NULL,
+    ADD COLUMN ownership text NOT NULL,
     ADD COLUMN finish_condition_kind text,
     ADD COLUMN finish_condition text,
-    ADD COLUMN rejection_kind text;
-
-UPDATE create_session_command
-   SET start_gate = 'open',
-       ownership = CASE creation_cause
-           WHEN 'module_dispatched' THEN 'owned'
-           ELSE 'unmonitored'
-       END,
-       finish_condition_kind = CASE creation_cause
-           WHEN 'module_dispatched' THEN 'external_gate'
-           ELSE NULL
-       END;
-
-ALTER TABLE create_session_command
-    ALTER COLUMN start_gate SET NOT NULL,
-    ALTER COLUMN ownership SET NOT NULL,
+    ADD COLUMN rejection_kind text,
     ALTER COLUMN created_session_id DROP NOT NULL;
 
 -- Supersedes 202609010001_sessions.
@@ -377,22 +325,13 @@ ALTER TABLE create_session_command
 --
 
 ALTER TABLE session_lifecycle
-    ADD COLUMN start_gate_held boolean,
+    ADD COLUMN start_gate_held boolean NOT NULL,
     ADD COLUMN finish_condition_kind text,
     ADD COLUMN finish_condition text,
     ADD COLUMN pending_terminal_actor_kind text,
-    ADD COLUMN pending_terminal_actor_module text;
-
-UPDATE session_lifecycle SET start_gate_held = false;
-
-ALTER TABLE session_lifecycle
-    ALTER COLUMN start_gate_held SET NOT NULL;
-
-UPDATE session_lifecycle AS lifecycle
-   SET finish_condition_kind = 'external_gate'
-  FROM session
- WHERE session.session_id = lifecycle.session_id
-   AND session.creation_cause = 'module_dispatched';
+    ADD COLUMN pending_terminal_actor_module text,
+    ADD COLUMN pending_terminal_actor_turn_id uuid,
+    ADD COLUMN pending_terminal_actor_tool_request_id uuid;
 
 ALTER TABLE session_lifecycle
     ADD CONSTRAINT session_lifecycle_finish_condition_shape CHECK (
@@ -414,7 +353,26 @@ ALTER TABLE session_lifecycle
              OR (pending_terminal_actor_module = ANY (ARRAY[
                  'repo_watch'::text, 'commissioned_dispatch'::text
              ])))
+        AND ((pending_terminal_actor_turn_id IS NULL)
+             OR (pending_terminal_actor_tool_request_id IS NULL))
+        AND ((pending_terminal_actor_kind = 'core'::text)
+             OR ((pending_terminal_actor_turn_id IS NULL)
+                 AND (pending_terminal_actor_tool_request_id IS NULL)))
     );
+
+ALTER TABLE ONLY session_lifecycle
+    ADD CONSTRAINT session_lifecycle_pending_actor_turn_fk
+        FOREIGN KEY (pending_terminal_actor_turn_id, session_id)
+        REFERENCES turn_lifecycle(turn_id, session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE ONLY session_lifecycle
+    ADD CONSTRAINT session_lifecycle_pending_actor_tool_request_fk
+        FOREIGN KEY (pending_terminal_actor_tool_request_id, session_id)
+        REFERENCES tool_request(request_id, session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
 
 --
 -- §7 start gate: a held gate keeps the session `created` until `release_start`
@@ -763,11 +721,10 @@ ALTER TABLE turn_lifecycle
 -- §1/§2 settlement. A closure that finds a live turn commits its outcome to
 -- the handoff and hands the turn to the committed interrupt machinery; the
 -- transaction that terminalizes the session's last live turn records the
--- terminal state, retiring the queued turns the closure stranded.
---
--- Queued turns are retired one statement at a time: each retirement re-fires
--- this trigger, and the nested invocation that finds no live turn left is the
--- one that settles.
+-- terminal state, retiring the queued turns the closure stranded. Deferred to
+-- commit, so the causal turn's own terminal event precedes the retirements
+-- and the session's terminal event; the queue drains in one invocation, and
+-- the invocations its own retirements queue find the session terminal.
 --
 
 CREATE FUNCTION settle_session_pending_terminal(subject uuid) RETURNS void
@@ -795,12 +752,13 @@ BEGIN
         RETURN;
     END IF;
 
-    SELECT turn_id INTO queued
-      FROM turn_lifecycle
-     WHERE session_id = subject AND state_kind = 'queued'
-     ORDER BY acceptance_position
-     LIMIT 1;
-    IF FOUND THEN
+    LOOP
+        SELECT turn_id INTO queued
+          FROM turn_lifecycle
+         WHERE session_id = subject AND state_kind = 'queued'
+         ORDER BY acceptance_position
+         LIMIT 1;
+        EXIT WHEN NOT FOUND;
         UPDATE turn_lifecycle
            SET state_kind = 'terminal',
                terminal_disposition_kind = 'retired',
@@ -818,9 +776,7 @@ BEGIN
         SELECT event_sequence, event_kind, storage_version, session_id,
                queued, 'retired'
           FROM header;
-        -- The retirement's own trigger settled if it was the last turn.
-        RETURN;
-    END IF;
+    END LOOP;
 
     SELECT event_kind, generation, event_ordinal
       INTO last_kind, last_generation, last_ordinal
@@ -871,8 +827,8 @@ BEGIN
            state_entered_at = statement_timestamp(),
            actor_kind = pending_terminal_actor_kind,
            actor_module = pending_terminal_actor_module,
-           actor_turn_id = NULL,
-           actor_tool_request_id = NULL,
+           actor_turn_id = pending_terminal_actor_turn_id,
+           actor_tool_request_id = pending_terminal_actor_tool_request_id,
            waiting_kind = NULL,
            waiting_waker = NULL,
            waiting_subject_session_id = NULL,
@@ -891,7 +847,9 @@ BEGIN
            pending_terminal_stop_sticky = NULL,
            pending_terminal_superseded_by = NULL,
            pending_terminal_actor_kind = NULL,
-           pending_terminal_actor_module = NULL
+           pending_terminal_actor_module = NULL,
+           pending_terminal_actor_turn_id = NULL,
+           pending_terminal_actor_tool_request_id = NULL
      WHERE session_id = subject;
 
     IF held.pending_terminal_outcome_kind = 'abandoned' THEN
@@ -913,7 +871,7 @@ BEGIN
 END;
 $$;
 
--- Named to fire after `turn_lifecycle_projects_session_state`.
-CREATE TRIGGER turn_lifecycle_settles_pending_terminal
+CREATE CONSTRAINT TRIGGER turn_lifecycle_settles_pending_terminal
     AFTER UPDATE OF state_kind ON turn_lifecycle
+    DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW EXECUTE FUNCTION settle_session_pending_terminal_from_turn();

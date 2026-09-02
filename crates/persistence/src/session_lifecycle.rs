@@ -545,7 +545,7 @@ pub(crate) async fn commit_pending_terminal_in_transaction(
         None => {}
     }
     let encoded = EncodedTerminal::from_outcome(outcome);
-    let (actor_kind, actor_module, _, _) = encode_actor(actor);
+    let (actor_kind, actor_module, actor_turn, actor_request) = encode_actor(actor);
     sqlx::query(
         "UPDATE session_lifecycle
             SET pending_terminal_outcome_kind = $2,
@@ -553,7 +553,9 @@ pub(crate) async fn commit_pending_terminal_in_transaction(
                 pending_terminal_stop_sticky = $4,
                 pending_terminal_superseded_by = $5,
                 pending_terminal_actor_kind = $6,
-                pending_terminal_actor_module = $7
+                pending_terminal_actor_module = $7,
+                pending_terminal_actor_turn_id = $8,
+                pending_terminal_actor_tool_request_id = $9
           WHERE session_id = $1",
     )
     .bind(session_id_to_uuid(session))
@@ -563,6 +565,8 @@ pub(crate) async fn commit_pending_terminal_in_transaction(
     .bind(encoded.superseded_by)
     .bind(actor_kind)
     .bind(actor_module)
+    .bind(actor_turn)
+    .bind(actor_request)
     .execute(&mut *connection)
     .await?;
     Ok(())
@@ -1045,6 +1049,14 @@ async fn write_state(
                 pending_terminal_actor_module = CASE
                     WHEN $2::text = 'terminal' THEN NULL
                     ELSE pending_terminal_actor_module
+                END,
+                pending_terminal_actor_turn_id = CASE
+                    WHEN $2::text = 'terminal' THEN NULL
+                    ELSE pending_terminal_actor_turn_id
+                END,
+                pending_terminal_actor_tool_request_id = CASE
+                    WHEN $2::text = 'terminal' THEN NULL
+                    ELSE pending_terminal_actor_tool_request_id
                 END
           WHERE session_id = $1",
     )

@@ -15852,7 +15852,6 @@ async fn interrupt_for_closure(
     command: &SessionLifecycleCommand,
     live_turn: TurnId,
 ) -> Result<(), ()> {
-    const CLOSURE_INTERRUPT_MASK: u128 = 0x5e55_1001_c105_4e00_0000_0000_0000_0001;
     let session = command.session();
     let descendant_scope = match command.operation() {
         SessionLifecycleOperation::Stop {
@@ -15884,9 +15883,7 @@ async fn interrupt_for_closure(
         return Err(());
     };
     let request = SubmitInputRequest::try_new_with_content_limit(
-        DurableCommandId::from_uuid(uuid::Uuid::from_u128(
-            command.command_id().as_uuid().as_u128() ^ CLOSURE_INTERRUPT_MASK,
-        )),
+        DurableCommandId::from_uuid(closure_interrupt_identity(command.command_id())),
         session,
         content,
         DeliveryRequest::Interrupt {
@@ -15926,6 +15923,18 @@ async fn interrupt_for_closure(
                 "closure interrupt failed");
             Err(())
         }
+    }
+}
+
+/// Derives the interrupt's identity from the closure command's, stepping past
+/// the two reserved identities.
+fn closure_interrupt_identity(command: DurableCommandId) -> uuid::Uuid {
+    const CLOSURE_INTERRUPT_MASK: u128 = 0x5e55_1001_c105_4e00_0000_0000_0000_0001;
+    let derived = uuid::Uuid::from_u128(command.as_uuid().as_u128() ^ CLOSURE_INTERRUPT_MASK);
+    if derived.is_nil() || derived.is_max() {
+        uuid::Uuid::from_u128(derived.as_u128() ^ 0b10)
+    } else {
+        derived
     }
 }
 

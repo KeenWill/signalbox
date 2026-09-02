@@ -1937,12 +1937,13 @@ appends it — the deadline engine and the injection contract will. The
 and `create_session` appends it for a rejection (`session_created` is its
 applied receipt). A closure that finds a live turn commits its outcome to the
 satellite's handoff with the acting principal; the transaction that terminalizes
-the session's last live turn settles it
-(`turn_lifecycle_settles_pending_terminal`): remaining queued turns retire as
-`retired{session_closed}`, an open goal generation closes as `session_closed`, a
-user-stopped generation admits only `stopped`, an achieved generation admits
-every closure, and the satellite records terminal. Model-call state transitions
-append `model_call_transition`, tool-round creation appends
+the session's last live turn settles it at commit
+(`turn_lifecycle_settles_pending_terminal`, a deferred constraint trigger, so
+the causal turn's own event precedes the settlement's): remaining queued turns
+retire as `retired{session_closed}`, an open goal generation closes as
+`session_closed`, a user-stopped generation admits only `stopped`, an achieved
+generation admits every closure, and the satellite records terminal. Model-call
+state transitions append `model_call_transition`, tool-round creation appends
 `tool_batch_transition { proposed }`, all-resolved result projection appends
 `tool_batch_transition { results_projected }`, and an external-effect ambiguity
 appends `tool_batch_transition { recovery_required }`. Completion closure
