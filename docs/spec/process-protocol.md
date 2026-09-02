@@ -2299,8 +2299,9 @@ work. Guard-session monitoring and fatal-loss behavior are owned by
 [Daemon runtime: startup order and shutdown](turn-lifecycle-and-scheduling.md#daemon-runtime-startup-order-and-shutdown).
 For each attempt, the dispatcher:
 
-1. starts a PostgreSQL transaction and locks the singleton
-   `outbox_delivery_state`;
+1. starts a PostgreSQL transaction and locks its own `outbox_consumer_cursor`
+   registry row, whose retention floor and per-consumer discipline are owned by
+   [persistence protocol](persistence-protocol.md);
 2. loads exactly `delivered_through + 1` and its one typed record;
 3. maps the storage record to a distinct process-update value and offers it to
    the in-process fan-out;
