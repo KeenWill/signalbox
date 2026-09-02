@@ -6,6 +6,8 @@ discovery, typed registration construction, and explicit-root configuration were
 verified against PR #798 (`agent/agent-docs-skills-foundation`). Durable
 registration, empty eligibility, turn-start evidence, and model-call correlation
 were verified against PR #810 (`agent/agent-docs-skills-model-call-followup`).
+The incomplete-discovery operator event is verified against this PR
+(`agent/t1-migration-backfill`).
 
 This page is the foundation proposal at the bottom of the workspace-instruction
 implementation stack. It specifies daemon-owned discovery, registration,
@@ -104,8 +106,12 @@ partial inventory as complete. Registration may retain the candidates already
 found, but session creation or turn preparation that requires a complete scan
 fails closed. An incomplete discovery may be retained as append-only diagnostic
 evidence, but no turn manifest names it; a later preparation retries with a new
-scan. Product ignore rules and configurable depth policy remain deferred. The
-4,096-finding bound reserves its final slot for this terminal limit finding.
+scan. The turn preparation that fails closed also records one operator event
+naming the exhausted dimension, the limit-set version, every consumed count, and
+the roots the scan walked, because the failure reaches the scheduler as a cause
+code that carries none of them. Product ignore rules and configurable depth
+policy remain deferred. The 4,096-finding bound reserves its final slot for this
+terminal limit finding.
 
 One scan emits a canonical source path only once even when workspace and
 configured roots overlap; the first read fixes its source hash for that scan.
