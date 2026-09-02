@@ -952,7 +952,11 @@ service_tiers = ["auto", "standard_only"]
 # a deployment on a plan that does not include one lowers the value here.
 
 # [[models]]
-# # Resolves to claude-fable-5. Hard cap: 128000.
+# # Resolves to claude-fable-5-1 at the pinned 2.1.258 program, which moved
+# # this alias off claude-fable-5. That move is the general caution above made
+# # concrete: a deployment that needs the identity pinned spells
+# # claude-fable-5-1 here and drops the colliding Anthropic row above, because
+# # one provider-model spelling is served by one adapter. Hard cap: 128000.
 # selection_id = "2b7fc5c7-14b2-4030-9ed8-eab7602f908c"
 # target_id = "eb742137-caa4-48fb-be37-45d61265325c"
 # model_family = "claude_code"
