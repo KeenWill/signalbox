@@ -314,7 +314,10 @@ impl StartEligibleTurnRepository {
                 .bind(session_uuid)
                 .fetch_one(&mut *transaction)
                 .await?;
-        if !session_exists || scheduler_session.is_none() {
+        if !session_exists
+            || scheduler_session.is_none()
+            || session_is_parked(&mut transaction, session).await?
+        {
             transaction.rollback().await?;
             return Ok(CommitActivationPreviewOutcome::Stale);
         }
@@ -365,7 +368,12 @@ impl StartEligibleTurnRepository {
                 .await
                 .map_err(StartEligibleTurnRepositoryError::from)
                 .map_err(CommitActivationPreviewError::Activation)?;
-        if !session_exists || scheduler_session.is_none() {
+        if !session_exists
+            || scheduler_session.is_none()
+            || session_is_parked(&mut transaction, session)
+                .await
+                .map_err(CommitActivationPreviewError::Activation)?
+        {
             transaction
                 .rollback()
                 .await
@@ -469,7 +477,12 @@ impl StartEligibleTurnRepository {
                 .await
                 .map_err(StartEligibleTurnRepositoryError::from)
                 .map_err(CommitActivationPreviewError::Activation)?;
-        if !session_exists || scheduler_session.is_none() {
+        if !session_exists
+            || scheduler_session.is_none()
+            || session_is_parked(&mut transaction, session)
+                .await
+                .map_err(CommitActivationPreviewError::Activation)?
+        {
             transaction
                 .rollback()
                 .await

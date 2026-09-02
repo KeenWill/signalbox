@@ -2132,3 +2132,43 @@ async fn a_park_cannot_contradict_a_committed_closure() -> Result<(), Box<dyn Er
     drop(container);
     Ok(())
 }
+
+/// A closure attributed to a tool records its own provenance columns, so the
+/// committed model-declaration rules — which validate every non-null
+/// `model_tool_request_id` as a `goal_declare` request and hold it globally
+/// unique — never see it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_tool_attributed_closure_records_its_own_provenance() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(48);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(48))
+        .await?;
+    attach_goal(&pool, session, 48).await?;
+    let acting_turn = TurnId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 48 + 0xc00));
+
+    SessionLifecycleRepository::new(pool.clone())
+        .close(
+            session,
+            SessionTerminalOutcome::Abandoned,
+            LifecycleActor::Core {
+                agency: CoreAgency::Model { turn: acting_turn },
+            },
+        )
+        .await?;
+
+    let recorded: (Option<Uuid>, Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+        "SELECT closure_actor_turn_id, model_turn_id, model_tool_request_id
+           FROM goal_event
+          WHERE session_id = $1 AND event_kind = 'session_closed'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(recorded, (Some(acting_turn.into_uuid()), None, None));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

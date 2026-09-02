@@ -1110,10 +1110,17 @@ CREATE CONSTRAINT TRIGGER session_terminal_settles_its_goal
 -- the session outcome and the §6 classification of the actor that closed it.
 --
 
+-- The closure's agency gets its own columns rather than reusing the model
+-- declaration's. `enforce_goal_model_declaration_request` validates every
+-- non-null `model_tool_request_id` as an achieved-or-blocked `goal_declare`
+-- request, and that column is globally unique, so a closure borrowing it would
+-- be rejected at commit or collide with the declaration that already used it.
 ALTER TABLE goal_event
     ADD COLUMN session_outcome_kind text,
     ADD COLUMN closure_actor_kind text,
-    ADD COLUMN closure_actor_module text;
+    ADD COLUMN closure_actor_module text,
+    ADD COLUMN closure_actor_turn_id uuid,
+    ADD COLUMN closure_actor_tool_request_id uuid;
 
 ALTER TABLE goal_event
     DROP CONSTRAINT goal_event_event_kind_check;
@@ -1180,7 +1187,7 @@ ALTER TABLE goal_event
         OR ((event_kind = 'achieved'::text) AND (statement IS NULL) AND (blocked_reason IS NULL) AND (need IS NULL) AND (guidance IS NULL) AND (report IS NOT NULL) AND (user_command_id IS NULL) AND (model_turn_id IS NOT NULL) AND (model_tool_request_id IS NOT NULL) AND (scheduler_turn_id IS NULL))
         OR ((event_kind = 'user_stopped'::text) AND (statement IS NULL) AND (blocked_reason IS NULL) AND (need IS NULL) AND (guidance IS NULL) AND (report IS NULL) AND (user_command_id IS NOT NULL) AND (model_turn_id IS NULL) AND (model_tool_request_id IS NULL) AND (scheduler_turn_id IS NULL))
         OR ((event_kind = 'superseded'::text) AND (statement IS NOT NULL) AND (blocked_reason IS NULL) AND (need IS NULL) AND (guidance IS NULL) AND (report IS NULL) AND (user_command_id IS NOT NULL) AND (model_turn_id IS NULL) AND (model_tool_request_id IS NULL) AND (scheduler_turn_id IS NULL))
-        OR ((event_kind = 'session_closed'::text) AND (statement IS NULL) AND (blocked_reason IS NULL) AND (need IS NULL) AND (guidance IS NULL) AND (report IS NULL) AND (user_command_id IS NULL) AND (scheduler_turn_id IS NULL) AND ((model_turn_id IS NULL) OR (model_tool_request_id IS NULL)) AND ((closure_actor_kind = 'core'::text) OR ((model_turn_id IS NULL) AND (model_tool_request_id IS NULL)))))
+        OR ((event_kind = 'session_closed'::text) AND (statement IS NULL) AND (blocked_reason IS NULL) AND (need IS NULL) AND (guidance IS NULL) AND (report IS NULL) AND (user_command_id IS NULL) AND (scheduler_turn_id IS NULL) AND (model_turn_id IS NULL) AND (model_tool_request_id IS NULL)))
     );
 
 --
@@ -1189,23 +1196,35 @@ ALTER TABLE goal_event
 -- tool-only actor leaves null by construction.
 --
 
-CREATE FUNCTION require_goal_closure_tool_request() RETURNS trigger
+CREATE FUNCTION require_goal_closure_actor_identity() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    IF NEW.event_kind <> 'session_closed' OR NEW.model_tool_request_id IS NULL THEN
+    IF NEW.event_kind <> 'session_closed' THEN
         RETURN NULL;
     END IF;
 
-    IF NOT EXISTS (
+    IF NEW.closure_actor_tool_request_id IS NOT NULL AND NOT EXISTS (
         SELECT 1
           FROM tool_request AS request
-         WHERE request.request_id = NEW.model_tool_request_id
+         WHERE request.request_id = NEW.closure_actor_tool_request_id
            AND request.session_id = NEW.session_id
     ) THEN
         RAISE EXCEPTION
             'session closure for % names tool request %, which is not its own',
-            NEW.session_id, NEW.model_tool_request_id
+            NEW.session_id, NEW.closure_actor_tool_request_id
+            USING ERRCODE = '23503';
+    END IF;
+
+    IF NEW.closure_actor_turn_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1
+          FROM turn_lifecycle AS turn
+         WHERE turn.turn_id = NEW.closure_actor_turn_id
+           AND turn.session_id = NEW.session_id
+    ) THEN
+        RAISE EXCEPTION
+            'session closure for % names turn %, which is not its own',
+            NEW.session_id, NEW.closure_actor_turn_id
             USING ERRCODE = '23503';
     END IF;
 
@@ -1215,10 +1234,10 @@ $$;
 
 -- A trigger rather than a foreign key: the key would validate every historical
 -- `achieved` and `blocked` row, and this rule is about the closure kind alone.
-CREATE CONSTRAINT TRIGGER goal_event_closure_names_its_own_request
+CREATE CONSTRAINT TRIGGER goal_event_closure_names_its_own_identity
     AFTER INSERT ON goal_event
     DEFERRABLE INITIALLY DEFERRED
-    FOR EACH ROW EXECUTE FUNCTION require_goal_closure_tool_request();
+    FOR EACH ROW EXECUTE FUNCTION require_goal_closure_actor_identity();
 
 --
 -- Deployment policy for the armed deadlines.

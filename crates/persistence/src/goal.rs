@@ -1685,9 +1685,10 @@ async fn insert_event(
             (session_id, event_ordinal, generation, event_kind, statement,
              blocked_reason, need, guidance, report, user_command_id,
              model_turn_id, model_tool_request_id, scheduler_turn_id,
-             session_outcome_kind, closure_actor_kind, closure_actor_module)
+             session_outcome_kind, closure_actor_kind, closure_actor_module,
+             closure_actor_turn_id, closure_actor_tool_request_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                 $14, $15, $16)",
+                 $14, $15, $16, $17, $18)",
     )
     .bind(session_id_to_uuid(session))
     .bind(Decimal::from(event.ordinal().get()))
@@ -1705,6 +1706,8 @@ async fn insert_event(
     .bind(encoded.session_outcome)
     .bind(encoded.closure_actor)
     .bind(encoded.closure_actor_module)
+    .bind(encoded.closure_actor_turn)
+    .bind(encoded.closure_actor_request)
     .execute(&mut *connection)
     .await?;
     Ok(())
@@ -1724,6 +1727,8 @@ struct EncodedEvent<'a> {
     session_outcome: Option<&'static str>,
     closure_actor: Option<&'static str>,
     closure_actor_module: Option<&'static str>,
+    closure_actor_turn: Option<Uuid>,
+    closure_actor_request: Option<Uuid>,
 }
 
 impl<'a> EncodedEvent<'a> {
@@ -1742,6 +1747,8 @@ impl<'a> EncodedEvent<'a> {
             session_outcome: None,
             closure_actor: None,
             closure_actor_module: None,
+            closure_actor_turn: None,
+            closure_actor_request: None,
         };
         match event.kind() {
             GoalEventKind::Commissioned {
@@ -1797,10 +1804,12 @@ impl<'a> EncodedEvent<'a> {
                 match provenance {
                     LifecycleActor::Core {
                         agency: CoreAgency::Model { turn },
-                    } => encoded.model_turn = Some(turn_id_to_uuid(*turn)),
+                    } => encoded.closure_actor_turn = Some(turn_id_to_uuid(*turn)),
                     LifecycleActor::Core {
                         agency: CoreAgency::Tool { request },
-                    } => encoded.model_tool_request = Some(tool_request_id_to_uuid(*request)),
+                    } => {
+                        encoded.closure_actor_request = Some(tool_request_id_to_uuid(*request));
+                    }
                     LifecycleActor::Module { module } => {
                         encoded.closure_actor_module = Some(dispatching_module_to_str(*module));
                     }
@@ -1824,7 +1833,8 @@ pub(crate) async fn load_goal_from_connection(
         "SELECT event_ordinal, generation, event_kind, statement,
                 blocked_reason, need, guidance, report, user_command_id,
                 model_turn_id, model_tool_request_id, scheduler_turn_id,
-                session_outcome_kind, closure_actor_kind, closure_actor_module
+                session_outcome_kind, closure_actor_kind, closure_actor_module,
+                closure_actor_turn_id, closure_actor_tool_request_id
            FROM goal_event
           WHERE session_id = $1
           ORDER BY event_ordinal",
@@ -1912,6 +1922,8 @@ fn decode_event(row: &sqlx::postgres::PgRow) -> Result<GoalEvent, GoalCorruption
     let session_outcome: Option<String> = column(row, "session_outcome_kind")?;
     let closure_actor: Option<String> = column(row, "closure_actor_kind")?;
     let closure_actor_module: Option<String> = column(row, "closure_actor_module")?;
+    let closure_actor_turn: Option<Uuid> = column(row, "closure_actor_turn_id")?;
+    let closure_actor_request: Option<Uuid> = column(row, "closure_actor_tool_request_id")?;
     let discriminator =
         goal_event_kind_from_str(&kind).ok_or_else(|| GoalCorruption::Unsupported {
             field: "event kind",
@@ -2001,8 +2013,8 @@ fn decode_event(row: &sqlx::postgres::PgRow) -> Result<GoalEvent, GoalCorruption
             provenance: decode_closure_actor(
                 required(closure_actor, "session closure actor")?,
                 closure_actor_module,
-                model_turn,
-                model_tool_request,
+                closure_actor_turn,
+                closure_actor_request,
             )?,
         },
     };
