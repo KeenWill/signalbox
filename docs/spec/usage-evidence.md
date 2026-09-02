@@ -137,16 +137,18 @@ be associated with the profile-partitioned group that represents it.
 Dollar cost is not stored in the projection. Signalboxd reconstructs the exact
 non-secret credential reference from the bounded profile label when it fits the
 configured-profile ceiling, then derives cost at read time from the
-configuration-owned rate window covering the model call's recorded timestamp; an
-over-ceiling reference derives unavailable configuration. A call whose timestamp
-falls in no configured window has unavailable cost, never zero. Independently
-reported axes remain priceable when cache normalization is incomplete; only a
-contradictory cache-inclusive breakdown is invalid. A derived amount prices
-every reported axis exactly: when any reported axis cannot be represented by
-exact decimal arithmetic, the whole cost is unavailable rather than an
-understated partial total. Each derived amount carries the identity of the
-window that priced it — provider, provider model, channel, and `effective_from`
-— and its `real` or `metered_equivalent` label. Unavailable cost carries one
-closed reason: no token evidence, unknown input semantics, incomplete cache
-axes, invalid cache breakdown, no covering rate window, or unavailable
-configuration.
+configuration-owned rate window that covers the model call's recorded timestamp
+on the channel it was submitted through; an over-ceiling reference derives
+unavailable configuration. A call whose timestamp falls in no configured window
+has unavailable cost, never zero. Independently reported axes remain priceable
+when cache normalization is incomplete; only a contradictory cache-inclusive
+breakdown is invalid. A derived amount prices every reported axis exactly: when
+any reported axis cannot be represented by exact decimal arithmetic, the whole
+cost is unavailable rather than an understated partial total. A summary group
+spanning a price change sums its calls' own per-call figures and names every
+window that contributed; it is never repriced against one window. Each derived
+amount carries the identity of the window that priced it — provider, provider
+model, channel, and `effective_from` — and its `real` or `metered_equivalent`
+label. Unavailable cost carries one closed reason: no token evidence, unknown
+input semantics, incomplete cache axes, invalid cache breakdown, no covering
+rate window, or unavailable configuration.

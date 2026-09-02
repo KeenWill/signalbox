@@ -1018,13 +1018,14 @@ unavailable candidate prevents a definitive integrity conclusion.
 
 **Committed unimplemented functionality.** The implemented request inventory
 above remains closed and rejects it. The implementing stack must add one
-authorized `reload_configuration` mutation carrying a user-global `command_id`
-and no other member. Success returns
-`configuration_reloaded { reloaded_sections }`, the closed set of sections the
-swap replaced. Failure returns `configuration_reload_failed { phase, reason }`,
-carrying the same sanitized operator failure class startup logs and no
-configuration value, path, or URL, and leaves the running configuration
-unchanged.
+authorized `reload_configuration` request carrying no members. It takes no
+`command_id`: the swap changes process memory alone and persists nothing, so
+there is no durable receipt to replay and a repeated request simply re-reads and
+re-validates. Success returns `configuration_reloaded { reloaded_sections }`,
+the closed set of sections the swap replaced. Failure returns
+`configuration_reload_failed { phase, reason }`, carrying the same sanitized
+operator failure class startup logs and no configuration value, path, or URL,
+and leaves the running configuration unchanged.
 [Configuration and credentials](configuration-and-credentials.md#configuration-reload)
 owns which sections are reloadable and the validate-then-swap rule.
 
@@ -1862,11 +1863,11 @@ with required-nullable `input_tokens`, `output_tokens`,
 that axis was not supplied; a present zero is the canonical decimal string
 `"0"`. The required-nullable `cost` member is null when no derivation is
 available. Otherwise it carries canonical nonnegative decimal `amount_usd`, the
-exact identity of the rate window that priced it — provider, provider model,
-channel, and `effective_from` — and label `real` or `metered_equivalent`.
-Because no read-time derivation exists without evidence, a nonnull `cost` is
-rejected when all four usage axes are null. `amount_usd` admits exactly the
-decimal representation used for derivation: at most 28 fractional digits and a
+exact `rate_window { provider, provider_model, channel, effective_from }`
+identity that priced it, and label `real` or `metered_equivalent`. Because no
+read-time derivation exists without evidence, a nonnull `cost` is rejected when
+all four usage axes are null. `amount_usd` admits exactly the decimal
+representation used for derivation: at most 28 fractional digits and a
 coefficient no greater than 79,228,162,514,264,337,593,543,950,335. The daemon
 derives that value at read time under the
 [configuration-and-credentials](configuration-and-credentials.md) contract; no
