@@ -99,6 +99,10 @@ class Source:
     def __post_init__(self) -> None:
         self.lines = self.text.splitlines()
         self.code = _strip_rust(self.text)
+        # Blanking preserves every newline, so the two line lists index alike:
+        # a rule can detect a construct in `code_lines` and still read the doc
+        # comment above it, which only `lines` retains.
+        self.code_lines = self.code.splitlines()
 
     def line_of(self, offset: int) -> int:
         return self.code.count("\n", 0, offset) + 1
@@ -445,7 +449,11 @@ def check_documented_configuration(repository: Repository) -> Iterator[Finding]:
     for source in repository.sources(RUST_SOURCE_GLOBS):
         if "clap::" not in source.text and "use clap" not in source.text:
             continue
-        for index, line in enumerate(source.lines):
+        # Detected in the code view: an `#[arg(...)]` inside a block comment or
+        # a template literal is example text, and reporting it would fail a
+        # build over prose. The doc check below reads the raw lines, because
+        # the code view blanks the `///` it is looking for.
+        for index, line in enumerate(source.code_lines):
             if CLAP_ARGUMENT.match(line) and not _documented_above(source.lines, index):
                 yield Finding(
                     "SR-12",
@@ -455,7 +463,7 @@ def check_documented_configuration(repository: Repository) -> Iterator[Finding]:
                 )
             if not VALUE_ENUM_DERIVE.match(line):
                 continue
-            for offset, variant in _enum_variants(source.lines, index):
+            for offset, variant in _enum_variants(source.code_lines, index):
                 if not _documented_above(source.lines, offset):
                     yield Finding(
                         "SR-12",

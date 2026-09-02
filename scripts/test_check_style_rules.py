@@ -339,6 +339,35 @@ class DocumentedConfigurationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn(MODULE, result.stdout)
 
+    def test_a_clap_attribute_inside_a_comment_passes(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "use clap::Parser;\n"
+            "/* An example of what callers write:\n"
+            "    #[arg(long)]\n"
+            "    confidence: u16,\n"
+            "*/\n"
+            "pub fn run() {}\n"
+        )
+
+        result = check("SR-12", {MODULE: source})
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_a_clap_attribute_inside_a_raw_string_passes(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "use clap::Parser;\n"
+            'const TEMPLATE: &str = r#"\n'
+            "    #[arg(long)]\n"
+            "    confidence: u16,\n"
+            '"#;\n'
+        )
+
+        result = check("SR-12", {MODULE: source})
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
     def test_undocumented_value_enum_variant_reports(self) -> None:
         source = (
             "//! Owned.\n"
