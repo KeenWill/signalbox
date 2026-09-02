@@ -19,6 +19,7 @@ unknown, not unsupported.
 | Anthropic | `anthropic:claude-4-family` | - | family | - | unknown |
 | Anthropic | `anthropic:claude-5-family` | - | family | - | unknown |
 | Anthropic | `anthropic:claude-fable-5` | `claude-fable-5` | pinned_release | `anthropic:claude-5-family` | unknown |
+| Anthropic | `anthropic:claude-fable-5-1` | `claude-fable-5-1` | pinned_release | `anthropic:claude-5-family` | unknown |
 | Anthropic | `anthropic:claude-haiku-4-5` | `claude-haiku-4-5` | rolling_alias | `anthropic:claude-4-family` | unknown |
 | Anthropic | `anthropic:claude-haiku-4-5-20251001` | `claude-haiku-4-5-20251001` | dated_snapshot | `anthropic:claude-4-family` | unknown |
 | Anthropic | `anthropic:claude-opus-4-20250514` | `claude-opus-4-20250514` | dated_snapshot | `anthropic:claude-4-family` | unknown |

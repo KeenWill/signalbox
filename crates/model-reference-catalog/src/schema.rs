@@ -11,7 +11,7 @@ use url::Url;
 
 use crate::GENERATED_PROJECTION_BANNER;
 
-const EXPECTED_SCHEMA_VERSION: u32 = 1;
+const EXPECTED_SCHEMA_VERSION: u32 = 2;
 
 /// First-party provider represented by this initial reference-data slice.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -399,11 +399,35 @@ struct ResearchGap {
     source_ids: Vec<String>,
 }
 
+/// The date through which each provider's evidence was audited.
+///
+/// The horizon is per provider because an audit is per provider: recovering a
+/// new Anthropic launch source says nothing about whether a mutable OpenAI
+/// price page still reads the way it did at its own retrieval. One shared date
+/// would let evidence for one provider silently extend every other provider's
+/// answers past what was actually checked.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvidenceHorizons {
+    openai: String,
+    anthropic: String,
+}
+
+impl EvidenceHorizons {
+    /// Borrows the date through which this provider's evidence was audited.
+    fn for_provider(&self, provider: Provider) -> &str {
+        match provider {
+            Provider::Openai => &self.openai,
+            Provider::Anthropic => &self.anthropic,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawCatalog {
     schema_version: u32,
-    verified_through: String,
+    verified_through: EvidenceHorizons,
     sources: Vec<Source>,
     models: Vec<ReferenceModel>,
     rate_sets: Vec<RateSet>,
@@ -603,9 +627,10 @@ impl Catalog {
         Ok(Self { raw, model_index })
     }
 
-    /// Date through which the bundled evidence audit was performed.
-    pub fn verified_through(&self) -> &str {
-        &self.raw.verified_through
+    /// Date through which the bundled evidence audit was performed for one
+    /// provider. Each provider carries its own horizon.
+    pub fn verified_through(&self, provider: Provider) -> &str {
+        self.raw.verified_through.for_provider(provider)
     }
 
     /// Number of reference identities. This count has no runtime meaning.
@@ -622,7 +647,7 @@ impl Catalog {
         commercial_channel: CommercialChannel,
     ) -> Result<ReferenceResolution, CatalogError> {
         validate_date(date, "query date")?;
-        if date > self.raw.verified_through.as_str() {
+        if date > self.raw.verified_through.for_provider(provider) {
             return Ok(ReferenceResolution::Unknown);
         }
         if commercial_channel.is_api_rate_channel() {
@@ -1000,16 +1025,20 @@ fn validate(raw: &RawCatalog) -> Result<HashMap<String, usize>, CatalogError> {
             "schema_version must be {EXPECTED_SCHEMA_VERSION}"
         )));
     }
-    validate_date(&raw.verified_through, "verified_through")?;
+    validate_date(&raw.verified_through.openai, "verified_through openai")?;
+    validate_date(
+        &raw.verified_through.anthropic,
+        "verified_through anthropic",
+    )?;
     let source_ids = unique_ids(
         raw.sources.iter().map(|source| source.id.as_str()),
         "source",
     )?;
     for source in &raw.sources {
         validate_source(source)?;
-        if source.retrieved > raw.verified_through {
+        if source.retrieved.as_str() > raw.verified_through.for_provider(source.provider) {
             return Err(CatalogError::new(format!(
-                "source {} was retrieved after verified_through",
+                "source {} was retrieved after its provider's verified_through",
                 source.id
             )));
         }
