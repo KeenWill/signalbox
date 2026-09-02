@@ -157,6 +157,21 @@ class AppSqlTableAccessTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout)
 
+    def test_a_quoted_query_inside_a_comment_passes(self) -> None:
+        source = (
+            "//! Owned.\n"
+            '// Reads the row the old "SELECT id FROM turn_lifecycle" read,\n'
+            "// through the projection instead.\n"
+            "pub fn read() {}\n"
+        )
+
+        result = check(
+            "SR-8",
+            {APP: source, MIGRATION: "CREATE TABLE turn_lifecycle (id uuid);\n"},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
 
 class DocumentedConfigurationTests(unittest.TestCase):
     def test_undocumented_clap_argument_reports(self) -> None:
@@ -188,6 +203,54 @@ class DocumentedConfigurationTests(unittest.TestCase):
         result = check("SR-12", {MODULE: source})
 
         self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_a_doc_attribute_documents_a_clap_argument(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "use clap::Parser;\n"
+            "struct Arguments {\n"
+            '    #[doc = "Confidence in basis points."]\n'
+            "    #[arg(long)]\n"
+            "    confidence: u16,\n"
+            "}\n"
+        )
+
+        result = check("SR-12", {MODULE: source})
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_a_block_doc_comment_documents_a_clap_argument(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "use clap::Parser;\n"
+            "struct Arguments {\n"
+            "    /** Confidence in basis points.\n"
+            "     * Omitting it records none.\n"
+            "     */\n"
+            "    #[arg(long)]\n"
+            "    confidence: u16,\n"
+            "}\n"
+        )
+
+        result = check("SR-12", {MODULE: source})
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_a_plain_block_comment_does_not_document_a_clap_argument(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "use clap::Parser;\n"
+            "struct Arguments {\n"
+            "    /* Confidence in basis points. */\n"
+            "    #[arg(long)]\n"
+            "    confidence: u16,\n"
+            "}\n"
+        )
+
+        result = check("SR-12", {MODULE: source})
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(MODULE, result.stdout)
 
     def test_undocumented_value_enum_variant_reports(self) -> None:
         source = (
@@ -252,6 +315,37 @@ class ProcMacroSpanTests(unittest.TestCase):
         result = check("SR-13", files)
 
         self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_a_generated_token_may_carry_the_call_site(self) -> None:
+        files = {
+            DERIVE_MANIFEST: PROC_MACRO_MANIFEST,
+            DERIVE_MODULE: (
+                "//! Owned.\n"
+                "pub fn expand() {\n"
+                '    let helper = Ident::new("helper", Span::call_site());\n'
+                "}\n"
+            ),
+        }
+
+        result = check("SR-13", files)
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_an_abort_macro_on_the_call_site_reports(self) -> None:
+        files = {
+            DERIVE_MANIFEST: PROC_MACRO_MANIFEST,
+            DERIVE_MODULE: (
+                "//! Owned.\n"
+                "pub fn expand() {\n"
+                '    abort!(Span::call_site(), "duplicate");\n'
+                "}\n"
+            ),
+        }
+
+        result = check("SR-13", files)
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(DERIVE_MODULE, result.stdout)
 
 
 class SourceScannerTests(unittest.TestCase):

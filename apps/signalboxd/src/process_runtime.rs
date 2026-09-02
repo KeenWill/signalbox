@@ -3736,7 +3736,7 @@ where
     {
         Ok(Some(origin)) => origin,
         Ok(None) => return write_review_invalid(writer, version, request_id).await,
-        Err(_) => return write_review_unavailable(writer, version, request_id, false).await,
+        Err(error) => return write_review_store_error(writer, version, request_id, error).await,
     };
     if origin.session() != SessionId::from_uuid(session_id.into_uuid())
         || origin.origin_turn().is_none()
@@ -4073,7 +4073,7 @@ where
     let lifecycle = match store.load_turn_lifecycle(turn_id).await {
         Ok(Some(lifecycle)) => lifecycle,
         Ok(None) => return write_review_invalid(writer, version, request_id).await,
-        Err(_) => return write_review_unavailable(writer, version, request_id, false).await,
+        Err(error) => return write_review_store_error(writer, version, request_id, error).await,
     };
     let Some(canonical_input) = lifecycle.accepted_input() else {
         return write_review_internal(writer, version, request_id).await;
@@ -5216,8 +5216,8 @@ where
                 .await
                 .map(|()| None);
         }
-        Err(_) => {
-            return write_review_unavailable(writer, version, request_id, false)
+        Err(error) => {
+            return write_review_store_error(writer, version, request_id, error)
                 .await
                 .map(|()| None);
         }

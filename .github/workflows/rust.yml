@@ -142,10 +142,9 @@ jobs:
       - name: Check panic-gate coverage
         run: python3 scripts/check_panic_gate.py
       # Gates normally: the tree satisfies all three rules this checker decides,
-      # so the step can only fail on a regression. The ten rules it once ran
-      # report-only were dropped on the 2026-09-01 owner ruling rather than
-      # carried indefinitely as a red baseline; a rule joins this step only once
-      # the tree it scans is already at zero.
+      # so the step can only fail on a regression. A rule joins this step only
+      # once the tree it scans is already at zero — never as a side effect of a
+      # change that merely reduces a count.
       - name: Check style rules
         run: python3 scripts/check_style_rules.py
   checker-and-format-tests:

@@ -17,8 +17,8 @@ files, and only when the tree it scans is already at zero. Rules whose decision
 needs type resolution, cross-crate body comparison, or a judgment about which
 enum a scrutinee belongs to are left to review and to Clippy, which sees the
 compiler's own answers; `docs/style.md` records which of those are deferred and
-why. Ten rules that ran here report-only were dropped on the 2026-09-01 owner
-ruling rather than carried as a permanently red baseline.
+why. A rule whose tree is not at zero belongs in neither place: a step that
+always reports gates nothing, and findings nobody can act on go unread.
 
 Coverage is best-effort by design, and this is a property of the tool rather
 than a gap in it. Each rule detects the common shapes of its convention in the
@@ -277,7 +277,7 @@ def check_app_sql_table_access(repository: Repository) -> Iterator[Finding]:
             (source.code.count("\n", 0, start) + 1, source.code.count("\n", 0, end) + 1)
             for start, end in _inline_test_spans(source.code)
         }
-        for line, literal in _string_literals(source.text):
+        for line, literal in _string_literals(source):
             if any(first <= line <= last for first, last in test_lines):
                 continue
             for match in SQL_TABLE_REFERENCE.finditer(literal):
@@ -291,9 +291,19 @@ def check_app_sql_table_access(repository: Repository) -> Iterator[Finding]:
                 )
 
 
-def _string_literals(text: str) -> Iterator[tuple[int, str]]:
-    """Yield each string literal body with the line it starts on."""
+def _string_literals(source: Source) -> Iterator[tuple[int, str]]:
+    """Yield each string literal in code, with the line it starts on.
+
+    Quotes inside a comment are prose, not a literal: a comment saying which
+    query the projection replaced is not a query. The code view blanks a
+    comment whole while keeping a real literal's opening delimiter in place, so
+    a literal whose first character survived the blanking is one the compiler
+    also sees.
+    """
+    text = source.text
     for match in re.finditer(r'r#*"(?:[^"]|"(?!#))*"#*|"(?:\\.|[^"\\])*"', text, re.S):
+        if source.code[match.start()] != text[match.start()]:
+            continue
         yield text.count("\n", 0, match.start()) + 1, match.group()
 
 
@@ -325,6 +335,13 @@ def _matching_brace(text: str, opening: int) -> int | None:
 CLAP_ARGUMENT = re.compile(r"^\s*#\[arg\(")
 VALUE_ENUM_DERIVE = re.compile(r"^\s*#\[derive\([^)]*\bValueEnum\b")
 ENUM_VARIANT = re.compile(r"^\s{4}([A-Z][A-Za-z0-9_]*)\s*(?:[,{(]|$)")
+# The three outer-doc spellings clap reads as help text. `#[doc = "..."]` is
+# what `///` desugars to and `/** ... */` is its block form; all three reach
+# `--help`, so a rule that saw only `///` would report documented arguments.
+# `#[doc(hidden)]` and the other `#[doc(...)]` forms carry no text and are not
+# among them.
+DOC_ATTRIBUTE = re.compile(r"^#\[\s*doc\s*=")
+BLOCK_DOC_OPENER = re.compile(r"^/\*\*(?![*/])")
 
 
 def check_documented_configuration(repository: Repository) -> Iterator[Finding]:
@@ -353,13 +370,29 @@ def check_documented_configuration(repository: Repository) -> Iterator[Finding]:
 
 
 def _documented_above(lines: list[str], index: int) -> bool:
+    """Whether an outer doc comment, in any of its spellings, precedes a line."""
     for candidate in range(index - 1, -1, -1):
         stripped = lines[candidate].strip()
         if stripped.startswith("///"):
             return True
+        if DOC_ATTRIBUTE.match(stripped):
+            return True
+        if stripped.endswith("*/"):
+            return _block_doc_opens_above(lines, candidate)
         if stripped.startswith("#["):
             continue
         return False
+    return False
+
+
+def _block_doc_opens_above(lines: list[str], closing: int) -> bool:
+    """Whether the block comment closing on a line opened as an outer doc."""
+    for candidate in range(closing, -1, -1):
+        stripped = lines[candidate].lstrip()
+        if BLOCK_DOC_OPENER.match(stripped):
+            return True
+        if stripped.startswith("/*"):
+            return False
     return False
 
 
@@ -382,6 +415,21 @@ def _enum_variants(lines: list[str], declaration: int) -> Iterator[tuple[int, st
 
 CALL_SITE = re.compile(r"\bSpan::call_site\(\)")
 PROC_MACRO_FLAG = re.compile(r"^\s*proc-macro\s*=\s*true\s*$", re.MULTILINE)
+# The rule forbids the call site as a *diagnostic's* span, not the span itself:
+# a generated token has no user tokens to point at, so `Ident::new("helper",
+# Span::call_site())` is the correct spelling and reporting it would block
+# conforming code. A finding therefore needs the call site to be an argument of
+# an error or diagnostic construction, which is where the span becomes what a
+# compiler shows the caller.
+DIAGNOSTIC_CONSTRUCTOR = re.compile(
+    r"(?:\b(?:Error|Diagnostic)\s*::\s*(?:new|new_spanned|spanned)"
+    r"|\b(?:abort|abort_call_site|emit_error|emit_warning|emit_call_site_error)\s*!)"
+    r"\s*$"
+)
+# How far back the callee is looked for. A path spelled out in full
+# (`proc_macro_error::abort!`) fits; a line break between the callee and its
+# `(` is not a spelling this repository writes.
+CONSTRUCTOR_WINDOW = 96
 
 
 def check_proc_macro_spans(repository: Repository) -> Iterator[Finding]:
@@ -398,12 +446,46 @@ def check_proc_macro_spans(repository: Repository) -> Iterator[Finding]:
         label = crate.relative_to(repository.root).as_posix()
         for source in repository.sources((f"{label}/src/*.rs",)):
             for match in CALL_SITE.finditer(source.code):
+                if not _spans_a_diagnostic(source.code, match.start()):
+                    continue
                 yield Finding(
                     "SR-13",
                     source.path,
                     source.line_of(match.start()),
                     "diagnostic spanned on the macro call site, not the tokens",
                 )
+
+
+def _spans_a_diagnostic(code: str, offset: int) -> bool:
+    """Whether the call enclosing an offset constructs a diagnostic.
+
+    Only the immediately enclosing call is read. A span bound to a local first
+    and passed in later reads as conforming here, which is the same
+    best-effort coverage every rule in this file offers: the checker declines
+    to report what it cannot see rather than reporting a shape that is correct.
+    """
+    opener = _enclosing_call(code, offset)
+    if opener is None:
+        return False
+    window = code[max(0, opener - CONSTRUCTOR_WINDOW) : opener]
+    return DIAGNOSTIC_CONSTRUCTOR.search(window) is not None
+
+
+def _enclosing_call(code: str, offset: int) -> int | None:
+    """The offset of the `(` opening the argument list an offset sits in."""
+    depth = 0
+    for index in range(offset - 1, -1, -1):
+        character = code[index]
+        if character in ")]}":
+            depth += 1
+        elif character in "([{":
+            if depth:
+                depth -= 1
+            elif character == "(":
+                return index
+            else:
+                return None
+    return None
 
 
 RULES: tuple[tuple[str, str, Callable[[Repository], Iterator[Finding]]], ...] = (

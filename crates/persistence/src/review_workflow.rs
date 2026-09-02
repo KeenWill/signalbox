@@ -3433,7 +3433,7 @@ fn decode_pass_turn_evidence(
                 turn_id(turn),
                 session_id(session),
                 accepted_input_id(accepted_input),
-                decode_turn_outcome(&state, disposition.as_deref())?,
+                decode_turn_outcome("review_pass", &state, disposition.as_deref())?,
                 frontier.map(context_frontier_id),
             )))
         }
@@ -3444,7 +3444,14 @@ fn decode_pass_turn_evidence(
     }
 }
 
+/// Decodes one turn outcome, reporting corruption against the reading table.
+///
+/// The same state/disposition pair is stored on `turn_lifecycle` and copied
+/// onto the `review_pass` evidence columns, so the caller names which of the
+/// two it read: a corruption report that named the other one would send a
+/// reader to a table whose rows are intact.
 fn decode_turn_outcome(
+    aggregate: &'static str,
     state: &str,
     disposition: Option<&str>,
 ) -> Result<ReviewPassTurnOutcome, ReviewWorkflowStoreError> {
@@ -3458,7 +3465,7 @@ fn decode_turn_outcome(
             Ok(ReviewPassTurnOutcome::ReconciliationRequired)
         }
         _ => Err(corruption(
-            "review_pass",
+            aggregate,
             format!("invalid canonical turn outcome {state}/{disposition:?}"),
         )),
     }
@@ -3472,6 +3479,7 @@ fn decode_turn_lifecycle_state(
         ("queued", None) => Ok(ReviewTurnLifecycleState::Queued),
         ("active", None) => Ok(ReviewTurnLifecycleState::Active),
         ("terminal", Some(_)) => Ok(ReviewTurnLifecycleState::Terminal(decode_turn_outcome(
+            "turn_lifecycle",
             state,
             disposition,
         )?)),

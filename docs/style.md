@@ -442,12 +442,11 @@ runs in CI as a blocking step: any finding fails the workflow, so the step can
 only fail on a regression. A rule joins it only once the tree it scans is at
 zero — never as a side effect of a change that merely reduces a count.
 
-The checker previously carried thirteen rules report-only, with about a thousand
-findings it could never act on. The 2026-09-01 owner ruling burned the three
-near-zero rules to zero, made them blocking, and dropped the other ten: a
-permanently red report gates nothing. The conventions those rules restated are
-unchanged — only their mechanical scan is gone, and review enforces them like
-the rest of this guide.
+The checker once carried thirteen rules report-only, with about a thousand
+findings it could never act on; ten of them are gone, because a step that always
+reports gates nothing and its findings go unread. The conventions those rules
+restated are unchanged — only their mechanical scan is gone, and review enforces
+them like the rest of this guide.
 
 Each rule below names the convention it decides:
 
