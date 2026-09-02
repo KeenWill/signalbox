@@ -2668,20 +2668,42 @@ async fn load_runner_recovery_yielded_attempt(
 /// session, its first queued turn, and the dispatch audit become visible at
 /// one commit boundary.
 ///
+/// The core identities a fresh initial input mints: the accepted input, its
+/// queued turn, and the cancellation entry and frontier the turn would need.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FreshInitialInput {
+    /// The accepted input.
+    pub accepted_input: AcceptedInputId,
+    /// The queued turn.
+    pub turn: TurnId,
+    /// The reserved cancellation entry.
+    pub cancellation_entry: SemanticTranscriptEntryId,
+    /// The reserved cancellation frontier.
+    pub cancellation_frontier: ContextFrontierId,
+}
+
 /// A freshly inserted session has no active turn, so submit preparation cannot
 /// apply an interrupt. The reclassification and tool-cancellation callbacks
 /// are therefore unreachable and use the reserved identities as placeholders.
-#[allow(clippy::too_many_arguments)]
+/// Core mints every lifecycle identity here (session-lifecycle §7).
 pub(crate) async fn insert_fresh_initial_input(
     connection: &mut PgConnection,
     command: SubmitInput,
     principal: CommandPrincipal,
-    accepted_input: AcceptedInputId,
-    turn: TurnId,
-    cancellation_entry: SemanticTranscriptEntryId,
-    cancellation_frontier: ContextFrontierId,
     select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
-) -> Result<(), SubmitInputRepositoryError> {
+) -> Result<FreshInitialInput, SubmitInputRepositoryError> {
+    let minted = FreshInitialInput {
+        accepted_input: AcceptedInputId::from_uuid(uuid::Uuid::now_v7()),
+        turn: TurnId::from_uuid(uuid::Uuid::now_v7()),
+        cancellation_entry: SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7()),
+        cancellation_frontier: ContextFrontierId::from_uuid(uuid::Uuid::now_v7()),
+    };
+    let FreshInitialInput {
+        accepted_input,
+        turn,
+        cancellation_entry,
+        cancellation_frontier,
+    } = minted;
     let outcome = handle_in_transaction(
         connection,
         command,
@@ -2699,7 +2721,7 @@ pub(crate) async fn insert_fresh_initial_input(
     match outcome {
         TransactionDecision::Commit(SubmitInputHandlingOutcome::Recorded(
             SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(result)),
-        )) if result.accepted_input() == accepted_input && result.turn() == turn => Ok(()),
+        )) if result.accepted_input() == accepted_input && result.turn() == turn => Ok(minted),
         TransactionDecision::Commit(_)
         | TransactionDecision::Rollback(SubmitInputHandlingOutcome::Recorded(_))
         | TransactionDecision::Rollback(SubmitInputHandlingOutcome::ConflictingReuse { .. }) => {

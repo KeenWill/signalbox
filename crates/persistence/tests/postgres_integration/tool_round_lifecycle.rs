@@ -2756,8 +2756,8 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
     let malformed_command = Uuid::from_u128(deny_seed + 90);
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp(), 'operator')",
     )
     .bind(malformed_command)
     .execute(&mut *malformed_denial)

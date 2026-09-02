@@ -290,17 +290,7 @@ impl PostgresCommissionedDispatchStore {
             transaction.rollback().await?;
             return Ok(CommissionDispatchOutcome::TargetCoolingOff { session });
         }
-        let (
-            dispatch_id,
-            fence,
-            prepared_session,
-            initial_input,
-            accepted_input,
-            turn,
-            cancellation_entry,
-            cancellation_frontier,
-            goal,
-        ) = prepared.into_parts();
+        let (dispatch_id, fence, prepared_session, initial_input, goal) = prepared.into_parts();
         let session = prepared_session.applied_result().session();
         if initial_input.session() != session {
             return Err(CommissionedDispatchRepositoryError::Corruption(
@@ -359,14 +349,10 @@ impl PostgresCommissionedDispatchStore {
             &fence,
         )
         .await?;
-        crate::submit_input::insert_fresh_initial_input(
+        let minted = crate::submit_input::insert_fresh_initial_input(
             &mut transaction,
             initial_input,
             principal,
-            accepted_input,
-            turn,
-            cancellation_entry,
-            cancellation_frontier,
             select_definition,
         )
         .await
@@ -379,8 +365,8 @@ impl PostgresCommissionedDispatchStore {
             &mut transaction,
             goal,
             principal,
-            accepted_input,
-            turn,
+            minted.accepted_input,
+            minted.turn,
         )
         .await
         .map_err(CommissionedDispatchRepositoryError::GoalCommission)?;

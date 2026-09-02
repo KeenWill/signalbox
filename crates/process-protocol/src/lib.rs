@@ -3100,6 +3100,8 @@ fn validate_review_orchestration_snapshot(
 pub enum GoalCommandRejection {
     /// The target session does not exist.
     SessionNotFound,
+    /// The session's closure is pending; the closure settles the goal.
+    SessionClosing,
     /// A goal is already pursuing or blocked.
     GoalAlreadyAttached,
     /// The session has no goal lineage.
@@ -3509,6 +3511,7 @@ pub enum SessionLifecycleCommandRejection {
     FinishConditionAlreadyDeclared,
     StandingCauseMismatch,
     SuccessorNotFound,
+    SuccessorIsSelf,
     GoalResumeRequired,
     GoalOutcomeMismatch,
     PendingTerminalConflict,

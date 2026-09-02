@@ -281,6 +281,11 @@ async fn apply(
             .await
         }
         SessionLifecycleOperation::Supersede { successor } => {
+            if *successor == session {
+                return Err(ApplyError::Rejected(
+                    SessionLifecycleCommandRejection::SuccessorIsSelf,
+                ));
+            }
             let exists: bool =
                 sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM session WHERE session_id = $1)")
                     .bind(session_id_to_uuid(*successor))
@@ -328,10 +333,14 @@ async fn apply(
             require_parked(&held.state())?;
             if crate::goal::load_goal_from_connection(connection, session)
                 .await
-                .map_err(|_| {
-                    ApplyError::Failed(SessionLifecycleCommandRepositoryError::Corruption(
+                .map_err(|error| match error {
+                    crate::goal::GoalRepositoryError::Database(error)
+                    | crate::goal::GoalRepositoryError::CommitAmbiguous(error) => {
+                        ApplyError::Failed(SessionLifecycleCommandRepositoryError::Database(error))
+                    }
+                    _ => ApplyError::Failed(SessionLifecycleCommandRepositoryError::Corruption(
                         "goal lineage",
-                    ))
+                    )),
                 })?
                 .is_some_and(|goal| goal.current().state().is_open())
             {
@@ -423,7 +432,7 @@ async fn retire_queued_turns(
             "UPDATE turn_lifecycle
                 SET state_kind = 'terminal',
                     terminal_disposition_kind = 'retired',
-                    terminal_cause_kind = 'session_closed'
+                    terminal_cause_kind = $2
               WHERE session_id = $1
                 AND turn_id = (
                     SELECT turn_id FROM turn_lifecycle
@@ -434,6 +443,9 @@ async fn retire_queued_turns(
             RETURNING turn_id",
         )
         .bind(session_id_to_uuid(session))
+        .bind(crate::mapping::turn_terminal_cause_to_str(
+            signalbox_domain::TurnTerminalCause::SessionClosed,
+        ))
         .fetch_optional(&mut *connection)
         .await?;
         let Some(turn) = retired else {
@@ -515,10 +527,17 @@ async fn insert_command_record(
     .bind(rejection)
     .execute(&mut *connection)
     .await?;
+    // A rejection naming a session that does not exist settles without one.
+    let settled_session = match result {
+        SessionLifecycleCommandResult::Rejected(
+            SessionLifecycleCommandRejection::SessionNotFound,
+        ) => None,
+        _ => Some(command.session()),
+    };
     outbox::append(
         connection,
         OutboxEvent::CommandSettled {
-            session: Some(command.session()),
+            session: settled_session,
             command: command.command_id(),
             result: match rejection {
                 None => CommandSettlementOutbox::Applied,

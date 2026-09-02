@@ -565,6 +565,7 @@ async fn insert_prepared(
         session.id(),
         &signalbox_domain::SessionCreationCause::Interactive,
         signalbox_domain::SessionOwnership::Unmonitored,
+        signalbox_domain::StartGate::Open,
         None,
     )
     .await?;

@@ -6259,6 +6259,7 @@ pub enum SessionLifecycleCommandRejection {
     FinishConditionAlreadyDeclared,
     StandingCauseMismatch,
     SuccessorNotFound,
+    SuccessorIsSelf,
     GoalResumeRequired,
     GoalOutcomeMismatch,
     PendingTerminalConflict,
@@ -7222,10 +7223,6 @@ pub trait CommissionedDispatchIdGenerator {
     fn next_dispatch_id(&mut self) -> CommissionedDispatchId;
     fn next_command_id(&mut self) -> DurableCommandId;
     fn next_session_id(&mut self) -> SessionId;
-    fn next_accepted_input_id(&mut self) -> AcceptedInputId;
-    fn next_turn_id(&mut self) -> TurnId;
-    fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
-    fn next_context_frontier_id(&mut self) -> ContextFrontierId;
 }
 
 pub struct UuidV7CommissionedDispatchIdGenerator;
@@ -7259,10 +7256,6 @@ impl PreparedCommissionedDispatch {
         CommissionedDispatchFence,
         PreparedCreateSession,
         SubmitInput,
-        AcceptedInputId,
-        TurnId,
-        SemanticTranscriptEntryId,
-        ContextFrontierId,
         GoalUserCommand,
     );
     // accessors: dispatch_id(), fence(), prepared_session(), goal(), session(),
@@ -9730,10 +9723,6 @@ impl RepoWatchPreparedDispatchAction {
         RepoWatchActionV1,
         PreparedCreateSession,
         SubmitInput,
-        AcceptedInputId,
-        TurnId,
-        SemanticTranscriptEntryId,
-        ContextFrontierId,
         GoalUserCommand,
     );
 }
@@ -9784,10 +9773,6 @@ pub trait RepoWatchDispatchIdGenerator {
     fn next_dispatch_id(&mut self) -> RepoWatchDispatchId;
     fn next_command_id(&mut self) -> DurableCommandId;
     fn next_session_id(&mut self) -> SessionId;
-    fn next_accepted_input_id(&mut self) -> AcceptedInputId;
-    fn next_turn_id(&mut self) -> TurnId;
-    fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
-    fn next_context_frontier_id(&mut self) -> ContextFrontierId;
 }
 
 pub struct UuidV7RepoWatchDispatchIdGenerator;
@@ -12306,6 +12291,7 @@ impl GoalUserCommand {
 
 pub enum GoalCommandRejection {
     SessionNotFound,
+    SessionClosing,
     GoalAlreadyAttached,
     GoalNotAttached,
     UnknownModelAlias,

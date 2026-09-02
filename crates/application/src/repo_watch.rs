@@ -11,18 +11,18 @@ use std::{
 use sha2::{Digest, Sha256};
 
 use signalbox_domain::{
-    AcceptedInputId, BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha,
-    ContextFrontierId, CreateSession, DeliveryRequest, DurableCommandId, GitHubObjectId,
-    GoalTextError, GoalUserAction, GoalUserCommand, LabelName, MergeableState,
-    ModelSelectionOverride, ModuleDispatch, PerInputConfigurationChoices, PreparedCreateSession,
-    PullRequestEventContext, PullRequestNumber, ReactionChange, ReactionContent, ReactionSubject,
-    RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchDispatchContextError, RepoWatchDispatchId,
-    RepoWatchEvent, RepoWatchEventConstructionError, RepoWatchEventId, RepoWatchEventKindNameV1,
+    BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, CreateSession,
+    DeliveryRequest, DurableCommandId, GitHubObjectId, GoalTextError, GoalUserAction,
+    GoalUserCommand, LabelName, MergeableState, ModelSelectionOverride, ModuleDispatch,
+    PerInputConfigurationChoices, PreparedCreateSession, PullRequestEventContext,
+    PullRequestNumber, ReactionChange, ReactionContent, ReactionSubject, RepoWatchActionV1,
+    RepoWatchAuthorLogin, RepoWatchDispatchContextError, RepoWatchDispatchId, RepoWatchEvent,
+    RepoWatchEventConstructionError, RepoWatchEventId, RepoWatchEventKindNameV1,
     RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchRule, RepoWatchRuleId,
     RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchWorkflowRunAttempt, RepositorySlug,
-    ReviewState, ReviewThreadId, SemanticTranscriptEntryId, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationProvenance, SessionId, SessionTemplateName,
-    SessionTemplateProvenance, SubmitInput, TurnId, UserContent, WorkflowName,
+    ReviewState, ReviewThreadId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+    SessionCreationProvenance, SessionId, SessionTemplateName, SessionTemplateProvenance,
+    SubmitInput, UserContent, WorkflowName,
 };
 
 /// Supplies identities in the exact order in which the differ emits facts.
@@ -3091,10 +3091,6 @@ pub struct RepoWatchPreparedDispatchAction {
     action: RepoWatchActionV1,
     prepared_session: PreparedCreateSession,
     initial_input: SubmitInput,
-    accepted_input: AcceptedInputId,
-    turn: TurnId,
-    cancellation_entry: SemanticTranscriptEntryId,
-    cancellation_frontier: ContextFrontierId,
     goal: GoalUserCommand,
 }
 
@@ -3122,20 +3118,12 @@ impl RepoWatchPreparedDispatchAction {
         RepoWatchActionV1,
         PreparedCreateSession,
         SubmitInput,
-        AcceptedInputId,
-        TurnId,
-        SemanticTranscriptEntryId,
-        ContextFrontierId,
         GoalUserCommand,
     ) {
         (
             self.action,
             self.prepared_session,
             self.initial_input,
-            self.accepted_input,
-            self.turn,
-            self.cancellation_entry,
-            self.cancellation_frontier,
             self.goal,
         )
     }
@@ -3194,10 +3182,6 @@ pub trait RepoWatchDispatchIdGenerator {
     fn next_dispatch_id(&mut self) -> RepoWatchDispatchId;
     fn next_command_id(&mut self) -> DurableCommandId;
     fn next_session_id(&mut self) -> SessionId;
-    fn next_accepted_input_id(&mut self) -> AcceptedInputId;
-    fn next_turn_id(&mut self) -> TurnId;
-    fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
-    fn next_context_frontier_id(&mut self) -> ContextFrontierId;
 }
 
 /// Production UUIDv7 identity source for repository-watch dispatch.
@@ -3215,22 +3199,6 @@ impl RepoWatchDispatchIdGenerator for UuidV7RepoWatchDispatchIdGenerator {
 
     fn next_session_id(&mut self) -> SessionId {
         SessionId::from_uuid(uuid::Uuid::now_v7())
-    }
-
-    fn next_accepted_input_id(&mut self) -> AcceptedInputId {
-        AcceptedInputId::from_uuid(uuid::Uuid::now_v7())
-    }
-
-    fn next_turn_id(&mut self) -> TurnId {
-        TurnId::from_uuid(uuid::Uuid::now_v7())
-    }
-
-    fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId {
-        SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7())
-    }
-
-    fn next_context_frontier_id(&mut self) -> ContextFrontierId {
-        ContextFrontierId::from_uuid(uuid::Uuid::now_v7())
     }
 }
 
@@ -3355,10 +3323,6 @@ where
                 .synthesized_goal_statement(rule.id())
                 .map_err(RepoWatchDispatchPreparationError::GoalStatement)
                 .map_err(RepoWatchDispatchServiceError::Preparation)?;
-            let accepted_input = self.ids.next_accepted_input_id();
-            let turn = self.ids.next_turn_id();
-            let cancellation_entry = self.ids.next_semantic_entry_id();
-            let cancellation_frontier = self.ids.next_context_frontier_id();
             let goal = GoalUserCommand::new(
                 self.ids.next_command_id(),
                 session,
@@ -3368,10 +3332,6 @@ where
                 action,
                 prepared_session,
                 initial_input,
-                accepted_input,
-                turn,
-                cancellation_entry,
-                cancellation_frontier,
                 goal,
             });
         }

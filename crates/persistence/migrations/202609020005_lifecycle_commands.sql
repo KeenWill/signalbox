@@ -47,7 +47,8 @@ UPDATE durable_command AS command
                      JOIN repo_watch_dispatch_action AS action
                        ON action.session_id = goal.session_id
                     WHERE goal.command_id = command.command_id
-                      AND goal.operation_kind = 'attach')
+                      AND goal.operation_kind = 'attach'
+                      AND goal.result_event_ordinal = 1)
        );
 
 UPDATE durable_command
@@ -210,6 +211,7 @@ CREATE TABLE session_lifecycle_command (
             'finish_condition_already_declared'::text,
             'standing_cause_mismatch'::text,
             'successor_not_found'::text,
+            'successor_is_self'::text,
             'goal_resume_required'::text,
             'goal_outcome_mismatch'::text,
             'pending_terminal_conflict'::text
@@ -232,7 +234,9 @@ CREATE TABLE session_lifecycle_command (
         OR ((operation_kind = 'close_failed'::text)
             AND (rejection_kind = 'standing_cause_mismatch'::text))
         OR ((operation_kind = 'supersede'::text)
-            AND (rejection_kind = 'successor_not_found'::text))
+            AND (rejection_kind = ANY (ARRAY[
+                'successor_not_found'::text, 'successor_is_self'::text
+            ])))
         OR ((operation_kind = 'resume'::text)
             AND (rejection_kind = 'goal_resume_required'::text))
         OR ((operation_kind = 'adopt'::text) AND (rejection_kind = ANY (ARRAY[
@@ -373,10 +377,16 @@ ALTER TABLE create_session_command
 --
 
 ALTER TABLE session_lifecycle
+    ADD COLUMN start_gate_held boolean,
     ADD COLUMN finish_condition_kind text,
     ADD COLUMN finish_condition text,
     ADD COLUMN pending_terminal_actor_kind text,
     ADD COLUMN pending_terminal_actor_module text;
+
+UPDATE session_lifecycle SET start_gate_held = false;
+
+ALTER TABLE session_lifecycle
+    ALTER COLUMN start_gate_held SET NOT NULL;
 
 UPDATE session_lifecycle AS lifecycle
    SET finish_condition_kind = 'external_gate'
@@ -407,9 +417,191 @@ ALTER TABLE session_lifecycle
     );
 
 --
--- §2: a session-level stop settles an open goal generation with the session's
--- outcome; `user_stopped` stays the goal command's own event.
+-- §7 start gate: a held gate keeps the session `created` until `release_start`
+-- or expiry; the projection's move out of `created` is discarded while the
+-- gate is held, and the created state arms the start-gate deadline instead of
+-- the first-input one. Releasing the gate and gating activation land with the
+-- deadline engine.
 --
+
+CREATE FUNCTION hold_session_start_gate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF OLD.state_kind = 'created'
+       AND OLD.start_gate_held
+       AND NEW.state_kind NOT IN ('created', 'terminal')
+    THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER session_lifecycle_start_gate_holds
+    BEFORE UPDATE OF state_kind ON session_lifecycle
+    FOR EACH ROW EXECUTE FUNCTION hold_session_start_gate();
+
+-- Supersedes 202609020002_session_lifecycle_satellite.
+CREATE OR REPLACE FUNCTION arm_session_deadline() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    required text;
+    policy interval;
+    armed text;
+BEGIN
+    required := CASE
+        WHEN NEW.state_kind = 'created' AND NEW.start_gate_held THEN 'start_gate'
+        ELSE session_deadline_kind_for_state(NEW.state_kind, NEW.waiting_kind)
+    END;
+
+    IF NOT NEW.owned OR required IS NULL THEN
+        DELETE FROM session_deadline WHERE session_id = NEW.session_id;
+        RETURN NULL;
+    END IF;
+
+    SELECT deadline_kind INTO armed
+      FROM session_deadline
+     WHERE session_id = NEW.session_id;
+
+    IF TG_OP = 'UPDATE'
+       AND armed IS NOT DISTINCT FROM required
+       AND OLD.owned = NEW.owned
+       AND OLD.state_entered_at = NEW.state_entered_at
+    THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT bound INTO policy
+      FROM session_lifecycle_bound
+     WHERE deadline_kind = required;
+
+    INSERT INTO session_deadline
+            (session_id, deadline_kind, on_expiry_kind, expires_at, armed_at)
+         VALUES (
+            NEW.session_id,
+            required,
+            session_deadline_expiry_for_kind(required),
+            CASE WHEN policy IS NULL THEN NULL ELSE statement_timestamp() + policy END,
+            statement_timestamp()
+         )
+    ON CONFLICT (session_id) DO UPDATE
+       SET deadline_kind = EXCLUDED.deadline_kind,
+           on_expiry_kind = EXCLUDED.on_expiry_kind,
+           expires_at = EXCLUDED.expires_at,
+           armed_at = EXCLUDED.armed_at;
+
+    RETURN NULL;
+END;
+$$;
+
+--
+-- A goal command on a session whose closure is pending is refused
+-- `session_closing`: the committed closure settles the generation.
+--
+
+-- Supersedes 202609010006_goals.
+ALTER TABLE goal_command
+    DROP CONSTRAINT goal_command_rejection_kind_check;
+
+ALTER TABLE goal_command
+    ADD CONSTRAINT goal_command_rejection_kind_check CHECK (
+        (rejection_kind IS NULL)
+        OR (rejection_kind = ANY (ARRAY[
+            'session_not_found'::text,
+            'session_closing'::text,
+            'goal_already_attached'::text,
+            'goal_not_attached'::text,
+            'unknown_model_alias'::text,
+            'requires_blocked'::text,
+            'requires_pursuing_or_blocked'::text,
+            'generation_exhausted'::text,
+            'event_ordinal_exhausted'::text,
+            'acceptance_position_exhausted'::text
+        ]))
+    );
+
+-- Supersedes 202609010006_goals.
+ALTER TABLE goal_command
+    DROP CONSTRAINT goal_command_rejection_operation;
+
+ALTER TABLE goal_command
+    ADD CONSTRAINT goal_command_rejection_operation CHECK (
+        (result_kind = 'applied'::text)
+        OR (rejection_kind = ANY (ARRAY['session_not_found'::text, 'session_closing'::text]))
+        OR ((operation_kind = 'attach'::text) AND (rejection_kind = ANY (ARRAY[
+            'goal_already_attached'::text, 'unknown_model_alias'::text,
+            'generation_exhausted'::text, 'event_ordinal_exhausted'::text,
+            'acceptance_position_exhausted'::text
+        ])))
+        OR ((operation_kind = 'resume'::text) AND (rejection_kind = ANY (ARRAY[
+            'goal_not_attached'::text, 'unknown_model_alias'::text,
+            'requires_blocked'::text, 'event_ordinal_exhausted'::text,
+            'acceptance_position_exhausted'::text
+        ])))
+        OR ((operation_kind = 'stop'::text) AND (rejection_kind = ANY (ARRAY[
+            'goal_not_attached'::text, 'requires_pursuing_or_blocked'::text,
+            'event_ordinal_exhausted'::text
+        ])))
+        OR ((operation_kind = 'supersede'::text) AND (rejection_kind = ANY (ARRAY[
+            'goal_not_attached'::text, 'unknown_model_alias'::text,
+            'requires_pursuing_or_blocked'::text, 'generation_exhausted'::text,
+            'event_ordinal_exhausted'::text, 'acceptance_position_exhausted'::text
+        ])))
+    );
+
+--
+-- §2: a session-level stop settles an open goal generation with the session's
+-- outcome; `user_stopped` stays the goal command's own event. An achieved
+-- generation that was never verified admits every later closure.
+--
+
+-- Supersedes 202609020002_session_lifecycle_satellite.
+CREATE OR REPLACE FUNCTION require_terminal_session_settles_its_goal() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    last_kind text;
+    last_outcome text;
+BEGIN
+    IF NEW.state_kind <> 'terminal' THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT event_kind, session_outcome_kind INTO last_kind, last_outcome
+      FROM goal_event
+     WHERE session_id = NEW.session_id
+     ORDER BY event_ordinal DESC
+     LIMIT 1;
+
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+
+    IF last_kind NOT IN ('achieved', 'user_stopped', 'session_closed') THEN
+        RAISE EXCEPTION
+            'terminal session % leaves its goal generation live at %',
+            NEW.session_id, last_kind
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NOT (
+        last_kind = 'achieved'
+        OR (last_kind = 'user_stopped' AND NEW.terminal_outcome_kind = 'stopped')
+        OR (last_kind = 'session_closed'
+            AND last_outcome = NEW.terminal_outcome_kind)
+    ) THEN
+        RAISE EXCEPTION
+            'terminal session % records % over a goal settled as %',
+            NEW.session_id, NEW.terminal_outcome_kind,
+            COALESCE(last_outcome, last_kind)
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NULL;
+END;
+$$;
 
 -- Supersedes 202609020002_session_lifecycle_satellite.
 ALTER TABLE goal_event
@@ -636,6 +828,14 @@ BEGIN
      WHERE session_id = subject
      ORDER BY event_ordinal DESC
      LIMIT 1;
+    IF FOUND AND last_kind = 'user_stopped'
+       AND held.pending_terminal_outcome_kind <> 'stopped'
+    THEN
+        RAISE EXCEPTION
+            'session % cannot settle % over a goal the user stopped',
+            subject, held.pending_terminal_outcome_kind
+            USING ERRCODE = '23514';
+    END IF;
     IF FOUND AND last_kind IN ('commissioned', 'resumed', 'blocked', 'superseded') THEN
         IF held.pending_terminal_outcome_kind = 'achieved_verified' THEN
             RAISE EXCEPTION

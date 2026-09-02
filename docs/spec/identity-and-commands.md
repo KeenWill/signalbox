@@ -201,10 +201,15 @@ key `command_id`, a closed `command_kind` discriminator (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
 `replace_session_metadata`, `submit_input`, `decide_tool_request`,
 `override_denied_tool_request`, `review_workflow`, `compact_session`,
-`update_session_placement`, `replace_lost_runner`, `abandon_lost_runner`,
-`promote_pending_runner`), a kind-scoped `storage_version`, and `claimed_at`
-(`transaction_timestamp()`), which is non-semantic operational metadata. No
-command kind, session, or client has a separate command-ID namespace.
+`update_session_placement`, `session_lifecycle`, `replace_lost_runner`,
+`abandon_lost_runner`, `promote_pending_runner`), a kind-scoped
+`storage_version`, `claimed_at` (`transaction_timestamp()`), which is
+non-semantic operational metadata, and the authenticated issuer principal —
+`issuer_kind` (`core`, `operator`, `module`, `watchdog`) with `issuer_module`
+naming the module — stamped by the boundary that admitted the command. The
+lifecycle actor classification derives from the principal and the domain actor:
+a module principal wins, otherwise the actor classifies. No command kind,
+session, or client has a separate command-ID namespace.
 
 Each admitted kind has one purpose-specific typed record family
 (`create_session_command`, `create_session_from_imported_frontier_command`,
@@ -212,20 +217,20 @@ Each admitted kind has one purpose-specific typed record family
 `submit_input_command`, `decide_tool_request_command`,
 `override_denied_tool_request_command`, `review_workflow_command`,
 `compact_session_command`, `update_session_placement_command`,
-`replace_lost_runner_command`, `abandon_lost_runner_command`,
-`promote_pending_runner_command`) keyed one-to-one by `command_id`, storing
-every caller-supplied semantic field under `CHECK` constraints and foreign keys.
-Every family except replacement also stores its terminal `applied`/`rejected`
-discriminator and typed result fields in that row. A compact-session record
-begins `pending` with its exact dedicated Prepared call, then changes exactly
-once to `applied` with its receipt or to `failed`; its request fields never
-change. Runner replacement instead has one immutable request row plus at most
-one append-only `replace_lost_runner_result`: the request row satisfies
-typed-claim completeness while provisioning crosses the runner boundary, and no
-success or rejection response exists until the result row commits. Kind and
-version agreement between the registry row and its typed record is enforced by a
-composite foreign key, and a deferred constraint trigger
-(`durable_command_requires_typed_record`, executing function
+`session_lifecycle_command`, `replace_lost_runner_command`,
+`abandon_lost_runner_command`, `promote_pending_runner_command`) keyed
+one-to-one by `command_id`, storing every caller-supplied semantic field under
+`CHECK` constraints and foreign keys. Every family except replacement also
+stores its terminal `applied`/`rejected` discriminator and typed result fields
+in that row. A compact-session record begins `pending` with its exact dedicated
+Prepared call, then changes exactly once to `applied` with its receipt or to
+`failed`; its request fields never change. Runner replacement instead has one
+immutable request row plus at most one append-only `replace_lost_runner_result`:
+the request row satisfies typed-claim completeness while provisioning crosses
+the runner boundary, and no success or rejection response exists until the
+result row commits. Kind and version agreement between the registry row and its
+typed record is enforced by a composite foreign key, and a deferred constraint
+trigger (`durable_command_requires_typed_record`, executing function
 `require_durable_command_typed_record`) requires exactly one typed record per
 claim at every transaction boundary. Why: typed relational records keep each
 command's comparison payload and result reviewable and constraint-checked
@@ -301,8 +306,15 @@ lands; version 6 adds path-scoped placement, and version 7 composes model
 settings with that implemented shape. Each field is absent before its
 introducing version, so an older reader rejects a newer creation record instead
 of discarding either decision. `ReplaceSessionMetadata` and `DecideToolRequest`
-use version 1. `CreateSession` records applied results only (its one preparation
-failure is an error, not a recorded rejection);
+use version 1. `CreateSession` records applied results and the two
+session-lifecycle §7 admission rejections, `finish_condition_required` and
+`held_gate_requires_ownership` (its one preparation failure is an error, not a
+recorded rejection); `session_lifecycle` (version 1) carries
+`stop{sticky, descendant_scope}`, `supersede{successor}`, `abandon`,
+`close_failed{cause}`, `resume`, `adopt{finish_condition}`, and `release` in one
+typed record with closed, operation-scoped rejections; every claimed lifecycle
+command settles as a `command_settled` receipt, and a rejected creation does too
+(`session_created` is an applied creation's receipt);
 `CreateSessionFromImportedFrontier` also records applied results only, because a
 missing conversation named by the frontier or a boundary absent from that
 conversation is a pre-claim admission error rather than an authoritative

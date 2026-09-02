@@ -9639,8 +9639,8 @@ async fn review_orchestration_intent_blocks_cross_kind_registry_insert()
     let mut transaction = pool.begin().await?;
     let error = sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'review_workflow', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'review_workflow', 1, transaction_timestamp(), 'operator')",
     )
     .bind(command.command_id.into_uuid())
     .execute(&mut *transaction)

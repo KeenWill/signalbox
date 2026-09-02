@@ -199,6 +199,8 @@ pub enum SessionLifecycleCommandRejection {
     StandingCauseMismatch,
     /// A supersession names a successor that does not exist.
     SuccessorNotFound,
+    /// A supersession names the session itself.
+    SuccessorIsSelf,
     /// A parked goal session resumes through the goal command.
     GoalResumeRequired,
     /// The outcome contradicts the terminal state the goal already recorded.

@@ -399,6 +399,9 @@ impl ToolExecutor for GoalDeclarationExecutor {
             GoalTransitionOutcome::Applied(_) => {
                 ToolExecutorEvidence::CompletedText(String::from(GOAL_DECLARE_RESULT))
             }
+            GoalTransitionOutcome::SessionClosing => ToolExecutorEvidence::KnownFailed {
+                detail: Some(self.rejected.clone()),
+            },
             GoalTransitionOutcome::FinishCheckFailed { detail } => {
                 ToolExecutorEvidence::KnownFailed {
                     detail: Some(
@@ -1074,6 +1077,7 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
                     adapter.arm_automatic_resumption(session, event.ordinal(), resumption);
                 }
                 GoalTransitionOutcome::FinishCheckFailed { .. }
+                | GoalTransitionOutcome::SessionClosing
                 | GoalTransitionOutcome::GoalNotAttached
                 | GoalTransitionOutcome::Rejected(_)
                 | GoalTransitionOutcome::NotCurrentGoalTurn => {}

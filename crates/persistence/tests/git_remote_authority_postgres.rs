@@ -96,8 +96,8 @@ async fn insert_command(
     kind: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO durable_command (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, $2, 1, now())",
+        "INSERT INTO durable_command (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, $2, 1, now(), 'operator')",
     )
     .bind(command.into_uuid())
     .bind(kind)

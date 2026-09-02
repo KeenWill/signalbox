@@ -931,6 +931,7 @@ pub const fn turn_terminal_cause_to_str(value: TurnTerminalCause) -> &'static st
         }
         TurnTerminalCause::UnclassifiedFailure => "unclassified_failure",
         TurnTerminalCause::GoalTurnIneligible => "goal_turn_ineligible",
+        TurnTerminalCause::SessionClosed => "session_closed",
     }
 }
 
@@ -963,6 +964,7 @@ pub fn turn_terminal_cause_from_str(value: &str) -> Option<TurnTerminalCause> {
         }
         "unclassified_failure" => Some(TurnTerminalCause::UnclassifiedFailure),
         "goal_turn_ineligible" => Some(TurnTerminalCause::GoalTurnIneligible),
+        "session_closed" => Some(TurnTerminalCause::SessionClosed),
         _ => None,
     }
 }
@@ -1626,6 +1628,7 @@ pub(crate) const fn session_lifecycle_command_rejection_to_str(
         }
         SessionLifecycleCommandRejection::StandingCauseMismatch => "standing_cause_mismatch",
         SessionLifecycleCommandRejection::SuccessorNotFound => "successor_not_found",
+        SessionLifecycleCommandRejection::SuccessorIsSelf => "successor_is_self",
         SessionLifecycleCommandRejection::GoalResumeRequired => "goal_resume_required",
         SessionLifecycleCommandRejection::GoalOutcomeMismatch => "goal_outcome_mismatch",
         SessionLifecycleCommandRejection::PendingTerminalConflict => "pending_terminal_conflict",
@@ -1650,6 +1653,7 @@ pub(crate) fn session_lifecycle_command_rejection_from_str(
         }
         "standing_cause_mismatch" => Some(SessionLifecycleCommandRejection::StandingCauseMismatch),
         "successor_not_found" => Some(SessionLifecycleCommandRejection::SuccessorNotFound),
+        "successor_is_self" => Some(SessionLifecycleCommandRejection::SuccessorIsSelf),
         "goal_resume_required" => Some(SessionLifecycleCommandRejection::GoalResumeRequired),
         "goal_outcome_mismatch" => Some(SessionLifecycleCommandRejection::GoalOutcomeMismatch),
         "pending_terminal_conflict" => {
@@ -2109,6 +2113,7 @@ pub(crate) fn goal_model_blocked_reason_from_str(
 pub(crate) const fn goal_command_rejection_to_str(value: GoalCommandRejection) -> &'static str {
     match value {
         GoalCommandRejection::SessionNotFound => "session_not_found",
+        GoalCommandRejection::SessionClosing => "session_closing",
         GoalCommandRejection::GoalAlreadyAttached => "goal_already_attached",
         GoalCommandRejection::GoalNotAttached => "goal_not_attached",
         GoalCommandRejection::UnknownModelAlias => "unknown_model_alias",
@@ -2123,6 +2128,7 @@ pub(crate) const fn goal_command_rejection_to_str(value: GoalCommandRejection) -
 pub(crate) fn goal_command_rejection_from_str(value: &str) -> Option<GoalCommandRejection> {
     match value {
         "session_not_found" => Some(GoalCommandRejection::SessionNotFound),
+        "session_closing" => Some(GoalCommandRejection::SessionClosing),
         "goal_already_attached" => Some(GoalCommandRejection::GoalAlreadyAttached),
         "goal_not_attached" => Some(GoalCommandRejection::GoalNotAttached),
         "unknown_model_alias" => Some(GoalCommandRejection::UnknownModelAlias),

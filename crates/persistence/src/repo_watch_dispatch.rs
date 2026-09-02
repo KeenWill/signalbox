@@ -1679,16 +1679,8 @@ impl PostgresRepoWatchDispatchStore {
                             "action ordinal exceeds storage",
                         )
                     })?;
-                    let (
-                        configured_action,
-                        prepared_session,
-                        initial_input,
-                        accepted_input,
-                        turn,
-                        cancellation_entry,
-                        cancellation_frontier,
-                        goal,
-                    ) = action.into_parts();
+                    let (configured_action, prepared_session, initial_input, goal) =
+                        action.into_parts();
                     let RepoWatchActionV1::DispatchSession(configured_dispatch) = configured_action;
                     let session = prepared_session.applied_result().session();
                     let command = prepared_session.command();
@@ -1766,14 +1758,15 @@ impl PostgresRepoWatchDispatchStore {
                     .bind(dispatch_start_lease_millis)
                     .execute(&mut *transaction)
                     .await?;
-                    crate::submit_input::insert_fresh_initial_input(
-                        &mut transaction,
-                        initial_input,
-                        principal,
+                    let crate::submit_input::FreshInitialInput {
                         accepted_input,
                         turn,
                         cancellation_entry,
                         cancellation_frontier,
+                    } = crate::submit_input::insert_fresh_initial_input(
+                        &mut transaction,
+                        initial_input,
+                        principal,
                         select_definition,
                     )
                     .await

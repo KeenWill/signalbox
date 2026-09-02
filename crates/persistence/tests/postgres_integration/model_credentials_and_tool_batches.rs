@@ -612,8 +612,8 @@ async fn s10_inv012_decision_receipt_rejects_cross_round_earliest_request()
     let command = Uuid::from_u128(seed + 0x200);
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp(), 'operator')",
     )
     .bind(command)
     .execute(&mut *transaction)

@@ -175,7 +175,16 @@ causes. A request failing any of those requirements cannot commit. Only the
 current goal turn may declare; an otherwise valid request from an older turn
 returns `NotCurrentGoalTurn` without appending an event. A tool-request identity
 can cause at most one goal declaration event. An achieved event stores the exact
-final report and derives its transcript reference from that same invocation.
+final report and derives its transcript reference from that same invocation. An
+achievement is gated on the session's finish check (session-lifecycle §2): a
+failing verdict appends no event, records `goal_finish_check{failed, detail}`,
+and fails the tool with the detail, so pursuit stays live and the next scheduler
+failure block carries the detail in its need; a passing verdict commits
+`achieved_verified` to the session's terminal handoff in the same transaction; a
+session with no finish condition, or one no verifier evaluates, records the
+achievement `unverified` and never reaches `achieved_verified`. A goal command
+or model declaration on a session whose closure is committed to the terminal
+handoff is refused `session_closing`: the closure settles the generation.
 
 **Implemented behavior.** Model-selectable blocked reasons are
 `user_input_required`, `external_change_required`, and `authorization_required`.

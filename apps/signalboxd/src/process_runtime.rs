@@ -15759,8 +15759,20 @@ where
         Ok(SessionLifecycleCommandHandlingOutcome::Recorded(
             SessionLifecycleCommandResult::Applied(application),
         )) => {
-            if let SessionLifecycleApplication::ClosurePending { live_turn, .. } = application {
-                interrupt_for_closure(services, &command, live_turn).await;
+            if let SessionLifecycleApplication::ClosurePending { live_turn, .. } = application
+                && interrupt_for_closure(services, &command, live_turn)
+                    .await
+                    .is_err()
+            {
+                // The closure is committed; a retransmission replays it and
+                // re-issues the interrupt.
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::mutation_unavailable(false),
+                )
+                .await;
             }
             write_message(
                 writer,
@@ -15839,7 +15851,7 @@ async fn interrupt_for_closure(
     services: &ConnectionServices,
     command: &SessionLifecycleCommand,
     live_turn: TurnId,
-) {
+) -> Result<(), ()> {
     const CLOSURE_INTERRUPT_MASK: u128 = 0x5e55_1001_c105_4e00_0000_0000_0000_0001;
     let session = command.session();
     let descendant_scope = match command.operation() {
@@ -15859,17 +15871,17 @@ async fn interrupt_for_closure(
         Err(error) => {
             tracing::warn!(session = %session.into_uuid(), cause = %error,
                 "closure interrupt could not read the session defaults version");
-            return;
+            return Err(());
         }
     };
     let Some(expected_version) = defaults_version
         .and_then(|version| u64::try_from(version).ok())
         .and_then(SessionConfigurationDefaultsVersion::try_from_u64)
     else {
-        return;
+        return Err(());
     };
     let Ok(content) = UserContent::try_text(String::from("The session was closed.")) else {
-        return;
+        return Err(());
     };
     let request = SubmitInputRequest::try_new_with_content_limit(
         DurableCommandId::from_uuid(uuid::Uuid::from_u128(
@@ -15888,7 +15900,7 @@ async fn interrupt_for_closure(
         configured_usize(&services.model_configuration, "max_message_utf8_bytes"),
     );
     let Ok(request) = request else {
-        return;
+        return Err(());
     };
     let mut service = SubmitInputService::new(
         UuidV7SubmitInputIdGenerator,
@@ -15903,14 +15915,16 @@ async fn interrupt_for_closure(
         services.tool_dispatch_gate.clone(),
     );
     match service.execute(request).await {
-        Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Applied(_))) => {}
+        Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Applied(_))) => Ok(()),
         Ok(other) => {
             tracing::warn!(session = %session.into_uuid(), outcome = ?other,
-                "closure interrupt was not applied; the turn settles at its boundary");
+                "closure interrupt was not applied");
+            Err(())
         }
         Err(error) => {
             tracing::warn!(session = %session.into_uuid(), cause = %error,
-                "closure interrupt failed; the turn settles at its boundary");
+                "closure interrupt failed");
+            Err(())
         }
     }
 }
@@ -15949,6 +15963,7 @@ const fn wire_lifecycle_rejection(value: DomainLifecycleRejection) -> WireLifecy
             WireLifecycleRejection::StandingCauseMismatch
         }
         DomainLifecycleRejection::SuccessorNotFound => WireLifecycleRejection::SuccessorNotFound,
+        DomainLifecycleRejection::SuccessorIsSelf => WireLifecycleRejection::SuccessorIsSelf,
         DomainLifecycleRejection::GoalResumeRequired => WireLifecycleRejection::GoalResumeRequired,
         DomainLifecycleRejection::GoalOutcomeMismatch => {
             WireLifecycleRejection::GoalOutcomeMismatch
@@ -16227,6 +16242,7 @@ const fn wire_goal_command_rejection(
 ) -> WireGoalCommandRejection {
     match value {
         DomainGoalCommandRejection::SessionNotFound => WireGoalCommandRejection::SessionNotFound,
+        DomainGoalCommandRejection::SessionClosing => WireGoalCommandRejection::SessionClosing,
         DomainGoalCommandRejection::GoalAlreadyAttached => {
             WireGoalCommandRejection::GoalAlreadyAttached
         }

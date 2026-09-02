@@ -24,7 +24,7 @@ use signalbox_domain::{
     CoreAgency, FinishCondition, Goal, GoalState, LifecycleActor, SessionClosureOutcome,
     SessionCreationCause, SessionFailureCause, SessionId, SessionLifecycleState, SessionOwnership,
     SessionOwnershipTransition, SessionParkCause, SessionParkResponder, SessionTerminalOutcome,
-    SessionWait, SessionWaitKind, StopStickiness,
+    SessionWait, SessionWaitKind, StartGate, StopStickiness,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -667,6 +667,7 @@ pub(crate) async fn insert_created(
     session: SessionId,
     cause: &SessionCreationCause,
     ownership: SessionOwnership,
+    start_gate: StartGate,
     finish_condition: Option<&FinishCondition>,
 ) -> Result<(), sqlx::Error> {
     let actor = creation_actor(cause);
@@ -675,9 +676,9 @@ pub(crate) async fn insert_created(
     sqlx::query(
         "INSERT INTO session_lifecycle
             (session_id, state_kind, owned, actor_kind, actor_module,
-             actor_turn_id, actor_tool_request_id,
+             actor_turn_id, actor_tool_request_id, start_gate_held,
              finish_condition_kind, finish_condition)
-         VALUES ($1, 'created', $2, $3, $4, $5, $6, $7, $8)",
+         VALUES ($1, 'created', $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(session_id_to_uuid(session))
     .bind(ownership.is_owned())
@@ -685,6 +686,7 @@ pub(crate) async fn insert_created(
     .bind(actor_module)
     .bind(actor_turn)
     .bind(actor_request)
+    .bind(matches!(start_gate, StartGate::Held))
     .bind(finish_kind)
     .bind(finish_statement)
     .execute(&mut *connection)
@@ -797,17 +799,18 @@ async fn settle_goal(
 /// is about to record.
 ///
 /// A goal the user stopped and a session claiming a verified achievement are
-/// two durable records of one ending that disagree.
+/// two durable records of one ending that disagree. An achieved generation
+/// admits every closure: a declared achievement the finish check never
+/// verified leaves the session open until one closes it.
 fn closed_goal_agrees(state: &GoalState, outcome: SessionTerminalOutcome) -> bool {
     match (state, outcome) {
-        (GoalState::Achieved { .. }, SessionTerminalOutcome::AchievedVerified)
+        (GoalState::Achieved { .. }, _)
         | (GoalState::UserStopped, SessionTerminalOutcome::Stopped { .. }) => true,
         (GoalState::SessionClosed { outcome: settled }, _) => {
             outcome.closure_outcome() == Some(*settled)
         }
         (
-            GoalState::Achieved { .. }
-            | GoalState::UserStopped
+            GoalState::UserStopped
             | GoalState::Pursuing
             | GoalState::Blocked { .. }
             | GoalState::Superseded { .. },

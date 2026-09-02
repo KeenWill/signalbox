@@ -1548,8 +1548,8 @@ async fn approval_guard_user_decision_requires_event_and_lifecycle_effect()
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp(), 'operator')",
     )
     .bind(command)
     .execute(&mut *transaction)
@@ -1624,8 +1624,8 @@ async fn s10_inv019_approval_guard_rejects_decision_for_later_request() -> Resul
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp(), 'operator')",
     )
     .bind(command)
     .execute(&mut *transaction)
@@ -1871,8 +1871,8 @@ async fn s10_inv019_approval_guard_rejects_decision_during_recovery() -> Result<
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp(), 'operator')",
     )
     .bind(command)
     .execute(&mut *transaction)
@@ -3030,8 +3030,8 @@ async fn user_override_guard_requires_a_terminal_delegate_denial() -> Result<(),
     let command = Uuid::from_u128(seed + 0xf0);
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'override_denied_tool_request', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'override_denied_tool_request', 1, transaction_timestamp(), 'operator')",
     )
     .bind(command)
     .execute(&mut *transaction)

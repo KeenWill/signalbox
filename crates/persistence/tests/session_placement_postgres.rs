@@ -1987,12 +1987,14 @@ async fn s36_post_migration_legacy_creation_materializes_pathless_placement()
              ancestry_kind, initial_defaults_version, model_selection_kind,
              direct_model_selection_id, model_alias_id, dangerous_tool_auto_approval,
              system_prompt, template_name, template_content_digest, placement_path,
-             root_global_read_intent, result_kind, created_session_id)
+             root_global_read_intent, result_kind, created_session_id,
+             start_gate, ownership)
          SELECT command_id, command_kind, storage_version, creation_cause,
                 ancestry_kind, initial_defaults_version, model_selection_kind,
                 direct_model_selection_id, model_alias_id, dangerous_tool_auto_approval,
                 system_prompt, template_name, template_content_digest, placement_path,
-                root_global_read_intent, result_kind, created_session_id
+                root_global_read_intent, result_kind, created_session_id,
+                'open', 'unmonitored'
            FROM legacy_creation",
     )
     .execute(&mut *transaction)
@@ -2022,8 +2024,8 @@ async fn s36_applied_update_receipt_requires_the_expected_predecessor() -> Resul
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, $2, $3, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, $2, $3, transaction_timestamp(), 'operator')",
     )
     .bind(*command_id.as_uuid())
     .bind("update_session_placement")
@@ -2063,8 +2065,8 @@ async fn s36_applied_update_receipt_requires_a_result_version() -> Result<(), Bo
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, $2, $3, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, $2, $3, transaction_timestamp(), 'operator')",
     )
     .bind(*command_id.as_uuid())
     .bind("update_session_placement")

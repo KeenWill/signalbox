@@ -103,6 +103,8 @@ pub enum GoalTransitionOutcome {
         /// The check result.
         detail: String,
     },
+    /// The session's closure is pending; the closure settles the goal.
+    SessionClosing,
     /// The session has no attached goal.
     GoalNotAttached,
     /// The current state rejected the requested transition.
@@ -423,6 +425,8 @@ impl GoalRepository {
         let session_exists = lock_session(&mut transaction, command.session()).await?;
         let mut result = if !session_exists {
             GoalCommandResult::Rejected(GoalCommandRejection::SessionNotFound)
+        } else if session_is_closing(&mut transaction, command.session()).await? {
+            GoalCommandResult::Rejected(GoalCommandRejection::SessionClosing)
         } else {
             match apply_user_command(&mut transaction, &command, expected_head).await? {
                 UserCommandApplication::Recorded(result) => result,
@@ -914,6 +918,10 @@ impl GoalRepository {
             transaction.rollback().await?;
             return Ok(GoalTransitionOutcome::GoalNotAttached);
         };
+        if session_is_closing(&mut transaction, session).await? {
+            transaction.rollback().await?;
+            return Ok(GoalTransitionOutcome::SessionClosing);
+        }
         match transition.authority() {
             SystemTransitionAuthority::ModelDeclaration => {}
             SystemTransitionAuthority::SchedulerFailure => {
@@ -1081,6 +1089,21 @@ pub(crate) async fn record_execution_failure_recovery_cause(
 }
 
 /// Whether the session is suspended in place.
+/// Whether a closure is committed to the session's terminal handoff.
+async fn session_is_closing(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<bool, GoalRepositoryError> {
+    let closing: Option<bool> = sqlx::query_scalar(
+        "SELECT pending_terminal_outcome_kind IS NOT NULL
+           FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?;
+    Ok(closing.unwrap_or(false))
+}
+
 async fn session_is_parked(
     connection: &mut PgConnection,
     session: SessionId,

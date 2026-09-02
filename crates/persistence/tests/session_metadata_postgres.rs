@@ -862,8 +862,8 @@ async fn inv012_metadata_installation_authenticates_snapshot_before_supersession
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'replace_session_metadata', 1, statement_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'replace_session_metadata', 1, statement_timestamp(), 'operator')",
     )
     .bind(Uuid::from_u128(0x905))
     .execute(&mut *transaction)
@@ -1285,8 +1285,8 @@ async fn inv002_applied_metadata_receipt_requires_current_root() -> Result<(), B
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'replace_session_metadata', 1, statement_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'replace_session_metadata', 1, statement_timestamp(), 'operator')",
     )
     .bind(Uuid::from_u128(0x908))
     .execute(&mut *transaction)
@@ -1518,8 +1518,8 @@ async fn metadata_schema_bounds_every_indexed_string() -> Result<(), Box<dyn Err
     let mut receipt_tag_transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'replace_session_metadata', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'replace_session_metadata', 1, transaction_timestamp(), 'operator')",
     )
     .bind(Uuid::from_u128(0xa03))
     .execute(&mut *receipt_tag_transaction)
@@ -1545,8 +1545,8 @@ async fn metadata_schema_bounds_every_indexed_string() -> Result<(), Box<dyn Err
     let mut receipt_attribute_transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'replace_session_metadata', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'replace_session_metadata', 1, transaction_timestamp(), 'operator')",
     )
     .bind(Uuid::from_u128(0xa04))
     .execute(&mut *receipt_attribute_transaction)

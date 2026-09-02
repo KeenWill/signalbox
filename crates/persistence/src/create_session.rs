@@ -524,6 +524,7 @@ pub(crate) async fn insert_prepared(
         session.id(),
         &cause,
         command.ownership(),
+        command.start_gate(),
         command.finish_condition(),
     )
     .await?;
@@ -615,7 +616,7 @@ pub(crate) async fn insert_prepared(
         outbox::OutboxEvent::SessionCreated {
             session: session.id(),
             cause,
-            ownership: crate::session_lifecycle::creation_ownership(&cause),
+            ownership: command.ownership(),
         },
     )
     .await?;
@@ -635,9 +636,23 @@ async fn insert_rejected(
         command,
         CreateSessionResult::Rejected(rejection),
     )
-    .await
+    .await?;
+    outbox::append(
+        connection,
+        outbox::OutboxEvent::CommandSettled {
+            session: None,
+            command: command.command_id(),
+            result: outbox::CommandSettlementOutbox::Rejected {
+                kind: create_session_rejection_to_str(rejection),
+            },
+        },
+    )
+    .await?;
+    Ok(())
 }
 
+/// Writes the typed command record. `session_created` is an applied creation's
+/// receipt; a rejection appends `command_settled`.
 async fn insert_command_record(
     connection: &mut PgConnection,
     command: &signalbox_domain::CreateSession,
@@ -720,18 +735,6 @@ async fn insert_command_record(
     .bind(finish_statement)
     .bind(rejection_kind)
     .execute(&mut *connection)
-    .await?;
-    outbox::append(
-        connection,
-        outbox::OutboxEvent::CommandSettled {
-            session: created_session.map(session_id_from_uuid),
-            command: command.command_id(),
-            result: match rejection_kind {
-                None => outbox::CommandSettlementOutbox::Applied,
-                Some(kind) => outbox::CommandSettlementOutbox::Rejected { kind },
-            },
-        },
-    )
     .await?;
     Ok(())
 }
