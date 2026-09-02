@@ -384,9 +384,11 @@ likewise connection and migration errors) into a generic `Infrastructure` class
 carrying only its phase, so an operator cannot distinguish an unreadable catalog
 from an unknown field, bad version, or invalid limit (see Open edges). The six
 unconditional deployment paths are accepted without I/O at environment parsing
-time; both catalogs and every template prompt file are read during startup.
-Provider and integration credential files remain lazy. A currently routed S3
-blob store is the sole static-file exception: after database connection and the
+time; both catalogs and every template prompt file are read during startup and
+are re-read afterward only through
+[configuration reload](#configuration-reload). Provider and integration
+credential files remain lazy. A currently routed S3 blob store is the sole
+static-file exception: after database connection and the
 configuration-independent recovery scan, startup reads that explicit credential
 to perform the marker and lifecycle checks owned by
 [blob storage](blob-storage.md#stores-routing-and-configuration), before socket
@@ -407,6 +409,30 @@ The local `signalbox-debug` harness reads `SIGNALBOX_DEBUG_DATABASE_URL` and
 from the configured profile exactly as the daemon does. It does not compose the
 daemon tool catalog and does not read `GITHUB_TOKEN_FILE`; it is a development
 driver, not the client protocol.
+
+## Configuration reload
+
+**Committed unimplemented functionality.** No present surface re-reads a
+configuration file after startup. Every section of the daemon document is
+classified **reloadable** or **startup-only**, and this page states which; a
+startup-only section changes only by restarting the process. Reload is exactly
+one admin verb,
+[`reload_configuration`](process-protocol.md#configuration-reload): it re-reads
+the configured paths, validates the complete replacement exactly as startup
+does, and swaps the in-memory catalogs atomically on success. Any read, parse,
+or validation failure leaves the running configuration in place and returns the
+typed failure. Why: a partially applied document would leave one process holding
+two configurations at once, against which no pinned selection or derived cost
+could be read. File watching and polling are external tooling that calls that
+verb; the daemon watches no path.
+
+The initially reloadable sections are the static model and alias catalog
+including its rate windows, the static session-template catalog, and the
+repository-watch configuration ([repo-watch](repo-watch.md)) — widening
+[#660](https://github.com/KeenWill/signalbox/issues/660), which named only the
+latter two. Every other section is startup-only, including process paths and
+bounds, adapter mappings, credential deliveries and pools, telemetry export, and
+the separate [runner configuration](#runner-configuration).
 
 ## Telemetry export
 
@@ -1430,16 +1456,27 @@ Each `[[models]]` entry defines one direct selection:
 - `context_window_tokens` — required positive `u32` usable context ceiling after
   any provider or adapter reservation, not the provider's larger raw advertised
   window, and not smaller than `max_output_tokens`.
-- the optional all-or-none rate set — `rate_version`,
+- zero or more `[[models.rate_windows]]` entries, each one dated price window
+  over this entry's own provider and `provider_model`: `channel` (`api` or
+  `batch_api`), `effective_from`, optional `effective_until`, the all-or-none
   `input_usd_per_million_tokens`, `output_usd_per_million_tokens`,
   `cache_creation_input_usd_per_million_tokens`, and
-  `cache_read_input_usd_per_million_tokens`. The four rates are nonnegative
-  decimal USD strings per million tokens. A derived figure is absent when
-  multiplying, dividing by one million, or summing those rates and the reported
-  counts would lose decimal precision. The version is nonempty, unpadded,
-  NUL-free, and at most 128 UTF-8 bytes. Declaring only part of the set is a
-  configuration error; omitting all five is valid and yields no dollar figure
-  for that model.
+  `cache_read_input_usd_per_million_tokens`, and the provenance pair
+  `source_url` and `retrieved_on`. The four rates are nonnegative decimal USD
+  strings per million tokens. A derived figure is absent when multiplying,
+  dividing by one million, or summing those rates and the reported counts would
+  lose decimal precision. Dates are exact days; `effective_until` is exclusive
+  and its absence means the window is still open. Windows sharing one provider,
+  provider model, and channel may not overlap. A window's identity is exactly
+  that triple plus its `effective_from`, and that identity is what a derived
+  cost names; the opaque `rate_version` label is retired. Declaring only part of
+  a window's rate set is a configuration error; declaring no window is valid and
+  yields no dollar figure for that model.
+
+An optional per-provider `verified_through` date records how far a deployment
+checked its rate evidence. It is provenance metadata and never a resolution
+gate: a call whose timestamp is later than that date still prices against the
+open window covering it.
 
 This build provides exactly `anthropic`, `openai`, `claude_cli`, and
 `codex_cli`. No adapter pins a profile name, and a pool may hold several
@@ -1497,8 +1534,8 @@ Each optional `[[aliases]]` entry defines one alias: `alias_id` (UUID of the
 `ModelAlias`) and `selection_id`, which must name a configured model (dangling
 aliases are rejected). Duplicate selection keys, duplicate aliases, and
 conflicting runtime meanings for one target are all rejected. If more than one
-model entry names the same target, its complete rate set or complete rate
-absence must also agree; a rated and unrated entry cannot share a target.
+model entry names the same target, its complete set of rate windows or complete
+rate absence must also agree; a rated and unrated entry cannot share a target.
 
 One valid document yields correlated immutable in-memory catalogs:
 
@@ -1512,18 +1549,19 @@ One valid document yields correlated immutable in-memory catalogs:
   each operation; the latter selects a session-pinned credential entry. A
   provider model routed to different adapters or a target assigned conflicting
   families is rejected at startup.
-- the profile-to-billing-kind registry and target-to-versioned-rate catalog used
-  only when a read surface derives dollar cost. Rates are never written to a
-  model-call row.
+- the profile-to-billing-kind registry and target-to-dated-rate-window catalog
+  used only when a read surface derives dollar cost. Rates are never written to
+  a model-call row.
 
-The file is read once at startup and never reread; changing the catalog is a
-process restart. Why: pinned targets and frozen selections must not change
-meaning mid-flight, so the restart is the visible unit of configuration change.
-Keeping a selection key immutable is deployment discipline that code enforces
-only partially: removal makes new resolution fail, but nothing prevents an
-edited document from pointing an existing `selection_id` at a new `target_id`
-across a restart — new turns would silently resolve to the new target (see Open
-edges). Where a stored call exists, code does enforce consistency: ordinary-path
+The file is read at startup; this catalog is reloadable, so it is also re-read
+on the admin verb [configuration reload](#configuration-reload) owns. Why:
+pinned targets and frozen selections must not change meaning mid-flight, so a
+validated atomic swap is the visible unit of configuration change. Keeping a
+selection key immutable is deployment discipline that code enforces only
+partially: removal makes new resolution fail, but nothing prevents an edited
+document from pointing an existing `selection_id` at a new `target_id` across a
+restart — new turns would silently resolve to the new target (see Open edges).
+Where a stored call exists, code does enforce consistency: ordinary-path
 reconstitution cross-checks every stored call's target against the configured
 `ModelTargetCatalog` and fails closed as corruption (`CallTargetMismatch`) when
 the catalog now resolves that selection to a different target. The startup-scan
@@ -2760,25 +2798,26 @@ the latest session credential snapshot entry for that target's family. A
 prepared or in-flight predecessor retains its call pin (INV-046).
 
 Dollar cost is derived only while reading a terminal call: the call's pinned
-target selects the current configured rate version, and the exact credential
-profile stored on that call selects `api_metered` or `subscription`. An
-API-metered profile produces `real`; a subscription profile produces
-`metered_equivalent`, regardless of adapter kind. A missing rate set, missing
-historical profile declaration, call with no present usage axis, or historical
-call whose input/cache semantics predate the durable pin produces no dollar
-figure rather than zero. Codex CLI's reported `input_tokens` includes its
-reported cache-creation and cache-read breakdowns. Derivation therefore applies
-the ordinary input rate only when both cache breakdown axes are present and can
-be subtracted from total input; an omitted breakdown leaves ordinary input
+target and its recorded timestamp select the one configured rate window covering
+that instant, and the exact credential profile stored on that call selects
+`api_metered` or `subscription`. An API-metered profile produces `real`; a
+subscription profile produces `metered_equivalent`, regardless of adapter kind.
+A timestamp covered by no configured window, missing historical profile
+declaration, call with no present usage axis, or historical call whose
+input/cache semantics predate the durable pin produces no dollar figure rather
+than zero. Codex CLI's reported `input_tokens` includes its reported
+cache-creation and cache-read breakdowns. Derivation therefore applies the
+ordinary input rate only when both cache breakdown axes are present and can be
+subtracted from total input; an omitted breakdown leaves ordinary input
 unreported while any independently reported output or cache axis remains
 priceable. Each cache rate is applied once. That inclusive-input meaning is
-pinned on the call when it is prepared, so a later configuration restart that
-reuses the target with another adapter cannot reinterpret historical usage. A
-cache breakdown larger than total input yields no figure. A credential update
-that advances the session head cannot relabel an earlier call because that call
-retains its original profile pin. Deployment keeps one profile name's billing
-meaning stable and uses a new name when an authentication update changes that
-meaning. The parser cannot detect a same-name semantic rewrite across
+pinned on the call when it is prepared, so a later configuration restart or
+reload that reuses the target with another adapter cannot reinterpret historical
+usage. A cache breakdown larger than total input yields no figure. A credential
+update that advances the session head cannot relabel an earlier call because
+that call retains its original profile pin. Deployment keeps one profile name's
+billing meaning stable and uses a new name when an authentication update changes
+that meaning. The parser cannot detect a same-name semantic rewrite across
 configuration restarts; such a rewrite would relabel historical reads and is
 invalid deployment evolution.
 

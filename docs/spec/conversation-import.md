@@ -180,6 +180,14 @@ neighboring record, wall clock, or another field. Sidechain and metadata flags
 are provenance, not exclusion: they do not remove content or make an imported
 frontier unseedable.
 
+Imported entries keep their attested source timestamps; nothing is restamped to
+import time. Where an imported turn carries usage evidence, dollar cost derives
+at read time from the configured rate window covering that attested timestamp,
+under the same
+[configuration and credentials](configuration-and-credentials.md#the-static-model-alias-and-web-fetch-catalog)
+contract native calls use, so a conversation years old prices at the rates in
+force when it ran. No dollar amount is persisted with an imported conversation.
+
 Claude Code versions 1 and 2 map the four text-valued provenance fields from the
 exact top-level members `uuid` (source record identifier), `parentUuid` (source
 parent record identifier), `sessionId` (source session identifier), and

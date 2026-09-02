@@ -1014,6 +1014,20 @@ registration. When no replica succeeds, `unavailable` takes precedence over
 `blob_corrupt`, which takes precedence over `blob_missing`, because an
 unavailable candidate prevents a definitive integrity conclusion.
 
+### Configuration reload
+
+**Committed unimplemented functionality.** The implemented request inventory
+above remains closed and rejects it. The implementing stack must add one
+authorized `reload_configuration` mutation carrying a user-global `command_id`
+and no other member. Success returns
+`configuration_reloaded { reloaded_sections }`, the closed set of sections the
+swap replaced. Failure returns `configuration_reload_failed { phase, reason }`,
+carrying the same sanitized operator failure class startup logs and no
+configuration value, path, or URL, and leaves the running configuration
+unchanged.
+[Configuration and credentials](configuration-and-credentials.md#configuration-reload)
+owns which sections are reloadable and the validate-then-swap rule.
+
 ## Server messages
 
 Message objects carry a required string `type` and reject fields not admitted by
@@ -1848,10 +1862,11 @@ with required-nullable `input_tokens`, `output_tokens`,
 that axis was not supplied; a present zero is the canonical decimal string
 `"0"`. The required-nullable `cost` member is null when no derivation is
 available. Otherwise it carries canonical nonnegative decimal `amount_usd`, the
-exact bounded `rate_version`, and label `real` or `metered_equivalent`. Because
-no read-time derivation exists without evidence, a nonnull `cost` is rejected
-when all four usage axes are null. `amount_usd` admits exactly the decimal
-representation used for derivation: at most 28 fractional digits and a
+exact identity of the rate window that priced it — provider, provider model,
+channel, and `effective_from` — and label `real` or `metered_equivalent`.
+Because no read-time derivation exists without evidence, a nonnull `cost` is
+rejected when all four usage axes are null. `amount_usd` admits exactly the
+decimal representation used for derivation: at most 28 fractional digits and a
 coefficient no greater than 79,228,162,514,264,337,593,543,950,335. The daemon
 derives that value at read time under the
 [configuration-and-credentials](configuration-and-credentials.md) contract; no
@@ -3009,9 +3024,9 @@ Snapshot validation rejects noncontiguous indices, unknown turn identities,
 repeated model-call identities, or usage rows outside strict turn-acceptance and
 per-turn model-call-UUID order. Currency presentation aggregates only per-call
 derived figures sharing the same usage provenance, billing label, and rate
-version; each line states that labeled triple and its costed-call count. These
+window; each line states that labeled triple and its costed-call count. These
 client totals are presentation arithmetic over exact per-call read evidence and
-use an anonymous temporary-file index so distinct rate versions do not grow
+use an anonymous temporary-file index so distinct rate windows do not grow
 client heap. The client scans that index once for output; totals are never
 persisted, and an addition that cannot retain both operands exactly rejects the
 snapshot instead of reporting a rounded total.
