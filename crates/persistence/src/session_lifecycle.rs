@@ -102,9 +102,9 @@ pub enum SessionLifecycleRejection {
     GoalOutcomeMismatch,
     /// A failed closure names a cause the park it closes does not hold.
     StandingCauseMismatch,
-    /// `abandoned` is an operator write-off (§2), so no other classification
-    /// may record one.
-    AbandonRequiresOperator,
+    /// `abandoned` is an operator's write-off of a parked session (§2), so no
+    /// other classification and no other state records one.
+    AbandonRequiresParkedOperator,
 }
 
 impl fmt::Display for SessionLifecycleRejection {
@@ -123,7 +123,7 @@ impl fmt::Display for SessionLifecycleRejection {
                 "the session outcome contradicts its goal's terminal state"
             }
             Self::StandingCauseMismatch => "the closure cause is not the park's standing cause",
-            Self::AbandonRequiresOperator => "only an operator writes a session off",
+            Self::AbandonRequiresParkedOperator => "only an operator writes off a parked session",
         };
         formatter.write_str(detail)
     }
@@ -457,6 +457,13 @@ impl SessionLifecycleRepository {
             )
             .await);
         }
+        if !admits_abandonment(&held.state, outcome, LifecycleActor::Operator) {
+            return Err(reject(
+                transaction,
+                SessionLifecycleRejection::AbandonRequiresParkedOperator,
+            )
+            .await);
+        }
         match held.pending_terminal {
             Some(committed) if committed == outcome => {
                 return commit(transaction).await;
@@ -655,9 +662,9 @@ pub(crate) async fn close_in_transaction(
             SessionLifecycleRejection::StandingCauseMismatch,
         ));
     }
-    if outcome == SessionTerminalOutcome::Abandoned && actor != LifecycleActor::Operator {
+    if !admits_abandonment(&held.state, outcome, actor) {
         return Err(SessionLifecycleRepositoryError::Rejected(
-            SessionLifecycleRejection::AbandonRequiresOperator,
+            SessionLifecycleRejection::AbandonRequiresParkedOperator,
         ));
     }
     // A committed handoff is the decision that started tearing the turn down,
@@ -723,6 +730,22 @@ fn closed_goal_agrees(state: &GoalState, outcome: SessionTerminalOutcome) -> boo
             _,
         ) => false,
     }
+}
+
+/// Whether the closure is an abandonment its state and actor permit.
+///
+/// §2 makes `abandoned` the operator's write-off of a parked session, so a
+/// session nobody parked is not one anybody wrote off — and the cleanup
+/// obligation it records would name resources no operator ever looked at.
+fn admits_abandonment(
+    held: &SessionLifecycleState,
+    outcome: SessionTerminalOutcome,
+    actor: LifecycleActor,
+) -> bool {
+    if outcome != SessionTerminalOutcome::Abandoned {
+        return true;
+    }
+    held.is_parked() && actor == LifecycleActor::Operator
 }
 
 /// Whether a closure carries forward the cause the park it closes holds.

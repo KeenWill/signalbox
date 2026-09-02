@@ -28,59 +28,8 @@ ALTER TABLE session
     ADD COLUMN dispatching_module text,
     ADD COLUMN dispatch_ref uuid;
 
---
--- Existing rows carry the retired spelling, and the append-only guards reject
--- an ordinary UPDATE, so the one-time carry disables them for the rewrite the
--- pre-alpha rule owes a live database. Nothing else about these rows changes.
---
-
--- Three things hold the retired spelling in place, and all three come off
--- before the rewrite.
---
--- The CHECKs, because disabling a trigger does not disable a CHECK. The two
--- provenance foreign keys, because each pins a command row to its session's
--- (cause, ancestry) and `ON UPDATE RESTRICT` refuses the parent update
--- immediately — RESTRICT is not deferrable, so the imported family's
--- `DEFERRABLE INITIALLY DEFERRED` does not postpone it either. And the
--- append-only triggers, disabled as a set rather than by name: re-firing a
--- baseline validation over history is exactly what this carry must not do.
---
--- `ENABLE TRIGGER USER` restores them without revalidating any row.
-
 ALTER TABLE session
     DROP CONSTRAINT session_creation_cause_closed;
-
-ALTER TABLE session
-    DROP CONSTRAINT session_delegated_cause_shape;
-
-ALTER TABLE create_session_command
-    DROP CONSTRAINT create_session_command_creation_cause_closed;
-
-ALTER TABLE create_session_from_imported_frontier_command
-    DROP CONSTRAINT create_session_from_imported_frontier_command_cause_closed;
-
-ALTER TABLE create_session_command
-    DROP CONSTRAINT create_session_command_provenance_fk;
-
-ALTER TABLE create_session_from_imported_frontier_command
-    DROP CONSTRAINT create_session_from_imported_frontier_command_provenance_fk;
-
-ALTER TABLE session DISABLE TRIGGER USER;
-ALTER TABLE create_session_command DISABLE TRIGGER USER;
-ALTER TABLE create_session_from_imported_frontier_command DISABLE TRIGGER USER;
-
-UPDATE session SET creation_cause = 'interactive'
- WHERE creation_cause = 'user_initiated';
-
-UPDATE create_session_command SET creation_cause = 'interactive'
- WHERE creation_cause = 'user_initiated';
-
-UPDATE create_session_from_imported_frontier_command SET creation_cause = 'interactive'
- WHERE creation_cause = 'user_initiated';
-
-ALTER TABLE session ENABLE TRIGGER USER;
-ALTER TABLE create_session_command ENABLE TRIGGER USER;
-ALTER TABLE create_session_from_imported_frontier_command ENABLE TRIGGER USER;
 
 ALTER TABLE session
     ADD CONSTRAINT session_creation_cause_closed CHECK (
@@ -90,6 +39,9 @@ ALTER TABLE session
             'delegated'::text
         ])
     );
+
+ALTER TABLE session
+    DROP CONSTRAINT session_delegated_cause_shape;
 
 ALTER TABLE session
     ADD CONSTRAINT session_creation_cause_shape CHECK (
@@ -541,45 +493,6 @@ ALTER TABLE ONLY session_lifecycle
         ON UPDATE RESTRICT ON DELETE RESTRICT;
 
 --
--- The one-time carry for sessions that predate the satellite.
---
--- Every existing session gets its row before the back-reference below starts
--- requiring one. They are recorded unmonitored: the daemon held no liveness
--- obligation for work created before the obligation existed, and unmonitored
--- arms no deadline and drives nothing, so the carry cannot retire or park
--- anything. The state is read from the turns each session actually has, and
--- the projection corrects it on that session's next turn or goal write.
---
--- Nothing is carried as terminal. A terminal row owes a settled goal and no
--- live turn, and neither is known for a session that closed before any of this
--- existed; §14's closure semantics decide those deliberately.
---
-
-INSERT INTO session_lifecycle
-        (session_id, state_kind, owned, actor_kind)
-SELECT existing.session_id,
-       CASE
-           WHEN EXISTS (
-               SELECT 1 FROM turn_lifecycle AS live
-                WHERE live.session_id = existing.session_id
-                  AND live.state_kind = 'active'
-           ) THEN 'active'
-           WHEN EXISTS (
-               SELECT 1 FROM turn_lifecycle AS queued
-                WHERE queued.session_id = existing.session_id
-                  AND queued.state_kind = 'queued'
-           ) THEN 'dispatched'
-           ELSE 'created'
-       END,
-       false,
-       'core'
-  FROM session AS existing
- WHERE NOT EXISTS (
-        SELECT 1 FROM session_lifecycle AS present
-         WHERE present.session_id = existing.session_id
- );
-
---
 -- Every session owns exactly one satellite, written in its own creating
 -- transaction. The deferred back-reference is how `session_current_defaults`
 -- already makes a satellite mandatory: a creation path that forgets the
@@ -758,16 +671,6 @@ CREATE TABLE session_ownership_event (
              OR ((actor_turn_id IS NULL) AND (actor_tool_request_id IS NULL)))
     )
 );
-
--- The carried sessions get the journal entry their bit needs.
-INSERT INTO session_ownership_event
-        (session_id, event_ordinal, transition_kind, owned_after, actor_kind)
-SELECT lifecycle.session_id, 1, 'created_unmonitored', false, 'core'
-  FROM session_lifecycle AS lifecycle
- WHERE NOT EXISTS (
-        SELECT 1 FROM session_ownership_event AS present
-         WHERE present.session_id = lifecycle.session_id
- );
 
 ALTER TABLE ONLY session_ownership_event
     ADD CONSTRAINT session_ownership_event_session_id_fkey
@@ -1460,7 +1363,6 @@ CREATE FUNCTION project_session_lifecycle(subject uuid, lifts_park boolean) RETU
 DECLARE
     held session_lifecycle%ROWTYPE;
     live_phase text;
-    live_turn uuid;
     goal_turn uuid;
     goal_request uuid;
     actor text;
@@ -1502,8 +1404,8 @@ BEGIN
         RETURN;
     END IF;
 
-    SELECT live.active_phase_kind, live.turn_id, live.child_wait_request_id
-      INTO live_phase, live_turn, live_child_request
+    SELECT live.active_phase_kind, live.child_wait_request_id
+      INTO live_phase, live_child_request
       FROM turn_lifecycle AS live
      WHERE live.session_id = subject
        AND live.state_kind = 'active'
@@ -1515,8 +1417,7 @@ BEGIN
     -- outranks it, and this runs on every turn write.
     IF live_phase IS NULL THEN
         SELECT event.event_kind, event.blocked_reason, event.generation,
-               COALESCE(event.model_turn_id, event.scheduler_turn_id),
-               event.model_tool_request_id
+               event.model_turn_id, event.model_tool_request_id
           INTO goal_kind, goal_reason, goal_generation,
                goal_turn, goal_request
           FROM goal_event AS event
@@ -1598,17 +1499,18 @@ BEGIN
 
     -- A projected transition is core machinery, and the live turn is the
     -- agency behind it; the creating actor is not.
-    -- The agency is the live turn, or the goal event that decided the state
-    -- when no turn is live. A lift is the operator's own resume, so it keeps
-    -- that classification rather than reading as daemon machinery.
+    -- The identity recorded here is model or tool agency and nothing else. A
+    -- turn activating, a phase moving, a scheduler-authored block: those are
+    -- daemon machinery that happens to concern a turn, and the reader takes a
+    -- stored turn to mean the model acted. Only a model-declared goal event
+    -- carries one. A lift is the operator's own resume.
     IF lifts_park THEN
         actor := 'operator';
         goal_turn := NULL;
         goal_request := NULL;
-        live_turn := NULL;
     ELSE
         actor := 'core';
-        IF live_turn IS NOT NULL THEN
+        IF live_phase IS NOT NULL THEN
             goal_turn := NULL;
             goal_request := NULL;
         END IF;
@@ -1619,9 +1521,9 @@ BEGIN
            state_entered_at = statement_timestamp(),
            actor_kind = actor,
            actor_module = NULL,
-           actor_turn_id = COALESCE(live_turn, goal_turn),
+           actor_turn_id = goal_turn,
            actor_tool_request_id = CASE
-               WHEN COALESCE(live_turn, goal_turn) IS NULL THEN goal_request
+               WHEN goal_turn IS NULL THEN goal_request
                ELSE NULL
            END,
            waiting_kind = next_waiting_kind,
@@ -1750,6 +1652,9 @@ CREATE INDEX session_cleanup_obligation_outstanding
 --
 
 ALTER TABLE create_session_command
+    DROP CONSTRAINT create_session_command_creation_cause_closed;
+
+ALTER TABLE create_session_command
     ADD CONSTRAINT create_session_command_creation_cause_closed CHECK (
         creation_cause = ANY (ARRAY[
             'interactive'::text,
@@ -1764,32 +1669,12 @@ ALTER TABLE create_session_command
 --
 
 ALTER TABLE create_session_from_imported_frontier_command
+    DROP CONSTRAINT create_session_from_imported_frontier_command_cause_closed;
+
+ALTER TABLE create_session_from_imported_frontier_command
     ADD CONSTRAINT create_session_from_imported_frontier_command_cause_closed CHECK (
         creation_cause = 'interactive'::text
     );
-
---
--- Both provenance keys go back exactly as they were, now that the two sides
--- agree on the respelled cause. Re-adding validates the rows they cover, which
--- is the check the carry owes and the only one it re-runs.
---
-
-ALTER TABLE ONLY create_session_command
-    ADD CONSTRAINT create_session_command_provenance_fk
-        FOREIGN KEY (created_session_id, creation_cause, ancestry_kind)
-        REFERENCES session(session_id, creation_cause, ancestry_kind)
-        ON UPDATE RESTRICT ON DELETE RESTRICT;
-
-ALTER TABLE ONLY create_session_from_imported_frontier_command
-    ADD CONSTRAINT create_session_from_imported_frontier_command_provenance_fk
-        FOREIGN KEY (created_session_id, creation_cause, ancestry_kind,
-                     imported_conversation_id, imported_frontier_entry_id,
-                     imported_frontier_position, imported_relationship_kind)
-        REFERENCES session(session_id, creation_cause, ancestry_kind,
-                           imported_conversation_id, imported_frontier_entry_id,
-                           imported_frontier_position, imported_relationship_kind)
-        ON UPDATE RESTRICT ON DELETE RESTRICT
-        DEFERRABLE INITIALLY DEFERRED;
 
 --
 -- Exactly one creation family per session, restated over the widened

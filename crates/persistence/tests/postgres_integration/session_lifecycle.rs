@@ -603,7 +603,9 @@ async fn a_closure_over_a_live_turn_is_refused() -> Result<(), Box<dyn Error>> {
     let error = SessionLifecycleRepository::new(pool.clone())
         .close(
             session,
-            SessionTerminalOutcome::Abandoned,
+            SessionTerminalOutcome::Stopped {
+                sticky: StopStickiness::Redispatchable,
+            },
             LifecycleActor::Operator,
         )
         .await
@@ -774,6 +776,10 @@ async fn an_abandoned_closure_records_its_cleanup_obligation() -> Result<(), Box
         .handle(dispatched_creation(10))
         .await?;
 
+    // Parked by statement, standing in for the module park: §1 admits a park
+    // only from the states the turn mapping derives, and this session has no
+    // turn to leave behind when it closes.
+    park_by_statement(&pool, abandoned).await?;
     repository
         .close(
             abandoned,
@@ -1256,7 +1262,7 @@ async fn a_second_pending_terminal_cannot_replace_the_first() -> Result<(), Box<
         .commit_pending_terminal(session, committed)
         .await?;
     let error = repository
-        .commit_pending_terminal(session, SessionTerminalOutcome::Abandoned)
+        .commit_pending_terminal(session, SessionTerminalOutcome::FailedUnknown)
         .await
         .expect_err("a second outcome cannot replace the committed decision");
 
@@ -2026,7 +2032,9 @@ async fn a_park_between_decision_and_settlement_keeps_the_handoff() -> Result<()
         .handle(dispatched_creation(45))
         .await?;
     activate_first_turn(&pool, session, 45).await?;
-    let committed = SessionTerminalOutcome::Abandoned;
+    let committed = SessionTerminalOutcome::Stopped {
+        sticky: StopStickiness::Sticky,
+    };
     repository
         .commit_pending_terminal(session, committed)
         .await?;
@@ -2067,7 +2075,12 @@ async fn a_closure_cannot_override_a_committed_handoff() -> Result<(), Box<dyn E
         .handle(dispatched_creation(46))
         .await?;
     repository
-        .commit_pending_terminal(session, SessionTerminalOutcome::Abandoned)
+        .commit_pending_terminal(
+            session,
+            SessionTerminalOutcome::Stopped {
+                sticky: StopStickiness::Sticky,
+            },
+        )
         .await?;
 
     let error = repository
@@ -2175,18 +2188,42 @@ async fn a_closure_records_its_acting_identity_in_its_own_columns() -> Result<()
     Ok(())
 }
 
-/// §2 makes `abandoned` an operator write-off, so no other classification
-/// records one.
+/// §2 makes `abandoned` the operator's write-off of a parked session, so
+/// neither another classification nor an unparked session records one.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn only_an_operator_writes_a_session_off() -> Result<(), Box<dyn Error>> {
+async fn only_an_operator_writes_off_a_parked_session() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
     let session = creation_session(49);
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(dispatched_creation(49))
         .await?;
+    activate_first_turn(&pool, session, 49).await?;
 
-    let error = SessionLifecycleRepository::new(pool.clone())
+    let unparked = repository
+        .close(
+            session,
+            SessionTerminalOutcome::Abandoned,
+            LifecycleActor::Operator,
+        )
+        .await
+        .expect_err("nobody wrote off a session nobody parked");
+    assert_eq!(
+        lifecycle_rejection(unparked),
+        SessionLifecycleRejection::AbandonRequiresParkedOperator
+    );
+
+    repository
+        .park(
+            session,
+            SessionParkCause::OperatorHold,
+            SessionParkResponder::Operator,
+            None,
+            LifecycleActor::Operator,
+        )
+        .await?;
+    let error = repository
         .close(
             session,
             SessionTerminalOutcome::Abandoned,
@@ -2197,7 +2234,7 @@ async fn only_an_operator_writes_a_session_off() -> Result<(), Box<dyn Error>> {
 
     assert_eq!(
         lifecycle_rejection(error),
-        SessionLifecycleRejection::AbandonRequiresOperator
+        SessionLifecycleRejection::AbandonRequiresParkedOperator
     );
 
     pool.close().await;
