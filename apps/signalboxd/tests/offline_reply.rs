@@ -25,7 +25,8 @@ use signalbox_domain::{
     ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, PerInputConfigurationChoices,
     ProviderModelIdentity, ResolvedProviderTarget, SemanticTranscriptEntryId,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
-    SubmitInputAppliedResult, SubmitInputResult, TurnAttemptId, TurnId, UserContent,
+    SubmitInputAppliedResult, SubmitInputResult, TurnAttemptId, TurnId, TurnTerminalCause,
+    UserContent,
 };
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
@@ -716,6 +717,7 @@ async fn s_goal_inv048_reconciled_success_parks_a_durably_non_resumable_failure(
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x2701)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x2702)),
             ),
+            TurnTerminalCause::ContextCompactionWall,
             Some(GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit),
         )
         .await?;

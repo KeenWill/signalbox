@@ -399,6 +399,7 @@ pub use turn_lifecycle::{
     AcceptedInputStartingLineage, AcceptedInputTurnStart, ActiveTurnPhase,
     AppliedStopForReconciliationProof, IssuedOperationRef, NonEmptyIssuedOperationRefs,
     NonEmptyIssuedOperationRefsError, ReconciliationMarker, ReconciliationReason, TurnDisposition,
+    TurnTerminalCause,
 };
 pub use user_content::{
     AttachmentBlobFact, AttachmentDisplayFilename, AttachmentDisplayFilenameError,

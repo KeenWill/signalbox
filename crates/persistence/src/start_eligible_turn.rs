@@ -445,6 +445,7 @@ impl StartEligibleTurnRepository {
         preview: PreparedActivationPreview,
         model_calls: &crate::model_execution::PostgresModelCallRepository,
         identities: signalbox_domain::FailedModelCallTurnIdentities,
+        terminal_cause: signalbox_domain::TurnTerminalCause,
         recovery_cause: Option<crate::goal::GoalExecutionFailureRecoveryCause>,
     ) -> Result<CommitCompactionFailurePreviewOutcome, CommitActivationPreviewError> {
         let session = preview.prepared.turn().session();
@@ -509,6 +510,7 @@ impl StartEligibleTurnRepository {
                 session,
                 turn,
                 identities,
+                terminal_cause,
                 recovery_cause,
             )
             .await

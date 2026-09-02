@@ -27,6 +27,9 @@ ancestry before exact prefix-member fallback is verified against this PR
 validation from its immutable predecessor and bounded current suffix is verified
 against this PR (`agent/daemon-live-current-compaction-validation-scope`).
 
+The outbox headers' `recorded_at` statement stamp is verified against this PR
+(`agent/lifecycle-t1-measurement`).
+
 The program-journal append transaction, reconstitution boundary, lock inventory,
 and migration were verified against this PR (`agent/program-substrate-journal`).
 
@@ -1791,7 +1794,9 @@ storage below plus the delegation-stack extension identified inline:
 
 - the baseline `outbox_event` header and delegation-owned
   `delegation_outbox_event` header (both carrying allocator-owned
-  `event_sequence`, closed `event_kind`, `storage_version`, and `session_id`)
+  `event_sequence`, closed `event_kind`, `storage_version`, `session_id`, and a
+  `recorded_at` statement stamp defaulted at insert, so an event's record time
+  is a property of the header rather than of a reader's arrival)
   plus one typed record table per kind — `session_created_outbox_event`,
   `input_accepted_outbox_event`, `session_model_settings_changed_outbox_event`,
   `turn_model_settings_resolved_outbox_event`, `goal_turn_retired_outbox_event`,

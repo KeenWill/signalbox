@@ -414,6 +414,63 @@ pub enum TurnDisposition {
     },
 }
 
+/// The mandatory typed reason one turn reached `terminal`.
+///
+/// The disposition says how a turn ended; the cause says why. The set is
+/// closed, every terminalization names exactly one member, and no turn reaches
+/// `terminal` without one. `UnclassifiedFailure` is the sole catch-all: cause
+/// completeness is measured as the share of terminal turns carrying a cause
+/// outside that set, so admitting a second catch-all weakens the measure
+/// rather than the vocabulary.
+///
+/// A cause is not derived from its disposition. `Failed` alone is what the
+/// classification exists to replace, so the failing arms name the evidence
+/// that ended the turn — an ended model call, an unavailable target, an
+/// exhausted credential pool, a compaction that could not fit its input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TurnTerminalCause {
+    /// The turn produced its conversational outcome.
+    Completed,
+    /// The provider produced an explicit refusal.
+    ModelRefusal,
+    /// An applied interrupt ended the turn.
+    InterruptApplied,
+    /// Unacknowledged physical model-call ambiguity requires reconciliation.
+    ModelCallAmbiguous,
+    /// Unacknowledged physical tool-attempt ambiguity requires reconciliation.
+    ToolAttemptAmbiguous,
+    /// A model call the turn owned ended failed.
+    ModelCallFailed,
+    /// No resolved provider target admitted the call the turn needed.
+    ModelTargetUnavailable,
+    /// Attachment preparation could not produce the call's input.
+    AttachmentPreparationFailed,
+    /// Provider capability preparation reported a trustworthy local failure.
+    CapabilityPreparationFailed,
+    /// The turn already held the maximum admitted automatic tool rounds.
+    ToolRoundLimitReached,
+    /// A tool attempt the turn owned was lost with its executing process.
+    ToolAttemptLost,
+    /// Every member of the turn's credential pool was exhausted.
+    CredentialPoolExhausted,
+    /// A tool request needed an approval decision no attended surface could give.
+    HeadlessApprovalEscalation,
+    /// A restart found the turn's work with no live process owning it.
+    AbandonedAtRestart,
+    /// Reserved context headroom could not admit the turn's continuation.
+    ContextHeadroomExhausted,
+    /// Context compaction could not fit the input it was asked to compact.
+    ContextCompactionWall,
+    /// Context compaction failed for a reason other than an unfittable input.
+    ContextCompactionFailed,
+    /// The turn's bounded automatic compaction attempt was already spent.
+    ReportedUsageContextCompactionExhausted,
+    /// Automatic compaction did not restore reserved context headroom.
+    ReportedUsageContextStillExceeded,
+    /// Durable evidence supports failure and classifies no reason.
+    UnclassifiedFailure,
+}
+
 #[cfg(test)]
 mod tests {
     use expect_test::expect;

@@ -35,7 +35,7 @@ use signalbox_domain::{
     SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
     SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput,
     SubmitInputAppliedResult, SubmitInputResult, ToolRequestId, TranscriptAncestry, TurnAttemptId,
-    TurnId, TurnModelSettingsResolved, UserContent,
+    TurnId, TurnModelSettingsResolved, TurnTerminalCause, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -396,6 +396,7 @@ async fn call_free_failure_recovery_cause_round_trips_as_a_closed_type()
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xe5f)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0xe60)),
             ),
+            TurnTerminalCause::ContextCompactionWall,
             Some(expected),
         )
         .await?;
