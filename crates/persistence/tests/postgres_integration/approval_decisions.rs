@@ -3405,10 +3405,44 @@ async fn a_denied_matching_request_after_the_denial_keeps_the_override()
     Ok(())
 }
 
+/// One `injection_settled` receipt as stored.
+#[derive(Debug, PartialEq, sqlx::FromRow)]
+struct InjectionReceipt {
+    outcome_kind: String,
+    rejection_kind: Option<String>,
+    delivered_turn_id: Option<Uuid>,
+}
+
+impl InjectionReceipt {
+    fn delivered(turn: TurnId) -> Self {
+        Self {
+            outcome_kind: String::from("delivered"),
+            rejection_kind: None,
+            delivered_turn_id: Some(turn.into_uuid()),
+        }
+    }
+
+    fn not_delivered() -> Self {
+        Self {
+            outcome_kind: String::from("not_delivered"),
+            rejection_kind: None,
+            delivered_turn_id: None,
+        }
+    }
+
+    fn rejected(kind: &str) -> Self {
+        Self {
+            outcome_kind: String::from("rejected"),
+            rejection_kind: Some(String::from(kind)),
+            delivered_turn_id: None,
+        }
+    }
+}
+
 async fn injection_receipt(
     pool: &PgPool,
     command: DurableCommandId,
-) -> Result<Option<(String, Option<String>, Option<Uuid>)>, sqlx::Error> {
+) -> Result<Option<InjectionReceipt>, sqlx::Error> {
     sqlx::query_as(
         "SELECT outcome_kind, rejection_kind, delivered_turn_id
            FROM injection_settled_outbox_event
@@ -3439,11 +3473,7 @@ async fn approval_decision_survives_restart_and_settles_delivered() -> Result<()
         .await?;
     assert_eq!(
         injection_receipt(&pool, command).await?,
-        Some((
-            String::from("delivered"),
-            None,
-            Some(fixture.turn.into_uuid())
-        ))
+        Some(InjectionReceipt::delivered(fixture.turn))
     );
 
     pool.close().await;
@@ -3590,11 +3620,7 @@ async fn assert_approved_and_delivered(
     assert_eq!(decided, (String::from("approve"), String::from("running")));
     assert_eq!(
         injection_receipt(pool, parked.command).await?,
-        Some((
-            String::from("delivered"),
-            None,
-            Some(parked.fixture.turn.into_uuid())
-        ))
+        Some(InjectionReceipt::delivered(parked.fixture.turn))
     );
     Ok(())
 }
@@ -3641,7 +3667,7 @@ async fn late_decision_settles_not_delivered() -> Result<(), Box<dyn Error>> {
     );
     assert_eq!(
         injection_receipt(&pool, late).await?,
-        Some((String::from("not_delivered"), None, None))
+        Some(InjectionReceipt::not_delivered())
     );
     let decisions: i64 =
         sqlx::query_scalar("SELECT count(*) FROM tool_approval_decision WHERE request_id = $1")
@@ -3694,11 +3720,7 @@ async fn decision_correlation_mismatches_stay_typed_rejections() -> Result<(), B
     );
     assert_eq!(
         injection_receipt(&pool, out_of_order).await?,
-        Some((
-            String::from("rejected"),
-            Some(String::from("not_earliest_undecided")),
-            None
-        ))
+        Some(InjectionReceipt::rejected("not_earliest_undecided"))
     );
 
     let unknown = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd2));

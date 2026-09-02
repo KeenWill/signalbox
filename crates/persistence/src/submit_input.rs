@@ -62,6 +62,7 @@ use signalbox_domain::{
     SubmitInputRejectedInterruptAlreadyAppliedReconstitutionInput,
     SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstitutionInput,
     SubmitInputRejectedNoActiveTurnReconstitutionInput, SubmitInputRejectedResult,
+    SubmitInputRejectedSafePointUnavailableWhileStoppingReconstitutionInput,
     SubmitInputRejectedSessionNotFoundReconstitutionInput,
     SubmitInputRejectedUnknownModelAliasReconstitutionInput, SubmitInputResult,
     SubmitInputTerminalSourceConstructionInput, SubmitInputTerminalSourceReconstitutionInput,
@@ -7513,6 +7514,29 @@ fn encode_result(
             attachment_digest: None,
             attachment_maximum_bytes: None,
         },
+        SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
+                session,
+                active_turn,
+                existing_command,
+            },
+        ) => EncodedResult {
+            kind: REJECTED,
+            rejection_kind: Some("safe_point_unavailable_while_stopping"),
+            session: *session,
+            accepted_input: None,
+            turn: None,
+            actual_active_turn: Some(turn_id_to_uuid(*active_turn)),
+            expected_active_turn: None,
+            expected_defaults_version: None,
+            current_defaults_version: None,
+            unknown_alias: None,
+            selected_defaults_version: None,
+            last_position: None,
+            existing_interrupt_command: Some(durable_command_id_to_uuid(*existing_command)),
+            attachment_digest: None,
+            attachment_maximum_bytes: None,
+        },
         SubmitInputResult::Rejected(SubmitInputRejectedResult::InterruptAlreadyApplied {
             session,
             active_turn,
@@ -7935,6 +7959,7 @@ fn related_turn_origin_key(
             Some(
                 "active_turn_present"
                 | "active_turn_mismatch"
+                | "safe_point_unavailable_while_stopping"
                 | "interrupt_already_applied"
                 | "interrupt_unavailable_while_awaiting_approval",
             ),
@@ -9203,8 +9228,10 @@ fn decode_rejected(
     attachment_maximum_bytes: Option<Decimal>,
     existing_interrupt: Option<AppliedInterruptCommandResult>,
 ) -> Result<SubmitInputReconstitutionInput, SubmitInputRepositoryError> {
-    if rejection_kind != "interrupt_already_applied"
-        && (existing_interrupt_command.is_some() || existing_interrupt.is_some())
+    if !matches!(
+        rejection_kind,
+        "safe_point_unavailable_while_stopping" | "interrupt_already_applied"
+    ) && (existing_interrupt_command.is_some() || existing_interrupt.is_some())
     {
         return Err(
             SubmitInputCorruption::Inconsistent("unexpected existing interrupt result").into(),
@@ -9496,6 +9523,50 @@ fn decode_rejected(
                         )?
                         .ok_or(SubmitInputCorruption::Missing("result_last_position"))?,
                         active_turn_origin,
+                    },
+                ),
+            )
+        }
+        "safe_point_unavailable_while_stopping" => {
+            if expected_turn.is_some()
+                || expected_defaults.is_some()
+                || current_defaults.is_some()
+                || unknown_alias.is_some()
+                || selected_defaults.is_some()
+                || last_position.is_some()
+            {
+                return Err(SubmitInputCorruption::Inconsistent(
+                    "stopping safe-point result fields",
+                )
+                .into());
+            }
+            let active_turn = turn_id_from_uuid(actual_turn.ok_or(
+                SubmitInputCorruption::Missing("result_actual_active_turn_id"),
+            )?);
+            let stored_command = durable_command_id_from_uuid(existing_interrupt_command.ok_or(
+                SubmitInputCorruption::Missing("result_existing_interrupt_command_id"),
+            )?)
+            .map_err(|_| {
+                SubmitInputCorruption::Inconsistent("existing interrupt command identity")
+            })?;
+            let interrupt = existing_interrupt.ok_or(SubmitInputCorruption::Missing(
+                "existing interrupt authority",
+            ))?;
+            if stored_command != interrupt.proof().command() {
+                return Err(
+                    SubmitInputCorruption::Inconsistent("existing interrupt command").into(),
+                );
+            }
+            Ok(
+                SubmitInputReconstitutionInput::rejected_safe_point_unavailable_while_stopping(
+                    SubmitInputRejectedSafePointUnavailableWhileStoppingReconstitutionInput {
+                        command,
+                        stored_actor,
+                        result_session,
+                        result_active_turn: active_turn,
+                        active_turn_origin: active_turn_origin
+                            .ok_or(SubmitInputCorruption::Missing("active turn origin"))?,
+                        existing_interrupt: interrupt,
                     },
                 ),
             )

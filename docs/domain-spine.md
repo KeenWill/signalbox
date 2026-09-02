@@ -2658,6 +2658,11 @@ pub enum SubmitInputRejectedResult {
         session: SessionId,
         last: SessionInputPosition,
     },
+    SafePointUnavailableWhileStopping {
+        session: SessionId,
+        active_turn: TurnId,
+        existing_command: DurableCommandId,
+    },
     InterruptAlreadyApplied {
         session: SessionId,
         active_turn: TurnId,
@@ -2786,6 +2791,9 @@ pub struct SubmitInputRejectedUnknownModelAliasReconstitutionInput {
 pub struct SubmitInputRejectedAcceptancePositionExhaustedReconstitutionInput {
     /* public named command, final-position, and optional active-origin facts */
 }
+pub struct SubmitInputRejectedSafePointUnavailableWhileStoppingReconstitutionInput {
+    /* public named command, active-origin, and existing-interrupt facts */
+}
 pub struct SubmitInputRejectedInterruptAlreadyAppliedReconstitutionInput {
     /* public named command, active-origin, and existing-interrupt facts */
 }
@@ -2805,6 +2813,9 @@ impl SubmitInputReconstitutionInput {
     ) -> Self;
     pub fn rejected_attachment_byte_budget_exceeded(
         input: SubmitInputRejectedAttachmentByteBudgetExceededReconstitutionInput,
+    ) -> Self;
+    pub fn rejected_safe_point_unavailable_while_stopping(
+        input: SubmitInputRejectedSafePointUnavailableWhileStoppingReconstitutionInput,
     ) -> Self;
     pub fn rejected_interrupt_already_applied(
         input: SubmitInputRejectedInterruptAlreadyAppliedReconstitutionInput,
@@ -13459,7 +13470,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: accepted_input                             | 5                                |
 | domain: delivery_request                           | 2                                |
 | domain: user_content                               | 15                               |
-| domain: submit_input                               | 36                               |
+| domain: submit_input                               | 37                               |
 | domain: queue_order                                | 5 (+1 free fn)                   |
 | domain: repo_watch                                 | 51                               |
 | domain: turn_lifecycle                             | 11                               |
@@ -13484,7 +13495,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
 | domain: workspace_instruction                      | 18                               |
-| **signalbox-domain total**                         | **882 (+12 free fn)**            |
+| **signalbox-domain total**                         | **883 (+12 free fn)**            |
 | application: repo_watch_operations                 | 33 (+2 free fn) (incl. 1 trait)  |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: attention                             | 16 (+6 free fn) (incl. 1 trait)  |

@@ -5982,7 +5982,7 @@ async fn process_runtime_reads_one_queued_transcript_snapshot() -> Result<(), Bo
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
     let content = "queued input".to_owned();
-    let expected_snapshot_cursor = 3;
+    let expected_snapshot_cursor = 4;
     let (accepted_input, turn) =
         submit_first_input(&mut connection, session_id, content.clone()).await?;
 
