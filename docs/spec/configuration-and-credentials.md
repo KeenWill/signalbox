@@ -1470,23 +1470,30 @@ Each `[[models]]` entry defines one direct selection:
   `output_usd_per_million_tokens`,
   `cache_creation_input_usd_per_million_tokens`, and
   `cache_read_input_usd_per_million_tokens`, and the provenance pair
-  `source_url` and `retrieved_on`. The four rates are nonnegative decimal USD
+  `source_url`, a bounded absolute `https` URL string, and `retrieved_on`, a
+  canonical `YYYY-MM-DD` string. The four rates are nonnegative decimal USD
   strings per million tokens. A derived figure is absent when multiplying,
   dividing by one million, or summing those rates and the reported counts would
   lose decimal precision. Both bounds are canonical `YYYY-MM-DD` strings naming
   exact UTC calendar days: a window covers a call timestamp from
   `effective_from` at 00:00:00 UTC inclusive to `effective_until` at 00:00:00
-  UTC exclusive, and an absent `effective_until` means the window is still open.
-  The windows resolved for one target and channel may not overlap; entries
-  naming the same target contribute one coalesced set, so the agreeing
-  duplicates below are not an overlap. A window's identity is exactly its
-  `provider`, `provider_model`, `channel`, and `effective_from`, and that
-  identity is what a derived cost names; the opaque `rate_version` label is
-  retired. Rewriting a published window's rates or its `effective_until`
-  boundary under that same identity is invalid deployment evolution, exactly as
-  a same-name credential-profile rewrite is; a correction declares a new window.
-  Declaring only part of a window's rate set is a configuration error; declaring
-  no window is valid and yields no dollar figure for that model.
+  UTC exclusive; a present `effective_until` must be strictly later than
+  `effective_from`, and an absent one means the window is still open. The
+  windows resolved for one target and channel may not overlap; entries naming
+  the same target contribute one coalesced set, so the agreeing duplicates below
+  are not an overlap. Every occurrence of one window identity in the document
+  carries identical rates, bounds, and provenance, whichever targets declare it.
+  A window's identity is exactly its `provider`, `provider_model`, `channel`,
+  and `effective_from`, and that identity is what a derived cost names; the
+  opaque `rate_version` label is retired. Rewriting a published window's rates
+  or its `effective_until` boundary under that same identity is invalid
+  deployment evolution, exactly as a same-name credential-profile rewrite is; a
+  correction declares a new window. The one admitted edit is closing an open
+  window: its absent `effective_until` may be set once, to the `effective_from`
+  of the successor window installed with it, so a scheduled price change neither
+  overlaps nor strands stale rates. Declaring only part of a window's rate set
+  is a configuration error; declaring no window is valid and yields no dollar
+  figure for that model.
 
 The document root may carry an optional `[verified_through]` table mapping a
 provider name to one date recording how far a deployment checked that provider's
@@ -1576,9 +1583,11 @@ swap is the visible unit of configuration change. Keeping a selection key
 immutable is deployment discipline that code enforces only partially: removal
 makes new resolution fail, but nothing prevents an edited document from pointing
 an existing `selection_id` at a new `target_id` across a restart — new turns
-would silently resolve to the new target (see Open edges). A reload that
-repoints an existing `selection_id` is rejected for that reason; restart remains
-the only path that changes a selection's meaning. Where a stored call exists,
+would silently resolve to the new target (see Open edges). A reload is held to
+more than that: it is rejected when it removes an existing `selection_id` or
+`target_id`, repoints one, or changes any other field of an entry whose
+selection or target already appears in accepted work. Restart remains the only
+path that changes what an existing selection means. Where a stored call exists,
 code does enforce consistency: ordinary-path reconstitution cross-checks every
 stored call's target against the configured `ModelTargetCatalog` and fails
 closed as corruption (`CallTargetMismatch`) when the catalog now resolves that
