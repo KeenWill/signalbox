@@ -72,9 +72,17 @@ records two required, independent, immutable creation facts, paired as
 `SessionCreationProvenance` (INV-003):
 
 - **Creation cause** — why the session exists. The constructible variants are
-  `UserInitiated` and `Delegated { spawning_request }`. The delegated variant is
-  produced only by the spawning-request path and fixes ancestry to `None`;
-  application and schedule causes are not represented as placeholders.
+  `Interactive`, `ModuleDispatched { dispatch }`, and
+  `Delegated { spawning_request }`. `ModuleDispatched` carries one typed
+  `ModuleDispatch`, which names both the dispatching module and that module's
+  own durable dispatch identity, and fixes ancestry to `None`: a dispatched
+  session starts from no prior transcript, so a module supplying one would be
+  inferring semantic history from a dispatch record. The delegated variant is
+  produced only by the spawning-request path and likewise fixes ancestry to
+  `None`. The imported-frontier creation family records `Interactive` with its
+  import reference in its own ancestry columns — importing a conversation is a
+  user-initiated act, so the vocabulary stays closed. Application and schedule
+  causes are not represented as placeholders.
 - **Transcript ancestry** — where initial semantic context came from: `None`
   (explicitly no prior transcript), `SingleSource` naming one source `SessionId`
   and one opaque `TranscriptFrontier`, or `ImportedConversation` naming one
@@ -135,7 +143,7 @@ discarded.
 Application orchestration (`crates/application/src/create_session.rs`):
 
 - rejects nil/max sentinel command identities before canonical construction;
-- fixes cause `UserInitiated` and ancestry `None` — the request type has no
+- fixes cause `Interactive` and ancestry `None` — the request type has no
   cause or ancestry inputs;
 - mints one fresh UUIDv7 `SessionId` candidate per invocation (the UUID
   timestamp confers no domain order or authority); and
@@ -611,9 +619,8 @@ current defaults version — alongside imported-conversation headers, in one
 bounded keyset page of its own. It adds no session state and changes none of the
 rules above.
 
-Because `UserInitiated` is the only constructible creation cause and every
-current session-creation boundary lacks actor attribution, the implemented
-default view is exactly all non-archived sessions. No visibility taxonomy,
+Because no current session-creation boundary carries actor attribution, the
+implemented default view is exactly all non-archived sessions. No visibility taxonomy,
 creation-time override, or inference from missing attribution is stored. The
 dependency for future creation-derived visibility is recorded in
 [open-questions.md](../open-questions.md#session-organization-visibility-and-retention).
@@ -624,10 +631,11 @@ and `eval` variants for sessions created by registered programs under the
 [program substrate](program-substrate.md): each names the creating program run
 (and, for `eval`, the trial identity the [evaluation system](eval-system.md)
 defines), is constructible only by the substrate's host-side session capability,
-and joins the stored closed-discriminator convention beside `user_initiated` and
-`delegated`. This constrains present change: creation-cause readers must not
-assume the two-variant vocabulary is final, and the stored discriminator's
-decode surface must stay extensible without reinterpreting existing spellings.
+and joins the stored closed-discriminator convention beside `interactive`,
+`module_dispatched`, and `delegated`. This constrains present change:
+creation-cause readers must not assume the present vocabulary is final, and the
+stored discriminator's decode surface must stay extensible without
+reinterpreting existing spellings.
 
 ## The session aggregate
 

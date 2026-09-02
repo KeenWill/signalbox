@@ -923,7 +923,22 @@ Locks per transaction, in acquisition order:
   registry and receipt without taking a session lifecycle lock or resolving
   current configuration.
 
+- **Session lifecycle satellite**: the mutable per-session lifecycle row sits
+  inside the session/scheduler prefix — after the `session` row and before the
+  `session_scheduler` row, never after it. Every inventory statement that locks
+  a scheduler row locks the satellite first, in a common table expression the
+  scheduler predicate reads, so the order is the statement's own structure
+  rather than a convention a caller could reorder. Turn-lifecycle writers
+  inherit it: the standing rule that every turn-lifecycle writer acquires the
+  scheduler lock before touching a turn row means every transaction whose turn
+  write projects a new session state already holds the satellite when the
+  projection runs. Two paths acquire the satellite outside a scheduler
+  statement, both holding no scheduler row: session creation, which inserts it,
+  and the lifecycle store's own park, closure, and ownership writes, which take
+  the `session` row first.
+
 - **SubmitInput** (`prepare_against_locked_state`): session row
+  `FOR NO KEY UPDATE`, then the session lifecycle satellite row
   `FOR NO KEY UPDATE`, then `session_scheduler` row `FOR UPDATE`, then
   `session_current_defaults` row `FOR UPDATE`; only then does it read the
   scheduling projection and assign the next acceptance position. A

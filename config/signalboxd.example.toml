@@ -158,6 +158,32 @@ max_code_host_result_text_bytes = 65536
 max_code_host_result_items = 100
 # Repository-file bytes retained in one code-host result.
 max_repository_file_content_bytes = 65536
+# Time a dispatched session has to activate its first turn before it is retired.
+session_dispatch_deadline = "900s"
+# Time a held start gate has to be released before its session is retired.
+session_start_gate_deadline = "900s"
+# Time an owned ungated creation has to receive its first input before it is retired.
+session_first_input_deadline = "3600s"
+# Time an active session may make no progress before it parks for a human.
+session_active_stall_deadline = "1800s"
+# Time an outstanding tool-approval decision may wait before its session parks.
+session_waiting_approval_deadline = "86400s"
+# Time an external gate may hold a session before it parks.
+session_waiting_external_deadline = "86400s"
+# Time a delegated child may run before its parent parks.
+session_waiting_child_deadline = "7200s"
+# Time a provider backoff may hold a session before it parks.
+session_waiting_provider_retry_deadline = "900s"
+# Time dispatch-pipeline backlog may hold a session before it parks.
+session_waiting_pipeline_deadline = "3600s"
+# Time a recorded scheduler fault may hold a session before it parks.
+session_waiting_scheduler_deadline = "1800s"
+# Time one recovery may run before its session parks.
+session_recovering_deadline = "1800s"
+# Time a blocked goal generation may sit before its session parks for a human.
+session_blocked_deadline = "259200s"
+# Interval at which a parked session re-raises its operator alert.
+session_parked_renotify_interval = "86400s"
 
 # Blob bytes live outside PostgreSQL. Each deployment generates and then keeps
 # one namespace UUID per physical store. Both directories must already exist,

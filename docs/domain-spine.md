@@ -997,7 +997,8 @@ impl UpdateSessionPlacementRejection {
 
 ```rust
 pub enum SessionCreationCause {
-    UserInitiated,
+    Interactive,
+    ModuleDispatched { dispatch: ModuleDispatch },
     Delegated { spawning_request: ToolRequestId },
 }
 
@@ -1026,6 +1027,7 @@ pub struct SessionCreationProvenance { /* private */ }
 impl SessionCreationProvenance {
     pub const fn new(cause: SessionCreationCause, ancestry: TranscriptAncestry) -> Self;
     pub const fn delegated(spawning_request: ToolRequestId) -> Self;
+    pub const fn module_dispatched(dispatch: ModuleDispatch) -> Self;
     // accessors: cause(), ancestry()
 }
 
@@ -5947,6 +5949,222 @@ impl ReconstitutedReplaceSessionDefaults {
 }
 ```
 
+## domain: session_lifecycle
+
+```rust
+pub enum DispatchingModule {
+    RepositoryWatch,
+    CommissionedDispatch,
+}
+
+pub enum ModuleDispatch {
+    RepositoryWatch { dispatch: RepoWatchDispatchId },
+    Commissioned { dispatch: CommissionedDispatchId },
+}
+impl ModuleDispatch {
+    pub const fn module(&self) -> DispatchingModule;
+}
+
+pub enum CoreAgency {
+    Daemon,
+    Model { turn: TurnId },
+    Tool { request: ToolRequestId },
+}
+
+pub enum LifecycleActor {
+    Core { agency: CoreAgency },
+    Operator,
+    Module { module: DispatchingModule },
+    Watchdog,
+}
+impl LifecycleActor {
+    pub const fn classify(actor: Actor) -> Self;
+}
+
+pub enum SessionOwnership {
+    Owned,
+    Unmonitored,
+}
+impl SessionOwnership {
+    pub const fn is_owned(&self) -> bool;
+}
+
+pub enum SessionWaitKind {
+    Approval,
+    External,
+    Child,
+    ProviderRetry,
+    Pipeline,
+    Scheduler,
+}
+
+pub enum SessionWaker {
+    ApprovalDecision,
+    ExternalRecheck,
+    ChildSettlement,
+    ProviderBackoff,
+    PipelineDrain,
+    SchedulerSweep,
+}
+
+pub enum SessionWait {
+    Approval,
+    External,
+    Child { session: SessionId },
+    ProviderRetry,
+    Pipeline,
+    Scheduler,
+}
+impl SessionWait {
+    pub const fn kind(&self) -> SessionWaitKind;
+    pub const fn waker(&self) -> SessionWaker;
+}
+
+pub enum SessionRecoveryOperation {
+    ModelCall,
+    Tool,
+    Runner,
+}
+
+pub enum SessionParkCause {
+    ProgressBudgetExhausted,
+    RetryBudgetExhausted,
+    StructuralFailure,
+    UnknownFailure,
+    ActiveStallDeadlineExpired,
+    WaitingDeadlineExpired,
+    RecoveringDeadlineExpired,
+    BlockedDeadlineExpired,
+    OperatorHold,
+    ModulePark,
+}
+
+pub enum SessionParkOwner {
+    Operator,
+    Module { module: DispatchingModule },
+}
+
+pub enum SessionRetryableCause {
+    ProviderTransient,
+    ProviderQuotaExhausted,
+    ProviderOverloaded,
+    InfrastructureFailure,
+    RetryBudgetExhausted,
+}
+
+pub enum SessionStructuralCause {
+    ContextCompactionWall,
+    ContextHeadroomExhausted,
+    BrokenToolchain,
+    ModerationBlock,
+}
+
+pub enum SessionRetirementCause {
+    DispatchDeadlineExpired,
+    StartGateDeadlineExpired,
+    FirstInputDeadlineExpired,
+    StrandedQueuedTurn,
+}
+
+pub enum SessionFailureCause {
+    Retryable(SessionRetryableCause),
+    Structural(SessionStructuralCause),
+}
+
+pub enum StopStickiness {
+    Sticky,
+    Redispatchable,
+}
+
+pub enum SessionClosureOutcome {
+    FailedRetryable,
+    FailedStructural,
+    FailedUnknown,
+    Superseded,
+    Abandoned,
+    Retired,
+}
+
+pub enum SessionTerminalOutcome {
+    AchievedVerified,
+    FailedRetryable { cause: SessionRetryableCause },
+    FailedStructural { cause: SessionStructuralCause },
+    FailedUnknown,
+    Stopped { sticky: StopStickiness },
+    Superseded { by: Option<SessionId> },
+    Abandoned,
+    Retired { cause: SessionRetirementCause },
+}
+impl SessionTerminalOutcome {
+    pub const fn closure_outcome(&self) -> Option<SessionClosureOutcome>;
+    pub const fn forbids_further_escalation(&self) -> bool;
+    pub const fn releases_resources(&self) -> bool;
+    pub const fn records_cleanup_obligations(&self) -> bool;
+}
+
+pub enum SessionLifecycleState {
+    Created,
+    Dispatched,
+    Active,
+    Waiting { wait: SessionWait },
+    Recovering { operation: SessionRecoveryOperation },
+    Blocked { reason: GoalBlockedReasonKind, cycle: u64 },
+    Parked {
+        cause: SessionParkCause,
+        owner: SessionParkOwner,
+        standing: Option<SessionFailureCause>,
+    },
+    Terminal { outcome: SessionTerminalOutcome },
+}
+impl SessionLifecycleState {
+    pub const fn is_terminal(&self) -> bool;
+    pub const fn is_parked(&self) -> bool;
+    pub const fn admits(&self, next: &Self) -> bool;
+    pub fn transition(self, next: Self) -> Result<Self, SessionLifecycleTransitionError>;
+}
+
+pub struct SessionLifecycleTransitionError { /* private */ }
+impl SessionLifecycleTransitionError {
+    // accessors: from(), to()
+}
+
+pub enum SessionDeadlineExpiry {
+    Retire,
+    Park,
+    Renotify,
+}
+
+pub enum SessionDeadlineKind {
+    Dispatch,
+    StartGate,
+    FirstInput,
+    ActiveStall,
+    WaitingApproval,
+    WaitingExternal,
+    WaitingChild,
+    WaitingProviderRetry,
+    WaitingPipeline,
+    WaitingScheduler,
+    Recovering,
+    Blocked,
+    ParkedRenotify,
+}
+impl SessionDeadlineKind {
+    pub const fn on_expiry(&self) -> SessionDeadlineExpiry;
+    pub const fn for_state(state: &SessionLifecycleState) -> Option<Self>;
+}
+
+pub enum SessionOwnershipTransition {
+    CreatedOwned,
+    CreatedUnmonitored,
+    Adopted,
+    Released,
+}
+impl SessionOwnershipTransition {
+    pub const fn ownership(&self) -> SessionOwnership;
+}
+```
+
 ## domain: session_metadata
 
 ```rust
@@ -10478,7 +10696,10 @@ impl EligibilitySweepBatch {
         dispatch_starts: HashSet<SessionId>,
         continuation: bool,
     ) -> Self;
+    #[must_use]
+    pub fn with_unmonitored(self, unmonitored: HashSet<SessionId>) -> Self;
     pub fn into_parts(self) -> (Vec<SessionId>, HashSet<SessionId>, bool);
+    // accessors: unmonitored()
 }
 
 pub trait EligibilityWorkSource {
@@ -11820,6 +12041,7 @@ pub enum GoalState {
     Achieved { report: GoalReportRef },
     UserStopped,
     Superseded { by_generation: GoalGeneration },
+    SessionClosed { outcome: SessionClosureOutcome },
 }
 impl GoalState {
     pub const fn is_open(&self) -> bool;
@@ -11848,6 +12070,7 @@ pub enum GoalEventKind {
         replacement_statement: GoalStatement,
         provenance: GoalUserProvenance,
     },
+    SessionClosed { outcome: SessionClosureOutcome, provenance: LifecycleActor },
 }
 
 pub struct Goal { /* private session + generations + events */ }
@@ -11884,6 +12107,11 @@ impl Goal {
         provenance: GoalModelProvenance,
     ) -> Result<Self, GoalTransitionError>;
     pub fn stop(self, provenance: GoalUserProvenance) -> Result<Self, GoalTransitionError>;
+    pub fn close_with_session(
+        self,
+        outcome: SessionClosureOutcome,
+        provenance: LifecycleActor,
+    ) -> Result<Self, GoalTransitionError>;
     pub fn supersede(
         self,
         replacement_statement: GoalStatement,
@@ -13217,6 +13445,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: git_remote                                 | 4 (+2 free fn)                   |
 | domain: session                                    | 22                               |
 | domain: session_delegation                         | 37 (+3 free fn)                  |
+| domain: session_lifecycle                          | 23                               |
 | domain: imported_session                           | 20                               |
 | domain: configuration                              | 24                               |
 | domain: model_settings                             | 25                               |
@@ -13248,7 +13477,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
 | domain: workspace_instruction                      | 18                               |
-| **signalbox-domain total**                         | **860 (+12 free fn)**            |
+| **signalbox-domain total**                         | **883 (+12 free fn)**            |
 | application: repo_watch_operations                 | 33 (+2 free fn) (incl. 1 trait)  |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: attention                             | 16 (+6 free fn) (incl. 1 trait)  |

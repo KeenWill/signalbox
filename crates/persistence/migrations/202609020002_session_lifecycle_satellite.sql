@@ -387,8 +387,9 @@ CREATE TABLE session_lifecycle (
                     'abandoned'::text,
                     'retired'::text
                 ])))
-        AND ((pending_terminal_outcome_kind = 'stopped'::text)
-             IS NOT DISTINCT FROM (pending_terminal_stop_sticky IS NOT NULL))
+        AND ((pending_terminal_outcome_kind IS NULL)
+             OR ((pending_terminal_outcome_kind = 'stopped'::text)
+                 = (pending_terminal_stop_sticky IS NOT NULL)))
         AND ((pending_terminal_superseded_by IS NULL)
              OR (pending_terminal_outcome_kind = 'superseded'::text))
     ),
@@ -804,8 +805,9 @@ ALTER TABLE goal_event
         AND ((closure_actor_kind IS NULL) OR (closure_actor_kind = ANY (ARRAY[
             'core'::text, 'operator'::text, 'module'::text, 'watchdog'::text
         ])))
-        AND ((closure_actor_kind = 'module'::text)
-             IS NOT DISTINCT FROM (closure_actor_module IS NOT NULL))
+        AND ((closure_actor_kind IS NULL)
+             OR ((closure_actor_kind = 'module'::text)
+                 = (closure_actor_module IS NOT NULL)))
         AND ((closure_actor_module IS NULL) OR (closure_actor_module = ANY (ARRAY[
             'repo_watch'::text,
             'commissioned_dispatch'::text

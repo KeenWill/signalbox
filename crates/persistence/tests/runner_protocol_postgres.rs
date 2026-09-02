@@ -1359,6 +1359,14 @@ async fn insert_session_for_with_creation_cause(
     .bind(creation_cause)
     .execute(pool)
     .await?;
+    sqlx::query(
+        "INSERT INTO session_lifecycle
+            (session_id, state_kind, owned, actor_kind)
+         VALUES ($1, 'created', false, 'operator')",
+    )
+    .bind(session)
+    .execute(pool)
+    .await?;
     sqlx::query("ALTER TABLE session ENABLE TRIGGER ALL")
         .execute(pool)
         .await?;
@@ -1424,7 +1432,16 @@ async fn insert_bounded_propagation_session_fixture(
         .await?;
     sqlx::query(
         "INSERT INTO session (session_id, creation_cause, ancestry_kind)
-         SELECT session_id, 'user_initiated', 'none'
+         SELECT session_id, 'interactive', 'none'
+           FROM unnest($1::uuid[]) AS fixture(session_id)",
+    )
+    .bind(&session_uuids)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_lifecycle
+            (session_id, state_kind, owned, actor_kind)
+         SELECT session_id, 'created', false, 'operator'
            FROM unnest($1::uuid[]) AS fixture(session_id)",
     )
     .bind(&session_uuids)

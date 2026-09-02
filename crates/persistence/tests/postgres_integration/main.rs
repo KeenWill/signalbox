@@ -27,6 +27,7 @@ mod outbox_dispatch_and_process_read;
 mod restart_recovery_and_submit;
 mod search;
 mod session_creation_and_submit;
+mod session_lifecycle;
 mod session_live;
 mod session_plan;
 mod session_timeline;
@@ -2519,6 +2520,27 @@ async fn rewind_outbox_delivery_before(
 /// Inserts the complete pre-outbox session record family for allocator tests.
 ///
 /// The command and model identities derive from the one session seed.
+/// Gives one raw-SQL session fixture the lifecycle row every session owns.
+///
+/// `session` carries a deferred foreign key to its satellite, so a fixture
+/// that inserts a session row by statement owes the same row a creation path
+/// writes. Unmonitored is the interactive default, and it is also what keeps
+/// the fixture out of the armed-deadline invariant it is not testing.
+async fn insert_raw_session_lifecycle(
+    connection: &mut sqlx::PgConnection,
+    session: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO session_lifecycle
+            (session_id, state_kind, owned, actor_kind)
+         VALUES ($1, 'created', false, 'operator')",
+    )
+    .bind(session)
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
 async fn insert_outbox_session_fixture(
     pool: &PgPool,
     session_seed: u128,
@@ -2558,6 +2580,7 @@ async fn insert_outbox_session_fixture_with_creation_cause(
     .bind(creation_cause)
     .execute(&mut *transaction)
     .await?;
+    insert_raw_session_lifecycle(&mut transaction, session).await?;
     sqlx::query("INSERT INTO session_scheduler (session_id) VALUES ($1)")
         .bind(session)
         .execute(&mut *transaction)
