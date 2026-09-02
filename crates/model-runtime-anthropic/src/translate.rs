@@ -316,7 +316,8 @@ fn tool_instruction(demand: &ToolDemand) -> String {
              arguments. Call no other tool and add no other reply."
         ),
         ToolDemand::AnyTool => {
-            "Answer by calling one of the declared tools rather than replying with text."
+            "Answer by calling at least one of the declared tools rather than replying \
+             with text."
                 .to_string()
         }
         ToolDemand::Named { name } => format!(
@@ -992,8 +993,10 @@ mod tests {
         let value = serde_json::to_value(&request).expect("wire request serializes");
 
         assert_eq!(value["tool_choice"], serde_json::json!({"type": "auto"}));
-        expect![["Answer by calling one of the declared tools rather than replying with text."]]
-            .assert_eq(request.system.as_deref().expect("an instruction is stated"));
+        expect![[
+            "Answer by calling at least one of the declared tools rather than replying with text."
+        ]]
+        .assert_eq(request.system.as_deref().expect("an instruction is stated"));
     }
 
     #[test]

@@ -251,9 +251,18 @@ async fn a_structured_output_request_never_sends_a_forced_tool_choice() {
         sent["tools"][0]["name"],
         serde_json::json!(contract.name.as_str())
     );
-    assert_eq!(sent["temperature"], serde_json::Value::Null);
-    assert_eq!(sent["top_p"], serde_json::Value::Null);
-    assert_eq!(sent["thinking"], serde_json::Value::Null);
+    assert!(
+        sent.get("temperature").is_none(),
+        "an explicit null sampling control is rejected exactly as a value is"
+    );
+    assert!(
+        sent.get("top_p").is_none(),
+        "an explicit null sampling control is rejected exactly as a value is"
+    );
+    assert!(
+        sent.get("thinking").is_none(),
+        "omitting the parameter is the accepted form; an explicit null is not"
+    );
 }
 
 #[tokio::test]
