@@ -683,6 +683,7 @@ async fn mark_goal_turn_completed(pool: &PgPool, turn: TurnId) -> Result<(), Box
     sqlx::query(
         "UPDATE turn_lifecycle
             SET state_kind = 'terminal', terminal_disposition_kind = 'completed',
+                terminal_cause_kind = 'completed',
                 terminal_frontier_id = $3, active_phase_kind = NULL,
                 terminal_attempt_id = current_attempt_id, current_attempt_id = NULL,
                 terminal_model_call_id = $4
@@ -2115,6 +2116,7 @@ async fn inv048_continuation_requires_the_latest_goal_turn() -> Result<(), Box<d
     sqlx::query(
         "UPDATE turn_lifecycle
             SET state_kind = 'terminal', terminal_disposition_kind = 'completed',
+                terminal_cause_kind = 'completed',
                 terminal_frontier_id = $3, active_phase_kind = NULL,
                 terminal_attempt_id = $4, current_attempt_id = NULL,
                 terminal_model_call_id = $5

@@ -86,7 +86,8 @@ async fn inv016_pending_steering_and_source_terminalization_serialize() -> Resul
                 terminal_attempt_id = current_attempt_id,
                 current_attempt_id = NULL,
                 terminal_frontier_id = $1,
-                terminal_disposition_kind = 'failed'
+                terminal_disposition_kind = 'failed',
+                terminal_cause_kind = 'model_call_failed'
           WHERE turn_id = $2",
     )
     .bind(Uuid::from_u128(0xe72))
@@ -1285,7 +1286,8 @@ async fn inv005_inv006_inv009_inv015_initial_semantic_entries_are_turn_correlate
             SET state_kind = 'terminal',
                 start_lineage_kind = 'first_in_session',
                 starting_frontier_id = $1,
-                terminal_disposition_kind = 'failed'
+                terminal_disposition_kind = 'failed',
+                terminal_cause_kind = 'model_call_failed'
           WHERE turn_id = $2",
     )
     .bind(starting_frontier)
@@ -1339,7 +1341,8 @@ async fn inv005_inv006_inv009_inv015_initial_semantic_entries_are_turn_correlate
                 start_lineage_kind = 'first_in_session',
                 starting_frontier_id = $1,
                 terminal_frontier_id = $2,
-                terminal_disposition_kind = 'failed'
+                terminal_disposition_kind = 'failed',
+                terminal_cause_kind = 'model_call_failed'
           WHERE turn_id = $3",
     )
     .bind(starting_frontier)
@@ -1394,7 +1397,8 @@ async fn inv005_inv006_inv009_inv015_initial_semantic_entries_are_turn_correlate
                 start_lineage_kind = 'first_in_session',
                 starting_frontier_id = $1,
                 terminal_frontier_id = $2,
-                terminal_disposition_kind = 'failed'
+                terminal_disposition_kind = 'failed',
+                terminal_cause_kind = 'model_call_failed'
           WHERE turn_id = $3",
     )
     .bind(starting_frontier)
@@ -1472,7 +1476,8 @@ async fn inv005_inv006_inv009_inv015_initial_semantic_entries_are_turn_correlate
                 start_lineage_kind = 'first_in_session',
                 starting_frontier_id = $1,
                 terminal_frontier_id = $2,
-                terminal_disposition_kind = 'failed'
+                terminal_disposition_kind = 'failed',
+                terminal_cause_kind = 'model_call_failed'
           WHERE turn_id = $3",
     )
     .bind(starting_frontier)
@@ -1527,7 +1532,8 @@ async fn inv005_inv006_inv009_inv015_initial_semantic_entries_are_turn_correlate
                 start_lineage_kind = 'first_in_session',
                 starting_frontier_id = $1,
                 terminal_frontier_id = $2,
-                terminal_disposition_kind = 'failed'
+                terminal_disposition_kind = 'failed',
+                terminal_cause_kind = 'model_call_failed'
           WHERE turn_id = $3",
     )
     .bind(starting_frontier)
@@ -1936,7 +1942,8 @@ async fn inv009_inv015_concurrent_attempt_and_frontier_inserts_fail_closed()
                 start_lineage_kind = 'first_in_session',
                 starting_frontier_id = $1,
                 terminal_frontier_id = $2,
-                terminal_disposition_kind = 'failed'
+                terminal_disposition_kind = 'failed',
+                terminal_cause_kind = 'model_call_failed'
           WHERE turn_id = $3",
     )
     .bind(starting_frontier)

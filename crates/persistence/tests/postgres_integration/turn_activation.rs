@@ -987,7 +987,8 @@ async fn s09_inv009_inv015_start_eligible_turn_preserves_failed_predecessor_pref
                 active_phase_kind = NULL,
                 terminal_attempt_id = current_attempt_id,
                 current_attempt_id = NULL,
-                terminal_disposition_kind = 'failed'
+                terminal_disposition_kind = 'failed',
+                terminal_cause_kind = 'model_call_failed'
           WHERE turn_id = $2",
     )
     .bind(terminal_frontier)
@@ -1489,7 +1490,8 @@ async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
                     terminal_attempt_id = current_attempt_id,
                     current_attempt_id = NULL,
                     terminal_frontier_id = $1,
-                    terminal_disposition_kind = 'failed'
+                    terminal_disposition_kind = 'failed',
+                    terminal_cause_kind = 'model_call_failed'
               WHERE turn_id = $2",
         )
         .bind(terminal_frontier)
@@ -1554,7 +1556,8 @@ async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
                 terminal_attempt_id = current_attempt_id,
                 current_attempt_id = NULL,
                 terminal_frontier_id = $1,
-                terminal_disposition_kind = 'failed'
+                terminal_disposition_kind = 'failed',
+                terminal_cause_kind = 'model_call_failed'
           WHERE turn_id = $2",
     )
     .bind(terminal_frontier)
@@ -2256,7 +2259,8 @@ async fn occupied_slot_handling_composes_with_service_activated_after_lineage_tu
                 active_phase_kind = NULL,
                 terminal_attempt_id = current_attempt_id,
                 current_attempt_id = NULL,
-                terminal_disposition_kind = 'failed'
+                terminal_disposition_kind = 'failed',
+                terminal_cause_kind = 'model_call_failed'
           WHERE turn_id = $2",
     )
     .bind(terminal_frontier)
@@ -2637,7 +2641,8 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
                 terminal_attempt_id = current_attempt_id,
                 current_attempt_id = NULL,
                 terminal_frontier_id = $1,
-                terminal_disposition_kind = 'failed'
+                terminal_disposition_kind = 'failed',
+                terminal_cause_kind = 'model_call_failed'
           WHERE turn_id = $2",
     )
     .bind(Uuid::from_u128(0xe63))

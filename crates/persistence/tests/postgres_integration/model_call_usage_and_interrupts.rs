@@ -1019,6 +1019,7 @@ async fn inv006_model_call_prepared_failure_reread_distinguishes_pending_and_com
                 active_phase_kind = NULL,
                 current_attempt_id = NULL,
                 terminal_disposition_kind = 'failed',
+                terminal_cause_kind = 'model_call_failed',
                 terminal_attempt_id = NULL,
                 terminal_model_call_id = $1
           WHERE turn_id = $2",

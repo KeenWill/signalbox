@@ -1010,7 +1010,8 @@ async fn a_retired_queued_goal_turn_is_never_subtracted_twice() -> Result<(), Bo
                 start_lineage_kind = 'first_in_session',
                 starting_frontier_id = $1,
                 terminal_frontier_id = $1,
-                terminal_disposition_kind = 'cancelled'
+                terminal_disposition_kind = 'cancelled',
+                terminal_cause_kind = 'interrupt_applied'
           WHERE session_id = $2 AND turn_id = $3",
     )
     .bind(frontier)
