@@ -3659,7 +3659,10 @@ fn validate_turn_origin_reconstitution_input(
 
 fn terminal_disposition_command(disposition: &TurnDisposition) -> Option<DurableCommandId> {
     match disposition {
-        TurnDisposition::Completed | TurnDisposition::Refused | TurnDisposition::Failed => None,
+        TurnDisposition::Completed
+        | TurnDisposition::Refused
+        | TurnDisposition::Failed
+        | TurnDisposition::Retired => None,
         TurnDisposition::Cancelled { cause } => Some(cause.command()),
         TurnDisposition::ReconciliationRequired { marker } => match marker.reason() {
             ReconciliationReason::UserChoseReconciliation { decision } => {
@@ -3681,7 +3684,10 @@ fn terminal_disposition_command(disposition: &TurnDisposition) -> Option<Durable
 
 fn terminal_disposition_matches_turn(disposition: &TurnDisposition, turn: TurnId) -> bool {
     match disposition {
-        TurnDisposition::Completed | TurnDisposition::Refused | TurnDisposition::Failed => true,
+        TurnDisposition::Completed
+        | TurnDisposition::Refused
+        | TurnDisposition::Failed
+        | TurnDisposition::Retired => true,
         TurnDisposition::Cancelled { cause } => cause.predecessor() == turn,
         TurnDisposition::ReconciliationRequired { marker } => match marker.reason() {
             ReconciliationReason::UserChoseReconciliation { decision } => decision.turn() == turn,

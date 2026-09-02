@@ -364,11 +364,12 @@ turn's accepted-input tail, the runtime projection retains its immutable
 acceptance position with an explicit retired-goal-origin marker while omitting
 it from the process transcript's turn inventory; tail completeness and the
 session acceptance high-water mark therefore remain exact. A stop or supersede
-that retires queued goal work appends a durable `goal_turn_retired` update
-before any replacement input acceptance. A live follower clears only that exact
-queued identity, so obsolete work cannot mask a replacement activation. Durable
-event and input correlation makes retrying command delivery idempotent rather
-than duplicating continuation work.
+that retires queued goal work moves the turn to `terminal{retired}` and appends
+a durable `turn_terminal{retired}` update before any replacement input
+acceptance. A live follower clears only that exact queued identity, so obsolete
+work cannot mask a replacement activation. Durable event and input correlation
+makes retrying command delivery idempotent rather than duplicating continuation
+work.
 
 ## Persistence and process surfaces
 

@@ -33,51 +33,68 @@ use signalbox_domain::{
 };
 
 pub(crate) const SESSION_CREATED: &str = "session_created";
+pub(crate) const SESSION_STATE_CHANGED: &str = "session_state_changed";
+pub(crate) const SESSION_TERMINAL: &str = "session_terminal";
+pub(crate) const TURN_TERMINAL: &str = "turn_terminal";
+pub(crate) const GOAL_CHANGED: &str = "goal_changed";
+pub(crate) const COMMAND_SETTLED: &str = "command_settled";
+pub(crate) const INJECTION_SETTLED: &str = "injection_settled";
+pub(crate) const SESSION_OWNERSHIP_CHANGED: &str = "session_ownership_changed";
 pub(crate) const SESSION_MODEL_SETTINGS_CHANGED: &str = "session_model_settings_changed";
 pub(crate) const TURN_MODEL_SETTINGS_RESOLVED: &str = "turn_model_settings_resolved";
 pub(crate) const INPUT_ACCEPTED: &str = "input_accepted";
-pub(crate) const GOAL_TURN_RETIRED: &str = "goal_turn_retired";
 pub(crate) const TURN_ACTIVATED: &str = "turn_activated";
-pub(crate) const TURN_FAILED: &str = "turn_failed";
 pub(crate) const MODEL_CALL_TRANSITION: &str = "model_call_transition";
 pub(crate) const TOOL_BATCH_TRANSITION: &str = "tool_batch_transition";
 pub(crate) const TOOL_APPROVAL_DECIDED: &str = "tool_approval_decided";
 pub(crate) const CONTEXT_COMPACTED: &str = "context_compacted";
-pub(crate) const TURN_COMPLETED: &str = "turn_completed";
-pub(crate) const TURN_REFUSED: &str = "turn_refused";
-pub(crate) const TURN_CANCELLED: &str = "turn_cancelled";
-pub(crate) const TURN_RECONCILIATION_REQUIRED: &str = "turn_reconciliation_required";
 pub(crate) const RUNNER_STATE_TRANSITION: &str = "runner_state_transition";
 pub(crate) const DELEGATION_UPDATE: &str = "delegation_update";
 pub(crate) const DELEGATION_WAKE: &str = "delegation_wake";
 
-const OUTBOX_EVENT_DISCRIMINATOR_SPELLINGS: [&str; 18] = [
+/// The timeline's per-disposition spellings of `turn_terminal`.
+pub(crate) const TURN_COMPLETED: &str = "turn_completed";
+pub(crate) const TURN_REFUSED: &str = "turn_refused";
+pub(crate) const TURN_FAILED: &str = "turn_failed";
+pub(crate) const TURN_CANCELLED: &str = "turn_cancelled";
+pub(crate) const TURN_RECONCILIATION_REQUIRED: &str = "turn_reconciliation_required";
+pub(crate) const GOAL_TURN_RETIRED: &str = "goal_turn_retired";
+
+/// Every spelling a timeline item can carry: the header kinds, with
+/// `turn_terminal` replaced by its projected per-disposition spellings.
+const TIMELINE_EVENT_KIND_SPELLINGS: [&str; 24] = [
     SESSION_CREATED,
+    SESSION_STATE_CHANGED,
+    SESSION_TERMINAL,
+    GOAL_CHANGED,
+    COMMAND_SETTLED,
+    INJECTION_SETTLED,
+    SESSION_OWNERSHIP_CHANGED,
     SESSION_MODEL_SETTINGS_CHANGED,
     TURN_MODEL_SETTINGS_RESOLVED,
     INPUT_ACCEPTED,
-    GOAL_TURN_RETIRED,
     TURN_ACTIVATED,
-    TURN_FAILED,
     MODEL_CALL_TRANSITION,
     TOOL_BATCH_TRANSITION,
     TOOL_APPROVAL_DECIDED,
     CONTEXT_COMPACTED,
-    TURN_COMPLETED,
-    TURN_REFUSED,
-    TURN_CANCELLED,
-    TURN_RECONCILIATION_REQUIRED,
     RUNNER_STATE_TRANSITION,
     DELEGATION_UPDATE,
     DELEGATION_WAKE,
+    TURN_COMPLETED,
+    TURN_REFUSED,
+    TURN_FAILED,
+    TURN_CANCELLED,
+    TURN_RECONCILIATION_REQUIRED,
+    GOAL_TURN_RETIRED,
 ];
 
 const fn outbox_event_kind_utf8_byte_bounds() -> (u64, u64) {
     let mut minimum = u64::MAX;
     let mut maximum = 0_u64;
     let mut index = 0;
-    while index < OUTBOX_EVENT_DISCRIMINATOR_SPELLINGS.len() {
-        let length = OUTBOX_EVENT_DISCRIMINATOR_SPELLINGS[index].len() as u64;
+    while index < TIMELINE_EVENT_KIND_SPELLINGS.len() {
+        let length = TIMELINE_EVENT_KIND_SPELLINGS[index].len() as u64;
         if length < minimum {
             minimum = length;
         }
@@ -199,20 +216,21 @@ pub(crate) fn usage_provenance_from_str(value: &str) -> Option<UsageProvenance> 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OutboxEventDiscriminator {
     SessionCreated,
+    SessionStateChanged,
+    SessionTerminal,
+    TurnTerminal,
+    GoalChanged,
+    CommandSettled,
+    InjectionSettled,
+    SessionOwnershipChanged,
     SessionModelSettingsChanged,
     TurnModelSettingsResolved,
     InputAccepted,
-    GoalTurnRetired,
     TurnActivated,
-    TurnFailed,
     ModelCallTransition,
     ToolBatchTransition,
     ToolApprovalDecided,
     ContextCompacted,
-    TurnCompleted,
-    TurnRefused,
-    TurnCancelled,
-    TurnReconciliationRequired,
     RunnerStateTransition,
     DelegationUpdate,
     DelegationWake,
@@ -221,25 +239,113 @@ pub(crate) enum OutboxEventDiscriminator {
 pub(crate) fn outbox_event_discriminator_from_str(value: &str) -> Option<OutboxEventDiscriminator> {
     Some(match value {
         SESSION_CREATED => OutboxEventDiscriminator::SessionCreated,
+        SESSION_STATE_CHANGED => OutboxEventDiscriminator::SessionStateChanged,
+        SESSION_TERMINAL => OutboxEventDiscriminator::SessionTerminal,
+        TURN_TERMINAL => OutboxEventDiscriminator::TurnTerminal,
+        GOAL_CHANGED => OutboxEventDiscriminator::GoalChanged,
+        COMMAND_SETTLED => OutboxEventDiscriminator::CommandSettled,
+        INJECTION_SETTLED => OutboxEventDiscriminator::InjectionSettled,
+        SESSION_OWNERSHIP_CHANGED => OutboxEventDiscriminator::SessionOwnershipChanged,
         SESSION_MODEL_SETTINGS_CHANGED => OutboxEventDiscriminator::SessionModelSettingsChanged,
         TURN_MODEL_SETTINGS_RESOLVED => OutboxEventDiscriminator::TurnModelSettingsResolved,
         INPUT_ACCEPTED => OutboxEventDiscriminator::InputAccepted,
-        GOAL_TURN_RETIRED => OutboxEventDiscriminator::GoalTurnRetired,
         TURN_ACTIVATED => OutboxEventDiscriminator::TurnActivated,
-        TURN_FAILED => OutboxEventDiscriminator::TurnFailed,
         MODEL_CALL_TRANSITION => OutboxEventDiscriminator::ModelCallTransition,
         TOOL_BATCH_TRANSITION => OutboxEventDiscriminator::ToolBatchTransition,
         TOOL_APPROVAL_DECIDED => OutboxEventDiscriminator::ToolApprovalDecided,
         CONTEXT_COMPACTED => OutboxEventDiscriminator::ContextCompacted,
-        TURN_COMPLETED => OutboxEventDiscriminator::TurnCompleted,
-        TURN_REFUSED => OutboxEventDiscriminator::TurnRefused,
-        TURN_CANCELLED => OutboxEventDiscriminator::TurnCancelled,
-        TURN_RECONCILIATION_REQUIRED => OutboxEventDiscriminator::TurnReconciliationRequired,
         RUNNER_STATE_TRANSITION => OutboxEventDiscriminator::RunnerStateTransition,
         DELEGATION_UPDATE => OutboxEventDiscriminator::DelegationUpdate,
         DELEGATION_WAKE => OutboxEventDiscriminator::DelegationWake,
         _ => return None,
     })
+}
+
+/// Closed `outbox_event.turn_disposition` spellings, one per
+/// `TurnDisposition` variant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TurnDispositionStorageKind {
+    Completed,
+    Refused,
+    Failed,
+    Cancelled,
+    ReconciliationRequired,
+    Retired,
+}
+
+pub(crate) const fn turn_disposition_kind_to_str(
+    value: TurnDispositionStorageKind,
+) -> &'static str {
+    match value {
+        TurnDispositionStorageKind::Completed => "completed",
+        TurnDispositionStorageKind::Refused => "refused",
+        TurnDispositionStorageKind::Failed => "failed",
+        TurnDispositionStorageKind::Cancelled => "cancelled",
+        TurnDispositionStorageKind::ReconciliationRequired => "reconciliation_required",
+        TurnDispositionStorageKind::Retired => "retired",
+    }
+}
+
+pub(crate) fn turn_disposition_kind_from_str(value: &str) -> Option<TurnDispositionStorageKind> {
+    Some(match value {
+        "completed" => TurnDispositionStorageKind::Completed,
+        "refused" => TurnDispositionStorageKind::Refused,
+        "failed" => TurnDispositionStorageKind::Failed,
+        "cancelled" => TurnDispositionStorageKind::Cancelled,
+        "reconciliation_required" => TurnDispositionStorageKind::ReconciliationRequired,
+        "retired" => TurnDispositionStorageKind::Retired,
+        _ => return None,
+    })
+}
+
+/// The timeline spelling of one header: `turn_terminal` projects under its
+/// disposition, every other kind under its own name.
+pub(crate) const fn timeline_event_kind_str(
+    kind: OutboxEventDiscriminator,
+    disposition: Option<TurnDispositionStorageKind>,
+) -> &'static str {
+    match (kind, disposition) {
+        (OutboxEventDiscriminator::TurnTerminal, Some(TurnDispositionStorageKind::Completed)) => {
+            TURN_COMPLETED
+        }
+        (OutboxEventDiscriminator::TurnTerminal, Some(TurnDispositionStorageKind::Refused)) => {
+            TURN_REFUSED
+        }
+        (OutboxEventDiscriminator::TurnTerminal, Some(TurnDispositionStorageKind::Failed)) => {
+            TURN_FAILED
+        }
+        (OutboxEventDiscriminator::TurnTerminal, Some(TurnDispositionStorageKind::Cancelled)) => {
+            TURN_CANCELLED
+        }
+        (
+            OutboxEventDiscriminator::TurnTerminal,
+            Some(TurnDispositionStorageKind::ReconciliationRequired),
+        ) => TURN_RECONCILIATION_REQUIRED,
+        (OutboxEventDiscriminator::TurnTerminal, Some(TurnDispositionStorageKind::Retired)) => {
+            GOAL_TURN_RETIRED
+        }
+        (OutboxEventDiscriminator::TurnTerminal, None)
+        | (OutboxEventDiscriminator::SessionCreated, _) => SESSION_CREATED,
+        (OutboxEventDiscriminator::SessionStateChanged, _) => SESSION_STATE_CHANGED,
+        (OutboxEventDiscriminator::SessionTerminal, _) => SESSION_TERMINAL,
+        (OutboxEventDiscriminator::GoalChanged, _) => GOAL_CHANGED,
+        (OutboxEventDiscriminator::CommandSettled, _) => COMMAND_SETTLED,
+        (OutboxEventDiscriminator::InjectionSettled, _) => INJECTION_SETTLED,
+        (OutboxEventDiscriminator::SessionOwnershipChanged, _) => SESSION_OWNERSHIP_CHANGED,
+        (OutboxEventDiscriminator::SessionModelSettingsChanged, _) => {
+            SESSION_MODEL_SETTINGS_CHANGED
+        }
+        (OutboxEventDiscriminator::TurnModelSettingsResolved, _) => TURN_MODEL_SETTINGS_RESOLVED,
+        (OutboxEventDiscriminator::InputAccepted, _) => INPUT_ACCEPTED,
+        (OutboxEventDiscriminator::TurnActivated, _) => TURN_ACTIVATED,
+        (OutboxEventDiscriminator::ModelCallTransition, _) => MODEL_CALL_TRANSITION,
+        (OutboxEventDiscriminator::ToolBatchTransition, _) => TOOL_BATCH_TRANSITION,
+        (OutboxEventDiscriminator::ToolApprovalDecided, _) => TOOL_APPROVAL_DECIDED,
+        (OutboxEventDiscriminator::ContextCompacted, _) => CONTEXT_COMPACTED,
+        (OutboxEventDiscriminator::RunnerStateTransition, _) => RUNNER_STATE_TRANSITION,
+        (OutboxEventDiscriminator::DelegationUpdate, _) => DELEGATION_UPDATE,
+        (OutboxEventDiscriminator::DelegationWake, _) => DELEGATION_WAKE,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -821,6 +927,7 @@ pub const fn turn_terminal_cause_to_str(value: TurnTerminalCause) -> &'static st
             "reported_usage_context_still_exceeded"
         }
         TurnTerminalCause::UnclassifiedFailure => "unclassified_failure",
+        TurnTerminalCause::GoalTurnIneligible => "goal_turn_ineligible",
     }
 }
 
@@ -852,6 +959,7 @@ pub fn turn_terminal_cause_from_str(value: &str) -> Option<TurnTerminalCause> {
             Some(TurnTerminalCause::ReportedUsageContextStillExceeded)
         }
         "unclassified_failure" => Some(TurnTerminalCause::UnclassifiedFailure),
+        "goal_turn_ineligible" => Some(TurnTerminalCause::GoalTurnIneligible),
         _ => None,
     }
 }
@@ -1814,7 +1922,7 @@ pub(crate) fn goal_operation_from_str(value: &str) -> Option<GoalOperationKind> 
 
 /// Closed stored event kinds for goal lineage events.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum GoalEventDiscriminator {
+pub enum GoalEventDiscriminator {
     Commissioned,
     Blocked,
     Resumed,

@@ -151,6 +151,18 @@ impl TimelineWindowLimits {
 pub enum SessionTimelineEventKind {
     /// A session was durably created.
     SessionCreated,
+    /// The session's lifecycle state changed.
+    SessionStateChanged,
+    /// The session closed with a declared outcome.
+    SessionTerminal,
+    /// A goal event was appended.
+    GoalChanged,
+    /// A claimed command settled.
+    CommandSettled,
+    /// An accepted injection settled.
+    InjectionSettled,
+    /// An adopt or release flipped the ownership bit.
+    SessionOwnershipChanged,
     /// Session-default model settings changed.
     SessionModelSettingsChanged,
     /// Effective model settings were resolved for a turn.

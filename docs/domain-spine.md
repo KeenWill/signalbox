@@ -3069,6 +3069,7 @@ pub enum TurnDisposition {
     Failed,
     Cancelled { cause: AppliedInterruptProof },
     ReconciliationRequired { marker: ReconciliationMarker },
+    Retired,
 }
 
 pub enum TurnTerminalCause {
@@ -3093,6 +3094,7 @@ pub enum TurnTerminalCause {
     ReportedUsageContextCompactionExhausted,
     ReportedUsageContextStillExceeded,
     UnclassifiedFailure,
+    GoalTurnIneligible,
 }
 ```
 
@@ -8041,6 +8043,12 @@ impl TimelineWindowLimits {
 
 pub enum SessionTimelineEventKind {
     SessionCreated,
+    SessionStateChanged,
+    SessionTerminal,
+    GoalChanged,
+    CommandSettled,
+    InjectionSettled,
+    SessionOwnershipChanged,
     SessionModelSettingsChanged,
     TurnModelSettingsResolved,
     InputAccepted,

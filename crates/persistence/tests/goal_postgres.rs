@@ -55,8 +55,8 @@ use signalbox_persistence::{
     model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
     outbox::{
         DispatchedDelegationOutcome, DispatchedDelegationProvenance, DispatchedDelegationReason,
-        DispatchedOutboxEvent, DispatchedOutboxEventKind, OutboxDeliveryDecision,
-        OutboxDispatchOutcome, OutboxDispatcher,
+        DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedTurnTerminalDisposition,
+        OutboxDeliveryDecision, OutboxDispatchOutcome, OutboxDispatcher,
     },
     process_read::{ProcessReadRepository, ProcessTurnState},
     replace_session_defaults::{
@@ -120,6 +120,26 @@ fn command(value: u128) -> DurableCommandId {
 
 fn tool_request(value: u128) -> ToolRequestId {
     ToolRequestId::from_uuid(Uuid::from_u128(value))
+}
+
+/// Delivers every committed event in order.
+async fn drain_dispatched(pool: &PgPool) -> Result<Vec<DispatchedOutboxEvent>, Box<dyn Error>> {
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    let mut dispatched = Vec::new();
+    loop {
+        let mut offered = None;
+        let outcome = dispatcher
+            .dispatch_next(|event| {
+                offered = Some(event.clone());
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?;
+        match (outcome, offered) {
+            (OutboxDispatchOutcome::Delivered { .. }, Some(event)) => dispatched.push(event),
+            (OutboxDispatchOutcome::Idle, None) => return Ok(dispatched),
+            (outcome, _) => return Err(format!("unexpected dispatch outcome {outcome:?}").into()),
+        }
+    }
 }
 
 #[track_caller]
@@ -810,52 +830,38 @@ async fn s_goal_inv048_inv053_goal_owned_input_activates_without_a_user_command(
     .await?;
     assert_eq!(accepted_events, 1);
 
-    let dispatcher = OutboxDispatcher::new(pool.clone());
-    let mut created = None;
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|event| {
-                created = Some(event.clone());
-                OutboxDeliveryDecision::Delivered
-            })
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 1 }
-    );
-    let created = created.expect("the session creation event was offered");
-    assert_eq!(created.session(), session(SESSION));
+    let dispatched = drain_dispatched(&pool).await?;
+    let created = dispatched
+        .first()
+        .expect("the session creation event was offered");
+    assert_eq!(created.session(), Some(session(SESSION)));
     assert!(matches!(
         created.kind(),
-        DispatchedOutboxEventKind::SessionCreated
+        DispatchedOutboxEventKind::SessionCreated(_)
     ));
-
-    let mut settings = None;
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|event| {
-                settings = Some(event.clone());
-                OutboxDeliveryDecision::Delivered
-            })
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 2 }
-    );
-    let settings = settings.expect("the goal settings event was offered");
-    assert_eq!(settings.session(), session(SESSION));
-    let settings = turn_model_settings_event(&settings);
+    let settings = dispatched
+        .iter()
+        .find(|event| {
+            matches!(
+                event.kind(),
+                DispatchedOutboxEventKind::TurnModelSettingsResolved(_)
+            )
+        })
+        .expect("the goal settings event was offered");
+    assert_eq!(settings.session(), Some(session(SESSION)));
+    let settings = turn_model_settings_event(settings);
     assert_eq!(settings.accepted_input(), candidates.accepted_input());
     assert_eq!(settings.turn(), candidates.turn());
-
-    let mut accepted = None;
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|event| {
-                accepted = Some(event.clone());
-                OutboxDeliveryDecision::Delivered
-            })
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 3 }
-    );
-    let accepted = accepted.expect("the goal input acceptance event was offered");
-    assert_eq!(accepted.session(), session(SESSION));
+    let accepted = dispatched
+        .iter()
+        .find(|event| {
+            matches!(
+                event.kind(),
+                DispatchedOutboxEventKind::InputAccepted { .. }
+            )
+        })
+        .expect("the goal input acceptance event was offered");
+    assert_eq!(accepted.session(), Some(session(SESSION)));
     assert_eq!(
         accepted.kind(),
         &DispatchedOutboxEventKind::InputAccepted {
@@ -1350,8 +1356,8 @@ async fn inv048_supersede_retires_the_obsolete_queued_turn() -> Result<(), Box<d
 
     let retired_rows: i64 = sqlx::query_scalar(
         "SELECT count(*)
-           FROM goal_turn_retired_outbox_event
-          WHERE session_id = $1 AND turn_id = $2",
+           FROM turn_terminal_outbox_event
+          WHERE session_id = $1 AND turn_id = $2 AND disposition_kind = 'retired'",
     )
     .bind(Uuid::from_u128(SESSION))
     .bind(obsolete.turn().into_uuid())
@@ -1359,43 +1365,38 @@ async fn inv048_supersede_retires_the_obsolete_queued_turn() -> Result<(), Box<d
     .await?;
     assert_eq!(retired_rows, 1);
 
-    let dispatcher = OutboxDispatcher::new(pool.clone());
+    let dispatched = drain_dispatched(&pool).await?;
+    let retired = dispatched
+        .iter()
+        .position(|event| {
+            matches!(
+                event.kind(),
+                DispatchedOutboxEventKind::TurnTerminal {
+                    disposition: DispatchedTurnTerminalDisposition::Retired,
+                    ..
+                }
+            )
+        })
+        .expect("the queued goal retirement event was offered");
+    assert_eq!(dispatched[retired].session(), Some(session(SESSION)));
     assert_eq!(
-        dispatcher
-            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 1 }
-    );
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 2 }
-    );
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 3 }
-    );
-    let mut retired = None;
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|event| {
-                retired = Some(event.clone());
-                OutboxDeliveryDecision::Delivered
-            })
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 4 }
-    );
-    let retired = retired.expect("the queued goal retirement event was offered");
-    assert_eq!(retired.session(), session(SESSION));
-    assert_eq!(
-        retired.kind(),
-        &DispatchedOutboxEventKind::GoalTurnRetired {
+        dispatched[retired].kind(),
+        &DispatchedOutboxEventKind::TurnTerminal {
             turn: obsolete.turn(),
+            disposition: DispatchedTurnTerminalDisposition::Retired,
         }
     );
+    // Retirement is published before the replacement's acceptance.
+    let replacement_accepted = dispatched
+        .iter()
+        .position(|event| {
+            matches!(
+                event.kind(),
+                DispatchedOutboxEventKind::InputAccepted { turn, .. } if *turn == replacement.turn()
+            )
+        })
+        .expect("the replacement acceptance event was offered");
+    assert!(retired < replacement_accepted);
 
     assert_eq!(activate_goal_turn(&pool, 0xd31).await?, replacement.turn());
 

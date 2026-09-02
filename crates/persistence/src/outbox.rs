@@ -13,36 +13,46 @@ use std::num::NonZeroU64;
 use rust_decimal::Decimal;
 use serde_json::Value;
 use signalbox_domain::{
-    AcceptedInputId, BoundChildAction, ContextCompactionId, ContextFrontierId, DelegationMessageId,
-    DelegationOutcomeKind, DelegationOutcomeReason, DelegationWaitMode, DescendantTerminationScope,
-    DirectModelSelection, DurableCommandId, FrozenAliasDefinition, FrozenModelSelection,
-    ModelAlias, ModelCallDisposition, ModelCallId, ModelSelectionRequest, RunnerEnrollmentId,
-    RunnerGeneration, RunnerId, RunnerSandboxProfile, RunnerWorkingDirectory,
-    SemanticTranscriptEntryId, SessionId, SessionInputPosition, SessionModelSettingsChanged,
-    ToolApprovalResolution, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
-    TurnModelSettingsResolved, UserContent,
+    AcceptedInputId, BoundChildAction, CommissionedDispatchId, ContextCompactionId,
+    ContextFrontierId, DelegationMessageId, DelegationOutcomeKind, DelegationOutcomeReason,
+    DelegationWaitMode, DescendantTerminationScope, DirectModelSelection, DispatchingModule,
+    DurableCommandId, FrozenAliasDefinition, FrozenModelSelection, LifecycleActor, ModelAlias,
+    ModelCallDisposition, ModelCallId, ModelSelectionRequest, ModuleDispatch, RepoWatchDispatchId,
+    RunnerEnrollmentId, RunnerGeneration, RunnerId, RunnerSandboxProfile, RunnerWorkingDirectory,
+    SemanticTranscriptEntryId, SessionCreationCause, SessionFailureCause, SessionId,
+    SessionInputPosition, SessionLifecycleState, SessionModelSettingsChanged, SessionOwnership,
+    SessionOwnershipTransition, SessionTerminalOutcome, ToolApprovalResolution, ToolAttemptId,
+    ToolRequestId, TurnAttemptId, TurnId, TurnModelSettingsResolved, UserContent,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
 use crate::{
     lock_inventory,
     mapping::{
-        CONTEXT_COMPACTED, DelegationPolicyStorageKind, DelegationUpdateStorageKind,
-        DelegationWakeStorageKind, GOAL_TURN_RETIRED, INPUT_ACCEPTED, MODEL_CALL_TRANSITION,
+        COMMAND_SETTLED, CONTEXT_COMPACTED, DelegationPolicyStorageKind,
+        DelegationUpdateStorageKind, DelegationWakeStorageKind, GOAL_CHANGED,
+        GoalEventDiscriminator, INJECTION_SETTLED, INPUT_ACCEPTED, MODEL_CALL_TRANSITION,
         OutboxEventDiscriminator, RUNNER_STATE_TRANSITION, SESSION_CREATED,
-        SESSION_MODEL_SETTINGS_CHANGED, TOOL_APPROVAL_DECIDED, TOOL_BATCH_TRANSITION,
-        TURN_ACTIVATED, TURN_CANCELLED, TURN_COMPLETED, TURN_FAILED, TURN_MODEL_SETTINGS_RESOLVED,
-        TURN_RECONCILIATION_REQUIRED, TURN_REFUSED, accepted_input_id_to_uuid,
-        bound_child_action_from_str, defaults_version_from_numeric, defaults_version_to_numeric,
+        SESSION_MODEL_SETTINGS_CHANGED, SESSION_OWNERSHIP_CHANGED, TOOL_APPROVAL_DECIDED,
+        TOOL_BATCH_TRANSITION, TURN_ACTIVATED, TURN_MODEL_SETTINGS_RESOLVED, TURN_TERMINAL,
+        TurnDispositionStorageKind, accepted_input_id_to_uuid, bound_child_action_from_str,
+        defaults_version_from_numeric, defaults_version_to_numeric,
         delegation_outcome_kind_from_str, delegation_outcome_reason_from_str,
         delegation_policy_kind_from_str, delegation_update_kind_from_str,
         delegation_wait_mode_from_str, delegation_wake_subject_from_str,
         dispatched_runner_state_from_str, dispatched_runner_state_to_str,
-        durable_command_id_from_uuid, input_position_from_numeric, input_position_to_numeric,
+        dispatching_module_from_str, dispatching_module_to_str, durable_command_id_from_uuid,
+        goal_event_kind_from_str, input_position_from_numeric, input_position_to_numeric,
         model_change_adjustments_from_json, model_settings_from_json,
         model_settings_overlay_from_json, outbox_event_discriminator_from_str,
-        runner_sandbox_from_str, runner_sandbox_to_str, session_id_from_uuid, session_id_to_uuid,
+        runner_sandbox_from_str, runner_sandbox_to_str, session_creation_cause_from_str,
+        session_creation_cause_to_str, session_id_from_uuid, session_id_to_uuid,
+        tool_request_id_from_uuid, turn_disposition_kind_from_str, turn_disposition_kind_to_str,
         turn_id_to_uuid,
+    },
+    session_lifecycle::{
+        decode_lifecycle_actor, decode_lifecycle_state, decode_standing_failure_cause,
+        decode_terminal_outcome_columns,
     },
 };
 
@@ -50,6 +60,32 @@ use crate::{
 use crate::runner_protocol::RunnerConnectionEpoch;
 
 const STORAGE_VERSION: i16 = 1;
+/// `session_created` advanced when its record gained §6 provenance.
+const SESSION_CREATED_STORAGE_VERSION: i16 = 2;
+
+const fn storage_version_for(discriminator: OutboxEventDiscriminator) -> i16 {
+    match discriminator {
+        OutboxEventDiscriminator::SessionCreated => SESSION_CREATED_STORAGE_VERSION,
+        OutboxEventDiscriminator::SessionStateChanged
+        | OutboxEventDiscriminator::SessionTerminal
+        | OutboxEventDiscriminator::TurnTerminal
+        | OutboxEventDiscriminator::GoalChanged
+        | OutboxEventDiscriminator::CommandSettled
+        | OutboxEventDiscriminator::InjectionSettled
+        | OutboxEventDiscriminator::SessionOwnershipChanged
+        | OutboxEventDiscriminator::SessionModelSettingsChanged
+        | OutboxEventDiscriminator::TurnModelSettingsResolved
+        | OutboxEventDiscriminator::InputAccepted
+        | OutboxEventDiscriminator::TurnActivated
+        | OutboxEventDiscriminator::ModelCallTransition
+        | OutboxEventDiscriminator::ToolBatchTransition
+        | OutboxEventDiscriminator::ToolApprovalDecided
+        | OutboxEventDiscriminator::ContextCompacted
+        | OutboxEventDiscriminator::RunnerStateTransition
+        | OutboxEventDiscriminator::DelegationUpdate
+        | OutboxEventDiscriminator::DelegationWake => STORAGE_VERSION,
+    }
+}
 
 type OutboxSlotRow = (
     Decimal,
@@ -58,12 +94,15 @@ type OutboxSlotRow = (
     Option<String>,
     Option<i16>,
     Option<Uuid>,
+    Option<String>,
 );
 
 pub(crate) struct ValidatedOutboxHeader {
-    pub(crate) session: SessionId,
-    stored_session: Uuid,
+    /// Absent exactly for a sessionless `command_settled`.
+    pub(crate) session: Option<SessionId>,
+    stored_session: Option<Uuid>,
     pub(crate) discriminator: OutboxEventDiscriminator,
+    pub(crate) turn_disposition: Option<TurnDispositionStorageKind>,
 }
 
 type ToolBatchTransitionRow = (Uuid, Uuid, String, Option<Uuid>, Option<Uuid>, bool);
@@ -88,7 +127,7 @@ struct TurnCancelledOutboxRow {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DispatchedOutboxEvent {
     sequence: u64,
-    session: SessionId,
+    session: Option<SessionId>,
     kind: DispatchedOutboxEventKind,
 }
 
@@ -98,8 +137,9 @@ impl DispatchedOutboxEvent {
         self.sequence
     }
 
-    /// Returns the session named by the outbox header.
-    pub const fn session(&self) -> SessionId {
+    /// Returns the session named by the outbox header; a `command_settled`
+    /// receipt for a rejected creation or an unknown session names none.
+    pub const fn session(&self) -> Option<SessionId> {
         self.session
     }
 
@@ -113,7 +153,36 @@ impl DispatchedOutboxEvent {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DispatchedOutboxEventKind {
     /// A session creation committed.
-    SessionCreated,
+    SessionCreated(DispatchedSessionCreation),
+    /// The session's lifecycle state moved to a non-terminal state.
+    SessionStateChanged(DispatchedSessionStateChange),
+    /// The session closed with a declared outcome.
+    SessionTerminal(DispatchedSessionTerminal),
+    /// A turn reached `terminal` under one disposition.
+    TurnTerminal {
+        /// The terminal turn.
+        turn: TurnId,
+        /// How it ended, with the evidence that disposition carries.
+        disposition: DispatchedTurnTerminalDisposition,
+    },
+    /// One goal event was appended to the session's goal lineage.
+    GoalChanged(DispatchedGoalChange),
+    /// A claimed command settled.
+    CommandSettled {
+        /// The settled command.
+        command: DurableCommandId,
+        /// Applied, or rejected with its closed rejection kind.
+        result: DispatchedCommandSettlement,
+    },
+    /// An accepted injection settled.
+    InjectionSettled {
+        /// The injecting command.
+        command: DurableCommandId,
+        /// How the injection settled.
+        outcome: DispatchedInjectionOutcome,
+    },
+    /// An adopt or release flipped the ownership bit.
+    SessionOwnershipChanged(DispatchedOwnershipChange),
     /// A defaults replacement changed the model or model settings.
     SessionModelSettingsChanged(SessionModelSettingsChanged),
     /// An accepted origin froze complete model settings.
@@ -129,26 +198,12 @@ pub enum DispatchedOutboxEventKind {
         /// Exact accepted ordered content.
         content: UserContent,
     },
-    /// A queued goal turn became intentionally ineligible.
-    GoalTurnRetired {
-        /// Exact immutable queued turn retired by a goal transition.
-        turn: TurnId,
-    },
     /// A queued turn atomically became active.
     TurnActivated {
         /// Activated turn.
         turn: TurnId,
         /// Initial current attempt.
         current_attempt: TurnAttemptId,
-    },
-    /// A turn closed as failed with its semantic marker and terminal frontier.
-    TurnFailed {
-        /// Failed turn.
-        turn: TurnId,
-        /// Semantic failure marker.
-        failure_entry: SemanticTranscriptEntryId,
-        /// Exact terminal frontier.
-        terminal_frontier: ContextFrontierId,
     },
     /// A model call advanced through one durable lifecycle checkpoint.
     ModelCallTransition {
@@ -190,44 +245,6 @@ pub enum DispatchedOutboxEventKind {
         /// Complete result frontier.
         result_frontier: ContextFrontierId,
     },
-    /// A turn committed authoritative assistant content and completed.
-    TurnCompleted {
-        /// Completed turn.
-        turn: TurnId,
-        /// Outcome-authoritative model call.
-        call: ModelCallId,
-        /// Final semantic completion marker.
-        completion_entry: SemanticTranscriptEntryId,
-        /// Exact terminal frontier.
-        terminal_frontier: ContextFrontierId,
-    },
-    /// A turn closed as refused without assistant content.
-    TurnRefused {
-        /// Refused turn.
-        turn: TurnId,
-        /// Outcome-authoritative model call.
-        call: ModelCallId,
-        /// Exact terminal frontier.
-        terminal_frontier: ContextFrontierId,
-    },
-    /// An interrupt-cancelled turn committed its semantic marker.
-    TurnCancelled {
-        /// Cancelled turn.
-        turn: TurnId,
-        /// Exact semantic cancellation marker.
-        cancellation_entry: SemanticTranscriptEntryId,
-        /// Exact terminal frontier.
-        terminal_frontier: ContextFrontierId,
-    },
-    /// A stopped turn terminalized for explicit reconciliation.
-    TurnReconciliationRequired {
-        /// Turn requiring reconciliation.
-        turn: TurnId,
-        /// Exact ambiguous operation.
-        operation: DispatchedReconciliationOperation,
-        /// Exact terminal frontier.
-        terminal_frontier: ContextFrontierId,
-    },
     /// A session-visible runner placement or connection state changed.
     RunnerStateTransition {
         /// Exact runner named by the transition.
@@ -245,6 +262,153 @@ pub enum DispatchedOutboxEventKind {
     DelegationUpdate(DispatchedDelegationUpdate),
     /// One committed result or message can wake its exact recipient.
     DelegationWake(DispatchedDelegationWake),
+}
+
+/// The §6 provenance a creation recorded.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DispatchedSessionCreation {
+    /// Why the session was created.
+    pub cause: SessionCreationCause,
+    /// Whether the daemon holds a liveness obligation for it.
+    pub ownership: SessionOwnership,
+}
+
+/// One non-terminal lifecycle transition, as the satellite row recorded it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DispatchedSessionStateChange {
+    /// The state left.
+    pub prior: DispatchedSessionStateKind,
+    /// The state entered, with its typed detail.
+    pub state: SessionLifecycleState,
+    /// Who produced the transition.
+    pub actor: LifecycleActor,
+}
+
+/// One session closure, as the satellite row recorded it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DispatchedSessionTerminal {
+    /// The state left.
+    pub prior: DispatchedSessionStateKind,
+    /// The declared outcome.
+    pub outcome: SessionTerminalOutcome,
+    /// The standing failure cause a closed park carried forward.
+    pub standing: Option<SessionFailureCause>,
+    /// Who closed the session.
+    pub actor: LifecycleActor,
+}
+
+/// The bare state a transition left; the entered state carries the detail.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DispatchedSessionStateKind {
+    /// `created`.
+    Created,
+    /// `dispatched`.
+    Dispatched,
+    /// `active`.
+    Active,
+    /// `waiting`.
+    Waiting,
+    /// `recovering`.
+    Recovering,
+    /// `blocked`.
+    Blocked,
+    /// `parked`.
+    Parked,
+}
+
+/// How a turn ended, with the evidence each disposition carries.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DispatchedTurnTerminalDisposition {
+    /// The turn committed authoritative assistant content.
+    Completed {
+        /// Outcome-authoritative model call.
+        call: ModelCallId,
+        /// Final semantic completion marker.
+        completion_entry: SemanticTranscriptEntryId,
+        /// Exact terminal frontier.
+        terminal_frontier: ContextFrontierId,
+    },
+    /// The turn closed as refused without assistant content.
+    Refused {
+        /// Outcome-authoritative model call.
+        call: ModelCallId,
+        /// Exact terminal frontier.
+        terminal_frontier: ContextFrontierId,
+    },
+    /// The turn closed as failed with its semantic marker.
+    Failed {
+        /// Semantic failure marker.
+        failure_entry: SemanticTranscriptEntryId,
+        /// Exact terminal frontier.
+        terminal_frontier: ContextFrontierId,
+    },
+    /// An interrupt cancelled the turn.
+    Cancelled {
+        /// Exact semantic cancellation marker.
+        cancellation_entry: SemanticTranscriptEntryId,
+        /// Exact terminal frontier.
+        terminal_frontier: ContextFrontierId,
+    },
+    /// A stopped turn terminalized for explicit reconciliation.
+    ReconciliationRequired {
+        /// Exact ambiguous operation.
+        operation: DispatchedReconciliationOperation,
+        /// Exact terminal frontier.
+        terminal_frontier: ContextFrontierId,
+    },
+    /// A queued turn that never activated was retired.
+    Retired,
+}
+
+/// One goal event, by its place in the lineage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DispatchedGoalChange {
+    /// The event's ordinal in the session's goal lineage.
+    pub event_ordinal: u64,
+    /// The generation the event belongs to.
+    pub generation: u64,
+    /// The event's closed kind.
+    pub kind: GoalEventDiscriminator,
+}
+
+/// One journaled ownership flip.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DispatchedOwnershipChange {
+    /// The journal row's ordinal.
+    pub event_ordinal: u64,
+    /// The flip recorded.
+    pub transition: SessionOwnershipTransition,
+    /// Who flipped it.
+    pub actor: LifecycleActor,
+}
+
+/// How a claimed command settled.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DispatchedCommandSettlement {
+    /// The command applied.
+    Applied,
+    /// The command was rejected.
+    Rejected {
+        /// The closed rejection kind.
+        kind: String,
+    },
+}
+
+/// How an accepted injection settled.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DispatchedInjectionOutcome {
+    /// The injection reached its boundary.
+    Delivered {
+        /// The turn that carried it, when one did.
+        turn: Option<TurnId>,
+    },
+    /// The session closed before any boundary could carry it.
+    NotDelivered,
+    /// The injection was rejected.
+    Rejected {
+        /// The closed rejection kind.
+        kind: String,
+    },
 }
 
 /// Closed relationship updates admitted by delegation outbox storage.
@@ -579,6 +743,11 @@ pub enum OutboxCorruption {
     InvalidModelSettingsEvent,
     /// A runner event had an inconsistent or unknown typed shape.
     InvalidRunnerEvent,
+    /// A session lifecycle, goal, or ownership record had an inconsistent or
+    /// unknown typed shape.
+    InvalidLifecycleEvent,
+    /// A settlement receipt had an inconsistent or unknown typed shape.
+    InvalidSettlementEvent,
 }
 
 impl fmt::Display for OutboxCorruption {
@@ -610,6 +779,8 @@ impl fmt::Display for OutboxCorruption {
             Self::InvalidDelegationEvent => "outbox delegation event is invalid",
             Self::InvalidModelSettingsEvent => "outbox model-settings event is invalid",
             Self::InvalidRunnerEvent => "outbox runner event is invalid",
+            Self::InvalidLifecycleEvent => "outbox lifecycle event is invalid",
+            Self::InvalidSettlementEvent => "outbox settlement event is invalid",
         })
     }
 }
@@ -767,13 +938,16 @@ pub(crate) async fn load_event_header(
             event.event_sequence,
             event.event_kind,
             event.storage_version,
-            event.session_id
+            event.session_id,
+            event.turn_disposition
            FROM outbox_sequence_state AS allocator
            LEFT JOIN (
-                SELECT event_sequence, event_kind, storage_version, session_id
+                SELECT event_sequence, event_kind, storage_version, session_id,
+                       turn_disposition
                   FROM outbox_event
                 UNION ALL
-                SELECT event_sequence, event_kind, storage_version, session_id
+                SELECT event_sequence, event_kind, storage_version, session_id,
+                       NULL::text AS turn_disposition
                   FROM delegation_outbox_event
            ) AS event
              ON event.event_sequence = $1
@@ -789,34 +963,47 @@ pub(crate) async fn load_event_header(
         event_kind,
         storage_version,
         stored_session,
+        turn_disposition,
     )) = row
     else {
         return Err(OutboxCorruption::MissingSequenceState.into());
     };
     let allocated = decode_nonnegative_sequence(allocated)?;
-    let (stored_sequence, event_kind, storage_version, stored_session) =
-        match (stored_sequence, event_kind, storage_version, stored_session) {
-            (None, None, None, None) => return Ok((allocated, event_beyond_allocated, None)),
-            (Some(sequence), Some(kind), Some(version), Some(session)) => {
-                (sequence, kind, version, session)
-            }
+    let (stored_sequence, event_kind, storage_version) =
+        match (stored_sequence, event_kind, storage_version) {
+            (None, None, None) => return Ok((allocated, event_beyond_allocated, None)),
+            (Some(sequence), Some(kind), Some(version)) => (sequence, kind, version),
             _ => return Err(OutboxCorruption::MissingCommittedEventHeader.into()),
         };
     if decode_positive_sequence(stored_sequence)? != expected_sequence {
         return Err(OutboxCorruption::InvalidSequence.into());
     }
-    if storage_version != STORAGE_VERSION {
-        return Err(OutboxCorruption::UnsupportedStorageVersion.into());
-    }
     let discriminator = outbox_event_discriminator_from_str(&event_kind)
         .ok_or(OutboxCorruption::UnsupportedEventKind)?;
+    if storage_version != storage_version_for(discriminator) {
+        return Err(OutboxCorruption::UnsupportedStorageVersion.into());
+    }
+    if stored_session.is_none() && discriminator != OutboxEventDiscriminator::CommandSettled {
+        return Err(OutboxCorruption::MissingCommittedEventHeader.into());
+    }
+    let turn_disposition = match (discriminator, turn_disposition) {
+        (OutboxEventDiscriminator::TurnTerminal, Some(disposition)) => Some(
+            turn_disposition_kind_from_str(&disposition)
+                .ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?,
+        ),
+        (OutboxEventDiscriminator::TurnTerminal, None) | (_, Some(_)) => {
+            return Err(OutboxCorruption::InvalidTerminalEventCorrelation.into());
+        }
+        (_, None) => None,
+    };
     Ok((
         allocated,
         event_beyond_allocated,
         Some(ValidatedOutboxHeader {
-            session: session_id_from_uuid(stored_session),
+            session: stored_session.map(session_id_from_uuid),
             stored_session,
             discriminator,
+            turn_disposition,
         }),
     ))
 }
@@ -830,21 +1017,46 @@ pub(crate) async fn load_event(
     let Some(header) = header else {
         return Ok((allocated, event_beyond_allocated, None));
     };
-    let session = header.session;
-    let stored_session = header.stored_session;
+    let Some(stored_session) = header.stored_session else {
+        let kind = load_command_settled(transaction, expected_sequence, None).await?;
+        return Ok((
+            allocated,
+            event_beyond_allocated,
+            Some(DispatchedOutboxEvent {
+                sequence: expected_sequence,
+                session: None,
+                kind,
+            }),
+        ));
+    };
+    let session = session_id_from_uuid(stored_session);
     let kind = match header.discriminator {
         OutboxEventDiscriminator::SessionCreated => {
-            require_typed_record(
-                transaction,
-                "SELECT event_sequence
-                   FROM session_created_outbox_event
-                  WHERE event_sequence = $1
-                    AND session_id = $2",
-                expected_sequence,
-                stored_session,
-            )
-            .await?;
-            DispatchedOutboxEventKind::SessionCreated
+            load_session_created(transaction, expected_sequence, stored_session).await?
+        }
+        OutboxEventDiscriminator::SessionStateChanged => {
+            load_session_state_changed(transaction, expected_sequence, stored_session).await?
+        }
+        OutboxEventDiscriminator::SessionTerminal => {
+            load_session_terminal(transaction, expected_sequence, stored_session).await?
+        }
+        OutboxEventDiscriminator::TurnTerminal => {
+            let disposition = header
+                .turn_disposition
+                .ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
+            load_turn_terminal(transaction, expected_sequence, stored_session, disposition).await?
+        }
+        OutboxEventDiscriminator::GoalChanged => {
+            load_goal_changed(transaction, expected_sequence, stored_session).await?
+        }
+        OutboxEventDiscriminator::CommandSettled => {
+            load_command_settled(transaction, expected_sequence, Some(stored_session)).await?
+        }
+        OutboxEventDiscriminator::InjectionSettled => {
+            load_injection_settled(transaction, expected_sequence, stored_session).await?
+        }
+        OutboxEventDiscriminator::SessionOwnershipChanged => {
+            load_session_ownership_changed(transaction, expected_sequence, stored_session).await?
         }
         OutboxEventDiscriminator::SessionModelSettingsChanged => {
             let row = sqlx::query(
@@ -1139,33 +1351,6 @@ pub(crate) async fn load_event(
                 content,
             }
         }
-        OutboxEventDiscriminator::GoalTurnRetired => {
-            let turn = sqlx::query_scalar::<_, Uuid>(
-                "SELECT event.turn_id
-                   FROM goal_turn_retired_outbox_event AS event
-                   JOIN goal_turn AS goal
-                     ON goal.session_id = event.session_id
-                    AND goal.turn_id = event.turn_id
-                   JOIN turn_lifecycle AS lifecycle
-                     ON lifecycle.session_id = goal.session_id
-                    AND lifecycle.turn_id = goal.turn_id
-                    AND lifecycle.state_kind = 'queued'
-                  WHERE event.event_sequence = $1
-                    AND event.session_id = $2
-                    AND NOT goal_turn_is_runtime_relevant(
-                        goal.session_id,
-                        goal.turn_id
-                    )",
-            )
-            .bind(Decimal::from(expected_sequence))
-            .bind(stored_session)
-            .fetch_optional(&mut **transaction)
-            .await?
-            .ok_or(OutboxCorruption::MissingTypedRecord)?;
-            DispatchedOutboxEventKind::GoalTurnRetired {
-                turn: TurnId::from_uuid(turn),
-            }
-        }
         OutboxEventDiscriminator::TurnActivated => {
             let row: Option<(Uuid, Uuid, bool)> = sqlx::query_as(
                 "SELECT event.turn_id, event.current_attempt_id,
@@ -1221,145 +1406,6 @@ pub(crate) async fn load_event(
             DispatchedOutboxEventKind::TurnActivated {
                 turn: TurnId::from_uuid(turn),
                 current_attempt: TurnAttemptId::from_uuid(current_attempt),
-            }
-        }
-        OutboxEventDiscriminator::TurnFailed => {
-            let row: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
-                "SELECT event.turn_id, event.failure_entry_id,
-                        event.terminal_frontier_id
-                   FROM turn_failed_outbox_event AS event
-                   JOIN turn_lifecycle AS turn
-                     ON turn.turn_id = event.turn_id
-                    AND turn.session_id = event.session_id
-                    AND turn.state_kind = 'terminal'
-                    AND turn.terminal_disposition_kind = 'failed'
-                    AND turn.terminal_frontier_id = event.terminal_frontier_id
-                   JOIN semantic_transcript_entry AS failure
-                     ON failure.source_session_id = event.session_id
-                    AND failure.semantic_entry_id = event.failure_entry_id
-                    AND failure.payload_kind = 'turn_failed'
-                    AND failure.failed_turn_id = event.turn_id
-                   JOIN context_frontier AS frontier
-                     ON frontier.owning_session_id = event.session_id
-                    AND frontier.context_frontier_id =
-                        event.terminal_frontier_id
-                   JOIN context_frontier_member AS terminal_member
-                     ON terminal_member.owning_session_id =
-                        frontier.owning_session_id
-                    AND terminal_member.context_frontier_id =
-                        frontier.context_frontier_id
-                    AND terminal_member.member_position = frontier.member_count
-                    AND terminal_member.source_session_id = event.session_id
-                    AND terminal_member.semantic_entry_id =
-                        event.failure_entry_id
-                  WHERE event.event_sequence = $1
-                    AND event.session_id = $2
-                    AND (
-                        (
-                            turn.terminal_attempt_id IS NULL
-                            AND turn.terminal_model_call_id IS NULL
-                            AND NOT EXISTS (
-                                SELECT 1
-                                  FROM turn_attempt AS any_attempt
-                                 WHERE any_attempt.turn_id = event.turn_id
-                                   AND any_attempt.session_id = event.session_id
-                            )
-                            AND NOT EXISTS (
-                                SELECT 1
-                                  FROM model_call AS any_call
-                                 WHERE any_call.turn_id = event.turn_id
-                                   AND any_call.session_id = event.session_id
-                            )
-                        )
-                        OR (
-                            turn.terminal_attempt_id IS NOT NULL
-                            AND EXISTS (
-                                SELECT 1
-                                  FROM turn_attempt AS terminal_attempt
-                                 WHERE terminal_attempt.turn_attempt_id =
-                                       turn.terminal_attempt_id
-                                   AND terminal_attempt.turn_id = event.turn_id
-                                   AND terminal_attempt.session_id =
-                                       event.session_id
-                                   AND terminal_attempt.state_kind = 'ended'
-                                   AND (
-                                        (
-                                            terminal_attempt.end_variant =
-                                                'without_stop'
-                                            AND terminal_attempt.end_disposition
-                                                IN ('known_failure', 'lost')
-                                        )
-                                        OR (
-                                            terminal_attempt.end_variant =
-                                                'after_cancellation'
-                                            AND terminal_attempt.end_disposition
-                                                = 'known_failure'
-                                            AND terminal_attempt.interrupt_command_id
-                                                IS NOT NULL
-                                            AND terminal_attempt.interrupt_predecessor_turn_id
-                                                = event.turn_id
-                                        )
-                                   )
-                            )
-                            AND (
-                                (
-                                    turn.terminal_model_call_id IS NULL
-                                )
-                                OR (
-                                    turn.terminal_model_call_id IS NOT NULL
-                                    AND EXISTS (
-                                        SELECT 1
-                                          FROM model_call AS terminal_call
-                                          JOIN turn_attempt AS terminal_attempt
-                                            ON terminal_attempt.turn_attempt_id =
-                                               terminal_call.turn_attempt_id
-                                           AND terminal_attempt.turn_id =
-                                               terminal_call.turn_id
-                                           AND terminal_attempt.session_id =
-                                               terminal_call.session_id
-                                         WHERE terminal_call.model_call_id =
-                                               turn.terminal_model_call_id
-                                           AND terminal_call.turn_attempt_id =
-                                               turn.terminal_attempt_id
-                                           AND terminal_call.turn_id =
-                                               event.turn_id
-                                           AND terminal_call.session_id =
-                                               event.session_id
-                                           AND terminal_call.state_kind =
-                                               'terminal'
-                                           AND (
-                                                (
-                                                    terminal_attempt.end_variant
-                                                        = 'without_stop'
-                                                    AND terminal_call.terminal_disposition_kind
-                                                        IN (
-                                                            'known_failed',
-                                                            'cancelled'
-                                                        )
-                                                )
-                                                OR (
-                                                    terminal_attempt.end_variant
-                                                        = 'after_cancellation'
-                                                    AND terminal_call.terminal_disposition_kind
-                                                        = 'known_failed'
-                                                )
-                                           )
-                                    )
-                                )
-                            )
-                        )
-                    )",
-            )
-            .bind(Decimal::from(expected_sequence))
-            .bind(stored_session)
-            .fetch_optional(&mut **transaction)
-            .await?;
-            let (turn, failure_entry, terminal_frontier) =
-                row.ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
-            DispatchedOutboxEventKind::TurnFailed {
-                turn: TurnId::from_uuid(turn),
-                failure_entry: SemanticTranscriptEntryId::from_uuid(failure_entry),
-                terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
             }
         }
         OutboxEventDiscriminator::ModelCallTransition => {
@@ -1651,11 +1697,346 @@ pub(crate) async fn load_event(
                 result_frontier: ContextFrontierId::from_uuid(row.4),
             }
         }
-        OutboxEventDiscriminator::TurnCompleted => {
+        OutboxEventDiscriminator::RunnerStateTransition => {
+            load_runner_state_transition(transaction, expected_sequence, stored_session).await?
+        }
+        OutboxEventDiscriminator::DelegationUpdate => DispatchedOutboxEventKind::DelegationUpdate(
+            load_delegation_update(transaction, expected_sequence, stored_session, true).await?,
+        ),
+        OutboxEventDiscriminator::DelegationWake => DispatchedOutboxEventKind::DelegationWake(
+            load_delegation_wake(transaction, expected_sequence, stored_session).await?,
+        ),
+    };
+
+    Ok((
+        allocated,
+        event_beyond_allocated,
+        Some(DispatchedOutboxEvent {
+            sequence: expected_sequence,
+            session: Some(session),
+            kind,
+        }),
+    ))
+}
+
+fn lifecycle_event<T>(
+    decoded: Result<T, crate::session_lifecycle::SessionLifecycleRepositoryError>,
+) -> Result<T, OutboxDispatchError> {
+    decoded.map_err(|error| match error {
+        crate::session_lifecycle::SessionLifecycleRepositoryError::Database(error) => {
+            OutboxDispatchError::Database(error)
+        }
+        _ => OutboxCorruption::InvalidLifecycleEvent.into(),
+    })
+}
+
+fn decode_session_state_kind(value: &str) -> Result<DispatchedSessionStateKind, OutboxCorruption> {
+    Ok(match value {
+        "created" => DispatchedSessionStateKind::Created,
+        "dispatched" => DispatchedSessionStateKind::Dispatched,
+        "active" => DispatchedSessionStateKind::Active,
+        "waiting" => DispatchedSessionStateKind::Waiting,
+        "recovering" => DispatchedSessionStateKind::Recovering,
+        "blocked" => DispatchedSessionStateKind::Blocked,
+        "parked" => DispatchedSessionStateKind::Parked,
+        _ => return Err(OutboxCorruption::InvalidLifecycleEvent),
+    })
+}
+
+async fn load_session_created(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    expected_sequence: u64,
+    stored_session: Uuid,
+) -> Result<DispatchedOutboxEventKind, OutboxDispatchError> {
+    let row = sqlx::query(
+        "SELECT event.creation_cause, event.dispatching_module, event.dispatch_ref,
+                event.spawning_tool_request_id, event.owned,
+                EXISTS (
+                    SELECT 1
+                      FROM session
+                     WHERE session.session_id = event.session_id
+                       AND session.creation_cause = event.creation_cause
+                       AND session.dispatching_module
+                           IS NOT DISTINCT FROM event.dispatching_module
+                       AND session.dispatch_ref IS NOT DISTINCT FROM event.dispatch_ref
+                       AND session.spawning_tool_request_id
+                           IS NOT DISTINCT FROM event.spawning_tool_request_id
+                ) AS correlated
+           FROM session_created_outbox_event AS event
+          WHERE event.event_sequence = $1
+            AND event.session_id = $2",
+    )
+    .bind(Decimal::from(expected_sequence))
+    .bind(stored_session)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(OutboxCorruption::MissingTypedRecord)?;
+    if !row.try_get::<bool, _>("correlated")? {
+        return Err(OutboxCorruption::InvalidLifecycleEvent.into());
+    }
+    let cause: String = row.try_get("creation_cause")?;
+    let module: Option<String> = row.try_get("dispatching_module")?;
+    let dispatch: Option<Uuid> = row.try_get("dispatch_ref")?;
+    let spawning_request: Option<Uuid> = row.try_get("spawning_tool_request_id")?;
+    let owned: bool = row.try_get("owned")?;
+    let cause = match (
+        session_creation_cause_from_str(&cause),
+        module,
+        dispatch,
+        spawning_request,
+    ) {
+        (Some(crate::mapping::SessionCreationCauseStorageKind::Interactive), None, None, None) => {
+            SessionCreationCause::Interactive
+        }
+        (
+            Some(crate::mapping::SessionCreationCauseStorageKind::Delegated),
+            None,
+            None,
+            Some(request),
+        ) => SessionCreationCause::Delegated {
+            spawning_request: tool_request_id_from_uuid(request),
+        },
+        (
+            Some(crate::mapping::SessionCreationCauseStorageKind::ModuleDispatched),
+            Some(module),
+            Some(dispatch),
+            None,
+        ) => SessionCreationCause::ModuleDispatched {
+            dispatch: match dispatching_module_from_str(&module) {
+                Some(DispatchingModule::RepositoryWatch) => ModuleDispatch::RepositoryWatch {
+                    dispatch: RepoWatchDispatchId::from_uuid(dispatch),
+                },
+                Some(DispatchingModule::CommissionedDispatch) => ModuleDispatch::Commissioned {
+                    dispatch: CommissionedDispatchId::from_uuid(dispatch),
+                },
+                None => return Err(OutboxCorruption::InvalidLifecycleEvent.into()),
+            },
+        },
+        _ => return Err(OutboxCorruption::InvalidLifecycleEvent.into()),
+    };
+    Ok(DispatchedOutboxEventKind::SessionCreated(
+        DispatchedSessionCreation {
+            cause,
+            ownership: if owned {
+                SessionOwnership::Owned
+            } else {
+                SessionOwnership::Unmonitored
+            },
+        },
+    ))
+}
+
+async fn load_session_state_changed(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    expected_sequence: u64,
+    stored_session: Uuid,
+) -> Result<DispatchedOutboxEventKind, OutboxDispatchError> {
+    let row = sqlx::query(
+        "SELECT prior_state_kind, state_kind, actor_kind, actor_module,
+                actor_turn_id, actor_tool_request_id, waiting_kind, waiting_waker,
+                waiting_subject_session_id, recovering_op, blocked_reason,
+                blocked_cycle, parked_cause, parked_responder,
+                parked_standing_cause_kind,
+                NULL::text AS terminal_outcome_kind,
+                NULL::text AS terminal_cause_kind,
+                NULL::boolean AS terminal_stop_sticky,
+                NULL::uuid AS terminal_superseded_by
+           FROM session_state_changed_outbox_event
+          WHERE event_sequence = $1
+            AND session_id = $2",
+    )
+    .bind(Decimal::from(expected_sequence))
+    .bind(stored_session)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(OutboxCorruption::MissingTypedRecord)?;
+    let prior: String = row.try_get("prior_state_kind")?;
+    Ok(DispatchedOutboxEventKind::SessionStateChanged(
+        DispatchedSessionStateChange {
+            prior: decode_session_state_kind(&prior)?,
+            state: lifecycle_event(decode_lifecycle_state(&row))?,
+            actor: lifecycle_event(decode_lifecycle_actor(&row))?,
+        },
+    ))
+}
+
+async fn load_session_terminal(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    expected_sequence: u64,
+    stored_session: Uuid,
+) -> Result<DispatchedOutboxEventKind, OutboxDispatchError> {
+    let row = sqlx::query(
+        "SELECT prior_state_kind, actor_kind, actor_module, actor_turn_id,
+                actor_tool_request_id, terminal_outcome_kind, terminal_cause_kind,
+                terminal_stop_sticky, terminal_superseded_by,
+                parked_standing_cause_kind
+           FROM session_terminal_outbox_event
+          WHERE event_sequence = $1
+            AND session_id = $2",
+    )
+    .bind(Decimal::from(expected_sequence))
+    .bind(stored_session)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(OutboxCorruption::MissingTypedRecord)?;
+    let prior: String = row.try_get("prior_state_kind")?;
+    let standing: Option<String> = row.try_get("parked_standing_cause_kind")?;
+    Ok(DispatchedOutboxEventKind::SessionTerminal(
+        DispatchedSessionTerminal {
+            prior: decode_session_state_kind(&prior)?,
+            outcome: lifecycle_event(decode_terminal_outcome_columns(&row))?
+                .ok_or(OutboxCorruption::InvalidLifecycleEvent)?,
+            standing: standing
+                .map(|cause| lifecycle_event(decode_standing_failure_cause(&cause)))
+                .transpose()?,
+            actor: lifecycle_event(decode_lifecycle_actor(&row))?,
+        },
+    ))
+}
+
+async fn load_goal_changed(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    expected_sequence: u64,
+    stored_session: Uuid,
+) -> Result<DispatchedOutboxEventKind, OutboxDispatchError> {
+    let row: Option<(Decimal, Decimal, String)> = sqlx::query_as(
+        "SELECT event.event_ordinal, goal.generation, goal.event_kind
+           FROM goal_changed_outbox_event AS event
+           JOIN goal_event AS goal
+             ON goal.session_id = event.session_id
+            AND goal.event_ordinal = event.event_ordinal
+          WHERE event.event_sequence = $1
+            AND event.session_id = $2",
+    )
+    .bind(Decimal::from(expected_sequence))
+    .bind(stored_session)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let (event_ordinal, generation, kind) = row.ok_or(OutboxCorruption::MissingTypedRecord)?;
+    Ok(DispatchedOutboxEventKind::GoalChanged(
+        DispatchedGoalChange {
+            event_ordinal: decode_positive_sequence(event_ordinal)
+                .map_err(|_| OutboxCorruption::InvalidLifecycleEvent)?,
+            generation: decode_positive_sequence(generation)
+                .map_err(|_| OutboxCorruption::InvalidLifecycleEvent)?,
+            kind: goal_event_kind_from_str(&kind).ok_or(OutboxCorruption::InvalidLifecycleEvent)?,
+        },
+    ))
+}
+
+async fn load_session_ownership_changed(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    expected_sequence: u64,
+    stored_session: Uuid,
+) -> Result<DispatchedOutboxEventKind, OutboxDispatchError> {
+    let row = sqlx::query(
+        "SELECT event.event_ordinal, journal.transition_kind, journal.actor_kind,
+                journal.actor_module, journal.actor_turn_id,
+                journal.actor_tool_request_id
+           FROM session_ownership_changed_outbox_event AS event
+           JOIN session_ownership_event AS journal
+             ON journal.session_id = event.session_id
+            AND journal.event_ordinal = event.event_ordinal
+          WHERE event.event_sequence = $1
+            AND event.session_id = $2",
+    )
+    .bind(Decimal::from(expected_sequence))
+    .bind(stored_session)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(OutboxCorruption::MissingTypedRecord)?;
+    let transition: String = row.try_get("transition_kind")?;
+    let transition = match transition.as_str() {
+        "created_owned" => SessionOwnershipTransition::CreatedOwned,
+        "created_unmonitored" => SessionOwnershipTransition::CreatedUnmonitored,
+        "adopted" => SessionOwnershipTransition::Adopted,
+        "released" => SessionOwnershipTransition::Released,
+        _ => return Err(OutboxCorruption::InvalidLifecycleEvent.into()),
+    };
+    Ok(DispatchedOutboxEventKind::SessionOwnershipChanged(
+        DispatchedOwnershipChange {
+            event_ordinal: u64::try_from(row.try_get::<i64, _>("event_ordinal")?)
+                .map_err(|_| OutboxCorruption::InvalidLifecycleEvent)?,
+            transition,
+            actor: lifecycle_event(decode_lifecycle_actor(&row))?,
+        },
+    ))
+}
+
+async fn load_command_settled(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    expected_sequence: u64,
+    stored_session: Option<Uuid>,
+) -> Result<DispatchedOutboxEventKind, OutboxDispatchError> {
+    let row: Option<(Uuid, String, Option<String>)> = sqlx::query_as(
+        "SELECT event.command_id, event.result_kind, event.rejection_kind
+           FROM command_settled_outbox_event AS event
+           JOIN durable_command AS command
+             ON command.command_id = event.command_id
+          WHERE event.event_sequence = $1
+            AND event.session_id IS NOT DISTINCT FROM $2",
+    )
+    .bind(Decimal::from(expected_sequence))
+    .bind(stored_session)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let (command, result, rejection) = row.ok_or(OutboxCorruption::MissingTypedRecord)?;
+    let result = match (result.as_str(), rejection) {
+        ("applied", None) => DispatchedCommandSettlement::Applied,
+        ("rejected", Some(kind)) => DispatchedCommandSettlement::Rejected { kind },
+        _ => return Err(OutboxCorruption::InvalidSettlementEvent.into()),
+    };
+    Ok(DispatchedOutboxEventKind::CommandSettled {
+        command: DurableCommandId::from_uuid(command),
+        result,
+    })
+}
+
+async fn load_injection_settled(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    expected_sequence: u64,
+    stored_session: Uuid,
+) -> Result<DispatchedOutboxEventKind, OutboxDispatchError> {
+    let row: Option<(Uuid, String, Option<String>, Option<Uuid>)> = sqlx::query_as(
+        "SELECT event.command_id, event.outcome_kind, event.rejection_kind,
+                event.delivered_turn_id
+           FROM injection_settled_outbox_event AS event
+           JOIN durable_command AS command
+             ON command.command_id = event.command_id
+          WHERE event.event_sequence = $1
+            AND event.session_id = $2",
+    )
+    .bind(Decimal::from(expected_sequence))
+    .bind(stored_session)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let (command, outcome, rejection, turn) = row.ok_or(OutboxCorruption::MissingTypedRecord)?;
+    let outcome = match (outcome.as_str(), rejection, turn) {
+        ("delivered", None, turn) => DispatchedInjectionOutcome::Delivered {
+            turn: turn.map(TurnId::from_uuid),
+        },
+        ("not_delivered", None, None) => DispatchedInjectionOutcome::NotDelivered,
+        ("rejected", Some(kind), None) => DispatchedInjectionOutcome::Rejected { kind },
+        _ => return Err(OutboxCorruption::InvalidSettlementEvent.into()),
+    };
+    Ok(DispatchedOutboxEventKind::InjectionSettled {
+        command: DurableCommandId::from_uuid(command),
+        outcome,
+    })
+}
+
+async fn load_turn_terminal(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    expected_sequence: u64,
+    stored_session: Uuid,
+    disposition: TurnDispositionStorageKind,
+) -> Result<DispatchedOutboxEventKind, OutboxDispatchError> {
+    let (turn, disposition) = match disposition {
+        TurnDispositionStorageKind::Completed => {
             let row: Option<(Uuid, Uuid, Uuid, Uuid)> = sqlx::query_as(
                 "SELECT event.turn_id, event.model_call_id,
                         event.completion_entry_id, event.terminal_frontier_id
-                   FROM turn_completed_outbox_event AS event
+                   FROM turn_terminal_outbox_event AS event
                    JOIN turn_lifecycle AS turn
                      ON turn.turn_id = event.turn_id
                     AND turn.session_id = event.session_id
@@ -1697,7 +2078,8 @@ pub(crate) async fn load_event(
                     AND terminal_member.semantic_entry_id =
                         event.completion_entry_id
                   WHERE event.event_sequence = $1
-                    AND event.session_id = $2",
+                    AND event.session_id = $2
+                    AND event.disposition_kind = 'completed'",
             )
             .bind(Decimal::from(expected_sequence))
             .bind(stored_session)
@@ -1705,18 +2087,20 @@ pub(crate) async fn load_event(
             .await?;
             let (turn, call, completion_entry, terminal_frontier) =
                 row.ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
-            DispatchedOutboxEventKind::TurnCompleted {
-                turn: TurnId::from_uuid(turn),
-                call: ModelCallId::from_uuid(call),
-                completion_entry: SemanticTranscriptEntryId::from_uuid(completion_entry),
-                terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
-            }
+            (
+                turn,
+                DispatchedTurnTerminalDisposition::Completed {
+                    call: ModelCallId::from_uuid(call),
+                    completion_entry: SemanticTranscriptEntryId::from_uuid(completion_entry),
+                    terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
+                },
+            )
         }
-        OutboxEventDiscriminator::TurnRefused => {
+        TurnDispositionStorageKind::Refused => {
             let row: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
                 "SELECT event.turn_id, event.model_call_id,
                         event.terminal_frontier_id
-                   FROM turn_refused_outbox_event AS event
+                   FROM turn_terminal_outbox_event AS event
                    JOIN turn_lifecycle AS turn
                      ON turn.turn_id = event.turn_id
                     AND turn.session_id = event.session_id
@@ -1740,7 +2124,8 @@ pub(crate) async fn load_event(
                     AND terminal_attempt.end_disposition
                         IN ('turn_refused', 'lost')
                   WHERE event.event_sequence = $1
-                    AND event.session_id = $2",
+                    AND event.session_id = $2
+                    AND event.disposition_kind = 'refused'",
             )
             .bind(Decimal::from(expected_sequence))
             .bind(stored_session)
@@ -1748,18 +2133,162 @@ pub(crate) async fn load_event(
             .await?;
             let (turn, call, terminal_frontier) =
                 row.ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
-            DispatchedOutboxEventKind::TurnRefused {
-                turn: TurnId::from_uuid(turn),
-                call: ModelCallId::from_uuid(call),
-                terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
-            }
+            (
+                turn,
+                DispatchedTurnTerminalDisposition::Refused {
+                    call: ModelCallId::from_uuid(call),
+                    terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
+                },
+            )
         }
-        OutboxEventDiscriminator::TurnCancelled => {
+        TurnDispositionStorageKind::Failed => {
+            let row: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
+                "SELECT event.turn_id, event.failure_entry_id,
+                        event.terminal_frontier_id
+                   FROM turn_terminal_outbox_event AS event
+                   JOIN turn_lifecycle AS turn
+                     ON turn.turn_id = event.turn_id
+                    AND turn.session_id = event.session_id
+                    AND turn.state_kind = 'terminal'
+                    AND turn.terminal_disposition_kind = 'failed'
+                    AND turn.terminal_frontier_id = event.terminal_frontier_id
+                   JOIN semantic_transcript_entry AS failure
+                     ON failure.source_session_id = event.session_id
+                    AND failure.semantic_entry_id = event.failure_entry_id
+                    AND failure.payload_kind = 'turn_failed'
+                    AND failure.failed_turn_id = event.turn_id
+                   JOIN context_frontier AS frontier
+                     ON frontier.owning_session_id = event.session_id
+                    AND frontier.context_frontier_id =
+                        event.terminal_frontier_id
+                   JOIN context_frontier_member AS terminal_member
+                     ON terminal_member.owning_session_id =
+                        frontier.owning_session_id
+                    AND terminal_member.context_frontier_id =
+                        frontier.context_frontier_id
+                    AND terminal_member.member_position = frontier.member_count
+                    AND terminal_member.source_session_id = event.session_id
+                    AND terminal_member.semantic_entry_id =
+                        event.failure_entry_id
+                  WHERE event.event_sequence = $1
+                    AND event.session_id = $2
+                    AND event.disposition_kind = 'failed'
+                    AND (
+                        (
+                            turn.terminal_attempt_id IS NULL
+                            AND turn.terminal_model_call_id IS NULL
+                            AND NOT EXISTS (
+                                SELECT 1
+                                  FROM turn_attempt AS any_attempt
+                                 WHERE any_attempt.turn_id = event.turn_id
+                                   AND any_attempt.session_id = event.session_id
+                            )
+                            AND NOT EXISTS (
+                                SELECT 1
+                                  FROM model_call AS any_call
+                                 WHERE any_call.turn_id = event.turn_id
+                                   AND any_call.session_id = event.session_id
+                            )
+                        )
+                        OR (
+                            turn.terminal_attempt_id IS NOT NULL
+                            AND EXISTS (
+                                SELECT 1
+                                  FROM turn_attempt AS terminal_attempt
+                                 WHERE terminal_attempt.turn_attempt_id =
+                                       turn.terminal_attempt_id
+                                   AND terminal_attempt.turn_id = event.turn_id
+                                   AND terminal_attempt.session_id =
+                                       event.session_id
+                                   AND terminal_attempt.state_kind = 'ended'
+                                   AND (
+                                        (
+                                            terminal_attempt.end_variant =
+                                                'without_stop'
+                                            AND terminal_attempt.end_disposition
+                                                IN ('known_failure', 'lost')
+                                        )
+                                        OR (
+                                            terminal_attempt.end_variant =
+                                                'after_cancellation'
+                                            AND terminal_attempt.end_disposition
+                                                = 'known_failure'
+                                            AND terminal_attempt.interrupt_command_id
+                                                IS NOT NULL
+                                            AND terminal_attempt.interrupt_predecessor_turn_id
+                                                = event.turn_id
+                                        )
+                                   )
+                            )
+                            AND (
+                                (
+                                    turn.terminal_model_call_id IS NULL
+                                )
+                                OR (
+                                    turn.terminal_model_call_id IS NOT NULL
+                                    AND EXISTS (
+                                        SELECT 1
+                                          FROM model_call AS terminal_call
+                                          JOIN turn_attempt AS terminal_attempt
+                                            ON terminal_attempt.turn_attempt_id =
+                                               terminal_call.turn_attempt_id
+                                           AND terminal_attempt.turn_id =
+                                               terminal_call.turn_id
+                                           AND terminal_attempt.session_id =
+                                               terminal_call.session_id
+                                         WHERE terminal_call.model_call_id =
+                                               turn.terminal_model_call_id
+                                           AND terminal_call.turn_attempt_id =
+                                               turn.terminal_attempt_id
+                                           AND terminal_call.turn_id =
+                                               event.turn_id
+                                           AND terminal_call.session_id =
+                                               event.session_id
+                                           AND terminal_call.state_kind =
+                                               'terminal'
+                                           AND (
+                                                (
+                                                    terminal_attempt.end_variant
+                                                        = 'without_stop'
+                                                    AND terminal_call.terminal_disposition_kind
+                                                        IN (
+                                                            'known_failed',
+                                                            'cancelled'
+                                                        )
+                                                )
+                                                OR (
+                                                    terminal_attempt.end_variant
+                                                        = 'after_cancellation'
+                                                    AND terminal_call.terminal_disposition_kind
+                                                        = 'known_failed'
+                                                )
+                                           )
+                                    )
+                                )
+                            )
+                        )
+                    )",
+            )
+            .bind(Decimal::from(expected_sequence))
+            .bind(stored_session)
+            .fetch_optional(&mut **transaction)
+            .await?;
+            let (turn, failure_entry, terminal_frontier) =
+                row.ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
+            (
+                turn,
+                DispatchedTurnTerminalDisposition::Failed {
+                    failure_entry: SemanticTranscriptEntryId::from_uuid(failure_entry),
+                    terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
+                },
+            )
+        }
+        TurnDispositionStorageKind::Cancelled => {
             let row: Option<TurnCancelledOutboxRow> = sqlx::query_as(
                 "SELECT event.turn_id AS turn_id,
                         event.cancellation_entry_id AS cancellation_entry_id,
                         event.terminal_frontier_id AS terminal_frontier_id
-                   FROM turn_cancelled_outbox_event AS event
+                   FROM turn_terminal_outbox_event AS event
                    JOIN turn_lifecycle AS turn
                      ON turn.turn_id = event.turn_id
                     AND turn.session_id = event.session_id
@@ -1815,6 +2344,7 @@ pub(crate) async fn load_event(
                         event.terminal_frontier_id
                   WHERE event.event_sequence = $1
                     AND event.session_id = $2
+                    AND event.disposition_kind = 'cancelled'
                     AND (
                         (
                             turn.terminal_model_call_id IS NULL
@@ -1838,17 +2368,21 @@ pub(crate) async fn load_event(
             .fetch_optional(&mut **transaction)
             .await?;
             let row = row.ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
-            DispatchedOutboxEventKind::TurnCancelled {
-                turn: TurnId::from_uuid(row.turn_id),
-                cancellation_entry: SemanticTranscriptEntryId::from_uuid(row.cancellation_entry_id),
-                terminal_frontier: ContextFrontierId::from_uuid(row.terminal_frontier_id),
-            }
+            (
+                row.turn_id,
+                DispatchedTurnTerminalDisposition::Cancelled {
+                    cancellation_entry: SemanticTranscriptEntryId::from_uuid(
+                        row.cancellation_entry_id,
+                    ),
+                    terminal_frontier: ContextFrontierId::from_uuid(row.terminal_frontier_id),
+                },
+            )
         }
-        OutboxEventDiscriminator::TurnReconciliationRequired => {
+        TurnDispositionStorageKind::ReconciliationRequired => {
             let row: Option<(Uuid, Option<Uuid>, Option<Uuid>, Uuid)> = sqlx::query_as(
                 "SELECT event.turn_id, event.model_call_id,
                         event.tool_attempt_id, event.terminal_frontier_id
-                   FROM turn_reconciliation_required_outbox_event AS event
+                   FROM turn_terminal_outbox_event AS event
                    JOIN turn_lifecycle AS turn
                      ON turn.turn_id = event.turn_id
                     AND turn.session_id = event.session_id
@@ -1872,7 +2406,8 @@ pub(crate) async fn load_event(
                         )
                     )
                   WHERE event.event_sequence = $1
-                    AND event.session_id = $2",
+                    AND event.session_id = $2
+                    AND event.disposition_kind = 'reconciliation_required'",
             )
             .bind(Decimal::from(expected_sequence))
             .bind(stored_session)
@@ -1991,32 +2526,39 @@ pub(crate) async fn load_event(
                     return Err(OutboxCorruption::InvalidTerminalEventCorrelation.into());
                 }
             };
-            DispatchedOutboxEventKind::TurnReconciliationRequired {
-                turn: TurnId::from_uuid(turn),
-                operation,
-                terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
-            }
+            (
+                turn,
+                DispatchedTurnTerminalDisposition::ReconciliationRequired {
+                    operation,
+                    terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
+                },
+            )
         }
-        OutboxEventDiscriminator::RunnerStateTransition => {
-            load_runner_state_transition(transaction, expected_sequence, stored_session).await?
+        TurnDispositionStorageKind::Retired => {
+            let turn = sqlx::query_scalar::<_, Uuid>(
+                "SELECT event.turn_id
+                   FROM turn_terminal_outbox_event AS event
+                   JOIN turn_lifecycle AS turn
+                     ON turn.session_id = event.session_id
+                    AND turn.turn_id = event.turn_id
+                    AND turn.state_kind = 'terminal'
+                    AND turn.terminal_disposition_kind = 'retired'
+                  WHERE event.event_sequence = $1
+                    AND event.session_id = $2
+                    AND event.disposition_kind = 'retired'",
+            )
+            .bind(Decimal::from(expected_sequence))
+            .bind(stored_session)
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
+            (turn, DispatchedTurnTerminalDisposition::Retired)
         }
-        OutboxEventDiscriminator::DelegationUpdate => DispatchedOutboxEventKind::DelegationUpdate(
-            load_delegation_update(transaction, expected_sequence, stored_session, true).await?,
-        ),
-        OutboxEventDiscriminator::DelegationWake => DispatchedOutboxEventKind::DelegationWake(
-            load_delegation_wake(transaction, expected_sequence, stored_session).await?,
-        ),
     };
-
-    Ok((
-        allocated,
-        event_beyond_allocated,
-        Some(DispatchedOutboxEvent {
-            sequence: expected_sequence,
-            session,
-            kind,
-        }),
-    ))
+    Ok(DispatchedOutboxEventKind::TurnTerminal {
+        turn: TurnId::from_uuid(turn),
+        disposition,
+    })
 }
 
 async fn load_runner_state_transition(
@@ -2596,24 +3138,6 @@ pub(crate) fn decode_delegation_provenance(
     }
 }
 
-async fn require_typed_record(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    statement: &'static str,
-    sequence: u64,
-    session: Uuid,
-) -> Result<(), OutboxDispatchError> {
-    let found: Option<Decimal> = sqlx::query_scalar(statement)
-        .bind(Decimal::from(sequence))
-        .bind(session)
-        .fetch_optional(&mut **transaction)
-        .await?;
-    if found.is_none() {
-        Err(OutboxCorruption::MissingTypedRecord.into())
-    } else {
-        Ok(())
-    }
-}
-
 fn decode_nonnegative_sequence(value: Decimal) -> Result<u64, OutboxCorruption> {
     if !value.fract().is_zero() || value.is_sign_negative() {
         return Err(OutboxCorruption::InvalidSequence);
@@ -2822,6 +3346,39 @@ impl RunnerStateTransitionOutboxTestEvent {
 pub(crate) enum OutboxEvent {
     SessionCreated {
         session: SessionId,
+        cause: SessionCreationCause,
+        ownership: SessionOwnership,
+    },
+    TurnTerminal {
+        session: SessionId,
+        turn: TurnId,
+        disposition: TurnTerminalOutboxDisposition,
+    },
+    GoalChanged {
+        session: SessionId,
+        event_ordinal: u64,
+    },
+    SessionOwnershipChanged {
+        session: SessionId,
+        event_ordinal: u64,
+    },
+    #[allow(
+        dead_code,
+        reason = "command settlement receipts are emitted by the command-surface change"
+    )]
+    CommandSettled {
+        session: Option<SessionId>,
+        command: DurableCommandId,
+        result: CommandSettlementOutbox,
+    },
+    #[allow(
+        dead_code,
+        reason = "injection receipts are emitted by the injection-contract change"
+    )]
+    InjectionSettled {
+        session: SessionId,
+        command: DurableCommandId,
+        outcome: InjectionOutcomeOutbox,
     },
     SessionModelSettingsChanged {
         session: SessionId,
@@ -2837,20 +3394,10 @@ pub(crate) enum OutboxEvent {
         turn: TurnId,
         acceptance_position: SessionInputPosition,
     },
-    GoalTurnRetired {
-        session: SessionId,
-        turn: TurnId,
-    },
     TurnActivated {
         session: SessionId,
         turn: TurnId,
         current_attempt: TurnAttemptId,
-    },
-    TurnFailed {
-        session: SessionId,
-        turn: TurnId,
-        failure_entry: SemanticTranscriptEntryId,
-        terminal_frontier: ContextFrontierId,
     },
     ModelCallTransition {
         session: SessionId,
@@ -2877,42 +3424,60 @@ pub(crate) enum OutboxEvent {
         summary_entry: SemanticTranscriptEntryId,
         result_frontier: ContextFrontierId,
     },
-    TurnCompleted {
-        session: SessionId,
-        turn: TurnId,
-        call: ModelCallId,
-        completion_entry: SemanticTranscriptEntryId,
-        terminal_frontier: ContextFrontierId,
-    },
-    TurnRefused {
-        session: SessionId,
-        turn: TurnId,
-        call: ModelCallId,
-        terminal_frontier: ContextFrontierId,
-    },
-    TurnCancelled {
-        session: SessionId,
-        turn: TurnId,
-        cancellation_entry: SemanticTranscriptEntryId,
-        terminal_frontier: ContextFrontierId,
-    },
-    TurnReconciliationRequired {
-        session: SessionId,
-        turn: TurnId,
-        call: ModelCallId,
-        terminal_frontier: ContextFrontierId,
-    },
-    TurnToolReconciliationRequired {
-        session: SessionId,
-        turn: TurnId,
-        attempt: ToolAttemptId,
-        terminal_frontier: ContextFrontierId,
-    },
     #[allow(
         dead_code,
         reason = "runner transition producers land in the child orchestration transactions"
     )]
     RunnerStateTransition(RunnerStateOutboxEvent),
+}
+
+/// The evidence one turn terminalization appends with its disposition.
+pub(crate) enum TurnTerminalOutboxDisposition {
+    Completed {
+        call: ModelCallId,
+        completion_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    },
+    Refused {
+        call: ModelCallId,
+        terminal_frontier: ContextFrontierId,
+    },
+    Failed {
+        failure_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    },
+    Cancelled {
+        cancellation_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    },
+    ModelCallReconciliationRequired {
+        call: ModelCallId,
+        terminal_frontier: ContextFrontierId,
+    },
+    ToolAttemptReconciliationRequired {
+        attempt: ToolAttemptId,
+        terminal_frontier: ContextFrontierId,
+    },
+    Retired,
+}
+
+#[allow(
+    dead_code,
+    reason = "command settlement receipts are emitted by the command-surface change"
+)]
+pub(crate) enum CommandSettlementOutbox {
+    Applied,
+    Rejected { kind: &'static str },
+}
+
+#[allow(
+    dead_code,
+    reason = "injection receipts are emitted by the injection-contract change"
+)]
+pub(crate) enum InjectionOutcomeOutbox {
+    Delivered { turn: Option<TurnId> },
+    NotDelivered,
+    Rejected { kind: &'static str },
 }
 
 pub(crate) enum ModelCallOutboxState {
@@ -2950,9 +3515,34 @@ pub(crate) async fn append(
     event: OutboxEvent,
 ) -> Result<(), sqlx::Error> {
     match event {
-        OutboxEvent::SessionCreated { session } => {
-            append_session_created(connection, session).await
-        }
+        OutboxEvent::SessionCreated {
+            session,
+            cause,
+            ownership,
+        } => append_session_created(connection, session, &cause, ownership).await,
+        OutboxEvent::TurnTerminal {
+            session,
+            turn,
+            disposition,
+        } => append_turn_terminal(connection, session, turn, disposition).await,
+        OutboxEvent::GoalChanged {
+            session,
+            event_ordinal,
+        } => append_goal_changed(connection, session, event_ordinal).await,
+        OutboxEvent::SessionOwnershipChanged {
+            session,
+            event_ordinal,
+        } => append_session_ownership_changed(connection, session, event_ordinal).await,
+        OutboxEvent::CommandSettled {
+            session,
+            command,
+            result,
+        } => append_command_settled(connection, session, command, result).await,
+        OutboxEvent::InjectionSettled {
+            session,
+            command,
+            outcome,
+        } => append_injection_settled(connection, session, command, outcome).await,
         OutboxEvent::SessionModelSettingsChanged {
             session,
             installed_defaults_version,
@@ -2979,20 +3569,11 @@ pub(crate) async fn append(
             )
             .await
         }
-        OutboxEvent::GoalTurnRetired { session, turn } => {
-            append_goal_turn_retired(connection, session, turn).await
-        }
         OutboxEvent::TurnActivated {
             session,
             turn,
             current_attempt,
         } => append_turn_activated(connection, session, turn, current_attempt).await,
-        OutboxEvent::TurnFailed {
-            session,
-            turn,
-            failure_entry,
-            terminal_frontier,
-        } => append_turn_failed(connection, session, turn, failure_entry, terminal_frontier).await,
         OutboxEvent::ModelCallTransition {
             session,
             turn,
@@ -3026,68 +3607,6 @@ pub(crate) async fn append(
                 through_position,
                 summary_entry,
                 result_frontier,
-            )
-            .await
-        }
-        OutboxEvent::TurnCompleted {
-            session,
-            turn,
-            call,
-            completion_entry,
-            terminal_frontier,
-        } => {
-            append_turn_completed(
-                connection,
-                session,
-                turn,
-                call,
-                completion_entry,
-                terminal_frontier,
-            )
-            .await
-        }
-        OutboxEvent::TurnRefused {
-            session,
-            turn,
-            call,
-            terminal_frontier,
-        } => append_turn_refused(connection, session, turn, call, terminal_frontier).await,
-        OutboxEvent::TurnCancelled {
-            session,
-            turn,
-            cancellation_entry,
-            terminal_frontier,
-        } => {
-            append_turn_cancelled(
-                connection,
-                session,
-                turn,
-                cancellation_entry,
-                terminal_frontier,
-            )
-            .await
-        }
-        OutboxEvent::TurnReconciliationRequired {
-            session,
-            turn,
-            call,
-            terminal_frontier,
-        } => {
-            append_turn_reconciliation_required(connection, session, turn, call, terminal_frontier)
-                .await
-        }
-        OutboxEvent::TurnToolReconciliationRequired {
-            session,
-            turn,
-            attempt,
-            terminal_frontier,
-        } => {
-            append_turn_tool_reconciliation_required(
-                connection,
-                session,
-                turn,
-                attempt,
-                terminal_frontier,
             )
             .await
         }
@@ -3288,7 +3807,23 @@ async fn append_tool_batch_transition(
 async fn append_session_created(
     connection: &mut PgConnection,
     session: SessionId,
+    cause: &SessionCreationCause,
+    ownership: SessionOwnership,
 ) -> Result<(), sqlx::Error> {
+    let (module, dispatch, spawning_request) = match cause {
+        SessionCreationCause::Interactive => (None, None, None),
+        SessionCreationCause::ModuleDispatched { dispatch } => (
+            Some(dispatching_module_to_str(dispatch.module())),
+            Some(match dispatch {
+                ModuleDispatch::RepositoryWatch { dispatch } => dispatch.into_uuid(),
+                ModuleDispatch::Commissioned { dispatch } => dispatch.into_uuid(),
+            }),
+            None,
+        ),
+        SessionCreationCause::Delegated { spawning_request } => {
+            (None, None, Some(spawning_request.into_uuid()))
+        }
+    };
     sqlx::query(
         "WITH header AS (
             INSERT INTO outbox_event
@@ -3297,16 +3832,273 @@ async fn append_session_created(
             RETURNING event_sequence, event_kind, storage_version, session_id
          )
          INSERT INTO session_created_outbox_event
-            (event_sequence, event_kind, storage_version, session_id)
-         SELECT event_sequence, event_kind, storage_version, session_id
+            (event_sequence, event_kind, storage_version, session_id,
+             creation_cause, dispatching_module, dispatch_ref,
+             spawning_tool_request_id, owned)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $4, $5, $6, $7, $8
            FROM header",
     )
     .bind(SESSION_CREATED)
-    .bind(STORAGE_VERSION)
+    .bind(SESSION_CREATED_STORAGE_VERSION)
     .bind(session_id_to_uuid(session))
+    .bind(session_creation_cause_to_str(cause))
+    .bind(module)
+    .bind(dispatch)
+    .bind(spawning_request)
+    .bind(ownership.is_owned())
     .execute(connection)
     .await?;
 
+    Ok(())
+}
+
+async fn append_turn_terminal(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    disposition: TurnTerminalOutboxDisposition,
+) -> Result<(), sqlx::Error> {
+    let (kind, call, attempt, completion_entry, failure_entry, cancellation_entry, frontier) =
+        match disposition {
+            TurnTerminalOutboxDisposition::Completed {
+                call,
+                completion_entry,
+                terminal_frontier,
+            } => (
+                TurnDispositionStorageKind::Completed,
+                Some(call.into_uuid()),
+                None,
+                Some(completion_entry.into_uuid()),
+                None,
+                None,
+                Some(terminal_frontier.into_uuid()),
+            ),
+            TurnTerminalOutboxDisposition::Refused {
+                call,
+                terminal_frontier,
+            } => (
+                TurnDispositionStorageKind::Refused,
+                Some(call.into_uuid()),
+                None,
+                None,
+                None,
+                None,
+                Some(terminal_frontier.into_uuid()),
+            ),
+            TurnTerminalOutboxDisposition::Failed {
+                failure_entry,
+                terminal_frontier,
+            } => (
+                TurnDispositionStorageKind::Failed,
+                None,
+                None,
+                None,
+                Some(failure_entry.into_uuid()),
+                None,
+                Some(terminal_frontier.into_uuid()),
+            ),
+            TurnTerminalOutboxDisposition::Cancelled {
+                cancellation_entry,
+                terminal_frontier,
+            } => (
+                TurnDispositionStorageKind::Cancelled,
+                None,
+                None,
+                None,
+                None,
+                Some(cancellation_entry.into_uuid()),
+                Some(terminal_frontier.into_uuid()),
+            ),
+            TurnTerminalOutboxDisposition::ModelCallReconciliationRequired {
+                call,
+                terminal_frontier,
+            } => (
+                TurnDispositionStorageKind::ReconciliationRequired,
+                Some(call.into_uuid()),
+                None,
+                None,
+                None,
+                None,
+                Some(terminal_frontier.into_uuid()),
+            ),
+            TurnTerminalOutboxDisposition::ToolAttemptReconciliationRequired {
+                attempt,
+                terminal_frontier,
+            } => (
+                TurnDispositionStorageKind::ReconciliationRequired,
+                None,
+                Some(attempt.into_uuid()),
+                None,
+                None,
+                None,
+                Some(terminal_frontier.into_uuid()),
+            ),
+            TurnTerminalOutboxDisposition::Retired => (
+                TurnDispositionStorageKind::Retired,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+        };
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id, turn_disposition)
+            VALUES ($1, $2, $3, $5)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO turn_terminal_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             turn_id, disposition_kind, model_call_id, tool_attempt_id,
+             completion_entry_id, failure_entry_id, cancellation_entry_id,
+             terminal_frontier_id)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $4, $5, $6, $7, $8, $9, $10, $11
+           FROM header",
+    )
+    .bind(TURN_TERMINAL)
+    .bind(STORAGE_VERSION)
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .bind(turn_disposition_kind_to_str(kind))
+    .bind(call)
+    .bind(attempt)
+    .bind(completion_entry)
+    .bind(failure_entry)
+    .bind(cancellation_entry)
+    .bind(frontier)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+async fn append_goal_changed(
+    connection: &mut PgConnection,
+    session: SessionId,
+    event_ordinal: u64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES ($1, $2, $3)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO goal_changed_outbox_event
+            (event_sequence, event_kind, storage_version, session_id, event_ordinal)
+         SELECT event_sequence, event_kind, storage_version, session_id, $4
+           FROM header",
+    )
+    .bind(GOAL_CHANGED)
+    .bind(STORAGE_VERSION)
+    .bind(session_id_to_uuid(session))
+    .bind(Decimal::from(event_ordinal))
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+async fn append_session_ownership_changed(
+    connection: &mut PgConnection,
+    session: SessionId,
+    event_ordinal: u64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES ($1, $2, $3)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO session_ownership_changed_outbox_event
+            (event_sequence, event_kind, storage_version, session_id, event_ordinal)
+         SELECT event_sequence, event_kind, storage_version, session_id, $4
+           FROM header",
+    )
+    .bind(SESSION_OWNERSHIP_CHANGED)
+    .bind(STORAGE_VERSION)
+    .bind(session_id_to_uuid(session))
+    .bind(i64::try_from(event_ordinal).unwrap_or(i64::MAX))
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+async fn append_command_settled(
+    connection: &mut PgConnection,
+    session: Option<SessionId>,
+    command: DurableCommandId,
+    result: CommandSettlementOutbox,
+) -> Result<(), sqlx::Error> {
+    let (result_kind, rejection_kind) = match result {
+        CommandSettlementOutbox::Applied => ("applied", None),
+        CommandSettlementOutbox::Rejected { kind } => ("rejected", Some(kind)),
+    };
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES ($1, $2, $3)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO command_settled_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             command_id, result_kind, rejection_kind)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $4, $5, $6
+           FROM header",
+    )
+    .bind(COMMAND_SETTLED)
+    .bind(STORAGE_VERSION)
+    .bind(session.map(session_id_to_uuid))
+    .bind(command.into_uuid())
+    .bind(result_kind)
+    .bind(rejection_kind)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+async fn append_injection_settled(
+    connection: &mut PgConnection,
+    session: SessionId,
+    command: DurableCommandId,
+    outcome: InjectionOutcomeOutbox,
+) -> Result<(), sqlx::Error> {
+    let (outcome_kind, rejection_kind, turn) = match outcome {
+        InjectionOutcomeOutbox::Delivered { turn } => {
+            ("delivered", None, turn.map(turn_id_to_uuid))
+        }
+        InjectionOutcomeOutbox::NotDelivered => ("not_delivered", None, None),
+        InjectionOutcomeOutbox::Rejected { kind } => ("rejected", Some(kind), None),
+    };
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES ($1, $2, $3)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO injection_settled_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             command_id, outcome_kind, rejection_kind, delivered_turn_id)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $4, $5, $6, $7
+           FROM header",
+    )
+    .bind(INJECTION_SETTLED)
+    .bind(STORAGE_VERSION)
+    .bind(session_id_to_uuid(session))
+    .bind(command.into_uuid())
+    .bind(outcome_kind)
+    .bind(rejection_kind)
+    .bind(turn)
+    .execute(connection)
+    .await?;
     Ok(())
 }
 
@@ -3396,32 +4188,6 @@ async fn append_input_accepted(
     Ok(())
 }
 
-async fn append_goal_turn_retired(
-    connection: &mut PgConnection,
-    session: SessionId,
-    turn: TurnId,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "WITH header AS (
-            INSERT INTO outbox_event
-                (event_kind, storage_version, session_id)
-            VALUES ($1, $2, $3)
-            RETURNING event_sequence, event_kind, storage_version, session_id
-         )
-         INSERT INTO goal_turn_retired_outbox_event
-            (event_sequence, event_kind, storage_version, session_id, turn_id)
-         SELECT event_sequence, event_kind, storage_version, session_id, $4
-           FROM header",
-    )
-    .bind(GOAL_TURN_RETIRED)
-    .bind(STORAGE_VERSION)
-    .bind(session_id_to_uuid(session))
-    .bind(turn_id_to_uuid(turn))
-    .execute(connection)
-    .await?;
-    Ok(())
-}
-
 async fn append_turn_activated(
     connection: &mut PgConnection,
     session: SessionId,
@@ -3449,39 +4215,6 @@ async fn append_turn_activated(
     .bind(current_attempt.into_uuid())
     .execute(connection)
     .await?;
-    Ok(())
-}
-
-async fn append_turn_failed(
-    connection: &mut PgConnection,
-    session: SessionId,
-    turn: TurnId,
-    failure_entry: SemanticTranscriptEntryId,
-    terminal_frontier: ContextFrontierId,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "WITH header AS (
-            INSERT INTO outbox_event
-                (event_kind, storage_version, session_id)
-            VALUES ($1, $2, $3)
-            RETURNING event_sequence, event_kind, storage_version, session_id
-         )
-         INSERT INTO turn_failed_outbox_event
-            (event_sequence, event_kind, storage_version, session_id,
-             turn_id, failure_entry_id, terminal_frontier_id)
-         SELECT event_sequence, event_kind, storage_version, session_id,
-                $4, $5, $6
-           FROM header",
-    )
-    .bind(TURN_FAILED)
-    .bind(STORAGE_VERSION)
-    .bind(session_id_to_uuid(session))
-    .bind(turn_id_to_uuid(turn))
-    .bind(failure_entry.into_uuid())
-    .bind(terminal_frontier.into_uuid())
-    .execute(connection)
-    .await?;
-
     Ok(())
 }
 
@@ -3521,168 +4254,6 @@ async fn append_model_call_transition(
     .bind(turn_id_to_uuid(turn))
     .bind(state_kind)
     .bind(terminal_disposition)
-    .execute(connection)
-    .await?;
-    Ok(())
-}
-
-async fn append_turn_cancelled(
-    connection: &mut PgConnection,
-    session: SessionId,
-    turn: TurnId,
-    cancellation_entry: SemanticTranscriptEntryId,
-    terminal_frontier: ContextFrontierId,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "WITH header AS (
-            INSERT INTO outbox_event
-                (event_kind, storage_version, session_id)
-            VALUES ($1, $2, $3)
-            RETURNING event_sequence, event_kind, storage_version, session_id
-         )
-         INSERT INTO turn_cancelled_outbox_event
-            (event_sequence, event_kind, storage_version, session_id,
-             turn_id, cancellation_entry_id, terminal_frontier_id)
-         SELECT event_sequence, event_kind, storage_version, session_id,
-                $4, $5, $6
-           FROM header",
-    )
-    .bind(TURN_CANCELLED)
-    .bind(STORAGE_VERSION)
-    .bind(session_id_to_uuid(session))
-    .bind(turn_id_to_uuid(turn))
-    .bind(cancellation_entry.into_uuid())
-    .bind(terminal_frontier.into_uuid())
-    .execute(connection)
-    .await?;
-    Ok(())
-}
-
-async fn append_turn_reconciliation_required(
-    connection: &mut PgConnection,
-    session: SessionId,
-    turn: TurnId,
-    call: ModelCallId,
-    terminal_frontier: ContextFrontierId,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "WITH header AS (
-            INSERT INTO outbox_event
-                (event_kind, storage_version, session_id)
-            VALUES ($1, $2, $3)
-            RETURNING event_sequence, event_kind, storage_version, session_id
-         )
-         INSERT INTO turn_reconciliation_required_outbox_event
-            (event_sequence, event_kind, storage_version, session_id,
-             turn_id, model_call_id, terminal_frontier_id)
-         SELECT event_sequence, event_kind, storage_version, session_id,
-                $4, $5, $6
-           FROM header",
-    )
-    .bind(TURN_RECONCILIATION_REQUIRED)
-    .bind(STORAGE_VERSION)
-    .bind(session_id_to_uuid(session))
-    .bind(turn_id_to_uuid(turn))
-    .bind(call.into_uuid())
-    .bind(terminal_frontier.into_uuid())
-    .execute(connection)
-    .await?;
-    Ok(())
-}
-
-async fn append_turn_tool_reconciliation_required(
-    connection: &mut PgConnection,
-    session: SessionId,
-    turn: TurnId,
-    attempt: ToolAttemptId,
-    terminal_frontier: ContextFrontierId,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "WITH header AS (
-            INSERT INTO outbox_event
-                (event_kind, storage_version, session_id)
-            VALUES ($1, $2, $3)
-            RETURNING event_sequence, event_kind, storage_version, session_id
-         )
-         INSERT INTO turn_reconciliation_required_outbox_event
-            (event_sequence, event_kind, storage_version, session_id,
-             turn_id, tool_attempt_id, terminal_frontier_id)
-         SELECT event_sequence, event_kind, storage_version, session_id,
-                $4, $5, $6
-           FROM header",
-    )
-    .bind(TURN_RECONCILIATION_REQUIRED)
-    .bind(STORAGE_VERSION)
-    .bind(session_id_to_uuid(session))
-    .bind(turn_id_to_uuid(turn))
-    .bind(attempt.into_uuid())
-    .bind(terminal_frontier.into_uuid())
-    .execute(connection)
-    .await?;
-    Ok(())
-}
-
-async fn append_turn_completed(
-    connection: &mut PgConnection,
-    session: SessionId,
-    turn: TurnId,
-    call: ModelCallId,
-    completion_entry: SemanticTranscriptEntryId,
-    terminal_frontier: ContextFrontierId,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "WITH header AS (
-            INSERT INTO outbox_event
-                (event_kind, storage_version, session_id)
-            VALUES ($1, $2, $3)
-            RETURNING event_sequence, event_kind, storage_version, session_id
-         )
-         INSERT INTO turn_completed_outbox_event
-            (event_sequence, event_kind, storage_version, session_id,
-             turn_id, model_call_id, completion_entry_id, terminal_frontier_id)
-         SELECT event_sequence, event_kind, storage_version, session_id,
-                $4, $5, $6, $7
-           FROM header",
-    )
-    .bind(TURN_COMPLETED)
-    .bind(STORAGE_VERSION)
-    .bind(session_id_to_uuid(session))
-    .bind(turn_id_to_uuid(turn))
-    .bind(call.into_uuid())
-    .bind(completion_entry.into_uuid())
-    .bind(terminal_frontier.into_uuid())
-    .execute(connection)
-    .await?;
-    Ok(())
-}
-
-async fn append_turn_refused(
-    connection: &mut PgConnection,
-    session: SessionId,
-    turn: TurnId,
-    call: ModelCallId,
-    terminal_frontier: ContextFrontierId,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "WITH header AS (
-            INSERT INTO outbox_event
-                (event_kind, storage_version, session_id)
-            VALUES ($1, $2, $3)
-            RETURNING event_sequence, event_kind, storage_version, session_id
-         )
-         INSERT INTO turn_refused_outbox_event
-            (event_sequence, event_kind, storage_version, session_id,
-             turn_id, model_call_id, terminal_frontier_id)
-         SELECT event_sequence, event_kind, storage_version, session_id,
-                $4, $5, $6
-           FROM header",
-    )
-    .bind(TURN_REFUSED)
-    .bind(STORAGE_VERSION)
-    .bind(session_id_to_uuid(session))
-    .bind(turn_id_to_uuid(turn))
-    .bind(call.into_uuid())
-    .bind(terminal_frontier.into_uuid())
     .execute(connection)
     .await?;
     Ok(())

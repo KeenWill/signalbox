@@ -1226,8 +1226,9 @@ async fn s17_inv032_automatic_delegated_reconciliation_closes_parent_delivery()
                     (SELECT count(*) FROM delegation_wake_outbox_event AS parent_wake
                       WHERE parent_wake.session_id = $2
                         AND parent_wake.result_spawning_request_id = $1),
-                    (SELECT count(*) FROM turn_reconciliation_required_outbox_event AS turn_event
-                      WHERE turn_event.session_id = $3
+                    (SELECT count(*) FROM turn_terminal_outbox_event AS turn_event
+                      WHERE turn_event.disposition_kind = 'reconciliation_required'
+                      AND turn_event.session_id = $3
                         AND turn_event.turn_id = $4)
                FROM session_child_result AS result
                JOIN session_delegation_event AS event

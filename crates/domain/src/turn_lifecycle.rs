@@ -412,6 +412,11 @@ pub enum TurnDisposition {
         /// The exact nonempty ambiguity set and typed reason.
         marker: ReconciliationMarker,
     },
+    /// A queued turn that never activated was retired from the queue.
+    ///
+    /// It contributes no terminal frontier and is excluded from queue
+    /// predecessor selection.
+    Retired,
 }
 
 /// The mandatory typed reason one turn reached `terminal`.
@@ -471,6 +476,8 @@ pub enum TurnTerminalCause {
     ReportedUsageContextStillExceeded,
     /// Durable evidence supports failure and classifies no reason.
     UnclassifiedFailure,
+    /// A queued goal turn became ineligible under its goal's lineage.
+    GoalTurnIneligible,
 }
 
 #[cfg(test)]

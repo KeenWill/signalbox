@@ -2577,6 +2577,7 @@ async fn load_execution_lineage_tip(
                   FROM turn_lifecycle
                  WHERE session_id = $1
                    AND state_kind IN ('active', 'terminal')
+                   AND start_lineage_kind IS NOT NULL
             ),
             chain(turn_id) AS (
                 SELECT turn_id

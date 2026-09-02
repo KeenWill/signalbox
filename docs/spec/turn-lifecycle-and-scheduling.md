@@ -126,21 +126,25 @@ scope; defaults-epoch binding is
 scope. The implemented slice stores three lifecycle states per turn
 (`turn_lifecycle.state_kind`): `queued`, `active`, and `terminal`, with the
 terminal disposition kind closed to `failed`, `completed`, `refused`,
-`cancelled`, and `reconciliation_required` (migrations `202607220001` and
-`202607220005`). A terminal turn additionally records a non-null typed
-`terminal_cause_kind` over its own closed vocabulary, and a non-terminal turn
-records none: disposition states how a turn ended, cause states why, and a
-database constraint makes the two co-extensive rather than the cause optional
-(migration `202609020001`). The domain `TurnTerminalCause` algebra carries that
-vocabulary; `crates/persistence/src/mapping.rs` holds its one encoder and
-decoder. `unclassified_failure` is the sole catch-all spelling, so the share of
-terminal turns carrying a cause outside it measures classification quality
-rather than mere presence. The liveness watchdog and startup recovery commit the
-identical failed-turn transition, which is what keeps every terminal trigger
-firing for both; the cause is what tells them apart in the rows rather than only
-in an operator log that is retained for a while. The domain `TurnDisposition`
-algebra carries all five accepted variants — `Completed`, `Refused`, `Failed`,
-`Cancelled { cause }`, `ReconciliationRequired { marker }` — but `Cancelled` is
+`cancelled`, `reconciliation_required`, and `retired` (migrations
+`202607220001`, `202607220005`, and `202609020004`). `retired` is the terminal
+disposition of a queued turn that never activated: it carries no lineage, no
+frontier, and no attempt, contributes no terminal frontier, and stays out of
+queue order and predecessor selection. A terminal turn additionally records a
+non-null typed `terminal_cause_kind` over its own closed vocabulary, and a
+non-terminal turn records none: disposition states how a turn ended, cause
+states why, and a database constraint makes the two co-extensive rather than the
+cause optional (migration `202609020001`). The domain `TurnTerminalCause`
+algebra carries that vocabulary; `crates/persistence/src/mapping.rs` holds its
+one encoder and decoder. `unclassified_failure` is the sole catch-all spelling,
+so the share of terminal turns carrying a cause outside it measures
+classification quality rather than mere presence. The liveness watchdog and
+startup recovery commit the identical failed-turn transition, which is what
+keeps every terminal trigger firing for both; the cause is what tells them apart
+in the rows rather than only in an operator log that is retained for a while.
+The domain `TurnDisposition` algebra carries all six accepted variants —
+`Completed`, `Refused`, `Failed`, `Cancelled { cause }`,
+`ReconciliationRequired { marker }`, `Retired` — but `Cancelled` is
 constructible only from an `AppliedInterruptProof`. `ReconciliationRequired`
 remains constructible only from a sealed `ReconciliationMarker`. Committed
 transitions produce every variant: interrupted physical ambiguity produces

@@ -39,6 +39,7 @@ use crate::{
         session_retryable_cause_from_str, session_structural_cause_from_str,
         session_wait_kind_from_str, session_wait_kind_to_str, session_waker_to_str,
     },
+    outbox::{self, OutboxEvent},
 };
 
 /// A durable lifecycle shape that cannot construct the public domain values.
@@ -764,7 +765,7 @@ async fn journal_ownership(
     actor: LifecycleActor,
 ) -> Result<(), sqlx::Error> {
     let (actor_kind, actor_module, actor_turn, actor_request) = encode_actor(actor);
-    sqlx::query(
+    let event_ordinal: i64 = sqlx::query_scalar(
         "INSERT INTO session_ownership_event
             (session_id, event_ordinal, transition_kind, owned_after,
              actor_kind, actor_module, actor_turn_id, actor_tool_request_id)
@@ -777,7 +778,8 @@ async fn journal_ownership(
                 $6,
                 $7
            FROM session_ownership_event
-          WHERE session_id = $1",
+          WHERE session_id = $1
+         RETURNING event_ordinal",
     )
     .bind(session_id_to_uuid(session))
     .bind(ownership_transition_to_str(transition))
@@ -786,9 +788,25 @@ async fn journal_ownership(
     .bind(actor_module)
     .bind(actor_turn)
     .bind(actor_request)
-    .execute(&mut *connection)
+    .fetch_one(&mut *connection)
     .await?;
-    Ok(())
+    // Creation records its bit on `session_created`; only a flip is an event.
+    match transition {
+        SessionOwnershipTransition::CreatedOwned
+        | SessionOwnershipTransition::CreatedUnmonitored => Ok(()),
+        SessionOwnershipTransition::Adopted | SessionOwnershipTransition::Released => {
+            let event_ordinal = u64::try_from(event_ordinal)
+                .map_err(|_| sqlx::Error::Protocol(String::from("ownership ordinal")))?;
+            outbox::append(
+                connection,
+                OutboxEvent::SessionOwnershipChanged {
+                    session,
+                    event_ordinal,
+                },
+            )
+            .await
+        }
+    }
 }
 
 const fn ownership_transition_to_str(value: SessionOwnershipTransition) -> &'static str {
@@ -1167,6 +1185,45 @@ fn decode_record(row: &PgRow) -> Result<SessionLifecycleRecord, SessionLifecycle
         )?,
         pending_terminal,
     })
+}
+
+/// Decodes the satellite's state columns; the outbox's lifecycle records carry
+/// the same columns.
+pub(crate) fn decode_lifecycle_state(
+    row: &PgRow,
+) -> Result<SessionLifecycleState, SessionLifecycleRepositoryError> {
+    decode_state(row)
+}
+
+/// Decodes the satellite's actor columns.
+pub(crate) fn decode_lifecycle_actor(
+    row: &PgRow,
+) -> Result<LifecycleActor, SessionLifecycleRepositoryError> {
+    decode_actor(
+        required::<String>(row, "actor_kind")?,
+        row.try_get("actor_module")?,
+        row.try_get("actor_turn_id")?,
+        row.try_get("actor_tool_request_id")?,
+    )
+}
+
+/// Decodes the satellite's terminal-outcome columns.
+pub(crate) fn decode_terminal_outcome_columns(
+    row: &PgRow,
+) -> Result<Option<SessionTerminalOutcome>, SessionLifecycleRepositoryError> {
+    decode_terminal_outcome(
+        row.try_get("terminal_outcome_kind")?,
+        row.try_get("terminal_cause_kind")?,
+        row.try_get("terminal_stop_sticky")?,
+        row.try_get("terminal_superseded_by")?,
+    )
+}
+
+/// Decodes one `parked_standing_cause_kind` spelling.
+pub(crate) fn decode_standing_failure_cause(
+    cause: &str,
+) -> Result<SessionFailureCause, SessionLifecycleRepositoryError> {
+    decode_failure_cause(cause)
 }
 
 /// Rebuilds the state and the typed detail its own shape constraint pairs it

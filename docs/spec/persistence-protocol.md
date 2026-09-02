@@ -1805,31 +1805,38 @@ storage below plus the delegation-stack extension identified inline:
 
 - the baseline `outbox_event` header and delegation-owned
   `delegation_outbox_event` header (both carrying allocator-owned
-  `event_sequence`, closed `event_kind`, `storage_version`, `session_id`, and a
+  `event_sequence`, closed `event_kind`, `storage_version`, `session_id` —
+  nullable for exactly `command_settled`, a receipt that can settle with no
+  session — a `turn_disposition` denormalized for exactly `turn_terminal`, and a
   `recorded_at` statement stamp defaulted at insert, so an event's record time
   is a property of the header rather than of a reader's arrival) plus one typed
-  record table per kind — `session_created_outbox_event`,
-  `input_accepted_outbox_event`, `session_model_settings_changed_outbox_event`,
-  `turn_model_settings_resolved_outbox_event`, `goal_turn_retired_outbox_event`,
-  `turn_activated_outbox_event`, `turn_failed_outbox_event`,
-  `model_call_transition_outbox_event`, `tool_batch_transition_outbox_event`,
-  `tool_approval_decided_outbox_event`, `context_compacted_outbox_event`,
-  `turn_completed_outbox_event`, `turn_refused_outbox_event`,
-  `turn_cancelled_outbox_event`, `turn_reconciliation_required_outbox_event`,
-  `runner_state_transition_outbox_event`, and the delegation header's
-  `delegation_update_outbox_event` and `delegation_wake_outbox_event` — with a
-  deferred triggers requiring exactly one typed record per header. Both header
-  families share the one allocator and delivery prefix, so their committed
-  events form one gap-free global sequence. A runner-transition record carries
-  the affected runner, the positive placement revision, the sandbox profile, one
-  closed transition state, and the relocation facts that state requires, so a
-  follower learns of loss, suspicion, recovery, replacement, working-directory
-  relocation, and abandonment from the same family. The family is deliberately
-  shaped for extension: a later runner fact — another relocation shape, or
-  runner metadata and attributes — adds a state and its columns to this one
-  record kind rather than a second event kind, so a follower already decoding
-  the family needs no new kind to keep hearing runner news. Extension stays
-  version-gated rather than silent: an addition every existing decoder can
+  record table per kind. The module-facing kinds are `session_created` (storage
+  version 2, carrying the creation cause and the ownership bit),
+  `session_state_changed`, `session_terminal`, `turn_terminal` (one record whose
+  `disposition_kind` — `completed`, `refused`, `failed`, `cancelled`,
+  `reconciliation_required`, `retired` — selects the evidence columns present),
+  `goal_changed`, `command_settled`, `injection_settled`, and
+  `session_ownership_changed`; the core-internal kinds are `input_accepted`,
+  `session_model_settings_changed`, `turn_model_settings_resolved`,
+  `turn_activated`, `model_call_transition`, `tool_batch_transition`,
+  `tool_approval_decided`, `context_compacted`, and `runner_state_transition`,
+  plus the delegation header's `delegation_update` and `delegation_wake`. Each
+  typed table authenticates its header through the four-column key;
+  `command_settled_outbox_event` uses the three-column
+  `(event_sequence, event_kind, storage_version)` key so a null session member
+  cannot switch the proof off. Deferred triggers require exactly one typed
+  record per header, matching the header's disposition for `turn_terminal`. Both
+  header families share the one allocator and delivery prefix, so their
+  committed events form one gap-free global sequence. A runner-transition record
+  carries the affected runner, the positive placement revision, the sandbox
+  profile, one closed transition state, and the relocation facts that state
+  requires, so a follower learns of loss, suspicion, recovery, replacement,
+  working-directory relocation, and abandonment from the same family. The family
+  is deliberately shaped for extension: a later runner fact — another relocation
+  shape, or runner metadata and attributes — adds a state and its columns to
+  this one record kind rather than a second event kind, so a follower already
+  decoding the family needs no new kind to keep hearing runner news. Extension
+  stays version-gated rather than silent: an addition every existing decoder can
   ignore leaves the kind-scoped `storage_version` alone, while a new closed
   transition state or a newly required column advances it, and a decoder that
   predates the advance rejects the record as `Unsupported` instead of coercing
@@ -1915,21 +1922,27 @@ Binding an already-accepted turn to a generation appends nothing, because the
 command that accepted that turn appended its correlated `input_accepted`
 already; dispatch authenticates that command, and the `goal_turn` row recording
 which generation the turn runs under does not disqualify it. A stop or supersede
-that makes a queued goal turn ineligible appends `goal_turn_retired` in the same
-transaction; supersede appends retirement before the replacement
-`input_accepted`. The typed record names the exact queued, now-ineligible
-`goal_turn`, and dispatch rechecks that durable correlation. Model-call state
+that makes a queued goal turn ineligible moves it to `terminal{retired}` and
+appends `turn_terminal{retired}` in the same transaction; supersede appends
+retirement before the replacement `input_accepted`. Dispatch rechecks that the
+named turn is terminal under that disposition. Every goal event appends
+`goal_changed`; an adopt or release appends `session_ownership_changed`; every
+satellite state transition appends `session_state_changed`, or
+`session_terminal` when it closes the session, from the satellite's own trigger.
+`command_settled` and `injection_settled` have their typed records and decoders;
+the command surface and the injection contract emit them. Model-call state
 transitions append `model_call_transition`, tool-round creation appends
 `tool_batch_transition { proposed }`, all-resolved result projection appends
 `tool_batch_transition { results_projected }`, and an external-effect ambiguity
 appends `tool_batch_transition { recovery_required }`. Completion closure
-appends `turn_completed`, refusal closure appends `turn_refused`, and
-known-failure closure appends `turn_failed`; interrupt-confirmed cancellation
-appends `turn_cancelled`, and live stopped ambiguity appends
-`turn_reconciliation_required`; completion of a context compaction appends
-`context_compacted` in the same transaction as its dedicated call, summary
-entry, result frontier, compaction result, and applied command receipt. An
-interrupt against a parked ambiguous tool attempt appends the same event kind
+appends `turn_terminal{completed}`, refusal closure appends
+`turn_terminal{refused}`, and known-failure closure appends
+`turn_terminal{failed}`; interrupt-confirmed cancellation appends
+`turn_terminal{cancelled}`, and live stopped ambiguity appends
+`turn_terminal{reconciliation_required}`; completion of a context compaction
+appends `context_compacted` in the same transaction as its dedicated call,
+summary entry, result frontier, compaction result, and applied command receipt.
+An interrupt against a parked ambiguous tool attempt appends the same event kind
 with that exact tool-attempt reference. Every durable runner state change
 appends one `runner_state_transition` per affected session in the same
 transaction that commits it: initial pin, first missed heartbeat, recovery

@@ -900,8 +900,9 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
                 AND terminal_model_call_id = $1),
             (SELECT count(*) FROM model_call_transition_outbox_event
               WHERE model_call_id = $1),
-            (SELECT count(*) FROM turn_completed_outbox_event
-              WHERE turn_id = $5
+            (SELECT count(*) FROM turn_terminal_outbox_event
+              WHERE disposition_kind = 'completed'
+              AND turn_id = $5
                 AND model_call_id = $1
                 AND completion_entry_id = $4
                 AND terminal_frontier_id = $6),
@@ -927,8 +928,9 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
 
     let completion_sequence: Decimal = sqlx::query_scalar(
         "SELECT event_sequence
-           FROM turn_completed_outbox_event
-          WHERE turn_id = $1",
+           FROM turn_terminal_outbox_event
+          WHERE disposition_kind = 'completed'
+          AND turn_id = $1",
     )
     .bind(turn.into_uuid())
     .fetch_one(&pool)
@@ -1004,14 +1006,14 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
         .execute(&pool)
         .await?;
 
-    sqlx::query("ALTER TABLE turn_completed_outbox_event DISABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
-    sqlx::query("DELETE FROM turn_completed_outbox_event WHERE turn_id = $1")
+    sqlx::query("DELETE FROM turn_terminal_outbox_event WHERE disposition_kind = 'completed' AND turn_id = $1")
         .bind(turn.into_uuid())
         .execute(&pool)
         .await?;
-    sqlx::query("ALTER TABLE turn_completed_outbox_event ENABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;
     assert!(matches!(
@@ -1779,8 +1781,9 @@ async fn s04_inv029_inv034_user_reconciliation_releases_a_restart_parked_ambiguo
                 turn.terminal_attempt_id,
                 turn.terminal_model_call_id,
                 (SELECT count(*)
-                   FROM turn_reconciliation_required_outbox_event
-                  WHERE turn_id = $1
+                   FROM turn_terminal_outbox_event
+                  WHERE disposition_kind = 'reconciliation_required'
+                  AND turn_id = $1
                     AND model_call_id = $2)
            FROM turn_lifecycle AS turn
           WHERE turn.turn_id = $1",
@@ -2173,8 +2176,9 @@ async fn s04_operator_reconciliation_supersedes_a_claimed_automatic_attempt()
         "SELECT recovery.state_kind,
                 attempt.outcome_kind,
                 (SELECT count(*)
-                   FROM turn_reconciliation_required_outbox_event
-                  WHERE turn_id = recovery.turn_id)
+                   FROM turn_terminal_outbox_event
+                  WHERE disposition_kind = 'reconciliation_required'
+                  AND turn_id = recovery.turn_id)
            FROM automatic_reconciliation AS recovery
            JOIN automatic_reconciliation_attempt AS attempt
              ON attempt.turn_id = recovery.turn_id
@@ -3699,8 +3703,9 @@ async fn s08_s21_inv006_inv014_inv032_inv036_target_unavailable_reclassifies_ste
                 AND terminal_frontier_id = $5
                 AND terminal_attempt_id = $2
                 AND terminal_model_call_id IS NULL),
-            (SELECT count(*) FROM turn_failed_outbox_event
-              WHERE turn_id = $4
+            (SELECT count(*) FROM turn_terminal_outbox_event
+              WHERE disposition_kind = 'failed'
+              AND turn_id = $4
                 AND failure_entry_id = $3
                 AND terminal_frontier_id = $5)",
     )

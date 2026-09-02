@@ -930,6 +930,12 @@ pub struct WebSessionTimelineDescriptor {
 #[serde(rename_all = "snake_case")]
 pub enum WebSessionTimelineEventKind {
     SessionCreated,
+    SessionStateChanged,
+    SessionTerminal,
+    GoalChanged,
+    CommandSettled,
+    InjectionSettled,
+    SessionOwnershipChanged,
     SessionModelSettingsChanged,
     TurnModelSettingsResolved,
     InputAccepted,

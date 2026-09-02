@@ -1339,10 +1339,12 @@ fn announcement_for_classifies_each_outcome() {
     );
     assert_eq!(
         announcement_for(
-            &DispatchedOutboxEventKind::TurnFailed {
+            &DispatchedOutboxEventKind::TurnTerminal {
                 turn,
-                failure_entry: entry,
-                terminal_frontier: frontier,
+                disposition: DispatchedTurnTerminalDisposition::Failed {
+                    failure_entry: entry,
+                    terminal_frontier: frontier,
+                },
             },
             turn,
             call,
@@ -1351,10 +1353,12 @@ fn announcement_for_classifies_each_outcome() {
     );
     assert_eq!(
         announcement_for(
-            &DispatchedOutboxEventKind::TurnFailed {
+            &DispatchedOutboxEventKind::TurnTerminal {
                 turn: other_turn,
-                failure_entry: entry,
-                terminal_frontier: frontier,
+                disposition: DispatchedTurnTerminalDisposition::Failed {
+                    failure_entry: entry,
+                    terminal_frontier: frontier,
+                },
             },
             turn,
             call,
@@ -1362,7 +1366,14 @@ fn announcement_for_classifies_each_outcome() {
         AmbiguityAnnouncement::Unrelated
     );
     assert_eq!(
-        announcement_for(&DispatchedOutboxEventKind::SessionCreated, turn, call),
+        announcement_for(
+            &DispatchedOutboxEventKind::SessionCreated(DispatchedSessionCreation {
+                cause: SessionCreationCause::Interactive,
+                ownership: SessionOwnership::Unmonitored,
+            }),
+            turn,
+            call,
+        ),
         AmbiguityAnnouncement::Unrelated
     );
 }
@@ -2332,8 +2343,9 @@ async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity
                 lifecycle.terminal_model_call_id,
                 lifecycle.terminal_tool_attempt_id,
                 (SELECT count(*)
-                   FROM turn_reconciliation_required_outbox_event AS event
-                  WHERE event.session_id = lifecycle.session_id
+                   FROM turn_terminal_outbox_event AS event
+                  WHERE event.disposition_kind = 'reconciliation_required'
+                  AND event.session_id = lifecycle.session_id
                     AND event.turn_id = lifecycle.turn_id
                     AND event.model_call_id IS NULL
                     AND event.tool_attempt_id = $3
@@ -3710,10 +3722,12 @@ async fn s02_s07_s11_inv032_inv037_stopped_tool_round_cancellation_dispatches()
     let mut dispatched = Vec::new();
     drain_outbox(&pool, |event| dispatched.push(event.kind().clone())).await?;
     assert!(
-        dispatched.contains(&DispatchedOutboxEventKind::TurnCancelled {
+        dispatched.contains(&DispatchedOutboxEventKind::TurnTerminal {
             turn: fixture.turn,
-            cancellation_entry,
-            terminal_frontier,
+            disposition: DispatchedTurnTerminalDisposition::Cancelled {
+                cancellation_entry,
+                terminal_frontier,
+            },
         }),
         "the cancelled turn with its completed producing call must dispatch"
     );
@@ -3735,8 +3749,9 @@ async fn s02_s07_s11_inv032_completed_cancellation_requires_closed_tool_round()
         commit_stopped_tool_round(&pool, seed).await?;
     let sequence = sqlx::query_scalar(
         "SELECT event_sequence
-           FROM turn_cancelled_outbox_event
-          WHERE turn_id = $1",
+           FROM turn_terminal_outbox_event
+          WHERE disposition_kind = 'cancelled'
+          AND turn_id = $1",
     )
     .bind(fixture.turn.into_uuid())
     .fetch_one(&pool)

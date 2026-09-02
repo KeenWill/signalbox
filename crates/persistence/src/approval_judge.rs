@@ -35,7 +35,7 @@ use crate::{
         turn_terminal_cause_to_str,
     },
     model_execution::{lock_session, resolve_session_credential},
-    outbox::{self, OutboxEvent},
+    outbox::{self, OutboxEvent, TurnTerminalOutboxDisposition},
     tool_loop::{ToolLoopRepositoryError, load_active_batch_from_connection},
 };
 
@@ -1023,11 +1023,13 @@ async fn persist_headless_escalation(
     require_single(terminalized, "headless escalation turn terminalization")?;
     outbox::append(
         connection,
-        OutboxEvent::TurnFailed {
+        OutboxEvent::TurnTerminal {
             session,
             turn,
-            failure_entry,
-            terminal_frontier: identities.terminal_frontier(),
+            disposition: TurnTerminalOutboxDisposition::Failed {
+                failure_entry,
+                terminal_frontier: identities.terminal_frontier(),
+            },
         },
     )
     .await?;

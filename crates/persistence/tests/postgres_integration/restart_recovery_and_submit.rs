@@ -291,8 +291,9 @@ async fn s03_s04_inv006_inv034_restart_scan_recovers_lost_attempt_once_and_unblo
                 failed.failure_entry_id,
                 failed.terminal_frontier_id
            FROM outbox_event AS header
-           JOIN turn_failed_outbox_event AS failed
-             ON failed.event_sequence = header.event_sequence
+           JOIN turn_terminal_outbox_event AS failed
+             ON failed.disposition_kind = 'failed'
+             AND failed.event_sequence = header.event_sequence
           ORDER BY header.event_sequence",
     )
     .fetch_all(&restarted_pool)
@@ -300,7 +301,7 @@ async fn s03_s04_inv006_inv034_restart_scan_recovers_lost_attempt_once_and_unblo
     assert_eq!(
         recovery_events,
         vec![(
-            "turn_failed".into(),
+            "turn_terminal".into(),
             1,
             session_uuid,
             first_turn_uuid,
@@ -317,9 +318,11 @@ async fn s03_s04_inv006_inv034_restart_scan_recovers_lost_attempt_once_and_unblo
             (SELECT count(*) FROM turn_attempt
               WHERE turn_id = $1),
             (SELECT count(*) FROM outbox_event
-              WHERE event_kind = 'turn_failed' AND session_id = $2),
-            (SELECT count(*) FROM turn_failed_outbox_event
-              WHERE turn_id = $1)",
+              WHERE event_kind = 'turn_terminal' AND turn_disposition = 'failed'
+                AND session_id = $2),
+            (SELECT count(*) FROM turn_terminal_outbox_event
+              WHERE disposition_kind = 'failed'
+              AND turn_id = $1)",
     )
     .bind(first_turn_uuid)
     .bind(session_uuid)
@@ -338,9 +341,11 @@ async fn s03_s04_inv006_inv034_restart_scan_recovers_lost_attempt_once_and_unblo
             (SELECT count(*) FROM turn_attempt
               WHERE turn_id = $1),
             (SELECT count(*) FROM outbox_event
-              WHERE event_kind = 'turn_failed' AND session_id = $2),
-            (SELECT count(*) FROM turn_failed_outbox_event
-              WHERE turn_id = $1)",
+              WHERE event_kind = 'turn_terminal' AND turn_disposition = 'failed'
+                AND session_id = $2),
+            (SELECT count(*) FROM turn_terminal_outbox_event
+              WHERE disposition_kind = 'failed'
+              AND turn_id = $1)",
     )
     .bind(first_turn_uuid)
     .bind(session_uuid)
@@ -431,7 +436,7 @@ async fn s03_inv032_inv034_startup_recovery_and_outbox_commit_or_roll_back_toget
     .await?;
     sqlx::query(
         "CREATE CONSTRAINT TRIGGER zz_test_fail_turn_failed_outbox_commit
-         AFTER INSERT ON turn_failed_outbox_event
+         AFTER INSERT ON turn_terminal_outbox_event
          DEFERRABLE INITIALLY DEFERRED
          FOR EACH ROW
          EXECUTE FUNCTION fail_test_turn_failed_outbox_commit()",
@@ -455,8 +460,9 @@ async fn s03_inv032_inv034_startup_recovery_and_outbox_commit_or_roll_back_toget
                 attempt.state_kind,
                 (SELECT count(*) FROM semantic_transcript_entry
                   WHERE failed_turn_id = $1),
-                (SELECT count(*) FROM turn_failed_outbox_event
-                  WHERE turn_id = $1),
+                (SELECT count(*) FROM turn_terminal_outbox_event
+                  WHERE disposition_kind = 'failed'
+                  AND turn_id = $1),
                 (SELECT last_sequence FROM outbox_sequence_state
                   WHERE singleton)
            FROM turn_lifecycle AS turn
@@ -474,7 +480,7 @@ async fn s03_inv032_inv034_startup_recovery_and_outbox_commit_or_roll_back_toget
 
     sqlx::query(
         "DROP TRIGGER zz_test_fail_turn_failed_outbox_commit
-            ON turn_failed_outbox_event",
+            ON turn_terminal_outbox_event",
     )
     .execute(&pool)
     .await?;
@@ -492,8 +498,9 @@ async fn s03_inv032_inv034_startup_recovery_and_outbox_commit_or_roll_back_toget
                 attempt.state_kind,
                 (SELECT count(*) FROM semantic_transcript_entry
                   WHERE failed_turn_id = $1),
-                (SELECT count(*) FROM turn_failed_outbox_event
-                  WHERE turn_id = $1),
+                (SELECT count(*) FROM turn_terminal_outbox_event
+                  WHERE disposition_kind = 'failed'
+                  AND turn_id = $1),
                 (SELECT last_sequence FROM outbox_sequence_state
                   WHERE singleton)
            FROM turn_lifecycle AS turn
@@ -604,9 +611,11 @@ async fn s08_s09_inv016_inv034_inv036_restart_reclassifies_pending_steering()
     let recovery_events: (i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM outbox_event
-              WHERE event_kind = 'turn_failed' AND session_id = $1),
-            (SELECT count(*) FROM turn_failed_outbox_event
-              WHERE session_id = $1)",
+              WHERE event_kind = 'turn_terminal' AND turn_disposition = 'failed'
+                AND session_id = $1),
+            (SELECT count(*) FROM turn_terminal_outbox_event
+              WHERE disposition_kind = 'failed'
+              AND session_id = $1)",
     )
     .bind(session_uuid)
     .fetch_one(&restarted_pool)

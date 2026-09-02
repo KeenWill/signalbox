@@ -692,7 +692,8 @@ async fn a_closure_settles_the_live_goal_generation() -> Result<(), Box<dyn Erro
     );
     assert_eq!(armed_deadline(&pool, session).await?, None);
     let retired: Option<Uuid> = sqlx::query_scalar(
-        "SELECT turn_id FROM goal_turn_retired_outbox_event WHERE session_id = $1",
+        "SELECT turn_id FROM turn_terminal_outbox_event
+          WHERE session_id = $1 AND disposition_kind = 'retired'",
     )
     .bind(session.into_uuid())
     .fetch_optional(&pool)
@@ -1586,7 +1587,7 @@ async fn the_ownership_journal_cannot_be_truncated() -> Result<(), Box<dyn Error
         .handle(dispatched_creation(32))
         .await?;
 
-    let error = sqlx::query("TRUNCATE session_ownership_event")
+    let error = sqlx::query("TRUNCATE session_ownership_event CASCADE")
         .execute(&pool)
         .await
         .expect_err("the ownership journal cannot be truncated");
