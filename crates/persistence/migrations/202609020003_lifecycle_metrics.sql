@@ -5,8 +5,9 @@
 
 --
 -- §12's denominator keeps a supersession that closed a park holding a failure
--- cause, so the standing cause must survive terminalization. The clause widens
--- by exactly the terminal state; a non-terminal, non-parked state still cannot
+-- cause, so the standing cause must outlive the park that raised it: through
+-- terminalization, and through the resume a committed closure survives between
+-- its decision and the turn's boundary. A state that owes neither still cannot
 -- carry one.
 --
 
@@ -27,7 +28,8 @@ ALTER TABLE session_lifecycle
         ])))
         AND ((parked_standing_cause_kind IS NULL)
              OR (parked_cause IS NOT NULL)
-             OR (state_kind = 'terminal'::text))
+             OR (state_kind = 'terminal'::text)
+             OR (pending_terminal_outcome_kind IS NOT NULL))
     );
 
 --

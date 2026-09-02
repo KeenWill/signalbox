@@ -15,7 +15,8 @@ use crate::{
         DECLARE_DEADLINE_VIOLATIONS_CURSOR, DECLARE_WEEKLY_METRICS_CURSOR,
         LifecycleDeadlineViolation, LifecycleGateVerdict, LifecycleMetricBounds,
         LifecycleMetricsError, LifecycleWeeklyMetrics, SELECT_BOUNDS, SELECT_CURRENT_WEEK,
-        decode_bounds, decode_violation, decode_week, gate_verdict, reported_week_limit,
+        decode_bounds, decode_violation, decode_week, gate_verdict, gate_week_limit,
+        reported_week_limit,
     },
     mapping::{
         RepoWatchSingletonScopeStorageKind, repo_watch_convergence_verdict_from_str,
@@ -440,7 +441,12 @@ impl ProcessOperatorStatusRepository {
             .fetch_one(&mut *transaction)
             .await?
             .try_get::<PrimitiveDateTime, _>("week")?;
-        declare_status_cursors(&mut transaction, reported_week_limit(bounds)).await?;
+        declare_status_cursors(
+            &mut transaction,
+            reported_week_limit(bounds),
+            gate_week_limit(bounds),
+        )
+        .await?;
         Ok(ProcessOperatorStatusReader {
             transaction: Some(transaction),
             phase: ProcessOperatorStatusPhase::HeldSlots,
@@ -630,6 +636,7 @@ fn lifecycle_read_failure(
 async fn declare_status_cursors(
     transaction: &mut Transaction<'_, Postgres>,
     reported_weeks: i64,
+    gate_weeks: i64,
 ) -> Result<(), sqlx::Error> {
     // A branch-origin hold carries `workflow_branch` where a pull-request
     // origin carries `pull_request_number`; exactly one is non-null per row,
@@ -717,6 +724,7 @@ async fn declare_status_cursors(
     // the same snapshot as the sections above.
     sqlx::query(DECLARE_WEEKLY_METRICS_CURSOR)
         .bind(reported_weeks)
+        .bind(gate_weeks)
         .execute(&mut **transaction)
         .await?;
     sqlx::query(DECLARE_DEADLINE_VIOLATIONS_CURSOR)

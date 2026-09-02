@@ -851,15 +851,25 @@ async fn write_state(
                 -- statement clock, like every other lifecycle stamp. §12 reads
                 -- both the standing cause and the instant it began after the
                 -- session closes — a supersession that closed a park holding a
-                -- failure cause counts under that cause — so terminalization
-                -- carries them forward instead of clearing them.
+                -- failure cause counts under that cause — so the standing
+                -- failure outlives the park that raised it.
+                --
+                -- A park states its own. Terminalization carries what it
+                -- closes. So does a state that still owes a committed closure:
+                -- the handoff deliberately survives a resume, and a cause
+                -- cleared under it would reach settlement empty and the
+                -- supersession would be trimmed as a non-failure.
                 parked_since = CASE
                     WHEN $13::text IS NOT NULL THEN statement_timestamp()
-                    WHEN $16::text IS NOT NULL THEN session_lifecycle.parked_since
+                    WHEN $16::text IS NOT NULL
+                        OR session_lifecycle.pending_terminal_outcome_kind IS NOT NULL
+                        THEN session_lifecycle.parked_since
                     ELSE NULL
                 END,
                 parked_standing_cause_kind = CASE
+                    WHEN $13::text IS NOT NULL THEN $15
                     WHEN $16::text IS NOT NULL
+                        OR session_lifecycle.pending_terminal_outcome_kind IS NOT NULL
                         THEN session_lifecycle.parked_standing_cause_kind
                     ELSE $15
                 END,

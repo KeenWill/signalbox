@@ -178,12 +178,18 @@ impl LifecycleRate {
         Some(scaled < target)
     }
 
-    /// Returns whether the rate is at or above a parts-per-million threshold.
+    /// Returns whether the rate is strictly above a parts-per-million threshold.
+    ///
+    /// Not the inverse of [`Self::below`]: a rate exactly at its threshold
+    /// neither passes the gate nor pages the alarm. Inverting would make a
+    /// zero threshold page a cohort with no occurrences at all.
     pub const fn breaches(self, threshold_ppm: u64) -> Option<bool> {
-        match self.below(threshold_ppm) {
-            None => None,
-            Some(below) => Some(!below),
+        if self.denominator == 0 {
+            return None;
         }
+        let scaled = (self.numerator as u128) * PARTS_PER_MILLION;
+        let target = (threshold_ppm as u128) * (self.denominator as u128);
+        Some(scaled > target)
     }
 }
 
@@ -480,12 +486,23 @@ macro_rules! weekly_metrics_sql {
        classified_terminal_turn_count,
        known_failed_call_count,
        classified_known_failed_call_count
-  FROM (
+  FROM ((
         SELECT *
           FROM session_lifecycle_weekly_metric
          ORDER BY week DESC
          LIMIT $1
-       ) AS recent
+       )
+        UNION
+       (
+        -- The horizon is a frame budget, and a week populated only by a
+        -- dispatch, wall, or cause metric spends it without telling the gate
+        -- anything. The window the gate grades is retained separately.
+        SELECT *
+          FROM session_lifecycle_weekly_metric
+         WHERE completion_failure_denominator > 0
+         ORDER BY week DESC
+         LIMIT $2
+       )) AS recent
  ORDER BY week"
     };
 }
@@ -593,6 +610,7 @@ impl LifecycleMetricsRepository {
             .try_get::<PrimitiveDateTime, _>("week")?;
         let weekly_rows = sqlx::query(SELECT_WEEKLY_METRICS)
             .bind(reported_week_limit(bounds))
+            .bind(gate_week_limit(bounds))
             .fetch_all(&mut *transaction)
             .await?;
         // Only the count; the rows stream through the status snapshot.
@@ -617,6 +635,17 @@ impl LifecycleMetricsRepository {
 ///
 /// The horizon bounds a wire frame; it never shortens a configured gate
 /// window, which would leave that gate `indeterminate` forever.
+/// Returns how many populated headline cohorts the report keeps regardless.
+///
+/// The gate grades weeks with a denominator; the horizon counts every week the
+/// views produce a row for, so the two budgets are taken separately.
+pub(crate) fn gate_week_limit(bounds: LifecycleMetricBounds) -> i64 {
+    bounds
+        .gate_weeks
+        .and_then(|weeks| i64::try_from(weeks).ok())
+        .unwrap_or(0)
+}
+
 pub(crate) fn reported_week_limit(bounds: LifecycleMetricBounds) -> i64 {
     let configured = bounds
         .gate_weeks
@@ -811,6 +840,32 @@ mod tests {
     }
 
     /// §12 states the gate as the headline below its target, not at it.
+    /// An alarm pages above its threshold; the gate passes below it. A rate
+    /// sitting exactly on the number does neither.
+    #[test]
+    fn a_rate_exactly_at_its_threshold_neither_passes_nor_pages() {
+        let one_in_ten = LifecycleRate::new(1, 10);
+
+        assert_eq!(one_in_ten.below(100_000), Some(false));
+        assert_eq!(one_in_ten.breaches(100_000), Some(false));
+        assert_eq!(one_in_ten.breaches(99_999), Some(true));
+    }
+
+    /// A zero threshold pages on an occurrence, not on a clean cohort.
+    #[test]
+    fn a_zero_threshold_does_not_page_a_cohort_with_no_occurrences() {
+        assert_eq!(LifecycleRate::new(0, 40).breaches(0), Some(false));
+        assert_eq!(LifecycleRate::new(1, 40).breaches(0), Some(true));
+    }
+
+    /// The horizon budgets the frame; the gate's own cohorts are kept beside
+    /// it, so weeks populated only by other metrics cannot crowd them out.
+    #[test]
+    fn the_gate_window_is_budgeted_apart_from_the_report_horizon() {
+        assert_eq!(gate_week_limit(gate_policy(4, 100_000)), 4);
+        assert_eq!(gate_week_limit(LifecycleMetricBounds::default()), 0);
+    }
+
     #[test]
     fn a_rate_exactly_at_its_threshold_is_not_below_it() {
         let one_in_ten = LifecycleRate::new(1, 10);

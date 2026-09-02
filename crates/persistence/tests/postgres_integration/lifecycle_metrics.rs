@@ -1012,6 +1012,9 @@ async fn a_parked_wall_is_counted_in_the_week_it_happened() -> Result<(), Box<dy
 
     let walled = owned_session(&pool, 0x1700).await?;
     let turn = activate_first_turn(&pool, walled, 0x1700).await?;
+    // The turn began a week before the wall, which is the ordinary ordering:
+    // the park instant is what dates the occurrence, not the turn's own.
+    backdate_dispatch(&pool, walled, 1).await?;
     repository
         .park(
             walled,
@@ -1031,6 +1034,13 @@ async fn a_parked_wall_is_counted_in_the_week_it_happened() -> Result<(), Box<dy
 
     let parked = LifecycleMetricsRepository::new(pool.clone()).read().await?;
     let parked_week = one_wall_occurrence_week(parked.weeks());
+    let dispatch_week = parked
+        .weeks()
+        .iter()
+        .find(|week| week.wall_rate().denominator() > 0)
+        .map(LifecycleWeeklyMetrics::week_start)
+        .expect("the dispatch cohort has one member");
+    assert_ne!(parked_week, dispatch_week);
 
     // The suspended turn has terminalized nothing, so the park is the only
     // evidence the wall happened at all.
@@ -1164,5 +1174,69 @@ async fn adopt_by_statement(pool: &PgPool, session: SessionId) -> Result<(), sql
     sqlx::query("ALTER TABLE session_ownership_event ENABLE TRIGGER ALL")
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+/// §12 counts a supersession that closed a park holding a failure cause, and
+/// the committed closure survives a resume, so its cause must too.
+///
+/// The handoff deliberately outlives the resume between the decision and the
+/// turn's boundary. A cause cleared under it would reach settlement empty and
+/// the supersession would be trimmed as a non-failure, flattering the gate.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_committed_supersession_keeps_its_cause_across_a_resume() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    apply_metric_bounds(&pool, LifecycleMetricBounds::default()).await?;
+
+    let respawned = owned_session(&pool, 0x1900).await?;
+    let turn = activate_first_turn(&pool, respawned, 0x1900).await?;
+    repository
+        .park(
+            respawned,
+            SessionParkCause::StructuralFailure,
+            SessionParkResponder::Module {
+                module: DispatchingModule::RepositoryWatch,
+            },
+            Some(SessionFailureCause::Structural(
+                SessionStructuralCause::ContextCompactionWall,
+            )),
+            LifecycleActor::Core {
+                agency: CoreAgency::Daemon,
+            },
+        )
+        .await?;
+    repository
+        .commit_pending_terminal(respawned, SessionTerminalOutcome::Superseded { by: None })
+        .await?;
+    repository
+        .resume(
+            respawned,
+            LifecycleActor::Core {
+                agency: CoreAgency::Daemon,
+            },
+        )
+        .await?;
+    settle_turn_with_cause(&pool, respawned, turn, 0x1900, "context_compaction_wall").await?;
+    repository
+        .settle_pending_terminal(
+            respawned,
+            LifecycleActor::Core {
+                agency: CoreAgency::Daemon,
+            },
+        )
+        .await?;
+
+    let report = LifecycleMetricsRepository::new(pool.clone()).read().await?;
+    let week = latest_populated_week(report.weeks());
+
+    // The supersession closed a failure, so it stays in both halves rather
+    // than being trimmed as withdrawn work.
+    assert_eq!(week.completion_failure().denominator(), 1);
+    assert_eq!(week.completion_failure().numerator(), 1);
+
+    pool.close().await;
+    drop(container);
     Ok(())
 }
