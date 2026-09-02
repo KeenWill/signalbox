@@ -1,26 +1,13 @@
 --
 -- Session lifecycle §12: the five metrics, the two companion alarms, and the
--- gate, defined on durable columns rather than proxies.
---
--- Every definition below is a view over the columns §3, §4 and §1/§2/§6
--- landed: `session_lifecycle`, `session_deadline`, `session_ownership_event`,
--- `turn_lifecycle.terminal_cause_kind`, and `model_call`'s provider cause. No
--- metric reads a log line, an outbox payload, or a derived classifier, so the
--- operator surface and the Prometheus gauges are the same SQL and cannot
--- disagree about a number the gate turns on.
+-- gate, as views over the durable columns §1–§6 landed.
 --
 
 --
--- A supersession's standing failure cause has to survive the terminalization
--- that reads it.
---
--- §12's denominator keeps a `superseded{by}` that closed a park holding a
--- failure cause — otherwise every failure recovered by respawn-fresh vanishes
--- from the gate. The park's standing cause is that evidence, and the shape
--- constraint as landed erases it at terminalization, because `parked_cause`
--- must be null once the state is no longer `parked`. Widening the clause by
--- exactly the terminal state keeps the record and changes nothing else: a
--- non-terminal, non-parked state still cannot carry a standing cause.
+-- §12's denominator keeps a supersession that closed a park holding a failure
+-- cause, so the standing cause must survive terminalization. The clause widens
+-- by exactly the terminal state; a non-terminal, non-parked state still cannot
+-- carry one.
 --
 
 ALTER TABLE session_lifecycle
@@ -43,17 +30,10 @@ ALTER TABLE session_lifecycle
     );
 
 --
--- Deployment policy for the metric bounds.
---
--- The same arrangement §1's deadline bounds use: the daemon writes its
--- `[numeric_bounds]` policy here at startup and the definitions read it, so a
--- view is a total statement of the metric rather than a fragment a caller
--- completes with a parameter. A row with both value columns null is the
--- explicit `none` marker the config idiom already spells.
---
--- Rate thresholds are integer parts per million, not floats: every rate below
--- is a pair of exact counts, and comparing exact counts against an exact
--- threshold is what keeps a gate verdict reproducible.
+-- Deployment policy, the arrangement §1's deadline bounds use: the daemon
+-- writes its `[numeric_bounds]` policy here at startup and the views read it.
+-- Both value columns null is the `none` marker. Rate thresholds are integer
+-- parts per million so a verdict compares exact counts.
 --
 
 CREATE TABLE session_lifecycle_metric_bound (
@@ -126,11 +106,8 @@ CREATE FUNCTION session_lifecycle_metric_count(kind text) RETURNS bigint
 $$;
 
 --
--- Calendar weeks are UTC weeks.
---
--- `date_trunc` on a `timestamptz` answers in the session's `TimeZone`, so the
--- same row would fall in different weeks for two readers. Truncating the UTC
--- instant makes a cohort a property of the data rather than of who asked.
+-- Weeks are UTC weeks: `date_trunc` on a `timestamptz` answers in the reader's
+-- `TimeZone`, which would put one row in two different weeks.
 --
 
 CREATE FUNCTION session_lifecycle_metric_week(moment timestamp with time zone)
@@ -142,18 +119,10 @@ CREATE FUNCTION session_lifecycle_metric_week(moment timestamp with time zone)
 $$;
 
 --
--- §12's terminal cohort: sessions that reached `terminal` in a calendar week
--- and were owned at any point in their life.
---
--- Membership follows the journaled ownership record, not the current bit, so
--- releasing a troubled session never removes it from the gate. `owned_after`
--- is true exactly on `created_owned` and `adopted`, which is what "owned at
--- any point" means in that journal.
---
--- The trim and the numerator are recorded per session here rather than
--- restated at every reader: `stopped` leaves the denominator, a supersession
--- leaves it only when it closed no failure, and a supersession that closed a
--- park holding a failure cause stays in both under that standing cause.
+-- §12's terminal cohort. Membership follows the journaled ownership record
+-- rather than the current bit, so a release never removes a session from the
+-- gate. The trim and the numerator are recorded per session here rather than
+-- restated at every reader.
 --
 
 CREATE VIEW session_lifecycle_terminal_cohort AS
@@ -190,13 +159,9 @@ SELECT lifecycle.session_id,
        );
 
 --
--- The two cause facts a session records, read from the turns that recorded
--- them.
---
--- `overflow_incidence` is defined on the turn cause (§12 says "on any turn").
--- A wall is a session-level fact with three durable spellings — the turn cause
--- §4 landed, the session's own structural terminal cause, and the standing
--- cause a park carried — and any of them is the session recording a wall.
+-- Overflow is a turn cause (§12: "on any turn"). A wall has three durable
+-- spellings — the turn cause, the session's structural terminal cause, and a
+-- park's standing cause — and any of them is the session recording one.
 --
 
 CREATE VIEW session_lifecycle_cause_incidence AS
@@ -225,25 +190,19 @@ SELECT session_row.session_id,
   FROM session AS session_row;
 
 --
--- §12's dispatch cohort, for `wall_rate`.
+-- §12's dispatch cohort, for `wall_rate`. A session enters `dispatched` when
+-- its first turn is queued (§1), and a turn row's write time is immutable,
+-- so the earliest one is the durable dispatch instant; `state_entered_at`
+-- moves with every later transition and is not.
 --
--- A session enters `dispatched` when its first turn is queued (§1), and
--- `turn_lifecycle.recorded_at` is that turn row's immutable write time, so the
--- earliest one is the durable instant the session was dispatched. The
--- satellite's `state_entered_at` is not that instant: it moves with every
--- later transition. A session that never held a turn was never dispatched and
--- joins no dispatch cohort.
---
--- F9's maturation: a weekly cohort is gate-evaluable once no member is both
--- non-terminal and still inside the configured maturation window. With the
--- bound configured `none` a non-terminal member is never past its window, so
--- only an all-terminal cohort matures — which is the conservative reading.
+-- F9's maturation: a cohort is gate-evaluable once no member is both
+-- non-terminal and inside the configured window. Under `none`, only an
+-- all-terminal cohort matures.
 --
 
--- The dispatch instant is a grouped minimum over the largest table in the
--- schema, and every metric read takes it. The existing session-prefixed
--- indexes are keyed on acceptance position rather than write time, so without
--- this the aggregate is a sequential scan of every turn ever written.
+-- Every metric read takes a grouped minimum of turn write times; the existing
+-- session-prefixed indexes are keyed on acceptance position, so without this
+-- the aggregate scans every turn ever written.
 CREATE INDEX turn_lifecycle_by_session_write_time
     ON turn_lifecycle (session_id, recorded_at);
 
@@ -269,20 +228,11 @@ SELECT dispatched.session_id,
     ON incidence.session_id = dispatched.session_id;
 
 --
--- §12's `cause_completeness`, both axes.
---
--- Turn axis: every terminal turn carries a cause by §4's mandate, so the
--- measured quantity is the share carrying one outside the catch-all set.
--- `unclassified_failure` is that set's sole member — widening it is what would
--- silently weaken the criterion, which is why the vocabulary keeps exactly one
--- such spelling.
---
--- Model-call axis: the denominator is the calls whose disposition admits a
--- cause — `known_failed`, the only disposition the schema allows a provider
--- cause on — never all terminal calls. `unrecognized` is that axis's
--- catch-all, and a null cause is the absent case §12 names. A known failure
--- classified by attachment preparation rather than by the provider carries a
--- typed cause too, and the schema forbids it from carrying both.
+-- §12's `cause_completeness`, both axes. The turn axis measures causes outside
+-- the catch-all set, whose sole member is `unclassified_failure`. The
+-- model-call axis measures over `known_failed` calls only — the one
+-- disposition the schema admits a cause on — with `unrecognized` and a null
+-- cause as its catch-all; an attachment-preparation cause counts as typed.
 --
 
 CREATE VIEW session_lifecycle_terminal_turn_cause AS
@@ -307,16 +257,34 @@ SELECT call.session_id,
    AND call.terminal_disposition_kind = 'known_failed'::text;
 
 --
--- The weekly report.
---
--- One row per calendar week any of the four cohorts has a member in, carrying
--- each metric as the exact pair of counts it is defined as. Rates are left to
--- the reader so a week with an empty denominator reports an absent rate rather
--- than a fabricated zero.
+-- The weekly report: one row per calendar week any cohort has a member in,
+-- each metric as its exact pair of counts. Rates are left to the reader, so an
+-- empty denominator reports no rate rather than a zero.
 --
 
 CREATE VIEW session_lifecycle_weekly_metric AS
-WITH weeks AS (
+WITH wall_occurrence AS (
+    -- F9's immediate half: a wall belongs to the week it happened in. §2 parks
+    -- a session on a wall and suspends its turn, so the park is the evidence
+    -- and `parked_since` the instant; terminalization carries both forward. A
+    -- turn cause is the evidence for a wall that ended a turn, at that row's
+    -- write week. One session's wall is one occurrence, at the earlier of the
+    -- two.
+    SELECT session_row.session_id,
+           LEAST(
+               (SELECT lifecycle.parked_since
+                  FROM session_lifecycle AS lifecycle
+                 WHERE lifecycle.session_id = session_row.session_id
+                   AND lifecycle.parked_standing_cause_kind
+                       = 'context_compaction_wall'::text
+                   AND lifecycle.parked_since IS NOT NULL),
+               (SELECT min(turn.recorded_at)
+                  FROM turn_lifecycle AS turn
+                 WHERE turn.session_id = session_row.session_id
+                   AND turn.terminal_cause_kind = 'context_compaction_wall'::text)
+           ) AS occurred_at
+      FROM session AS session_row
+), weeks AS (
     SELECT cohort_week AS week FROM session_lifecycle_terminal_cohort
      UNION
     SELECT dispatch_week AS week FROM session_lifecycle_dispatch_cohort
@@ -324,6 +292,10 @@ WITH weeks AS (
     SELECT recorded_week AS week FROM session_lifecycle_terminal_turn_cause
      UNION
     SELECT recorded_week AS week FROM session_lifecycle_known_failed_call_cause
+     UNION
+    SELECT session_lifecycle_metric_week(occurred_at) AS week
+      FROM wall_occurrence
+     WHERE occurred_at IS NOT NULL
 ), terminal AS (
     SELECT cohort.cohort_week AS week,
            count(*) AS cohort_size,
@@ -350,16 +322,11 @@ WITH weeks AS (
       FROM session_lifecycle_dispatch_cohort AS cohort
      GROUP BY cohort.dispatch_week
 ), walls_recorded AS (
-    -- F9's immediate half: walls attributed to the week they were recorded in,
-    -- so a breach pages without waiting for a cohort to mature. §3 stamps a
-    -- turn row's write time and no terminalization instant, so the recorded
-    -- week is the turn's own write week — the closest durable answer to when
-    -- the wall happened, and the same stamp the cause-completeness axes use.
-    SELECT session_lifecycle_metric_week(turn.recorded_at) AS week,
+    SELECT session_lifecycle_metric_week(occurrence.occurred_at) AS week,
            count(*) AS occurrences
-      FROM turn_lifecycle AS turn
-     WHERE turn.terminal_cause_kind = 'context_compaction_wall'::text
-     GROUP BY session_lifecycle_metric_week(turn.recorded_at)
+      FROM wall_occurrence AS occurrence
+     WHERE occurrence.occurred_at IS NOT NULL
+     GROUP BY session_lifecycle_metric_week(occurrence.occurred_at)
 ), turn_causes AS (
     SELECT cause.recorded_week AS week,
            count(*) AS terminal_turns,
@@ -398,18 +365,11 @@ SELECT weeks.week,
   LEFT JOIN call_causes ON call_causes.week = weeks.week;
 
 --
--- §12's first companion alarm, target zero.
---
--- An owned non-terminal session either holds an armed deadline whose expiry
--- has not passed, or it is a violation. A deadline explicitly configured
--- unbounded — `expires_at` null, the journaled `none` marker — is never
--- counted; a missing record always is.
---
--- F8's grace: an expiry counts only once the configured processing grace has
--- also passed, so ordinary timer and commit latency never trips a zero-target
--- alarm. A grace configured `none` is unbounded exactly as every other `none`
--- bound is: no expiry is ever late, and the alarm reduces to its missing-record
--- half, which is the §1 invariant violation proper.
+-- §12's first companion alarm, target zero. An unbounded deadline —
+-- `expires_at` null — is never counted; a missing record always is. F8's
+-- grace: an expiry counts only once the configured grace has also passed. A
+-- grace configured `none` is unbounded like every other, so only the
+-- missing-record half counts.
 --
 
 CREATE VIEW session_lifecycle_deadline_violation AS

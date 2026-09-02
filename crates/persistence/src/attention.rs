@@ -321,15 +321,12 @@ macro_rules! summary_sql {
       LEFT JOIN goal_turn AS current_goal
         ON current_goal.session_id = lifecycle.session_id
        AND current_goal.turn_id = lifecycle.turn_id
-     -- A queued goal turn whose generation has moved on is retired: it is
-     -- not the turn this session is doing. The retirement is recorded as an
-     -- outbox event, but its own admission predicate is exactly
-     -- `goal_turn_is_runtime_relevant` on a queued turn, so reading the
-     -- predicate reads the fact from its source rather than from the outbox
-     -- record of it — and leaves the event vocabulary free to change shape
-     -- without a raw reader here to migrate. The function is true for every
-     -- turn that is not queued and already carries the delegation-terminal
-     -- conjunct this replaces.
+     -- A retired queued goal turn is not the turn this session is doing. Its
+     -- retirement event's own admission predicate is exactly
+     -- `goal_turn_is_runtime_relevant` on a queued turn, so this reads the
+     -- fact from its source rather than from the outbox record of it. The
+     -- function is true for every non-queued turn and already carries the
+     -- delegation-terminal conjunct it replaces.
      WHERE goal_turn_is_runtime_relevant(lifecycle.session_id, lifecycle.turn_id)
        AND (
            lifecycle.state_kind <> 'queued'
@@ -930,10 +927,8 @@ fn attention_action(
 
 /// The durable session state a summary row is classified from.
 ///
-/// The three columns travel together because the state's typed detail is what
-/// distinguishes one `waiting` or `recovering` session from another, and a
-/// classifier that took the kind without its detail could not tell an approval
-/// wait from a child wait.
+/// The typed detail travels with the kind: an approval wait and a child wait
+/// are the same kind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SessionLifecycleProjection<'row> {
     state: &'row str,
@@ -943,18 +938,14 @@ struct SessionLifecycleProjection<'row> {
 
 /// Projects one attention state from the durable session state and turn phase.
 ///
-/// This is a projection of `session_lifecycle.state_kind` plus the turn phase,
-/// never a second state machine: the goal machine is not consulted, and the
-/// arms below are the mapping section 1 of the session-lifecycle specification
-/// states. Where the durable state defers to the turn — `created`,
-/// `dispatched`, `active`, and the `parked` suspension that keeps its turn's
-/// phase in place — the phase decides, which is the same rule the database
-/// projection applies when the session leaves `parked`.
+/// A projection, never a second state machine: the goal machine is not
+/// consulted. Where the durable state defers to the turn — `created`,
+/// `dispatched`, `active`, and the `parked` suspension that keeps its phase —
+/// the phase decides, which is the rule the database projection applies when
+/// the session leaves `parked`.
 ///
-/// A lost runner is read ahead of the session state because it is a placement
-/// fact rather than a state: a session whose runner is gone reports that
-/// however its turns stand, exactly as it did before, and `recovering{runner}`
-/// reaches the same answer through the state.
+/// A lost runner is read first because it is a placement fact rather than a
+/// state; `recovering{runner}` reaches the same answer through the state.
 fn classify_state(
     runner: Option<&str>,
     session: SessionLifecycleProjection<'_>,
@@ -993,12 +984,9 @@ fn classify_state(
 
 /// Projects the attention state of a session waiting on a typed waker.
 ///
-/// Only `approval` and `child` have a producer today: the database projection
-/// derives them from the two `awaiting_*` phases that carry them. The other
-/// four kinds section 1 closes over arrive with the deadline engine, and
-/// attention has no member for a session waiting on an external gate, a
-/// provider backoff, a pipeline, or the scheduler — none of them is owed to an
-/// operator — so they read as live work.
+/// Only `approval` and `child` have a producer today; the other four arrive
+/// with the deadline engine. Attention has no member for them and none is owed
+/// to an operator, so they read as live work.
 fn classify_wait(kind: Option<&str>) -> Result<AttentionState, AttentionRepositoryError> {
     match kind {
         Some("approval") => Ok(AttentionState::AwaitingApproval),
@@ -1030,12 +1018,6 @@ fn classify_recovery(operation: Option<&str>) -> Result<AttentionState, Attentio
 }
 
 /// Projects the attention state the session's own turn phase decides.
-///
-/// The live phases that map to a session state of their own never reach here:
-/// the durable state already carries them. What is left is the work the
-/// session is doing under a state that describes the session rather than the
-/// turn — a running turn, a queued one, a settled one that owes a
-/// reconciliation, and rest.
 fn classify_turn_phase(
     turn: Option<&str>,
     phase: Option<&str>,
@@ -1128,13 +1110,8 @@ fn nonnegative(value: i64, field: &'static str) -> Result<u64, AttentionReposito
 mod tests {
     use super::*;
 
-    /// The classifier this projection replaces, kept as the equivalence oracle.
-    ///
-    /// It is the pre-projection body verbatim: a runner-placement arm, then a
-    /// goal-machine arm ahead of everything, then the turn phase. Keeping it
-    /// here is what lets the tests below state that the projection agrees with
-    /// it on the fixtures it was built from, and name the one place §1
-    /// deliberately disagrees.
+    /// The classifier this projection replaces, kept as the equivalence
+    /// oracle: the pre-projection body verbatim.
     fn legacy_classify_state(
         runner: Option<&str>,
         goal: Option<&str>,
@@ -1471,13 +1448,10 @@ mod tests {
         );
     }
 
-    /// The one place the projection deliberately parts from the classifier.
-    ///
-    /// Section 1 maps a blocked goal to a blocked session only when no turn is
-    /// live; a session whose turn is still running is `active` whatever its
-    /// goal says. The retired classifier read the goal machine ahead of the
-    /// turn and so reported an operator-actionable block over live work, which
-    /// is exactly the independent machine the projection replaces.
+    /// The one place the projection deliberately parts from the classifier:
+    /// section 1 maps a blocked goal to a blocked session only when no turn is
+    /// live. Reading the goal machine ahead of the turn is the independent
+    /// machine the projection replaces.
     #[test]
     fn blocked_goal_over_a_live_turn_projects_the_session_state_not_the_goal() {
         assert_eq!(

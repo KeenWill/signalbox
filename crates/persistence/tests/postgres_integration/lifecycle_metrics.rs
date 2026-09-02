@@ -11,6 +11,8 @@
 
 use std::time::Duration;
 
+use sqlx::types::time::PrimitiveDateTime;
+
 use crate::*;
 use signalbox_domain::{
     CoreAgency, DispatchingModule, LifecycleActor, ModuleDispatch, RepoWatchDispatchId,
@@ -19,8 +21,8 @@ use signalbox_domain::{
 };
 use signalbox_persistence::{
     lifecycle_metrics::{
-        LifecycleGateVerdict, LifecycleMetricBounds, LifecycleMetricsRepository,
-        LifecycleNonTerminalState, LifecycleWeeklyMetrics,
+        LifecycleDeadlineViolation, LifecycleGateVerdict, LifecycleMetricBounds,
+        LifecycleMetricsRepository, LifecycleNonTerminalState, LifecycleWeeklyMetrics,
     },
     operator_status::{
         ProcessOperatorStatusCounts, ProcessOperatorStatusItem, ProcessOperatorStatusRepository,
@@ -262,6 +264,26 @@ async fn apply_metric_bounds(
     Ok(())
 }
 
+/// Reads the one deadline violation the snapshot streams.
+///
+/// The report carries the alarm as a count; the rows themselves reach an
+/// operator through the status snapshot's cursor, so a test that asserts on a
+/// row reads it where the operator does.
+async fn one_deadline_violation(
+    pool: &PgPool,
+) -> Result<LifecycleDeadlineViolation, Box<dyn Error>> {
+    let (items, counts, _) = drain_operator_status(pool).await?;
+    assert_eq!(counts.lifecycle_deadline_violations(), 1);
+    let violation = items
+        .into_iter()
+        .find_map(|item| match item {
+            ProcessOperatorStatusItem::LifecycleDeadlineViolation(violation) => Some(violation),
+            _ => None,
+        })
+        .expect("the counted violation is one of the streamed rows");
+    Ok(violation)
+}
+
 /// Returns the week whose members are the sessions closed most recently.
 fn latest_populated_week(weeks: &[LifecycleWeeklyMetrics]) -> LifecycleWeeklyMetrics {
     *weeks
@@ -410,10 +432,7 @@ async fn an_unbounded_deadline_is_exempt_and_a_missing_record_is_not() -> Result
 
     let violated = LifecycleMetricsRepository::new(pool.clone()).read().await?;
     assert_eq!(violated.nonterminal_past_deadline(), 1);
-    let violation = violated
-        .violations()
-        .first()
-        .expect("the alarm names the session it counted");
+    let violation = one_deadline_violation(&pool).await?;
     assert_eq!(violation.session(), session);
     assert_eq!(violation.state(), LifecycleNonTerminalState::Created);
     assert_eq!(violation.expired_for_seconds(), None);
@@ -467,10 +486,7 @@ async fn an_expired_deadline_counts_only_past_the_processing_grace() -> Result<(
     .await?;
     let past_grace = LifecycleMetricsRepository::new(pool.clone()).read().await?;
     assert_eq!(past_grace.nonterminal_past_deadline(), 1);
-    let violation = past_grace
-        .violations()
-        .first()
-        .expect("the alarm names the session it counted");
+    let violation = one_deadline_violation(&pool).await?;
     assert_eq!(violation.deadline_kind(), Some("first_input"));
     assert!(
         violation
@@ -772,27 +788,30 @@ async fn the_gate_requires_consecutive_weeks_and_a_silent_integrity_alarm()
     )
     .await?;
 
-    let this_week = owned_session(&pool, 0x1100).await?;
+    // Both cohorts are complete weeks: the week in progress is still growing,
+    // so §12 never grades it.
+    let recent_week = owned_session(&pool, 0x1100).await?;
     repository
         .close(
-            this_week,
+            recent_week,
             SessionTerminalOutcome::AchievedVerified,
             LifecycleActor::Operator,
         )
         .await?;
+    backdate_closure(&pool, recent_week, 1).await?;
 
     let one_week = LifecycleMetricsRepository::new(pool.clone()).read().await?;
     assert_eq!(one_week.gate_verdict(), LifecycleGateVerdict::Indeterminate);
 
-    let last_week = owned_session(&pool, 0x1200).await?;
+    let earlier_week = owned_session(&pool, 0x1200).await?;
     repository
         .close(
-            last_week,
+            earlier_week,
             SessionTerminalOutcome::AchievedVerified,
             LifecycleActor::Operator,
         )
         .await?;
-    backdate_closure(&pool, last_week, 1).await?;
+    backdate_closure(&pool, earlier_week, 2).await?;
 
     let two_weeks = LifecycleMetricsRepository::new(pool.clone()).read().await?;
     assert_eq!(two_weeks.weeks().len(), 2);
@@ -838,6 +857,7 @@ async fn a_breached_headline_fails_the_gate_on_its_configured_threshold()
             },
         )
         .await?;
+    backdate_closure(&pool, failed, 1).await?;
 
     let report = LifecycleMetricsRepository::new(pool.clone()).read().await?;
     let week = latest_populated_week(report.weeks());
@@ -918,6 +938,7 @@ async fn the_operator_status_snapshot_carries_the_metrics_and_the_alarm()
             LifecycleActor::Operator,
         )
         .await?;
+    backdate_closure(&pool, closed, 1).await?;
     let stuck = owned_session(&pool, 0x1600).await?;
     strand_deadline(&pool, stuck).await?;
 
@@ -938,4 +959,104 @@ async fn the_operator_status_snapshot_carries_the_metrics_and_the_alarm()
     pool.close().await;
     drop(container);
     Ok(())
+}
+
+/// Moves one parked session's park instant into an earlier week.
+async fn backdate_park(
+    pool: &PgPool,
+    session: SessionId,
+    weeks_ago: i32,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE session_lifecycle
+            SET parked_since = parked_since - make_interval(weeks => $2)
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .bind(weeks_ago)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// §12 finding F9's immediate half: a wall is counted in the week it happened.
+///
+/// §2 parks a session on a wall and leaves its turn suspended, so at the
+/// moment the alarm most needs to page there is no terminal turn to read. The
+/// park is the durable evidence, and terminalization carries it forward so the
+/// week the wall is counted in does not move when the session later closes.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_parked_wall_is_counted_in_the_week_it_happened() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    apply_metric_bounds(&pool, LifecycleMetricBounds::default()).await?;
+
+    let walled = owned_session(&pool, 0x1700).await?;
+    let turn = activate_first_turn(&pool, walled, 0x1700).await?;
+    repository
+        .park(
+            walled,
+            SessionParkCause::StructuralFailure,
+            SessionParkResponder::Module {
+                module: DispatchingModule::RepositoryWatch,
+            },
+            Some(SessionFailureCause::Structural(
+                SessionStructuralCause::ContextCompactionWall,
+            )),
+            LifecycleActor::Core {
+                agency: CoreAgency::Daemon,
+            },
+        )
+        .await?;
+    backdate_park(&pool, walled, 2).await?;
+
+    let parked = LifecycleMetricsRepository::new(pool.clone()).read().await?;
+    let parked_week = one_wall_occurrence_week(parked.weeks());
+
+    // The suspended turn has terminalized nothing, so the park is the only
+    // evidence the wall happened at all.
+    assert_eq!(
+        parked
+            .weeks()
+            .iter()
+            .map(LifecycleWeeklyMetrics::wall_occurrences)
+            .sum::<u64>(),
+        1
+    );
+
+    settle_turn_with_cause(&pool, walled, turn, 0x1700, "context_compaction_wall").await?;
+    repository
+        .close(
+            walled,
+            SessionTerminalOutcome::Superseded { by: None },
+            LifecycleActor::Operator,
+        )
+        .await?;
+
+    let closed = LifecycleMetricsRepository::new(pool.clone()).read().await?;
+    let closed_week = one_wall_occurrence_week(closed.weeks());
+
+    assert_eq!(closed_week, parked_week);
+    assert_eq!(
+        closed
+            .weeks()
+            .iter()
+            .map(LifecycleWeeklyMetrics::wall_occurrences)
+            .sum::<u64>(),
+        1
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Returns the week the one recorded wall occurrence belongs to.
+fn one_wall_occurrence_week(weeks: &[LifecycleWeeklyMetrics]) -> PrimitiveDateTime {
+    weeks
+        .iter()
+        .find(|week| week.wall_occurrences() > 0)
+        .expect("the fixture recorded one wall")
+        .week_start()
 }

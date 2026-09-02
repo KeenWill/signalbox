@@ -714,12 +714,14 @@ async fn write_state(
                 blocked_cycle = $12,
                 parked_cause = $13,
                 parked_responder = $14,
-                parked_since = $15,
                 -- §12 keeps a supersession that closed a park holding a
-                -- failure cause in both the denominator and the numerator,
-                -- under that standing cause. The cause has to outlive the park
-                -- to be read at all, so terminalization carries it forward
-                -- rather than clearing it with the rest of the park detail.
+                -- failure cause, under that standing cause and dated from the
+                -- park. Both outlive the park; the park's shape stays false
+                -- for a terminal row because its cause and responder clear.
+                parked_since = CASE
+                    WHEN $2 = 'terminal' THEN session_lifecycle.parked_since
+                    ELSE $15
+                END,
                 parked_standing_cause_kind = CASE
                     WHEN $2 = 'terminal'
                         THEN session_lifecycle.parked_standing_cause_kind

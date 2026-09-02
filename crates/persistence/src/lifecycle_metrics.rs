@@ -1,15 +1,9 @@
 //! PostgreSQL adapter for the §12 lifecycle metrics, alarms, and gate.
 //!
-//! Nothing here computes a metric. The definitions are the views the
-//! `202609020003_lifecycle_metrics.sql` migration installs, and this module
-//! reads them, so the operator status surface and the Prometheus gauges are
-//! the same SQL and cannot report two different numbers for the gate the owner
-//! watches.
-//!
-//! Every rate is carried as its exact pair of counts rather than as a ratio.
-//! An empty denominator is then an absent rate rather than a fabricated zero,
-//! and a threshold comparison is integer arithmetic on parts per million
-//! rather than a float comparison whose verdict depends on rounding.
+//! Nothing here computes a metric: the definitions are the views the
+//! `202609020003_lifecycle_metrics.sql` migration installs. The operator
+//! status surface and the Prometheus gauges read the same statements, so they
+//! cannot report two different numbers for the gate.
 
 use std::{error::Error, fmt, time::Duration};
 
@@ -18,11 +12,10 @@ use sqlx::{PgPool, Row, postgres::PgRow, types::Uuid, types::time::PrimitiveDate
 
 use crate::mapping::session_id_from_uuid;
 
-/// How many weekly cohorts one report carries.
+/// How many weekly cohorts one report carries by default.
 ///
-/// The report is a bounded snapshot written to a wire frame, and weeks accrue
-/// forever, so it names its own horizon. Two years of weeks is far past any
-/// gate window and far short of anything a reader must page.
+/// Weeks accrue forever and the report is written to a wire frame, so it names
+/// its own horizon.
 // numeric-bound: guard - bounds one metric report to a fixed number of weeks
 pub(crate) const MAX_REPORTED_WEEKS: i64 = 104;
 
@@ -87,10 +80,7 @@ impl From<LifecycleMetricsCorruption> for LifecycleMetricsError {
 
 /// The deployment's configured §12 policy.
 ///
-/// Every member is `None` when its bound is configured `"none"`. The two
-/// intervals are the bounds F8 and F9 introduce beyond the specification's own
-/// named numbers; the four counts are the thresholds and the gate window §12
-/// names and leaves to configuration.
+/// Every member is `None` when its bound is configured `"none"`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LifecycleMetricBounds {
     /// Processing latency past an expiry before the alarm counts it (F8).
@@ -108,7 +98,7 @@ pub struct LifecycleMetricBounds {
 }
 
 impl LifecycleMetricBounds {
-    /// Returns each bound's durable spelling beside its configured interval.
+    /// Returns each interval bound beside its durable spelling.
     fn interval_rows(&self) -> [(&'static str, Option<Duration>); 2] {
         [
             ("deadline_processing_grace", self.deadline_processing_grace),
@@ -116,7 +106,7 @@ impl LifecycleMetricBounds {
         ]
     }
 
-    /// Returns each bound's durable spelling beside its configured count.
+    /// Returns each count bound beside its durable spelling.
     fn count_rows(&self) -> [(&'static str, Option<u64>); 4] {
         [
             ("gate_weeks", self.gate_weeks),
@@ -135,9 +125,7 @@ impl LifecycleMetricBounds {
 
 /// One metric's exact numerator and denominator.
 ///
-/// A rate is derived rather than stored so that a week with no members reports
-/// no rate at all: dividing zero by zero to reach "0%" is exactly how an empty
-/// cohort would flatter the gate.
+/// The rate is derived, so a week with no members reports no rate at all.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LifecycleRate {
     numerator: u64,
@@ -164,8 +152,7 @@ impl LifecycleRate {
 
     /// Returns the rate in parts per million, absent for an empty population.
     ///
-    /// The division truncates, so a reported value never overstates the rate;
-    /// the exact counts stay available for a reader that needs them.
+    /// Truncating, so a reported value never overstates the rate.
     pub const fn parts_per_million(self) -> Option<u64> {
         if self.denominator == 0 {
             return None;
@@ -176,17 +163,24 @@ impl LifecycleRate {
 
     /// Returns whether the rate is strictly below a parts-per-million threshold.
     ///
-    /// Strict, because §12 states the gate as the headline *below* its target
-    /// rather than at it, and an alarm threshold read the same way fires a
-    /// fraction earlier rather than a fraction later.
-    ///
-    /// An empty population is below no threshold and breaches none: there is
-    /// no rate to compare, and the caller decides what an absent verdict
-    /// means.
+    /// Cross-multiplies the exact counts: `parts_per_million` truncates, so a
+    /// cohort a hair above its target reports exactly the target. The reported
+    /// number is for reading; this is for deciding. An empty population is
+    /// below no threshold and breaches none.
     pub const fn below(self, threshold_ppm: u64) -> Option<bool> {
-        match self.parts_per_million() {
+        if self.denominator == 0 {
+            return None;
+        }
+        let scaled = (self.numerator as u128) * PARTS_PER_MILLION;
+        let target = (threshold_ppm as u128) * (self.denominator as u128);
+        Some(scaled < target)
+    }
+
+    /// Returns whether the rate is at or above a parts-per-million threshold.
+    pub const fn breaches(self, threshold_ppm: u64) -> Option<bool> {
+        match self.below(threshold_ppm) {
             None => None,
-            Some(rate) => Some(rate < threshold_ppm),
+            Some(below) => Some(!below),
         }
     }
 }
@@ -213,12 +207,6 @@ impl LifecycleWeeklyMetrics {
     }
 
     /// Returns the week's UTC start as an ISO-8601 calendar date.
-    ///
-    /// The stored value is a naive timestamp because the definitions truncate
-    /// the UTC instant, so a cohort is a property of the data rather than of
-    /// the reader's `TimeZone`. The date is rendered here, beside that rule,
-    /// rather than in each reader that would otherwise need a calendar of its
-    /// own to say which week a number belongs to.
     pub fn week_start_date(&self) -> String {
         let date = self.week_start.date();
         format!(
@@ -277,9 +265,7 @@ impl LifecycleWeeklyMetrics {
 
 /// One state an owned session can hold a deadline obligation in.
 ///
-/// `terminal` is not a member: a terminal session owes no deadline, so a
-/// violation could never name one. Decoding the durable spelling into this
-/// closed set here is what lets every reader above be total.
+/// `terminal` is not a member: a terminal session owes no deadline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LifecycleNonTerminalState {
     Created,
@@ -312,9 +298,6 @@ impl LifecycleDeadlineViolation {
     }
 
     /// Returns the armed deadline's kind, absent when no record exists.
-    ///
-    /// Absent is the §1 invariant violation proper: an owned non-terminal
-    /// session with no armed deadline at all.
     pub fn deadline_kind(&self) -> Option<&str> {
         self.deadline_kind.as_deref()
     }
@@ -337,10 +320,15 @@ pub enum LifecycleGateVerdict {
 }
 
 /// One coherent §12 report.
+///
+/// Carries the alarm as a count, not as rows: a widespread incident is exactly
+/// when a periodic reader must not build one object per stuck session. The
+/// rows stream through the operator-status snapshot's cursor instead.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LifecycleMetricsReport {
     weeks: Vec<LifecycleWeeklyMetrics>,
-    violations: Vec<LifecycleDeadlineViolation>,
+    current_week: PrimitiveDateTime,
+    nonterminal_past_deadline: u64,
     bounds: LifecycleMetricBounds,
 }
 
@@ -350,54 +338,63 @@ impl LifecycleMetricsReport {
         &self.weeks
     }
 
-    /// Returns every owned non-terminal session past its deadline obligation.
-    pub fn violations(&self) -> &[LifecycleDeadlineViolation] {
-        &self.violations
-    }
-
     /// Returns the configured policy the report was computed under.
     pub const fn bounds(&self) -> LifecycleMetricBounds {
         self.bounds
     }
 
     /// Returns the `nonterminal_past_deadline` alarm value, target zero.
-    pub fn nonterminal_past_deadline(&self) -> u64 {
-        self.violations.len() as u64
+    pub const fn nonterminal_past_deadline(&self) -> u64 {
+        self.nonterminal_past_deadline
     }
 
-    /// Returns the most recent week's report, if any week has members.
-    pub fn latest_week(&self) -> Option<&LifecycleWeeklyMetrics> {
-        self.weeks.last()
+    /// Returns the most recent complete week's report.
+    ///
+    /// A cohort that is still growing is not a cohort.
+    pub fn latest_complete_week(&self) -> Option<&LifecycleWeeklyMetrics> {
+        self.weeks
+            .iter()
+            .rev()
+            .find(|week| week.week_start < self.current_week)
+    }
+
+    /// Returns whether the wall rate breached its configured threshold.
+    ///
+    /// Absent when no threshold is configured or no complete week measures one.
+    pub fn wall_rate_breached(&self) -> Option<bool> {
+        let threshold = self.bounds.wall_rate_threshold_ppm?;
+        self.latest_complete_week()?.wall_rate().breaches(threshold)
+    }
+
+    /// Returns whether the `failed_unknown` share breached its threshold.
+    pub fn failed_unknown_share_breached(&self) -> Option<bool> {
+        let threshold = self.bounds.failed_unknown_share_threshold_ppm?;
+        self.latest_complete_week()?
+            .failed_unknown_share()
+            .breaches(threshold)
     }
 
     /// Returns the substrate-v0 gate verdict.
-    ///
-    /// The gate is §12's: the headline below its configured target across the
-    /// configured number of consecutive weekly cohorts, and the integrity
-    /// alarm at zero across the same weeks. The alarm has no durable weekly
-    /// history — a deadline record is re-armed in place — so its half of the
-    /// gate is evaluated at assessment time, which is the strongest statement
-    /// the durable columns support.
     pub fn gate_verdict(&self) -> LifecycleGateVerdict {
-        gate_verdict(&self.weeks, self.nonterminal_past_deadline(), self.bounds)
+        gate_verdict(
+            &self.weeks,
+            self.current_week,
+            self.nonterminal_past_deadline,
+            self.bounds,
+        )
     }
 }
 
 /// Returns the substrate-v0 gate verdict for one report's parts.
 ///
-/// The gate is §12's: the headline below its configured target across the
-/// configured number of consecutive weekly cohorts that have a denominator at
-/// all, and the integrity alarm at zero across the same weeks. A week with an
-/// empty denominator states nothing about the headline and is skipped rather
-/// than counted as a pass — a gate that consecutive empty weeks could satisfy
-/// would measure quiet, not reliability.
+/// Two kinds of week are never assessed: one with an empty denominator, which
+/// states nothing, and the week in progress, whose members are still arriving.
 ///
-/// The alarm has no durable weekly history: a deadline record is re-armed in
-/// place, so no column says what the alarm read in a week that has passed. Its
-/// half of the gate is therefore evaluated at assessment time, which is the
-/// strongest statement the durable columns support.
+/// The alarm has no durable weekly history — a deadline record is re-armed in
+/// place — so its half of the gate reads at assessment time.
 pub fn gate_verdict(
     weeks: &[LifecycleWeeklyMetrics],
+    current_week: PrimitiveDateTime,
     nonterminal_past_deadline: u64,
     bounds: LifecycleMetricBounds,
 ) -> LifecycleGateVerdict {
@@ -415,6 +412,7 @@ pub fn gate_verdict(
     }
     let assessed = weeks
         .iter()
+        .filter(|week| week.week_start < current_week)
         .filter(|week| week.completion_failure.denominator() > 0)
         .rev()
         .take(required)
@@ -440,11 +438,7 @@ pub struct LifecycleMetricsRepository {
     pool: PgPool,
 }
 
-/// The weekly report, as the same statement both readers issue.
-///
-/// The telemetry pass runs it directly and the operator-status snapshot
-/// declares a cursor over it, so a single spelling backs both surfaces and the
-/// two cannot report different numbers for the gate the owner watches.
+/// The weekly report, as the one statement both readers issue.
 macro_rules! weekly_metrics_sql {
     () => {
         "SELECT week,
@@ -496,7 +490,12 @@ pub(crate) const DECLARE_WEEKLY_METRICS_CURSOR: &str = concat!(
     weekly_metrics_sql!()
 );
 
-pub(crate) const SELECT_DEADLINE_VIOLATIONS: &str = deadline_violations_sql!();
+pub(crate) const COUNT_DEADLINE_VIOLATIONS: &str =
+    "SELECT count(*)::bigint AS count FROM session_lifecycle_deadline_violation";
+
+/// The calendar week the read itself falls in.
+pub(crate) const SELECT_CURRENT_WEEK: &str =
+    "SELECT session_lifecycle_metric_week(clock_timestamp()) AS week";
 
 pub(crate) const DECLARE_DEADLINE_VIOLATIONS_CURSOR: &str = concat!(
     "DECLARE operator_status_lifecycle_deadline_violations NO SCROLL CURSOR FOR ",
@@ -514,12 +513,7 @@ impl LifecycleMetricsRepository {
         Self { pool }
     }
 
-    /// Writes the deployment's configured §12 policy.
-    ///
-    /// §12's thresholds and windows are configuration, and the definitions
-    /// that use them are views. Installing the policy where the views read it
-    /// is what lets a metric be a total statement rather than a query fragment
-    /// every caller completes the same way and one caller eventually does not.
+    /// Writes the deployment's configured §12 policy where the views read it.
     pub async fn apply_configured_bounds(
         &self,
         bounds: &LifecycleMetricBounds,
@@ -558,8 +552,8 @@ impl LifecycleMetricsRepository {
 
     /// Reads one coherent report over every §12 definition.
     ///
-    /// The three reads share one repeatable-read snapshot, so a week's cohort
-    /// and the alarm that guards it describe the same instant.
+    /// One repeatable-read snapshot, so a cohort and the alarm that guards it
+    /// describe the same instant.
     pub async fn read(&self) -> Result<LifecycleMetricsReport, LifecycleMetricsError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -568,29 +562,43 @@ impl LifecycleMetricsRepository {
         let bound_rows = sqlx::query(SELECT_BOUNDS)
             .fetch_all(&mut *transaction)
             .await?;
+        let bounds = decode_bounds(&bound_rows)?;
+        let current_week = sqlx::query(SELECT_CURRENT_WEEK)
+            .fetch_one(&mut *transaction)
+            .await?
+            .try_get::<PrimitiveDateTime, _>("week")?;
         let weekly_rows = sqlx::query(SELECT_WEEKLY_METRICS)
-            .bind(MAX_REPORTED_WEEKS)
+            .bind(reported_week_limit(bounds))
             .fetch_all(&mut *transaction)
             .await?;
-        let violation_rows = sqlx::query(SELECT_DEADLINE_VIOLATIONS)
-            .fetch_all(&mut *transaction)
+        // Only the count; the rows stream through the status snapshot.
+        let nonterminal_past_deadline = sqlx::query(COUNT_DEADLINE_VIOLATIONS)
+            .fetch_one(&mut *transaction)
             .await?;
         transaction.commit().await?;
-        let bounds = decode_bounds(&bound_rows)?;
         let weeks = weekly_rows
             .iter()
             .map(decode_week)
             .collect::<Result<Vec<_>, _>>()?;
-        let violations = violation_rows
-            .iter()
-            .map(decode_violation)
-            .collect::<Result<Vec<_>, _>>()?;
         Ok(LifecycleMetricsReport {
             weeks,
-            violations,
+            current_week,
+            nonterminal_past_deadline: counted(&nonterminal_past_deadline, "count")?,
             bounds,
         })
     }
+}
+
+/// Returns how many weeks one report carries.
+///
+/// The horizon bounds a wire frame; it never shortens a configured gate
+/// window, which would leave that gate `indeterminate` forever.
+pub(crate) fn reported_week_limit(bounds: LifecycleMetricBounds) -> i64 {
+    let configured = bounds
+        .gate_weeks
+        .and_then(|weeks| i64::try_from(weeks).ok())
+        .unwrap_or(0);
+    configured.max(MAX_REPORTED_WEEKS)
 }
 
 pub(crate) fn decode_bounds(
@@ -625,12 +633,9 @@ pub(crate) fn decode_bounds(
 }
 
 fn decode_interval(row: &PgRow) -> Result<Option<Duration>, LifecycleMetricsError> {
-    // The interval is read as whole microseconds rather than as an interval
-    // value: `interval` carries a month component whose length depends on the
-    // instant it is added to, and a policy bound that means a different number
-    // of seconds in February is not a bound. The daemon writes these from
-    // `Duration`s, so the month component is always zero and the epoch
-    // extraction is exact.
+    // Read as whole microseconds: an `interval`'s month component means a
+    // different number of seconds depending on when it is added, which is not
+    // a bound. The daemon writes these from `Duration`s, so it is always zero.
     row.try_get::<Option<i64>, _>("interval_microseconds")?
         .map(u64::try_from)
         .transpose()
@@ -742,6 +747,14 @@ mod tests {
         }
     }
 
+    /// The week every fixture calls "in progress", one past its latest cohort.
+    fn current_week() -> PrimitiveDateTime {
+        PrimitiveDateTime::new(
+            Date::from_ordinal_date(2026, 31).expect("the fixture names a real ordinal date"),
+            Time::MIDNIGHT,
+        )
+    }
+
     const fn gate_policy(weeks: u64, threshold_ppm: u64) -> LifecycleMetricBounds {
         LifecycleMetricBounds {
             deadline_processing_grace: None,
@@ -786,7 +799,12 @@ mod tests {
     /// A deployment that configured no gate window has no gate to fail.
     #[test]
     fn the_gate_is_indeterminate_without_a_configured_window() {
-        let verdict = gate_verdict(&[week(24, 0, 10)], 0, LifecycleMetricBounds::default());
+        let verdict = gate_verdict(
+            &[week(24, 0, 10)],
+            current_week(),
+            0,
+            LifecycleMetricBounds::default(),
+        );
 
         assert_eq!(verdict, LifecycleGateVerdict::Indeterminate);
     }
@@ -798,11 +816,13 @@ mod tests {
     fn an_empty_week_does_not_count_toward_the_gate_window() {
         let quiet = gate_verdict(
             &[week(17, 0, 0), week(24, 0, 10)],
+            current_week(),
             0,
             gate_policy(2, 100_000),
         );
         let populated = gate_verdict(
             &[week(17, 0, 10), week(24, 0, 10)],
+            current_week(),
             0,
             gate_policy(2, 100_000),
         );
@@ -815,8 +835,18 @@ mod tests {
     /// thinned by sessions stuck outside `terminal` passes nothing.
     #[test]
     fn a_live_integrity_alarm_fails_a_gate_the_headline_would_pass() {
-        let alarmed = gate_verdict(&[week(24, 0, 10)], 1, gate_policy(1, 100_000));
-        let silent = gate_verdict(&[week(24, 0, 10)], 0, gate_policy(1, 100_000));
+        let alarmed = gate_verdict(
+            &[week(24, 0, 10)],
+            current_week(),
+            1,
+            gate_policy(1, 100_000),
+        );
+        let silent = gate_verdict(
+            &[week(24, 0, 10)],
+            current_week(),
+            0,
+            gate_policy(1, 100_000),
+        );
 
         assert_eq!(alarmed, LifecycleGateVerdict::NotMet);
         assert_eq!(silent, LifecycleGateVerdict::Met);
@@ -828,16 +858,62 @@ mod tests {
     fn a_breach_inside_the_window_fails_the_gate() {
         let breached = gate_verdict(
             &[week(17, 2, 10), week(24, 0, 10)],
+            current_week(),
             0,
             gate_policy(2, 100_000),
         );
         let outside_window = gate_verdict(
             &[week(17, 2, 10), week(24, 0, 10)],
+            current_week(),
             0,
             gate_policy(1, 100_000),
         );
 
         assert_eq!(breached, LifecycleGateVerdict::NotMet);
         assert_eq!(outside_window, LifecycleGateVerdict::Met);
+    }
+
+    /// §12 asks for a result sustained across completed weekly cohorts, and
+    /// the week in progress is not one: its members are still arriving, so one
+    /// early success would satisfy a window that later failures reverse.
+    #[test]
+    fn the_week_in_progress_never_counts_toward_the_gate() {
+        let in_progress = gate_verdict(
+            &[week(31, 0, 10)],
+            current_week(),
+            0,
+            gate_policy(1, 100_000),
+        );
+        let completed = gate_verdict(
+            &[week(24, 0, 10)],
+            current_week(),
+            0,
+            gate_policy(1, 100_000),
+        );
+
+        assert_eq!(in_progress, LifecycleGateVerdict::Indeterminate);
+        assert_eq!(completed, LifecycleGateVerdict::Met);
+    }
+
+    /// A window wider than the report horizon still reads every week it has,
+    /// rather than sitting at `indeterminate` because the horizon truncated
+    /// the history the gate was configured to grade.
+    #[test]
+    fn a_gate_window_wider_than_the_horizon_widens_the_report() {
+        let narrow = reported_week_limit(gate_policy(4, 100_000));
+        let wide = reported_week_limit(gate_policy(400, 100_000));
+
+        assert_eq!(narrow, MAX_REPORTED_WEEKS);
+        assert_eq!(wide, 400);
+    }
+
+    /// The rate a report prints truncates; the verdict it reaches does not.
+    #[test]
+    fn a_rate_a_hair_above_its_target_does_not_pass_on_the_printed_number() {
+        let hair_above = LifecycleRate::new(1_000_001, 10_000_000);
+
+        assert_eq!(hair_above.parts_per_million(), Some(100_000));
+        assert_eq!(hair_above.below(100_000), Some(false));
+        assert_eq!(hair_above.breaches(100_000), Some(true));
     }
 }

@@ -1070,6 +1070,7 @@ pub struct TelemetryMetrics {
     scheduler_oldest: Arc<Mutex<Option<SchedulerOldestInFlightPass>>>,
     lifecycle_rate_ppm: IntGaugeVec,
     lifecycle_nonterminal_past_deadline: IntGauge,
+    lifecycle_alarm_breached: IntGaugeVec,
     lifecycle_substrate_v0_gate: IntGaugeVec,
 }
 
@@ -1110,6 +1111,15 @@ impl TelemetryMetrics {
             "signalbox_sessions_nonterminal_past_deadline",
             "Owned non-terminal sessions past their armed deadline obligation; target zero.",
         ))
+        .map_err(|_| metrics_error())?;
+        let lifecycle_alarm_breached = IntGaugeVec::new(
+            Opts::new(
+                "signalbox_session_lifecycle_alarm_breached",
+                "Whether one configured lifecycle rate alarm is breached by the latest \
+                 complete weekly cohort.",
+            ),
+            &["alarm"],
+        )
         .map_err(|_| metrics_error())?;
         let lifecycle_substrate_v0_gate = IntGaugeVec::new(
             Opts::new(
@@ -1153,6 +1163,9 @@ impl TelemetryMetrics {
             .register(Box::new(lifecycle_nonterminal_past_deadline.clone()))
             .map_err(|_| metrics_error())?;
         registry
+            .register(Box::new(lifecycle_alarm_breached.clone()))
+            .map_err(|_| metrics_error())?;
+        registry
             .register(Box::new(lifecycle_substrate_v0_gate.clone()))
             .map_err(|_| metrics_error())?;
         registry
@@ -1194,18 +1207,16 @@ impl TelemetryMetrics {
             scheduler_oldest: Arc::new(Mutex::new(None)),
             lifecycle_rate_ppm,
             lifecycle_nonterminal_past_deadline,
+            lifecycle_alarm_breached,
             lifecycle_substrate_v0_gate,
         })
     }
 
     /// Publishes one §12 report onto the exported gauges.
     ///
-    /// The rates come from the most recent week that has a population at all:
-    /// a week with an empty denominator states nothing, and carrying its
-    /// absence forward as a zero would export a reliability claim the durable
-    /// columns do not make. Such a metric's series is simply left where it
-    /// was, and the alarm and the gate — which are instantaneous rather than
-    /// weekly — always publish.
+    /// A rate with no population leaves its series where it was rather than
+    /// exporting a zero the durable columns do not claim. The alarm and the
+    /// gate are instantaneous and always publish.
     pub(crate) fn observe_lifecycle_metrics(&self, report: &LifecycleMetricsReport) {
         self.lifecycle_nonterminal_past_deadline
             .set(clamp_gauge(report.nonterminal_past_deadline()));
@@ -1213,7 +1224,12 @@ impl TelemetryMetrics {
         self.set_gate_series(LifecycleGateVerdict::Met, verdict);
         self.set_gate_series(LifecycleGateVerdict::NotMet, verdict);
         self.set_gate_series(LifecycleGateVerdict::Indeterminate, verdict);
-        let Some(week) = report.latest_week() else {
+        self.set_alarm("wall_rate", report.wall_rate_breached());
+        self.set_alarm(
+            "failed_unknown_share",
+            report.failed_unknown_share_breached(),
+        );
+        let Some(week) = report.latest_complete_week() else {
             return;
         };
         self.set_rate("session_completion_failure_rate", week.completion_failure());
@@ -1226,6 +1242,22 @@ impl TelemetryMetrics {
             "model_call_cause_completeness",
             week.model_call_cause_completeness(),
         );
+    }
+
+    /// Publishes one configured-threshold alarm as a zero-or-one series.
+    ///
+    /// An absent verdict leaves the series where it was.
+    fn set_alarm(&self, alarm: &str, breached: Option<bool>) {
+        let Some(breached) = breached else {
+            return;
+        };
+        let Ok(gauge) = self
+            .lifecycle_alarm_breached
+            .get_metric_with_label_values(&[alarm])
+        else {
+            return;
+        };
+        gauge.set(i64::from(breached));
     }
 
     fn set_rate(&self, metric: &str, rate: LifecycleRate) {
@@ -1299,11 +1331,8 @@ const fn lifecycle_gate_label(verdict: LifecycleGateVerdict) -> &'static str {
     }
 }
 
-/// Presents one unsigned count on a signed gauge without wrapping it.
-///
-/// Prometheus gauges are signed; a population that could not fit would
-/// otherwise be exported as a negative reliability number, which reads as the
-/// opposite of what it is.
+/// Presents one unsigned count on a signed Prometheus gauge without wrapping
+/// it into a negative reliability number.
 const fn clamp_gauge(value: u64) -> i64 {
     if value > i64::MAX as u64 {
         return i64::MAX;

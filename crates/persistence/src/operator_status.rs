@@ -5,14 +5,17 @@ use std::{error::Error, fmt};
 use rust_decimal::Decimal;
 use signalbox_application::{RepoWatchConvergenceVerdict, RepoWatchReviewDecision};
 use signalbox_domain::MergeableState;
-use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
+use sqlx::{
+    PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid,
+    types::time::PrimitiveDateTime,
+};
 
 use crate::{
     lifecycle_metrics::{
         DECLARE_DEADLINE_VIOLATIONS_CURSOR, DECLARE_WEEKLY_METRICS_CURSOR,
         LifecycleDeadlineViolation, LifecycleGateVerdict, LifecycleMetricBounds,
-        LifecycleMetricsError, LifecycleWeeklyMetrics, MAX_REPORTED_WEEKS, SELECT_BOUNDS,
-        decode_bounds, decode_violation, decode_week, gate_verdict,
+        LifecycleMetricsError, LifecycleWeeklyMetrics, SELECT_BOUNDS, SELECT_CURRENT_WEEK,
+        decode_bounds, decode_violation, decode_week, gate_verdict, reported_week_limit,
     },
     mapping::{
         RepoWatchSingletonScopeStorageKind, repo_watch_convergence_verdict_from_str,
@@ -423,10 +426,9 @@ impl ProcessOperatorStatusRepository {
         sqlx::query(REPEATABLE_READ_ONLY)
             .execute(&mut *transaction)
             .await?;
-        declare_status_cursors(&mut transaction).await?;
-        // The configured §12 policy is read inside the same snapshot as the
-        // cohorts it grades, so a gate verdict can never pair one deployment's
-        // threshold with another's numbers.
+        // Policy and current week come from the same snapshot as the cohorts
+        // they grade. The policy is read before the cursors because it decides
+        // how many weeks one of them carries.
         let bounds = decode_bounds(
             &sqlx::query(SELECT_BOUNDS)
                 .fetch_all(&mut *transaction)
@@ -434,12 +436,18 @@ impl ProcessOperatorStatusRepository {
                 .map_err(ProcessOperatorStatusError::Database)?,
         )
         .map_err(|error| lifecycle_read_failure(error, "lifecycle metric bound"))?;
+        let current_week = sqlx::query(SELECT_CURRENT_WEEK)
+            .fetch_one(&mut *transaction)
+            .await?
+            .try_get::<PrimitiveDateTime, _>("week")?;
+        declare_status_cursors(&mut transaction, reported_week_limit(bounds)).await?;
         Ok(ProcessOperatorStatusReader {
             transaction: Some(transaction),
             phase: ProcessOperatorStatusPhase::HeldSlots,
             counts: ProcessOperatorStatusCounts::default(),
             committed_counts: None,
             bounds,
+            current_week,
             weeks: Vec::new(),
             gate: None,
         })
@@ -464,6 +472,7 @@ pub struct ProcessOperatorStatusReader {
     counts: ProcessOperatorStatusCounts,
     committed_counts: Option<ProcessOperatorStatusCounts>,
     bounds: LifecycleMetricBounds,
+    current_week: PrimitiveDateTime,
     weeks: Vec<LifecycleWeeklyMetrics>,
     gate: Option<LifecycleGateVerdict>,
 }
@@ -524,6 +533,7 @@ impl ProcessOperatorStatusReader {
                     transaction.commit().await?;
                     self.gate = Some(gate_verdict(
                         &self.weeks,
+                        self.current_week,
                         self.counts.lifecycle_deadline_violations,
                         self.bounds,
                     ));
@@ -596,9 +606,7 @@ impl ProcessOperatorStatusReader {
 
     /// Returns the substrate-v0 gate verdict for the committed snapshot.
     ///
-    /// Absent until every cursor is exhausted, for the same reason the counts
-    /// are: a verdict over part of a snapshot would grade weeks it had not
-    /// read yet.
+    /// Absent until every cursor is exhausted, like the counts.
     pub const fn gate_verdict(&self) -> Option<LifecycleGateVerdict> {
         self.gate
     }
@@ -606,10 +614,7 @@ impl ProcessOperatorStatusReader {
 
 /// Carries one lifecycle-metric read failure into this module's own class.
 ///
-/// The two classes are not interchangeable here: a database failure answers
-/// the client `unavailable` and is worth retrying, while corruption answers an
-/// internal error and is not. Collapsing both into corruption would report a
-/// dropped connection as a durable defect.
+/// A dropped connection answers `unavailable`; only corruption is a defect.
 fn lifecycle_read_failure(
     error: LifecycleMetricsError,
     field: &'static str,
@@ -624,6 +629,7 @@ fn lifecycle_read_failure(
 
 async fn declare_status_cursors(
     transaction: &mut Transaction<'_, Postgres>,
+    reported_weeks: i64,
 ) -> Result<(), sqlx::Error> {
     // A branch-origin hold carries `workflow_branch` where a pull-request
     // origin carries `pull_request_number`; exactly one is non-null per row,
@@ -708,10 +714,9 @@ async fn declare_status_cursors(
     .execute(&mut **transaction)
     .await?;
     // The two §12 sections read the same views the telemetry pass reads, in
-    // the same snapshot as the repository-watch sections above, so one status
-    // read cannot pair a cohort with an alarm from a different instant.
+    // the same snapshot as the sections above.
     sqlx::query(DECLARE_WEEKLY_METRICS_CURSOR)
-        .bind(MAX_REPORTED_WEEKS)
+        .bind(reported_weeks)
         .execute(&mut **transaction)
         .await?;
     sqlx::query(DECLARE_DEADLINE_VIOLATIONS_CURSOR)

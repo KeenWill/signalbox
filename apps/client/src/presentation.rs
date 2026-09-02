@@ -3056,9 +3056,7 @@ const fn operator_status_lifecycle_state_label(
 
 /// Renders one metric as its exact counts beside its parts-per-million rate.
 ///
-/// The counts lead because they are what the definitions produce; the rate is
-/// the derived reading. An empty population prints no rate at all rather than
-/// a zero, which is the same distinction the durable report makes.
+/// An empty population prints no rate rather than a zero.
 fn rate_label(numerator: u64, denominator: u64) -> String {
     if denominator == 0 {
         return format!("{numerator}/0");

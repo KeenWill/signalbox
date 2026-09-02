@@ -8643,19 +8643,36 @@ fn validate_operator_status_message(message: &ServerMessage) -> Result<(), Frame
     }
 }
 
-/// Accepts exactly the `YYYY-MM-DD` shape the metric weeks are rendered in.
+/// Accepts exactly a real `YYYY-MM-DD` calendar date.
 ///
-/// A week label is a calendar fact the reader groups by, so a value that is not
-/// a date at all — or that carries a time, an offset, or a different field
-/// order — would silently regroup a report rather than fail.
+/// A week label is what a reader groups by, and `2026-99-99` has the shape
+/// without being a day.
 fn operator_status_calendar_date_is_valid(value: &str) -> bool {
     let bytes = value.as_bytes();
-    bytes.len() == 10
-        && bytes[4] == b'-'
-        && bytes[7] == b'-'
-        && bytes[..4].iter().all(u8::is_ascii_digit)
-        && bytes[5..7].iter().all(u8::is_ascii_digit)
-        && bytes[8..].iter().all(u8::is_ascii_digit)
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    let Some(Ok(year)) = value.get(0..4).map(str::parse::<i64>) else {
+        return false;
+    };
+    let Some(Ok(month)) = value.get(5..7).map(str::parse::<u32>) else {
+        return false;
+    };
+    let Some(Ok(day)) = value.get(8..10).map(str::parse::<u32>) else {
+        return false;
+    };
+    (1..=12).contains(&month) && day >= 1 && day <= operator_status_days_in_month(year, month)
+}
+
+/// Returns how many days one month of one year has.
+const fn operator_status_days_in_month(year: i64, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 => 29,
+        2 => 28,
+        _ => 0,
+    }
 }
 
 fn operator_status_held_slot_origin_is_valid(
@@ -9968,7 +9985,7 @@ mod tests {
         TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval, TurnModelSettingsSnapshot,
         TurnState, UsageProvenance, UserAttachmentKind, UserInputContent, UserInputPart,
         decode_client_line, decode_server_line, encode_client_line, encode_server_line,
-        validate_adjustments,
+        operator_status_calendar_date_is_valid, validate_adjustments,
     };
     use signalbox_domain::ToolDecisionRationale;
     use uuid::Uuid;
@@ -10543,6 +10560,19 @@ mod tests {
             Err(FrameValidationError::OperatorStatusShape)
         ));
         Ok(())
+    }
+
+    /// A digit-shaped value that names no day is not a week label.
+    #[test]
+    fn operator_status_rejects_a_week_label_that_names_no_day() {
+        assert!(operator_status_calendar_date_is_valid("2026-08-31"));
+        assert!(operator_status_calendar_date_is_valid("2024-02-29"));
+        assert!(!operator_status_calendar_date_is_valid("2026-99-99"));
+        assert!(!operator_status_calendar_date_is_valid("2026-02-29"));
+        assert!(!operator_status_calendar_date_is_valid("2026-8-31"));
+        assert!(!operator_status_calendar_date_is_valid(
+            "2026-08-31T00:00:00Z"
+        ));
     }
 
     #[test]

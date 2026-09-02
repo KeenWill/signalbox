@@ -62,13 +62,12 @@ import transport in PR #401 (`agent/import-chunks-protocol`), and the typed
 delegation session-follow events, queued task-origin projection, recipient
 routing, wake exclusion, delivered delegation transcript entries, and typed
 parent-terminated turn projection against this PR
-(`agent/delegation-persistence-schema`), and the session-lifecycle metric and
-deadline-violation sections of the operator-status snapshot against
-`agent/lifecycle-t3-metrics`. This page is the normative boundary between a
-local client process and `signalboxd`; domain values, PostgreSQL records, and
-wire messages remain distinct representations. The path-scoped session-placement
-wire and terminal-client surface were verified through PR #400
-(`agent/scoped-visibility-wiring`).
+(`agent/delegation-persistence-schema`), and the session-lifecycle sections of
+the operator-status snapshot against `agent/lifecycle-t3-metrics`. This page is
+the normative boundary between a local client process and `signalboxd`; domain
+values, PostgreSQL records, and wire messages remain distinct representations.
+The path-scoped session-placement wire and terminal-client surface were verified
+through PR #400 (`agent/scoped-visibility-wiring`).
 
 The session-metadata last-writer actor inventory, its native and terminal-client
 projections, and the totality of the daemon projection that produces it are

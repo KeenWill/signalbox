@@ -1556,8 +1556,21 @@ async fn run_hub(
             "session_failed_unknown_share_threshold_ppm",
         ),
     };
+    // A zero interval reaches `tokio::time::interval`, which refuses a zero
+    // period by panicking; a spawned task's panic is a runtime defect that
+    // stops the daemon. A configuration that means "never export" spells that
+    // `"none"`, so zero is a configuration error and is refused here, before
+    // anything is spawned.
     let lifecycle_metric_scan_interval =
-        configured_duration("session_lifecycle_metric_scan_interval");
+        match configured_duration("session_lifecycle_metric_scan_interval") {
+            Some(interval) if interval.is_zero() => {
+                return Err(erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("lifecycle_metric_scan_interval_is_zero"),
+                ));
+            }
+            configured => configured,
+        };
     let diagnostic_model_identity_limit = configured_usize("diagnostic_model_identity_limit")?;
     let automatic_tool_round_limit = configured_usize("max_automatic_tool_rounds_per_turn")?;
     let post_kill_reap_bound = configured_duration("post_kill_reap_bound");
