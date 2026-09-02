@@ -3507,7 +3507,6 @@ pub enum SessionLifecycleCommandRejection {
     RequiresParked,
     ReleaseWhileParked,
     OwnershipUnchanged,
-    FinishConditionRequired,
     FinishConditionAlreadyDeclared,
     StandingCauseMismatch,
     SuccessorNotFound,
@@ -3521,7 +3520,6 @@ pub enum SessionLifecycleCommandRejection {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CreateSessionRejection {
-    FinishConditionRequired,
     HeldGateRequiresOwnership,
 }
 

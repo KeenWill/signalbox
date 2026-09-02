@@ -119,7 +119,9 @@ and one optional complete session runner placement, plus its explicit or
 template-derived creation mode and the session-lifecycle §7 members —
 `start_gate`, `ownership`, and an optional `finish_condition` (`external_gate`
 or declared text) — which default from the cause (module dispatch: owned with
-`external_gate`; interactive: unmonitored with none). Structural equality
+`external_gate`; interactive: unmonitored with none). Attaching a goal confers
+ownership: `goal{attach}` on an unmonitored session records `owned` (journal
+`adopted`, the attaching actor) in the same transaction. Structural equality
 excludes the command identifier and includes the lifecycle members. Explicit
 mode compares provenance, the complete defaults, and the placement;
 template-derived mode compares provenance, the placement, and the

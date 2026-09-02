@@ -450,9 +450,6 @@ impl CreateSession {
             (crate::StartGate::Held, crate::SessionOwnership::Unmonitored, _) => {
                 Err(CreateSessionRejection::HeldGateRequiresOwnership)
             }
-            (_, crate::SessionOwnership::Owned, false) => {
-                Err(CreateSessionRejection::FinishConditionRequired)
-            }
             (_, _, _) => Ok(()),
         }
     }
@@ -1137,8 +1134,6 @@ impl SessionReconstitutionError {
 /// Why a claimed creation recorded a rejection instead of a session.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CreateSessionRejection {
-    /// An owned creation declared no finish condition.
-    FinishConditionRequired,
     /// A held start gate on an unmonitored creation.
     HeldGateRequiresOwnership,
 }

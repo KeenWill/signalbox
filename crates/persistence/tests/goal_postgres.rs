@@ -879,17 +879,18 @@ async fn s_goal_inv048_inv053_goal_owned_input_activates_without_a_user_command(
         [
             "session_created",
             "goal_changed",
+            "session_ownership_changed",
             "turn_model_settings_resolved",
             "input_accepted",
         ]
     );
     assert_eq!(dispatched[0].session(), Some(session(SESSION)));
-    let settings = &dispatched[2];
+    let settings = &dispatched[3];
     assert_eq!(settings.session(), Some(session(SESSION)));
     let settings = turn_model_settings_event(settings);
     assert_eq!(settings.accepted_input(), candidates.accepted_input());
     assert_eq!(settings.turn(), candidates.turn());
-    let accepted = &dispatched[3];
+    let accepted = &dispatched[4];
     assert_eq!(accepted.session(), Some(session(SESSION)));
     assert_eq!(
         accepted.kind(),
@@ -1011,16 +1012,6 @@ async fn s_goal_inv048_expected_resume_binds_to_one_blocked_event() -> Result<()
     let GoalTransitionOutcome::Applied(blocked) = blocked else {
         panic!("fixture execution-failure block must apply");
     };
-    // Automatic resumption is an owned-session obligation (§6): the inventory
-    // reads the ownership bit, so the fixture states the ownership its subject
-    // depends on rather than inheriting the interactive default.
-    SessionLifecycleRepository::new(pool.clone())
-        .adopt(
-            session(SESSION),
-            Some(signalbox_domain::FinishCondition::ExternalGate),
-            signalbox_domain::LifecycleActor::Operator,
-        )
-        .await?;
     let pending = repository
         .pending_execution_failures_with_need(&scheduled_need)
         .await?;
@@ -1069,6 +1060,15 @@ async fn s_goal_inv048_expected_resume_binds_to_one_blocked_event() -> Result<()
             .await?
             .is_empty()
     );
+    // The automatic resume is daemon core's, and the transition it projects
+    // says so: the envelope issuer classifies it, not the command's presence.
+    let actor: (String, Option<String>) = sqlx::query_as(
+        "SELECT actor_kind, actor_module FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session(SESSION).into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(actor, (String::from("core"), None));
     let spent: i64 =
         sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
             .bind(Uuid::from_u128(RESUME_COMMAND))
@@ -1405,6 +1405,7 @@ async fn inv048_supersede_retires_the_obsolete_queued_turn() -> Result<(), Box<d
         [
             "session_created",
             "goal_changed",
+            "session_ownership_changed",
             "turn_model_settings_resolved",
             "input_accepted",
             "goal_changed",
@@ -1413,9 +1414,9 @@ async fn inv048_supersede_retires_the_obsolete_queued_turn() -> Result<(), Box<d
             "input_accepted",
         ]
     );
-    assert_eq!(dispatched[5].session(), Some(session(SESSION)));
+    assert_eq!(dispatched[6].session(), Some(session(SESSION)));
     assert_eq!(
-        dispatched[5].kind(),
+        dispatched[6].kind(),
         &DispatchedOutboxEventKind::TurnTerminal {
             turn: obsolete.turn(),
             disposition: DispatchedTurnTerminalDisposition::Retired,
@@ -1423,7 +1424,7 @@ async fn inv048_supersede_retires_the_obsolete_queued_turn() -> Result<(), Box<d
     );
     assert_eq!(
         acceptance_position(&dispatched, replacement.turn()),
-        Some(7)
+        Some(8)
     );
 
     assert_eq!(activate_goal_turn(&pool, 0xd31).await?, replacement.turn());
@@ -4599,7 +4600,7 @@ async fn a_failing_finish_check_leaves_pursuit_live() -> Result<(), Box<dyn Erro
         .handle(creation())
         .await?;
     let repository = GoalRepository::new(pool.clone());
-    let (turn, provenance) = attach_and_declare(&pool, 0x9c1, 0xbc1, 0xfc1, true).await?;
+    let (_, provenance) = attach_and_declare(&pool, 0x9c1, 0xbc1, 0xfc1, true).await?;
 
     let outcome = repository
         .declare_achieved(
@@ -4623,13 +4624,6 @@ async fn a_failing_finish_check_leaves_pursuit_live() -> Result<(), Box<dyn Erro
         .expect("the goal stays attached");
     assert_eq!(*goal.current().state(), GoalState::Pursuing);
     assert_eq!(goal.events().len(), 1, "no achievement event was appended");
-    assert_eq!(
-        repository
-            .latest_failed_finish_check(session(SESSION), turn)
-            .await?
-            .as_deref(),
-        Some("two review threads are unresolved")
-    );
 
     pool.close().await;
     drop(container);
@@ -4669,6 +4663,46 @@ async fn a_passing_finish_check_settles_achieved_verified() -> Result<(), Box<dy
         settled.state(),
         SessionLifecycleState::Terminal {
             outcome: SessionTerminalOutcome::AchievedVerified,
+        }
+    );
+    assert_eq!(settled.pending_terminal(), None);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// An achievement no finish check verifies closes the session `achieved_declared`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_declared_achievement_settles_achieved_declared() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    let (_, provenance) = attach_and_declare(&pool, 0x9c4, 0xbc4, 0xfc4, false).await?;
+
+    assert_applied_transition(
+        repository
+            .declare_achieved(
+                session(SESSION),
+                GoalReport::try_new(String::from("the fixture work is finished"))?,
+                provenance,
+                FinishCheckVerdict::Unverified,
+            )
+            .await?,
+    );
+    let settled = lifecycle
+        .load(session(SESSION))
+        .await?
+        .expect("the session keeps its lifecycle row");
+
+    assert_eq!(
+        settled.state(),
+        SessionLifecycleState::Terminal {
+            outcome: SessionTerminalOutcome::AchievedDeclared,
         }
     );
     assert_eq!(settled.pending_terminal(), None);

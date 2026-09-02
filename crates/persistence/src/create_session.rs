@@ -771,14 +771,12 @@ fn ownership_from_str(value: &str) -> Option<SessionOwnership> {
 
 const fn create_session_rejection_to_str(value: CreateSessionRejection) -> &'static str {
     match value {
-        CreateSessionRejection::FinishConditionRequired => "finish_condition_required",
         CreateSessionRejection::HeldGateRequiresOwnership => "held_gate_requires_ownership",
     }
 }
 
 fn create_session_rejection_from_str(value: &str) -> Option<CreateSessionRejection> {
     match value {
-        "finish_condition_required" => Some(CreateSessionRejection::FinishConditionRequired),
         "held_gate_requires_ownership" => Some(CreateSessionRejection::HeldGateRequiresOwnership),
         _ => None,
     }

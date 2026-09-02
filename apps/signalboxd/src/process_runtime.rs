@@ -9177,9 +9177,6 @@ const fn wire_create_session_rejection(
     value: DomainCreateSessionRejection,
 ) -> WireCreateSessionRejection {
     match value {
-        DomainCreateSessionRejection::FinishConditionRequired => {
-            WireCreateSessionRejection::FinishConditionRequired
-        }
         DomainCreateSessionRejection::HeldGateRequiresOwnership => {
             WireCreateSessionRejection::HeldGateRequiresOwnership
         }
@@ -15964,9 +15961,6 @@ const fn wire_lifecycle_rejection(value: DomainLifecycleRejection) -> WireLifecy
         DomainLifecycleRejection::RequiresParked => WireLifecycleRejection::RequiresParked,
         DomainLifecycleRejection::ReleaseWhileParked => WireLifecycleRejection::ReleaseWhileParked,
         DomainLifecycleRejection::OwnershipUnchanged => WireLifecycleRejection::OwnershipUnchanged,
-        DomainLifecycleRejection::FinishConditionRequired => {
-            WireLifecycleRejection::FinishConditionRequired
-        }
         DomainLifecycleRejection::FinishConditionAlreadyDeclared => {
             WireLifecycleRejection::FinishConditionAlreadyDeclared
         }

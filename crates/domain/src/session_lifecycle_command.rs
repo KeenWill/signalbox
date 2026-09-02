@@ -192,8 +192,6 @@ pub enum SessionLifecycleCommandRejection {
     ReleaseWhileParked,
     /// The session already holds the ownership the flip would install.
     OwnershipUnchanged,
-    /// An adopt would leave an owned session with no finish condition.
-    FinishConditionRequired,
     /// An adopt declares a finish condition the session already carries.
     FinishConditionAlreadyDeclared,
     /// A failed closure names a cause the park does not hold.

@@ -359,6 +359,8 @@ pub enum StopStickiness {
 pub enum SessionTerminalOutcome {
     /// The declared finish check passed. Slots and worktrees are released.
     AchievedVerified,
+    /// Achieved on the model's word: no declared finish check passed.
+    AchievedDeclared,
     /// The session closed with a retryable cause standing.
     FailedRetryable {
         /// The standing cause.
@@ -427,7 +429,7 @@ impl SessionTerminalOutcome {
     /// settles as `achieved`.
     pub const fn closure_outcome(&self) -> Option<SessionClosureOutcome> {
         match self {
-            Self::AchievedVerified => None,
+            Self::AchievedVerified | Self::AchievedDeclared => None,
             Self::Stopped { .. } => Some(SessionClosureOutcome::Stopped),
             Self::FailedRetryable { .. } => Some(SessionClosureOutcome::FailedRetryable),
             Self::FailedStructural { .. } => Some(SessionClosureOutcome::FailedStructural),
@@ -446,6 +448,7 @@ impl SessionTerminalOutcome {
         match self {
             Self::Superseded { .. } => true,
             Self::AchievedVerified
+            | Self::AchievedDeclared
             | Self::FailedRetryable { .. }
             | Self::FailedStructural { .. }
             | Self::FailedUnknown
@@ -470,6 +473,7 @@ impl SessionTerminalOutcome {
         match self {
             Self::Abandoned => true,
             Self::AchievedVerified
+            | Self::AchievedDeclared
             | Self::FailedRetryable { .. }
             | Self::FailedStructural { .. }
             | Self::FailedUnknown
@@ -623,6 +627,7 @@ impl SessionLifecycleState {
                 ) => false,
             },
             SessionTerminalOutcome::AchievedVerified
+            | SessionTerminalOutcome::AchievedDeclared
             | SessionTerminalOutcome::FailedRetryable { .. }
             | SessionTerminalOutcome::FailedStructural { .. }
             | SessionTerminalOutcome::FailedUnknown

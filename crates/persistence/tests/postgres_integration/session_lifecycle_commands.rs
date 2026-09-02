@@ -355,7 +355,7 @@ async fn a_refused_command_records_its_rejection() -> Result<(), Box<dyn Error>>
 /// replays; an owned creation declaring its condition carries it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn an_owned_creation_declares_its_finish_condition() -> Result<(), Box<dyn Error>> {
+async fn an_owned_creation_needs_no_finish_condition() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     let creation = |seed: u128, gate, ownership, condition| {
@@ -395,10 +395,10 @@ async fn an_owned_creation_declares_its_finish_condition() -> Result<(), Box<dyn
         ))
         .await?;
 
-    assert_eq!(
+    assert!(matches!(
         unconditioned,
-        CreateSessionHandlingOutcome::Rejected(CreateSessionRejection::FinishConditionRequired)
-    );
+        CreateSessionHandlingOutcome::Applied(_)
+    ));
     assert_eq!(replay, unconditioned);
     assert_eq!(
         held,
@@ -410,30 +410,36 @@ async fn an_owned_creation_declares_its_finish_condition() -> Result<(), Box<dyn
     ));
     let created: bool =
         sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM session WHERE session_id = $1)")
-            .bind(creation_session(3).into_uuid())
+            .bind(creation_session(4).into_uuid())
             .fetch_one(&pool)
             .await?;
     assert!(!created, "a rejected creation leaves no session row");
     assert!(matches!(
         repository
-            .load(DurableCommandId::from_uuid(Uuid::from_u128(SEED + 3)))
+            .load(DurableCommandId::from_uuid(Uuid::from_u128(SEED + 4)))
             .await?,
         Some(RecordedSessionCreation::Rejected {
-            rejection: CreateSessionRejection::FinishConditionRequired,
+            rejection: CreateSessionRejection::HeldGateRequiresOwnership,
             ..
         })
     ));
     assert_eq!(
         settlement(
             &pool,
-            DurableCommandId::from_uuid(Uuid::from_u128(SEED + 3))
+            DurableCommandId::from_uuid(Uuid::from_u128(SEED + 4))
         )
         .await?,
         (
             String::from("rejected"),
-            Some(String::from("finish_condition_required"))
+            Some(String::from("held_gate_requires_ownership"))
         )
     );
+    let unconditioned = SessionLifecycleRepository::new(pool.clone())
+        .load(creation_session(3))
+        .await?
+        .expect("the owned creation has its lifecycle row");
+    assert_eq!(unconditioned.ownership(), SessionOwnership::Owned);
+    assert_eq!(unconditioned.finish_condition(), None);
     let lifecycle = SessionLifecycleRepository::new(pool.clone())
         .load(creation_session(5))
         .await?
@@ -510,7 +516,8 @@ async fn a_held_start_gate_keeps_the_session_created() -> Result<(), Box<dyn Err
 /// carries none, and refuses to redeclare one it already carries.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn adopt_declares_the_finish_condition_an_owned_session_owes() -> Result<(), Box<dyn Error>> {
+async fn adopt_takes_an_unmonitored_session_with_or_without_a_condition()
+-> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let creation = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     let conversation = creation_session(6);
@@ -554,13 +561,13 @@ async fn adopt_declares_the_finish_condition_an_owned_session_owes() -> Result<(
 
     assert_eq!(
         bare,
-        SessionLifecycleCommandResult::Rejected(
-            SessionLifecycleCommandRejection::FinishConditionRequired
-        )
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::OwnershipChanged)
     );
     assert_eq!(
         declared_adopt,
-        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::OwnershipChanged)
+        SessionLifecycleCommandResult::Rejected(
+            SessionLifecycleCommandRejection::OwnershipUnchanged
+        )
     );
     assert_eq!(
         again,
@@ -583,10 +590,7 @@ async fn adopt_declares_the_finish_condition_an_owned_session_owes() -> Result<(
         .await?
         .expect("the conversation keeps its lifecycle row");
     assert_eq!(lifecycle.ownership(), SessionOwnership::Owned);
-    assert_eq!(
-        lifecycle.finish_condition(),
-        Some(&declared("all fixture threads resolved"))
-    );
+    assert_eq!(lifecycle.finish_condition(), None);
 
     pool.close().await;
     drop(container);
@@ -923,6 +927,82 @@ async fn ownership_commands_on_a_closed_session_are_recorded_rejections()
             )
         );
     }
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// §6: attaching a goal confers ownership. An unmonitored conversation becomes
+/// owned by the attaching actor in the attach transaction, with its journal
+/// entry; an explicit adopt afterwards finds nothing to change.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn attaching_a_goal_confers_ownership() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(24);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(interactive_creation(24))
+        .await?;
+    GoalRepository::new(pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(SEED + 24 + 0xa00)),
+                session,
+                GoalUserAction::Attach(
+                    GoalStatement::try_new(String::from("converge the fixture branch"))
+                        .expect("the fixture statement is admitted"),
+                ),
+            ),
+            Some(GoalTurnCandidates::new(
+                AcceptedInputId::from_uuid(Uuid::from_u128(SEED + 24 + 0xb00)),
+                TurnId::from_uuid(Uuid::from_u128(SEED + 24 + 0xc00)),
+            )),
+            |_| None,
+        )
+        .await?;
+
+    let lifecycle = SessionLifecycleRepository::new(pool.clone())
+        .load(session)
+        .await?
+        .expect("the conversation keeps its lifecycle row");
+    let journal: Vec<(String, String)> = sqlx::query_as(
+        "SELECT transition_kind, actor_kind FROM session_ownership_event
+          WHERE session_id = $1 ORDER BY event_ordinal",
+    )
+    .bind(session.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    let adopt = recorded(
+        &pool,
+        lifecycle_command(
+            24,
+            1,
+            session,
+            SessionLifecycleOperation::Adopt {
+                finish_condition: None,
+            },
+        ),
+    )
+    .await?;
+
+    assert_eq!(lifecycle.ownership(), SessionOwnership::Owned);
+    assert_eq!(
+        journal,
+        vec![
+            (
+                String::from("created_unmonitored"),
+                String::from("operator")
+            ),
+            (String::from("adopted"), String::from("operator")),
+        ]
+    );
+    assert_eq!(
+        adopt,
+        SessionLifecycleCommandResult::Rejected(
+            SessionLifecycleCommandRejection::OwnershipUnchanged
+        )
+    );
 
     pool.close().await;
     drop(container);

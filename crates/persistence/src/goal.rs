@@ -483,6 +483,22 @@ impl GoalRepository {
         match &result {
             GoalCommandResult::Applied(event) => {
                 insert_event(&mut transaction, command.session(), event).await?;
+                if matches!(command.action(), GoalUserAction::Attach(_)) {
+                    crate::session_lifecycle::confer_ownership_in_transaction(
+                        &mut transaction,
+                        command.session(),
+                        principal.classify(None),
+                    )
+                    .await
+                    .map_err(|error| match error {
+                        SessionLifecycleRepositoryError::Database(error)
+                        | SessionLifecycleRepositoryError::CommitAmbiguous(error) => {
+                            GoalRepositoryError::Database(error)
+                        }
+                        _ => GoalCorruption::Inconsistent("attached session refused ownership")
+                            .into(),
+                    })?;
+                }
                 if event_may_retire_queued_turn(event) {
                     retire_ineligible_queued_goal_turn(&mut transaction, command.session()).await?;
                 }
@@ -841,7 +857,7 @@ impl GoalRepository {
 
     /// Appends a model-declared achievement gated on its finish check: a
     /// passing verdict commits `achieved_verified` to the session's terminal
-    /// handoff, a failing verdict appends nothing.
+    /// handoff, an unverified one `achieved_declared`, a failing one nothing.
     pub async fn declare_achieved(
         &self,
         session: SessionId,
@@ -881,24 +897,6 @@ impl GoalRepository {
             row.try_get("finish_condition")?,
         )
         .map_err(|detail| GoalCorruption::Inconsistent(detail).into())
-    }
-
-    /// Returns the detail of the latest failed finish check on one turn.
-    pub async fn latest_failed_finish_check(
-        &self,
-        session: SessionId,
-        turn: TurnId,
-    ) -> Result<Option<String>, GoalRepositoryError> {
-        Ok(sqlx::query_scalar(
-            "SELECT detail FROM goal_finish_check
-              WHERE session_id = $1 AND turn_id = $2 AND verdict_kind = 'failed'
-              ORDER BY recorded_at DESC
-              LIMIT 1",
-        )
-        .bind(session_id_to_uuid(session))
-        .bind(turn_id_to_uuid(turn))
-        .fetch_optional(&self.pool)
-        .await?)
     }
 
     /// Appends scheduler-only execution-failure blocking without retry.
@@ -965,7 +963,7 @@ impl GoalRepository {
                 }
             }
         }
-        let mut verified = None;
+        let mut settled = None;
         let transitioned = match transition {
             SystemTransition::Blocked {
                 reason,
@@ -977,14 +975,17 @@ impl GoalRepository {
                 provenance,
                 verdict,
             } => {
-                record_finish_check(&mut transaction, session, &goal, provenance, &verdict).await?;
                 match verdict {
                     FinishCheckVerdict::Failed { detail } => {
-                        commit(transaction).await?;
+                        transaction.rollback().await?;
                         return Ok(GoalTransitionOutcome::FinishCheckFailed { detail });
                     }
-                    FinishCheckVerdict::Passed => verified = Some(provenance),
-                    FinishCheckVerdict::Unverified => {}
+                    FinishCheckVerdict::Passed => {
+                        settled = Some((SessionTerminalOutcome::AchievedVerified, provenance));
+                    }
+                    FinishCheckVerdict::Unverified => {
+                        settled = Some((SessionTerminalOutcome::AchievedDeclared, provenance));
+                    }
                 }
                 goal.declare_achieved(report, provenance)
             }
@@ -1001,11 +1002,11 @@ impl GoalRepository {
         };
         let event = latest_event(&goal)?;
         insert_event(&mut transaction, session, &event).await?;
-        if let Some(provenance) = verified {
+        if let Some((outcome, provenance)) = settled {
             crate::session_lifecycle::commit_pending_terminal_in_transaction(
                 &mut transaction,
                 session,
-                SessionTerminalOutcome::AchievedVerified,
+                outcome,
                 LifecycleActor::Core {
                     agency: CoreAgency::Tool {
                         request: provenance.tool_request(),
@@ -1106,7 +1107,7 @@ async fn session_is_closing(
     session: SessionId,
 ) -> Result<bool, GoalRepositoryError> {
     let closing: Option<bool> = sqlx::query_scalar(
-        "SELECT pending_terminal_outcome_kind IS NOT NULL
+        "SELECT pending_terminal_outcome_kind IS NOT NULL OR state_kind = 'terminal'
            FROM session_lifecycle WHERE session_id = $1",
     )
     .bind(session_id_to_uuid(session))
@@ -1821,34 +1822,6 @@ async fn insert_event(
             event_ordinal: event.ordinal().get(),
         },
     )
-    .await?;
-    Ok(())
-}
-
-async fn record_finish_check(
-    connection: &mut PgConnection,
-    session: SessionId,
-    goal: &Goal,
-    provenance: GoalModelProvenance,
-    verdict: &FinishCheckVerdict,
-) -> Result<(), GoalRepositoryError> {
-    let (kind, detail) = match verdict {
-        FinishCheckVerdict::Passed => ("passed", None),
-        FinishCheckVerdict::Failed { detail } => ("failed", Some(detail.as_str())),
-        FinishCheckVerdict::Unverified => ("unverified", None),
-    };
-    sqlx::query(
-        "INSERT INTO goal_finish_check
-            (session_id, tool_request_id, turn_id, generation, verdict_kind, detail)
-         VALUES ($1, $2, $3, $4, $5, $6)",
-    )
-    .bind(session_id_to_uuid(session))
-    .bind(tool_request_id_to_uuid(provenance.tool_request()))
-    .bind(turn_id_to_uuid(provenance.turn()))
-    .bind(Decimal::from(goal.current().generation().get()))
-    .bind(kind)
-    .bind(detail)
-    .execute(&mut *connection)
     .await?;
     Ok(())
 }

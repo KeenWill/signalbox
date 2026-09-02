@@ -104,8 +104,6 @@ pub enum SessionLifecycleRejection {
     GoalOutcomeMismatch,
     /// A failed closure names a cause the park it closes does not hold.
     StandingCauseMismatch,
-    /// An adopt would leave an owned session with no finish condition (§7).
-    FinishConditionRequired,
     /// An adopt declares a finish condition the session already carries.
     FinishConditionAlreadyDeclared,
 }
@@ -126,7 +124,6 @@ impl fmt::Display for SessionLifecycleRejection {
                 "the session outcome contradicts its goal's terminal state"
             }
             Self::StandingCauseMismatch => "the closure cause is not the park's standing cause",
-            Self::FinishConditionRequired => "an owned session must declare a finish condition",
             Self::FinishConditionAlreadyDeclared => {
                 "the session already declares a finish condition"
             }
@@ -507,8 +504,11 @@ pub(crate) async fn resume_in_transaction(
         ));
     }
     write_state(connection, &held, SessionLifecycleState::Active, actor).await?;
-    sqlx::query("SELECT project_session_lifecycle($1, true)")
+    let (actor_kind, actor_module, _, _) = encode_actor(actor);
+    sqlx::query("SELECT project_session_lifecycle($1, true, $2, $3)")
         .bind(session_id_to_uuid(session))
+        .bind(actor_kind)
+        .bind(actor_module)
         .execute(&mut *connection)
         .await?;
     Ok(load_locked(connection, session).await?.state)
@@ -591,11 +591,7 @@ pub(crate) async fn adopt_in_transaction(
         ));
     }
     match (held.finish_condition.as_ref(), finish_condition) {
-        (None, None) => {
-            return Err(SessionLifecycleRepositoryError::Rejected(
-                SessionLifecycleRejection::FinishConditionRequired,
-            ));
-        }
+        (None, None) => {}
         (Some(_), Some(_)) => {
             return Err(SessionLifecycleRepositoryError::Rejected(
                 SessionLifecycleRejection::FinishConditionAlreadyDeclared,
@@ -651,6 +647,26 @@ pub(crate) async fn release_in_transaction(
         connection,
         session,
         SessionOwnershipTransition::Released,
+        actor,
+    )
+    .await
+}
+
+/// Attaching a goal confers ownership (§6): an unmonitored session becomes
+/// owned by whoever attached; an owned one is unchanged.
+pub(crate) async fn confer_ownership_in_transaction(
+    connection: &mut PgConnection,
+    session: SessionId,
+    actor: LifecycleActor,
+) -> Result<(), SessionLifecycleRepositoryError> {
+    let held = load_locked(connection, session).await?;
+    if held.ownership == SessionOwnership::Owned {
+        return Ok(());
+    }
+    flip_ownership(
+        connection,
+        session,
+        SessionOwnershipTransition::Adopted,
         actor,
     )
     .await
@@ -866,6 +882,7 @@ fn closure_carries_standing_cause(
         (
             _,
             SessionTerminalOutcome::AchievedVerified
+            | SessionTerminalOutcome::AchievedDeclared
             | SessionTerminalOutcome::Stopped { .. }
             | SessionTerminalOutcome::Superseded { .. }
             | SessionTerminalOutcome::Abandoned
@@ -1180,6 +1197,10 @@ impl EncodedTerminal {
         match outcome {
             SessionTerminalOutcome::AchievedVerified => Self {
                 outcome: Some("achieved_verified"),
+                ..Self::empty()
+            },
+            SessionTerminalOutcome::AchievedDeclared => Self {
+                outcome: Some("achieved_declared"),
                 ..Self::empty()
             },
             SessionTerminalOutcome::FailedRetryable { cause } => Self {
@@ -1566,6 +1587,7 @@ fn decode_terminal_outcome(
     };
     let decoded = match (outcome.as_str(), cause, sticky, superseded_by) {
         ("achieved_verified", None, None, None) => SessionTerminalOutcome::AchievedVerified,
+        ("achieved_declared", None, None, None) => SessionTerminalOutcome::AchievedDeclared,
         ("failed_retryable", Some(cause), None, None) => SessionTerminalOutcome::FailedRetryable {
             cause: session_retryable_cause_from_str(&cause).ok_or(
                 SessionLifecycleCorruption::Inconsistent("retryable failure cause"),
@@ -1595,8 +1617,8 @@ fn decode_terminal_outcome(
                 .ok_or(SessionLifecycleCorruption::Inconsistent("retirement cause"))?,
         },
         (
-            "achieved_verified" | "failed_retryable" | "failed_structural" | "failed_unknown"
-            | "stopped" | "superseded" | "abandoned" | "retired",
+            "achieved_verified" | "achieved_declared" | "failed_retryable" | "failed_structural"
+            | "failed_unknown" | "stopped" | "superseded" | "abandoned" | "retired",
             _,
             _,
             _,

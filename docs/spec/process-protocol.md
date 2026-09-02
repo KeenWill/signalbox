@@ -376,10 +376,10 @@ that variant.
 `create_session` and `create_session_from_template` accept an optional
 `lifecycle` object: `start_gate` (`open`, the default, or `held`), `ownership`
 (`unmonitored`, the default, or `owned`), and `finish_condition` (string). A
-held gate requires `owned`, and `owned` requires a finish condition; either
-violation is the recorded rejection `create_session_rejected`. A held gate is
-durable on the lifecycle satellite: the session stays `created` and arms the
-start-gate deadline; `release_start` lands with the deadline engine.
+held gate requires `owned`; the violation is the recorded rejection
+`create_session_rejected`. A held gate is durable on the lifecycle satellite:
+the session stays `created` and arms the start-gate deadline; `release_start`
+lands with the deadline engine.
 
 | Type                                 | Additional required members                                                                                                | Meaning                                                                  |
 | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |

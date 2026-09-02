@@ -1107,6 +1107,7 @@ async fn the_terminal_outcome_vocabulary_matches_its_database_constraint()
         admitted,
         BTreeSet::from([
             String::from("achieved_verified"),
+            String::from("achieved_declared"),
             String::from("failed_retryable"),
             String::from("failed_structural"),
             String::from("failed_unknown"),

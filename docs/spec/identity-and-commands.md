@@ -208,8 +208,11 @@ non-semantic operational metadata, and the authenticated issuer principal —
 `issuer_kind` (`core`, `operator`, `module`, `watchdog`) with `issuer_module`
 naming the module — stamped by the boundary that admitted the command. The
 lifecycle actor classification derives from the principal and the domain actor:
-a module principal wins, otherwise the actor classifies. No command kind,
-session, or client has a separate command-ID namespace.
+a module principal wins, otherwise the actor classifies. A goal event a command
+authored projects the session's actor from that command's envelope issuer, so
+daemon core's automatic resume and a module's composed stop never read as the
+operator's. No command kind, session, or client has a separate command-ID
+namespace.
 
 Each admitted kind has one purpose-specific typed record family
 (`create_session_command`, `create_session_from_imported_frontier_command`,
@@ -306,11 +309,10 @@ lands; version 6 adds path-scoped placement, and version 7 composes model
 settings with that implemented shape. Each field is absent before its
 introducing version, so an older reader rejects a newer creation record instead
 of discarding either decision. `ReplaceSessionMetadata` and `DecideToolRequest`
-use version 1. `CreateSession` records applied results and the two
-session-lifecycle §7 admission rejections, `finish_condition_required` and
-`held_gate_requires_ownership` (its one preparation failure is an error, not a
-recorded rejection); `session_lifecycle` (version 1) carries
-`stop{sticky, descendant_scope}`, `supersede{successor}`, `abandon`,
+use version 1. `CreateSession` records applied results and the session-lifecycle
+§7 admission rejection `held_gate_requires_ownership` (its one preparation
+failure is an error, not a recorded rejection); `session_lifecycle` (version 1)
+carries `stop{sticky, descendant_scope}`, `supersede{successor}`, `abandon`,
 `close_failed{cause}`, `resume`, `adopt{finish_condition}`, and `release` in one
 typed record with closed, operation-scoped rejections; every claimed lifecycle
 command settles as a `command_settled` receipt, and a rejected creation does too

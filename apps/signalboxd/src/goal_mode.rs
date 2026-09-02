@@ -316,8 +316,7 @@ pub(crate) trait FinishCheck: Send + Sync + std::fmt::Debug {
     ) -> Pin<Box<dyn Future<Output = FinishCheckVerdict> + Send + '_>>;
 }
 
-/// No verifier is wired: every declared achievement stays unverified, and
-/// `achieved_verified` is never recorded.
+/// No verifier is wired: every declared achievement settles `achieved_declared`.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct UnverifiedFinishCheck;
 
@@ -1090,17 +1089,6 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
                 .plan_automatic_resumption(session, Some(turn))
                 .await?;
             let need = resumption.need()?;
-            let need = match adapter
-                .repository
-                .latest_failed_finish_check(session, turn)
-                .await?
-            {
-                Some(detail) => {
-                    GoalNeed::try_new(format!("Finish check failed: {detail} {}", need.as_str()))
-                        .unwrap_or(need)
-                }
-                None => need,
-            };
             let outcome = match adapter
                 .repository
                 .block_execution_failure(session, need, GoalSchedulerProvenance::new(turn))

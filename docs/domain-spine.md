@@ -1079,7 +1079,6 @@ impl CreateSession {
 // compares the requested template name, and the two modes differ.
 
 pub enum CreateSessionRejection {
-    FinishConditionRequired,
     HeldGateRequiresOwnership,
 }
 
@@ -6120,6 +6119,7 @@ pub enum SessionClosureOutcome {
 
 pub enum SessionTerminalOutcome {
     AchievedVerified,
+    AchievedDeclared,
     FailedRetryable { cause: SessionRetryableCause },
     FailedStructural { cause: SessionStructuralCause },
     FailedUnknown,
@@ -6255,7 +6255,6 @@ pub enum SessionLifecycleCommandRejection {
     RequiresParked,
     ReleaseWhileParked,
     OwnershipUnchanged,
-    FinishConditionRequired,
     FinishConditionAlreadyDeclared,
     StandingCauseMismatch,
     SuccessorNotFound,

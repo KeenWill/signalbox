@@ -246,9 +246,6 @@ const fn command_rejection(
         SessionLifecycleRejection::StandingCauseMismatch => {
             SessionLifecycleCommandRejection::StandingCauseMismatch
         }
-        SessionLifecycleRejection::FinishConditionRequired => {
-            SessionLifecycleCommandRejection::FinishConditionRequired
-        }
         SessionLifecycleRejection::FinishConditionAlreadyDeclared => {
             SessionLifecycleCommandRejection::FinishConditionAlreadyDeclared
         }

@@ -26,6 +26,36 @@ ALTER TABLE durable_command
     );
 
 --
+-- A goal event a command authored projects with that command's issuer (§6):
+-- daemon core's automatic resume is core's, a module's composed stop is the
+-- module's, and only the operator's own commands read as the operator's.
+-- Supersedes 202609020002_session_lifecycle_satellite.sql.
+--
+
+CREATE OR REPLACE FUNCTION project_session_lifecycle_from_goal() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    authored_kind text;
+    authored_module text;
+BEGIN
+    IF NEW.user_command_id IS NOT NULL THEN
+        SELECT command.issuer_kind, command.issuer_module
+          INTO STRICT authored_kind, authored_module
+          FROM durable_command AS command
+         WHERE command.command_id = NEW.user_command_id;
+    END IF;
+    PERFORM project_session_lifecycle(
+        NEW.session_id,
+        NEW.event_kind = 'resumed',
+        authored_kind,
+        authored_module
+    );
+    RETURN NULL;
+END;
+$$;
+
+--
 -- One registry kind carries the seven §7 lifecycle operations, the way `goal`
 -- carries its four.
 --
@@ -175,7 +205,6 @@ CREATE TABLE session_lifecycle_command (
             'requires_parked'::text,
             'release_while_parked'::text,
             'ownership_unchanged'::text,
-            'finish_condition_required'::text,
             'finish_condition_already_declared'::text,
             'standing_cause_mismatch'::text,
             'successor_not_found'::text,
@@ -209,7 +238,6 @@ CREATE TABLE session_lifecycle_command (
             AND (rejection_kind = 'goal_resume_required'::text))
         OR ((operation_kind = 'adopt'::text) AND (rejection_kind = ANY (ARRAY[
                 'ownership_unchanged'::text,
-                'finish_condition_required'::text,
                 'finish_condition_already_declared'::text
             ])))
         OR ((operation_kind = 'release'::text) AND (rejection_kind = ANY (ARRAY[
@@ -310,15 +338,13 @@ ALTER TABLE create_session_command
         OR ((result_kind = 'rejected'::text)
             AND (created_session_id IS NULL)
             AND (rejection_kind = ANY (ARRAY[
-                'finish_condition_required'::text,
                 'held_gate_requires_ownership'::text
             ])))
     ),
     -- The validations §7 states, as the shape an applied row must have.
     ADD CONSTRAINT create_session_command_applied_admission CHECK (
         (result_kind = 'rejected'::text)
-        OR (((ownership = 'unmonitored'::text) OR (finish_condition_kind IS NOT NULL))
-            AND ((start_gate = 'open'::text) OR (ownership = 'owned'::text)))
+        OR ((start_gate = 'open'::text) OR (ownership = 'owned'::text))
     );
 
 --
@@ -599,48 +625,6 @@ ALTER TABLE goal_event
     );
 
 --
--- §2 finish check: every declaration's verdict is recorded against the exact
--- request, so a failed check can surface as the need text of the failure
--- that follows.
---
-
-CREATE TABLE goal_finish_check (
-    session_id uuid NOT NULL,
-    tool_request_id uuid NOT NULL,
-    turn_id uuid NOT NULL,
-    generation numeric(20,0) NOT NULL,
-    verdict_kind text NOT NULL,
-    detail text,
-    recorded_at timestamp with time zone DEFAULT statement_timestamp() NOT NULL,
-
-    CONSTRAINT goal_finish_check_pkey PRIMARY KEY (tool_request_id),
-    CONSTRAINT goal_finish_check_verdict_shape CHECK (
-        (verdict_kind = ANY (ARRAY['passed'::text, 'failed'::text, 'unverified'::text]))
-        AND ((verdict_kind = 'failed'::text) = (detail IS NOT NULL))
-        AND ((detail IS NULL)
-             OR ((octet_length(detail) >= 1) AND (octet_length(detail) <= 1048576)))
-    ),
-    CONSTRAINT goal_finish_check_generation_positive CHECK (
-        (generation >= (1)::numeric) AND (generation <= '18446744073709551615'::numeric)
-    ),
-    CONSTRAINT goal_finish_check_request_fk
-        FOREIGN KEY (tool_request_id, session_id)
-        REFERENCES tool_request (request_id, session_id)
-        ON UPDATE RESTRICT ON DELETE RESTRICT,
-    CONSTRAINT goal_finish_check_turn_fk
-        FOREIGN KEY (turn_id, session_id)
-        REFERENCES turn_lifecycle (turn_id, session_id)
-        ON UPDATE RESTRICT ON DELETE RESTRICT
-);
-
-CREATE INDEX goal_finish_check_by_turn
-    ON goal_finish_check (session_id, turn_id, recorded_at);
-
-CREATE TRIGGER goal_finish_check_is_append_only
-    BEFORE DELETE OR UPDATE ON goal_finish_check
-    FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
-
---
 -- §10: a closure retires the queued turns it strands.
 --
 
@@ -796,9 +780,9 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
     IF FOUND AND last_kind IN ('commissioned', 'resumed', 'blocked', 'superseded') THEN
-        IF held.pending_terminal_outcome_kind = 'achieved_verified' THEN
+        IF held.pending_terminal_outcome_kind IN ('achieved_verified', 'achieved_declared') THEN
             RAISE EXCEPTION
-                'session % cannot settle achieved_verified over an open goal', subject
+                'session % cannot settle an achievement over an open goal', subject
                 USING ERRCODE = '23514';
         END IF;
         INSERT INTO goal_event

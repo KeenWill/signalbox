@@ -533,18 +533,10 @@ async fn goal_failure_block_after_success(
         CreateSessionRepository::new(pool.clone(), configuration.session_credential_pin()),
     );
     let CreateSessionOutcome::Applied(created) = create
-        .execute(
-            CreateSessionRequest::try_new(
-                DurableCommandId::from_uuid(Uuid::from_u128(0x2101)),
-                SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
-            )?
-            .with_lifecycle(
-                signalbox_domain::StartGate::Open,
-                ownership,
-                matches!(ownership, signalbox_domain::SessionOwnership::Owned)
-                    .then_some(signalbox_domain::FinishCondition::ExternalGate),
-            ),
-        )
+        .execute(CreateSessionRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x2101)),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+        )?)
         .await?
     else {
         panic!("the unique fixture command must create its session")
@@ -564,6 +556,25 @@ async fn goal_failure_block_after_success(
         )
         .await?;
     assert_goal_command_applied(attached);
+    // Attaching conferred ownership; an unmonitored subject releases it again.
+    if matches!(ownership, signalbox_domain::SessionOwnership::Unmonitored) {
+        let released = signalbox_persistence::session_lifecycle_command::SessionLifecycleCommandRepository::new(pool.clone())
+            .handle(
+                signalbox_domain::SessionLifecycleCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(0x2103)),
+                    session,
+                    signalbox_domain::SessionLifecycleOperation::Release,
+                ),
+                signalbox_domain::CommandPrincipal::Operator,
+            )
+            .await?;
+        assert!(matches!(
+            released,
+            signalbox_persistence::session_lifecycle_command::SessionLifecycleCommandHandlingOutcome::Recorded(
+                signalbox_domain::SessionLifecycleCommandResult::Applied(_)
+            )
+        ));
+    }
 
     let sweep = PostgresEligibilitySweep::new(pool.clone());
     let (nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);

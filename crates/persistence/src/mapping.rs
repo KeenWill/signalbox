@@ -1622,7 +1622,6 @@ pub(crate) const fn session_lifecycle_command_rejection_to_str(
         SessionLifecycleCommandRejection::RequiresParked => "requires_parked",
         SessionLifecycleCommandRejection::ReleaseWhileParked => "release_while_parked",
         SessionLifecycleCommandRejection::OwnershipUnchanged => "ownership_unchanged",
-        SessionLifecycleCommandRejection::FinishConditionRequired => "finish_condition_required",
         SessionLifecycleCommandRejection::FinishConditionAlreadyDeclared => {
             "finish_condition_already_declared"
         }
@@ -1645,9 +1644,6 @@ pub(crate) fn session_lifecycle_command_rejection_from_str(
         "requires_parked" => Some(SessionLifecycleCommandRejection::RequiresParked),
         "release_while_parked" => Some(SessionLifecycleCommandRejection::ReleaseWhileParked),
         "ownership_unchanged" => Some(SessionLifecycleCommandRejection::OwnershipUnchanged),
-        "finish_condition_required" => {
-            Some(SessionLifecycleCommandRejection::FinishConditionRequired)
-        }
         "finish_condition_already_declared" => {
             Some(SessionLifecycleCommandRejection::FinishConditionAlreadyDeclared)
         }
