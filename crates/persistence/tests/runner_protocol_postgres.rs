@@ -1338,7 +1338,7 @@ async fn insert_lease_generation_direct(
 /// must write the retired spelling: the `CHECK` in force there admits nothing
 /// else, and the insert fails with `23514` before the migration under test
 /// runs. Fully migrated pools take the current spelling.
-const CURRENT_CREATION_CAUSE: &str = "user_initiated";
+const CURRENT_CREATION_CAUSE: &str = "interactive";
 async fn insert_session_for(pool: &PgPool, session: Uuid) -> Result<(), sqlx::Error> {
     insert_session_for_with_creation_cause(pool, session, CURRENT_CREATION_CAUSE).await
 }
@@ -2417,10 +2417,7 @@ async fn insert_running_turn(
     .expect("the fixture credential pin is valid");
     let creation = CreateSession::new(
         DurableCommandId::from_uuid(uuid(0xa102)),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
     )
     .prepare(session)
@@ -7612,10 +7609,7 @@ async fn s32_inv044_session_summary_authenticates_current_pre_pin_runner_loss()
     .expect("the fixture credential pin is valid");
     let creation = CreateSession::new(
         DurableCommandId::from_uuid(uuid(0xa142)),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
     )
     .prepare(session)

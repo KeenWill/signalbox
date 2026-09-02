@@ -146,10 +146,7 @@ fn creation() -> PreparedCreateSession {
 fn creation_with_model(model: ModelSelectionRequest) -> PreparedCreateSession {
     CreateSession::new(
         command(CREATE_COMMAND),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         SessionConfigurationDefaults::new(model),
     )
     .prepare(session(SESSION))
@@ -159,10 +156,7 @@ fn creation_with_model(model: ModelSelectionRequest) -> PreparedCreateSession {
 fn creation_fixture(command_id: u128, session_id: u128, selection: u128) -> PreparedCreateSession {
     CreateSession::new(
         command(command_id),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
             DirectModelSelection::from_uuid(Uuid::from_u128(selection)),
         )),

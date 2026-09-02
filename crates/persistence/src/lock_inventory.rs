@@ -10,6 +10,22 @@
 //! transactions wait on this pair in opposite orders. A scheduler-first
 //! acquisition of the pair would deadlock against every path above and must
 //! not be introduced.
+//!
+//! The `session_lifecycle` satellite sits inside that prefix, between the
+//! `session` row and the `session_scheduler` row, and is never acquired after
+//! the scheduler row. Every statement below that locks a scheduler row locks
+//! the satellite first, in a common table expression the scheduler predicate
+//! reads, so the order is the statement's own structure rather than a
+//! convention a caller could reorder. Turn-lifecycle writers inherit it: the
+//! standing rule that every turn-lifecycle writer acquires the scheduler lock
+//! before touching a turn row means every transaction whose turn write
+//! projects a new session state already holds the satellite when the
+//! projection runs.
+//!
+//! Two paths acquire the satellite outside a scheduler statement, both without
+//! a scheduler row in the same transaction: session creation, which inserts it,
+//! and the lifecycle store's own park, closure, and ownership writes, which
+//! take the `session` row first.
 
 use signalbox_domain::SessionId;
 
@@ -78,7 +94,13 @@ pub(crate) const REPO_WATCH_WEBHOOK_DELIVERY: &str = "SELECT receipt_sequence
       WHERE hook_id = $1 AND delivery_id = $2
       FOR UPDATE";
 
-pub(crate) const START_ELIGIBLE_TURN: &str = "SELECT
+pub(crate) const START_ELIGIBLE_TURN: &str = "WITH satellite AS (
+                SELECT session_id
+                  FROM session_lifecycle
+                 WHERE session_id = $1
+                 FOR NO KEY UPDATE
+            )
+            SELECT
             EXISTS (
                 SELECT 1
                   FROM session
@@ -87,7 +109,7 @@ pub(crate) const START_ELIGIBLE_TURN: &str = "SELECT
             (
                 SELECT session_id
                   FROM session_scheduler
-                 WHERE session_id = $1
+                 WHERE session_id = (SELECT session_id FROM satellite)
                  FOR UPDATE
             )";
 
@@ -139,7 +161,13 @@ pub(crate) const EXPIRED_DISPATCH_START_LEASE: &str = "SELECT EXISTS (
            )
     )";
 
-pub(crate) const STARTUP_RECOVERY: &str = "SELECT
+pub(crate) const STARTUP_RECOVERY: &str = "WITH satellite AS (
+                SELECT session_id
+                  FROM session_lifecycle
+                 WHERE session_id = $1
+                 FOR NO KEY UPDATE
+            )
+            SELECT
             EXISTS (
                 SELECT 1
                   FROM session
@@ -148,7 +176,7 @@ pub(crate) const STARTUP_RECOVERY: &str = "SELECT
             (
                 SELECT session_id
                   FROM session_scheduler
-                 WHERE session_id = $1
+                 WHERE session_id = (SELECT session_id FROM satellite)
                  FOR UPDATE
             ),
             (
@@ -397,7 +425,13 @@ pub(crate) const AUTOMATIC_RECONCILIATION_CLAIM: &str = "WITH due AS (
                JOIN recorded USING (turn_id)
               ORDER BY claimed.turn_id";
 
-pub(crate) const CONTEXT_COMPACTION_SCHEDULER: &str = "SELECT
+pub(crate) const CONTEXT_COMPACTION_SCHEDULER: &str = "WITH satellite AS (
+                SELECT session_id
+                  FROM session_lifecycle
+                 WHERE session_id = $1
+                 FOR NO KEY UPDATE
+            )
+            SELECT
             EXISTS (
                 SELECT 1
                   FROM session
@@ -406,7 +440,7 @@ pub(crate) const CONTEXT_COMPACTION_SCHEDULER: &str = "SELECT
             (
                 SELECT session_id
                   FROM session_scheduler
-                 WHERE session_id = $1
+                 WHERE session_id = (SELECT session_id FROM satellite)
                  FOR UPDATE
             )";
 
@@ -423,12 +457,29 @@ pub(crate) const REPLACE_SESSION_DEFAULTS_CURRENT: &str = "SELECT current_versio
 pub(crate) const CONTEXT_COMPACTION_LIFECYCLE_SESSION: &str =
     "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
 
+/// Serializes one session's own lifecycle writes — park, closure, ownership.
+///
+/// Taken after the session row and before any scheduler row, which is the
+/// satellite's declared place in the order. These transactions hold no
+/// scheduler row at all, so the pair they take is session then satellite.
+pub(crate) const SESSION_LIFECYCLE_SESSION: &str =
+    "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
+
+pub(crate) const SESSION_LIFECYCLE_SATELLITE: &str =
+    "SELECT session_id FROM session_lifecycle WHERE session_id = $1 FOR NO KEY UPDATE";
+
 pub(crate) const SUBMIT_INPUT_SESSION: &str =
     "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
 
-pub(crate) const SUBMIT_INPUT_SCHEDULER: &str = "SELECT session_id
+pub(crate) const SUBMIT_INPUT_SCHEDULER: &str = "WITH satellite AS (
+            SELECT session_id
+              FROM session_lifecycle
+             WHERE session_id = $1
+             FOR NO KEY UPDATE
+        )
+        SELECT session_id
            FROM session_scheduler
-          WHERE session_id = $1
+          WHERE session_id = (SELECT session_id FROM satellite)
           FOR UPDATE";
 
 pub(crate) const SUBMIT_INPUT_DEFAULTS: &str = "SELECT current_version
@@ -733,9 +784,15 @@ pub(crate) const RUNNER_PLACEMENT_CURRENT_LOSS: &str = "SELECT loss_epoch
               WHERE enrollment_id = $1
               FOR SHARE";
 
-pub(crate) const RUNNER_RETRY_REPLACEMENT_SCHEDULER: &str = "SELECT session_id
+pub(crate) const RUNNER_RETRY_REPLACEMENT_SCHEDULER: &str = "WITH satellite AS (
+                SELECT session_id
+                  FROM session_lifecycle
+                 WHERE session_id = $1
+                 FOR NO KEY UPDATE
+            )
+            SELECT session_id
                FROM session_scheduler
-              WHERE session_id = $1
+              WHERE session_id = (SELECT session_id FROM satellite)
               FOR UPDATE";
 
 pub(crate) const RUNNER_LEASE_HEAD: &str = "SELECT current_event.event_ordinal, event.state_kind,

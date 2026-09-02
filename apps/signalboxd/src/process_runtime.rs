@@ -182,9 +182,9 @@ use signalbox_process_protocol::{
     GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
     ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
-    ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MAX_BLOB_READ_BYTES,
-    MAX_FRAME_BYTES, MetadataActor, MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition,
-    ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
+    ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, LifecycleActorClass,
+    MAX_BLOB_READ_BYTES, MAX_FRAME_BYTES, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
+    ModelCallDisposition, ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
     ModelCapabilities as WireModelCapabilities, ModelChangeAdjustment as WireModelChangeAdjustment,
     ModelSelection as WireModelSelection, ModelSettingSource as WireModelSettingSource,
     ModelSettingsOverlay as WireModelSettingsOverlay,
@@ -217,9 +217,10 @@ use signalbox_process_protocol::{
     RunnerSandboxProfile as WireRunnerSandboxProfile,
     RunnerStateTransitionState as WireRunnerStateTransitionState,
     RunnerWorkingDirectory as WireRunnerWorkingDirectory, ServerFrame, ServerMessage,
-    ServiceTier as WireServiceTier, SessionEvent, SessionMetadata as WireSessionMetadata,
-    SessionPlacement as WireSessionPlacement, SettingOverlay as WireSettingOverlay,
-    SystemPromptMember, SystemPromptText, ToolApprovalEventDecider as WireToolApprovalEventDecider,
+    ServiceTier as WireServiceTier, SessionClosureOutcome, SessionEvent,
+    SessionMetadata as WireSessionMetadata, SessionPlacement as WireSessionPlacement,
+    SettingOverlay as WireSettingOverlay, SystemPromptMember, SystemPromptText,
+    ToolApprovalEventDecider as WireToolApprovalEventDecider,
     ToolApprovalEventDecision as WireToolApprovalEventDecision, ToolBatchState, ToolDecision,
     TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval,
     TurnModelSettingsSnapshot as WireTurnModelSettingsSnapshot, TurnState, UsageProvenance,
@@ -15459,6 +15460,37 @@ fn wire_goal_state(state: &GoalState) -> GoalLifecycleState {
         GoalState::Superseded { by_generation } => GoalLifecycleState::Superseded {
             by_generation: CanonicalU64::new(by_generation.get()),
         },
+        GoalState::SessionClosed { outcome } => GoalLifecycleState::SessionClosed {
+            outcome: wire_session_closure_outcome(*outcome),
+        },
+    }
+}
+
+fn wire_session_closure_outcome(
+    outcome: signalbox_domain::SessionClosureOutcome,
+) -> SessionClosureOutcome {
+    match outcome {
+        signalbox_domain::SessionClosureOutcome::FailedRetryable => {
+            SessionClosureOutcome::FailedRetryable
+        }
+        signalbox_domain::SessionClosureOutcome::FailedStructural => {
+            SessionClosureOutcome::FailedStructural
+        }
+        signalbox_domain::SessionClosureOutcome::FailedUnknown => {
+            SessionClosureOutcome::FailedUnknown
+        }
+        signalbox_domain::SessionClosureOutcome::Superseded => SessionClosureOutcome::Superseded,
+        signalbox_domain::SessionClosureOutcome::Abandoned => SessionClosureOutcome::Abandoned,
+        signalbox_domain::SessionClosureOutcome::Retired => SessionClosureOutcome::Retired,
+    }
+}
+
+fn wire_lifecycle_actor(actor: signalbox_domain::LifecycleActor) -> LifecycleActorClass {
+    match actor {
+        signalbox_domain::LifecycleActor::Core { .. } => LifecycleActorClass::Core,
+        signalbox_domain::LifecycleActor::Operator => LifecycleActorClass::Operator,
+        signalbox_domain::LifecycleActor::Module { .. } => LifecycleActorClass::Module,
+        signalbox_domain::LifecycleActor::Watchdog => LifecycleActorClass::Watchdog,
     }
 }
 
@@ -15497,6 +15529,13 @@ fn wire_goal_event(event: &GoalEvent) -> Result<GoalHistoryEvent, ProcessConnect
         } => Ok(GoalHistoryEvent::Superseded {
             replacement_statement: replacement_statement.as_str().to_owned(),
             command_id: wire_goal_command_id(provenance.command())?,
+        }),
+        GoalEventKind::SessionClosed {
+            outcome,
+            provenance,
+        } => Ok(GoalHistoryEvent::SessionClosed {
+            outcome: wire_session_closure_outcome(*outcome),
+            actor: wire_lifecycle_actor(*provenance),
         }),
     }
 }

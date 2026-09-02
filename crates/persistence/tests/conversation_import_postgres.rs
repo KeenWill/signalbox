@@ -329,7 +329,7 @@ async fn insert_catalogued_raw_source(
 /// insert would fail before the migration under test could run. A fixture
 /// seeding a fully migrated database writes the current spelling for the
 /// mirror-image reason.
-const CURRENT_CREATION_CAUSE: &str = "user_initiated";
+const CURRENT_CREATION_CAUSE: &str = "interactive";
 async fn insert_imported_session_scaffolding(
     transaction: &mut Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), sqlx::Error> {

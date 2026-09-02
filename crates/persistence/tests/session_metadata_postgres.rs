@@ -84,10 +84,7 @@ fn command(value: u128) -> DurableCommandId {
 fn creation(command_value: u128, session_value: u128) -> PreparedCreateSession {
     CreateSession::new(
         command(command_value),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
             DirectModelSelection::from_uuid(Uuid::from_u128(session_value + 0x1000)),
         )),

@@ -7,14 +7,14 @@ use std::{error::Error, fmt, num::NonZeroU64};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    AcceptedInputId, DescendantTerminationScope, DurableCommandId, FrozenAliasDefinition, Goal,
-    GoalBlockProvenance, GoalBlockedReasonKind, GoalCommandRejection, GoalCommandResult, GoalEvent,
-    GoalEventKind, GoalEventOrdinal, GoalGeneration, GoalGuidance, GoalModelBlockedReasonKind,
-    GoalModelProvenance, GoalNeed, GoalReconstitutionFailure, GoalReconstitutionInput, GoalReport,
-    GoalSchedulerProvenance, GoalState, GoalStatement, GoalTextError, GoalTransitionError,
-    GoalTransitionFailure, GoalTurnSource, GoalUserAction, GoalUserCommand, GoalUserProvenance,
-    ModelAlias, ModelSelectionOverride, OriginConfiguration, ReconstitutedGoalCommand, SessionId,
-    TurnId,
+    AcceptedInputId, CoreAgency, DescendantTerminationScope, DurableCommandId,
+    FrozenAliasDefinition, Goal, GoalBlockProvenance, GoalBlockedReasonKind, GoalCommandRejection,
+    GoalCommandResult, GoalEvent, GoalEventKind, GoalEventOrdinal, GoalGeneration, GoalGuidance,
+    GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed, GoalReconstitutionFailure,
+    GoalReconstitutionInput, GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement,
+    GoalTextError, GoalTransitionError, GoalTransitionFailure, GoalTurnSource, GoalUserAction,
+    GoalUserCommand, GoalUserProvenance, LifecycleActor, ModelAlias, ModelSelectionOverride,
+    OriginConfiguration, ReconstitutedGoalCommand, SessionClosureOutcome, SessionId, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
@@ -30,11 +30,13 @@ use crate::{
     },
     mapping::{
         DurableCommandIdMappingError, GoalEventDiscriminator, GoalOperationKind,
-        PositiveOrdinalMappingError, durable_command_id_from_uuid, durable_command_id_to_uuid,
-        goal_blocked_reason_from_str, goal_blocked_reason_to_str, goal_command_rejection_from_str,
-        goal_command_rejection_to_str, goal_event_kind_from_str, goal_event_kind_to_str,
-        goal_model_blocked_reason_from_str, goal_operation_from_str, goal_operation_to_str,
-        positive_u64_from_numeric, session_id_from_uuid, session_id_to_uuid,
+        PositiveOrdinalMappingError, dispatching_module_from_str, dispatching_module_to_str,
+        durable_command_id_from_uuid, durable_command_id_to_uuid, goal_blocked_reason_from_str,
+        goal_blocked_reason_to_str, goal_command_rejection_from_str, goal_command_rejection_to_str,
+        goal_event_kind_from_str, goal_event_kind_to_str, goal_model_blocked_reason_from_str,
+        goal_operation_from_str, goal_operation_to_str, lifecycle_actor_to_str,
+        positive_u64_from_numeric, session_closure_outcome_from_str,
+        session_closure_outcome_to_str, session_id_from_uuid, session_id_to_uuid,
         tool_request_id_from_uuid, tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
     outbox::{self, OutboxEvent},
@@ -701,7 +703,8 @@ impl GoalRepository {
             GoalState::Blocked { .. }
             | GoalState::Achieved { .. }
             | GoalState::UserStopped
-            | GoalState::Superseded { .. } => {
+            | GoalState::Superseded { .. }
+            | GoalState::SessionClosed { .. } => {
                 transaction.rollback().await?;
                 return Ok(GoalTurnContinuationOutcome::NotPursuing);
             }
@@ -989,13 +992,16 @@ fn recorded_scheduler_failure(goal: &Goal, turn: TurnId) -> Option<&GoalEvent> {
         | GoalEventKind::Resumed { .. }
         | GoalEventKind::Achieved { .. }
         | GoalEventKind::UserStopped { .. }
-        | GoalEventKind::Superseded { .. } => false,
+        | GoalEventKind::Superseded { .. }
+        | GoalEventKind::SessionClosed { .. } => false,
     })
 }
 
 fn event_may_retire_queued_turn(event: &GoalEvent) -> bool {
     match event.kind() {
-        GoalEventKind::UserStopped { .. } | GoalEventKind::Superseded { .. } => true,
+        GoalEventKind::UserStopped { .. }
+        | GoalEventKind::Superseded { .. }
+        | GoalEventKind::SessionClosed { .. } => true,
         GoalEventKind::Commissioned { .. }
         | GoalEventKind::Blocked { .. }
         | GoalEventKind::Resumed { .. }
@@ -1175,7 +1181,8 @@ fn event_starts_pursuit(event: &GoalEvent) -> bool {
         | GoalEventKind::Superseded { .. } => true,
         GoalEventKind::Blocked { .. }
         | GoalEventKind::Achieved { .. }
-        | GoalEventKind::UserStopped { .. } => false,
+        | GoalEventKind::UserStopped { .. }
+        | GoalEventKind::SessionClosed { .. } => false,
     }
 }
 
@@ -1190,7 +1197,8 @@ fn pursuit_input<'a>(goal: &'a Goal, event: &'a GoalEvent) -> Result<&'a str, Go
         | GoalEventKind::Superseded { .. } => Ok(goal.current().statement().as_str()),
         GoalEventKind::Blocked { .. }
         | GoalEventKind::Achieved { .. }
-        | GoalEventKind::UserStopped { .. } => Err(GoalCorruption::Inconsistent(
+        | GoalEventKind::UserStopped { .. }
+        | GoalEventKind::SessionClosed { .. } => Err(GoalCorruption::Inconsistent(
             "non-pursuing event scheduled a turn",
         )),
     }
@@ -1615,8 +1623,10 @@ async fn insert_event(
         "INSERT INTO goal_event
             (session_id, event_ordinal, generation, event_kind, statement,
              blocked_reason, need, guidance, report, user_command_id,
-             model_turn_id, model_tool_request_id, scheduler_turn_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+             model_turn_id, model_tool_request_id, scheduler_turn_id,
+             session_outcome_kind, closure_actor_kind, closure_actor_module)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                 $14, $15, $16)",
     )
     .bind(session_id_to_uuid(session))
     .bind(Decimal::from(event.ordinal().get()))
@@ -1631,6 +1641,9 @@ async fn insert_event(
     .bind(encoded.model_turn)
     .bind(encoded.model_tool_request)
     .bind(encoded.scheduler_turn)
+    .bind(encoded.session_outcome)
+    .bind(encoded.closure_actor)
+    .bind(encoded.closure_actor_module)
     .execute(&mut *connection)
     .await?;
     Ok(())
@@ -1647,6 +1660,9 @@ struct EncodedEvent<'a> {
     model_turn: Option<Uuid>,
     model_tool_request: Option<Uuid>,
     scheduler_turn: Option<Uuid>,
+    session_outcome: Option<&'static str>,
+    closure_actor: Option<&'static str>,
+    closure_actor_module: Option<&'static str>,
 }
 
 impl<'a> EncodedEvent<'a> {
@@ -1662,6 +1678,9 @@ impl<'a> EncodedEvent<'a> {
             model_turn: None,
             model_tool_request: None,
             scheduler_turn: None,
+            session_outcome: None,
+            closure_actor: None,
+            closure_actor_module: None,
         };
         match event.kind() {
             GoalEventKind::Commissioned {
@@ -1708,6 +1727,29 @@ impl<'a> EncodedEvent<'a> {
                 encoded.statement = Some(replacement_statement.as_str());
                 encoded.user_command = Some(durable_command_id_to_uuid(provenance.command()));
             }
+            GoalEventKind::SessionClosed {
+                outcome,
+                provenance,
+            } => {
+                encoded.session_outcome = Some(session_closure_outcome_to_str(*outcome));
+                encoded.closure_actor = Some(lifecycle_actor_to_str(*provenance));
+                match provenance {
+                    LifecycleActor::Core {
+                        agency: CoreAgency::Model { turn },
+                    } => encoded.model_turn = Some(turn_id_to_uuid(*turn)),
+                    LifecycleActor::Core {
+                        agency: CoreAgency::Tool { request },
+                    } => encoded.model_tool_request = Some(tool_request_id_to_uuid(*request)),
+                    LifecycleActor::Module { module } => {
+                        encoded.closure_actor_module = Some(dispatching_module_to_str(*module));
+                    }
+                    LifecycleActor::Core {
+                        agency: CoreAgency::Daemon,
+                    }
+                    | LifecycleActor::Operator
+                    | LifecycleActor::Watchdog => {}
+                }
+            }
         }
         encoded
     }
@@ -1720,7 +1762,8 @@ pub(crate) async fn load_goal_from_connection(
     let rows = sqlx::query(
         "SELECT event_ordinal, generation, event_kind, statement,
                 blocked_reason, need, guidance, report, user_command_id,
-                model_turn_id, model_tool_request_id, scheduler_turn_id
+                model_turn_id, model_tool_request_id, scheduler_turn_id,
+                session_outcome_kind, closure_actor_kind, closure_actor_module
            FROM goal_event
           WHERE session_id = $1
           ORDER BY event_ordinal",
@@ -1741,6 +1784,57 @@ pub(crate) async fn load_goal_from_connection(
         .map_err(|error| GoalCorruption::Domain(error.failure()).into())
 }
 
+/// Rebuilds the closure outcome one settled generation recorded.
+fn decode_session_closure_outcome(value: String) -> Result<SessionClosureOutcome, GoalCorruption> {
+    session_closure_outcome_from_str(&value).ok_or(GoalCorruption::Unsupported {
+        field: "session closure outcome",
+        value,
+    })
+}
+
+/// Rebuilds the §6 classification, and the exact agency behind a core closure.
+///
+/// The classification and the agency are one value, so a stored row that
+/// carries a turn identity under an operator classification is corrupt rather
+/// than silently reclassified.
+fn decode_closure_actor(
+    kind: String,
+    module: Option<String>,
+    model_turn: Option<Uuid>,
+    model_tool_request: Option<Uuid>,
+) -> Result<LifecycleActor, GoalCorruption> {
+    match (kind.as_str(), module, model_turn, model_tool_request) {
+        ("core", None, None, None) => Ok(LifecycleActor::Core {
+            agency: CoreAgency::Daemon,
+        }),
+        ("core", None, Some(turn), None) => Ok(LifecycleActor::Core {
+            agency: CoreAgency::Model {
+                turn: turn_id_from_uuid(turn),
+            },
+        }),
+        ("core", None, None, Some(request)) => Ok(LifecycleActor::Core {
+            agency: CoreAgency::Tool {
+                request: tool_request_id_from_uuid(request),
+            },
+        }),
+        ("operator", None, None, None) => Ok(LifecycleActor::Operator),
+        ("watchdog", None, None, None) => Ok(LifecycleActor::Watchdog),
+        ("module", Some(module), None, None) => dispatching_module_from_str(&module)
+            .map(|module| LifecycleActor::Module { module })
+            .ok_or(GoalCorruption::Unsupported {
+                field: "session closure module",
+                value: module,
+            }),
+        ("core" | "operator" | "watchdog" | "module", _, _, _) => Err(
+            GoalCorruption::Inconsistent("session closure actor provenance"),
+        ),
+        _ => Err(GoalCorruption::Unsupported {
+            field: "session closure actor",
+            value: kind,
+        }),
+    }
+}
+
 fn decode_event(row: &sqlx::postgres::PgRow) -> Result<GoalEvent, GoalCorruption> {
     let ordinal = positive(column(row, "event_ordinal")?)?;
     let generation = positive(column(row, "generation")?)?;
@@ -1754,6 +1848,9 @@ fn decode_event(row: &sqlx::postgres::PgRow) -> Result<GoalEvent, GoalCorruption
     let model_turn: Option<Uuid> = column(row, "model_turn_id")?;
     let model_tool_request: Option<Uuid> = column(row, "model_tool_request_id")?;
     let scheduler_turn: Option<Uuid> = column(row, "scheduler_turn_id")?;
+    let session_outcome: Option<String> = column(row, "session_outcome_kind")?;
+    let closure_actor: Option<String> = column(row, "closure_actor_kind")?;
+    let closure_actor_module: Option<String> = column(row, "closure_actor_module")?;
     let discriminator =
         goal_event_kind_from_str(&kind).ok_or_else(|| GoalCorruption::Unsupported {
             field: "event kind",
@@ -1834,6 +1931,18 @@ fn decode_event(row: &sqlx::postgres::PgRow) -> Result<GoalEvent, GoalCorruption
                 durable_command_id_from_uuid(required(user_command, "supersede command")?)
                     .map_err(GoalCorruption::InvalidCommandId)?,
             ),
+        },
+        GoalEventDiscriminator::SessionClosed => GoalEventKind::SessionClosed {
+            outcome: decode_session_closure_outcome(required(
+                session_outcome,
+                "session closure outcome",
+            )?)?,
+            provenance: decode_closure_actor(
+                required(closure_actor, "session closure actor")?,
+                closure_actor_module,
+                model_turn,
+                model_tool_request,
+            )?,
         },
     };
     Ok(GoalEvent::from_stored_parts(

@@ -8582,7 +8582,7 @@ mod tests {
             session,
             session,
             SessionCreationProvenance::new(
-                SessionCreationCause::UserInitiated,
+                SessionCreationCause::Interactive,
                 TranscriptAncestry::None,
             ),
             session,
@@ -16050,7 +16050,7 @@ mod tests {
             ancestral,
             ancestral,
             SessionCreationProvenance::new(
-                SessionCreationCause::UserInitiated,
+                SessionCreationCause::Interactive,
                 TranscriptAncestry::SingleSource {
                     source_session: session_id(9),
                     source_frontier: transcript_frontier(9),

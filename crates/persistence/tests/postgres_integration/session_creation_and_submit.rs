@@ -477,7 +477,7 @@ async fn s01_inv003_inv008_inv012_create_session_schema_preserves_typed_facts()
     assert_eq!(
         stored,
         (
-            "user_initiated".to_owned(),
+            "interactive".to_owned(),
             "none".to_owned(),
             "direct".to_owned(),
             "applied".to_owned()

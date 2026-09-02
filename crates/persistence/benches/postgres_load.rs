@@ -704,10 +704,7 @@ async fn create_session(pool: &PgPool, ids: OperationIds) -> HarnessResult<TurnF
     let selection = DirectModelSelection::from_uuid(ids.uuid(IdentityRole::ModelSelection));
     let prepared = CreateSession::new(
         command,
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
     )
     .prepare(session)

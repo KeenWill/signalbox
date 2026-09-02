@@ -2201,10 +2201,7 @@ fn prepared(
 ) -> PreparedCreateSession {
     CreateSession::new(
         DurableCommandId::from_uuid(Uuid::from_u128(command)),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         SessionConfigurationDefaults::new(selection),
     )
     .prepare(SessionId::from_uuid(Uuid::from_u128(session)))
@@ -2242,10 +2239,7 @@ fn prepared_with_low_reasoning(
     .expect("the fixture settings belong to the direct selection");
     CreateSession::new(
         DurableCommandId::from_uuid(Uuid::from_u128(command)),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         defaults,
     )
     .prepare(SessionId::from_uuid(Uuid::from_u128(session)))
@@ -2529,7 +2523,7 @@ async fn insert_outbox_session_fixture(
     pool: &PgPool,
     session_seed: u128,
 ) -> Result<Uuid, sqlx::Error> {
-    insert_outbox_session_fixture_with_creation_cause(pool, session_seed, "user_initiated").await
+    insert_outbox_session_fixture_with_creation_cause(pool, session_seed, "interactive").await
 }
 
 /// Seeds the outbox session fixture with an explicit `creation_cause`.

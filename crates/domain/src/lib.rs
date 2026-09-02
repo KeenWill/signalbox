@@ -33,6 +33,7 @@ mod runner;
 mod semantic_entry;
 mod session;
 mod session_delegation;
+mod session_lifecycle;
 mod session_metadata;
 mod session_placement;
 mod session_template;
@@ -280,6 +281,14 @@ pub use session_delegation::{
     SessionDelegationReconstitutionFailure, SessionDelegationReconstitutionInput,
     TerminalChildTurn, await_session_tool_name, send_session_message_tool_name,
     spawn_session_tool_name,
+};
+pub use session_lifecycle::{
+    CoreAgency, DispatchingModule, LifecycleActor, ModuleDispatch, SessionClosureOutcome,
+    SessionDeadlineExpiry, SessionDeadlineKind, SessionFailureCause, SessionLifecycleState,
+    SessionLifecycleTransitionError, SessionOwnership, SessionOwnershipTransition,
+    SessionParkCause, SessionParkOwner, SessionRecoveryOperation, SessionRetirementCause,
+    SessionRetryableCause, SessionStructuralCause, SessionTerminalOutcome, SessionWait,
+    SessionWaitKind, SessionWaker, StopStickiness,
 };
 pub use session_metadata::{
     PreparedReplaceSessionMetadata, ReconstitutedReplaceSessionMetadata, ReplaceSessionMetadata,

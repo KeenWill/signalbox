@@ -28,11 +28,12 @@ enum SessionCreationDefaults {
 
 /// Why one session exists.
 ///
-/// User-initiated and delegated causes are implemented. Application-initiated,
-/// scheduled, and any other causes remain reserved extension examples rather
-/// than valid baseline values: the specification revision that enables one
-/// must add a typed variant carrying the exact durable initiating domain
-/// identity, so this type contains no uninhabitable placeholders.
+/// Interactive, module-dispatched, and delegated causes are implemented.
+/// Application-initiated, scheduled, and any other causes remain reserved
+/// extension examples rather than valid baseline values: the specification
+/// revision that enables one must add a typed variant carrying the exact
+/// durable initiating domain identity, so this type contains no uninhabitable
+/// placeholders.
 ///
 /// and an unstructured string is not a substitute for a typed variant:
 ///
@@ -48,13 +49,22 @@ enum SessionCreationDefaults {
 /// use signalbox_domain::{SessionCreationCause, TranscriptAncestry};
 ///
 /// fn a_cause_cannot_carry_ancestry(ancestry: TranscriptAncestry) {
-///     let _ = SessionCreationCause::UserInitiated { ancestry };
+///     let _ = SessionCreationCause::Interactive { ancestry };
 /// }
 /// ```
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SessionCreationCause {
-    /// The user started this conversation.
-    UserInitiated,
+    /// A person started this conversation.
+    ///
+    /// The imported-frontier creation family records this cause with its
+    /// import reference in its own ancestry columns: importing a conversation
+    /// is a user-initiated act, so the vocabulary stays closed.
+    Interactive,
+    /// One exact module dispatch created this session.
+    ModuleDispatched {
+        /// The dispatching module and its own durable dispatch identity.
+        dispatch: crate::ModuleDispatch,
+    },
     /// One exact logical tool request spawned this delegated child.
     Delegated {
         /// The parent work to which the child must return its result.
@@ -185,6 +195,18 @@ impl SessionCreationProvenance {
     pub const fn delegated(spawning_request: crate::ToolRequestId) -> Self {
         Self {
             cause: SessionCreationCause::Delegated { spawning_request },
+            ancestry: TranscriptAncestry::None,
+        }
+    }
+
+    /// Creates module-dispatched provenance naming the exact dispatch.
+    ///
+    /// A dispatched session starts from no prior transcript, so the ancestry
+    /// is fixed rather than accepted: a module supplying one would be
+    /// inferring semantic history from a dispatch record.
+    pub const fn module_dispatched(dispatch: crate::ModuleDispatch) -> Self {
+        Self {
+            cause: SessionCreationCause::ModuleDispatched { dispatch },
             ancestry: TranscriptAncestry::None,
         }
     }
@@ -950,11 +972,12 @@ const fn session_provenance_failure(
 ) -> Option<SessionReconstitutionFailure> {
     match (provenance.cause(), provenance.ancestry()) {
         (
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::None | TranscriptAncestry::SingleSource { .. },
         )
-        | (SessionCreationCause::Delegated { .. }, TranscriptAncestry::None) => None,
-        (SessionCreationCause::UserInitiated, TranscriptAncestry::ImportedConversation { .. }) => {
+        | (SessionCreationCause::Delegated { .. }, TranscriptAncestry::None)
+        | (SessionCreationCause::ModuleDispatched { .. }, TranscriptAncestry::None) => None,
+        (SessionCreationCause::Interactive, TranscriptAncestry::ImportedConversation { .. }) => {
             Some(SessionReconstitutionFailure::ImportedSessionSeedUnavailable)
         }
         (
@@ -962,6 +985,11 @@ const fn session_provenance_failure(
             TranscriptAncestry::SingleSource { .. }
             | TranscriptAncestry::ImportedConversation { .. },
         ) => Some(SessionReconstitutionFailure::DelegatedAncestryMismatch),
+        (
+            SessionCreationCause::ModuleDispatched { .. },
+            TranscriptAncestry::SingleSource { .. }
+            | TranscriptAncestry::ImportedConversation { .. },
+        ) => Some(SessionReconstitutionFailure::ModuleDispatchedAncestryMismatch),
     }
 }
 
@@ -989,6 +1017,8 @@ pub enum SessionReconstitutionFailure {
     DelegatedAncestryMismatch,
     /// Delegated creation cannot carry user-selected template provenance.
     DelegatedTemplateProvenance,
+    /// Module-dispatched creation is independently constrained to no ancestry.
+    ModuleDispatchedAncestryMismatch,
 }
 
 /// A failed current-session reconstitution retaining every typed input
@@ -1132,9 +1162,12 @@ impl CreateSession {
         session: SessionId,
     ) -> Result<PreparedCreateSession, CreateSessionPreparationError> {
         match (self.provenance.cause(), self.provenance.ancestry()) {
-            (SessionCreationCause::UserInitiated, TranscriptAncestry::None) => {}
             (
-                SessionCreationCause::UserInitiated,
+                SessionCreationCause::Interactive | SessionCreationCause::ModuleDispatched { .. },
+                TranscriptAncestry::None,
+            ) => {}
+            (
+                SessionCreationCause::Interactive | SessionCreationCause::ModuleDispatched { .. },
                 TranscriptAncestry::SingleSource { .. }
                 | TranscriptAncestry::ImportedConversation { .. },
             ) => {
@@ -1355,9 +1388,12 @@ impl CreateSessionReconstitutionInput {
             ));
         }
         match (self.provenance.cause(), self.provenance.ancestry()) {
-            (SessionCreationCause::UserInitiated, TranscriptAncestry::None) => {}
             (
-                SessionCreationCause::UserInitiated,
+                SessionCreationCause::Interactive | SessionCreationCause::ModuleDispatched { .. },
+                TranscriptAncestry::None,
+            ) => {}
+            (
+                SessionCreationCause::Interactive | SessionCreationCause::ModuleDispatched { .. },
                 TranscriptAncestry::SingleSource { .. }
                 | TranscriptAncestry::ImportedConversation { .. },
             ) => {
@@ -1520,10 +1556,7 @@ mod tests {
     }
 
     fn user_initiated_empty() -> SessionCreationProvenance {
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        )
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None)
     }
 
     /// Canonical spawning-request identity for delegated-session fixtures.
@@ -1577,11 +1610,11 @@ mod tests {
     #[test]
     fn s01_inv003_user_initiated_with_no_ancestry_is_complete_provenance() {
         let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::None,
         );
 
-        assert_eq!(provenance.cause(), SessionCreationCause::UserInitiated);
+        assert_eq!(provenance.cause(), SessionCreationCause::Interactive);
         assert_eq!(provenance.ancestry(), TranscriptAncestry::None);
     }
 
@@ -1592,14 +1625,14 @@ mod tests {
         let source_session = session_id(1);
         let source_frontier = test_frontier(2);
         let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::SingleSource {
                 source_session,
                 source_frontier,
             },
         );
 
-        assert_eq!(provenance.cause(), SessionCreationCause::UserInitiated);
+        assert_eq!(provenance.cause(), SessionCreationCause::Interactive);
         let TranscriptAncestry::SingleSource {
             source_session: carried_session,
             source_frontier: carried_frontier,
@@ -1622,7 +1655,7 @@ mod tests {
             ImportedTranscriptPosition::try_from_u64(3).expect("positive position"),
         );
         let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::ImportedConversation {
                 source_frontier,
                 relationship: ImportedSessionRelationship::Resume,
@@ -1674,7 +1707,7 @@ mod tests {
     #[test]
     fn s28_inv039_current_session_requires_imported_seed_reconstitution() {
         let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::ImportedConversation {
                 source_frontier: test_imported_frontier(
                     imported_conversation_id(1),
@@ -1708,11 +1741,11 @@ mod tests {
     #[test]
     fn s01_s17_inv003_cause_and_ancestry_vary_independently() {
         let empty = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::None,
         );
         let fork = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::SingleSource {
                 source_session: session_id(1),
                 source_frontier: test_frontier(2),
@@ -1789,7 +1822,7 @@ mod tests {
     #[test]
     fn inv003_current_session_reconstitution_retains_typed_provenance() {
         let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::SingleSource {
                 source_session: session_id(1),
                 source_frontier: test_frontier(2),
@@ -2168,7 +2201,7 @@ mod tests {
     #[test]
     fn s01_s17_inv012_create_session_comparison_payload_excludes_command_id() {
         let fork = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::SingleSource {
                 source_session: session_id(1),
                 source_frontier: test_frontier(2),
@@ -2381,7 +2414,7 @@ mod tests {
     #[test]
     fn s17_unavailable_ancestry_is_a_nonclaiming_preparation_failure() {
         let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::SingleSource {
                 source_session: session_id(1),
                 source_frontier: test_frontier(2),
@@ -2572,7 +2605,7 @@ mod tests {
             .checked_next()
             .expect("version two exists");
         let fork = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::SingleSource {
                 source_session: session_id(10),
                 source_frontier: test_frontier(11),

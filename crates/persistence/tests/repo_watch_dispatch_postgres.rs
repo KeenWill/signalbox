@@ -8891,10 +8891,7 @@ async fn a_replayed_commission_returns_its_committed_session() -> Result<(), Box
     let (provenance, defaults) = commissioned_template();
     let ordinary = CreateSession::new_from_template(
         DurableCommandId::from_uuid(Uuid::from_u128(COMMISSION_COMMAND_ID)),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         provenance,
         defaults,
     )

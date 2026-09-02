@@ -16,16 +16,17 @@ use signalbox_domain::{
     CodexCliServiceTier, DangerousToolAutoApproval, DelegateApprovalRecommendation,
     DelegationMessageDirection, DelegationOutcomeKind, DelegationOutcomeReason,
     DelegationTransitionFailure, DelegationWaitMode, DeliveryKind, DescendantTerminationScope,
-    DirectModelSelection, DurableCommandId, EffectiveModelSettings, FastMode, FastModeOverlay,
-    FaultCause, GoalBlockedReasonKind, GoalCommandRejection, GoalEventKind,
+    DirectModelSelection, DispatchingModule, DurableCommandId, EffectiveModelSettings, FastMode,
+    FastModeOverlay, FaultCause, GoalBlockedReasonKind, GoalCommandRejection, GoalEventKind,
     GoalModelBlockedReasonKind, GoalUserAction, InstructionBundleKind,
-    InstructionDiscoveryRootKind, MergeableState, ModelChangeAdjustment, ModelSettingSource,
-    ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier, ProgramCapability,
-    ReactionChange, ReactionSubject, ReasoningLevel, RejectReason, RepoWatchEventKindNameV1,
-    RequestKind, ReviewState, RunnerPlacementLossSource, RunnerSandboxProfile, ScopeOperation,
-    ServiceTier, SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId,
-    SessionInputPosition, SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture,
-    ToolAttemptId, ToolPermissionDefault, ToolRequestId, TurnId, TurnTerminalCause,
+    InstructionDiscoveryRootKind, LifecycleActor, MergeableState, ModelChangeAdjustment,
+    ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier,
+    ProgramCapability, ReactionChange, ReactionSubject, ReasoningLevel, RejectReason,
+    RepoWatchEventKindNameV1, RequestKind, ReviewState, RunnerPlacementLossSource,
+    RunnerSandboxProfile, ScopeOperation, ServiceTier, SessionClosureOutcome,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId, SessionInputPosition,
+    SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture, ToolAttemptId,
+    ToolPermissionDefault, ToolRequestId, TurnId, TurnTerminalCause,
     UpdateSessionPlacementRejectionKind, ValidatedModelSettings, WorkspaceOrigin,
 };
 
@@ -1209,14 +1210,16 @@ pub(crate) fn delegation_outcome_reason_from_str(value: &str) -> Option<Delegati
 /// Closed session-creation cause discriminators stored in PostgreSQL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SessionCreationCauseStorageKind {
-    UserInitiated,
+    Interactive,
+    ModuleDispatched,
     Delegated,
 }
 
 /// Encodes a session-creation cause as its closed PostgreSQL spelling.
 pub(crate) const fn session_creation_cause_to_str(value: &SessionCreationCause) -> &'static str {
     match value {
-        SessionCreationCause::UserInitiated => "user_initiated",
+        SessionCreationCause::Interactive => "interactive",
+        SessionCreationCause::ModuleDispatched { .. } => "module_dispatched",
         SessionCreationCause::Delegated { .. } => "delegated",
     }
 }
@@ -1226,9 +1229,62 @@ pub(crate) fn session_creation_cause_from_str(
     value: &str,
 ) -> Option<SessionCreationCauseStorageKind> {
     match value {
-        "user_initiated" => Some(SessionCreationCauseStorageKind::UserInitiated),
+        "interactive" => Some(SessionCreationCauseStorageKind::Interactive),
+        "module_dispatched" => Some(SessionCreationCauseStorageKind::ModuleDispatched),
         "delegated" => Some(SessionCreationCauseStorageKind::Delegated),
         _ => None,
+    }
+}
+
+/// Encodes the dispatching module of a module-dispatched creation.
+pub(crate) const fn dispatching_module_to_str(value: DispatchingModule) -> &'static str {
+    match value {
+        DispatchingModule::RepositoryWatch => "repo_watch",
+        DispatchingModule::CommissionedDispatch => "commissioned_dispatch",
+    }
+}
+
+/// Decodes the dispatching module of a module-dispatched creation.
+pub(crate) fn dispatching_module_from_str(value: &str) -> Option<DispatchingModule> {
+    match value {
+        "repo_watch" => Some(DispatchingModule::RepositoryWatch),
+        "commissioned_dispatch" => Some(DispatchingModule::CommissionedDispatch),
+        _ => None,
+    }
+}
+
+/// Encodes the outcome that settled a goal generation beneath its session.
+pub(crate) const fn session_closure_outcome_to_str(value: SessionClosureOutcome) -> &'static str {
+    match value {
+        SessionClosureOutcome::FailedRetryable => "failed_retryable",
+        SessionClosureOutcome::FailedStructural => "failed_structural",
+        SessionClosureOutcome::FailedUnknown => "failed_unknown",
+        SessionClosureOutcome::Superseded => "superseded",
+        SessionClosureOutcome::Abandoned => "abandoned",
+        SessionClosureOutcome::Retired => "retired",
+    }
+}
+
+/// Decodes the outcome that settled a goal generation beneath its session.
+pub(crate) fn session_closure_outcome_from_str(value: &str) -> Option<SessionClosureOutcome> {
+    match value {
+        "failed_retryable" => Some(SessionClosureOutcome::FailedRetryable),
+        "failed_structural" => Some(SessionClosureOutcome::FailedStructural),
+        "failed_unknown" => Some(SessionClosureOutcome::FailedUnknown),
+        "superseded" => Some(SessionClosureOutcome::Superseded),
+        "abandoned" => Some(SessionClosureOutcome::Abandoned),
+        "retired" => Some(SessionClosureOutcome::Retired),
+        _ => None,
+    }
+}
+
+/// Encodes the §6 actor classification of one lifecycle transition.
+pub(crate) const fn lifecycle_actor_to_str(value: LifecycleActor) -> &'static str {
+    match value {
+        LifecycleActor::Core { .. } => "core",
+        LifecycleActor::Operator => "operator",
+        LifecycleActor::Module { .. } => "module",
+        LifecycleActor::Watchdog => "watchdog",
     }
 }
 
@@ -1591,6 +1647,7 @@ pub(crate) enum GoalEventDiscriminator {
     Achieved,
     UserStopped,
     Superseded,
+    SessionClosed,
 }
 
 pub(crate) const fn goal_event_kind_to_str(value: &GoalEventKind) -> &'static str {
@@ -1601,6 +1658,7 @@ pub(crate) const fn goal_event_kind_to_str(value: &GoalEventKind) -> &'static st
         GoalEventKind::Achieved { .. } => "achieved",
         GoalEventKind::UserStopped { .. } => "user_stopped",
         GoalEventKind::Superseded { .. } => "superseded",
+        GoalEventKind::SessionClosed { .. } => "session_closed",
     }
 }
 
@@ -1612,6 +1670,7 @@ pub(crate) fn goal_event_kind_from_str(value: &str) -> Option<GoalEventDiscrimin
         "achieved" => Some(GoalEventDiscriminator::Achieved),
         "user_stopped" => Some(GoalEventDiscriminator::UserStopped),
         "superseded" => Some(GoalEventDiscriminator::Superseded),
+        "session_closed" => Some(GoalEventDiscriminator::SessionClosed),
         _ => None,
     }
 }
@@ -3846,9 +3905,9 @@ mod tests {
     fn session_creation_cause_mapping_is_closed() {
         assert_eq!(
             session_creation_cause_from_str(session_creation_cause_to_str(
-                &SessionCreationCause::UserInitiated,
+                &SessionCreationCause::Interactive,
             )),
-            Some(SessionCreationCauseStorageKind::UserInitiated)
+            Some(SessionCreationCauseStorageKind::Interactive)
         );
         assert_eq!(
             session_creation_cause_from_str(session_creation_cause_to_str(
@@ -3909,8 +3968,8 @@ mod tests {
     #[test]
     fn storage_spells_the_human_principal_user() {
         assert_eq!(
-            session_creation_cause_to_str(&SessionCreationCause::UserInitiated),
-            "user_initiated"
+            session_creation_cause_to_str(&SessionCreationCause::Interactive),
+            "interactive"
         );
         assert_eq!(
             tool_approval_decision_source_to_str(

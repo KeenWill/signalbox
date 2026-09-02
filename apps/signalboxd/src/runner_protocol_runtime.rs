@@ -2125,7 +2125,7 @@ mod tests {
                 ARBITRARY_RUNNER_SESSION_COMMAND_ID_SEED,
             )),
             SessionCreationProvenance::new(
-                SessionCreationCause::UserInitiated,
+                SessionCreationCause::Interactive,
                 TranscriptAncestry::None,
             ),
             SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(

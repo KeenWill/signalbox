@@ -175,10 +175,7 @@ async fn s24_process_session_summary_page_batches_placement_projection()
     .expect("the later fixture path is non-root");
     let later_creation = CreateSession::new_with_placement(
         DurableCommandId::from_uuid(Uuid::from_u128(0x4e32)),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Alias(alias)),
         later_placement.clone(),
     )
@@ -2748,10 +2745,7 @@ async fn s37_inv003_inv053_process_defaults_read_retains_model_settings_evidence
     .expect("the fixture settings belong to the direct default");
     let creation = CreateSession::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0x3753)),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         defaults.clone(),
     )
     .prepare(session)
@@ -2800,10 +2794,7 @@ async fn s34_inv008_inv012_inv046_system_prompt_rides_the_frozen_defaults_epoch(
     );
     let creation = CreateSession::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xa47)),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         prompted_defaults.clone(),
     )
     .prepare(session)
@@ -2818,10 +2809,7 @@ async fn s34_inv008_inv012_inv046_system_prompt_rides_the_frozen_defaults_epoch(
     );
     let promptless_reuse = CreateSession::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xa47)),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
     )
     .prepare(SessionId::from_uuid(Uuid::from_u128(0xa60)))

@@ -6,11 +6,12 @@ use rust_decimal::Decimal;
 use serde_json::Value;
 use signalbox_application::SessionReader;
 use signalbox_domain::{
-    DirectModelSelection, ModelAlias, ModelSelectionRequest, Session, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, SessionPlacementEventKind, SessionPlacementVersion, SessionReconstitutionFailure,
-    SessionReconstitutionInput, SessionTemplateContentDigest, SessionTemplateName,
-    SessionTemplateProvenance, TranscriptAncestry, VersionedSessionPlacement,
+    CommissionedDispatchId, DirectModelSelection, DispatchingModule, ModelAlias,
+    ModelSelectionRequest, ModuleDispatch, RepoWatchDispatchId, Session,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, SessionId, SessionPlacementEventKind, SessionPlacementVersion,
+    SessionReconstitutionFailure, SessionReconstitutionInput, SessionTemplateContentDigest,
+    SessionTemplateName, SessionTemplateProvenance, TranscriptAncestry, VersionedSessionPlacement,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -173,6 +174,8 @@ pub(crate) async fn load_session_from_connection(
             s.creation_cause AS stored_cause,
             s.ancestry_kind AS stored_ancestry,
             s.spawning_tool_request_id AS stored_spawning_request_id,
+            s.dispatching_module AS stored_dispatching_module,
+            s.dispatch_ref AS stored_dispatch_ref,
             s.template_name AS stored_template_name,
             s.template_content_digest AS stored_template_digest,
             creation.storage_version AS create_storage_version,
@@ -350,6 +353,8 @@ fn decode_complete(
         required(&row, "stored_cause")?,
         ancestry,
         row.try_get("stored_spawning_request_id")?,
+        row.try_get("stored_dispatching_module")?,
+        row.try_get("stored_dispatch_ref")?,
     )?;
     let template_provenance = decode_template_provenance(
         row.try_get("stored_template_name")?,
@@ -635,6 +640,8 @@ fn decode_provenance(
     cause: String,
     ancestry: String,
     spawning_request: Option<Uuid>,
+    dispatching_module: Option<String>,
+    dispatch_ref: Option<Uuid>,
 ) -> Result<SessionCreationProvenance, SessionRepositoryError> {
     if ancestry != NO_ANCESTRY {
         return Err(SessionCorruption::Unsupported {
@@ -650,21 +657,56 @@ fn decode_provenance(
         }
         .into());
     };
-    match (cause_kind, spawning_request) {
-        (SessionCreationCauseStorageKind::UserInitiated, None) => {
+    match (
+        cause_kind,
+        spawning_request,
+        dispatching_module,
+        dispatch_ref,
+    ) {
+        (SessionCreationCauseStorageKind::Interactive, None, None, None) => {
             Ok(SessionCreationProvenance::new(
-                SessionCreationCause::UserInitiated,
+                SessionCreationCause::Interactive,
                 TranscriptAncestry::None,
             ))
         }
-        (SessionCreationCauseStorageKind::Delegated, Some(request)) => Ok(
+        (SessionCreationCauseStorageKind::Delegated, Some(request), None, None) => Ok(
             SessionCreationProvenance::delegated(tool_request_id_from_uuid(request)),
         ),
+        (SessionCreationCauseStorageKind::ModuleDispatched, None, Some(module), Some(dispatch)) => {
+            decode_module_dispatch(&module, dispatch)
+                .map(SessionCreationProvenance::module_dispatched)
+        }
         (
-            SessionCreationCauseStorageKind::UserInitiated
-            | SessionCreationCauseStorageKind::Delegated,
+            SessionCreationCauseStorageKind::Interactive
+            | SessionCreationCauseStorageKind::Delegated
+            | SessionCreationCauseStorageKind::ModuleDispatched,
+            _,
+            _,
             _,
         ) => Err(SessionCorruption::Inconsistent("creation cause provenance").into()),
+    }
+}
+
+/// Rebuilds the exact dispatch a module-dispatched creation names.
+///
+/// The module spelling selects which identity kind the reference is, so a
+/// dispatch identity never silently changes hands between modules.
+fn decode_module_dispatch(
+    module: &str,
+    dispatch: Uuid,
+) -> Result<ModuleDispatch, SessionRepositoryError> {
+    match crate::mapping::dispatching_module_from_str(module) {
+        Some(DispatchingModule::RepositoryWatch) => Ok(ModuleDispatch::RepositoryWatch {
+            dispatch: RepoWatchDispatchId::from_uuid(dispatch),
+        }),
+        Some(DispatchingModule::CommissionedDispatch) => Ok(ModuleDispatch::Commissioned {
+            dispatch: CommissionedDispatchId::from_uuid(dispatch),
+        }),
+        None => Err(SessionCorruption::Unsupported {
+            field: "dispatching module",
+            value: String::from(module),
+        }
+        .into()),
     }
 }
 
@@ -680,10 +722,11 @@ fn validate_imported_creation_provenance(
         .into());
     };
     match (cause_kind, spawning_request) {
-        (SessionCreationCauseStorageKind::UserInitiated, None) => Ok(()),
+        (SessionCreationCauseStorageKind::Interactive, None) => Ok(()),
         (
-            SessionCreationCauseStorageKind::UserInitiated
-            | SessionCreationCauseStorageKind::Delegated,
+            SessionCreationCauseStorageKind::Interactive
+            | SessionCreationCauseStorageKind::Delegated
+            | SessionCreationCauseStorageKind::ModuleDispatched,
             _,
         ) => Err(SessionCorruption::Inconsistent("creation cause provenance").into()),
     }
@@ -793,6 +836,8 @@ mod tests {
             )),
             String::from(NO_ANCESTRY),
             Some(request),
+            None,
+            None,
         )
         .expect("the complete delegated storage shape decodes");
 
@@ -815,6 +860,8 @@ mod tests {
             String::from(session_creation_cause_to_str(&delegated)),
             String::from(NO_ANCESTRY),
             None,
+            None,
+            None,
         )
         .expect_err("delegated provenance without its request is corrupt");
 
@@ -824,17 +871,19 @@ mod tests {
         );
     }
 
-    /// S01 / INV-003: user-initiated storage cannot claim a spawning request.
+    /// S01 / INV-003: interactive storage cannot claim a spawning request.
     #[test]
-    fn s01_inv003_user_initiated_provenance_rejects_spawning_request() {
+    fn s01_inv003_interactive_provenance_rejects_spawning_request() {
         let error = decode_provenance(
             String::from(session_creation_cause_to_str(
-                &SessionCreationCause::UserInitiated,
+                &SessionCreationCause::Interactive,
             )),
             String::from(NO_ANCESTRY),
             Some(spawning_request()),
+            None,
+            None,
         )
-        .expect_err("user-initiated provenance cannot carry delegated authority");
+        .expect_err("interactive provenance cannot carry delegated authority");
 
         assert_eq!(
             corruption(error),
@@ -842,17 +891,17 @@ mod tests {
         );
     }
 
-    /// S28 / INV-003: an imported user-initiated row cannot silently discard
+    /// S28 / INV-003: an imported interactive row cannot silently discard
     /// a contradictory delegated spawning identity.
     #[test]
     fn s28_inv003_imported_provenance_rejects_spawning_request() {
         let error = validate_imported_creation_provenance(
             String::from(session_creation_cause_to_str(
-                &SessionCreationCause::UserInitiated,
+                &SessionCreationCause::Interactive,
             )),
             Some(spawning_request()),
         )
-        .expect_err("imported user-initiated provenance cannot carry a spawning request");
+        .expect_err("imported interactive provenance cannot carry a spawning request");
 
         assert_eq!(
             corruption(error),
@@ -874,6 +923,8 @@ mod tests {
                 )),
                 String::from(NON_NONE_ANCESTRY),
                 Some(spawning_request()),
+                None,
+                None,
             )
             .expect_err("delegated provenance cannot inherit transcript ancestry");
 

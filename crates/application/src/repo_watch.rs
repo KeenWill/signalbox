@@ -3330,7 +3330,7 @@ where
             let command = CreateSession::new_from_template(
                 self.ids.next_command_id(),
                 SessionCreationProvenance::new(
-                    SessionCreationCause::UserInitiated,
+                    SessionCreationCause::Interactive,
                     TranscriptAncestry::None,
                 ),
                 template.provenance,

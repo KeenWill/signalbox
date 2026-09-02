@@ -457,7 +457,7 @@ pub(crate) async fn insert_prepared(
     )
     .bind(session_id_to_uuid(session.id()))
     .bind(session_creation_cause_to_str(
-        &SessionCreationCause::UserInitiated,
+        &SessionCreationCause::Interactive,
     ))
     .bind(NO_ANCESTRY)
     .bind(
@@ -563,7 +563,7 @@ pub(crate) async fn insert_prepared(
     .bind(COMMAND_KIND)
     .bind(WRITTEN_STORAGE_VERSION)
     .bind(session_creation_cause_to_str(
-        &SessionCreationCause::UserInitiated,
+        &SessionCreationCause::Interactive,
     ))
     .bind(NO_ANCESTRY)
     .bind(defaults_version_to_numeric(defaults.version()))
@@ -1019,7 +1019,7 @@ fn decode_provenance(
     ancestry: String,
     spawning_request: Option<Uuid>,
 ) -> Result<SessionCreationProvenance, CreateSessionRepositoryError> {
-    if cause != session_creation_cause_to_str(&SessionCreationCause::UserInitiated) {
+    if cause != session_creation_cause_to_str(&SessionCreationCause::Interactive) {
         return Err(CreateSessionCorruption::Unsupported {
             field: "creation cause",
             value: cause,
@@ -1037,7 +1037,7 @@ fn decode_provenance(
         return Err(CreateSessionCorruption::Inconsistent("creation cause provenance").into());
     }
     Ok(SessionCreationProvenance::new(
-        SessionCreationCause::UserInitiated,
+        SessionCreationCause::Interactive,
         TranscriptAncestry::None,
     ))
 }
@@ -1186,7 +1186,7 @@ mod tests {
     fn s01_inv003_user_initiated_creation_rejects_spawning_request() {
         let error = decode_provenance(
             String::from(session_creation_cause_to_str(
-                &SessionCreationCause::UserInitiated,
+                &SessionCreationCause::Interactive,
             )),
             String::from(NO_ANCESTRY),
             Some(Uuid::from_u128(1)),

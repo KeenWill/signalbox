@@ -127,10 +127,7 @@ fn current_session() -> Result<Session, FixtureError> {
     SessionReconstitutionInput::new(
         session,
         session,
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         session,
         version,
         session,

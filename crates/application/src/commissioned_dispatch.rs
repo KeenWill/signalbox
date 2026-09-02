@@ -192,7 +192,7 @@ impl CommissionDispatchRequest {
         let command = CreateSession::new_from_template(
             self.command_id,
             SessionCreationProvenance::new(
-                SessionCreationCause::UserInitiated,
+                SessionCreationCause::Interactive,
                 TranscriptAncestry::None,
             ),
             template_provenance,

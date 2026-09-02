@@ -3564,7 +3564,8 @@ const fn goal_state_is_pursuing(state: &GoalLifecycleState) -> bool {
         GoalLifecycleState::Blocked { .. }
         | GoalLifecycleState::Achieved { .. }
         | GoalLifecycleState::UserStopped {}
-        | GoalLifecycleState::Superseded { .. } => false,
+        | GoalLifecycleState::Superseded { .. }
+        | GoalLifecycleState::SessionClosed { .. } => false,
     }
 }
 
@@ -3574,7 +3575,8 @@ const fn goal_state_is_blocked(state: &GoalLifecycleState) -> bool {
         GoalLifecycleState::Pursuing {}
         | GoalLifecycleState::Achieved { .. }
         | GoalLifecycleState::UserStopped {}
-        | GoalLifecycleState::Superseded { .. } => false,
+        | GoalLifecycleState::Superseded { .. }
+        | GoalLifecycleState::SessionClosed { .. } => false,
     }
 }
 
@@ -3583,7 +3585,8 @@ const fn goal_state_is_open(state: &GoalLifecycleState) -> bool {
         GoalLifecycleState::Pursuing {} | GoalLifecycleState::Blocked { .. } => true,
         GoalLifecycleState::Achieved { .. }
         | GoalLifecycleState::UserStopped {}
-        | GoalLifecycleState::Superseded { .. } => false,
+        | GoalLifecycleState::Superseded { .. }
+        | GoalLifecycleState::SessionClosed { .. } => false,
     }
 }
 
@@ -3592,7 +3595,8 @@ const fn goal_state_admits_commission(state: &GoalLifecycleState) -> bool {
         GoalLifecycleState::Achieved { .. } | GoalLifecycleState::UserStopped {} => true,
         GoalLifecycleState::Pursuing {}
         | GoalLifecycleState::Blocked { .. }
-        | GoalLifecycleState::Superseded { .. } => false,
+        | GoalLifecycleState::Superseded { .. }
+        | GoalLifecycleState::SessionClosed { .. } => false,
     }
 }
 
