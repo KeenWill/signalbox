@@ -9836,6 +9836,10 @@ mod checked_in_example {
             .expect("the example's commented families activate into a valid version 1 document");
 
         assert_eq!(
+            configuration.adapter_for_provider_model("claude-fable-5-1"),
+            Some(ModelAdapter::Anthropic)
+        );
+        assert_eq!(
             configuration.adapter_for_provider_model("claude-fable-5"),
             Some(ModelAdapter::Anthropic)
         );

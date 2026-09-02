@@ -577,6 +577,23 @@ web_search = "human"
 # selection_id = "c70bd4e1-3699-458c-ae03-310a77763807"
 
 # Anthropic's most capable widely released model. Hard cap: 128000.
+#
+# This model rejects a forced tool choice, which is how the Anthropic adapter
+# realizes a structured-output contract, so an [approval_judge] selection
+# naming this row would fail every judge call at the provider. Until the
+# adapter can declare that per model, name a different row there.
+[[models]]
+selection_id = "3aa432ca-488e-4237-ac2b-7496a2ccc2b4"
+target_id = "ba705029-f367-4da8-a0bf-dbc6bf798e17"
+model_family = "anthropic"
+provider_model = "claude-fable-5-1"
+max_output_tokens = 8192
+context_window_tokens = 1000000
+reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+service_tiers = ["auto", "standard_only"]
+
+# The model the row above succeeds, still served at the same per-token
+# standard rates. Hard cap: 128000.
 [[models]]
 selection_id = "c70bd4e1-3699-458c-ae03-310a77763807"
 target_id = "c74d2c41-8c70-4537-ab5d-7bbeac25562a"

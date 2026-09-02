@@ -355,6 +355,132 @@ fn anthropic_cache_read_and_writes_remain_distinct_dimensions() {
     );
 }
 
+/// Fable 5.1 succeeds Fable 5 in the same tier at the same per-token price, so
+/// the succession is only visible in the identities: two separate pinned
+/// releases, each carrying its own rate set, rather than one identity whose
+/// price moved.
+#[test]
+fn fable_5_1_is_a_separate_identity_from_fable_5_at_the_same_standard_rate() {
+    let catalog = bundled_catalog().unwrap();
+
+    let fable_5 = catalog
+        .resolve(
+            Provider::Anthropic,
+            "claude-fable-5",
+            "2026-09-01",
+            CommercialChannel::Api,
+        )
+        .unwrap();
+    let fable_5_1 = catalog
+        .resolve(
+            Provider::Anthropic,
+            "claude-fable-5-1",
+            "2026-09-01",
+            CommercialChannel::Api,
+        )
+        .unwrap();
+
+    assert_eq!(
+        fable_5.resolved_model_id(),
+        Some("anthropic:claude-fable-5")
+    );
+    assert_eq!(
+        fable_5_1.resolved_model_id(),
+        Some("anthropic:claude-fable-5-1")
+    );
+    for (resolution, expected_rate_set) in [
+        (&fable_5, "anth-fable5-standard"),
+        (&fable_5_1, "anth-fable51-standard-cache"),
+    ] {
+        let rate_sets = resolution.price().unwrap().resolved_rate_sets().unwrap();
+        assert_eq!(rate_sets.len(), 1);
+        assert_eq!(rate_sets[0].id, expected_rate_set);
+        assert_eq!(
+            rate_sets[0]
+                .rate(RateDimension::Input, "tier=standard, region=global")
+                .unwrap()
+                .usd_per_million_tokens,
+            Some(Decimal::new(10, 0))
+        );
+        assert_eq!(
+            rate_sets[0]
+                .rate(RateDimension::Output, "tier=standard, region=global")
+                .unwrap()
+                .usd_per_million_tokens,
+            Some(Decimal::new(50, 0))
+        );
+    }
+}
+
+/// The launch-day evidence prices Fable 5.1's cache reads at a quarter of the
+/// otherwise standard cache-read multiplier while the cache writes keep the
+/// ordinary 1.25x and 2x relationship to input. Recording those as separate
+/// dimensions is what keeps the reduction from being read as a change to the
+/// input price.
+#[test]
+fn fable_5_1_records_its_reduced_cache_read_beside_ordinary_cache_writes() {
+    let catalog = bundled_catalog().unwrap();
+
+    let resolution = catalog
+        .resolve(
+            Provider::Anthropic,
+            "claude-fable-5-1",
+            "2026-09-01",
+            CommercialChannel::Api,
+        )
+        .unwrap();
+    let rate_set = &resolution.price().unwrap().resolved_rate_sets().unwrap()[0];
+
+    assert_eq!(
+        rate_set
+            .rate(
+                RateDimension::CachedInput,
+                "tier=standard, ttl=cache_read, region=global"
+            )
+            .unwrap()
+            .usd_per_million_tokens,
+        Some(Decimal::new(25, 2))
+    );
+    assert_eq!(
+        rate_set
+            .rate(
+                RateDimension::CacheWrite,
+                "tier=standard, ttl=5m, region=global"
+            )
+            .unwrap()
+            .usd_per_million_tokens,
+        Some(Decimal::new(125, 1))
+    );
+    assert_eq!(
+        rate_set
+            .rate(
+                RateDimension::CacheWrite,
+                "tier=standard, ttl=1h, region=global"
+            )
+            .unwrap()
+            .usd_per_million_tokens,
+        Some(Decimal::new(20, 0))
+    );
+}
+
+/// A pinned release carries no price before it existed, and the catalog does
+/// not backdate a launch-day rate onto the identity it succeeded.
+#[test]
+fn fable_5_1_is_unknown_before_its_launch_day() {
+    let catalog = bundled_catalog().unwrap();
+
+    let resolution = catalog
+        .resolve(
+            Provider::Anthropic,
+            "claude-fable-5-1",
+            "2026-08-31",
+            CommercialChannel::Api,
+        )
+        .unwrap();
+
+    assert_eq!(resolution, ReferenceResolution::Unknown);
+}
+
 #[test]
 fn uncertain_launch_interval_remains_unknown_before_first_observation() {
     let catalog = bundled_catalog().unwrap();
@@ -655,7 +781,7 @@ fn query_after_the_evidence_horizon_is_unknown() {
         .resolve(
             Provider::Openai,
             "gpt-5.6-sol",
-            "2026-08-25",
+            "2026-09-02",
             CommercialChannel::Api,
         )
         .unwrap();
