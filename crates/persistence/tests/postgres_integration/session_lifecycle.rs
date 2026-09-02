@@ -2088,3 +2088,47 @@ async fn a_closure_cannot_override_a_committed_handoff() -> Result<(), Box<dyn E
     drop(container);
     Ok(())
 }
+
+/// A park cannot install standing evidence that contradicts a decision already
+/// committed: settlement would then refuse the outcome the closure recorded.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_park_cannot_contradict_a_committed_closure() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    let session = creation_session(47);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(47))
+        .await?;
+    activate_first_turn(&pool, session, 47).await?;
+    repository
+        .commit_pending_terminal(
+            session,
+            SessionTerminalOutcome::FailedRetryable {
+                cause: SessionRetryableCause::ProviderTransient,
+            },
+        )
+        .await?;
+
+    let error = repository
+        .park(
+            session,
+            SessionParkCause::StructuralFailure,
+            SessionParkResponder::Operator,
+            Some(SessionFailureCause::Structural(
+                SessionStructuralCause::BrokenToolchain,
+            )),
+            LifecycleActor::Operator,
+        )
+        .await
+        .expect_err("the park would strand the committed decision");
+
+    assert_eq!(
+        lifecycle_rejection(error),
+        SessionLifecycleRejection::StandingCauseMismatch
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

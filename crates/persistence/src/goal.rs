@@ -386,17 +386,21 @@ impl GoalRepository {
                 .await?;
         }
 
+        let session_exists = lock_session(&mut transaction, command.session()).await?;
+
         // An automatic resume names the block it answers; a park taken since is
         // the same "the lineage moved under us" case, and lifting it would undo
-        // an operator hold and schedule new model work. An operator's own
-        // resume names no expected head and still lifts the park.
-        if expected_head.is_some() && session_is_parked(&mut transaction, command.session()).await?
+        // an operator hold and schedule new model work. Read under the session
+        // lock, so a park cannot commit between the decision and the resume.
+        // An operator's own resume names no expected head and still lifts it.
+        if session_exists
+            && expected_head.is_some()
+            && session_is_parked(&mut transaction, command.session()).await?
         {
             transaction.rollback().await?;
             return Ok(GoalCommandHandlingOutcome::LineageMoved);
         }
 
-        let session_exists = lock_session(&mut transaction, command.session()).await?;
         let mut result = if !session_exists {
             GoalCommandResult::Rejected(GoalCommandRejection::SessionNotFound)
         } else {

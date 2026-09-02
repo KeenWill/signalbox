@@ -351,6 +351,19 @@ impl SessionLifecycleRepository {
             responder,
             standing,
         };
+        // A park installs the standing evidence a closure will carry forward,
+        // so it cannot contradict a decision already committed: settlement
+        // would then refuse the outcome the closure had recorded.
+        if held
+            .pending_terminal
+            .is_some_and(|committed| !closure_carries_standing_cause(&parked, committed))
+        {
+            return Err(reject(
+                transaction,
+                SessionLifecycleRejection::StandingCauseMismatch,
+            )
+            .await);
+        }
         write_state(&mut transaction, &held, parked, actor).await?;
         commit(transaction).await?;
         Ok(parked)
