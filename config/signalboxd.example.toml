@@ -928,9 +928,9 @@ service_tiers = ["auto", "standard_only"]
 # context_window_tokens = 121600
 # reasoning_levels = ["low", "medium", "high", "xhigh"]
 
-# Claude Code catalog, extracted on 2026-08-06 from the model catalog embedded
-# in the pinned 2.1.258 command-line program, with the provider's published
-# documentation for the subscription behavior around it.
+# Claude Code catalog, extracted from the model catalog embedded in the pinned
+# 2.1.258 command-line program, with the provider's published documentation for
+# the subscription behavior around it.
 #
 # These rows name the aliases the program accepts for `--model` — its own
 # surface, unrelated to the client-facing `[[aliases]]` identities below —
