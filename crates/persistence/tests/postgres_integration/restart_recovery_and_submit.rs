@@ -475,7 +475,7 @@ async fn s03_inv032_inv034_startup_recovery_and_outbox_commit_or_roll_back_toget
     .await?;
     assert_eq!(
         rolled_back,
-        ("active".into(), "prepared".into(), 0, 0, Decimal::from(4))
+        ("active".into(), "prepared".into(), 0, 0, Decimal::from(5))
     );
 
     sqlx::query(
@@ -514,7 +514,7 @@ async fn s03_inv032_inv034_startup_recovery_and_outbox_commit_or_roll_back_toget
     .await?;
     assert_eq!(
         committed,
-        ("terminal".into(), "ended".into(), 1, 1, Decimal::from(5))
+        ("terminal".into(), "ended".into(), 1, 1, Decimal::from(6))
     );
 
     pool.close().await;
@@ -658,6 +658,19 @@ async fn s08_s09_inv016_inv034_inv036_restart_reclassifies_pending_steering()
             Uuid::from_u128(0xac2),
             "queued".into(),
         )
+    );
+    let receipt: (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT outcome_kind, delivered_turn_id
+           FROM injection_settled_outbox_event
+          WHERE command_id = $1",
+    )
+    .bind(Uuid::from_u128(0x3c2))
+    .fetch_one(&restarted_pool)
+    .await?;
+    assert_eq!(
+        receipt,
+        (String::from("delivered"), Some(Uuid::from_u128(0xac2))),
+        "reclassification at the restart boundary settles the steering delivered"
     );
     let mut completed_recovery_ids = FixedStartupScanIds::new([], []);
     assert_eq!(

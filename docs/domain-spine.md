@@ -2341,12 +2341,14 @@ impl AcceptedInputLifecycle {
         -> Result<Self, AcceptedInputLifecycleTransitionError>;
     pub fn reclassify_as_turn_origin(self, turn: TurnId, reason: SteeringReclassificationReason)
         -> Result<Self, AcceptedInputLifecycleTransitionError>;
+    pub fn close_not_delivered(self) -> Result<Self, AcceptedInputLifecycleTransitionError>;
     // accessors: id(), disposition()
 }
 
 pub enum AcceptedInputLifecycleTransitionError {
     CannotConsumeAsSteering { lifecycle: AcceptedInputLifecycle },
     CannotReclassifyAsTurnOrigin { lifecycle: AcceptedInputLifecycle },
+    CannotCloseNotDelivered { lifecycle: AcceptedInputLifecycle },
 }
 impl AcceptedInputLifecycleTransitionError {
     pub fn into_lifecycle(self) -> AcceptedInputLifecycle;
@@ -2364,6 +2366,7 @@ pub enum AcceptedInputDisposition {
     PendingSteering { binding: SteeringBinding },
     ConsumedAsSteering { call: ModelCallId },
     ReclassifiedAsTurnOrigin { turn: TurnId, reason: SteeringReclassificationReason },
+    ClosedNotDelivered,
 }
 // transitions on a bare disposition are crate-private; AcceptedInputLifecycle
 // is the public transition boundary
@@ -2655,11 +2658,6 @@ pub enum SubmitInputRejectedResult {
         session: SessionId,
         last: SessionInputPosition,
     },
-    SafePointUnavailableWhileStopping {
-        session: SessionId,
-        active_turn: TurnId,
-        existing_command: DurableCommandId,
-    },
     InterruptAlreadyApplied {
         session: SessionId,
         active_turn: TurnId,
@@ -2788,9 +2786,6 @@ pub struct SubmitInputRejectedUnknownModelAliasReconstitutionInput {
 pub struct SubmitInputRejectedAcceptancePositionExhaustedReconstitutionInput {
     /* public named command, final-position, and optional active-origin facts */
 }
-pub struct SubmitInputRejectedSafePointUnavailableWhileStoppingReconstitutionInput {
-    /* public named command, active-origin, and existing-interrupt facts */
-}
 pub struct SubmitInputRejectedInterruptAlreadyAppliedReconstitutionInput {
     /* public named command, active-origin, and existing-interrupt facts */
 }
@@ -2810,9 +2805,6 @@ impl SubmitInputReconstitutionInput {
     ) -> Self;
     pub fn rejected_attachment_byte_budget_exceeded(
         input: SubmitInputRejectedAttachmentByteBudgetExceededReconstitutionInput,
-    ) -> Self;
-    pub fn rejected_safe_point_unavailable_while_stopping(
-        input: SubmitInputRejectedSafePointUnavailableWhileStoppingReconstitutionInput,
     ) -> Self;
     pub fn rejected_interrupt_already_applied(
         input: SubmitInputRejectedInterruptAlreadyAppliedReconstitutionInput,
@@ -3948,7 +3940,12 @@ impl AcceptedInputTurnFailureIdentities {
         failure_entry: SemanticTranscriptEntryId,
         terminal_frontier: ContextFrontierId,
     ) -> Self;
-    // accessors: failure_entry(), terminal_frontier()
+    pub fn with_pending_steering_reclassifications(
+        self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self;
+    // accessors: failure_entry(), terminal_frontier(),
+    // pending_steering_reclassifications()
 }
 
 pub struct FailedAcceptedInputTurn { /* private */ }
@@ -3967,13 +3964,15 @@ impl PreparedAcceptedInputTurnFailure {
         FailedAcceptedInputTurn,
         SemanticTranscriptEntry,
         ResolvedContextFrontierSnapshot,
+        Box<[ReclassifiedPendingSteeringTurn]>,
     );
-    // accessors: turn(), failure_entry(), terminal_snapshot()
+    // accessors: turn(), failure_entry(), terminal_snapshot(),
+    // reclassified_pending_steering()
 }
 
 pub enum AcceptedInputTurnFailureFailure {
     NoActiveTurn,
-    PendingSteering { accepted_input: AcceptedInputId },
+    PendingSteeringReclassificationMismatch,
     FailureEntryIdentityAlreadyExists,
     TerminalFrontierIdentityAlreadyExists,
     ActiveAttemptCannotEndLost,
@@ -11358,7 +11357,6 @@ impl StaleTurnCandidate {
 pub enum StaleTurnOutcome {
     Terminalized,
     Superseded,
-    BlockedByPendingSteering,
 }
 
 pub struct TurnLivenessLedger { /* private */ }
@@ -13461,7 +13459,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: accepted_input                             | 5                                |
 | domain: delivery_request                           | 2                                |
 | domain: user_content                               | 15                               |
-| domain: submit_input                               | 37                               |
+| domain: submit_input                               | 36                               |
 | domain: queue_order                                | 5 (+1 free fn)                   |
 | domain: repo_watch                                 | 51                               |
 | domain: turn_lifecycle                             | 11                               |
@@ -13486,7 +13484,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
 | domain: workspace_instruction                      | 18                               |
-| **signalbox-domain total**                         | **883 (+12 free fn)**            |
+| **signalbox-domain total**                         | **882 (+12 free fn)**            |
 | application: repo_watch_operations                 | 33 (+2 free fn) (incl. 1 trait)  |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: attention                             | 16 (+6 free fn) (incl. 1 trait)  |

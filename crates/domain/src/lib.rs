@@ -332,7 +332,6 @@ pub use submit_input::{
     SubmitInputRejectedInterruptAlreadyAppliedReconstitutionInput,
     SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstitutionInput,
     SubmitInputRejectedNoActiveTurnReconstitutionInput, SubmitInputRejectedResult,
-    SubmitInputRejectedSafePointUnavailableWhileStoppingReconstitutionInput,
     SubmitInputRejectedSessionNotFoundReconstitutionInput,
     SubmitInputRejectedUnknownModelAliasReconstitutionInput, SubmitInputResult,
     SubmitInputTerminalSourceConstructionInput, SubmitInputTerminalSourceReconstitutionInput,

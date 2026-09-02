@@ -1,5 +1,9 @@
 # Turn lifecycle and scheduling
 
+The injection contract — steering accepted while stopping, watchdog
+reclassification, closure at a committed session terminal, and settlement
+receipts — is verified against this PR (`agent/lifecycle-t7-injection`).
+
 The scheduler occupancy ceiling and metrics, daemon-owned ambiguous-call
 reconciliation, and outer slot-held watchdog coverage were verified against this
 PR (`agent/turn-lifecycle-hardening`). Automatic reconciliation of ambiguous
@@ -783,10 +787,9 @@ and a lap is a membership fixed when it opens — the turns due at that moment.
 Later scans serve the next of those members that are still due, and the lap ends
 when they are exhausted, whereupon the next scan opens a fresh lap over whatever
 is due then. Fixing membership rather than taking whatever is due at each scan
-is what makes the lap finish: a turn can be due forever without ending, one
-holding pending steering is refused every time it is attempted, and turns that
-become due while a lap runs would otherwise be served ahead of the members
-waiting behind them.
+is what makes the lap finish: a turn can be due forever without ending, and
+turns that become due while a lap runs would otherwise be served ahead of the
+members waiting behind them.
 
 What that costs is stated exactly, because it is the one number here that
 depends on population. The staleness bound governs when a turn becomes *due*,
@@ -865,21 +868,14 @@ concurrent pass can be changing, and the ordinary
 row, and the `TurnFailed` outbox event. No terminal state, disposition, or
 direct row edit is introduced for this pass. A revalidation that no longer
 matches the observation, and a preparation the domain refuses, both leave the
-turn untouched for a later pass. Steering pending on the turn is the one refusal
-with a name of its own: every steering row bound to a turn must be closed before
-it terminalizes — the `turn_lifecycle_pending_steering_closed` constraint
-enforces it — and this transition closes none, so the pass reports the turn by
-identity under `turn_liveness_steering_blocks_terminalization` each time its lap
-reaches it, rather than ending it. That is once per lap and not once per scan:
-the turn occupies a slot in every lap it is due for, and reporting it more often
-would mean attempting a terminalization already known to be refused, at the cost
-of slots the turns beside it are waiting for. Such a turn stays wedged; a
-terminalization that also reclassifies its steering into a queued successor is
-an [open question](../open-questions.md#turn-lifecycle). Because the turn ends
-through the ordinary lifecycle write, every trigger watching a turn reach
-`terminal` fires unchanged, so a repository-watch dispatch occupying this
-session releases its singleton and records its requeue obligation without this
-pass naming either.
+turn untouched for a later pass. Steering pending on the turn does not refuse
+it: the transition reclassifies every pending row into a queued successor
+origin, exactly as the interrupt and model-call terminal paths do, so the
+`turn_lifecycle_pending_steering_closed` constraint is satisfied and the
+injection settles `delivered`. Because the turn ends through the ordinary
+lifecycle write, every trigger watching a turn reach `terminal` fires unchanged,
+so a repository-watch dispatch occupying this session releases its singleton and
+records its requeue obligation without this pass naming either.
 
 **Audit.** Terminalization emits a key-bearing operator log line carrying the
 cause code `turn_liveness_watchdog_stale` with the session, the turn, and the
@@ -1109,7 +1105,13 @@ The occupied-slot delivery outcomes implemented here are:
   origin turn that inherits the source turn's configuration
   (`queued_input_origin.source_configuration_turn_id`). At the next model-call
   preparation, every pending input is consumed under the atomic boundary in
-  [model-call-execution](model-call-execution.md) (INV-036).
+  [model-call-execution](model-call-execution.md) (INV-036). A session closure
+  committed while steering is pending closes it `closed_not_delivered` instead;
+  no successor turn can exist. Every accepted input settles one
+  `injection_settled` receipt: an origin `delivered` to its turn at acceptance,
+  steering `delivered` when consumed or reclassified, `not_delivered` when
+  closed, and every recorded rejection `rejected` with its kind
+  ([session-lifecycle](../proposals/session-lifecycle.md) §8).
 - `AfterCurrentTurn` creates an ordinary queued origin turn with frozen
   configuration and an immutable acceptance position; it fixes no predecessor
   until eligibility. While the source turn holds the slot it cannot activate.
@@ -1139,8 +1141,9 @@ The occupied-slot delivery outcomes implemented here are:
   revalidates the exact expected active turn under the scheduler lock and
   records `ActiveTurnMismatch`, or `NoActiveTurn` when the winning decision left
   the slot empty, if a racing decision won. A next-safe-point request against a
-  stopping turn records `SafePointUnavailableWhileStopping`; equal interrupt
-  replay returns the original applied result. A distinct later interrupt records
+  stopping turn is accepted as pending steering and reclassified when the turn
+  terminalizes; equal interrupt replay returns the original applied result. A
+  distinct later interrupt records
   `InterruptAlreadyApplied { active_turn, existing_command }` without accepting
   an input or replacing the existing proof. An interrupt delivered while the
   active turn is parked on a tool-approval wait records
@@ -1613,11 +1616,6 @@ from child transcript state nor depend on process-local wake memory.
   actually did. Provider-evidence resolution remains an
   [open question](../open-questions.md#turn-lifecycle); the tool-attempt
   ambiguity wait keeps its own operator surface deferred with that question.
-- A turn holding pending steering cannot be ended by the liveness watchdog,
-  because the failed-turn transition it reuses closes no steering row. Giving
-  that transition the reclassification the interrupt and model-call terminal
-  paths already perform is an
-  [open question](../open-questions.md#turn-lifecycle).
 - Whether a terminal turn carries a durable cause, which would separate a
   watchdog-ended turn from a restart-recovered one in the rows rather than only
   in the operator log, is an

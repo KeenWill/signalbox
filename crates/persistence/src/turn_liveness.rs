@@ -28,7 +28,7 @@ use crate::mapping::{
 use crate::session::{SessionRepositoryError, load_session_from_connection};
 use crate::startup::{
     StartupScanCorruption, StartupScanIdentityCollision, StartupScanRepositoryError,
-    TransactionDecision, insert_prepared_failure, map_scheduling_error,
+    TransactionDecision, insert_prepared_failure, lost_failure_identities, map_scheduling_error,
     recover_observed_slot_held_in_transaction,
 };
 use crate::submit_input::load_scheduling_projection;
@@ -376,11 +376,15 @@ impl PostgresTurnLivenessRepository {
     /// The observation is revalidated inside the transaction, so a turn that
     /// resumed between the scan and this call is left untouched and reported
     /// [`StaleTurnOutcome::Superseded`].
-    pub async fn terminalize_stale_turn(
+    pub async fn terminalize_stale_turn<Generator>(
         &self,
         candidate: StaleTurnCandidate,
         identities: AcceptedInputTurnFailureIdentities,
-    ) -> Result<StaleTurnOutcome, TurnLivenessRepositoryError> {
+        ids: &mut Generator,
+    ) -> Result<StaleTurnOutcome, TurnLivenessRepositoryError>
+    where
+        Generator: signalbox_application::StartupScanIdGenerator + Send,
+    {
         let mut transaction = optional_timeout(self.bounds.acquire_wait, self.pool.begin())
             .await
             .unwrap_or(Err(sqlx::Error::PoolTimedOut))
@@ -400,6 +404,7 @@ impl PostgresTurnLivenessRepository {
             candidate,
             identities,
             self.bounds.write_lock_wait,
+            ids,
         )
         .await;
         match outcome {
@@ -412,11 +417,8 @@ impl PostgresTurnLivenessRepository {
                 })?;
                 Ok(StaleTurnOutcome::Terminalized)
             }
-            // Neither decided outcome wrote anything, so both roll back.
-            Ok(
-                outcome @ (StaleTurnOutcome::Superseded
-                | StaleTurnOutcome::BlockedByPendingSteering),
-            ) => {
+            // A superseded candidate wrote nothing, so it rolls back.
+            Ok(outcome @ StaleTurnOutcome::Superseded) => {
                 transaction
                     .rollback()
                     .await
@@ -837,12 +839,16 @@ fn decode_outbox_frontier(sequence: Decimal) -> Option<u64> {
     }
 }
 
-async fn terminalize_in_transaction(
+async fn terminalize_in_transaction<Generator>(
     connection: &mut PgConnection,
     candidate: StaleTurnCandidate,
     identities: AcceptedInputTurnFailureIdentities,
     write_lock_wait: Option<Duration>,
-) -> Result<StaleTurnOutcome, TurnLivenessRepositoryError> {
+    ids: &mut Generator,
+) -> Result<StaleTurnOutcome, TurnLivenessRepositoryError>
+where
+    Generator: signalbox_application::StartupScanIdGenerator + Send,
+{
     let locks = sqlx::query(crate::lock_inventory::STARTUP_RECOVERY)
         .bind(session_id_to_uuid(candidate.session()))
         .fetch_one(&mut *connection)
@@ -910,6 +916,7 @@ async fn terminalize_in_transaction(
     let scheduling = load_scheduling_projection(connection, session)
         .await
         .map_err(map_scheduling_error)?;
+    let identities = lost_failure_identities(identities, &scheduling, ids);
     let prepared =
         match scheduling.prepare_active_turn_lost_failure(identities) {
             Ok(prepared) => prepared,
@@ -926,16 +933,8 @@ async fn terminalize_in_transaction(
                 AcceptedInputTurnFailureFailure::NoActiveTurn => {
                     return Ok(StaleTurnOutcome::Superseded);
                 }
-                // The candidate query no longer proves steering absent, so this
-                // refusal is an expected shape rather than an impossible one:
-                // the schema requires every steering row pending on a turn to
-                // be closed before it terminalizes, and this transition closes
-                // none. Reporting it as its own outcome keeps the wedge visible
-                // without claiming inconsistent durable state.
-                AcceptedInputTurnFailureFailure::PendingSteering { .. } => {
-                    return Ok(StaleTurnOutcome::BlockedByPendingSteering);
-                }
-                AcceptedInputTurnFailureFailure::ActiveAttemptCannotEndLost
+                AcceptedInputTurnFailureFailure::PendingSteeringReclassificationMismatch
+                | AcceptedInputTurnFailureFailure::ActiveAttemptCannotEndLost
                 | AcceptedInputTurnFailureFailure::ActiveStartMissing
                 | AcceptedInputTurnFailureFailure::StartingSnapshotMissing
                 | AcceptedInputTurnFailureFailure::TerminalFrontierCannotAppend => {

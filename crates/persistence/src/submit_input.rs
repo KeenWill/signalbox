@@ -62,7 +62,6 @@ use signalbox_domain::{
     SubmitInputRejectedInterruptAlreadyAppliedReconstitutionInput,
     SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstitutionInput,
     SubmitInputRejectedNoActiveTurnReconstitutionInput, SubmitInputRejectedResult,
-    SubmitInputRejectedSafePointUnavailableWhileStoppingReconstitutionInput,
     SubmitInputRejectedSessionNotFoundReconstitutionInput,
     SubmitInputRejectedUnknownModelAliasReconstitutionInput, SubmitInputResult,
     SubmitInputTerminalSourceConstructionInput, SubmitInputTerminalSourceReconstitutionInput,
@@ -893,6 +892,7 @@ where
     {
         let recorded = prepared.result().clone();
         insert_prepared_command(connection, &prepared).await?;
+        settle_injection_receipt(connection, &prepared).await?;
         return Ok(TransactionDecision::Commit(
             SubmitInputHandlingOutcome::Recorded(recorded),
         ));
@@ -6646,11 +6646,15 @@ async fn load_active_acceptance_tail(
                     call: ModelCallId::from_uuid(call),
                 }
             }
+            ("closed_not_delivered", None, None, DeliveryRequest::NextSafePoint { .. }) => {
+                AcceptedInputDisposition::ClosedNotDelivered
+            }
             (
                 "origin_of"
                 | "pending_steering"
                 | "reclassified_as_turn_origin"
-                | "consumed_as_steering",
+                | "consumed_as_steering"
+                | "closed_not_delivered",
                 _,
                 _,
                 _,
@@ -6955,6 +6959,55 @@ async fn insert_prepared_effects(
         mirror_accepted_content_parts(connection, applied.accepted_input()).await?;
     }
 
+    settle_injection_receipt(connection, &prepared).await
+}
+
+/// Settles the command's injection receipt (§8). Pending steering settles at
+/// its boundary; a session that does not exist has no receipt to carry.
+async fn settle_injection_receipt(
+    connection: &mut PgConnection,
+    prepared: &PreparedSubmitInput,
+) -> Result<(), SubmitInputRepositoryError> {
+    let command = prepared.command();
+    let outcome = match prepared.result() {
+        SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(applied)) => {
+            outbox::InjectionOutcomeOutbox::Delivered {
+                turn: Some(applied.turn()),
+            }
+        }
+        SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(_))
+        | SubmitInputResult::Rejected(SubmitInputRejectedResult::SessionNotFound { .. }) => {
+            return Ok(());
+        }
+        SubmitInputResult::Rejected(rejected) => {
+            if matches!(
+                rejected,
+                SubmitInputRejectedResult::AttachmentBlobNotFound { .. }
+                    | SubmitInputRejectedResult::AttachmentByteBudgetExceeded { .. }
+            ) && !sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM session WHERE session_id = $1)",
+            )
+            .bind(session_id_to_uuid(command.session()))
+            .fetch_one(&mut *connection)
+            .await?
+            {
+                return Ok(());
+            }
+            let kind = encode_result(prepared.result(), command.delivery(), command.session())
+                .rejection_kind
+                .ok_or(SubmitInputCorruption::Inconsistent("rejection kind"))?;
+            outbox::InjectionOutcomeOutbox::Rejected { kind }
+        }
+    };
+    outbox::append(
+        connection,
+        OutboxEvent::InjectionSettled {
+            session: command.session(),
+            command: command.command_id(),
+            outcome,
+        },
+    )
+    .await?;
     Ok(())
 }
 
@@ -7460,29 +7513,6 @@ fn encode_result(
             attachment_digest: None,
             attachment_maximum_bytes: None,
         },
-        SubmitInputResult::Rejected(
-            SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
-                session,
-                active_turn,
-                existing_command,
-            },
-        ) => EncodedResult {
-            kind: REJECTED,
-            rejection_kind: Some("safe_point_unavailable_while_stopping"),
-            session: *session,
-            accepted_input: None,
-            turn: None,
-            actual_active_turn: Some(turn_id_to_uuid(*active_turn)),
-            expected_active_turn: None,
-            expected_defaults_version: None,
-            current_defaults_version: None,
-            unknown_alias: None,
-            selected_defaults_version: None,
-            last_position: None,
-            existing_interrupt_command: Some(durable_command_id_to_uuid(*existing_command)),
-            attachment_digest: None,
-            attachment_maximum_bytes: None,
-        },
         SubmitInputResult::Rejected(SubmitInputRejectedResult::InterruptAlreadyApplied {
             session,
             active_turn,
@@ -7905,7 +7935,6 @@ fn related_turn_origin_key(
             Some(
                 "active_turn_present"
                 | "active_turn_mismatch"
-                | "safe_point_unavailable_while_stopping"
                 | "interrupt_already_applied"
                 | "interrupt_unavailable_while_awaiting_approval",
             ),
@@ -9174,10 +9203,8 @@ fn decode_rejected(
     attachment_maximum_bytes: Option<Decimal>,
     existing_interrupt: Option<AppliedInterruptCommandResult>,
 ) -> Result<SubmitInputReconstitutionInput, SubmitInputRepositoryError> {
-    if !matches!(
-        rejection_kind,
-        "safe_point_unavailable_while_stopping" | "interrupt_already_applied"
-    ) && (existing_interrupt_command.is_some() || existing_interrupt.is_some())
+    if rejection_kind != "interrupt_already_applied"
+        && (existing_interrupt_command.is_some() || existing_interrupt.is_some())
     {
         return Err(
             SubmitInputCorruption::Inconsistent("unexpected existing interrupt result").into(),
@@ -9469,50 +9496,6 @@ fn decode_rejected(
                         )?
                         .ok_or(SubmitInputCorruption::Missing("result_last_position"))?,
                         active_turn_origin,
-                    },
-                ),
-            )
-        }
-        "safe_point_unavailable_while_stopping" => {
-            if expected_turn.is_some()
-                || expected_defaults.is_some()
-                || current_defaults.is_some()
-                || unknown_alias.is_some()
-                || selected_defaults.is_some()
-                || last_position.is_some()
-            {
-                return Err(SubmitInputCorruption::Inconsistent(
-                    "stopping safe-point result fields",
-                )
-                .into());
-            }
-            let active_turn = turn_id_from_uuid(actual_turn.ok_or(
-                SubmitInputCorruption::Missing("result_actual_active_turn_id"),
-            )?);
-            let stored_command = durable_command_id_from_uuid(existing_interrupt_command.ok_or(
-                SubmitInputCorruption::Missing("result_existing_interrupt_command_id"),
-            )?)
-            .map_err(|_| {
-                SubmitInputCorruption::Inconsistent("existing interrupt command identity")
-            })?;
-            let interrupt = existing_interrupt.ok_or(SubmitInputCorruption::Missing(
-                "existing interrupt authority",
-            ))?;
-            if stored_command != interrupt.proof().command() {
-                return Err(
-                    SubmitInputCorruption::Inconsistent("existing interrupt command").into(),
-                );
-            }
-            Ok(
-                SubmitInputReconstitutionInput::rejected_safe_point_unavailable_while_stopping(
-                    SubmitInputRejectedSafePointUnavailableWhileStoppingReconstitutionInput {
-                        command,
-                        stored_actor,
-                        result_session,
-                        result_active_turn: active_turn,
-                        active_turn_origin: active_turn_origin
-                            .ok_or(SubmitInputCorruption::Missing("active turn origin"))?,
-                        existing_interrupt: interrupt,
                     },
                 ),
             )

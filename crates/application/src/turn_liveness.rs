@@ -384,14 +384,6 @@ pub enum StaleTurnOutcome {
     Terminalized,
     /// Durable state no longer matched the observation, so nothing changed.
     Superseded,
-    /// Steering is pending on the turn, which no present transition can end.
-    ///
-    /// Terminalizing a turn requires closing every steering input pending on
-    /// it, and the failed-turn transition this pass reuses cannot do that. The
-    /// turn stays wedged, so this outcome exists to report it by identity
-    /// rather than let it pass as an ordinary race — once per lap of the
-    /// terminalization window, which for a large population is far apart.
-    BlockedByPendingSteering,
 }
 
 /// Remembers how long each quiescent turn has stood still.

@@ -23,6 +23,7 @@ use crate::{
         input_position_to_numeric, session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid,
         turn_id_to_uuid, turn_terminal_cause_to_str,
     },
+    model_execution::persist_reclassified_pending_steering,
     model_execution::{
         ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
         fail_tool_crash_in_transaction, insert_snapshot, lock_delegated_turn_terminal_frontier,
@@ -837,6 +838,7 @@ where
         ));
     }
 
+    let identities = lost_failure_identities(identities, &scheduling, ids);
     let prepared = match scheduling.prepare_active_turn_lost_failure(identities) {
         Ok(prepared) => prepared,
         Err(error) => match error.failure() {
@@ -855,7 +857,7 @@ where
                     StartupScanIdentityCollision::TerminalFrontier,
                 ));
             }
-            AcceptedInputTurnFailureFailure::PendingSteering { .. }
+            AcceptedInputTurnFailureFailure::PendingSteeringReclassificationMismatch
             | AcceptedInputTurnFailureFailure::ActiveAttemptCannotEndLost
             | AcceptedInputTurnFailureFailure::ActiveStartMissing
             | AcceptedInputTurnFailureFailure::StartingSnapshotMissing
@@ -881,12 +883,41 @@ where
 /// The startup scan and the liveness watchdog commit the identical transition,
 /// which is what keeps every terminal trigger firing for both; the cause is
 /// what makes the two distinguishable in the rows rather than only in a log.
+/// Proposes one fresh successor turn per steering input pending on the
+/// active turn, so a lost failure reclassifies rather than refuses (§8).
+pub(crate) fn lost_failure_identities<Generator>(
+    identities: AcceptedInputTurnFailureIdentities,
+    scheduling: &signalbox_domain::AcceptedInputSchedulingProjection,
+    ids: &mut Generator,
+) -> AcceptedInputTurnFailureIdentities
+where
+    Generator: StartupScanIdGenerator,
+{
+    let reclassifications = scheduling
+        .active_turn_execution()
+        .map(|execution| {
+            execution
+                .pending_steering()
+                .iter()
+                .map(|pending| {
+                    let accepted_input = pending.accepted_input();
+                    PendingSteeringReclassificationIdentity::new(
+                        accepted_input,
+                        ids.next_reclassified_turn_id(accepted_input),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    identities.with_pending_steering_reclassifications(reclassifications)
+}
+
 pub(crate) async fn insert_prepared_failure(
     connection: &mut PgConnection,
     prepared: PreparedAcceptedInputTurnFailure,
     cause: TurnTerminalCause,
 ) -> Result<signalbox_domain::FailedAcceptedInputTurn, StartupScanRepositoryError> {
-    let (failed, failure_entry, terminal_snapshot) = prepared.into_parts();
+    let (failed, failure_entry, terminal_snapshot, reclassified) = prepared.into_parts();
     let session = failed.session();
     let turn = failed.turn();
     if failure_entry.source_session() != session
@@ -941,6 +972,9 @@ pub(crate) async fn insert_prepared_failure(
     .await?;
 
     insert_snapshot(connection, &terminal_snapshot)
+        .await
+        .map_err(map_model_call_error)?;
+    persist_reclassified_pending_steering(connection, session, turn, &reclassified)
         .await
         .map_err(map_model_call_error)?;
 

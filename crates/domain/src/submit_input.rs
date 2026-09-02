@@ -602,18 +602,6 @@ impl SubmitInput {
                 })
             }
             DeliveryRequest::NextSafePoint { .. } => {
-                if let Some(existing) = existing_interrupt {
-                    return Ok(PreparedSubmitInput {
-                        command: self,
-                        result: SubmitInputResult::Rejected(
-                            SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
-                                session: target_session,
-                                active_turn: actual_active_turn,
-                                existing_command: existing.command(),
-                            },
-                        ),
-                    });
-                }
                 let acceptance_position = match next_acceptance_position(previous_position) {
                     Ok(position) => position,
                     Err(last) => {
@@ -828,18 +816,6 @@ impl SubmitInput {
                 }),
             }),
             DeliveryRequest::NextSafePoint { .. } => {
-                if let Some(existing) = existing_interrupt {
-                    return Ok(PreparedSubmitInput {
-                        command: self,
-                        result: SubmitInputResult::Rejected(
-                            SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
-                                session: target_session,
-                                active_turn: actual_active_turn,
-                                existing_command: existing,
-                            },
-                        ),
-                    });
-                }
                 let acceptance_position = match next_acceptance_position(previous_position) {
                     Ok(position) => position,
                     Err(last) => {
@@ -1383,16 +1359,6 @@ pub enum SubmitInputRejectedResult {
         session: SessionId,
         /// The maximum recorded position.
         last: SessionInputPosition,
-    },
-    /// A safe-point request arrived after interruption had already stopped the
-    /// active attempt from authorizing more semantic work.
-    SafePointUnavailableWhileStopping {
-        /// The target session.
-        session: SessionId,
-        /// The exact active turn retaining the slot.
-        active_turn: TurnId,
-        /// The command whose applied result is already stopping the turn.
-        existing_command: DurableCommandId,
     },
     /// A distinct later interrupt cannot replace the exact proof already
     /// applied to the active turn.
@@ -1968,12 +1934,6 @@ enum SubmitInputReconstitutionFacts {
         result_last_position: SessionInputPosition,
         active_turn_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
     },
-    RejectedSafePointUnavailableWhileStopping {
-        result_session: SessionId,
-        result_active_turn: TurnId,
-        active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
-        existing_interrupt: AppliedInterruptCommandResult,
-    },
     RejectedInterruptAlreadyApplied {
         result_session: SessionId,
         result_active_turn: TurnId,
@@ -2204,23 +2164,6 @@ pub struct SubmitInputRejectedAcceptancePositionExhaustedReconstitutionInput {
     pub result_last_position: SessionInputPosition,
     /// The canonical active-turn origin when the session had active work.
     pub active_turn_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
-}
-
-/// Named facts for reconstructing a safe-point-unavailable rejection.
-#[derive(Clone, Debug)]
-pub struct SubmitInputRejectedSafePointUnavailableWhileStoppingReconstitutionInput {
-    /// The canonical durable command.
-    pub command: SubmitInput,
-    /// The actor spelling stored with the command.
-    pub stored_actor: Actor,
-    /// The target session identity stored in the result.
-    pub result_session: SessionId,
-    /// The authoritative active turn stored in the result.
-    pub result_active_turn: TurnId,
-    /// The canonical origin facts for the active turn.
-    pub active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
-    /// The applied interrupt already stopping the active turn.
-    pub existing_interrupt: AppliedInterruptCommandResult,
 }
 
 /// Named facts for reconstructing an interrupt-already-applied rejection.
@@ -2570,31 +2513,6 @@ impl SubmitInputReconstitutionInput {
                 result_session,
                 result_last_position,
                 active_turn_origin,
-            },
-        }
-    }
-
-    /// Supplies a safe-point rejection and the exact applied interrupt that
-    /// has already stopped its authoritative active turn.
-    pub fn rejected_safe_point_unavailable_while_stopping(
-        input: SubmitInputRejectedSafePointUnavailableWhileStoppingReconstitutionInput,
-    ) -> Self {
-        let SubmitInputRejectedSafePointUnavailableWhileStoppingReconstitutionInput {
-            command,
-            stored_actor,
-            result_session,
-            result_active_turn,
-            active_turn_origin,
-            existing_interrupt,
-        } = input;
-        Self {
-            command,
-            stored_actor,
-            facts: SubmitInputReconstitutionFacts::RejectedSafePointUnavailableWhileStopping {
-                result_session,
-                result_active_turn,
-                active_turn_origin,
-                existing_interrupt,
             },
         }
     }
@@ -3238,48 +3156,6 @@ impl SubmitInputReconstitutionInput {
                     SubmitInputRejectedResult::AcceptancePositionExhausted {
                         session: result_session,
                         last: result_last_position,
-                    },
-                )
-            }
-            SubmitInputReconstitutionFacts::RejectedSafePointUnavailableWhileStopping {
-                result_session,
-                result_active_turn,
-                active_turn_origin,
-                existing_interrupt,
-            } => {
-                if result_session != self.command.session {
-                    return Err(fail(
-                        SubmitInputReconstitutionFailure::ResultSessionMismatch,
-                    ));
-                }
-                if !matches!(
-                    self.command.delivery,
-                    DeliveryRequest::NextSafePoint {
-                        expected_active_turn
-                    } if expected_active_turn == result_active_turn
-                ) {
-                    return Err(fail(
-                        SubmitInputReconstitutionFailure::StoppingRejectionMismatch,
-                    ));
-                }
-                validate_rejection_active_turn_origin(
-                    &self.command,
-                    Some(result_active_turn),
-                    Some(&active_turn_origin),
-                )
-                .map_err(&fail)?;
-                validate_existing_interrupt(
-                    &self.command,
-                    result_active_turn,
-                    existing_interrupt,
-                    None,
-                )
-                .map_err(&fail)?;
-                SubmitInputResult::Rejected(
-                    SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
-                        session: result_session,
-                        active_turn: result_active_turn,
-                        existing_command: existing_interrupt.proof().command(),
                     },
                 )
             }

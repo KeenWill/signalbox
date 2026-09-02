@@ -21,8 +21,8 @@
 use std::{error::Error, fmt, time::Duration};
 
 use signalbox_domain::{
-    CoreAgency, Goal, GoalState, LifecycleActor, SessionClosureOutcome, SessionCreationCause,
-    SessionFailureCause, SessionId, SessionLifecycleState, SessionOwnership,
+    CoreAgency, DurableCommandId, Goal, GoalState, LifecycleActor, SessionClosureOutcome,
+    SessionCreationCause, SessionFailureCause, SessionId, SessionLifecycleState, SessionOwnership,
     SessionOwnershipTransition, SessionParkCause, SessionParkResponder, SessionTerminalOutcome,
     SessionWait, SessionWaitKind, StopStickiness,
 };
@@ -463,6 +463,7 @@ impl SessionLifecycleRepository {
         .bind(encoded.superseded_by)
         .execute(&mut *transaction)
         .await?;
+        close_pending_steering(&mut transaction, session).await?;
         commit(transaction).await
     }
 
@@ -637,8 +638,46 @@ pub(crate) async fn close_in_transaction(
     }
     settle_goal(connection, session, outcome, actor).await?;
     write_state(connection, &held, terminal, actor).await?;
+    close_pending_steering(connection, session).await?;
     record_cleanup_obligation(connection, session, outcome).await?;
     Ok(terminal)
+}
+
+/// Closes every steering input still pending on the session `not_delivered`
+/// (§8) and settles each one's injection receipt. The handoff closes them
+/// too: once a closure is committed no successor turn can exist, so the
+/// turn's settlement reclassifies nothing.
+async fn close_pending_steering(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<(), SessionLifecycleRepositoryError> {
+    let commands: Vec<Option<Uuid>> = sqlx::query_scalar(
+        "WITH closed AS (
+            UPDATE accepted_input
+               SET disposition_kind = 'closed_not_delivered'
+             WHERE session_id = $1
+               AND disposition_kind = 'pending_steering'
+            RETURNING accepting_command_id, acceptance_position
+         )
+         SELECT accepting_command_id
+           FROM closed
+          ORDER BY acceptance_position",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_all(&mut *connection)
+    .await?;
+    for command in commands.into_iter().flatten() {
+        outbox::append(
+            connection,
+            OutboxEvent::InjectionSettled {
+                session,
+                command: DurableCommandId::from_uuid(command),
+                outcome: outbox::InjectionOutcomeOutbox::NotDelivered,
+            },
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn settle_goal(

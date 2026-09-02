@@ -20,6 +20,7 @@ use std::{
 };
 
 use crate::context_frontier::ContextFrontierEntryValidationCache;
+use crate::model_execution::reclassify_pending_steering_inputs;
 use crate::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
     AcceptedInputQueueOrderError, AcceptedInputQueuePriority, AcceptedInputQueueWork,
@@ -29,6 +30,7 @@ use crate::{
     CurrentTurnAttempt, DelegationContent, DelegationWaitMode, DeliveryRequest,
     DirectModelSelection, EndedTurnAttempt, InitialSemanticTranscriptEntryPayload,
     ModelCallDisposition, NonEmptyIssuedOperationRefs, OriginConfiguration,
+    PendingSteeringReclassificationIdentity, ReclassifiedPendingSteeringTurn,
     ReconstitutedImportedSession, ReconstitutedModelCall,
     ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
     SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
@@ -4045,10 +4047,11 @@ impl AcceptedInputEligibilityError {
 }
 
 /// Fresh identities supplied for one failed-terminal startup candidate.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceptedInputTurnFailureIdentities {
     failure_entry: SemanticTranscriptEntryId,
     terminal_frontier: ContextFrontierId,
+    pending_steering_reclassifications: Vec<PendingSteeringReclassificationIdentity>,
 }
 
 impl AcceptedInputTurnFailureIdentities {
@@ -4060,7 +4063,18 @@ impl AcceptedInputTurnFailureIdentities {
         Self {
             failure_entry,
             terminal_frontier,
+            pending_steering_reclassifications: Vec::new(),
         }
+    }
+
+    /// Supplies one fresh successor identity per pending steering input, in
+    /// session acceptance order.
+    pub fn with_pending_steering_reclassifications(
+        mut self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self {
+        self.pending_steering_reclassifications = identities;
+        self
     }
 
     /// Returns the proposed failed-marker identity.
@@ -4071,6 +4085,11 @@ impl AcceptedInputTurnFailureIdentities {
     /// Returns the proposed terminal-frontier identity.
     pub const fn terminal_frontier(&self) -> ContextFrontierId {
         self.terminal_frontier
+    }
+
+    /// Borrows the proposed successor identities for pending steering.
+    pub fn pending_steering_reclassifications(&self) -> &[PendingSteeringReclassificationIdentity] {
+        &self.pending_steering_reclassifications
     }
 }
 
@@ -4135,6 +4154,7 @@ pub struct PreparedAcceptedInputTurnFailure {
     turn: FailedAcceptedInputTurn,
     failure_entry: SemanticTranscriptEntry,
     terminal_snapshot: ResolvedContextFrontierSnapshot,
+    reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
 }
 
 impl PreparedAcceptedInputTurnFailure {
@@ -4153,6 +4173,11 @@ impl PreparedAcceptedInputTurnFailure {
         &self.terminal_snapshot
     }
 
+    /// Borrows the queued successors reclassified from pending steering.
+    pub fn reclassified_pending_steering(&self) -> &[ReclassifiedPendingSteeringTurn] {
+        &self.reclassified_pending_steering
+    }
+
     /// Returns all atomic commit values.
     pub fn into_parts(
         self,
@@ -4160,8 +4185,14 @@ impl PreparedAcceptedInputTurnFailure {
         FailedAcceptedInputTurn,
         SemanticTranscriptEntry,
         ResolvedContextFrontierSnapshot,
+        Box<[ReclassifiedPendingSteeringTurn]>,
     ) {
-        (self.turn, self.failure_entry, self.terminal_snapshot)
+        (
+            self.turn,
+            self.failure_entry,
+            self.terminal_snapshot,
+            self.reclassified_pending_steering,
+        )
     }
 }
 
@@ -4170,11 +4201,8 @@ impl PreparedAcceptedInputTurnFailure {
 pub enum AcceptedInputTurnFailureFailure {
     /// No turn currently owns the session's progressing slot.
     NoActiveTurn,
-    /// A pending steering input keeps the active source turn live.
-    PendingSteering {
-        /// The exact pending accepted input.
-        accepted_input: AcceptedInputId,
-    },
+    /// The supplied successor identities do not match the pending steering.
+    PendingSteeringReclassificationMismatch,
     /// The proposed failed-marker identity is already present.
     FailureEntryIdentityAlreadyExists,
     /// The proposed terminal-frontier identity is already present.
@@ -4203,9 +4231,9 @@ impl AcceptedInputTurnFailureError {
         &self.projection
     }
 
-    /// Returns the unchanged supplied identities.
-    pub const fn identities(&self) -> AcceptedInputTurnFailureIdentities {
-        self.identities
+    /// Borrows the unchanged supplied identities.
+    pub const fn identities(&self) -> &AcceptedInputTurnFailureIdentities {
+        &self.identities
     }
 
     /// Returns the exact preparation failure.
@@ -7447,7 +7475,8 @@ fn reconstitute_active_acceptance_tail(
                     }
                     AcceptedInputDisposition::PendingSteering { .. }
                     | AcceptedInputDisposition::ConsumedAsSteering { .. }
-                    | AcceptedInputDisposition::ReclassifiedAsTurnOrigin { .. } => false,
+                    | AcceptedInputDisposition::ReclassifiedAsTurnOrigin { .. }
+                    | AcceptedInputDisposition::ClosedNotDelivered => false,
                 }
             }
             SessionAcceptanceTailEntryState::RuntimeRelevant => {
@@ -7476,6 +7505,16 @@ fn reconstitute_active_acceptance_tail(
                                     expected_active_turn,
                                 } if expected_active_turn == binding.source_turn()
                                     && expected_active_turn == active
+                            )
+                    }
+                    AcceptedInputDisposition::ClosedNotDelivered => {
+                        !accepted_input_turns.contains_key(&accepted_input)
+                            && !origin_by_position.contains_key(&entry.position)
+                            && matches!(
+                                entry.delivery,
+                                DeliveryRequest::NextSafePoint {
+                                    expected_active_turn,
+                                } if expected_active_turn == active
                             )
                     }
                     AcceptedInputDisposition::ConsumedAsSteering { call } => {
@@ -8186,7 +8225,7 @@ fn prepare_active_turn_lost_failure(
 ) -> Result<PreparedAcceptedInputTurnFailure, AcceptedInputTurnFailureError> {
     let fail = |projection, failure| AcceptedInputTurnFailureError {
         projection: Box::new(projection),
-        identities,
+        identities: identities.clone(),
         failure,
     };
 
@@ -8198,22 +8237,28 @@ fn prepare_active_turn_lost_failure(
     };
     let active = active.clone();
 
-    if let Some(pending) = projection.active_acceptance_tail.as_ref().and_then(|tail| {
-        tail.entries.iter().find_map(|entry| {
-            matches!(
-                entry.accepted_input.disposition(),
-                AcceptedInputDisposition::PendingSteering { .. }
-            )
-            .then_some(entry.accepted_input.id())
-        })
-    }) {
+    let reclassified = match projection.active_turn_execution() {
+        Some(execution) => reclassify_pending_steering_inputs(
+            execution.session(),
+            execution.turn(),
+            execution.pending_steering(),
+            identities.pending_steering_reclassifications(),
+            execution.configuration().effective(),
+        ),
+        None => reclassify_pending_steering_inputs(
+            active.session,
+            active.turn,
+            &[],
+            identities.pending_steering_reclassifications(),
+            active.origin_configuration.effective(),
+        ),
+    };
+    let Ok(reclassified_pending_steering) = reclassified else {
         return Err(fail(
             projection,
-            AcceptedInputTurnFailureFailure::PendingSteering {
-                accepted_input: pending,
-            },
+            AcceptedInputTurnFailureFailure::PendingSteeringReclassificationMismatch,
         ));
-    }
+    };
 
     let failure_ref =
         SemanticTranscriptEntryRef::from_source(active.session, identities.failure_entry);
@@ -8297,6 +8342,7 @@ fn prepare_active_turn_lost_failure(
         turn,
         failure_entry,
         terminal_snapshot,
+        reclassified_pending_steering,
     })
 }
 
@@ -10508,10 +10554,11 @@ mod tests {
         );
     }
 
-    /// INV-016 / INV-034: pending steering is not a stop cause and keeps the
-    /// complete projection unchanged while startup reports deferral.
+    /// INV-016 / INV-034: pending steering is not a stop cause; the lost
+    /// failure reclassifies it into a queued successor, and identities that do
+    /// not match the pending inventory leave the projection unchanged.
     #[test]
-    fn inv016_inv034_pending_steering_defers_lost_failure_unchanged() {
+    fn inv016_inv034_lost_failure_reclassifies_pending_steering() {
         let session = current_session();
         let active = accepted_origin(1);
         let pending = accepted_origin(2);
@@ -10541,27 +10588,45 @@ mod tests {
             .expect("the pending-steering tail is complete");
         let identities =
             AcceptedInputTurnFailureIdentities::new(semantic_entry(500).id(), frontier(600).id());
-        let execution = projection
-            .active_turn_execution()
-            .expect("the active execution retains its complete steering inventory");
-        assert_eq!(execution.pending_steering().len(), 1);
-        assert_eq!(
-            execution.pending_steering()[0].accepted_input(),
-            pending.accepted_input()
-        );
 
         let error = projection
             .clone()
-            .prepare_active_turn_lost_failure(identities)
-            .expect_err("pending steering keeps its source active");
-
+            .prepare_active_turn_lost_failure(identities.clone())
+            .expect_err("pending steering needs a successor identity");
         assert_eq!(error.projection(), &projection);
-        assert_eq!(error.identities(), identities);
+        assert_eq!(error.identities(), &identities);
         assert_eq!(
             error.failure(),
-            AcceptedInputTurnFailureFailure::PendingSteering {
-                accepted_input: pending.accepted_input(),
-            }
+            AcceptedInputTurnFailureFailure::PendingSteeringReclassificationMismatch
+        );
+
+        let successor = turn_id(700);
+        let candidate = projection
+            .prepare_active_turn_lost_failure(identities.with_pending_steering_reclassifications(
+                vec![PendingSteeringReclassificationIdentity::new(
+                    pending.accepted_input(),
+                    successor,
+                )],
+            ))
+            .expect("pending steering is reclassified rather than refused");
+        let [reclassified] = candidate.reclassified_pending_steering() else {
+            panic!("exactly one successor is reclassified");
+        };
+        assert_eq!(reclassified.turn(), successor);
+        assert_eq!(reclassified.source_turn(), active.turn());
+        assert_eq!(
+            reclassified.accepted_input(),
+            &AcceptedInputLifecycle::new(
+                pending.accepted_input(),
+                AcceptedInputDisposition::ReclassifiedAsTurnOrigin {
+                    turn: successor,
+                    reason: crate::SteeringReclassificationReason::NoSafePointBeforeTerminal,
+                },
+            )
+        );
+        assert_eq!(
+            reclassified.order(),
+            AcceptedInputQueueOrder::ordinary(pending.position())
         );
     }
 

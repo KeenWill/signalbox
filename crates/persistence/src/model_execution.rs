@@ -71,7 +71,7 @@ use crate::{
         tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid, turn_terminal_cause_to_str,
     },
     outbox::{
-        self, ModelCallOutboxState, OutboxEvent, ToolBatchOutboxState,
+        self, InjectionOutcomeOutbox, ModelCallOutboxState, OutboxEvent, ToolBatchOutboxState,
         TurnTerminalOutboxDisposition,
     },
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
@@ -7046,7 +7046,7 @@ pub(crate) async fn insert_prepared_call(
         insert_snapshot(connection, snapshot).await?;
     }
     for steering in prepared.consumed_steering() {
-        let rows = sqlx::query(
+        let command: Option<Option<Uuid>> = sqlx::query_scalar(
             "UPDATE accepted_input
                 SET disposition_kind = 'consumed_as_steering',
                     consuming_model_call_id = $1
@@ -7056,16 +7056,27 @@ pub(crate) async fn insert_prepared_call(
                 AND origin_turn_id IS NULL
                 AND consuming_model_call_id IS NULL
                 AND delivery_kind = 'next_safe_point'
-                AND expected_active_turn_id = $4",
+                AND expected_active_turn_id = $4
+            RETURNING accepting_command_id",
         )
         .bind(call.id().into_uuid())
         .bind(steering.accepted_input().id().into_uuid())
         .bind(session_id_to_uuid(prepared.session()))
         .bind(turn_id_to_uuid(prepared.turn()))
-        .execute(&mut *connection)
-        .await?
-        .rows_affected();
-        require_single(rows, "consumed steering accepted input")?;
+        .fetch_optional(&mut *connection)
+        .await?;
+        let command = command.ok_or(ModelCallCorruption::Inconsistent(
+            "consumed steering accepted input",
+        ))?;
+        settle_injection(
+            connection,
+            prepared.session(),
+            command,
+            InjectionOutcomeOutbox::Delivered {
+                turn: Some(prepared.turn()),
+            },
+        )
+        .await?;
     }
     let pinned_rows = sqlx::query(
         "UPDATE turn_lifecycle
@@ -9249,7 +9260,29 @@ async fn persist_refused(
     Ok(())
 }
 
-async fn persist_reclassified_pending_steering(
+/// Settles the injection receipt of one accepted input's command, when the
+/// input was accepted by a command.
+pub(crate) async fn settle_injection(
+    connection: &mut PgConnection,
+    session: SessionId,
+    command: Option<Uuid>,
+    outcome: InjectionOutcomeOutbox,
+) -> Result<(), sqlx::Error> {
+    let Some(command) = command else {
+        return Ok(());
+    };
+    outbox::append(
+        connection,
+        OutboxEvent::InjectionSettled {
+            session,
+            command: DurableCommandId::from_uuid(command),
+            outcome,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn persist_reclassified_pending_steering(
     connection: &mut PgConnection,
     session: SessionId,
     source_turn: TurnId,
@@ -9315,7 +9348,7 @@ async fn persist_reclassified_pending_steering(
             );
         }
 
-        let accepted_rows = sqlx::query(
+        let command: Option<Option<Uuid>> = sqlx::query_scalar(
             "UPDATE accepted_input
                 SET disposition_kind = 'reclassified_as_turn_origin',
                     origin_turn_id = $1
@@ -9325,7 +9358,8 @@ async fn persist_reclassified_pending_steering(
                 AND delivery_kind = 'next_safe_point'
                 AND expected_active_turn_id = $5
                 AND disposition_kind = 'pending_steering'
-                AND origin_turn_id IS NULL",
+                AND origin_turn_id IS NULL
+            RETURNING accepting_command_id",
         )
         .bind(turn_id_to_uuid(successor.turn()))
         .bind(successor.accepted_input().id().into_uuid())
@@ -9334,10 +9368,20 @@ async fn persist_reclassified_pending_steering(
             successor.order().acceptance_position(),
         ))
         .bind(turn_id_to_uuid(source_turn))
-        .execute(&mut *connection)
-        .await?
-        .rows_affected();
-        require_single(accepted_rows, "pending-steering reclassification")?;
+        .fetch_optional(&mut *connection)
+        .await?;
+        let command = command.ok_or(ModelCallCorruption::Inconsistent(
+            "pending-steering reclassification",
+        ))?;
+        settle_injection(
+            connection,
+            session,
+            command,
+            InjectionOutcomeOutbox::Delivered {
+                turn: Some(successor.turn()),
+            },
+        )
+        .await?;
 
         let (frozen_kind, frozen_direct, frozen_alias, frozen_alias_selected) =
             match successor.effective_configuration().model() {

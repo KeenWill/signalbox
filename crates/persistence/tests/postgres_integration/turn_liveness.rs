@@ -177,6 +177,7 @@ async fn a_quiescent_active_turn_terminalizes_as_failed() -> Result<(), Box<dyn 
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x11_100)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x11_101)),
             ),
+            &mut UuidV7StartupScanIdGenerator,
         )
         .await?;
     assert_eq!(outcome, StaleTurnOutcome::Terminalized);
@@ -386,6 +387,7 @@ async fn a_changed_observation_is_superseded() -> Result<(), Box<dyn Error>> {
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x13_100)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x13_101)),
             ),
+            &mut UuidV7StartupScanIdGenerator,
         )
         .await?;
     assert_eq!(outcome, StaleTurnOutcome::Superseded);
@@ -472,18 +474,18 @@ async fn repository_page(pool: &PgPool) -> Result<Box<[StaleTurnCandidate]>, Box
     Ok(page.candidates().to_vec().into_boxed_slice())
 }
 
-/// Steering a wedged turn must not hide it. Nothing consumes a steering input
-/// without a model call to consume it at a safe point, so a steered turn that
-/// is otherwise quiescent stays wedged; it reaches the inventory, and
-/// terminalization reports by identity that no present transition can end it.
+/// Steering a wedged turn must not hide it, and it must not keep the turn
+/// wedged: the watchdog's failed-turn transition reclassifies the pending
+/// steering into a queued successor, which settles the injection `delivered`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn pending_steering_leaves_a_wedged_turn_visible_and_unreachable()
+async fn pending_steering_is_reclassified_when_the_watchdog_ends_its_turn()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = activated_watchdog_session(&pool, 0x15_000).await?;
+    let steering_command = DurableCommandId::from_uuid(Uuid::from_u128(0x15_301));
     let steering = SubmitInput::new(
-        DurableCommandId::from_uuid(Uuid::from_u128(0x15_301)),
+        steering_command,
         fixture.session,
         UserContent::try_text(String::from("steer the wedged turn"))
             .expect("fixture steering content is admitted"),
@@ -521,17 +523,40 @@ async fn pending_steering_leaves_a_wedged_turn_visible_and_unreachable()
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x15_400)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x15_401)),
             ),
+            &mut UuidV7StartupScanIdGenerator,
         )
         .await?;
 
     assert_eq!(candidate.turn(), fixture.turn);
-    assert_eq!(outcome, StaleTurnOutcome::BlockedByPendingSteering);
+    assert_eq!(outcome, StaleTurnOutcome::Terminalized);
     let state: (String,) =
         sqlx::query_as("SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1")
             .bind(fixture.turn.into_uuid())
             .fetch_one(&pool)
             .await?;
-    assert_eq!(state, (String::from("active"),));
+    assert_eq!(state, (String::from("terminal"),));
+    let (disposition, successor, successor_state): (String, Option<Uuid>, Option<String>) =
+        sqlx::query_as(
+            "SELECT accepted.disposition_kind, accepted.origin_turn_id, successor.state_kind
+               FROM accepted_input AS accepted
+               LEFT JOIN turn_lifecycle AS successor
+                 ON successor.turn_id = accepted.origin_turn_id
+              WHERE accepted.accepting_command_id = $1",
+        )
+        .bind(steering_command.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(disposition, "reclassified_as_turn_origin");
+    assert_eq!(successor_state.as_deref(), Some("queued"));
+    let receipt: (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT outcome_kind, delivered_turn_id
+           FROM injection_settled_outbox_event
+          WHERE command_id = $1",
+    )
+    .bind(steering_command.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(receipt, (String::from("delivered"), successor));
 
     pool.close().await;
     drop(container);

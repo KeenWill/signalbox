@@ -2554,3 +2554,132 @@ async fn interrupt_completion_and_restart_races_retain_stop_history() -> Result<
     drop(container);
     Ok(())
 }
+
+/// §8: steering into a stopping turn is accepted, not rejected for state; the
+/// cancellation boundary reclassifies it into a queued successor and settles
+/// it `delivered`, as it settles the interrupt's own origin.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn steering_accepted_while_stopping_is_reclassified_at_cancellation()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7a00;
+    let (fixture, model_repository, _, authorized) =
+        authorize_checkpointed_model_call_with_prepared(&pool, seed).await?;
+    let inputs = SubmitInputRepository::new(pool.clone());
+    let interrupt_command = seed + 19;
+    let steering_command = seed + 30;
+    let successor_turn = TurnId::from_uuid(Uuid::from_u128(seed + 21));
+    let interrupt_outcome = inputs
+        .handle(
+            input_with_delivery(
+                interrupt_command,
+                seed + 1,
+                "stop issued call",
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: fixture.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 20)),
+            Some(successor_turn),
+        )
+        .await?;
+    assert!(matches!(
+        interrupt_outcome,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+
+    let steering_outcome = inputs
+        .handle(
+            input_with_delivery(
+                steering_command,
+                seed + 1,
+                "steer the stopping turn",
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: fixture.turn,
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 31)),
+            None,
+        )
+        .await?;
+    assert!(
+        matches!(
+            steering_outcome,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::PendingSteering(_)
+            ))
+        ),
+        "a stopping turn still accepts steering: {steering_outcome:?}"
+    );
+
+    let reclassified_turn = TurnId::from_uuid(Uuid::from_u128(seed + 32));
+    let terminal = model_repository
+        .apply_terminal_observation(
+            fixture.session,
+            authorized
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::Cancelled),
+            ModelCallTerminalIdentities::PhysicalCancellation(
+                PhysicalCancellationModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 22)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 23)),
+                ),
+            ),
+            |_| reclassified_turn,
+        )
+        .await?;
+    assert!(matches!(terminal, ModelCallTerminalOutcome::Cancelled(_)));
+
+    let receipts: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT receipt.command_id, receipt.outcome_kind, receipt.delivered_turn_id
+           FROM injection_settled_outbox_event AS receipt
+          WHERE receipt.command_id = ANY($1)
+          ORDER BY receipt.event_sequence",
+    )
+    .bind(vec![
+        Uuid::from_u128(interrupt_command),
+        Uuid::from_u128(steering_command),
+    ])
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        receipts,
+        vec![
+            (
+                Uuid::from_u128(interrupt_command),
+                String::from("delivered"),
+                Some(successor_turn.into_uuid()),
+            ),
+            (
+                Uuid::from_u128(steering_command),
+                String::from("delivered"),
+                Some(reclassified_turn.into_uuid()),
+            ),
+        ]
+    );
+    let queued: (String, String) = sqlx::query_as(
+        "SELECT accepted.disposition_kind, successor.state_kind
+           FROM accepted_input AS accepted
+           JOIN turn_lifecycle AS successor ON successor.turn_id = accepted.origin_turn_id
+          WHERE accepted.accepted_input_id = $1",
+    )
+    .bind(Uuid::from_u128(seed + 31))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        queued,
+        (
+            String::from("reclassified_as_turn_origin"),
+            String::from("queued")
+        )
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
