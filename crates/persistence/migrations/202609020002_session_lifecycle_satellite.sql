@@ -1150,12 +1150,16 @@ BEGIN
      ORDER BY live.acceptance_position DESC
      LIMIT 1;
 
-    SELECT event.event_kind, event.blocked_reason, event.generation
-      INTO goal_kind, goal_reason, goal_generation
-      FROM goal_event AS event
-     WHERE event.session_id = subject
-     ORDER BY event.event_ordinal DESC
-     LIMIT 1;
+    -- The goal lineage is read only when it can decide the state: a live turn
+    -- outranks it, and this runs on every turn write.
+    IF live_phase IS NULL THEN
+        SELECT event.event_kind, event.blocked_reason, event.generation
+          INTO goal_kind, goal_reason, goal_generation
+          FROM goal_event AS event
+         WHERE event.session_id = subject
+         ORDER BY event.event_ordinal DESC
+         LIMIT 1;
+    END IF;
 
     IF live_phase IS NOT NULL THEN
         CASE live_phase

@@ -571,11 +571,11 @@ impl QuiescentActiveTurnPage {
 /// exactly the work an operator is holding.
 ///
 /// The ownership bit is deliberately not a second conjunct here. §6 gives an
-/// unmonitored session no watchdog, and adding `owned` would honor that
-/// literally — but it withdraws stale-turn recovery from every conversation at
-/// once, and §13 admits a new guard or fence only with a written check against
-/// the recorded safety-caused incidents. That check belongs with the change
-/// that owns watchdog posture, not with the one that introduces the bit.
+/// unmonitored session no watchdog, which would exclude conversations —
+/// dispatched work is owned and unaffected. What that leaves a conversation is
+/// a dead provider call's turn staying active forever, which also blocks the
+/// session's next input; this scan is what unwedges it. Withdrawing that is a
+/// product decision for the change that owns watchdog posture.
 const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
             active.turn_id,
             active.current_attempt_id,
@@ -648,11 +648,11 @@ const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
 /// exactly the work an operator is holding.
 ///
 /// The ownership bit is deliberately not a second conjunct here. §6 gives an
-/// unmonitored session no watchdog, and adding `owned` would honor that
-/// literally — but it withdraws stale-turn recovery from every conversation at
-/// once, and §13 admits a new guard or fence only with a written check against
-/// the recorded safety-caused incidents. That check belongs with the change
-/// that owns watchdog posture, not with the one that introduces the bit.
+/// unmonitored session no watchdog, which would exclude conversations —
+/// dispatched work is owned and unaffected. What that leaves a conversation is
+/// a dead provider call's turn staying active forever, which also blocks the
+/// session's next input; this scan is what unwedges it. Withdrawing that is a
+/// product decision for the change that owns watchdog posture.
 const SLOT_HELD_ACTIVE_TURNS: &str = "SELECT active.session_id,
             active.turn_id,
             active.current_attempt_id,
