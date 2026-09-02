@@ -142,6 +142,48 @@ async fn drain_dispatched(pool: &PgPool) -> Result<Vec<DispatchedOutboxEvent>, B
     }
 }
 
+/// The stored kind of each delivered event, in delivery order.
+fn dispatched_kind_names(dispatched: &[DispatchedOutboxEvent]) -> Vec<&'static str> {
+    dispatched
+        .iter()
+        .map(|event| match event.kind() {
+            DispatchedOutboxEventKind::SessionCreated(_) => "session_created",
+            DispatchedOutboxEventKind::SessionStateChanged(_) => "session_state_changed",
+            DispatchedOutboxEventKind::SessionTerminal(_) => "session_terminal",
+            DispatchedOutboxEventKind::TurnTerminal { .. } => "turn_terminal",
+            DispatchedOutboxEventKind::GoalChanged(_) => "goal_changed",
+            DispatchedOutboxEventKind::CommandSettled { .. } => "command_settled",
+            DispatchedOutboxEventKind::InjectionSettled { .. } => "injection_settled",
+            DispatchedOutboxEventKind::SessionOwnershipChanged(_) => "session_ownership_changed",
+            DispatchedOutboxEventKind::SessionModelSettingsChanged(_) => {
+                "session_model_settings_changed"
+            }
+            DispatchedOutboxEventKind::TurnModelSettingsResolved(_) => {
+                "turn_model_settings_resolved"
+            }
+            DispatchedOutboxEventKind::InputAccepted { .. } => "input_accepted",
+            DispatchedOutboxEventKind::TurnActivated { .. } => "turn_activated",
+            DispatchedOutboxEventKind::ModelCallTransition { .. } => "model_call_transition",
+            DispatchedOutboxEventKind::ToolBatchTransition { .. } => "tool_batch_transition",
+            DispatchedOutboxEventKind::ToolApprovalDecided { .. } => "tool_approval_decided",
+            DispatchedOutboxEventKind::ContextCompacted { .. } => "context_compacted",
+            DispatchedOutboxEventKind::RunnerStateTransition { .. } => "runner_state_transition",
+            DispatchedOutboxEventKind::DelegationUpdate(_) => "delegation_update",
+            DispatchedOutboxEventKind::DelegationWake(_) => "delegation_wake",
+        })
+        .collect()
+}
+
+/// Where `turn`'s acceptance event sits in the delivered order.
+fn acceptance_position(dispatched: &[DispatchedOutboxEvent], turn: TurnId) -> Option<usize> {
+    dispatched.iter().position(|event| {
+        matches!(
+            event.kind(),
+            DispatchedOutboxEventKind::InputAccepted { turn: accepted, .. } if *accepted == turn
+        )
+    })
+}
+
 #[track_caller]
 fn turn_model_settings_event(event: &DispatchedOutboxEvent) -> &TurnModelSettingsResolved {
     match event.kind() {
@@ -831,36 +873,22 @@ async fn s_goal_inv048_inv053_goal_owned_input_activates_without_a_user_command(
     assert_eq!(accepted_events, 1);
 
     let dispatched = drain_dispatched(&pool).await?;
-    let created = dispatched
-        .first()
-        .expect("the session creation event was offered");
-    assert_eq!(created.session(), Some(session(SESSION)));
-    assert!(matches!(
-        created.kind(),
-        DispatchedOutboxEventKind::SessionCreated(_)
-    ));
-    let settings = dispatched
-        .iter()
-        .find(|event| {
-            matches!(
-                event.kind(),
-                DispatchedOutboxEventKind::TurnModelSettingsResolved(_)
-            )
-        })
-        .expect("the goal settings event was offered");
+    assert_eq!(
+        dispatched_kind_names(&dispatched),
+        [
+            "session_created",
+            "goal_changed",
+            "turn_model_settings_resolved",
+            "input_accepted",
+        ]
+    );
+    assert_eq!(dispatched[0].session(), Some(session(SESSION)));
+    let settings = &dispatched[2];
     assert_eq!(settings.session(), Some(session(SESSION)));
     let settings = turn_model_settings_event(settings);
     assert_eq!(settings.accepted_input(), candidates.accepted_input());
     assert_eq!(settings.turn(), candidates.turn());
-    let accepted = dispatched
-        .iter()
-        .find(|event| {
-            matches!(
-                event.kind(),
-                DispatchedOutboxEventKind::InputAccepted { .. }
-            )
-        })
-        .expect("the goal input acceptance event was offered");
+    let accepted = &dispatched[3];
     assert_eq!(accepted.session(), Some(session(SESSION)));
     assert_eq!(
         accepted.kind(),
@@ -1366,37 +1394,32 @@ async fn inv048_supersede_retires_the_obsolete_queued_turn() -> Result<(), Box<d
     assert_eq!(retired_rows, 1);
 
     let dispatched = drain_dispatched(&pool).await?;
-    let retired = dispatched
-        .iter()
-        .position(|event| {
-            matches!(
-                event.kind(),
-                DispatchedOutboxEventKind::TurnTerminal {
-                    disposition: DispatchedTurnTerminalDisposition::Retired,
-                    ..
-                }
-            )
-        })
-        .expect("the queued goal retirement event was offered");
-    assert_eq!(dispatched[retired].session(), Some(session(SESSION)));
+    // Retirement is published before the replacement's acceptance.
     assert_eq!(
-        dispatched[retired].kind(),
+        dispatched_kind_names(&dispatched),
+        [
+            "session_created",
+            "goal_changed",
+            "turn_model_settings_resolved",
+            "input_accepted",
+            "goal_changed",
+            "turn_terminal",
+            "turn_model_settings_resolved",
+            "input_accepted",
+        ]
+    );
+    assert_eq!(dispatched[5].session(), Some(session(SESSION)));
+    assert_eq!(
+        dispatched[5].kind(),
         &DispatchedOutboxEventKind::TurnTerminal {
             turn: obsolete.turn(),
             disposition: DispatchedTurnTerminalDisposition::Retired,
         }
     );
-    // Retirement is published before the replacement's acceptance.
-    let replacement_accepted = dispatched
-        .iter()
-        .position(|event| {
-            matches!(
-                event.kind(),
-                DispatchedOutboxEventKind::InputAccepted { turn, .. } if *turn == replacement.turn()
-            )
-        })
-        .expect("the replacement acceptance event was offered");
-    assert!(retired < replacement_accepted);
+    assert_eq!(
+        acceptance_position(&dispatched, replacement.turn()),
+        Some(7)
+    );
 
     assert_eq!(activate_goal_turn(&pool, 0xd31).await?, replacement.turn());
 

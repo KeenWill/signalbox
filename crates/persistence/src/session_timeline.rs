@@ -39,6 +39,7 @@ pub enum SessionTimelineCorruption {
     InvalidOrdinal(&'static str),
     Inconsistent(&'static str),
     UnsupportedEventKind(String),
+    UnsupportedTurnDisposition(String),
     ItemProjectionOverflow,
     DetailProjectionOverflow,
     MissingDetailRecord,
@@ -54,6 +55,12 @@ impl fmt::Display for SessionTimelineCorruption {
             }
             Self::UnsupportedEventKind(kind) => {
                 write!(formatter, "unsupported session timeline event kind: {kind}")
+            }
+            Self::UnsupportedTurnDisposition(disposition) => {
+                write!(
+                    formatter,
+                    "unsupported session timeline turn disposition: {disposition}"
+                )
             }
             Self::ItemProjectionOverflow => {
                 formatter.write_str("session timeline item projection overflowed")
@@ -1427,24 +1434,9 @@ fn dispatched_event_kind(kind: &DispatchedOutboxEventKind) -> SessionTimelineEve
         }
         DispatchedOutboxEventKind::InputAccepted { .. } => SessionTimelineEventKind::InputAccepted,
         DispatchedOutboxEventKind::TurnActivated { .. } => SessionTimelineEventKind::TurnActivated,
-        DispatchedOutboxEventKind::TurnTerminal { disposition, .. } => match disposition {
-            DispatchedTurnTerminalDisposition::Completed { .. } => {
-                SessionTimelineEventKind::TurnCompleted
-            }
-            DispatchedTurnTerminalDisposition::Refused { .. } => {
-                SessionTimelineEventKind::TurnRefused
-            }
-            DispatchedTurnTerminalDisposition::Failed { .. } => {
-                SessionTimelineEventKind::TurnFailed
-            }
-            DispatchedTurnTerminalDisposition::Cancelled { .. } => {
-                SessionTimelineEventKind::TurnCancelled
-            }
-            DispatchedTurnTerminalDisposition::ReconciliationRequired { .. } => {
-                SessionTimelineEventKind::TurnReconciliationRequired
-            }
-            DispatchedTurnTerminalDisposition::Retired => SessionTimelineEventKind::GoalTurnRetired,
-        },
+        DispatchedOutboxEventKind::TurnTerminal { disposition, .. } => {
+            terminal_turn_kind(disposition_storage_kind(disposition))
+        }
         DispatchedOutboxEventKind::ModelCallTransition { .. } => {
             SessionTimelineEventKind::ModelCallTransition
         }
@@ -1703,7 +1695,7 @@ fn decode_kind(
     let disposition = match (discriminator, turn_disposition) {
         (OutboxEventDiscriminator::TurnTerminal, Some(disposition)) => {
             Some(turn_disposition_kind_from_str(disposition).ok_or_else(|| {
-                SessionTimelineCorruption::UnsupportedEventKind(disposition.to_owned())
+                SessionTimelineCorruption::UnsupportedTurnDisposition(disposition.to_owned())
             })?)
         }
         (OutboxEventDiscriminator::TurnTerminal, None) | (_, Some(_)) => {
@@ -1733,24 +1725,8 @@ fn decode_kind(
         }
         (OutboxEventDiscriminator::InputAccepted, _) => SessionTimelineEventKind::InputAccepted,
         (OutboxEventDiscriminator::TurnActivated, _) => SessionTimelineEventKind::TurnActivated,
-        (OutboxEventDiscriminator::TurnTerminal, Some(TurnDispositionStorageKind::Completed)) => {
-            SessionTimelineEventKind::TurnCompleted
-        }
-        (OutboxEventDiscriminator::TurnTerminal, Some(TurnDispositionStorageKind::Refused)) => {
-            SessionTimelineEventKind::TurnRefused
-        }
-        (OutboxEventDiscriminator::TurnTerminal, Some(TurnDispositionStorageKind::Failed)) => {
-            SessionTimelineEventKind::TurnFailed
-        }
-        (OutboxEventDiscriminator::TurnTerminal, Some(TurnDispositionStorageKind::Cancelled)) => {
-            SessionTimelineEventKind::TurnCancelled
-        }
-        (
-            OutboxEventDiscriminator::TurnTerminal,
-            Some(TurnDispositionStorageKind::ReconciliationRequired),
-        ) => SessionTimelineEventKind::TurnReconciliationRequired,
-        (OutboxEventDiscriminator::TurnTerminal, Some(TurnDispositionStorageKind::Retired)) => {
-            SessionTimelineEventKind::GoalTurnRetired
+        (OutboxEventDiscriminator::TurnTerminal, Some(disposition)) => {
+            terminal_turn_kind(disposition)
         }
         (OutboxEventDiscriminator::TurnTerminal, None) => {
             return Err(SessionTimelineCorruption::Inconsistent("turn disposition"));
@@ -1775,7 +1751,42 @@ fn decode_kind(
         }
         (OutboxEventDiscriminator::DelegationWake, _) => SessionTimelineEventKind::DelegationWake,
     };
-    Ok((kind, timeline_event_kind_str(discriminator, disposition)))
+    let spelling = timeline_event_kind_str(discriminator, disposition)
+        .ok_or(SessionTimelineCorruption::Inconsistent("turn disposition"))?;
+    Ok((kind, spelling))
+}
+
+/// The timeline kind a `turn_terminal` header projects under.
+const fn terminal_turn_kind(disposition: TurnDispositionStorageKind) -> SessionTimelineEventKind {
+    match disposition {
+        TurnDispositionStorageKind::Completed => SessionTimelineEventKind::TurnCompleted,
+        TurnDispositionStorageKind::Refused => SessionTimelineEventKind::TurnRefused,
+        TurnDispositionStorageKind::Failed => SessionTimelineEventKind::TurnFailed,
+        TurnDispositionStorageKind::Cancelled => SessionTimelineEventKind::TurnCancelled,
+        TurnDispositionStorageKind::ReconciliationRequired => {
+            SessionTimelineEventKind::TurnReconciliationRequired
+        }
+        TurnDispositionStorageKind::Retired => SessionTimelineEventKind::GoalTurnRetired,
+    }
+}
+
+const fn disposition_storage_kind(
+    disposition: &DispatchedTurnTerminalDisposition,
+) -> TurnDispositionStorageKind {
+    match disposition {
+        DispatchedTurnTerminalDisposition::Completed { .. } => {
+            TurnDispositionStorageKind::Completed
+        }
+        DispatchedTurnTerminalDisposition::Refused { .. } => TurnDispositionStorageKind::Refused,
+        DispatchedTurnTerminalDisposition::Failed { .. } => TurnDispositionStorageKind::Failed,
+        DispatchedTurnTerminalDisposition::Cancelled { .. } => {
+            TurnDispositionStorageKind::Cancelled
+        }
+        DispatchedTurnTerminalDisposition::ReconciliationRequired { .. } => {
+            TurnDispositionStorageKind::ReconciliationRequired
+        }
+        DispatchedTurnTerminalDisposition::Retired => TurnDispositionStorageKind::Retired,
+    }
 }
 
 fn nonnegative(value: Decimal, field: &'static str) -> Result<u64, SessionTimelineCorruption> {
@@ -1827,6 +1838,10 @@ mod tests {
         ));
         assert!(matches!(
             decode_kind("turn_terminal", None),
+            Err(SessionTimelineCorruption::Inconsistent(_))
+        ));
+        assert!(matches!(
+            decode_kind("turn_activated", Some("completed")),
             Err(SessionTimelineCorruption::Inconsistent(_))
         ));
     }

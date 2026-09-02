@@ -472,8 +472,8 @@ Representation rules, all enforced in the schema:
   `queued`/`active`/`terminal`, active phase `running`,
   `awaiting_model_call_recovery`, `awaiting_tool_approval`,
   `awaiting_tool_recovery`, or `awaiting_runner_recovery`, terminal disposition
-  `failed`/`completed`/`refused`/`cancelled`/`reconciliation_required`, attempt
-  state `prepared`/`running`/`stop_requested`/`ended` with end variants
+  `failed`/`completed`/`refused`/`cancelled`/`reconciliation_required`/`retired`,
+  attempt state `prepared`/`running`/`stop_requested`/`ended` with end variants
   `without_stop` and `after_cancellation`, and model-call state
   `prepared`/`in_flight`/`cancellation_requested`/`terminal` with terminal
   dispositions `completed`/`known_failed`/`refused`/`cancelled`/`ambiguous`.
@@ -1926,12 +1926,13 @@ that makes a queued goal turn ineligible moves it to `terminal{retired}` and
 appends `turn_terminal{retired}` in the same transaction; supersede appends
 retirement before the replacement `input_accepted`. Dispatch rechecks that the
 named turn is terminal under that disposition. Every goal event appends
-`goal_changed`; an adopt or release appends `session_ownership_changed`; every
-satellite state transition appends `session_state_changed`, or
-`session_terminal` when it closes the session, from the satellite's own trigger.
-`command_settled` and `injection_settled` have their typed records and decoders;
-the command surface and the injection contract emit them. Model-call state
-transitions append `model_call_transition`, tool-round creation appends
+`goal_changed`; an adopt or release appends `session_ownership_changed`; a
+transition into `terminal` appends `session_terminal` from the satellite's own
+trigger. `session_state_changed`, `command_settled`, and `injection_settled` are
+committed unimplemented functionality: each has its typed record and decoder and
+no present surface appends it — the deadline engine, the command surface, and
+the injection contract will. Model-call state transitions append
+`model_call_transition`, tool-round creation appends
 `tool_batch_transition { proposed }`, all-resolved result projection appends
 `tool_batch_transition { results_projected }`, and an external-effect ambiguity
 appends `tool_batch_transition { recovery_required }`. Completion closure

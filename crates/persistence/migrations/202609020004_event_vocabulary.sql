@@ -245,6 +245,18 @@ CREATE TABLE turn_terminal_outbox_event (
     CONSTRAINT turn_terminal_outbox_frontier_fk
         FOREIGN KEY (session_id, terminal_frontier_id)
         REFERENCES context_frontier (owning_session_id, context_frontier_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT turn_terminal_outbox_completion_entry_fk
+        FOREIGN KEY (session_id, completion_entry_id)
+        REFERENCES semantic_transcript_entry (source_session_id, semantic_entry_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT turn_terminal_outbox_failure_entry_fk
+        FOREIGN KEY (session_id, failure_entry_id)
+        REFERENCES semantic_transcript_entry (source_session_id, semantic_entry_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT turn_terminal_outbox_cancellation_entry_fk
+        FOREIGN KEY (session_id, cancellation_entry_id)
+        REFERENCES semantic_transcript_entry (source_session_id, semantic_entry_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
 );
 

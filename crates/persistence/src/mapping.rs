@@ -299,12 +299,13 @@ pub(crate) fn turn_disposition_kind_from_str(value: &str) -> Option<TurnDisposit
 }
 
 /// The timeline spelling of one header: `turn_terminal` projects under its
-/// disposition, every other kind under its own name.
+/// disposition, every other kind under its own name. A `turn_terminal` header
+/// without a disposition has no spelling.
 pub(crate) const fn timeline_event_kind_str(
     kind: OutboxEventDiscriminator,
     disposition: Option<TurnDispositionStorageKind>,
-) -> &'static str {
-    match (kind, disposition) {
+) -> Option<&'static str> {
+    Some(match (kind, disposition) {
         (OutboxEventDiscriminator::TurnTerminal, Some(TurnDispositionStorageKind::Completed)) => {
             TURN_COMPLETED
         }
@@ -324,8 +325,8 @@ pub(crate) const fn timeline_event_kind_str(
         (OutboxEventDiscriminator::TurnTerminal, Some(TurnDispositionStorageKind::Retired)) => {
             GOAL_TURN_RETIRED
         }
-        (OutboxEventDiscriminator::TurnTerminal, None)
-        | (OutboxEventDiscriminator::SessionCreated, _) => SESSION_CREATED,
+        (OutboxEventDiscriminator::TurnTerminal, None) => return None,
+        (OutboxEventDiscriminator::SessionCreated, _) => SESSION_CREATED,
         (OutboxEventDiscriminator::SessionStateChanged, _) => SESSION_STATE_CHANGED,
         (OutboxEventDiscriminator::SessionTerminal, _) => SESSION_TERMINAL,
         (OutboxEventDiscriminator::GoalChanged, _) => GOAL_CHANGED,
@@ -345,7 +346,7 @@ pub(crate) const fn timeline_event_kind_str(
         (OutboxEventDiscriminator::RunnerStateTransition, _) => RUNNER_STATE_TRANSITION,
         (OutboxEventDiscriminator::DelegationUpdate, _) => DELEGATION_UPDATE,
         (OutboxEventDiscriminator::DelegationWake, _) => DELEGATION_WAKE,
-    }
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3391,18 +3392,19 @@ mod tests {
         SessionCreationCauseStorageKind, SessionPlacementRejectionStorageKind,
         SessionPlacementResultStorageKind, StoredModelSettingsError,
         ToolApprovalDecisionSourceStorageKind, ToolAttemptDispositionStorageKind,
-        WorkspaceInstructionAuthorityStorageKind, accepted_input_id_from_uuid,
-        accepted_input_id_to_uuid, active_turn_phase_from_str, active_turn_phase_to_str,
-        approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
-        approval_judge_state_from_str, approval_judge_state_to_str,
-        approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
-        blob_read_rejection_from_str, blob_read_rejection_to_str, bound_child_action_from_str,
-        bound_child_action_to_str, convergence_sweep_decision_outcome,
-        convergence_sweep_failure_from_str, convergence_sweep_failure_outcome,
-        convergence_sweep_failure_to_str, convergence_sweep_operator_need_from_str,
-        convergence_sweep_operator_need_to_str, convergence_sweep_outcome_from_str,
-        convergence_sweep_outcome_to_str, convergence_sweep_state_from_str,
-        convergence_sweep_state_to_str, defaults_version_from_numeric, defaults_version_to_numeric,
+        TurnDispositionStorageKind, WorkspaceInstructionAuthorityStorageKind,
+        accepted_input_id_from_uuid, accepted_input_id_to_uuid, active_turn_phase_from_str,
+        active_turn_phase_to_str, approval_judge_recommendation_from_str,
+        approval_judge_recommendation_to_str, approval_judge_state_from_str,
+        approval_judge_state_to_str, approval_judge_terminal_disposition_from_str,
+        approval_judge_terminal_disposition_to_str, blob_read_rejection_from_str,
+        blob_read_rejection_to_str, bound_child_action_from_str, bound_child_action_to_str,
+        convergence_sweep_decision_outcome, convergence_sweep_failure_from_str,
+        convergence_sweep_failure_outcome, convergence_sweep_failure_to_str,
+        convergence_sweep_operator_need_from_str, convergence_sweep_operator_need_to_str,
+        convergence_sweep_outcome_from_str, convergence_sweep_outcome_to_str,
+        convergence_sweep_state_from_str, convergence_sweep_state_to_str,
+        defaults_version_from_numeric, defaults_version_to_numeric,
         delegation_message_direction_from_str, delegation_message_direction_to_str,
         delegation_outcome_kind_from_str, delegation_outcome_kind_to_str,
         delegation_outcome_reason_from_str, delegation_outcome_reason_to_str,
@@ -3446,7 +3448,8 @@ mod tests {
         tool_approval_decision_source_from_str, tool_approval_decision_source_to_str,
         tool_approval_posture_from_str, tool_approval_posture_to_str,
         tool_attempt_disposition_from_str, tool_attempt_disposition_to_str,
-        tool_permission_default_from_str, tool_permission_default_to_str, turn_id_from_uuid,
+        tool_permission_default_from_str, tool_permission_default_to_str,
+        turn_disposition_kind_from_str, turn_disposition_kind_to_str, turn_id_from_uuid,
         turn_id_to_uuid, workspace_instruction_authority_from_placement_state,
     };
 
@@ -3852,6 +3855,52 @@ mod tests {
             Some(DelegationPolicyStorageKind::Bound)
         );
         assert_eq!(delegation_policy_kind_from_str(UNKNOWN_DISCRIMINATOR), None);
+    }
+
+    /// Every turn-disposition spelling survives a round trip, and only those.
+    ///
+    /// The outbox dispatcher decodes the header's disposition for every
+    /// committed `turn_terminal`, and a spelling it cannot read stalls the
+    /// singleton cursor for every session.
+    #[test]
+    fn turn_disposition_mapping_is_closed() {
+        assert_eq!(
+            turn_disposition_kind_from_str(turn_disposition_kind_to_str(
+                TurnDispositionStorageKind::Completed,
+            )),
+            Some(TurnDispositionStorageKind::Completed)
+        );
+        assert_eq!(
+            turn_disposition_kind_from_str(turn_disposition_kind_to_str(
+                TurnDispositionStorageKind::Refused,
+            )),
+            Some(TurnDispositionStorageKind::Refused)
+        );
+        assert_eq!(
+            turn_disposition_kind_from_str(turn_disposition_kind_to_str(
+                TurnDispositionStorageKind::Failed,
+            )),
+            Some(TurnDispositionStorageKind::Failed)
+        );
+        assert_eq!(
+            turn_disposition_kind_from_str(turn_disposition_kind_to_str(
+                TurnDispositionStorageKind::Cancelled,
+            )),
+            Some(TurnDispositionStorageKind::Cancelled)
+        );
+        assert_eq!(
+            turn_disposition_kind_from_str(turn_disposition_kind_to_str(
+                TurnDispositionStorageKind::ReconciliationRequired,
+            )),
+            Some(TurnDispositionStorageKind::ReconciliationRequired)
+        );
+        assert_eq!(
+            turn_disposition_kind_from_str(turn_disposition_kind_to_str(
+                TurnDispositionStorageKind::Retired,
+            )),
+            Some(TurnDispositionStorageKind::Retired)
+        );
+        assert_eq!(turn_disposition_kind_from_str("goal_turn_retired"), None);
     }
 
     /// Every delegation update spelling survives a round trip, and only those.
