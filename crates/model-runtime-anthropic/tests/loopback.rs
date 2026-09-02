@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use signalbox_model_runtime::{
-    AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, DeliveryMode,
-    FastMode, FastModeTarget, InputTokenCountOutcome, LossCause, ModelCapabilities,
+    AssistantPart, CancellationSignal, CompletionEvidence, CompletionFinish, ConversationMessage,
+    DeliveryMode, FastMode, FastModeTarget, InputTokenCountOutcome, LossCause, ModelCapabilities,
     ModelCapabilityCatalog, ModelCapabilityDefinition, ModelInputTokenCounter, ModelOperation,
     ModelRuntime, ModelSettings, Observation, ObservationFact, PROVIDER_JSON_NESTING_LIMIT,
     PreparationFailure, PreparationOutcome, ProviderErrorKind, ProviderRequestId, ReasoningLevel,
@@ -199,6 +199,18 @@ fn verdict_contract() -> StructuredOutputContract {
     }
 }
 
+/// The completion evidence a terminal report carries, or a failed assertion.
+///
+/// Rule 2 of `docs/agents/testing-style.md` keeps a test body straight-line,
+/// so the refutable destructure lives here rather than in the test.
+#[track_caller]
+fn completion_evidence(report: TerminalReport<String>) -> CompletionEvidence {
+    match report.evidence {
+        TerminalEvidence::Completed(completion) => completion,
+        other => panic!("a canned success response must classify as completed: {other:?}"),
+    }
+}
+
 /// The tool-call identity the canned contract response proposes under.
 const CONTRACT_PROPOSAL_ID: &str = "toolu_c1";
 
@@ -276,11 +288,8 @@ async fn a_contract_named_tool_use_still_decodes_as_the_contract_proposal() {
 
     let (report, _observations) = execute(&runtime, operation, CancellationSignal::never()).await;
 
-    let TerminalEvidence::Completed(completion) = report.evidence else {
-        panic!("a canned contract proposal must classify as completed");
-    };
     assert_eq!(
-        completion.content,
+        completion_evidence(report).content,
         vec![AssistantPart::ToolCall(ToolCallProposal {
             id: ToolCallId::new(CONTRACT_PROPOSAL_ID),
             name: contract.name.clone(),
