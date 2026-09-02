@@ -184,24 +184,11 @@ session_recovering_deadline = "1800s"
 session_blocked_deadline = "259200s"
 # Interval at which a parked session re-raises its operator alert.
 session_parked_renotify_interval = "86400s"
-# Processing latency allowed past an armed expiry before the
-# `nonterminal_past_deadline` alarm counts it. Ordinary timer and commit latency
-# must never trip a zero-target alarm; a missing deadline record always counts.
+# Processing latency allowed past an armed expiry before
+# `nonterminal_past_deadline` counts it; a missing record always counts.
 session_deadline_processing_grace = "120s"
-# How long a dispatched session may stay non-terminal before its week's wall-rate
-# cohort is treated as matured anyway. A cohort is gate-evaluable once no member
-# is both non-terminal and inside this window.
-session_wall_cohort_maturation = "604800s"
 # How often the daemon refreshes the exported lifecycle-metric gauges.
 session_lifecycle_metric_scan_interval = "300s"
-# Consecutive weekly cohorts the substrate-v0 gate requires below target.
-session_gate_weeks = 4
-# The gate's completion-failure threshold, in parts per million: 10%.
-session_completion_failure_rate_threshold_ppm = 100000
-# Wall-rate alarm threshold, in parts per million: 0.1%.
-session_wall_rate_threshold_ppm = 1000
-# `failed_unknown` share alarm threshold, in parts per million: 2%.
-session_failed_unknown_share_threshold_ppm = 20000
 
 # Blob bytes live outside PostgreSQL. Each deployment generates and then keeps
 # one namespace UUID per physical store. Both directories must already exist,

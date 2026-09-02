@@ -6425,6 +6425,17 @@ impl AttentionCursor {
     pub const fn value(self) -> u64;
 }
 
+pub enum AttentionLifecycleState {
+    Created,
+    Dispatched,
+    Active,
+    Waiting,
+    Recovering,
+    Blocked,
+    Parked,
+    Terminal,
+}
+
 pub enum AttentionState {
     Active,
     Queued,
@@ -6434,6 +6445,7 @@ pub enum AttentionState {
     AwaitingToolRecovery,
     AwaitingReconciliation,
     RunnerLost,
+    Parked,
     Idle,
 }
 
@@ -13486,7 +13498,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | **signalbox-domain total**                         | **883 (+12 free fn)**            |
 | application: repo_watch_operations                 | 33 (+2 free fn) (incl. 1 trait)  |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
-| application: attention                             | 16 (+6 free fn) (incl. 1 trait)  |
+| application: attention                             | 17 (+6 free fn) (incl. 1 trait)  |
 | application: blob_derivation                       | 9 (incl. 3 traits)               |
 | application: commissioned_dispatch                 | 6 (incl. 1 trait)                |
 | application: conversation_import                   | 12 (incl. 4 traits)              |
@@ -13519,4 +13531,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop_ports                       | 10 (incl. 3 traits)              |
 | application: turn_liveness                         | 14                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **494 (+34 free fn)**            |
+| **signalbox-application total**                    | **495 (+34 free fn)**            |

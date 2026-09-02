@@ -34,76 +34,34 @@ ALTER TABLE session_lifecycle
 
 --
 -- Deployment policy, the arrangement §1's deadline bounds use: the daemon
--- writes its `[numeric_bounds]` policy here at startup and the views read it.
--- Both value columns null is the `none` marker. Rate thresholds are integer
--- parts per million so a verdict compares exact counts.
+-- writes its `[numeric_bounds]` policy here at startup and the view reads it.
+-- A null bound is the `none` marker.
 --
 
 CREATE TABLE session_lifecycle_metric_bound (
     bound_kind text NOT NULL,
     interval_bound interval,
-    count_bound bigint,
     updated_at timestamp with time zone DEFAULT statement_timestamp() NOT NULL,
 
     CONSTRAINT session_lifecycle_metric_bound_pkey PRIMARY KEY (bound_kind),
 
     CONSTRAINT session_lifecycle_metric_bound_kind_closed CHECK (
-        bound_kind = ANY (ARRAY[
-            'deadline_processing_grace'::text,
-            'wall_cohort_maturation'::text,
-            'gate_weeks'::text,
-            'completion_failure_rate_threshold_ppm'::text,
-            'wall_rate_threshold_ppm'::text,
-            'failed_unknown_share_threshold_ppm'::text
-        ])
+        bound_kind = 'deadline_processing_grace'::text
     ),
 
-    -- Each bound is one kind of number, and the row carries that kind or
-    -- nothing at all.
-    CONSTRAINT session_lifecycle_metric_bound_shape CHECK (
-        ((bound_kind = ANY (ARRAY[
-            'deadline_processing_grace'::text,
-            'wall_cohort_maturation'::text
-         ])) AND (count_bound IS NULL))
-        OR ((bound_kind = ANY (ARRAY[
-            'gate_weeks'::text,
-            'completion_failure_rate_threshold_ppm'::text,
-            'wall_rate_threshold_ppm'::text,
-            'failed_unknown_share_threshold_ppm'::text
-         ])) AND (interval_bound IS NULL))
-    ),
-
-    CONSTRAINT session_lifecycle_metric_bound_nonnegative CHECK (
-        ((interval_bound IS NULL) OR (interval_bound > '0'::interval))
-        AND ((count_bound IS NULL) OR (count_bound >= 0))
+    CONSTRAINT session_lifecycle_metric_bound_positive CHECK (
+        (interval_bound IS NULL) OR (interval_bound > '0'::interval)
     )
 );
 
 INSERT INTO session_lifecycle_metric_bound (bound_kind)
-SELECT kind
-  FROM unnest(ARRAY[
-        'deadline_processing_grace',
-        'wall_cohort_maturation',
-        'gate_weeks',
-        'completion_failure_rate_threshold_ppm',
-        'wall_rate_threshold_ppm',
-        'failed_unknown_share_threshold_ppm'
-       ]) AS kind;
+VALUES ('deadline_processing_grace');
 
 CREATE FUNCTION session_lifecycle_metric_interval(kind text) RETURNS interval
     LANGUAGE sql
     STABLE
     AS $$
     SELECT interval_bound
-      FROM session_lifecycle_metric_bound
-     WHERE bound_kind = kind;
-$$;
-
-CREATE FUNCTION session_lifecycle_metric_count(kind text) RETURNS bigint
-    LANGUAGE sql
-    STABLE
-    AS $$
-    SELECT count_bound
       FROM session_lifecycle_metric_bound
      WHERE bound_kind = kind;
 $$;
@@ -198,31 +156,16 @@ SELECT session_row.session_id,
 
 --
 -- §12's dispatch cohort, for `wall_rate`. A session enters `dispatched` when
--- its first turn is queued (§1), and a turn row's write time is immutable,
--- so the earliest one is the durable dispatch instant; `state_entered_at`
--- moves with every later transition and is not.
+-- its first turn is queued (§1), and a turn row's write time is immutable, so
+-- the earliest one is the durable dispatch instant; `state_entered_at` moves
+-- with every later transition and is not.
 --
--- F9's maturation: a cohort is gate-evaluable once no member is both
--- non-terminal and inside the configured window. Under `none`, only an
--- all-terminal cohort matures.
---
-
--- Every metric read takes a grouped minimum of turn write times; the existing
--- session-prefixed indexes are keyed on acceptance position, so without this
--- the aggregate scans every turn ever written.
-CREATE INDEX turn_lifecycle_by_session_write_time
-    ON turn_lifecycle (session_id, recorded_at);
 
 CREATE VIEW session_lifecycle_dispatch_cohort AS
 SELECT dispatched.session_id,
        session_lifecycle_metric_week(dispatched.dispatched_at) AS dispatch_week,
        dispatched.dispatched_at,
        (lifecycle.state_kind = 'terminal'::text) AS terminal,
-       ((lifecycle.state_kind = 'terminal'::text)
-        OR ((session_lifecycle_metric_interval('wall_cohort_maturation') IS NOT NULL)
-            AND ((dispatched.dispatched_at
-                  + session_lifecycle_metric_interval('wall_cohort_maturation'))
-                 <= clock_timestamp()))) AS matured,
        incidence.recorded_context_compaction_wall AS wall
   FROM (
         SELECT turn.session_id, min(turn.recorded_at) AS dispatched_at
@@ -329,8 +272,7 @@ WITH wall_occurrence AS (
 ), dispatched AS (
     SELECT cohort.dispatch_week AS week,
            count(*) AS cohort_size,
-           count(*) FILTER (WHERE cohort.wall) AS wall,
-           bool_and(cohort.matured) AS matured
+           count(*) FILTER (WHERE cohort.wall) AS wall
       FROM session_lifecycle_dispatch_cohort AS cohort
      GROUP BY cohort.dispatch_week
 ), walls_recorded AS (
@@ -363,7 +305,6 @@ SELECT weeks.week,
        COALESCE(terminal.overflow_finished, 0) AS overflow_finished_count,
        COALESCE(dispatched.cohort_size, 0) AS dispatch_cohort_size,
        COALESCE(dispatched.wall, 0) AS wall_count,
-       COALESCE(dispatched.matured, true) AS wall_cohort_matured,
        COALESCE(walls_recorded.occurrences, 0) AS wall_occurrence_count,
        COALESCE(turn_causes.terminal_turns, 0) AS terminal_turn_count,
        COALESCE(turn_causes.classified_turns, 0) AS classified_terminal_turn_count,

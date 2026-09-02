@@ -939,20 +939,9 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
         "session_deadline_processing_grace",
         NumericBoundKind::Duration,
     ),
-    ("session_wall_cohort_maturation", NumericBoundKind::Duration),
     (
         "session_lifecycle_metric_scan_interval",
         NumericBoundKind::Duration,
-    ),
-    ("session_gate_weeks", NumericBoundKind::Integer),
-    (
-        "session_completion_failure_rate_threshold_ppm",
-        NumericBoundKind::Integer,
-    ),
-    ("session_wall_rate_threshold_ppm", NumericBoundKind::Integer),
-    (
-        "session_failed_unknown_share_threshold_ppm",
-        NumericBoundKind::Integer,
     ),
 ];
 
@@ -4747,12 +4736,7 @@ session_recovering_deadline = "none"
 session_blocked_deadline = "none"
 session_parked_renotify_interval = "none"
 session_deadline_processing_grace = "none"
-session_wall_cohort_maturation = "none"
 session_lifecycle_metric_scan_interval = "none"
-session_gate_weeks = 0
-session_completion_failure_rate_threshold_ppm = 0
-session_wall_rate_threshold_ppm = 0
-session_failed_unknown_share_threshold_ppm = 0
 
 [[credential_profiles]]
 name = "anthropic-primary"

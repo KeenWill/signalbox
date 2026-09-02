@@ -713,22 +713,15 @@ program behind it.
 session that never terminalizes never enters any weekly cohort.
 `nonterminal_past_deadline` counts owned sessions whose armed deadline has
 expired without its transition firing, plus owned sessions holding no armed
-deadline at all — the §1 invariant violation, wired as an alarm with target
-zero. A deadline explicitly configured unbounded (§1) is not counted; a missing
-one is. The 281-session class this specification opens with is visible here, not
-in the headline. A second companion alarm delivers §2's promised
-`failed_unknown` watch: the share of `failed_unknown` in the weekly terminal
-cohort, over the headline's denominator, with a config-sourced threshold — a
-rising unknown rate is a classification regression even while the headline holds
+deadline at all — the §1 invariant violation. A deadline explicitly configured
+unbounded (§1) is not counted; a missing one is. The 281-session class this
+specification opens with is visible here, not in the headline. A second
+companion count delivers §2's promised `failed_unknown` watch: the share of
+`failed_unknown` in the weekly terminal cohort, over the headline's denominator
 (§2, §4).
 
-**Proposed behavior.** The substrate-v0 gate requires
-`session_completion_failure_rate` below the 10% target, sustained across
-consecutive weekly cohorts; the number of weeks is config-sourced. The same
-weeks must hold `nonterminal_past_deadline` at zero: the headline is the gate,
-and the companion alarm is its integrity condition — a cohort thinned by
-sessions stuck outside `terminal` passes nothing. The dispatch re-enable gate
-additionally requires cause classification and cycle budgets to have landed.
+**Proposed behavior.** These metrics are read-only views; targets and the
+decision to start substrate work are owner decisions made outside the daemon.
 
 ## 13. Watchdog and recovery posture
 

@@ -1358,7 +1358,6 @@ async fn run_hub(
                 )
             })
     };
-    let configured_u64 = |field| numeric_bounds.integer(field).flatten();
     let model_exchange_timeout = configured_duration("model_exchange_timeout");
     let codex_cli_version_probe_bound = configured_duration("codex_cli_version_probe_bound")
         .filter(|bound| !bound.is_zero())
@@ -1544,35 +1543,8 @@ async fn run_hub(
         blocked: configured_duration("session_blocked_deadline"),
         parked_renotify: configured_duration("session_parked_renotify_interval"),
     };
-    // A rate cannot exceed a million parts per million, so a threshold above
-    // the scale is a typo that silently disables the check it configures.
-    let configured_ppm = |field| match configured_u64(field) {
-        Some(value) if value > 1_000_000 => Err(erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Static("configured_rate_threshold_exceeds_scale"),
-        )),
-        configured => Ok(configured),
-    };
-    // `"none"` is the spelling for no gate, so a zero window is a typo that
-    // would leave the gate `indeterminate` forever without saying so.
-    let configured_gate_weeks = match configured_u64("session_gate_weeks") {
-        Some(0) => Err(erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Static("configured_gate_weeks_is_zero"),
-        )),
-        configured => Ok(configured),
-    };
     let lifecycle_metric_bounds = LifecycleMetricBounds {
         deadline_processing_grace: configured_duration("session_deadline_processing_grace"),
-        wall_cohort_maturation: configured_duration("session_wall_cohort_maturation"),
-        gate_weeks: configured_gate_weeks?,
-        completion_failure_rate_threshold_ppm: configured_ppm(
-            "session_completion_failure_rate_threshold_ppm",
-        )?,
-        wall_rate_threshold_ppm: configured_ppm("session_wall_rate_threshold_ppm")?,
-        failed_unknown_share_threshold_ppm: configured_ppm(
-            "session_failed_unknown_share_threshold_ppm",
-        )?,
     };
     // A zero interval reaches `tokio::time::interval`, which refuses a zero
     // period by panicking; a spawned task's panic is a runtime defect that

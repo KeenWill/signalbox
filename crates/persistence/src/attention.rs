@@ -5,8 +5,8 @@ use std::{collections::BTreeSet, error::Error, fmt, time::SystemTime};
 use signalbox_application::{
     AttentionAction, AttentionActivity, AttentionActivityKind, AttentionBlockedReason,
     AttentionChanges, AttentionContinuation, AttentionCursor, AttentionGoalBlock,
-    AttentionJudgeFacts, AttentionQuery, AttentionReader, AttentionSnapshot, AttentionSort,
-    AttentionState, AttentionSummary, max_attention_change_items,
+    AttentionJudgeFacts, AttentionLifecycleState, AttentionQuery, AttentionReader,
+    AttentionSnapshot, AttentionSort, AttentionState, AttentionSummary, max_attention_change_items,
     max_attention_goal_summary_characters, max_attention_snapshot_items,
     max_attention_title_characters,
 };
@@ -870,6 +870,7 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
         current_turn: row
             .try_get::<Option<Uuid>, _>("turn_id")?
             .map(TurnId::from_uuid),
+        lifecycle_state: lifecycle_state(session_state),
         active_turn_count,
         queued_turn_count,
         state,
@@ -929,6 +930,9 @@ fn attention_action(
         | AttentionState::RunnerLost
         | AttentionState::Active
         | AttentionState::Queued
+        // A park already reads as the state that waits on a human; naming the
+        // command that lifts it is the web slice's, not this projection's.
+        | AttentionState::Parked
         | AttentionState::Idle => None,
     }
 }
@@ -947,10 +951,9 @@ struct SessionLifecycleProjection<'row> {
 /// Projects one attention state from the durable session state and turn phase.
 ///
 /// A projection, never a second state machine: the goal machine is not
-/// consulted. Where the durable state defers to the turn — `created`,
-/// `dispatched`, `active`, and the `parked` suspension that keeps its phase —
-/// the phase decides, which is the rule the database projection applies when
-/// the session leaves `parked`.
+/// consulted, and every durable state answers for itself. Only `active` is
+/// refined by the turn phase — it is the one state that names the session
+/// rather than what the session is doing.
 ///
 /// A lost runner is read first because it is a placement fact rather than a
 /// state; `recovering{runner}` reaches the same answer through the state.
@@ -978,11 +981,26 @@ fn classify_state(
         SessionLifecycleStateKind::Waiting => classify_wait(session.waiting),
         SessionLifecycleStateKind::Recovering => classify_recovery(session.recovering),
         SessionLifecycleStateKind::Blocked => Ok(AttentionState::Blocked),
-        SessionLifecycleStateKind::Terminal => Ok(AttentionState::Idle),
-        SessionLifecycleStateKind::Created
-        | SessionLifecycleStateKind::Dispatched
-        | SessionLifecycleStateKind::Active
-        | SessionLifecycleStateKind::Parked => classify_turn_phase(turn, phase, terminal),
+        SessionLifecycleStateKind::Parked => Ok(AttentionState::Parked),
+        SessionLifecycleStateKind::Terminal | SessionLifecycleStateKind::Created => {
+            Ok(AttentionState::Idle)
+        }
+        SessionLifecycleStateKind::Dispatched => Ok(AttentionState::Queued),
+        SessionLifecycleStateKind::Active => classify_turn_phase(turn, phase, terminal),
+    }
+}
+
+/// Projects the durable state a summary carries beside its attention reading.
+const fn lifecycle_state(kind: SessionLifecycleStateKind) -> AttentionLifecycleState {
+    match kind {
+        SessionLifecycleStateKind::Created => AttentionLifecycleState::Created,
+        SessionLifecycleStateKind::Dispatched => AttentionLifecycleState::Dispatched,
+        SessionLifecycleStateKind::Active => AttentionLifecycleState::Active,
+        SessionLifecycleStateKind::Waiting => AttentionLifecycleState::Waiting,
+        SessionLifecycleStateKind::Recovering => AttentionLifecycleState::Recovering,
+        SessionLifecycleStateKind::Blocked => AttentionLifecycleState::Blocked,
+        SessionLifecycleStateKind::Parked => AttentionLifecycleState::Parked,
+        SessionLifecycleStateKind::Terminal => AttentionLifecycleState::Terminal,
     }
 }
 
@@ -1021,7 +1039,7 @@ fn classify_recovery(operation: Option<&str>) -> Result<AttentionState, Attentio
     }
 }
 
-/// Projects the attention state the session's own turn phase decides.
+/// Refines `active` by the phase of the turn the session is running.
 fn classify_turn_phase(
     turn: Option<&str>,
     phase: Option<&str>,
@@ -1571,8 +1589,10 @@ mod tests {
         ));
     }
 
+    /// `parked` is the one state that waits on a human, so it reads as itself
+    /// whatever the suspended turn was doing.
     #[test]
-    fn parked_session_projects_the_state_its_suspended_phase_gives() {
+    fn a_parked_session_projects_parked() {
         assert_eq!(
             classify_state(
                 None,
@@ -1582,7 +1602,7 @@ mod tests {
                 None
             )
             .unwrap(),
-            AttentionState::AwaitingApproval
+            AttentionState::Parked
         );
         assert_eq!(
             classify_state(
@@ -1593,7 +1613,73 @@ mod tests {
                 None
             )
             .unwrap(),
-            AttentionState::Active
+            AttentionState::Parked
+        );
+        assert_eq!(
+            classify_state(
+                None,
+                session(SessionLifecycleStateKind::Parked),
+                None,
+                None,
+                None
+            )
+            .unwrap(),
+            AttentionState::Parked
+        );
+    }
+
+    /// Every durable state answers for itself; only `active` asks the turn.
+    #[test]
+    fn only_the_active_state_is_refined_by_its_turn() {
+        assert_eq!(
+            classify_state(
+                None,
+                session(SessionLifecycleStateKind::Dispatched),
+                Some("terminal"),
+                None,
+                Some("completed")
+            )
+            .unwrap(),
+            AttentionState::Queued
+        );
+        assert_eq!(
+            classify_state(
+                None,
+                session(SessionLifecycleStateKind::Created),
+                Some("queued"),
+                None,
+                None
+            )
+            .unwrap(),
+            AttentionState::Idle
+        );
+        assert_eq!(
+            classify_state(
+                None,
+                session(SessionLifecycleStateKind::Active),
+                Some("terminal"),
+                None,
+                Some("reconciliation_required")
+            )
+            .unwrap(),
+            AttentionState::AwaitingReconciliation
+        );
+    }
+
+    /// The summary carries the durable state beside the reading of it.
+    #[test]
+    fn the_summary_carries_the_durable_state_kind() {
+        assert_eq!(
+            lifecycle_state(SessionLifecycleStateKind::Parked),
+            AttentionLifecycleState::Parked
+        );
+        assert_eq!(
+            lifecycle_state(SessionLifecycleStateKind::Waiting),
+            AttentionLifecycleState::Waiting
+        );
+        assert_eq!(
+            lifecycle_state(SessionLifecycleStateKind::Terminal),
+            AttentionLifecycleState::Terminal
         );
     }
 

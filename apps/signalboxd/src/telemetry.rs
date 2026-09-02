@@ -37,7 +37,7 @@ use prometheus::{IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registr
 use signalbox_application::{SchedulerOccupancyObserver, SchedulerOldestInFlightPass};
 use signalbox_model_provider_runtime::ModelCallCauseToken;
 use signalbox_persistence::lifecycle_metrics::{
-    LifecycleGateVerdict, LifecycleMetricsReport, LifecycleRate, LifecycleWeeklyMetrics,
+    LifecycleMetricsReport, LifecycleRate, LifecycleWeeklyMetrics,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -1071,8 +1071,6 @@ pub struct TelemetryMetrics {
     lifecycle_rate_ppm: IntGaugeVec,
     lifecycle_nonterminal_past_deadline: IntGauge,
     lifecycle_export_fresh: IntGauge,
-    lifecycle_alarm_breached: IntGaugeVec,
-    lifecycle_substrate_v0_gate: IntGaugeVec,
 }
 
 impl TelemetryMetrics {
@@ -1118,23 +1116,6 @@ impl TelemetryMetrics {
             "Whether the latest lifecycle metric export succeeded; alerts gate on this.",
         ))
         .map_err(|_| metrics_error())?;
-        let lifecycle_alarm_breached = IntGaugeVec::new(
-            Opts::new(
-                "signalbox_session_lifecycle_alarm_breached",
-                "Whether one configured lifecycle rate alarm is breached by the latest \
-                 complete weekly cohort.",
-            ),
-            &["alarm"],
-        )
-        .map_err(|_| metrics_error())?;
-        let lifecycle_substrate_v0_gate = IntGaugeVec::new(
-            Opts::new(
-                "signalbox_substrate_v0_gate",
-                "Substrate-v0 gate verdict; exactly one verdict series is one.",
-            ),
-            &["verdict"],
-        )
-        .map_err(|_| metrics_error())?;
         let scheduler_occupancy = IntGauge::with_opts(Opts::new(
             "signalbox_scheduler_passes_in_flight",
             "Authoritative scheduler passes currently holding admission slots.",
@@ -1170,12 +1151,6 @@ impl TelemetryMetrics {
             .map_err(|_| metrics_error())?;
         registry
             .register(Box::new(lifecycle_export_fresh.clone()))
-            .map_err(|_| metrics_error())?;
-        registry
-            .register(Box::new(lifecycle_alarm_breached.clone()))
-            .map_err(|_| metrics_error())?;
-        registry
-            .register(Box::new(lifecycle_substrate_v0_gate.clone()))
             .map_err(|_| metrics_error())?;
         registry
             .register(Box::new(scheduler_occupancy.clone()))
@@ -1217,8 +1192,6 @@ impl TelemetryMetrics {
             lifecycle_rate_ppm,
             lifecycle_nonterminal_past_deadline,
             lifecycle_export_fresh,
-            lifecycle_alarm_breached,
-            lifecycle_substrate_v0_gate,
         })
     }
 
@@ -1230,16 +1203,6 @@ impl TelemetryMetrics {
     pub(crate) fn observe_lifecycle_metrics(&self, report: &LifecycleMetricsReport) {
         self.lifecycle_nonterminal_past_deadline
             .set(clamp_gauge(report.nonterminal_past_deadline()));
-        let verdict = report.gate_verdict();
-        self.set_gate_series(LifecycleGateVerdict::Met, verdict);
-        self.set_gate_series(LifecycleGateVerdict::NotMet, verdict);
-        self.set_gate_series(LifecycleGateVerdict::Indeterminate, verdict);
-        self.lifecycle_export_fresh.set(1);
-        self.set_alarm("wall_rate", report.wall_rate_breached());
-        self.set_alarm(
-            "failed_unknown_share",
-            report.failed_unknown_share_breached(),
-        );
         self.set_rate(
             "session_completion_failure_rate",
             report.latest_measured(LifecycleWeeklyMetrics::completion_failure),
@@ -1258,7 +1221,10 @@ impl TelemetryMetrics {
         );
         // The same matured cohort the alarm reads: a gauge on an immature week
         // would still be changing, and would disagree with its own alarm.
-        self.set_rate("wall_rate", report.latest_matured_wall_rate());
+        self.set_rate(
+            "wall_rate",
+            report.latest_measured(LifecycleWeeklyMetrics::wall_rate),
+        );
         self.set_rate(
             "turn_cause_completeness",
             report.latest_measured(LifecycleWeeklyMetrics::turn_cause_completeness),
@@ -1269,46 +1235,10 @@ impl TelemetryMetrics {
         );
     }
 
-    /// Withdraws every judgement the last report supported.
-    ///
-    /// A gate verdict and an alarm are claims about now. When the read behind
-    /// them fails, leaving the series in place would keep advertising `met`
-    /// and an unbreached alarm through an outage, so they are removed rather
-    /// than held; the rates stay, since a rate is a reading of a past week.
-    /// `..._export_fresh` is what an alert gates on.
+    /// Records that the last export failed, so a reader can tell a stale
+    /// series from a current one.
     pub(crate) fn invalidate_lifecycle_metrics(&self) {
         self.lifecycle_export_fresh.set(0);
-        let _ = self
-            .lifecycle_substrate_v0_gate
-            .remove_label_values(&[lifecycle_gate_label(LifecycleGateVerdict::Met)]);
-        let _ = self
-            .lifecycle_substrate_v0_gate
-            .remove_label_values(&[lifecycle_gate_label(LifecycleGateVerdict::NotMet)]);
-        let _ = self
-            .lifecycle_substrate_v0_gate
-            .remove_label_values(&[lifecycle_gate_label(LifecycleGateVerdict::Indeterminate)]);
-        let _ = self
-            .lifecycle_alarm_breached
-            .remove_label_values(&["wall_rate"]);
-        let _ = self
-            .lifecycle_alarm_breached
-            .remove_label_values(&["failed_unknown_share"]);
-    }
-
-    /// Publishes one configured-threshold alarm as a zero-or-one series.
-    ///
-    /// An absent verdict leaves the series where it was.
-    fn set_alarm(&self, alarm: &str, breached: Option<bool>) {
-        let Some(breached) = breached else {
-            return;
-        };
-        let Ok(gauge) = self
-            .lifecycle_alarm_breached
-            .get_metric_with_label_values(&[alarm])
-        else {
-            return;
-        };
-        gauge.set(i64::from(breached));
     }
 
     fn set_rate(&self, metric: &str, rate: Option<LifecycleRate>) {
@@ -1322,16 +1252,6 @@ impl TelemetryMetrics {
             return;
         };
         gauge.set(clamp_gauge(parts_per_million));
-    }
-
-    fn set_gate_series(&self, series: LifecycleGateVerdict, verdict: LifecycleGateVerdict) {
-        let Ok(gauge) = self
-            .lifecycle_substrate_v0_gate
-            .get_metric_with_label_values(&[lifecycle_gate_label(series)])
-        else {
-            return;
-        };
-        gauge.set(i64::from(series == verdict));
     }
 
     pub(crate) fn observe_turn_started(&self) {
@@ -1371,14 +1291,6 @@ impl TelemetryMetrics {
                 .unwrap_or(0),
         );
         TextEncoder::new().encode_to_string(&self.registry.gather())
-    }
-}
-
-const fn lifecycle_gate_label(verdict: LifecycleGateVerdict) -> &'static str {
-    match verdict {
-        LifecycleGateVerdict::Met => "met",
-        LifecycleGateVerdict::NotMet => "not_met",
-        LifecycleGateVerdict::Indeterminate => "indeterminate",
     }
 }
 

@@ -1321,8 +1321,8 @@ message and count validate. This avoids an aggregate frame-size limit.
 
 A successful `read_operator_status` response consists of `operator_status`
 messages: `kind=start`, zero or more rows from each section in this fixed order,
-then `kind=end` with one count per section and the substrate-v0 gate verdict.
-The row kinds are `held_slot`, `queued_obligation`, `pull_request_convergence`,
+then `kind=end` with one count per section. The row kinds are `held_slot`,
+`queued_obligation`, `pull_request_convergence`,
 `pending_stale_review_clearance`, `lifecycle_week`, and
 `lifecycle_deadline_violation`. The daemon reads the four repository-watch views
 bearing those respective concepts and the two session-lifecycle metric views in
@@ -2699,25 +2699,24 @@ line.
 `status` sends exactly one `read_operator_status` request through the configured
 owner-only daemon socket; it never opens the database itself. It validates the
 fixed section order and all six terminal counts before printing anything. The
-first output line names those counts and the gate verdict, followed by one
-human-scannable line per row with `held`, `queued`, `convergence`,
-`stale_review_clearance`, `lifecycle_week`, or `nonterminal_past_deadline` as
-its kind. A `lifecycle_week` line prints each metric as `numerator/denominator`
-and, where the denominator is not zero, the derived rate in parts per million,
-so an absent rate is visibly absent rather than printed as zero. A held line
-prints its dispatch origin as `origin=pull_request#<number>` or
-`origin=branch:<branch>`, naming the fact the slot was taken from under one
-field whichever shape it has. A queued line prints an occupant blocked by an
-independently commissioned live session as `occupying=external:<sessions>`,
-distinguishing it from a watch dispatch, which prints its identity ahead of its
-sessions. A convergence line prints `non_green_count` beside the comma-joined
-`non_green` field, so an empty inventory cannot collide with a check literally
-named `none`. Durations use compact day, hour, minute, and second units.
-Process-derived text uses terminal-safe field escaping unless `--raw-output` is
-selected. The final `model_usage=omitted` line states that no cheap status
-aggregate is available: model usage crosses this protocol only inside each
-complete session transcript, and `status` does not issue one transcript read per
-session.
+first output line names those counts, followed by one human-scannable line per
+row with `held`, `queued`, `convergence`, `stale_review_clearance`,
+`lifecycle_week`, or `nonterminal_past_deadline` as its kind. A `lifecycle_week`
+line prints each metric as `numerator/denominator` and, where the denominator is
+not zero, the derived rate in parts per million, so an absent rate is visibly
+absent rather than printed as zero. A held line prints its dispatch origin as
+`origin=pull_request#<number>` or `origin=branch:<branch>`, naming the fact the
+slot was taken from under one field whichever shape it has. A queued line prints
+an occupant blocked by an independently commissioned live session as
+`occupying=external:<sessions>`, distinguishing it from a watch dispatch, which
+prints its identity ahead of its sessions. A convergence line prints
+`non_green_count` beside the comma-joined `non_green` field, so an empty
+inventory cannot collide with a check literally named `none`. Durations use
+compact day, hour, minute, and second units. Process-derived text uses
+terminal-safe field escaping unless `--raw-output` is selected. The final
+`model_usage=omitted` line states that no cheap status aggregate is available:
+model usage crosses this protocol only inside each complete session transcript,
+and `status` does not issue one transcript read per session.
 
 `list` remains the complete unfiltered summary sequence. `search` is the
 separate verb for `list_session_metadata`, whose filters, bounded page, and
