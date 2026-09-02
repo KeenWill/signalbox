@@ -1688,8 +1688,12 @@ where
     insert_prepared_effects(connection, prepared).await?;
     match interrupt_outcome {
         Some(ModelCallInterruptOutcome::Cancelled(cancelled)) => {
-            persist_terminal_outcome(connection, &ModelCallTerminalOutcome::Cancelled(cancelled))
-                .await?;
+            persist_terminal_outcome(
+                connection,
+                &ModelCallTerminalOutcome::Cancelled(cancelled),
+                None,
+            )
+            .await?;
         }
         Some(ModelCallInterruptOutcome::CancellationRequested(stopped)) => {
             persist_stop_requested(connection, &stopped).await?;
@@ -1700,6 +1704,7 @@ where
             persist_terminal_outcome(
                 connection,
                 &ModelCallTerminalOutcome::ReconciliationRequired(reconciliation),
+                None,
             )
             .await?;
             supersede_automatic_reconciliation(connection, session, turn).await?;

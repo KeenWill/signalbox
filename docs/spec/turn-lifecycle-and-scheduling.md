@@ -23,6 +23,9 @@ ceilings, the recovery transaction's write-lock budget, the handoff's bounded
 attempts across correlating and recovering, and expiry recovery for the
 pre-activation compaction window are verified against the same PR.
 
+Mandatory typed cause classification on turn terminalization is verified against
+this PR (`agent/lifecycle-t1-measurement`).
+
 The expired-pass recovery lock classification and retry budgets were re-verified
 against this PR (`agent/daemon-live-reconciliation-lock-cadence`). Exact
 resumed-turn correlation and the scheduler-expiry handoff were re-verified
@@ -124,7 +127,10 @@ scope. The implemented slice stores three lifecycle states per turn
 (`turn_lifecycle.state_kind`): `queued`, `active`, and `terminal`, with the
 terminal disposition kind closed to `failed`, `completed`, `refused`,
 `cancelled`, and `reconciliation_required` (migrations `202607220001` and
-`202607220005`). The domain `TurnDisposition` algebra carries all five accepted
+`202607220005`). A terminal turn records a non-null typed `terminal_cause_kind`
+from a closed vocabulary its disposition admits, and a non-terminal turn records
+none (migration `202609020001`). `unclassified_failure` is the only catch-all
+spelling. The domain `TurnDisposition` algebra carries all five accepted
 variants — `Completed`, `Refused`, `Failed`, `Cancelled { cause }`,
 `ReconciliationRequired { marker }` — but `Cancelled` is constructible only from
 an `AppliedInterruptProof`. `ReconciliationRequired` remains constructible only

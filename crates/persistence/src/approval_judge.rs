@@ -18,7 +18,7 @@ use signalbox_domain::{
     ProviderReportedTokenUsage, PullRequestNumber, RepoWatchDispatchId, RepositorySlug,
     ResolvedProviderTarget, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId,
     SessionSystemPrompt, SessionTemplateName, ToolApprovalPosture, ToolDecisionRationale,
-    ToolRequest, ToolRequestId, TurnAttemptId, TurnId,
+    ToolRequest, ToolRequestId, TurnAttemptId, TurnId, TurnTerminalCause,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
@@ -32,6 +32,7 @@ use crate::{
         approval_judge_state_to_str, approval_judge_terminal_disposition_from_str,
         approval_judge_terminal_disposition_to_str, positive_u64_from_numeric, session_id_to_uuid,
         tool_approval_decision_source_to_str, tool_request_id_to_uuid, turn_id_to_uuid,
+        turn_terminal_cause_to_str,
     },
     model_execution::{lock_session, resolve_session_credential},
     outbox::{self, OutboxEvent},
@@ -1001,7 +1002,8 @@ async fn persist_headless_escalation(
                 runner_recovery_placement_revision = NULL,
                 runner_recovery_tool_attempt_id = NULL, terminal_attempt_id = $2,
                 terminal_model_call_id = NULL, terminal_tool_attempt_id = NULL,
-                terminal_disposition_kind = 'failed'
+                terminal_disposition_kind = 'failed',
+                terminal_cause_kind = $7
           WHERE turn_id = $3 AND session_id = $4 AND state_kind = 'active'
             AND active_phase_kind = 'awaiting_tool_approval'
             AND active_tool_round_call_id = $5 AND approval_tool_request_id = $6",
@@ -1012,6 +1014,9 @@ async fn persist_headless_escalation(
     .bind(session_id_to_uuid(session))
     .bind(batch.producing_call().into_uuid())
     .bind(tool_request_id_to_uuid(prepared.request.id()))
+    .bind(turn_terminal_cause_to_str(
+        TurnTerminalCause::HeadlessApprovalEscalation,
+    ))
     .execute(&mut *connection)
     .await?
     .rows_affected();

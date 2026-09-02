@@ -3068,6 +3068,30 @@ pub enum TurnDisposition {
     Cancelled { cause: AppliedInterruptProof },
     ReconciliationRequired { marker: ReconciliationMarker },
 }
+
+pub enum TurnTerminalCause {
+    Completed,
+    ModelRefusal,
+    InterruptApplied,
+    ModelCallAmbiguous,
+    ToolAttemptAmbiguous,
+    ModelCallFailed,
+    ModelTargetUnavailable,
+    AttachmentPreparationFailed,
+    CapabilityPreparationFailed,
+    ToolRoundLimitReached,
+    ToolAttemptLost,
+    CredentialPoolExhausted,
+    HeadlessApprovalEscalation,
+    AbandonedAtRestart,
+    WatchdogStaleTurn,
+    ContextHeadroomExhausted,
+    ContextCompactionWall,
+    ContextCompactionFailed,
+    ReportedUsageContextCompactionExhausted,
+    ReportedUsageContextStillExceeded,
+    UnclassifiedFailure,
+}
 ```
 
 ## domain: turn_eligibility
@@ -13203,7 +13227,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: submit_input                               | 37                               |
 | domain: queue_order                                | 5 (+1 free fn)                   |
 | domain: repo_watch                                 | 51                               |
-| domain: turn_lifecycle                             | 10                               |
+| domain: turn_lifecycle                             | 11                               |
 | domain: turn_eligibility                           | 39                               |
 | domain: turn_attempt                               | 13                               |
 | domain: model_call                                 | 12                               |
@@ -13225,7 +13249,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
 | domain: workspace_instruction                      | 18                               |
-| **signalbox-domain total**                         | **859 (+12 free fn)**            |
+| **signalbox-domain total**                         | **860 (+12 free fn)**            |
 | application: repo_watch_operations                 | 33 (+2 free fn) (incl. 1 trait)  |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: attention                             | 16 (+6 free fn) (incl. 1 trait)  |

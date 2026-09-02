@@ -9,7 +9,7 @@ use signalbox_application::{
 use signalbox_domain::{
     AcceptedInputTurnActivationIdentities, ContextFrontierId, FailedModelCallTurnIdentities,
     ModelCallId, ResolvedContextFrontierSnapshot, SemanticTranscriptEntryId, SessionId,
-    TurnAttemptId, TurnId,
+    TurnAttemptId, TurnId, TurnTerminalCause,
 };
 use signalbox_model_provider_runtime::{ContextCompactionModel, RuntimeModelCatalog};
 use signalbox_persistence::{
@@ -200,6 +200,7 @@ impl ReportedUsageCompaction {
                     &self.activation,
                     &self.model_calls,
                     preview,
+                    TurnTerminalCause::ReportedUsageContextCompactionExhausted,
                     None,
                 )
                 .await
@@ -234,6 +235,7 @@ impl ReportedUsageCompaction {
                         &self.activation,
                         &self.model_calls,
                         preview,
+                        compaction_terminal_cause(&error),
                         compaction_recovery_cause(&error),
                     )
                     .await
@@ -266,6 +268,7 @@ impl ReportedUsageCompaction {
             &self.activation,
             &self.model_calls,
             remaining.preview,
+            TurnTerminalCause::ReportedUsageContextStillExceeded,
             None,
         )
         .await
@@ -716,6 +719,7 @@ where
                                 &activation,
                                 &model_calls,
                                 preview,
+                                TurnTerminalCause::ContextHeadroomExhausted,
                                 None,
                             )
                             .await
@@ -746,6 +750,7 @@ where
                                     &activation,
                                     &model_calls,
                                     preview,
+                                    TurnTerminalCause::ContextHeadroomExhausted,
                                     None,
                                 )
                                 .await
@@ -772,6 +777,7 @@ where
                                         &activation,
                                         &model_calls,
                                         preview,
+                                        compaction_terminal_cause(&error),
                                         compaction_recovery_cause(&error),
                                     )
                                     .await
@@ -961,6 +967,7 @@ async fn close_failed_compaction_turn(
     activation: &StartEligibleTurnRepository,
     model_calls: &PostgresModelCallRepository,
     preview: PreparedActivationPreview,
+    terminal_cause: TurnTerminalCause,
     recovery_cause: Option<GoalExecutionFailureRecoveryCause>,
 ) -> Result<CommitCompactionFailurePreviewOutcome, CommitActivationPreviewError> {
     loop {
@@ -973,6 +980,7 @@ async fn close_failed_compaction_turn(
                 preview.clone(),
                 model_calls,
                 identities,
+                terminal_cause,
                 recovery_cause,
             )
             .await
@@ -991,6 +999,22 @@ fn compaction_recovery_cause(
         crate::process_runtime::AutomaticContextCompactionError::InputDoesNotFit
     )
     .then_some(GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit)
+}
+
+/// Classifies the turn-terminal cause a failed automatic compaction records.
+///
+/// An input the compactor cannot fit is the §11 wall and keeps its own
+/// spelling; every other compaction failure is recorded as such rather than
+/// borrowed from the wall.
+const fn compaction_terminal_cause(
+    error: &crate::process_runtime::AutomaticContextCompactionError,
+) -> TurnTerminalCause {
+    match error {
+        crate::process_runtime::AutomaticContextCompactionError::InputDoesNotFit => {
+            TurnTerminalCause::ContextCompactionWall
+        }
+        _ => TurnTerminalCause::ContextCompactionFailed,
+    }
 }
 
 fn compaction_failure_closure_collision_is_retryable(error: &CommitActivationPreviewError) -> bool {

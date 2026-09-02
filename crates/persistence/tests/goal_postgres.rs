@@ -35,7 +35,7 @@ use signalbox_domain::{
     SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
     SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput,
     SubmitInputAppliedResult, SubmitInputResult, ToolRequestId, TranscriptAncestry, TurnAttemptId,
-    TurnId, TurnModelSettingsResolved, UserContent,
+    TurnId, TurnModelSettingsResolved, TurnTerminalCause, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -396,6 +396,7 @@ async fn call_free_failure_recovery_cause_round_trips_as_a_closed_type()
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xe5f)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0xe60)),
             ),
+            TurnTerminalCause::ContextCompactionWall,
             Some(expected),
         )
         .await?;
@@ -682,6 +683,7 @@ async fn mark_goal_turn_completed(pool: &PgPool, turn: TurnId) -> Result<(), Box
     sqlx::query(
         "UPDATE turn_lifecycle
             SET state_kind = 'terminal', terminal_disposition_kind = 'completed',
+                terminal_cause_kind = 'completed',
                 terminal_frontier_id = $3, active_phase_kind = NULL,
                 terminal_attempt_id = current_attempt_id, current_attempt_id = NULL,
                 terminal_model_call_id = $4
@@ -746,7 +748,8 @@ async fn mark_completed_goal_turn_failed(
         .await?;
     sqlx::query(
         "UPDATE turn_lifecycle
-            SET terminal_disposition_kind = 'failed'
+            SET terminal_disposition_kind = 'failed',
+                terminal_cause_kind = 'model_call_failed'
           WHERE session_id = $1 AND turn_id = $2",
     )
     .bind(Uuid::from_u128(SESSION))
@@ -2114,6 +2117,7 @@ async fn inv048_continuation_requires_the_latest_goal_turn() -> Result<(), Box<d
     sqlx::query(
         "UPDATE turn_lifecycle
             SET state_kind = 'terminal', terminal_disposition_kind = 'completed',
+                terminal_cause_kind = 'completed',
                 terminal_frontier_id = $3, active_phase_kind = NULL,
                 terminal_attempt_id = $4, current_attempt_id = NULL,
                 terminal_model_call_id = $5

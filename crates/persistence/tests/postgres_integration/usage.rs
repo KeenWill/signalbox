@@ -1129,7 +1129,7 @@ async fn terminal_compaction_call_with_reference(
     .await?;
     sqlx::query(
         "UPDATE context_compaction_model_call
-         SET state_kind = 'in_flight'
+         SET state_kind = 'in_flight', in_flight_at = clock_timestamp()
          WHERE model_call_id = $1",
     )
     .bind(call)
@@ -1137,7 +1137,8 @@ async fn terminal_compaction_call_with_reference(
     .await?;
     sqlx::query(
         "UPDATE context_compaction_model_call
-         SET state_kind = 'terminal', terminal_disposition_kind = 'completed',
+         SET state_kind = 'terminal', terminal_at = clock_timestamp(),
+             terminal_disposition_kind = 'completed',
              input_tokens = 11, output_tokens = 5
          WHERE model_call_id = $1",
     )

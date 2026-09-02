@@ -25,7 +25,7 @@ use signalbox_domain::{
     RequestKind, ReviewState, RunnerPlacementLossSource, RunnerSandboxProfile, ScopeOperation,
     ServiceTier, SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId,
     SessionInputPosition, SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture,
-    ToolAttemptId, ToolPermissionDefault, ToolRequestId, TurnId,
+    ToolAttemptId, ToolPermissionDefault, ToolRequestId, TurnId, TurnTerminalCause,
     UpdateSessionPlacementRejectionKind, ValidatedModelSettings, WorkspaceOrigin,
 };
 
@@ -783,6 +783,72 @@ pub fn delegation_policy_kind_from_str(value: &str) -> Option<DelegationPolicySt
     match value {
         "background" => Some(DelegationPolicyStorageKind::Background),
         "bound" => Some(DelegationPolicyStorageKind::Bound),
+        _ => None,
+    }
+}
+
+/// Encodes one durable `turn_lifecycle.terminal_cause_kind` spelling.
+///
+/// The turn's disposition and its cause are separate axes, so this pair is the
+/// only place the cause vocabulary meets a durable spelling.
+pub const fn turn_terminal_cause_to_str(value: TurnTerminalCause) -> &'static str {
+    match value {
+        TurnTerminalCause::Completed => "completed",
+        TurnTerminalCause::ModelRefusal => "model_refusal",
+        TurnTerminalCause::InterruptApplied => "interrupt_applied",
+        TurnTerminalCause::ModelCallAmbiguous => "model_call_ambiguous",
+        TurnTerminalCause::ToolAttemptAmbiguous => "tool_attempt_ambiguous",
+        TurnTerminalCause::ModelCallFailed => "model_call_failed",
+        TurnTerminalCause::ModelTargetUnavailable => "model_target_unavailable",
+        TurnTerminalCause::AttachmentPreparationFailed => "attachment_preparation_failed",
+        TurnTerminalCause::CapabilityPreparationFailed => "capability_preparation_failed",
+        TurnTerminalCause::ToolRoundLimitReached => "tool_round_limit_reached",
+        TurnTerminalCause::ToolAttemptLost => "tool_attempt_lost",
+        TurnTerminalCause::CredentialPoolExhausted => "credential_pool_exhausted",
+        TurnTerminalCause::HeadlessApprovalEscalation => "headless_approval_escalation",
+        TurnTerminalCause::AbandonedAtRestart => "abandoned_at_restart",
+        TurnTerminalCause::WatchdogStaleTurn => "watchdog_stale_turn",
+        TurnTerminalCause::ContextHeadroomExhausted => "context_headroom_exhausted",
+        TurnTerminalCause::ContextCompactionWall => "context_compaction_wall",
+        TurnTerminalCause::ContextCompactionFailed => "context_compaction_failed",
+        TurnTerminalCause::ReportedUsageContextCompactionExhausted => {
+            "reported_usage_context_compaction_exhausted"
+        }
+        TurnTerminalCause::ReportedUsageContextStillExceeded => {
+            "reported_usage_context_still_exceeded"
+        }
+        TurnTerminalCause::UnclassifiedFailure => "unclassified_failure",
+    }
+}
+
+/// Decodes one durable `turn_lifecycle.terminal_cause_kind` spelling.
+pub fn turn_terminal_cause_from_str(value: &str) -> Option<TurnTerminalCause> {
+    match value {
+        "completed" => Some(TurnTerminalCause::Completed),
+        "model_refusal" => Some(TurnTerminalCause::ModelRefusal),
+        "interrupt_applied" => Some(TurnTerminalCause::InterruptApplied),
+        "model_call_ambiguous" => Some(TurnTerminalCause::ModelCallAmbiguous),
+        "tool_attempt_ambiguous" => Some(TurnTerminalCause::ToolAttemptAmbiguous),
+        "model_call_failed" => Some(TurnTerminalCause::ModelCallFailed),
+        "model_target_unavailable" => Some(TurnTerminalCause::ModelTargetUnavailable),
+        "attachment_preparation_failed" => Some(TurnTerminalCause::AttachmentPreparationFailed),
+        "capability_preparation_failed" => Some(TurnTerminalCause::CapabilityPreparationFailed),
+        "tool_round_limit_reached" => Some(TurnTerminalCause::ToolRoundLimitReached),
+        "tool_attempt_lost" => Some(TurnTerminalCause::ToolAttemptLost),
+        "credential_pool_exhausted" => Some(TurnTerminalCause::CredentialPoolExhausted),
+        "headless_approval_escalation" => Some(TurnTerminalCause::HeadlessApprovalEscalation),
+        "abandoned_at_restart" => Some(TurnTerminalCause::AbandonedAtRestart),
+        "watchdog_stale_turn" => Some(TurnTerminalCause::WatchdogStaleTurn),
+        "context_headroom_exhausted" => Some(TurnTerminalCause::ContextHeadroomExhausted),
+        "context_compaction_wall" => Some(TurnTerminalCause::ContextCompactionWall),
+        "context_compaction_failed" => Some(TurnTerminalCause::ContextCompactionFailed),
+        "reported_usage_context_compaction_exhausted" => {
+            Some(TurnTerminalCause::ReportedUsageContextCompactionExhausted)
+        }
+        "reported_usage_context_still_exceeded" => {
+            Some(TurnTerminalCause::ReportedUsageContextStillExceeded)
+        }
+        "unclassified_failure" => Some(TurnTerminalCause::UnclassifiedFailure),
         _ => None,
     }
 }

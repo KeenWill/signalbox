@@ -19,6 +19,7 @@ mod delegation_schema;
 mod delegation_transactions;
 mod frontier_validation;
 mod hub_fence;
+mod lifecycle_measurement;
 mod model_call_execution_and_recovery;
 mod model_call_usage_and_interrupts;
 mod model_credentials_and_tool_batches;
@@ -59,11 +60,12 @@ use signalbox_application::{
     InProcessAttemptDispatchGate, LoadSessionService, ModelCallAuthorizationReread,
     ModelCallCredentialReference, ModelCallExecutionError, ModelCallExecutionIdGenerator,
     ModelCallExecutionOutcome, ModelCallExecutionService, ModelCallObservationCommitOutcome,
-    ModelConversationMessage, OperatorFailureClass, PromptMemberStatement,
-    ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService,
-    RetainedModelCallObservationStatus, RetainedPreparedFailureStatus, ScriptedModelCallProvider,
-    ScriptedModelCallStep, SessionIdGenerator, StartEligibleTurnIdGenerator,
-    StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
+    ModelConversationMessage, OperatorFailureClass, PreparedModelCallFailureCause,
+    PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
+    ReplaceSessionDefaultsService, RetainedModelCallObservationStatus,
+    RetainedPreparedFailureStatus, ScriptedModelCallProvider, ScriptedModelCallStep,
+    SessionIdGenerator, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
+    StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
     StartupScanSessionOutcome, SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest,
     SubmitInputService, ToolAttemptAuthorizationOutcome, ToolAttemptAuthorizationStatus,
     ToolCatalog, ToolDefinition, ToolInputSchema, ToolPreauthorization,
@@ -107,7 +109,7 @@ use signalbox_domain::{
     ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolPermissionDefault,
     ToolRequestId, ToolResponsePartIdentity, ToolResultContent, ToolResultText,
     ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId,
-    TurnConfigurationProvenance, TurnId, UserContent, UserContentPart,
+    TurnConfigurationProvenance, TurnId, TurnTerminalCause, UserContent, UserContentPart,
 };
 use signalbox_persistence::{
     ModelCredentialFamilyCatalog,
@@ -1995,7 +1997,7 @@ async fn insert_completed_context_compaction_call(
     .await?;
     sqlx::query(
         "UPDATE context_compaction_model_call
-         SET state_kind = 'in_flight'
+         SET state_kind = 'in_flight', in_flight_at = clock_timestamp()
          WHERE model_call_id = $1",
     )
     .bind(call)
@@ -2003,7 +2005,8 @@ async fn insert_completed_context_compaction_call(
     .await?;
     sqlx::query(
         "UPDATE context_compaction_model_call
-         SET state_kind = 'terminal', terminal_disposition_kind = 'completed',
+         SET state_kind = 'terminal', terminal_at = clock_timestamp(),
+             terminal_disposition_kind = 'completed',
              input_tokens = 17, output_tokens = 5
          WHERE model_call_id = $1",
     )
@@ -5020,6 +5023,7 @@ async fn delegated_capability_failure_fixture(
         .fail_prepared_call(
             child,
             call,
+            PreparedModelCallFailureCause::CapabilityKnownFailure,
             None,
             FailedModelCallTurnIdentities::new(
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 27)),

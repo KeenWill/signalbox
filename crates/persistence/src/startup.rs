@@ -12,7 +12,8 @@ use signalbox_domain::{
     ModelCallTerminalOutcome, PendingSteeringReclassificationIdentity,
     PreparedAcceptedInputTurnFailure, ReconstitutedToolAttempt,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload, SessionId,
-    ToolAttemptCrashOutcome, TurnDisposition, TurnId, UnstoppedAttemptDisposition,
+    ToolAttemptCrashOutcome, TurnDisposition, TurnId, TurnTerminalCause,
+    UnstoppedAttemptDisposition,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
@@ -20,7 +21,7 @@ use crate::{
     commit_failure_is_ambiguous,
     mapping::{
         input_position_to_numeric, session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid,
-        turn_id_to_uuid,
+        turn_id_to_uuid, turn_terminal_cause_to_str,
     },
     model_execution::{
         ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
@@ -785,9 +786,13 @@ where
         ) {
             return Err(StartupScanCorruption::Inconsistent("model-call restart outcome").into());
         }
-        persist_terminal_outcome(connection, &outcome)
-            .await
-            .map_err(map_model_call_error)?;
+        persist_terminal_outcome(
+            connection,
+            &outcome,
+            Some(TurnTerminalCause::AbandonedAtRestart),
+        )
+        .await
+        .map_err(map_model_call_error)?;
         return Ok(TransactionDecision::Commit(
             StartupScanSessionOutcome::RecoveredModelCall(Box::new(outcome)),
         ));
@@ -820,9 +825,13 @@ where
                 StartupScanCorruption::Inconsistent("evidence-free restart classification")
             })?;
         let outcome = ModelCallTerminalOutcome::Failed(failed);
-        persist_terminal_outcome(connection, &outcome)
-            .await
-            .map_err(map_model_call_error)?;
+        persist_terminal_outcome(
+            connection,
+            &outcome,
+            Some(TurnTerminalCause::AbandonedAtRestart),
+        )
+        .await
+        .map_err(map_model_call_error)?;
         return Ok(TransactionDecision::Commit(
             StartupScanSessionOutcome::RecoveredModelCall(Box::new(outcome)),
         ));
@@ -858,15 +867,24 @@ where
         },
     };
 
-    let failed = insert_prepared_failure(connection, prepared).await?;
+    let failed =
+        insert_prepared_failure(connection, prepared, TurnTerminalCause::AbandonedAtRestart)
+            .await?;
     Ok(TransactionDecision::Commit(
         StartupScanSessionOutcome::Recovered(Box::new(failed)),
     ))
 }
 
+/// Commits one prepared failed-turn transition, recording `cause` as why the
+/// turn ended.
+///
+/// The startup scan and the liveness watchdog commit the identical transition,
+/// which is what keeps every terminal trigger firing for both; the cause is
+/// what makes the two distinguishable in the rows rather than only in a log.
 pub(crate) async fn insert_prepared_failure(
     connection: &mut PgConnection,
     prepared: PreparedAcceptedInputTurnFailure,
+    cause: TurnTerminalCause,
 ) -> Result<signalbox_domain::FailedAcceptedInputTurn, StartupScanRepositoryError> {
     let (failed, failure_entry, terminal_snapshot) = prepared.into_parts();
     let session = failed.session();
@@ -935,6 +953,7 @@ pub(crate) async fn insert_prepared_failure(
                 current_attempt_id = NULL,
                 terminal_model_call_id = NULL,
                 terminal_disposition_kind = 'failed',
+                terminal_cause_kind = $8,
                 active_tool_round_call_id = NULL,
                 approval_tool_request_id = NULL,
                 recovery_tool_attempt_id = NULL
@@ -956,6 +975,7 @@ pub(crate) async fn insert_prepared_failure(
     ))
     .bind(failed.start().frontier().snapshot().into_uuid())
     .bind(attempt.id().into_uuid())
+    .bind(turn_terminal_cause_to_str(cause))
     .execute(&mut *connection)
     .await?
     .rows_affected();
@@ -1042,7 +1062,8 @@ async fn recover_context_compaction(
     };
     let call_rows = sqlx::query(
         "UPDATE context_compaction_model_call
-            SET state_kind = 'terminal', terminal_disposition_kind = $1
+            SET state_kind = 'terminal', terminal_at = statement_timestamp(),
+                terminal_disposition_kind = $1
           WHERE session_id = $2
             AND model_call_id = $3
             AND state_kind = $4",

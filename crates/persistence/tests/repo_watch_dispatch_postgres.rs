@@ -1198,7 +1198,8 @@ async fn mark_queued_turn_failed(
         "UPDATE turn_lifecycle
             SET state_kind = 'terminal', start_lineage_kind = 'first_in_session',
                 immediate_predecessor_turn_id = NULL, starting_frontier_id = $3,
-                terminal_frontier_id = $4, terminal_disposition_kind = 'failed'
+                terminal_frontier_id = $4, terminal_disposition_kind = 'failed',
+                terminal_cause_kind = 'unclassified_failure'
           WHERE session_id = $1 AND turn_id = $2",
     )
     .bind(session.as_uuid())

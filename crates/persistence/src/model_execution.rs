@@ -21,8 +21,9 @@ use signalbox_application::{
     CredentialPoolExhaustedOutcome, FailPreparedModelCallTransaction, ModelCallAuthorizationReread,
     ModelCallCredentialReference, ModelCallObservationCommitOutcome,
     ModelCallTerminalIdentityCandidates, OperatorFailureClass, PrepareModelCallOutcome,
-    PrepareModelCallTransaction, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
-    RetainedModelCallObservationStatus, RetainedPreparedFailureStatus,
+    PrepareModelCallTransaction, PrepareToolContinuationOutcome, PreparedModelCallFailureCause,
+    ResolvedToolConversationEntry, RetainedModelCallObservationStatus,
+    RetainedPreparedFailureStatus,
 };
 use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, ActiveTurnPhase,
@@ -52,7 +53,7 @@ use signalbox_domain::{
     SemanticTranscriptEntryRef, SessionId, StopRequestedModelCallTurn, ToolApprovalDecision,
     ToolApprovalResolution, ToolDecisionSource, ToolRequest, ToolResultAttemptCorrelation,
     ToolRoundModelCallTurn, TurnAttemptId, TurnId, TurnInstructionManifest,
-    TurnInstructionManifestId, UserContent,
+    TurnInstructionManifestId, TurnTerminalCause, UserContent,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -67,7 +68,7 @@ use crate::{
         durable_command_id_from_uuid, durable_command_id_to_uuid, input_position_from_numeric,
         positive_u64_from_numeric, session_id_from_uuid, session_id_to_uuid,
         tool_approval_decision_source_to_str, tool_approval_posture_to_str,
-        tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
+        tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid, turn_terminal_cause_to_str,
     },
     outbox::{self, ModelCallOutboxState, OutboxEvent, ToolBatchOutboxState},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
@@ -1598,6 +1599,7 @@ impl PostgresModelCallRepository {
                     persist_failed_with_delegated_child_result(
                         &mut transaction,
                         &failed,
+                        TurnTerminalCause::ModelTargetUnavailable,
                         ProviderReportedTokenUsage::unreported(),
                         None,
                         None,
@@ -1795,6 +1797,7 @@ impl PostgresModelCallRepository {
                     persist_terminal_outcome_with_usage(
                         &mut transaction,
                         &outcome,
+                        Some(TurnTerminalCause::ModelCallFailed),
                         usage,
                         provider_failure_cause,
                     )
@@ -1934,9 +1937,16 @@ impl PostgresModelCallRepository {
                             "terminal observation does not match fresh issued state",
                         )
                     })?;
+                // Exhausting the pool's last member is why this turn ended,
+                // so the durable exhaustion record and the cause agree.
+                let terminal_cause = match pool_exhausted_name {
+                    Some(_) => TurnTerminalCause::CredentialPoolExhausted,
+                    None => TurnTerminalCause::ModelCallFailed,
+                };
                 persist_terminal_outcome_with_usage(
                     &mut transaction,
                     &outcome,
+                    Some(terminal_cause),
                     usage,
                     provider_failure_cause,
                 )
@@ -1968,6 +1978,7 @@ impl PostgresModelCallRepository {
             persist_terminal_outcome_with_usage(
                 &mut transaction,
                 &outcome,
+                Some(TurnTerminalCause::ModelCallFailed),
                 usage,
                 provider_failure_cause,
             )
@@ -1985,6 +1996,7 @@ impl PostgresModelCallRepository {
         &self,
         session: SessionId,
         call: ModelCallId,
+        cause: PreparedModelCallFailureCause,
         attachment_failure: Option<AttachmentPreparationFailure>,
         identities: FailedModelCallTurnIdentities,
         mut next_reclassified_turn: NextTurn,
@@ -2013,6 +2025,7 @@ impl PostgresModelCallRepository {
             persist_failed_with_delegated_child_result(
                 &mut transaction,
                 &failed,
+                prepared_failure_cause(cause, attachment_failure),
                 ProviderReportedTokenUsage::unreported(),
                 None,
                 attachment_failure,
@@ -2032,6 +2045,7 @@ impl PostgresModelCallRepository {
         session: SessionId,
         turn: TurnId,
         identities: FailedModelCallTurnIdentities,
+        terminal_cause: TurnTerminalCause,
         recovery_cause: Option<crate::goal::GoalExecutionFailureRecoveryCause>,
     ) -> Result<FailedModelCallTurn, ModelCallRepositoryError> {
         let execution = require_live_execution(connection, session, &self.targets).await?;
@@ -2050,6 +2064,7 @@ impl PostgresModelCallRepository {
         persist_failed_with_delegated_child_result(
             connection,
             &failed,
+            terminal_cause,
             ProviderReportedTokenUsage::unreported(),
             None,
             None,
@@ -2553,7 +2568,12 @@ impl PostgresModelCallRepository {
                     "startup recovery requires a live Prepared or issued call",
                 )
             })?;
-            persist_terminal_outcome(&mut transaction, &outcome).await?;
+            persist_terminal_outcome(
+                &mut transaction,
+                &outcome,
+                Some(TurnTerminalCause::AbandonedAtRestart),
+            )
+            .await?;
             Ok(outcome)
         }
         .await;
@@ -3029,6 +3049,7 @@ where
         persist_failed_with_delegated_child_result(
             connection,
             required.failed(),
+            TurnTerminalCause::ContextHeadroomExhausted,
             ProviderReportedTokenUsage::unreported(),
             None,
             None,
@@ -3142,6 +3163,7 @@ where
             persist_failed_with_delegated_child_result(
                 connection,
                 &failed,
+                TurnTerminalCause::ModelTargetUnavailable,
                 ProviderReportedTokenUsage::unreported(),
                 None,
                 None,
@@ -3413,6 +3435,7 @@ where
     persist_failed_with_delegated_child_result(
         connection,
         &failed,
+        TurnTerminalCause::ToolAttemptLost,
         ProviderReportedTokenUsage::unreported(),
         None,
         None,
@@ -3459,7 +3482,7 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
         &mut self,
         session: SessionId,
         call: ModelCallId,
-        _cause: signalbox_application::PreparedModelCallFailureCause,
+        cause: PreparedModelCallFailureCause,
         attachment_failure: Option<AttachmentPreparationFailure>,
         identities: FailedModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
@@ -3471,6 +3494,7 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
             self,
             session,
             call,
+            cause,
             attachment_failure,
             identities,
             next_reclassified_turn,
@@ -7634,13 +7658,21 @@ pub(crate) async fn persist_stop_requested(
     Ok(())
 }
 
+/// Persists one terminal outcome, recording `failure_cause` when the outcome
+/// is `Failed`.
+///
+/// The cause is optional because two callers construct only non-failing
+/// outcomes; a `Failed` outcome that names none is a typed corruption rather
+/// than a silently unclassified terminalization.
 pub(crate) async fn persist_terminal_outcome(
     connection: &mut PgConnection,
     outcome: &ModelCallTerminalOutcome,
+    failure_cause: Option<TurnTerminalCause>,
 ) -> Result<(), ModelCallRepositoryError> {
     persist_terminal_outcome_with_usage(
         connection,
         outcome,
+        failure_cause,
         ProviderReportedTokenUsage::unreported(),
         None,
     )
@@ -7650,6 +7682,7 @@ pub(crate) async fn persist_terminal_outcome(
 async fn persist_terminal_outcome_with_usage(
     connection: &mut PgConnection,
     outcome: &ModelCallTerminalOutcome,
+    failure_cause: Option<TurnTerminalCause>,
     usage: ProviderReportedTokenUsage,
     provider_failure_cause: Option<ProviderModelCallFailureCause>,
 ) -> Result<(), ModelCallRepositoryError> {
@@ -7678,9 +7711,13 @@ async fn persist_terminal_outcome_with_usage(
             .await
         }
         ModelCallTerminalOutcome::Failed(failed) => {
+            let cause = failure_cause.ok_or(ModelCallCorruption::Inconsistent(
+                "failed terminal outcome without a terminal cause",
+            ))?;
             persist_failed_with_delegated_child_result(
                 connection,
                 failed,
+                cause,
                 usage,
                 provider_failure_cause,
                 None,
@@ -7719,6 +7756,7 @@ async fn persist_terminal_outcome_with_usage(
 async fn persist_failed_with_delegated_child_result(
     connection: &mut PgConnection,
     failed: &FailedModelCallTurn,
+    cause: TurnTerminalCause,
     usage: ProviderReportedTokenUsage,
     provider_failure_cause: Option<ProviderModelCallFailureCause>,
     attachment_failure: Option<AttachmentPreparationFailure>,
@@ -7727,6 +7765,7 @@ async fn persist_failed_with_delegated_child_result(
     persist_failed(
         connection,
         failed,
+        cause,
         usage,
         provider_failure_cause,
         attachment_failure,
@@ -8116,6 +8155,7 @@ pub(crate) async fn persist_reconciliation_required(
         reconciliation.session(),
         reconciliation.turn(),
         "reconciliation_required",
+        TurnTerminalCause::ModelCallAmbiguous,
         reconciliation.terminal_snapshot().frontier().snapshot(),
         Some(reconciliation.attempt().id()),
         Some(reconciliation.call().id()),
@@ -8174,7 +8214,8 @@ pub(crate) async fn persist_tool_reconciliation_required(
                 terminal_attempt_id = $2,
                 terminal_model_call_id = NULL,
                 terminal_tool_attempt_id = $3,
-                terminal_disposition_kind = 'reconciliation_required'
+                terminal_disposition_kind = 'reconciliation_required',
+                terminal_cause_kind = $6
           WHERE turn_id = $4
             AND session_id = $5
             AND state_kind = 'active'
@@ -8219,6 +8260,9 @@ pub(crate) async fn persist_tool_reconciliation_required(
     .bind(reconciliation.tool_attempt().attempt().into_uuid())
     .bind(turn_id_to_uuid(reconciliation.turn()))
     .bind(session_id_to_uuid(reconciliation.session()))
+    .bind(turn_terminal_cause_to_str(
+        TurnTerminalCause::ToolAttemptAmbiguous,
+    ))
     .execute(&mut *connection)
     .await?
     .rows_affected();
@@ -8521,6 +8565,7 @@ async fn persist_credential_pool_exhaustion(
     persist_failed_with_delegated_child_result(
         connection,
         exhausted.failed(),
+        TurnTerminalCause::CredentialPoolExhausted,
         ProviderReportedTokenUsage::unreported(),
         None,
         None,
@@ -8675,6 +8720,7 @@ async fn persist_cancelled_tool_round(
         cancelled.session(),
         cancelled.turn(),
         "cancelled",
+        TurnTerminalCause::InterruptApplied,
         cancelled.terminal_snapshot().frontier().snapshot(),
         Some(cancelled.attempt().id()),
         Some(cancelled.call().id()),
@@ -8899,6 +8945,7 @@ async fn persist_cancelled(
         cancelled.session(),
         cancelled.turn(),
         "cancelled",
+        TurnTerminalCause::InterruptApplied,
         cancelled.terminal_snapshot().frontier().snapshot(),
         cancelled
             .attempt()
@@ -9009,6 +9056,7 @@ async fn persist_completed(
         completed.session(),
         completed.turn(),
         "completed",
+        TurnTerminalCause::Completed,
         completed.terminal_snapshot().frontier().snapshot(),
         Some(completed.attempt().id()),
         Some(completed.call().id()),
@@ -9038,6 +9086,7 @@ async fn persist_completed(
 async fn persist_failed(
     connection: &mut PgConnection,
     failed: &FailedModelCallTurn,
+    cause: TurnTerminalCause,
     usage: ProviderReportedTokenUsage,
     provider_failure_cause: Option<ProviderModelCallFailureCause>,
     attachment_failure: Option<AttachmentPreparationFailure>,
@@ -9096,6 +9145,7 @@ async fn persist_failed(
         failed.session(),
         failed.turn(),
         "failed",
+        cause,
         failed.terminal_snapshot().frontier().snapshot(),
         Some(failed.attempt().id()),
         failed.call().map(signalbox_domain::EndedModelCall::id),
@@ -9150,6 +9200,7 @@ async fn persist_refused(
         refused.session(),
         refused.turn(),
         "refused",
+        TurnTerminalCause::ModelRefusal,
         refused.terminal_snapshot().frontier().snapshot(),
         Some(refused.attempt().id()),
         Some(refused.call().id()),
@@ -9788,11 +9839,35 @@ pub(crate) async fn insert_snapshot(
     })
 }
 
+/// Classifies one pre-send prepared-call failure as a turn-terminal cause.
+///
+/// Attachment preparation is the more specific evidence: when it produced the
+/// failure it names the cause, and the application's pre-send vocabulary names
+/// it otherwise. Taking that vocabulary rather than a bare terminal cause is
+/// what keeps a caller from pairing a `failed` disposition with a cause that
+/// contradicts it.
+const fn prepared_failure_cause(
+    cause: PreparedModelCallFailureCause,
+    attachment_failure: Option<AttachmentPreparationFailure>,
+) -> TurnTerminalCause {
+    match (attachment_failure, cause) {
+        (Some(_), _) => TurnTerminalCause::AttachmentPreparationFailed,
+        (None, PreparedModelCallFailureCause::CapabilityKnownFailure) => {
+            TurnTerminalCause::CapabilityPreparationFailed
+        }
+        (None, PreparedModelCallFailureCause::ToolRoundLimitReached) => {
+            TurnTerminalCause::ToolRoundLimitReached
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn terminalize_lifecycle(
     connection: &mut PgConnection,
     session: SessionId,
     turn: TurnId,
     disposition: &'static str,
+    cause: TurnTerminalCause,
     terminal_frontier: signalbox_domain::ContextFrontierId,
     terminal_attempt: Option<signalbox_domain::TurnAttemptId>,
     terminal_call: Option<ModelCallId>,
@@ -9826,7 +9901,8 @@ async fn terminalize_lifecycle(
                 terminal_attempt_id = $2,
                 terminal_model_call_id = $3,
                 terminal_tool_attempt_id = NULL,
-                terminal_disposition_kind = $4
+                terminal_disposition_kind = $4,
+                terminal_cause_kind = $7
           WHERE turn_id = $5
             AND session_id = $6
             AND state_kind = 'active'
@@ -9869,6 +9945,7 @@ async fn terminalize_lifecycle(
     .bind(disposition)
     .bind(turn_id_to_uuid(turn))
     .bind(session_id_to_uuid(session))
+    .bind(turn_terminal_cause_to_str(cause))
     .execute(&mut *connection)
     .await?
     .rows_affected();
