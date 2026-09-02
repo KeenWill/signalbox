@@ -314,14 +314,19 @@ pub trait EligibilityWorkSource {
         false
     }
 
-    /// Whether the daemon holds no liveness obligation for this session.
+    /// Takes the ownership marker the source attached to this session's hint.
     ///
     /// An unmonitored session is a conversation. It still runs the turns a
-    /// person submits, but §6 excludes it from occupancy accounting, so the
-    /// occupancy the daemon reports stays a measure of driven work rather than
-    /// of open chat windows. Sources with no durable ownership hint report
-    /// every session as owned.
-    fn is_unmonitored(&self, _session: SessionId) -> bool {
+    /// person submits, but §6 gives it no watchdog and no place in occupancy
+    /// accounting, so the occupancy the daemon reports stays a measure of
+    /// driven work rather than of open chat windows.
+    ///
+    /// The marker is taken, not read: it authorizes exactly the one admission
+    /// the reconciliation that produced it described. A source with no durable
+    /// ownership hint — and any session admitted from a nudge rather than that
+    /// reconciliation — reports owned, which is the answer that keeps the
+    /// session's watchdog rather than removing it.
+    fn take_returned_unmonitored(&mut self, _session: SessionId) -> bool {
         false
     }
 
@@ -1065,8 +1070,8 @@ where
         }
     }
 
-    fn is_unmonitored(&self, session: SessionId) -> bool {
-        self.unmonitored_sessions.contains(&session)
+    fn take_returned_unmonitored(&mut self, session: SessionId) -> bool {
+        self.unmonitored_sessions.remove(&session)
     }
 
     fn take_returned_dispatch_start(&mut self, session: SessionId) -> bool {
@@ -1271,13 +1276,24 @@ where
                     () = &mut shutdown => break,
                     () = ready(()) => {
                         if in_flight_sessions.insert(session) {
+                            // The occupancy bound is a watchdog: its expiry
+                            // cancels the pass and hands the turn to recovery.
+                            // An unmonitored session has none, so the marker
+                            // disables the bound, not just the metric.
+                            let counts_toward_occupancy =
+                                !self.work_source.take_returned_unmonitored(session);
+                            let bound = if counts_toward_occupancy {
+                                self.occupancy_bound
+                            } else {
+                                SchedulerPassOccupancyBound::unbounded()
+                            };
                             spawn_pass(
                                 &mut passes,
                                 &mut self.pass,
                                 session,
                                 priority,
-                                !self.work_source.is_unmonitored(session),
-                                self.occupancy_bound,
+                                counts_toward_occupancy,
+                                bound,
                                 shutdown_drain_receiver.clone(),
                                 &mut task_sessions,
                                 &self.occupancy_observer,

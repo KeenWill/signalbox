@@ -648,8 +648,14 @@ impl GoalRepository {
         need: &GoalNeed,
     ) -> Result<Box<[PendingGoalExecutionFailure]>, GoalRepositoryError> {
         let rows = sqlx::query(
+            // Auto-resume is an owned-session obligation: without the
+            // conjunct a conversation someone attached a goal to keeps
+            // spending model work on its own.
             "SELECT event.session_id, event.event_ordinal
                FROM goal_event AS event
+               JOIN session_lifecycle AS lifecycle
+                 ON lifecycle.session_id = event.session_id
+                AND lifecycle.owned
               WHERE event.event_kind = 'blocked'
                 AND event.blocked_reason = 'execution_failure'
                 AND event.need = $1
@@ -1622,7 +1628,21 @@ pub(crate) async fn insert_event_for_session_closure(
     session: SessionId,
     event: &GoalEvent,
 ) -> Result<(), GoalRepositoryError> {
-    insert_event(connection, session, event).await
+    insert_event(connection, session, event).await?;
+    // A closure retires its queued turn through the same committed path a stop
+    // or a supersession uses; otherwise the turn stays live beneath a terminal
+    // session.
+    if let Some(retired) = retired_queued_goal_turn_without_outbox(connection, session).await? {
+        outbox::append(
+            connection,
+            OutboxEvent::GoalTurnRetired {
+                session,
+                turn: retired,
+            },
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn insert_event(

@@ -63,6 +63,7 @@ use signalbox_persistence::{
         ReplaceSessionDefaultsHandlingOutcome, ReplaceSessionDefaultsRepository,
     },
     scheduler::PostgresEligibilitySweep,
+    session_lifecycle::SessionLifecycleRepository,
     start_eligible_turn::{CommitCompactionFailurePreviewOutcome, StartEligibleTurnRepository},
     startup::PostgresStartupScanRepository,
     submit_input::SubmitInputRepository,
@@ -975,6 +976,12 @@ async fn s_goal_inv048_expected_resume_binds_to_one_blocked_event() -> Result<()
     let GoalTransitionOutcome::Applied(blocked) = blocked else {
         panic!("fixture execution-failure block must apply");
     };
+    // Automatic resumption is an owned-session obligation (§6): the inventory
+    // reads the ownership bit, so the fixture states the ownership its subject
+    // depends on rather than inheriting the interactive default.
+    SessionLifecycleRepository::new(pool.clone())
+        .adopt(session(SESSION), signalbox_domain::LifecycleActor::Operator)
+        .await?;
     let pending = repository
         .pending_execution_failures_with_need(&scheduled_need)
         .await?;

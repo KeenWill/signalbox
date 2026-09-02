@@ -77,15 +77,11 @@ records two required, independent, immutable creation facts, paired as
 - **Creation cause** — why the session exists. The constructible variants are
   `Interactive`, `ModuleDispatched { dispatch }`, and
   `Delegated { spawning_request }`. `ModuleDispatched` carries one typed
-  `ModuleDispatch`, which names both the dispatching module and that module's
-  own durable dispatch identity, and fixes ancestry to `None`: a dispatched
-  session starts from no prior transcript, so a module supplying one would be
-  inferring semantic history from a dispatch record. The delegated variant is
+  `ModuleDispatch` naming the dispatching module and that module's own durable
+  dispatch identity, and fixes ancestry to `None`. The delegated variant is
   produced only by the spawning-request path and likewise fixes ancestry to
-  `None`. The imported-frontier creation family records `Interactive` with its
-  import reference in its own ancestry columns — importing a conversation is a
-  user-initiated act, so the vocabulary stays closed. Application and schedule
-  causes are not represented as placeholders.
+  `None`. The imported-frontier creation family records `Interactive`.
+  Application and schedule causes are not represented as placeholders.
 - **Transcript ancestry** — where initial semantic context came from: `None`
   (explicitly no prior transcript), `SingleSource` naming one source `SessionId`
   and one opaque `TranscriptFrontier`, or `ImportedConversation` naming one

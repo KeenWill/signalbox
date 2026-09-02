@@ -21,7 +21,7 @@
 use std::{error::Error, fmt, time::Duration};
 
 use signalbox_domain::{
-    CoreAgency, Goal, LifecycleActor, SessionClosureOutcome, SessionCreationCause,
+    CoreAgency, Goal, GoalState, LifecycleActor, SessionClosureOutcome, SessionCreationCause,
     SessionFailureCause, SessionId, SessionLifecycleState, SessionOwnership,
     SessionOwnershipTransition, SessionParkCause, SessionParkResponder, SessionTerminalOutcome,
     SessionWait, SessionWaitKind, StopStickiness,
@@ -91,6 +91,17 @@ pub enum SessionLifecycleRejection {
     GoalGenerationStillOpen,
     /// The session holds no committed terminal handoff to settle.
     NoPendingTerminal,
+    /// `parked` is an owned-only state (§1), so an unmonitored conversation
+    /// cannot be parked: nothing would be watching it afterwards.
+    ParkWhileUnmonitored,
+    /// A different terminal outcome is already committed to this session's
+    /// settlement, and the first decision is the one that stands.
+    PendingTerminalConflict,
+    /// The session outcome contradicts the terminal state its goal already
+    /// recorded.
+    GoalOutcomeMismatch,
+    /// A failed closure names a cause the park it closes does not hold.
+    StandingCauseMismatch,
 }
 
 impl fmt::Display for SessionLifecycleRejection {
@@ -101,6 +112,14 @@ impl fmt::Display for SessionLifecycleRejection {
             Self::OwnershipUnchanged => "the session already holds that ownership",
             Self::GoalGenerationStillOpen => "the goal generation is still open",
             Self::NoPendingTerminal => "the session holds no pending terminal outcome",
+            Self::ParkWhileUnmonitored => "an unmonitored session cannot be parked",
+            Self::PendingTerminalConflict => {
+                "a different terminal outcome is already committed to this settlement"
+            }
+            Self::GoalOutcomeMismatch => {
+                "the session outcome contradicts its goal's terminal state"
+            }
+            Self::StandingCauseMismatch => "the closure cause is not the park's standing cause",
         };
         formatter.write_str(detail)
     }
@@ -324,6 +343,9 @@ impl SessionLifecycleRepository {
     ) -> Result<SessionLifecycleState, SessionLifecycleRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let held = load_locked(&mut transaction, session).await?;
+        if held.ownership == SessionOwnership::Unmonitored {
+            return Err(reject(transaction, SessionLifecycleRejection::ParkWhileUnmonitored).await);
+        }
         let parked = SessionLifecycleState::Parked {
             cause,
             responder,
@@ -360,7 +382,7 @@ impl SessionLifecycleRepository {
             actor,
         )
         .await?;
-        sqlx::query("SELECT project_session_lifecycle($1)")
+        sqlx::query("SELECT project_session_lifecycle($1, true)")
             .bind(session_id_to_uuid(session))
             .execute(&mut *transaction)
             .await?;
@@ -403,6 +425,19 @@ impl SessionLifecycleRepository {
                 SessionLifecycleRejection::TransitionNotAdmitted,
             )
             .await);
+        }
+        match held.pending_terminal {
+            Some(committed) if committed == outcome => {
+                return commit(transaction).await;
+            }
+            Some(_) => {
+                return Err(reject(
+                    transaction,
+                    SessionLifecycleRejection::PendingTerminalConflict,
+                )
+                .await);
+            }
+            None => {}
         }
         let encoded = EncodedTerminal::from_outcome(outcome);
         sqlx::query(
@@ -575,6 +610,11 @@ pub(crate) async fn close_in_transaction(
             SessionLifecycleRejection::TransitionNotAdmitted,
         ));
     }
+    if !closure_carries_standing_cause(&held.state, outcome) {
+        return Err(SessionLifecycleRepositoryError::Rejected(
+            SessionLifecycleRejection::StandingCauseMismatch,
+        ));
+    }
     settle_goal(connection, session, outcome, actor).await?;
     write_state(connection, &held, terminal, actor).await?;
     record_cleanup_obligation(connection, session, outcome).await?;
@@ -591,7 +631,13 @@ async fn settle_goal(
         return Ok(());
     };
     if !goal.current().state().is_open() {
-        return Ok(());
+        return if closed_goal_agrees(goal.current().state(), outcome) {
+            Ok(())
+        } else {
+            Err(SessionLifecycleRepositoryError::Rejected(
+                SessionLifecycleRejection::GoalOutcomeMismatch,
+            ))
+        };
     }
     let Some(closure) = outcome.closure_outcome() else {
         return Err(SessionLifecycleRepositoryError::Rejected(
@@ -599,6 +645,70 @@ async fn settle_goal(
         ));
     };
     append_session_closure(connection, session, goal, closure, actor).await
+}
+
+/// Whether an already-settled generation records the same ending the session
+/// is about to record.
+///
+/// A goal the user stopped and a session claiming a verified achievement are
+/// two durable records of one ending that disagree.
+fn closed_goal_agrees(state: &GoalState, outcome: SessionTerminalOutcome) -> bool {
+    match (state, outcome) {
+        (GoalState::Achieved { .. }, SessionTerminalOutcome::AchievedVerified)
+        | (GoalState::UserStopped, SessionTerminalOutcome::Stopped { .. }) => true,
+        (GoalState::SessionClosed { outcome: settled }, _) => {
+            outcome.closure_outcome() == Some(*settled)
+        }
+        (
+            GoalState::Achieved { .. }
+            | GoalState::UserStopped
+            | GoalState::Pursuing
+            | GoalState::Blocked { .. }
+            | GoalState::Superseded { .. },
+            _,
+        ) => false,
+    }
+}
+
+/// Whether a closure carries forward the cause the park it closes holds.
+///
+/// A closure naming a different cause records a fabricated one, and the same
+/// write clears the park that would have contradicted it.
+fn closure_carries_standing_cause(
+    held: &SessionLifecycleState,
+    outcome: SessionTerminalOutcome,
+) -> bool {
+    let SessionLifecycleState::Parked {
+        standing: Some(standing),
+        ..
+    } = held
+    else {
+        return true;
+    };
+    match (standing, outcome) {
+        (
+            SessionFailureCause::Retryable(standing),
+            SessionTerminalOutcome::FailedRetryable { cause },
+        ) => *standing == cause,
+        (
+            SessionFailureCause::Structural(standing),
+            SessionTerminalOutcome::FailedStructural { cause },
+        ) => *standing == cause,
+        (
+            _,
+            SessionTerminalOutcome::FailedRetryable { .. }
+            | SessionTerminalOutcome::FailedStructural { .. }
+            | SessionTerminalOutcome::FailedUnknown,
+        ) => false,
+        (
+            _,
+            SessionTerminalOutcome::AchievedVerified
+            | SessionTerminalOutcome::Stopped { .. }
+            | SessionTerminalOutcome::Superseded { .. }
+            | SessionTerminalOutcome::Abandoned
+            | SessionTerminalOutcome::Retired { .. },
+        ) => true,
+    }
 }
 
 async fn append_session_closure(
@@ -653,17 +763,19 @@ async fn journal_ownership(
     transition: SessionOwnershipTransition,
     actor: LifecycleActor,
 ) -> Result<(), sqlx::Error> {
-    let (actor_kind, actor_module, _, _) = encode_actor(actor);
+    let (actor_kind, actor_module, actor_turn, actor_request) = encode_actor(actor);
     sqlx::query(
         "INSERT INTO session_ownership_event
             (session_id, event_ordinal, transition_kind, owned_after,
-             actor_kind, actor_module)
+             actor_kind, actor_module, actor_turn_id, actor_tool_request_id)
          SELECT $1,
                 COALESCE(MAX(event_ordinal), 0) + 1,
                 $2,
                 $3,
                 $4,
-                $5
+                $5,
+                $6,
+                $7
            FROM session_ownership_event
           WHERE session_id = $1",
     )
@@ -672,6 +784,8 @@ async fn journal_ownership(
     .bind(transition.ownership().is_owned())
     .bind(actor_kind)
     .bind(actor_module)
+    .bind(actor_turn)
+    .bind(actor_request)
     .execute(&mut *connection)
     .await?;
     Ok(())
@@ -790,7 +904,7 @@ async fn load_optional(
     let row = sqlx::query(
         "SELECT session_id, state_kind, owned, actor_kind, actor_module,
                 actor_turn_id, actor_tool_request_id, waiting_kind,
-                waiting_subject_session_id, recovering_op, blocked_reason,
+                waiting_waker, waiting_subject_session_id, recovering_op, blocked_reason,
                 blocked_cycle, parked_cause, parked_responder,
                 parked_standing_cause_kind, terminal_outcome_kind,
                 terminal_cause_kind, terminal_stop_sticky,
@@ -1067,6 +1181,7 @@ fn decode_state(row: &PgRow) -> Result<SessionLifecycleState, SessionLifecycleRe
         "waiting" => Ok(SessionLifecycleState::Waiting {
             wait: decode_wait(
                 &required::<String>(row, "waiting_kind")?,
+                &required::<String>(row, "waiting_waker")?,
                 row.try_get("waiting_subject_session_id")?,
             )?,
         }),
@@ -1110,7 +1225,23 @@ fn decode_state(row: &PgRow) -> Result<SessionLifecycleState, SessionLifecycleRe
     }
 }
 
+/// Rebuilds one wait from the kind, its designated waker, and its subject.
+///
+/// The waker is read rather than derived: a reader that reconstructed it would
+/// report a plausible wait for a row whose durable waker had drifted.
 fn decode_wait(
+    kind: &str,
+    waker: &str,
+    subject: Option<Uuid>,
+) -> Result<SessionWait, SessionLifecycleRepositoryError> {
+    let decoded = decode_wait_kind(kind, subject)?;
+    if session_waker_to_str(decoded.waker()) != waker {
+        return Err(SessionLifecycleCorruption::Inconsistent("waiting waker").into());
+    }
+    Ok(decoded)
+}
+
+fn decode_wait_kind(
     kind: &str,
     subject: Option<Uuid>,
 ) -> Result<SessionWait, SessionLifecycleRepositoryError> {
