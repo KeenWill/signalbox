@@ -45,14 +45,14 @@ append-only row that fails matching reads closed.
 ## Compatibility grouping
 
 Aggregate reads group only calls that agree on call kind, resolved target,
-credential profile, provenance, input-token semantics, and the typed presence
-state of every token axis. Absence is never replaced by zero. This separation is
-the compatibility boundary for later rate-based cost derivation. Each group
-carries a named two-state cache-normalization axis that says only whether
-cache-inclusive input can be normalized without underflow. It does not claim
-that a configured rate's decimal arithmetic is representable or equivalent to
-checked per-call costing; rate consumers must establish those properties
-independently.
+credential profile, provenance, input-token semantics, the pinned rate-window
+identity, and the typed presence state of every token axis. Absence is never
+replaced by zero. This separation is the compatibility boundary for later
+rate-based cost derivation. Each group carries a named two-state
+cache-normalization axis that says only whether cache-inclusive input can be
+normalized without underflow. It does not claim that a configured rate's decimal
+arithmetic is representable or equivalent to checked per-call costing; rate
+consumers must establish those properties independently.
 
 An aggregate consumes at most 10,000 newest matching calls and returns at most
 256 compatibility groups. The report carries a named two-state completeness axis
@@ -138,15 +138,14 @@ Dollar cost is not stored in the projection. Signalboxd reconstructs the exact
 non-secret credential reference from the bounded profile label when it fits the
 configured-profile ceiling, then derives cost at read time from the
 configuration-owned rate window that covers the model call's recorded timestamp
-on the channel it was submitted through; an over-ceiling reference derives
+on the channel pinned on that call; an over-ceiling reference derives
 unavailable configuration. A call whose timestamp falls in no configured window
 has unavailable cost, never zero. Independently reported axes remain priceable
 when cache normalization is incomplete; only a contradictory cache-inclusive
 breakdown is invalid. A derived amount prices every reported axis exactly: when
 any reported axis cannot be represented by exact decimal arithmetic, the whole
-cost is unavailable rather than an understated partial total. A summary group
-spanning a price change sums its calls' own per-call figures and names every
-window that contributed; it is never repriced against one window. Each derived
+cost is unavailable rather than an understated partial total. A price change
+therefore splits a group rather than being averaged inside one. Each derived
 amount carries the identity of the window that priced it — provider, provider
 model, channel, and `effective_from` — and its `real` or `metered_equivalent`
 label. Unavailable cost carries one closed reason: no token evidence, unknown

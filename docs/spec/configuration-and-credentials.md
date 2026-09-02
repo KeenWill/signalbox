@@ -429,9 +429,12 @@ polling are external tooling that calls that verb; the daemon watches no path.
 
 The initially reloadable sections are the static model and alias catalog
 including its rate windows, the static session-template catalog together with
-every template prompt file it names, and the repository-watch configuration,
-whose reload additionally requires the durable activation reconciliation and
-worker start/stop ordering [repo-watch](repo-watch.md) owns — widening
+every template prompt file it names, and the repository-watch configuration
+except its webhook listener's bind address and request path, which stay
+startup-only because rebinding a live listener is not a catalog swap. The
+reload-time transaction for the rest of that section — durable activation and
+deactivation ordering, worker start and stop, and rollback — is owed to
+[repo-watch](repo-watch.md) and is not stated there yet. This widens
 [#660](https://github.com/KeenWill/signalbox/issues/660), which named only the
 latter two. Every other section is startup-only, including process paths and
 bounds, adapter mappings, credential deliveries and pools, telemetry export, and
@@ -1460,9 +1463,11 @@ Each `[[models]]` entry defines one direct selection:
   any provider or adapter reservation, not the provider's larger raw advertised
   window, and not smaller than `max_output_tokens`.
 - zero or more `[[models.rate_windows]]` entries, each one dated price window
-  over this entry's own provider and `provider_model`: `channel` (`api` or
-  `batch_api`), `effective_from`, optional `effective_until`, the all-or-none
-  `input_usd_per_million_tokens`, `output_usd_per_million_tokens`,
+  over this entry's own `provider_model`: `provider`, the commercial provider
+  that published the rates (`anthropic` or `openai`) and never the adapter or
+  family name, `channel` (`api` or `batch_api`), `effective_from`, optional
+  `effective_until`, the all-or-none `input_usd_per_million_tokens`,
+  `output_usd_per_million_tokens`,
   `cache_creation_input_usd_per_million_tokens`, and
   `cache_read_input_usd_per_million_tokens`, and the provenance pair
   `source_url` and `retrieved_on`. The four rates are nonnegative decimal USD
@@ -1474,14 +1479,14 @@ Each `[[models]]` entry defines one direct selection:
   UTC exclusive, and an absent `effective_until` means the window is still open.
   The windows resolved for one target and channel may not overlap; entries
   naming the same target contribute one coalesced set, so the agreeing
-  duplicates below are not an overlap. A window's identity is exactly that
-  triple plus its `effective_from`, and that identity is what a derived cost
-  names; the opaque `rate_version` label is retired. Rewriting a published
-  window's rates under that same identity is invalid deployment evolution,
-  exactly as a same-name credential-profile rewrite is; a correction declares a
-  new window. Declaring only part of a window's rate set is a configuration
-  error; declaring no window is valid and yields no dollar figure for that
-  model.
+  duplicates below are not an overlap. A window's identity is exactly its
+  `provider`, `provider_model`, `channel`, and `effective_from`, and that
+  identity is what a derived cost names; the opaque `rate_version` label is
+  retired. Rewriting a published window's rates or its `effective_until`
+  boundary under that same identity is invalid deployment evolution, exactly as
+  a same-name credential-profile rewrite is; a correction declares a new window.
+  Declaring only part of a window's rate set is a configuration error; declaring
+  no window is valid and yields no dollar figure for that model.
 
 The document root may carry an optional `[verified_through]` table mapping a
 provider name to one date recording how far a deployment checked that provider's
@@ -1571,9 +1576,11 @@ swap is the visible unit of configuration change. Keeping a selection key
 immutable is deployment discipline that code enforces only partially: removal
 makes new resolution fail, but nothing prevents an edited document from pointing
 an existing `selection_id` at a new `target_id` across a restart — new turns
-would silently resolve to the new target (see Open edges). Where a stored call
-exists, code does enforce consistency: ordinary-path reconstitution cross-checks
-every stored call's target against the configured `ModelTargetCatalog` and fails
+would silently resolve to the new target (see Open edges). A reload that
+repoints an existing `selection_id` is rejected for that reason; restart remains
+the only path that changes a selection's meaning. Where a stored call exists,
+code does enforce consistency: ordinary-path reconstitution cross-checks every
+stored call's target against the configured `ModelTargetCatalog` and fails
 closed as corruption (`CallTargetMismatch`) when the catalog now resolves that
 selection to a different target. The startup-scan restart path instead rebuilds
 its target catalog from the stored calls themselves, deliberately not from
@@ -2823,14 +2830,15 @@ cache-creation and cache-read breakdowns. Derivation therefore applies the
 ordinary input rate only when both cache breakdown axes are present and can be
 subtracted from total input; an omitted breakdown leaves ordinary input
 unreported while any independently reported output or cache axis remains
-priceable. Each cache rate is applied once. That inclusive-input meaning is
-pinned on the call when it is prepared, so a later configuration restart or
-reload that reuses the target with another adapter cannot reinterpret historical
-usage. A cache breakdown larger than total input yields no figure. A credential
-update that advances the session head cannot relabel an earlier call because
-that call retains its original profile pin. Deployment keeps one profile name's
-billing meaning stable and uses a new name when an authentication update changes
-that meaning. The parser cannot detect a same-name semantic rewrite across
+priceable. Each cache rate is applied once. The channel and that inclusive-input
+meaning are both pinned on the call when it is prepared, and every call this
+build prepares pins channel `api`, so a later configuration restart or reload
+that reuses the target with another adapter cannot reinterpret historical usage.
+A cache breakdown larger than total input yields no figure. A credential update
+that advances the session head cannot relabel an earlier call because that call
+retains its original profile pin. Deployment keeps one profile name's billing
+meaning stable and uses a new name when an authentication update changes that
+meaning. The parser cannot detect a same-name semantic rewrite across
 configuration restarts; such a rewrite would relabel historical reads and is
 invalid deployment evolution.
 
