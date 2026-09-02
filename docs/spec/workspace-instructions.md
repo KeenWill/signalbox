@@ -6,6 +6,8 @@ discovery, typed registration construction, and explicit-root configuration were
 verified against PR #798 (`agent/agent-docs-skills-foundation`). Durable
 registration, empty eligibility, turn-start evidence, and model-call correlation
 were verified against PR #810 (`agent/agent-docs-skills-model-call-followup`).
+Directory exclusions and limit-set version two were verified against PR #1488
+(`agent/workspace-instruction-exclusions`).
 
 This page is the foundation proposal at the bottom of the workspace-instruction
 implementation stack. It specifies daemon-owned discovery, registration,

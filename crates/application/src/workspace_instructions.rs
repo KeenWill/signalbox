@@ -155,7 +155,9 @@ impl InstructionDiscoverySnapshot {
 
 // numeric-bound: not-a-bound - names which fixed discovery-limit set was applied
 const DISCOVERY_LIMIT_SET_VERSION: u16 = 2;
+#[cfg(unix)]
 const VCS_METADATA_DIRECTORIES: [&str; 4] = [".git", ".hg", ".svn", ".jj"];
+#[cfg(unix)]
 const BUILD_AND_DEPENDENCY_DIRECTORIES: [&str; 5] =
     ["target", "node_modules", ".venv", "dist", "build"];
 // numeric-bound: guard - prevents a pathological workspace tree from walking the daemon forever
