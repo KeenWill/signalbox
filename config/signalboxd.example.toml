@@ -579,9 +579,13 @@ web_search = "human"
 # Anthropic's most capable widely released model. Hard cap: 128000.
 #
 # This model rejects a forced tool choice, which is how the Anthropic adapter
-# realizes a structured-output contract, so an [approval_judge] selection
-# naming this row would fail every judge call at the provider. Until the
-# adapter can declare that per model, name a different row there.
+# realizes a structured-output contract, so every approval-judge call routed to
+# this row fails at the provider. That covers two paths, not one: naming this
+# row under [approval_judge], and — when that table is absent, as it is above —
+# any delegated tool request produced by a call on this row, because the judge
+# then reuses the producing call's own selection. Until the adapter declares
+# forced tool choice per model, deployments that delegate tool approval name a
+# different row under [approval_judge] rather than leaving the table absent.
 [[models]]
 selection_id = "3aa432ca-488e-4237-ac2b-7496a2ccc2b4"
 target_id = "ba705029-f367-4da8-a0bf-dbc6bf798e17"

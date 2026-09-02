@@ -380,6 +380,9 @@ fn fable_5_1_is_a_separate_identity_from_fable_5_at_the_same_standard_rate() {
         )
         .unwrap();
 
+    let fable_5_rates = fable_5.price().unwrap().resolved_rate_sets().unwrap();
+    let fable_5_1_rates = fable_5_1.price().unwrap().resolved_rate_sets().unwrap();
+
     assert_eq!(
         fable_5.resolved_model_id(),
         Some("anthropic:claude-fable-5")
@@ -388,28 +391,38 @@ fn fable_5_1_is_a_separate_identity_from_fable_5_at_the_same_standard_rate() {
         fable_5_1.resolved_model_id(),
         Some("anthropic:claude-fable-5-1")
     );
-    for (resolution, expected_rate_set) in [
-        (&fable_5, "anth-fable5-standard"),
-        (&fable_5_1, "anth-fable51-standard-cache"),
-    ] {
-        let rate_sets = resolution.price().unwrap().resolved_rate_sets().unwrap();
-        assert_eq!(rate_sets.len(), 1);
-        assert_eq!(rate_sets[0].id, expected_rate_set);
-        assert_eq!(
-            rate_sets[0]
-                .rate(RateDimension::Input, "tier=standard, region=global")
-                .unwrap()
-                .usd_per_million_tokens,
-            Some(Decimal::new(10, 0))
-        );
-        assert_eq!(
-            rate_sets[0]
-                .rate(RateDimension::Output, "tier=standard, region=global")
-                .unwrap()
-                .usd_per_million_tokens,
-            Some(Decimal::new(50, 0))
-        );
-    }
+    assert_eq!(fable_5_rates.len(), 1);
+    assert_eq!(fable_5_rates[0].id, "anth-fable5-standard");
+    assert_eq!(
+        fable_5_rates[0]
+            .rate(RateDimension::Input, "tier=standard, region=global")
+            .unwrap()
+            .usd_per_million_tokens,
+        Some(Decimal::new(10, 0))
+    );
+    assert_eq!(
+        fable_5_rates[0]
+            .rate(RateDimension::Output, "tier=standard, region=global")
+            .unwrap()
+            .usd_per_million_tokens,
+        Some(Decimal::new(50, 0))
+    );
+    assert_eq!(fable_5_1_rates.len(), 1);
+    assert_eq!(fable_5_1_rates[0].id, "anth-fable51-standard-cache");
+    assert_eq!(
+        fable_5_1_rates[0]
+            .rate(RateDimension::Input, "tier=standard, region=global")
+            .unwrap()
+            .usd_per_million_tokens,
+        Some(Decimal::new(10, 0))
+    );
+    assert_eq!(
+        fable_5_1_rates[0]
+            .rate(RateDimension::Output, "tier=standard, region=global")
+            .unwrap()
+            .usd_per_million_tokens,
+        Some(Decimal::new(50, 0))
+    );
 }
 
 /// The launch-day evidence prices Fable 5.1's cache reads at a quarter of the
@@ -460,6 +473,92 @@ fn fable_5_1_records_its_reduced_cache_read_beside_ordinary_cache_writes() {
             .unwrap()
             .usd_per_million_tokens,
         Some(Decimal::new(20, 0))
+    );
+}
+
+/// The published batch schedule halves the standard rates, and the batch
+/// channel resolves only against batch rate sets, so a launch-day batch lookup
+/// must find its own record rather than fall back to the synchronous one.
+#[test]
+fn fable_5_1_batch_lookup_resolves_the_published_batch_rates() {
+    let catalog = bundled_catalog().unwrap();
+
+    let resolution = catalog
+        .resolve(
+            Provider::Anthropic,
+            "claude-fable-5-1",
+            "2026-09-01",
+            CommercialChannel::BatchApi,
+        )
+        .unwrap();
+    let rate_set = &resolution.price().unwrap().resolved_rate_sets().unwrap()[0];
+
+    assert_eq!(rate_set.id, "anth-fable51-batch");
+    assert_eq!(
+        rate_set
+            .rate(RateDimension::Input, "tier=batch, region=global")
+            .unwrap()
+            .usd_per_million_tokens,
+        Some(Decimal::new(5, 0))
+    );
+    assert_eq!(
+        rate_set
+            .rate(RateDimension::Output, "tier=batch, region=global")
+            .unwrap()
+            .usd_per_million_tokens,
+        Some(Decimal::new(25, 0))
+    );
+}
+
+/// Auditing one provider's new launch says nothing about whether another
+/// provider's mutable price page still reads the way it did at its own
+/// retrieval, so the evidence horizon is per provider: the Anthropic horizon
+/// reaches the Fable 5.1 launch day while the OpenAI horizon stays where its
+/// own audit left it, and the same query date answers differently by provider.
+#[test]
+fn each_provider_keeps_its_own_evidence_horizon() {
+    let catalog = bundled_catalog().unwrap();
+
+    let anthropic = catalog
+        .resolve(
+            Provider::Anthropic,
+            "claude-fable-5-1",
+            "2026-09-01",
+            CommercialChannel::Api,
+        )
+        .unwrap();
+    let openai = catalog
+        .resolve(
+            Provider::Openai,
+            "gpt-5.6-sol",
+            "2026-09-01",
+            CommercialChannel::Api,
+        )
+        .unwrap();
+
+    assert_eq!(catalog.verified_through(Provider::Anthropic), "2026-09-01");
+    assert_eq!(catalog.verified_through(Provider::Openai), "2026-08-24");
+    assert_eq!(
+        anthropic.resolved_model_id(),
+        Some("anthropic:claude-fable-5-1")
+    );
+    assert_eq!(openai, ReferenceResolution::Unknown);
+}
+
+/// A source is admitted against its own provider's horizon, so extending one
+/// provider's horizon cannot admit another provider's unaudited retrieval.
+#[test]
+fn source_retrieved_after_its_own_provider_horizon_is_rejected() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    assert_eq!(raw["sources"][0]["provider"], "openai");
+    raw["sources"][0]["retrieved"] = Value::String(String::from("2026-09-01"));
+
+    let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("was retrieved after its provider's verified_through")
     );
 }
 
@@ -781,7 +880,7 @@ fn query_after_the_evidence_horizon_is_unknown() {
         .resolve(
             Provider::Openai,
             "gpt-5.6-sol",
-            "2026-09-02",
+            "2026-08-25",
             CommercialChannel::Api,
         )
         .unwrap();
