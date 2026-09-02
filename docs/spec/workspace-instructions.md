@@ -61,7 +61,7 @@ grants no session authority, and eligibility spends no model context.
 
 ## Discovery
 
-Discovery greedily walks the complete directory tree rooted at the session's
+Discovery greedily walks every non-excluded directory rooted at the session's
 daemon-local resolved workspace and each instruction directory explicitly
 registered by the owning
 [configuration grammar](configuration-and-credentials.md#workspace-instruction-roots).
@@ -83,18 +83,18 @@ later placement-revision-correlated protocol that returns bytes and findings
 from the pinned runner workspace. It may not be emulated by asking a
 model-runtime adapter to load ambient files.
 
-The walk considers every nested directory and yields an agent-document candidate
-for each `AGENTS.md` regular file. In the workspace it yields an agent-skill
-candidate for each directory immediately below an `.agents/skills` directory
-that contains a regular `SKILL.md`; `.agents/skills` may occur at any depth.
-Within an explicitly registered root, every nested directory containing a
-regular `SKILL.md` is a candidate, including the root itself. This lets a
-configured root name either one bundle or a collection without requiring the
-workspace convention outside the workspace. Version one does not follow symbolic
-links. It sorts directory entries by raw path spelling before descending, so
-identical trees yield candidates in identical order. Entries that cannot be read
-or classified produce typed discovery findings; they do not disappear as an
-empty successful result.
+Within that boundary, the walk considers every nested directory and yields an
+agent-document candidate for each `AGENTS.md` regular file. In the workspace it
+yields an agent-skill candidate for each directory immediately below an
+`.agents/skills` directory that contains a regular `SKILL.md`; `.agents/skills`
+may occur at any depth. Within an explicitly registered root, every nested
+directory containing a regular `SKILL.md` is a candidate, including the root
+itself. This lets a configured root name either one bundle or a collection
+without requiring the workspace convention outside the workspace. Version one
+does not follow symbolic links. It sorts directory entries by raw path spelling
+before descending, so identical trees yield candidates in identical order.
+Entries that cannot be read or classified produce typed discovery findings; they
+do not disappear as an empty successful result.
 
 Discovery does not descend into VCS metadata directories (`.git`, `.hg`, `.svn`,
 `.jj`), workspace descendants containing one of those directories, or

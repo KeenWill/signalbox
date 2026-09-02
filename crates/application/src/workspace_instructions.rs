@@ -430,7 +430,11 @@ fn walk_root(
                 continue;
             }
         };
-        if !is_root && root.kind() == InstructionDiscoveryRootKind::Workspace {
+        let inspect_for_nested_repository = match root.kind() {
+            InstructionDiscoveryRootKind::Workspace => !is_root,
+            InstructionDiscoveryRootKind::Configured => false,
+        };
+        if inspect_for_nested_repository {
             let metadata_deadline = state.started + state.limits.elapsed;
             match contains_vcs_metadata_before_deadline(&directory_descriptor, metadata_deadline) {
                 Ok(Ok(true)) => continue,
