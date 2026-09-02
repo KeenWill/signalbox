@@ -10,9 +10,9 @@ use std::{collections::VecDeque, future::Future};
 
 use signalbox_application::{
     AutomaticReconciliationOperation, AutomaticReconciliationOutcome,
-    ClaimedAutomaticReconciliation, ClassifyOperatorFailure, StaleActiveTurnBound,
-    StaleTurnCandidate, StaleTurnOutcome, TurnLivenessLedger, TurnLivenessScanInterval,
-    UuidV7StartupScanIdGenerator,
+    ClaimedAutomaticReconciliation, ClassifyOperatorFailure, DurableTurnLivenessObservation,
+    StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessGuardKind,
+    TurnLivenessLedger, TurnLivenessScanInterval, UuidV7StartupScanIdGenerator,
 };
 use signalbox_domain::{
     AcceptedInputTurnFailureIdentities, ContextFrontierId, SemanticTranscriptEntryId, SessionId,
@@ -30,7 +30,7 @@ use sqlx::PgPool;
 use tokio::{
     select,
     sync::watch,
-    time::{Duration, Instant, Interval, MissedTickBehavior, interval, timeout},
+    time::{Duration, Interval, MissedTickBehavior, interval, timeout},
 };
 use uuid::Uuid;
 
@@ -277,6 +277,27 @@ trait QuiescentInventory {
     ) -> impl Future<Output = Result<InventoryPage, TurnLivenessRepositoryError>> + Send;
 }
 
+/// Persists one complete guard population and returns its advanced ordinals.
+trait DurableObservationRecorder {
+    fn record_observation(
+        &self,
+        guard: TurnLivenessGuardKind,
+        candidates: &[StaleTurnCandidate],
+    ) -> impl Future<
+        Output = Result<Box<[DurableTurnLivenessObservation]>, TurnLivenessRepositoryError>,
+    > + Send;
+}
+
+impl DurableObservationRecorder for PostgresTurnLivenessRepository {
+    async fn record_observation(
+        &self,
+        guard: TurnLivenessGuardKind,
+        candidates: &[StaleTurnCandidate],
+    ) -> Result<Box<[DurableTurnLivenessObservation]>, TurnLivenessRepositoryError> {
+        self.record_complete_observation(guard, candidates).await
+    }
+}
+
 impl QuiescentInventory for PostgresTurnLivenessRepository {
     async fn read_page(
         &self,
@@ -410,15 +431,20 @@ async fn run_quiescent_watchdog(
 ) {
     let mut ticker = interval(scan_interval.get());
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let mut ledger = TurnLivenessLedger::new(staleness_bound);
+    let ledger = TurnLivenessLedger::new(staleness_bound, scan_interval);
     let mut window = TerminalizationWindow::new(numeric_bounds.terminalizations_per_scan);
     loop {
         match next_turn_liveness_wake(&mut shutdown, &mut ticker).await {
             TurnLivenessWake::Shutdown => return,
             TurnLivenessWake::Scan => {
-                let _ =
-                    reconcile_turn_liveness(&repository, &mut ledger, staleness_bound, &mut window)
-                        .await;
+                let _ = reconcile_turn_liveness(
+                    &repository,
+                    ledger,
+                    TurnLivenessGuardKind::Quiescent,
+                    staleness_bound,
+                    &mut window,
+                )
+                .await;
             }
         }
     }
@@ -433,7 +459,7 @@ async fn run_slot_held_watchdog(
 ) {
     let mut ticker = interval(scan_interval.get());
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let mut ledger = TurnLivenessLedger::new(staleness_bound);
+    let ledger = TurnLivenessLedger::new(staleness_bound, scan_interval);
     let mut window = TerminalizationWindow::new(numeric_bounds.terminalizations_per_scan);
     loop {
         match next_turn_liveness_wake(&mut shutdown, &mut ticker).await {
@@ -441,7 +467,7 @@ async fn run_slot_held_watchdog(
             TurnLivenessWake::Scan => {
                 reconcile_slot_held_turns(
                     &repository,
-                    &mut ledger,
+                    ledger,
                     &mut window,
                     numeric_bounds.recovery_attempt_bound,
                     &mut shutdown,
@@ -479,7 +505,7 @@ async fn run_ambiguous_operation_watchdog(
 
 async fn reconcile_slot_held_turns(
     inventory: &PostgresTurnLivenessRepository,
-    ledger: &mut TurnLivenessLedger,
+    ledger: TurnLivenessLedger,
     window: &mut TerminalizationWindow,
     recovery_attempt_bound: Option<Duration>,
     shutdown: &mut watch::Receiver<bool>,
@@ -487,7 +513,17 @@ async fn reconcile_slot_held_turns(
     let Some(active) = drain_slot_held_rotation(inventory, recovery_attempt_bound).await else {
         return;
     };
-    let due = ledger.reconcile(&active, Instant::now());
+    let observations = match inventory
+        .record_complete_observation(TurnLivenessGuardKind::SlotHeld, &active)
+        .await
+    {
+        Ok(observations) => observations,
+        Err(error) => {
+            report_turn_liveness_failure(&error);
+            return;
+        }
+    };
+    let due = ledger.reconcile(&observations, std::num::NonZeroU32::MIN);
     let attempted = window.take(&due);
     for candidate in attempted {
         let identities = AcceptedInputTurnFailureIdentities::new(
@@ -912,12 +948,13 @@ where
 /// overlapping it, so the pass degrades to observing less often.
 async fn reconcile_turn_liveness<Repository>(
     repository: &Repository,
-    ledger: &mut TurnLivenessLedger,
+    ledger: TurnLivenessLedger,
+    guard: TurnLivenessGuardKind,
     staleness_bound: StaleActiveTurnBound,
     window: &mut TerminalizationWindow,
 ) -> TerminalizationTally
 where
-    Repository: QuiescentInventory + StaleTurnTerminalizer,
+    Repository: QuiescentInventory + DurableObservationRecorder + StaleTurnTerminalizer,
 {
     // A rotation that could not be drained is not a smaller population; the
     // pass therefore ends without a decision and the ledger keeps what it had,
@@ -927,7 +964,14 @@ where
     else {
         return TerminalizationTally::default();
     };
-    let due = ledger.reconcile(&quiescent, Instant::now());
+    let observations = match repository.record_observation(guard, &quiescent).await {
+        Ok(observations) => observations,
+        Err(error) => {
+            report_turn_liveness_failure(&error);
+            return TerminalizationTally::default();
+        }
+    };
+    let due = ledger.reconcile(&observations, std::num::NonZeroU32::MIN);
     let attempted = window.take(&due);
     let mut tally = TerminalizationTally::default();
     for candidate in &attempted {
@@ -1139,15 +1183,16 @@ mod tests {
         reconcile_turn_liveness, reconciliation_deadline,
     };
     use signalbox_application::{
-        StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence,
-        TurnLivenessLedger,
+        DurableTurnLivenessObservation, StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome,
+        TurnLivenessEvidence, TurnLivenessGuardKind, TurnLivenessLedger, TurnLivenessScanInterval,
     };
     use signalbox_domain::{AcceptedInputTurnFailureIdentities, SessionId, TurnAttemptId, TurnId};
     use signalbox_persistence::turn_liveness::{
         TurnLivenessPersistenceBounds, TurnLivenessRepositoryError,
     };
     use std::{
-        sync::{Mutex, atomic::AtomicUsize, atomic::Ordering},
+        num::{NonZeroU32, NonZeroU64},
+        sync::{Mutex, atomic::AtomicU64, atomic::AtomicUsize, atomic::Ordering},
         time::Duration,
     };
     use uuid::Uuid;
@@ -1155,6 +1200,14 @@ mod tests {
     fn fixture_staleness_bound() -> StaleActiveTurnBound {
         StaleActiveTurnBound::try_new(Duration::from_secs(37))
             .expect("fixture staleness bound is valid")
+    }
+
+    fn fixture_ledger(bound: StaleActiveTurnBound) -> TurnLivenessLedger {
+        TurnLivenessLedger::new(
+            bound,
+            TurnLivenessScanInterval::try_new(bound.get())
+                .expect("fixture interval is timer-representable"),
+        )
     }
 
     fn example_numeric_bounds() -> TurnLivenessNumericBounds {
@@ -1256,6 +1309,7 @@ mod tests {
         remaining: Mutex<Vec<StaleTurnCandidate>>,
         busy: Vec<TurnId>,
         terminalized: AtomicUsize,
+        observation_ordinal: AtomicU64,
     }
 
     impl CountingRepository {
@@ -1264,6 +1318,7 @@ mod tests {
                 remaining: Mutex::new(candidates),
                 busy: Vec::new(),
                 terminalized: AtomicUsize::new(0),
+                observation_ordinal: AtomicU64::new(0),
             }
         }
 
@@ -1303,6 +1358,26 @@ mod tests {
                 candidates: candidates.into_boxed_slice(),
                 resume_after: None,
             })
+        }
+    }
+
+    impl super::DurableObservationRecorder for CountingRepository {
+        async fn record_observation(
+            &self,
+            _guard: TurnLivenessGuardKind,
+            candidates: &[StaleTurnCandidate],
+        ) -> Result<Box<[DurableTurnLivenessObservation]>, TurnLivenessRepositoryError> {
+            let ordinal = self
+                .observation_ordinal
+                .fetch_add(1, Ordering::Relaxed)
+                .saturating_add(1);
+            let ordinal = NonZeroU64::new(ordinal).expect("fixture ordinal stays positive");
+            Ok(candidates
+                .iter()
+                .copied()
+                .map(|candidate| DurableTurnLivenessObservation::new(candidate, ordinal))
+                .collect::<Vec<_>>()
+                .into_boxed_slice())
         }
     }
 
@@ -1397,12 +1472,25 @@ mod tests {
         let cohort = vec![candidate(1), candidate(2), candidate(3)];
         let capacity = cohort.len() - 1;
         let repository = CountingRepository::new(cohort.clone());
-        let mut ledger = TurnLivenessLedger::new(bound);
+        let ledger = fixture_ledger(bound);
         let mut window = TerminalizationWindow::new(Some(capacity));
-        let _ = reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
-        tokio::time::advance(bound.get()).await;
+        let _ = reconcile_turn_liveness(
+            &repository,
+            ledger,
+            TurnLivenessGuardKind::Quiescent,
+            bound,
+            &mut window,
+        )
+        .await;
 
-        let _ = reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
+        let _ = reconcile_turn_liveness(
+            &repository,
+            ledger,
+            TurnLivenessGuardKind::Quiescent,
+            bound,
+            &mut window,
+        )
+        .await;
 
         assert_eq!(repository.terminalized(), capacity);
         assert_eq!(repository.still_active(), cohort.len() - capacity);
@@ -1416,13 +1504,33 @@ mod tests {
         let cohort = vec![candidate(1), candidate(2), candidate(3)];
         let capacity = cohort.len() - 1;
         let repository = CountingRepository::new(cohort.clone());
-        let mut ledger = TurnLivenessLedger::new(bound);
+        let ledger = fixture_ledger(bound);
         let mut window = TerminalizationWindow::new(Some(capacity));
-        let _ = reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
-        tokio::time::advance(bound.get()).await;
-        let _ = reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
+        let _ = reconcile_turn_liveness(
+            &repository,
+            ledger,
+            TurnLivenessGuardKind::Quiescent,
+            bound,
+            &mut window,
+        )
+        .await;
+        let _ = reconcile_turn_liveness(
+            &repository,
+            ledger,
+            TurnLivenessGuardKind::Quiescent,
+            bound,
+            &mut window,
+        )
+        .await;
 
-        let _ = reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
+        let _ = reconcile_turn_liveness(
+            &repository,
+            ledger,
+            TurnLivenessGuardKind::Quiescent,
+            bound,
+            &mut window,
+        )
+        .await;
 
         assert_eq!(repository.terminalized(), cohort.len());
         assert_eq!(repository.still_active(), 0);
@@ -1499,12 +1607,25 @@ mod tests {
         let busy = candidate(1);
         let ends = candidate(2);
         let repository = CountingRepository::with_busy(vec![busy, ends], vec![busy.turn()]);
-        let mut ledger = TurnLivenessLedger::new(bound);
+        let ledger = fixture_ledger(bound);
         let mut window = TerminalizationWindow::new(Some(2));
-        let _ = reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
-        tokio::time::advance(bound.get()).await;
+        let _ = reconcile_turn_liveness(
+            &repository,
+            ledger,
+            TurnLivenessGuardKind::Quiescent,
+            bound,
+            &mut window,
+        )
+        .await;
 
-        let tally = reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
+        let tally = reconcile_turn_liveness(
+            &repository,
+            ledger,
+            TurnLivenessGuardKind::Quiescent,
+            bound,
+            &mut window,
+        )
+        .await;
 
         assert_eq!(tally.lock_unavailable, 1);
         assert_eq!(tally.failed, 0);

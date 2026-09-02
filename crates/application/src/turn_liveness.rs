@@ -8,7 +8,7 @@
 //! transition belong to the persistence adapter, and the periodic pass that
 //! drives both belongs to the daemon runtime.
 
-use std::{collections::HashMap, error::Error, fmt, num::NonZeroU32, time::Duration};
+use std::{error::Error, fmt, num::NonZeroU32, num::NonZeroU64, time::Duration};
 
 use signalbox_domain::{ModelCallId, SessionId, ToolAttemptId, TurnAttemptId, TurnId};
 use tokio::time::Instant;
@@ -386,34 +386,62 @@ pub enum StaleTurnOutcome {
     Superseded,
 }
 
-/// Remembers how long each quiescent turn has stood still.
-///
-/// The ledger is in-process state with no authority: losing it costs one more
-/// staleness bound before a wedged turn is reached, which is the safe
-/// direction. Nothing here can terminalize a turn that a scan did not first
-/// report as quiescent.
-#[derive(Clone, Debug)]
-pub struct TurnLivenessLedger {
-    bound: StaleActiveTurnBound,
-    quiescent: HashMap<TurnId, QuiescentObservation>,
+/// The independently observed watchdog predicate for one turn.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TurnLivenessGuardKind {
+    /// The turn has no physical operation in flight.
+    Quiescent,
+    /// The turn still holds its slot after a component deadline should have settled it.
+    SlotHeld,
 }
 
+impl TurnLivenessGuardKind {
+    /// Returns the durable storage token.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Quiescent => "quiescent",
+            Self::SlotHeld => "slot_held",
+        }
+    }
+}
+
+/// One commit-ordered observation after persistence advanced its ordinal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DurableTurnLivenessObservation {
+    candidate: StaleTurnCandidate,
+    ordinal: NonZeroU64,
+}
+
+impl DurableTurnLivenessObservation {
+    /// Reconstitutes one persisted observation.
+    pub const fn new(candidate: StaleTurnCandidate, ordinal: NonZeroU64) -> Self {
+        Self { candidate, ordinal }
+    }
+
+    /// Returns the observed turn and progress evidence.
+    pub const fn candidate(self) -> StaleTurnCandidate {
+        self.candidate
+    }
+
+    /// Returns the number of consecutive equal scan observations.
+    pub const fn ordinal(self) -> NonZeroU64 {
+        self.ordinal
+    }
+}
+
+/// Decides staleness from durable repeated-observation ordinals.
 #[derive(Clone, Copy, Debug)]
-struct QuiescentObservation {
-    evidence: TurnLivenessEvidence,
-    since: Instant,
+pub struct TurnLivenessLedger {
+    bound: StaleActiveTurnBound,
+    scan_interval: TurnLivenessScanInterval,
 }
 
 impl TurnLivenessLedger {
-    /// Starts with no observed turn, deciding staleness by the given bound.
-    ///
-    /// The bound is supplied rather than reloaded from the ceiling so a
-    /// deployment that validated a shorter one through
-    /// [`StaleActiveTurnBound::try_new`] actually gets it.
-    pub fn new(bound: StaleActiveTurnBound) -> Self {
+    /// Binds a staleness decision to its configured scan cadence.
+    pub const fn new(bound: StaleActiveTurnBound, scan_interval: TurnLivenessScanInterval) -> Self {
         Self {
             bound,
-            quiescent: HashMap::new(),
+            scan_interval,
         }
     }
 
@@ -422,53 +450,47 @@ impl TurnLivenessLedger {
         self.bound
     }
 
-    /// Returns how many turns are currently being watched for staleness.
-    pub fn watched_turn_count(&self) -> usize {
-        self.quiescent.len()
+    /// Returns the configured scan interval used to interpret ordinals.
+    pub const fn scan_interval(&self) -> TurnLivenessScanInterval {
+        self.scan_interval
     }
 
-    /// Folds one complete observation into the ledger and returns what is due.
+    /// Returns candidates whose persisted repeated observations cover the bound.
     ///
-    /// `quiescent` is the whole quiescent population, not a page of it: the
-    /// caller drains its rotation before reconciling, because a ledger fed
-    /// pages could neither forget a departed turn nor accumulate a bound for a
-    /// turn outside the current page. A turn whose evidence differs from the
-    /// last observation restarts its bound — progress must reset the clock —
-    /// and a turn absent from this scan is forgotten, since it left the
-    /// quiescent shape and must carry no credit into a later quiescent period.
+    /// The first observation establishes the frontier. Each later equal
+    /// observation contributes one configured scan interval, so system-clock
+    /// adjustment cannot add elapsed time. A slow-substrate factor increases
+    /// the required intervals without changing stored evidence.
     pub fn reconcile(
-        &mut self,
-        quiescent: &[StaleTurnCandidate],
-        now: Instant,
+        self,
+        observations: &[DurableTurnLivenessObservation],
+        slow_substrate_factor: NonZeroU32,
     ) -> Box<[StaleTurnCandidate]> {
-        let bound = self.bound.get();
-        let mut retained = HashMap::with_capacity(quiescent.len());
-        let mut due = Vec::new();
-        for candidate in quiescent {
-            let evidence = candidate.evidence();
-            let since = match self.quiescent.get(&candidate.turn()) {
-                Some(previous) if previous.evidence == evidence => previous.since,
-                Some(_) | None => now,
-            };
-            retained.insert(candidate.turn(), QuiescentObservation { evidence, since });
-            if now.saturating_duration_since(since) >= bound {
-                due.push(*candidate);
-            }
-        }
-        self.quiescent = retained;
-        due.into_boxed_slice()
+        let interval_nanos = self.scan_interval.get().as_nanos();
+        let bound_nanos = self.bound.get().as_nanos();
+        let intervals =
+            bound_nanos.saturating_add(interval_nanos.saturating_sub(1)) / interval_nanos;
+        let required = intervals
+            .saturating_mul(u128::from(slow_substrate_factor.get()))
+            .saturating_add(1);
+        observations
+            .iter()
+            .filter(|observation| u128::from(observation.ordinal().get()) >= required)
+            .map(|observation| observation.candidate())
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AutomaticReconciliationAttempt, StaleActiveTurnBound, StaleTurnCandidate,
-        TurnLivenessBoundError, TurnLivenessEvidence, TurnLivenessLedger, TurnLivenessScanInterval,
+        AutomaticReconciliationAttempt, DurableTurnLivenessObservation, StaleActiveTurnBound,
+        StaleTurnCandidate, TurnLivenessBoundError, TurnLivenessEvidence, TurnLivenessLedger,
+        TurnLivenessScanInterval,
     };
     use signalbox_domain::{SessionId, TurnAttemptId, TurnId};
-    use std::time::Duration;
-    use tokio::time::Instant;
+    use std::{num::NonZeroU32, num::NonZeroU64, time::Duration};
 
     const BOUND: Duration = Duration::from_secs(1_800);
 
@@ -499,7 +521,20 @@ mod tests {
     fn ledger() -> TurnLivenessLedger {
         TurnLivenessLedger::new(
             StaleActiveTurnBound::try_new(BOUND).expect("fixture bound is valid"),
+            TurnLivenessScanInterval::try_new(Duration::from_secs(60))
+                .expect("fixture interval is valid"),
         )
+    }
+
+    fn observation(frontier: u64, ordinal: u64) -> DurableTurnLivenessObservation {
+        DurableTurnLivenessObservation::new(
+            candidate(frontier),
+            NonZeroU64::new(ordinal).expect("fixture ordinal is positive"),
+        )
+    }
+
+    fn ordinary_factor() -> NonZeroU32 {
+        NonZeroU32::MIN
     }
 
     /// The deployment may select any positive whole-second staleness bound.
@@ -573,91 +608,59 @@ mod tests {
         );
     }
 
-    /// A turn seen for the first time is never due, however long the daemon
-    /// has been running: the bound is measured from observation, not startup.
-    #[tokio::test(start_paused = true)]
-    async fn a_first_observation_is_never_due() {
-        tokio::time::advance(Duration::from_secs(60 * 60)).await;
-        let mut ledger = ledger();
+    /// A first persisted observation establishes evidence but carries no elapsed scans.
+    #[test]
+    fn a_first_observation_is_never_due() {
+        let due = ledger().reconcile(&[observation(1, 1)], ordinary_factor());
 
-        let due = ledger.reconcile(&[candidate(1)], Instant::now());
-
-        assert_eq!(due.len(), 0);
-        assert_eq!(ledger.watched_turn_count(), 1);
+        assert!(due.is_empty());
     }
 
-    /// Unchanged evidence across the bound is what makes a turn due.
-    #[tokio::test(start_paused = true)]
-    async fn unchanged_evidence_across_the_bound_becomes_due() {
-        let mut ledger = ledger();
-        let first = ledger.reconcile(&[candidate(1)], Instant::now());
-        tokio::time::advance(BOUND).await;
+    /// Thirty elapsed minute scans plus the establishing observation cover a 30-minute bound.
+    #[test]
+    fn unchanged_evidence_across_the_bound_becomes_due() {
+        let due = ledger().reconcile(&[observation(1, 31)], ordinary_factor());
 
-        let second = ledger.reconcile(&[candidate(1)], Instant::now());
-
-        assert_eq!(first.len(), 0);
-        assert_eq!(second.len(), 1);
-        assert_eq!(second.first().copied(), Some(candidate(1)));
+        assert_eq!(due.as_ref(), &[candidate(1)]);
     }
 
-    /// Progress restarts the bound, so a turn that produced one more model
-    /// call is not terminalized on the strength of its earlier silence.
-    #[tokio::test(start_paused = true)]
-    async fn changed_evidence_restarts_the_bound() {
-        let mut ledger = ledger();
-        let _ = ledger.reconcile(&[candidate(1)], Instant::now());
-        tokio::time::advance(BOUND - Duration::from_secs(1)).await;
-        let _ = ledger.reconcile(&[candidate(2)], Instant::now());
-        tokio::time::advance(BOUND - Duration::from_secs(1)).await;
+    /// Persistence resets the ordinal when commit-ordered progress changes.
+    #[test]
+    fn changed_evidence_restarts_the_bound() {
+        let due = ledger().reconcile(&[observation(2, 2)], ordinary_factor());
 
-        let due = ledger.reconcile(&[candidate(2)], Instant::now());
-
-        assert_eq!(due.len(), 0);
+        assert!(due.is_empty());
     }
 
-    /// A turn that a complete scan no longer reports has left the quiescent
-    /// shape, so it carries no credit back into it.
-    #[tokio::test(start_paused = true)]
-    async fn a_complete_scan_forgets_an_absent_turn() {
-        let mut ledger = ledger();
-        let _ = ledger.reconcile(&[candidate(1)], Instant::now());
-        tokio::time::advance(BOUND - Duration::from_secs(1)).await;
-        let _ = ledger.reconcile(&[], Instant::now());
-        tokio::time::advance(BOUND - Duration::from_secs(1)).await;
+    /// A forward wall-clock jump supplies no input to the ordinal decision.
+    #[test]
+    fn forward_clock_jump_does_not_stale_live_work() {
+        let due = ledger().reconcile(&[observation(2, 1)], ordinary_factor());
 
-        let due = ledger.reconcile(&[candidate(1)], Instant::now());
-
-        assert_eq!(due.len(), 0);
-        assert_eq!(ledger.watched_turn_count(), 1);
+        assert!(due.is_empty());
     }
 
-    /// Every turn in the scan accrues its own bound, and only the turns this
-    /// scan no longer reports are pruned — one scan carries the whole
-    /// population, so neither outcome depends on how large it is.
-    #[tokio::test(start_paused = true)]
-    async fn each_scanned_turn_accrues_its_own_bound_and_departures_are_pruned() {
-        let mut ledger = ledger();
-        let _ = ledger.reconcile(&[candidate(1), other_candidate()], Instant::now());
-        tokio::time::advance(BOUND).await;
+    /// A declared slow substrate multiplies the observation threshold.
+    #[test]
+    fn healthy_turn_survives_a_slow_substrate_window() {
+        let factor = NonZeroU32::new(4).expect("fixture factor is positive");
+        let due = ledger().reconcile(&[observation(1, 31)], factor);
 
-        let due = ledger.reconcile(&[candidate(1)], Instant::now());
-
-        assert_eq!(due.first().copied(), Some(candidate(1)));
-        assert_eq!(due.len(), 1);
-        assert_eq!(ledger.watched_turn_count(), 1);
+        assert!(due.is_empty());
     }
 
     /// The validated configured bound is the one the ledger decides by.
-    #[tokio::test(start_paused = true)]
-    async fn a_lowered_bound_is_the_one_the_ledger_applies() {
+    #[test]
+    fn a_lowered_bound_is_the_one_the_ledger_applies() {
         let lowered = StaleActiveTurnBound::try_new(Duration::from_secs(60)).expect("60s is valid");
-        let mut ledger = TurnLivenessLedger::new(lowered);
-        let _ = ledger.reconcile(&[candidate(1)], Instant::now());
-        tokio::time::advance(Duration::from_secs(60)).await;
-
-        let due = ledger.reconcile(&[candidate(1)], Instant::now());
+        let ledger = TurnLivenessLedger::new(
+            lowered,
+            TurnLivenessScanInterval::try_new(Duration::from_secs(60))
+                .expect("fixture interval is valid"),
+        );
+        let due = ledger.reconcile(&[observation(1, 2)], ordinary_factor());
 
         assert_eq!(ledger.bound(), lowered);
-        assert_eq!(due.first().copied(), Some(candidate(1)));
+        assert_eq!(due.as_ref(), &[candidate(1)]);
     }
 }

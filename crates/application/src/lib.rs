@@ -264,9 +264,10 @@ pub use tool_loop_ports::{
 pub use turn_liveness::{
     AutomaticReconciliationAttempt, AutomaticReconciliationBatch,
     AutomaticReconciliationFailureKind, AutomaticReconciliationOperation,
-    AutomaticReconciliationOutcome, ClaimedAutomaticReconciliation,
+    AutomaticReconciliationOutcome, ClaimedAutomaticReconciliation, DurableTurnLivenessObservation,
     ExhaustedAutomaticReconciliation, StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome,
-    TurnLivenessBoundError, TurnLivenessEvidence, TurnLivenessLedger, TurnLivenessScanInterval,
+    TurnLivenessBoundError, TurnLivenessEvidence, TurnLivenessGuardKind, TurnLivenessLedger,
+    TurnLivenessScanInterval,
 };
 pub use update_session_placement::{
     UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest, UpdateSessionPlacementService,

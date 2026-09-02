@@ -9,11 +9,12 @@
 //! for a terminal turn — repository-watch dispatch release included — fires
 //! without this module naming any of them.
 
-use std::{error::Error, fmt, future::Future, time::Duration};
+use std::{error::Error, fmt, future::Future, num::NonZeroU64, time::Duration};
 
 use signalbox_application::{
-    ClassifyOperatorFailure, OperatorFailureClass, StaleTurnCandidate, StaleTurnOutcome,
-    StartupScanSessionOutcome, TurnLivenessEvidence,
+    ClassifyOperatorFailure, DurableTurnLivenessObservation, OperatorFailureClass,
+    StaleTurnCandidate, StaleTurnOutcome, StartupScanSessionOutcome, TurnLivenessEvidence,
+    TurnLivenessGuardKind,
 };
 use signalbox_domain::{
     AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, ModelCallId, SessionId,
@@ -75,6 +76,8 @@ impl TurnLivenessPersistenceBounds {
 pub enum TurnLivenessRepositoryError {
     /// Reading the quiescent active-turn inventory failed.
     Inventory(sqlx::Error),
+    /// Recording a complete durable observation population failed.
+    Observation(sqlx::Error),
     /// A required terminalization row stayed locked past the attempt's wait.
     TerminalizationLockUnavailable(sqlx::Error),
     /// A database operation on the terminalization path failed.
@@ -119,6 +122,12 @@ impl fmt::Display for TurnLivenessRepositoryError {
                     "quiescent active-turn inventory failed: {source}"
                 )
             }
+            Self::Observation(source) => {
+                write!(
+                    formatter,
+                    "durable turn-liveness observation failed: {source}"
+                )
+            }
             Self::TerminalizationLockUnavailable(source) => {
                 write!(
                     formatter,
@@ -137,6 +146,7 @@ impl Error for TurnLivenessRepositoryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Inventory(source)
+            | Self::Observation(source)
             | Self::TerminalizationLockUnavailable(source)
             | Self::TerminalizationDatabase { source, .. } => Some(source),
             Self::Terminalization(source) => Some(source),
@@ -147,7 +157,7 @@ impl Error for TurnLivenessRepositoryError {
 impl ClassifyOperatorFailure for TurnLivenessRepositoryError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
         match self {
-            Self::Inventory(_) => OperatorFailureClass::Infrastructure {
+            Self::Inventory(_) | Self::Observation(_) => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
             },
             Self::TerminalizationLockUnavailable(_) => OperatorFailureClass::Infrastructure {
@@ -165,6 +175,7 @@ impl ClassifyOperatorFailure for TurnLivenessRepositoryError {
     fn operator_failure_cause_code(&self) -> &'static str {
         match self {
             Self::Inventory(_) => "turn_liveness_inventory_failed",
+            Self::Observation(_) => "turn_liveness_observation_failed",
             Self::TerminalizationLockUnavailable(_) => {
                 "turn_liveness_terminalization_lock_unavailable"
             }
@@ -236,6 +247,101 @@ impl PostgresTurnLivenessRepository {
             .await
             .map_err(TurnLivenessRepositoryError::Inventory)?;
         Ok(QuiescentActiveTurnPage::new(fetched))
+    }
+
+    /// Advances one guard's durable repeated-observation ledger atomically.
+    ///
+    /// `candidates` is the complete population for the guard. Rows absent from
+    /// it are removed in the same transaction, so a turn that leaves and later
+    /// re-enters the predicate starts again at ordinal one.
+    pub async fn record_complete_observation(
+        &self,
+        guard: TurnLivenessGuardKind,
+        candidates: &[StaleTurnCandidate],
+    ) -> Result<Box<[DurableTurnLivenessObservation]>, TurnLivenessRepositoryError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(TurnLivenessRepositoryError::Observation)?;
+        let turns = candidates
+            .iter()
+            .map(|candidate| turn_id_to_uuid(candidate.turn()))
+            .collect::<Vec<_>>();
+        let sessions = candidates
+            .iter()
+            .map(|candidate| session_id_to_uuid(candidate.session()))
+            .collect::<Vec<_>>();
+        let attempts = candidates
+            .iter()
+            .map(|candidate| candidate.evidence().current_attempt().into_uuid())
+            .collect::<Vec<_>>();
+        let frontiers = candidates
+            .iter()
+            .map(|candidate| {
+                candidate
+                    .evidence()
+                    .outbox_frontier()
+                    .map_or_else(|| "none".to_owned(), |frontier| frontier.to_string())
+            })
+            .collect::<Vec<_>>();
+        let rows = sqlx::query(
+            "WITH incoming AS (
+                SELECT *
+                  FROM UNNEST($2::uuid[], $3::uuid[], $4::uuid[], $5::text[])
+                       AS item(turn_id, session_id, current_attempt_id, outbox_frontier_token)
+             )
+             INSERT INTO turn_liveness_observation AS observation
+                (guard_kind, turn_id, session_id, current_attempt_id,
+                 outbox_frontier_token, observation_ordinal)
+             SELECT $1, turn_id, session_id, current_attempt_id,
+                    outbox_frontier_token, 1
+               FROM incoming
+             ON CONFLICT (guard_kind, turn_id) DO UPDATE
+                SET session_id = EXCLUDED.session_id,
+                    current_attempt_id = EXCLUDED.current_attempt_id,
+                    outbox_frontier_token = EXCLUDED.outbox_frontier_token,
+                    observation_ordinal = CASE
+                        WHEN ROW(
+                            observation.current_attempt_id,
+                            observation.outbox_frontier_token
+                        ) IS NOT DISTINCT FROM ROW(
+                            EXCLUDED.current_attempt_id,
+                            EXCLUDED.outbox_frontier_token
+                        )
+                        THEN LEAST(observation.observation_ordinal + 1, 9223372036854775807)
+                        ELSE 1
+                    END,
+                    recorded_at = statement_timestamp()
+             RETURNING turn_id, session_id, current_attempt_id,
+                       outbox_frontier_token, observation_ordinal",
+        )
+        .bind(guard.as_str())
+        .bind(&turns)
+        .bind(&sessions)
+        .bind(&attempts)
+        .bind(&frontiers)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(TurnLivenessRepositoryError::Observation)?;
+        sqlx::query(
+            "DELETE FROM turn_liveness_observation
+              WHERE guard_kind = $1
+                AND NOT (turn_id = ANY($2::uuid[]))",
+        )
+        .bind(guard.as_str())
+        .bind(&turns)
+        .execute(&mut *transaction)
+        .await
+        .map_err(TurnLivenessRepositoryError::Observation)?;
+        transaction
+            .commit()
+            .await
+            .map_err(TurnLivenessRepositoryError::Observation)?;
+        rows.into_iter()
+            .map(decode_durable_observation)
+            .collect::<Result<Vec<_>, _>>()
+            .map(Vec::into_boxed_slice)
     }
 
     /// Reads the current slot-held observation for one exact session.
@@ -434,6 +540,54 @@ impl PostgresTurnLivenessRepository {
             Err(error) => Err(error),
         }
     }
+}
+
+fn decode_durable_observation(
+    row: sqlx::postgres::PgRow,
+) -> Result<DurableTurnLivenessObservation, TurnLivenessRepositoryError> {
+    let token: String = row
+        .try_get("outbox_frontier_token")
+        .map_err(TurnLivenessRepositoryError::Observation)?;
+    let frontier = if token == "none" {
+        None
+    } else {
+        Some(token.parse::<u64>().map_err(|_| {
+            TurnLivenessRepositoryError::Observation(sqlx::Error::Decode(
+                "invalid durable turn-liveness frontier".into(),
+            ))
+        })?)
+    };
+    let ordinal: i64 = row
+        .try_get("observation_ordinal")
+        .map_err(TurnLivenessRepositoryError::Observation)?;
+    let ordinal = u64::try_from(ordinal)
+        .ok()
+        .and_then(NonZeroU64::new)
+        .ok_or_else(|| {
+            TurnLivenessRepositoryError::Observation(sqlx::Error::Decode(
+                "invalid durable turn-liveness ordinal".into(),
+            ))
+        })?;
+    Ok(DurableTurnLivenessObservation::new(
+        StaleTurnCandidate::new(
+            session_id_from_uuid(
+                row.try_get("session_id")
+                    .map_err(TurnLivenessRepositoryError::Observation)?,
+            ),
+            turn_id_from_uuid(
+                row.try_get("turn_id")
+                    .map_err(TurnLivenessRepositoryError::Observation)?,
+            ),
+            TurnLivenessEvidence::new(
+                TurnAttemptId::from_uuid(
+                    row.try_get("current_attempt_id")
+                        .map_err(TurnLivenessRepositoryError::Observation)?,
+                ),
+                frontier,
+            ),
+        ),
+        ordinal,
+    ))
 }
 
 /// One page of the quiescent inventory, and where the rotation continues.
