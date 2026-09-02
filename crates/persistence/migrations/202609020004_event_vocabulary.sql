@@ -679,15 +679,20 @@ END
 $$;
 
 --
--- Operator attention. A sessionless receipt changes no session's facts. The
--- delegation header, which carries no disposition, keeps a function of its own.
+-- Operator attention. The lifecycle, goal, and settlement kinds journal
+-- nothing here: the satellite and goal rows they describe journal their own
+-- change (`lifecycle`, `goal`), and a receipt changes no fact. The delegation
+-- header, which carries no disposition, keeps a function of its own.
 --
 
 CREATE OR REPLACE FUNCTION record_operator_attention_outbox_change() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    IF NEW.session_id IS NULL THEN
+    IF NEW.event_kind IN (
+        'session_state_changed', 'session_terminal', 'session_ownership_changed',
+        'goal_changed', 'command_settled', 'injection_settled'
+    ) THEN
         RETURN NULL;
     END IF;
     INSERT INTO operator_attention_change (session_id, fact_kind)
@@ -695,12 +700,7 @@ BEGIN
         NEW.session_id,
         CASE NEW.event_kind
             WHEN 'session_created' THEN 'session'
-            WHEN 'session_state_changed' THEN 'session'
-            WHEN 'session_terminal' THEN 'session'
-            WHEN 'session_ownership_changed' THEN 'session'
             WHEN 'session_model_settings_changed' THEN 'session'
-            WHEN 'command_settled' THEN 'session'
-            WHEN 'goal_changed' THEN 'goal'
             WHEN 'turn_terminal' THEN CASE NEW.turn_disposition
                 WHEN 'retired' THEN 'goal'
                 ELSE 'turn'
@@ -708,7 +708,6 @@ BEGIN
             WHEN 'runner_state_transition' THEN 'runner'
             WHEN 'turn_model_settings_resolved' THEN 'turn'
             WHEN 'input_accepted' THEN 'turn'
-            WHEN 'injection_settled' THEN 'turn'
             WHEN 'turn_activated' THEN 'turn'
             WHEN 'model_call_transition' THEN 'turn'
             WHEN 'tool_batch_transition' THEN 'turn'
