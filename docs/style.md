@@ -131,9 +131,10 @@ derived guard declares the guard it derives from. Configuration may lower a
 guard but never raise it.
 
 Every other timeout, interval, attempt budget, concurrency or page bound, and
-retained-detail policy is required deployment configuration, with no code
-default. It is not also declared as a production constant. Test-only constants
-may size or bound their fixture without a production declaration.
+retained-detail policy the task names is required deployment configuration, with
+no code default and no production constant; one the task does not name is not
+introduced at all ([minimum mechanism](../AGENTS.md)). Test-only constants may
+size or bound their fixture without a production declaration.
 
 A constant whose name reads like a bound but states a fixed representation fact
 — a numeric type's exact maximum, UTF-8's continuation width, the basis points

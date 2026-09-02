@@ -13,6 +13,9 @@ reviews:
   # banner (owned as a class by AGENTS.md and stamped on the file itself, e.g.
   # docs/agents/backlog.md) decide nothing and are not statements of record.
   path_instructions:
+    - path: "**"
+      instructions: |-
+        Review doctrine owned by AGENTS.md (Minimum mechanism; Finished pull requests). A finding that a mechanism can be removed is a valid finding. A finding asking how a case the PR's task does not name is enforced, guarded, or handled is deferred by default unless the gap corrupts stored data or a committed contract, and is not re-raised once dispositioned. Do not request a config key, threshold, gate, or policy the task does not name.
     - path: "docs/agents/backlog.md"
       instructions: |-
         This file opens with a non-authoritative-planning banner: it is the owner's working scratchpad, decides nothing, and is not a statement of record. Do NOT review it for normative-statement placement, decision weight, or PR-description accuracy, and do NOT flag its prose for cross-document consistency, single-source-of-record duplication, or normative wording (must/never/only). Its entries are deliberately loose and are superseded by the owning docs/spec/ page, pull-request record, or docs/open-questions.md when an item is picked up. Treat findings only for plainly broken Markdown or dead repository-relative links.
@@ -114,5 +117,6 @@ reviews:
 knowledge_base:
   code_guidelines:
     filePatterns:
+      - "AGENTS.md"
       - "docs/agents/testing-style.md"
       - "docs/agents/goal-mode.md"

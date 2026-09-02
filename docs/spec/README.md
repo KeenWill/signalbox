@@ -31,12 +31,13 @@ inherited. `scripts/check_docs_consistency.py` enforces this form.
 
 Conventions: pages state implemented behavior, plus the committed unimplemented
 functionality that constrains it, per the three prose categories
-[AGENTS.md](../../AGENTS.md) defines and normatively owns; load-bearing design
-choices carry one-sentence "Why:" rationales; invariant references use INV tags
-resolved through the generated [invariants.md](../invariants.md) index; deferred
-or undecided items are recorded in [open-questions.md](../open-questions.md) and
-surfaced as pointers in each page's "Open edges" section; a topic normatively
-owned by a sibling page is linked, never restated.
+[AGENTS.md](../../AGENTS.md) defines and normatively owns; pages state behavior,
+not rationale — a load-bearing choice may carry one "Why:" sentence; invariant
+references use INV tags resolved through the generated
+[invariants.md](../invariants.md) index; deferred or undecided items are
+recorded in [open-questions.md](../open-questions.md) and surfaced as pointers
+in each page's "Open edges" section; a topic normatively owned by a sibling page
+is linked, never restated.
 
 ## Pages
 

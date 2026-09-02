@@ -3,6 +3,13 @@
 Signalbox is built in narrowly scoped slices authorized by implemented contracts
 or explicit owner-approved plans; speculative product behavior is not permitted.
 
+**Minimum mechanism.** Build the smallest thing that satisfies the behavior the
+task names: no config key, table, threshold, gate, or policy the task does not
+name. Measurement in the daemon is welcome; a decision on top of a measurement
+is the owner's and lives outside the daemon. Removing a mechanism the
+specification permits but the behavior does not need is a better change than
+adding one.
+
 **Documentation discipline.** A document earns its place only when it tells a
 reader who has the code something the code cannot say. Public API type shapes
 belong in `docs/domain-spine.md`, which is mechanically checked. Invariants
@@ -156,22 +163,23 @@ one finished and awaiting owner merge:
   still counts as a regression regardless of any reset. When a pull request's
   open-thread count exceeds roughly fifty, a wave's replies may batch, but a
   reply-and-resolve sweep across every open thread is mandatory before the pull
-  request is declared finished. A re-report of an already-fixed finding made
-  against a stale head is declined by standing policy, naming the fixing commit;
-  a finding materially identical to one dispositioned in a prior wave is a
-  re-raise, declined by the same standing policy with a link to the prior
-  thread. Neither standing decline applies to a finding that reproduces on the
-  current head: a defect reintroduced by a later wave's edits is live and is
-  dispositioned on its merits. If a wave finds a defect introduced by one of
-  this effort's own earlier fix waves, fix it in that wave's own disposition
-  round — an agent's own regression is always must-fix and never grounds to stop
-  (owner ruling 2026-07-31, after three same-night escalations each ended in the
-  identical authorization). The cap and the extension gate govern only whether a
-  further review is requested, never whether that fix is made, so a
-  self-regression found at the cap or at the wave-eight hard stop is still fixed
-  and the pull request then finishes without another review. Stop and escalate
-  to the owner only when the defect was introduced by a different effort's fix,
-  because repairing it means editing work someone else owns.
+  request is declared finished. Three findings are declined in one line by
+  standing policy: a re-report of an already-fixed finding against a stale head
+  (name the fixing commit); a re-raise of a finding dispositioned in a prior
+  wave (link that thread; reviewers do not re-raise); and a request to enforce,
+  guard, or handle a case the task does not name ("not enforced; deferred"),
+  unless the gap corrupts stored data or a committed contract. A finding that a
+  mechanism can be removed is valid and judged on its merits like any other. A
+  finding that reproduces on the current head is live and dispositioned on its
+  merits. If a wave finds a defect introduced by one of this effort's own
+  earlier fix waves, fix it in that wave's own disposition round — an agent's
+  own regression is always must-fix and never grounds to stop. The cap and the
+  extension gate govern only whether a further review is requested, never
+  whether that fix is made, so a self-regression found at the cap or at the
+  wave-eight hard stop is still fixed and the pull request then finishes without
+  another review. Stop and escalate to the owner only when the defect was
+  introduced by a different effort's fix, because repairing it means editing
+  work someone else owns.
 
 **Stacked pull requests.** Stacks may grow as deep as the work requires; the
 owner merges in batches, so never wait on a merge to continue. Keep every stack
