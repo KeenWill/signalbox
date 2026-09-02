@@ -48,6 +48,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
 use rust_decimal::Decimal;
@@ -152,6 +153,7 @@ use signalbox_persistence::{
         DispatchedOutboxEventKind, DispatchedReconciliationOperation, DispatchedSessionCreation,
         DispatchedToolBatchState, DispatchedTurnTerminalDisposition, OutboxCorruption,
         OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
+        OutboxPruneOutcome, OutboxRetention, PRUNABLE_TABLES,
     },
     plan::{SessionPlanCorruption, SessionPlanRepository, SessionPlanRepositoryError},
     process_read::{
@@ -2352,6 +2354,72 @@ async fn append_session_created_test_event(
     Ok(sequence)
 }
 
+/// Reads one registered consumer's durable position.
+async fn consumer_cursor(pool: &PgPool, consumer: &str) -> Result<Decimal, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT delivered_through
+           FROM outbox_consumer_cursor
+          WHERE consumer_name = $1",
+    )
+    .bind(consumer)
+    .fetch_one(pool)
+    .await
+}
+
+/// Reads the registry floor a prune is bounded by.
+async fn retention_floor(pool: &PgPool) -> Result<Decimal, sqlx::Error> {
+    sqlx::query_scalar("SELECT outbox_retention_floor()")
+        .fetch_one(pool)
+        .await
+}
+
+/// Reads one whole-table count or singleton mark as a number.
+async fn table_rows(pool: &PgPool, statement: &'static str) -> Result<i64, sqlx::Error> {
+    let value: Decimal = sqlx::query_scalar(statement).fetch_one(pool).await?;
+    Ok(i64::try_from(value).unwrap_or(-1))
+}
+
+/// Plants one committed `delegation_wake` header and typed record.
+///
+/// The wake's relationship rows are not what a prune reads, and building them
+/// honestly costs the same ~35 coupled tables that
+/// `outbox_decode_postgres.rs` documents. Referential triggers are disabled on
+/// the typed table alone, so the header's allocator, its deferred
+/// typed-record requirement, and both tables' delete guards stay enabled —
+/// which is exactly what the prune exercises.
+async fn plant_delegation_wake_test_event(
+    pool: &PgPool,
+    session: Uuid,
+    spawning_request: Uuid,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query("ALTER TABLE delegation_wake_outbox_event DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "WITH header AS (
+             INSERT INTO delegation_outbox_event
+                 (event_kind, storage_version, session_id)
+             VALUES ('delegation_wake', 1, $1)
+             RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO delegation_wake_outbox_event
+             (event_sequence, event_kind, storage_version, session_id,
+              spawning_tool_request_id, subject_kind,
+              result_spawning_request_id)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $2, 'result', $2
+           FROM header",
+    )
+    .bind(session)
+    .bind(spawning_request)
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE delegation_wake_outbox_event ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 async fn assert_outbox_truncate_rejected(
     pool: &PgPool,
     statement: &'static str,
@@ -2508,23 +2576,23 @@ async fn rewind_outbox_delivery_before(
     sequence: Decimal,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         DISABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         DISABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(pool)
     .await?;
     sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = $1 - 1,
                 last_delivery_xid = pg_current_xact_id()
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .bind(sequence)
     .execute(pool)
     .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         ENABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         ENABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(pool)
     .await?;

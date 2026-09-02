@@ -707,12 +707,16 @@ pub enum OutboxDispatchOutcome {
 /// Fail-closed reason a committed outbox projection could not be decoded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutboxCorruption {
-    /// The singleton delivery row was absent.
+    /// The consumer's registry cursor row was absent.
     MissingDeliveryState,
-    /// The locked singleton could not be advanced from the observed cursor.
+    /// The locked cursor could not be advanced from the observed position.
     DeliveryStateChanged,
     /// The singleton allocation row was absent.
     MissingSequenceState,
+    /// The singleton retention row was absent.
+    MissingRetentionState,
+    /// The locked retention row could not be advanced from its observed mark.
+    RetentionStateChanged,
     /// The delivered cursor exceeded the allocator cursor.
     DeliveryBeyondAllocatedSequence,
     /// A committed header existed beyond the allocator cursor.
@@ -753,9 +757,11 @@ pub enum OutboxCorruption {
 impl fmt::Display for OutboxCorruption {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::MissingDeliveryState => "outbox delivery state is missing",
-            Self::DeliveryStateChanged => "outbox delivery state changed unexpectedly",
+            Self::MissingDeliveryState => "outbox consumer cursor is missing",
+            Self::DeliveryStateChanged => "outbox consumer cursor changed unexpectedly",
             Self::MissingSequenceState => "outbox sequence state is missing",
+            Self::MissingRetentionState => "outbox retention state is missing",
+            Self::RetentionStateChanged => "outbox retention state changed unexpectedly",
             Self::DeliveryBeyondAllocatedSequence => {
                 "outbox delivery state exceeds the allocated sequence"
             }
@@ -826,6 +832,10 @@ impl From<OutboxCorruption> for OutboxDispatchError {
     }
 }
 
+/// Registry name of the process-protocol wire fan-out
+/// (`202609020012_outbox_consumer_cursors.sql`).
+const WIRE_CONSUMER: &str = "process_protocol";
+
 /// PostgreSQL-backed single-event transactional outbox dispatcher.
 ///
 /// Composition runs exactly one attempt loop. The database lock still
@@ -841,10 +851,11 @@ impl OutboxDispatcher {
         Self { pool }
     }
 
-    /// Offers exactly the next committed event and advances its cursor only
-    /// after the synchronous consumer accepts it.
+    /// Offers exactly the next committed event and advances the wire
+    /// consumer's registry cursor only after the synchronous consumer accepts
+    /// it.
     ///
-    /// The consumer runs while the delivery-state row lock is held. Returning
+    /// The consumer runs while that cursor row's lock is held. Returning
     /// [`OutboxDeliveryDecision::Retry`] or ending before the commit request
     /// leaves the prefix unchanged, so a later attempt offers the same event.
     /// A lost commit response is resolved by the next locked cursor read: a
@@ -858,6 +869,7 @@ impl OutboxDispatcher {
     {
         let mut transaction = self.pool.begin().await?;
         let delivered: Option<Decimal> = sqlx::query_scalar(lock_inventory::OUTBOX_DELIVERY)
+            .bind(WIRE_CONSUMER)
             .fetch_optional(&mut *transaction)
             .await?;
         let delivered = delivered.ok_or(OutboxCorruption::MissingDeliveryState)?;
@@ -891,13 +903,14 @@ impl OutboxDispatcher {
         }
 
         let updated = sqlx::query(
-            "UPDATE outbox_delivery_state
+            "UPDATE outbox_consumer_cursor
                 SET delivered_through = $1
-              WHERE singleton
+              WHERE consumer_name = $3
                 AND delivered_through = $2",
         )
         .bind(Decimal::from(next))
         .bind(Decimal::from(delivered))
+        .bind(WIRE_CONSUMER)
         .execute(&mut *transaction)
         .await?;
         if updated.rows_affected() != 1 {
@@ -905,6 +918,138 @@ impl OutboxDispatcher {
         }
         transaction.commit().await?;
         Ok(OutboxDispatchOutcome::Delivered { sequence: next })
+    }
+}
+
+macro_rules! prunable_tables {
+    ($count:literal, $($table:literal,)+) => {
+        /// Every outbox table the retention guard admits deletion from, typed
+        /// records before the headers they reference
+        /// (`202609020013_outbox_retention.sql`).
+        pub const PRUNABLE_TABLES: [&str; $count] = [$($table),+];
+
+        const PRUNE_STATEMENTS: [&str; $count] = [$(
+            concat!("DELETE FROM ", $table, " WHERE event_sequence <= $1")
+        ),+];
+    };
+}
+
+prunable_tables!(
+    21,
+    "session_created_outbox_event",
+    "session_model_settings_changed_outbox_event",
+    "turn_model_settings_resolved_outbox_event",
+    "input_accepted_outbox_event",
+    "turn_activated_outbox_event",
+    "turn_terminal_outbox_event",
+    "model_call_transition_outbox_event",
+    "tool_batch_transition_outbox_event",
+    "tool_approval_decided_outbox_event",
+    "context_compacted_outbox_event",
+    "runner_state_transition_outbox_event",
+    "session_state_changed_outbox_event",
+    "session_terminal_outbox_event",
+    "goal_changed_outbox_event",
+    "session_ownership_changed_outbox_event",
+    "command_settled_outbox_event",
+    "injection_settled_outbox_event",
+    "delegation_update_outbox_event",
+    "delegation_wake_outbox_event",
+    "outbox_event",
+    "delegation_outbox_event",
+);
+
+/// Highest sequence this pass may delete through: the registry floor, further
+/// bounded to the contiguous prefix whose headers all predate the window.
+const PRUNE_BOUND_SQL: &str = "SELECT least(
+    outbox_retention_floor(),
+    coalesce(
+        (SELECT min(header.event_sequence) - 1
+           FROM (
+                SELECT event_sequence, recorded_at FROM outbox_event
+                 UNION ALL
+                SELECT event_sequence, recorded_at FROM delegation_outbox_event
+           ) AS header
+          WHERE header.recorded_at
+                >= now() - ($1::double precision * interval '1 second')),
+        outbox_retention_floor()
+    )
+)";
+
+/// What one pruning pass removed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OutboxPruneOutcome {
+    /// Sequence the outbox is pruned through after this pass.
+    pub pruned_through: u64,
+    /// Rows this pass deleted across every outbox table.
+    pub removed_rows: u64,
+}
+
+/// PostgreSQL-backed outbox pruning below the consumer registry's floor.
+///
+/// A pass deletes only committed rows every registered consumer has already
+/// read, so no consumer can be outrun, and only the contiguous prefix older
+/// than the caller's retention window.
+#[derive(Clone, Debug)]
+pub struct OutboxRetention {
+    pool: PgPool,
+}
+
+impl OutboxRetention {
+    /// Binds the pruning pass to the shared hub pool.
+    pub const fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    /// Runs exactly one pruning pass and returns what it removed.
+    pub async fn prune(
+        &self,
+        window: std::time::Duration,
+    ) -> Result<OutboxPruneOutcome, OutboxDispatchError> {
+        let mut transaction = self.pool.begin().await?;
+        let pruned: Option<Decimal> = sqlx::query_scalar(lock_inventory::OUTBOX_RETENTION)
+            .fetch_optional(&mut *transaction)
+            .await?;
+        let pruned =
+            decode_nonnegative_sequence(pruned.ok_or(OutboxCorruption::MissingRetentionState)?)?;
+        let bound: Decimal = sqlx::query_scalar(PRUNE_BOUND_SQL)
+            .bind(window.as_secs_f64())
+            .fetch_one(&mut *transaction)
+            .await?;
+        let bound = decode_nonnegative_sequence(bound)?;
+        if bound <= pruned {
+            transaction.rollback().await?;
+            return Ok(OutboxPruneOutcome {
+                pruned_through: pruned,
+                removed_rows: 0,
+            });
+        }
+        let mut removed_rows: u64 = 0;
+        for statement in PRUNE_STATEMENTS {
+            let removed = sqlx::query(statement)
+                .bind(Decimal::from(bound))
+                .execute(&mut *transaction)
+                .await?;
+            removed_rows = removed_rows.saturating_add(removed.rows_affected());
+        }
+        let advanced = sqlx::query(
+            "UPDATE outbox_retention_state
+                SET pruned_through = $1
+              WHERE singleton
+                AND pruned_through = $2",
+        )
+        .bind(Decimal::from(bound))
+        .bind(Decimal::from(pruned))
+        .execute(&mut *transaction)
+        .await?;
+        if advanced.rows_affected() != 1 {
+            return Err(OutboxCorruption::RetentionStateChanged.into());
+        }
+        transaction.commit().await?;
+        Ok(OutboxPruneOutcome {
+            pruned_through: bound,
+            removed_rows,
+        })
     }
 }
 

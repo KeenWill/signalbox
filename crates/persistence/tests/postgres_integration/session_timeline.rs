@@ -1264,3 +1264,98 @@ async fn around_windows_reach_both_sides_of_an_interior_anchor() -> Result<(), B
     drop(container);
     Ok(())
 }
+
+/// The durable projection the window and region reads now read is exactly the
+/// union of both header families, so a read over it returns what the raw join
+/// returned. A fixture exercising both families and every disposition-bearing
+/// kind leaves no row unmatched in either direction.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn timeline_projection_matches_both_raw_header_families() -> Result<(), Box<dyn Error>> {
+    let (container, pool, fixture) = prepared_complete_delegation_outbox(0x9975).await?;
+
+    let projected_only: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM (
+             SELECT event_sequence, session_id, event_kind, turn_disposition
+               FROM session_timeline_item
+             EXCEPT ALL
+             SELECT event_sequence, session_id, event_kind, turn_disposition
+               FROM outbox_event
+             EXCEPT ALL
+             SELECT event_sequence, session_id, event_kind, NULL::text
+               FROM delegation_outbox_event
+         ) AS unmatched",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let raw_only: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM (
+             SELECT event_sequence, session_id, event_kind, turn_disposition
+               FROM outbox_event
+             UNION ALL
+             SELECT event_sequence, session_id, event_kind, NULL::text
+               FROM delegation_outbox_event
+             EXCEPT ALL
+             SELECT event_sequence, session_id, event_kind, turn_disposition
+               FROM session_timeline_item
+         ) AS unmatched",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(projected_only, 0);
+    assert_eq!(raw_only, 0);
+
+    let repository = SessionTimelineRepository::new(pool.clone());
+    let parent_window = projected_addresses(&repository, fixture.parent).await?;
+    let child_window = projected_addresses(&repository, fixture.child).await?;
+    let parent_raw = raw_session_addresses(&pool, fixture.parent).await?;
+    let child_raw = raw_session_addresses(&pool, fixture.child).await?;
+    assert_eq!(parent_window, parent_raw);
+    assert_eq!(child_window, child_raw);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Reads one session's whole address order straight from the raw headers.
+async fn raw_session_addresses(
+    pool: &PgPool,
+    identity: SessionId,
+) -> Result<Vec<TimelineAddress>, Box<dyn Error>> {
+    let sequences: Vec<i64> = sqlx::query_scalar(
+        "SELECT event_sequence::bigint FROM (
+             SELECT event_sequence FROM outbox_event WHERE session_id = $1
+             UNION ALL
+             SELECT event_sequence FROM delegation_outbox_event WHERE session_id = $1
+         ) AS header
+         ORDER BY event_sequence",
+    )
+    .bind(identity.into_uuid())
+    .fetch_all(pool)
+    .await?;
+    sequences
+        .into_iter()
+        .map(|sequence| {
+            Ok(TimelineAddress::new(
+                NonZeroU64::new(u64::try_from(sequence)?).expect("outbox sequence is positive"),
+            ))
+        })
+        .collect()
+}
+
+/// Reads one session's whole address order through the projection-backed
+/// window, exhausted in both directions.
+async fn projected_addresses(
+    repository: &SessionTimelineRepository,
+    identity: SessionId,
+) -> Result<Vec<TimelineAddress>, Box<dyn Error>> {
+    let unbounded = TimelineWindowLimits::new(256, 64 * 1024).expect("fixture limits are bounded");
+    let window = repository
+        .read_window(identity, TimelineWindowAnchor::First, unbounded)
+        .await?
+        .expect("the fixture session has a first window");
+    assert_eq!(window.continuation_before, TimelineContinuation::Exhausted);
+    assert_eq!(window.continuation_after, TimelineContinuation::Exhausted);
+    Ok(window.items.iter().map(|item| item.address).collect())
+}

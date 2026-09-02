@@ -202,6 +202,11 @@ session_completion_failure_rate_threshold_ppm = 100000
 session_wall_rate_threshold_ppm = 1000
 # `failed_unknown` share alarm threshold, in parts per million: 2%.
 session_failed_unknown_share_threshold_ppm = 20000
+# How long an outbox event every registered consumer has read is kept before
+# pruning may delete it. `"none"` never prunes, which is the only safe setting
+# until every raw reader of the outbox holds a projection or a bound — see the
+# retention floor in docs/spec/persistence-protocol.md.
+outbox_retention_window = "none"
 
 # Blob bytes live outside PostgreSQL. Each deployment generates and then keeps
 # one namespace UUID per physical store. Both directories must already exist,

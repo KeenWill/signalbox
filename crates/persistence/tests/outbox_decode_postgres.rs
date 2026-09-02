@@ -911,7 +911,7 @@ async fn delegation_storage_and_decoder_close_over_the_same_spellings() -> Resul
 ///
 /// This pins current behavior rather than endorsing it. The dispatcher offers
 /// exactly the next committed sequence and advances the singleton
-/// `outbox_delivery_state` cursor only after the consumer accepts; a row that
+/// wire consumer cursor only after the consumer accepts; a row that
 /// fails to decode never reaches a consumer, so the cursor cannot move and no
 /// later sequence — for any session — is ever offered. The assertions below
 /// state that as a conjunction because it is one contract: the error repeats,
@@ -970,10 +970,12 @@ async fn an_undecodable_committed_row_stalls_every_session() -> Result<(), Box<d
         "the undecodable row is offered again rather than skipped"
     );
 
-    let delivered: rust_decimal::Decimal =
-        sqlx::query_scalar("SELECT delivered_through FROM outbox_delivery_state WHERE singleton")
-            .fetch_one(&pool)
-            .await?;
+    let delivered: rust_decimal::Decimal = sqlx::query_scalar(
+        "SELECT delivered_through FROM outbox_consumer_cursor
+             WHERE consumer_name = 'process_protocol'",
+    )
+    .fetch_one(&pool)
+    .await?;
     assert_eq!(
         delivered,
         rust_decimal::Decimal::from(0_u64),

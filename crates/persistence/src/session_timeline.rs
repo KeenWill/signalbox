@@ -580,17 +580,17 @@ WITH turn_events AS (
 )
 SELECT event_sequence FROM turn_events
  WHERE event_sequence >= $3
+   AND event_sequence > (SELECT pruned_through FROM outbox_retention_state
+                          WHERE singleton)
  ORDER BY event_sequence ASC LIMIT $4
 "#;
 
 const REGION_DETAIL_ADDRESSES_SQL: &str = r#"
-WITH session_events AS (
-    SELECT event_sequence FROM outbox_event WHERE session_id = $1
-    UNION ALL
-    SELECT event_sequence FROM delegation_outbox_event WHERE session_id = $1
-)
-SELECT event_sequence FROM session_events
- WHERE event_sequence >= $2 AND event_sequence <= $3
+SELECT event_sequence FROM session_timeline_item
+ WHERE session_id = $1
+   AND event_sequence >= $2 AND event_sequence <= $3
+   AND event_sequence > (SELECT pruned_through FROM outbox_retention_state
+                          WHERE singleton)
  ORDER BY event_sequence ASC LIMIT $4
 "#;
 
@@ -1510,9 +1510,7 @@ macro_rules! window_sql {
     ($tail:literal) => {
         concat!(
             "WITH session_events AS (",
-            "SELECT event_sequence, event_kind, turn_disposition FROM outbox_event WHERE session_id = $1 ",
-            "UNION ALL ",
-            "SELECT event_sequence, event_kind, NULL::text AS turn_disposition FROM delegation_outbox_event WHERE session_id = $1",
+            "SELECT event_sequence, event_kind, turn_disposition FROM session_timeline_item WHERE session_id = $1",
             ") ",
             $tail
         )
@@ -1532,27 +1530,13 @@ const AFTER_WINDOW_SQL: &str = window_sql!(
     "SELECT event_sequence, event_kind, turn_disposition FROM session_events WHERE event_sequence > $2 ORDER BY event_sequence ASC LIMIT $3"
 );
 const AROUND_WINDOW_SQL: &str = r#"
-WITH before_candidates AS (
-    (SELECT event_sequence, event_kind, turn_disposition FROM outbox_event
-      WHERE session_id = $1 AND event_sequence <= $2
-      ORDER BY event_sequence DESC LIMIT $3)
-    UNION ALL
-    (SELECT event_sequence, event_kind, NULL::text AS turn_disposition FROM delegation_outbox_event
-      WHERE session_id = $1 AND event_sequence <= $2
-      ORDER BY event_sequence DESC LIMIT $3)
-), before_events AS (
-    SELECT event_sequence, event_kind, turn_disposition FROM before_candidates
+WITH before_events AS (
+    SELECT event_sequence, event_kind, turn_disposition FROM session_timeline_item
+     WHERE session_id = $1 AND event_sequence <= $2
      ORDER BY event_sequence DESC LIMIT $3
-), after_candidates AS (
-    (SELECT event_sequence, event_kind, turn_disposition FROM outbox_event
-      WHERE session_id = $1 AND event_sequence > $2
-      ORDER BY event_sequence ASC LIMIT $3)
-    UNION ALL
-    (SELECT event_sequence, event_kind, NULL::text AS turn_disposition FROM delegation_outbox_event
-      WHERE session_id = $1 AND event_sequence > $2
-      ORDER BY event_sequence ASC LIMIT $3)
 ), after_events AS (
-    SELECT event_sequence, event_kind, turn_disposition FROM after_candidates
+    SELECT event_sequence, event_kind, turn_disposition FROM session_timeline_item
+     WHERE session_id = $1 AND event_sequence > $2
      ORDER BY event_sequence ASC LIMIT $3
 ), candidates AS (
     SELECT event_sequence, event_kind, turn_disposition FROM before_events

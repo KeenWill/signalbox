@@ -2452,7 +2452,8 @@ async fn run_hub(
         template_configuration,
     )
     .with_context_compaction_model(Arc::clone(&context_compaction_model))
-    .with_snapshot_reader_budget(snapshot_reader_budget);
+    .with_snapshot_reader_budget(snapshot_reader_budget)
+    .with_outbox_retention_window(configured_duration("outbox_retention_window"));
     let process_runtime = match prometheus_runtime.as_ref() {
         Some((metrics, _server)) => process_runtime.with_metrics(metrics.clone()),
         None => process_runtime,

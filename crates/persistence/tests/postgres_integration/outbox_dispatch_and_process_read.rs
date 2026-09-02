@@ -92,14 +92,14 @@ async fn s24_inv032_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Err
         "the second allocation must wait while the first is uncommitted"
     );
 
-    let invisible_events: i64 = sqlx::query_scalar("SELECT count(*) FROM outbox_event")
+    let invisible_events: i64 = sqlx::query_scalar("SELECT count(*)::numeric FROM outbox_event")
         .fetch_one(&pool)
         .await?;
     assert_eq!(invisible_events, 0);
     let uncommitted_delivery = sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = $1
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .bind(first_sequence)
     .execute(&pool)
@@ -125,9 +125,9 @@ async fn s24_inv032_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Err
     assert_eq!(visible_sequences, vec![first_sequence]);
 
     sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = $1
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .bind(first_sequence)
     .execute(&pool)
@@ -140,8 +140,8 @@ async fn s24_inv032_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Err
     let undelivered_suffix: Vec<Decimal> = sqlx::query_scalar(
         "SELECT event.event_sequence
            FROM outbox_event AS event
-           CROSS JOIN outbox_delivery_state AS delivery
-          WHERE delivery.singleton
+           CROSS JOIN outbox_consumer_cursor AS delivery
+          WHERE delivery.consumer_name = 'process_protocol'
             AND event.event_sequence > delivery.delivered_through
           ORDER BY event.event_sequence",
     )
@@ -525,7 +525,7 @@ async fn s24_inv032_dispatcher_redelivers_after_cursor_commit_failure_in_order()
     .await?;
     sqlx::query(
         "CREATE CONSTRAINT TRIGGER zz_test_fail_outbox_delivery_commit
-         AFTER UPDATE ON outbox_delivery_state
+         AFTER UPDATE ON outbox_consumer_cursor
          DEFERRABLE INITIALLY DEFERRED
          FOR EACH ROW
          EXECUTE FUNCTION fail_test_outbox_delivery_commit()",
@@ -564,8 +564,8 @@ async fn s24_inv032_dispatcher_redelivers_after_cursor_commit_failure_in_order()
     assert_eq!(
         sqlx::query_scalar::<_, Decimal>(
             "SELECT delivered_through
-               FROM outbox_delivery_state
-              WHERE singleton",
+               FROM outbox_consumer_cursor
+              WHERE consumer_name = 'process_protocol'",
         )
         .fetch_one(&pool)
         .await?,
@@ -574,7 +574,7 @@ async fn s24_inv032_dispatcher_redelivers_after_cursor_commit_failure_in_order()
 
     sqlx::query(
         "DROP TRIGGER zz_test_fail_outbox_delivery_commit
-            ON outbox_delivery_state",
+            ON outbox_consumer_cursor",
     )
     .execute(&pool)
     .await?;
@@ -626,8 +626,8 @@ async fn s24_inv032_dispatcher_redelivers_after_cursor_commit_failure_in_order()
     assert_eq!(
         sqlx::query_scalar::<_, Decimal>(
             "SELECT delivered_through
-               FROM outbox_delivery_state
-              WHERE singleton",
+               FROM outbox_consumer_cursor
+              WHERE consumer_name = 'process_protocol'",
         )
         .fetch_one(&pool)
         .await?,
@@ -711,8 +711,8 @@ async fn s24_inv032_dispatcher_reports_a_missing_committed_header() -> Result<()
     assert_eq!(
         sqlx::query_scalar::<_, Decimal>(
             "SELECT delivered_through
-               FROM outbox_delivery_state
-              WHERE singleton",
+               FROM outbox_consumer_cursor
+              WHERE consumer_name = 'process_protocol'",
         )
         .fetch_one(&pool)
         .await?,
@@ -850,22 +850,22 @@ async fn s24_inv032_dispatcher_validates_the_allocator_at_exhaustion() -> Result
 {
     let (container, pool, _database_url) = migrated_postgres().await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         DISABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         DISABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(&pool)
     .await?;
     sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = 18446744073709551615,
                 last_delivery_xid = pg_current_xact_id()
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .execute(&pool)
     .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         ENABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         ENABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(&pool)
     .await?;
@@ -1023,23 +1023,23 @@ async fn s24_inv032_dispatcher_rejects_crosswired_terminal_correlations()
     .execute(&pool)
     .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         DISABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         DISABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(&pool)
     .await?;
     sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = $1 - 1,
                 last_delivery_xid = pg_current_xact_id()
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .bind(first.0)
     .execute(&pool)
     .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         ENABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         ENABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(&pool)
     .await?;
@@ -1107,9 +1107,9 @@ async fn s24_inv032_outbox_delivery_rejects_event_producing_transaction()
     let sequence =
         append_session_created_test_event(&mut event_transaction, Uuid::from_u128(0xe15)).await?;
     let same_transaction_delivery = sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = $1
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .bind(sequence)
     .execute(&mut *event_transaction)
@@ -1127,8 +1127,8 @@ async fn s24_inv032_outbox_delivery_rejects_event_producing_transaction()
     let rolled_back: (Decimal, i64) = sqlx::query_as(
         "SELECT
             (SELECT delivered_through
-               FROM outbox_delivery_state
-              WHERE singleton),
+               FROM outbox_consumer_cursor
+              WHERE consumer_name = 'process_protocol'),
             (SELECT count(*)
                FROM outbox_event)",
     )
@@ -1143,9 +1143,9 @@ async fn s24_inv032_outbox_delivery_rejects_event_producing_transaction()
 
     let mut delivery_then_event = pool.begin().await?;
     sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = $1
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .bind(sequence)
     .execute(&mut *delivery_then_event)
@@ -1166,8 +1166,8 @@ async fn s24_inv032_outbox_delivery_rejects_event_producing_transaction()
     let after_delivery_first_rollback: (Decimal, i64) = sqlx::query_as(
         "SELECT
             (SELECT delivered_through
-               FROM outbox_delivery_state
-              WHERE singleton),
+               FROM outbox_consumer_cursor
+              WHERE consumer_name = 'process_protocol'),
             (SELECT count(*)
                FROM outbox_event)",
     )
@@ -1176,17 +1176,17 @@ async fn s24_inv032_outbox_delivery_rejects_event_producing_transaction()
     assert_eq!(after_delivery_first_rollback, (Decimal::ZERO, 1));
 
     sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = $1
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .bind(sequence)
     .execute(&pool)
     .await?;
     let delivered_through: Decimal = sqlx::query_scalar(
         "SELECT delivered_through
-           FROM outbox_delivery_state
-          WHERE singleton",
+           FROM outbox_consumer_cursor
+          WHERE consumer_name = 'process_protocol'",
     )
     .fetch_one(&pool)
     .await?;
@@ -1206,7 +1206,7 @@ async fn inv032_outbox_storage_rejects_truncate() -> Result<(), Box<dyn Error>> 
 
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE hub_fence_state CASCADE").await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_sequence_state CASCADE").await?;
-    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_delivery_state CASCADE").await?;
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_consumer_cursor CASCADE").await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_event CASCADE").await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE session_created_outbox_event CASCADE")
         .await?;
@@ -1245,6 +1245,8 @@ async fn inv032_outbox_storage_rejects_truncate() -> Result<(), Box<dyn Error>> 
         "TRUNCATE TABLE session_ownership_changed_outbox_event CASCADE",
     )
     .await?;
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE session_timeline_item CASCADE").await?;
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_retention_state CASCADE").await?;
 
     pool.close().await;
     drop(container);
@@ -1401,9 +1403,10 @@ async fn s01_inv012_inv032_create_session_first_handling_appends_exactly_once()
             creation.applied_result().session().into_uuid(),
         )]
     );
-    let typed_events: i64 = sqlx::query_scalar("SELECT count(*) FROM session_created_outbox_event")
-        .fetch_one(&pool)
-        .await?;
+    let typed_events: i64 =
+        sqlx::query_scalar("SELECT count(*)::numeric FROM session_created_outbox_event")
+            .fetch_one(&pool)
+            .await?;
     assert_eq!(typed_events, 1);
 
     pool.close().await;
@@ -1539,7 +1542,7 @@ async fn s01_inv012_inv032_scheduling_transitions_dispatch_in_commit_order()
               WHERE accepted_input_id = $1),
             (SELECT count(*) FROM turn_activated_outbox_event
               WHERE current_attempt_id = $2),
-            (SELECT delivered_through FROM outbox_delivery_state
+            (SELECT delivered_through FROM outbox_consumer_cursor
               WHERE singleton)",
     )
     .bind(accepted_input.into_uuid())
@@ -1660,22 +1663,22 @@ async fn s01_inv032_turn_activation_dispatch_requires_authoritative_attempt()
         .execute(&pool)
         .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         DISABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         DISABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(&pool)
     .await?;
     sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = 3,
                 last_delivery_xid = pg_current_xact_id()
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .execute(&pool)
     .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         ENABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         ENABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(&pool)
     .await?;
@@ -3767,6 +3770,253 @@ async fn s03_inv015_context_compaction_constraints_use_projected_successor_order
 
     assert_eq!(
         orphan_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24: each registered consumer holds its own position over the one shared
+/// sequence — delivery moves the wire cursor alone, appending moves the
+/// timeline projection's alone — and the floor is the lower of the two.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_outbox_consumer_cursors_advance_independently() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let first_session = insert_outbox_session_fixture(&pool, 0xe21).await?;
+    let second_session = insert_outbox_session_fixture(&pool, 0xe22).await?;
+    let third_session = insert_outbox_session_fixture(&pool, 0xe23).await?;
+
+    let mut appends = pool.begin().await?;
+    let first = append_session_created_test_event(&mut appends, first_session).await?;
+    appends.commit().await?;
+    let mut appends = pool.begin().await?;
+    let second = append_session_created_test_event(&mut appends, second_session).await?;
+    appends.commit().await?;
+    let mut appends = pool.begin().await?;
+    let third = append_session_created_test_event(&mut appends, third_session).await?;
+    appends.commit().await?;
+
+    assert_eq!(consumer_cursor(&pool, "session_timeline").await?, third);
+    assert_eq!(
+        consumer_cursor(&pool, "process_protocol").await?,
+        Decimal::ZERO
+    );
+    assert_eq!(retention_floor(&pool).await?, Decimal::ZERO);
+
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 1 }
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 2 }
+    );
+
+    assert_eq!(consumer_cursor(&pool, "session_timeline").await?, third);
+    assert_eq!(consumer_cursor(&pool, "process_protocol").await?, second);
+    assert_eq!(retention_floor(&pool).await?, second);
+    assert_eq!(first, Decimal::ONE);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24: a projecting consumer's cursor is refused past a sequence it has not
+/// projected, which is what keeps the floor behind the projection.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_timeline_cursor_cannot_pass_an_unprojected_sequence() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = insert_outbox_session_fixture(&pool, 0xe24).await?;
+    let mut appends = pool.begin().await?;
+    let appended = append_session_created_test_event(&mut appends, session).await?;
+    appends.commit().await?;
+
+    let unprojected = sqlx::query(
+        "UPDATE outbox_consumer_cursor
+            SET delivered_through = delivered_through + 1
+          WHERE consumer_name = 'session_timeline'",
+    )
+    .execute(&pool)
+    .await
+    .expect_err("an unprojected sequence is not a projection prefix");
+    assert_eq!(
+        unprojected
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23503")
+    );
+    assert_eq!(consumer_cursor(&pool, "session_timeline").await?, appended);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24: a pass deletes typed records and their headers together across both
+/// families, keeps the timeline projection, and deletes nothing whose header
+/// is younger than the window.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_outbox_prune_removes_child_and_header_below_the_floor() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let first_session = insert_outbox_session_fixture(&pool, 0xe25).await?;
+    let second_session = insert_outbox_session_fixture(&pool, 0xe26).await?;
+
+    let mut appends = pool.begin().await?;
+    append_session_created_test_event(&mut appends, first_session).await?;
+    appends.commit().await?;
+    let mut appends = pool.begin().await?;
+    append_session_created_test_event(&mut appends, second_session).await?;
+    appends.commit().await?;
+    plant_delegation_wake_test_event(&pool, first_session, Uuid::from_u128(0xe27)).await?;
+
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    dispatcher
+        .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+        .await?;
+    dispatcher
+        .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+        .await?;
+    let last = dispatcher
+        .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+        .await?;
+    assert_eq!(last, OutboxDispatchOutcome::Delivered { sequence: 3 });
+
+    let retention = OutboxRetention::new(pool.clone());
+    assert_eq!(
+        retention.prune(Duration::from_secs(3600)).await?,
+        OutboxPruneOutcome {
+            pruned_through: 0,
+            removed_rows: 0
+        },
+        "no header is older than an hour, so the window admits nothing"
+    );
+    assert_eq!(
+        retention.prune(Duration::ZERO).await?,
+        OutboxPruneOutcome {
+            pruned_through: 3,
+            removed_rows: 6
+        }
+    );
+
+    assert_eq!(
+        table_rows(&pool, "SELECT count(*)::numeric FROM outbox_event").await?,
+        0
+    );
+    assert_eq!(
+        table_rows(
+            &pool,
+            "SELECT count(*)::numeric FROM session_created_outbox_event"
+        )
+        .await?,
+        0
+    );
+    assert_eq!(
+        table_rows(
+            &pool,
+            "SELECT count(*)::numeric FROM delegation_outbox_event"
+        )
+        .await?,
+        0
+    );
+    assert_eq!(
+        table_rows(
+            &pool,
+            "SELECT count(*)::numeric FROM delegation_wake_outbox_event"
+        )
+        .await?,
+        0
+    );
+    assert_eq!(
+        table_rows(&pool, "SELECT count(*)::numeric FROM session_timeline_item").await?,
+        3,
+        "the timeline index outlives the events it indexes"
+    );
+    assert_eq!(
+        table_rows(
+            &pool,
+            "SELECT pruned_through FROM outbox_retention_state WHERE singleton"
+        )
+        .await?,
+        3
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24: the pass's statement list is exactly the set of tables the migration
+/// gave the floor-bounded delete guard, so no guarded table escapes a prune.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_outbox_prune_covers_every_floor_guarded_table() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+
+    let guarded: Vec<String> = sqlx::query_scalar(
+        "SELECT guarded.relname::text
+           FROM pg_trigger AS guard
+           JOIN pg_proc AS guard_function ON guard_function.oid = guard.tgfoid
+           JOIN pg_class AS guarded ON guarded.oid = guard.tgrelid
+          WHERE guard_function.proname = 'reject_outbox_record_change'
+          ORDER BY guarded.relname",
+    )
+    .fetch_all(&pool)
+    .await?;
+    let mut pruned: Vec<String> = PRUNABLE_TABLES
+        .iter()
+        .map(|&name| name.to_owned())
+        .collect();
+    pruned.sort();
+    assert_eq!(guarded, pruned);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24: the floor-bounded guard admits nothing above the floor, and rejects
+/// every update the way plain append-only did.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_outbox_rows_above_the_floor_cannot_be_deleted() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = insert_outbox_session_fixture(&pool, 0xe28).await?;
+    let mut appends = pool.begin().await?;
+    append_session_created_test_event(&mut appends, session).await?;
+    appends.commit().await?;
+
+    let above_floor = sqlx::query("DELETE FROM session_created_outbox_event")
+        .execute(&pool)
+        .await
+        .expect_err("an undelivered event is above the retention floor");
+    assert_eq!(
+        above_floor
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    let updated = sqlx::query("UPDATE outbox_event SET storage_version = 2")
+        .execute(&pool)
+        .await
+        .expect_err("the outbox admits no update at any floor");
+    assert_eq!(
+        updated
             .as_database_error()
             .and_then(|error| error.code())
             .as_deref(),

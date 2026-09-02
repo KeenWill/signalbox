@@ -954,6 +954,7 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
         "session_failed_unknown_share_threshold_ppm",
         NumericBoundKind::Integer,
     ),
+    ("outbox_retention_window", NumericBoundKind::Duration),
 ];
 
 impl NumericBoundsConfiguration {
@@ -4753,6 +4754,7 @@ session_gate_weeks = 0
 session_completion_failure_rate_threshold_ppm = 0
 session_wall_rate_threshold_ppm = 0
 session_failed_unknown_share_threshold_ppm = 0
+outbox_retention_window = "none"
 
 [[credential_profiles]]
 name = "anthropic-primary"
