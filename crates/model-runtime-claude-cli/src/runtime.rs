@@ -53,10 +53,36 @@ const CLAUDE_ENVIRONMENT: &[CliEnvironmentVariable] = &[
     CliEnvironmentVariable::inherited("no_proxy"),
 ];
 
-/// Every built-in tool reported by the pinned isolated Claude Code CLI.
+/// The exact Claude Code CLI version the built-in inventory below was last
+/// reconciled against.
+///
+/// Reconciliation reads the `tools` member of the executable's own
+/// `system/init` event once per configuration the CLI offers, because the
+/// reported set is configuration-dependent rather than fixed: credential
+/// delivery, `--restricted`, `--disable-slash-commands`, and
+/// `CLAUDE_CODE_USE_POWERSHELL_TOOL` each change it. A pin bump that leaves
+/// this marker behind fails `the_builtin_inventory_is_reconciled_with_the_pin`,
+/// so an upstream release that adds a built-in cannot reach a daemon-driven
+/// session merely because a dependency update landed unread.
+pub const RECONCILED_CLAUDE_CLI_BUILTIN_INVENTORY_VERSION: &str = "2.1.258";
+
+/// Every built-in tool the pinned Claude Code CLI reports in any configuration
+/// it offers, in the order the CLI itself reports them.
 ///
 /// The invocation both selects an empty built-in surface with `--tools` and
-/// explicitly passes this entire inventory through `--disallowedTools`.
+/// explicitly passes this entire inventory through `--disallowedTools`, so the
+/// inventory is the second of two independent controls rather than the only
+/// one. It therefore names every built-in the executable can expose, not only
+/// the ones this adapter's own invocation would otherwise reach: `Glob`,
+/// `Grep`, `PowerShell`, and `Skill` are reported only under a flag or
+/// environment variable the adapter never passes, and naming them anyway is
+/// what keeps a regression in that first control from being the whole defense.
+///
+/// The cross-session pair is the reason the inventory is audited rather than
+/// appended to: `SendMessage` and `ListAgents` reach other Claude Code sessions
+/// on the same host through the CLI's own messaging socket, so a session this
+/// daemon drives could otherwise enumerate and message sessions it does not
+/// own.
 pub const DISABLED_CLAUDE_CLI_BUILTIN_TOOLS: &[&str] = &[
     "Task",
     "Bash",
@@ -67,8 +93,12 @@ pub const DISABLED_CLAUDE_CLI_BUILTIN_TOOLS: &[&str] = &[
     "Edit",
     "EnterWorktree",
     "ExitWorktree",
+    "Glob",
+    "Grep",
+    "ListAgents",
     "Monitor",
     "NotebookEdit",
+    "PowerShell",
     "PushNotification",
     "Read",
     "RemoteTrigger",
@@ -76,6 +106,7 @@ pub const DISABLED_CLAUDE_CLI_BUILTIN_TOOLS: &[&str] = &[
     "ScheduleWakeup",
     "SendFeedback",
     "SendMessage",
+    "Skill",
     "TaskCreate",
     "TaskGet",
     "TaskList",

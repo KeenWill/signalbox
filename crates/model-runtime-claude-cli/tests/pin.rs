@@ -9,6 +9,15 @@
 //! executable. That smoke proves a live exchange, not that the offline fixture
 //! corpus still represents the current CLI event shapes; fixture regeneration
 //! or validation against the installed CLI would close that residual gap.
+//!
+//! The pin also carries a security obligation, which the second group of
+//! assertions keeps: the version selects which built-in tools the executable
+//! can expose, and the adapter's `--disallowedTools` inventory must have been
+//! reconciled against that exact version. Reconciliation is a human act
+//! performed against the installed executable, so what an offline test can
+//! prove is that it happened for the version now pinned — which is enough to
+//! stop a dependency bump from silently widening the built-in surface a
+//! daemon-driven session can reach.
 
 #![allow(
     clippy::expect_used,
@@ -133,4 +142,87 @@ fn manifest_dependency() -> String {
 fn read_lockfile() -> serde_json::Value {
     serde_json::from_str(include_str!("../package-lock.json"))
         .expect("package-lock.json is valid JSON")
+}
+
+/// The built-in surface is a property of the pinned executable, so the pin and
+/// the inventory move together or the inventory is stale. Upstream 2.1.248
+/// widened the cross-session tools to configurations that had not carried them,
+/// and this repository learned of it from a reviewer rather than from a failing
+/// check; this assertion is that missing check. A bump therefore stays red
+/// until someone re-reads the installed executable's reported tool sets and
+/// advances the marker, which is the point — the reconciliation is the work,
+/// and the marker is only its receipt.
+#[test]
+fn the_builtin_inventory_is_reconciled_with_the_pin() {
+    assert_eq!(
+        signalbox_model_runtime_claude_cli::RECONCILED_CLAUDE_CLI_BUILTIN_INVENTORY_VERSION,
+        signalbox_model_runtime_claude_cli::SUPPORTED_CLAUDE_CLI_VERSION,
+        "the disallowed-built-in inventory was last reconciled against an older \
+         Claude Code CLI than this manifest now pins; re-read the installed \
+         executable's reported built-in tools, extend \
+         DISABLED_CLAUDE_CLI_BUILTIN_TOOLS with anything new, and advance \
+         RECONCILED_CLAUDE_CLI_BUILTIN_INVENTORY_VERSION"
+    );
+}
+
+/// Cross-session discovery is the built-in whose absence from the inventory
+/// prompted this test: it lets one session enumerate the other Claude Code
+/// sessions on the host, which is reach outside the box a daemon-driven session
+/// never has.
+#[test]
+fn the_builtin_inventory_denies_cross_session_discovery() {
+    assert!(
+        signalbox_model_runtime_claude_cli::DISABLED_CLAUDE_CLI_BUILTIN_TOOLS
+            .contains(&"ListAgents"),
+        "ListAgents enumerates other Claude Code sessions on this host and must \
+         stay denied"
+    );
+}
+
+/// Cross-session messaging is the other half of that surface: discovery names
+/// the neighbours, messaging talks to them, and denying one without the other
+/// would leave the reach intact.
+#[test]
+fn the_builtin_inventory_denies_cross_session_messaging() {
+    assert!(
+        signalbox_model_runtime_claude_cli::DISABLED_CLAUDE_CLI_BUILTIN_TOOLS
+            .contains(&"SendMessage"),
+        "SendMessage delivers to other Claude Code sessions on this host and \
+         must stay denied"
+    );
+}
+
+/// A reconciliation appends, and an append is where a name gets added twice or
+/// dropped into the wrong place. The CLI reports `Task` first and the rest
+/// alphabetically, and holding the inventory to that shape is what makes the
+/// next append reviewable as a diff rather than a re-reading of the whole list.
+#[test]
+fn the_builtin_inventory_keeps_the_order_the_cli_reports() {
+    let reported_tail = &signalbox_model_runtime_claude_cli::DISABLED_CLAUDE_CLI_BUILTIN_TOOLS[1..];
+    let mut sorted_tail = reported_tail.to_vec();
+    sorted_tail.sort_unstable();
+
+    assert_eq!(
+        reported_tail, sorted_tail,
+        "after the leading Task the inventory follows the CLI's own alphabetical \
+         reporting order; an entry added out of place is an unreviewed append"
+    );
+}
+
+/// Naming a built-in twice reads as two decisions and hides that one of them
+/// was never made; the CLI accepts a repeated name silently, so nothing else
+/// would catch it.
+#[test]
+fn the_builtin_inventory_names_each_builtin_once() {
+    let inventory = signalbox_model_runtime_claude_cli::DISABLED_CLAUDE_CLI_BUILTIN_TOOLS;
+    let distinct = inventory
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<&str>>();
+
+    assert_eq!(
+        distinct.len(),
+        inventory.len(),
+        "the disallowed-built-in inventory names a built-in more than once"
+    );
 }

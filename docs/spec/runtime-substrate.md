@@ -11,7 +11,10 @@ smoke, twice-daily schedule, and workflow-self-change trigger were verified
 through PR #468 (`agent/claude-cli-smoke`), including the credential-free
 version gate against the installed pinned executable. Its request-scoped file
 credential delivery and authenticated live smoke are verified against this PR
-(`agent/claude-cli-credential-delivery`). The Codex CLI adapter stack comprises
+(`agent/claude-cli-credential-delivery`). Its disallowed-built-in inventory and
+the marker recording which version that inventory was reconciled against are
+verified against the installed `2.1.258` executable through PR #1431
+(`renovate/anthropic-ai-claude-code-2.x`). The Codex CLI adapter stack comprises
 PR #264 (`agent/codex-cli-wrap`) and PR #268 (`agent/codex-cli-pin-smoke`); its
 escalation closeout is PR #317 (`agent/escalation-closeout`). The Codex CLI
 typed rate-limit and overload evidence, provider-directed retry delay, and
@@ -1121,15 +1124,27 @@ assistant content is admitted.
 
 The invocation excludes ambient settings, sessions, slash commands, browser
 integration, plugins, and built-in tools. `--tools` selects an empty built-in
-surface; `--disallowedTools` also names every built-in reported by isolated
-2.1.220 (`Task`, `Bash`, the `Cron*` tools, `DesignSync`, `Edit`, worktree,
-monitoring, notebook, notification, read/remote/report/scheduling/messaging,
-`Task*`, `ToolSearch`, web, workflow, and write); and `--allowedTools` contains
-only the qualified declared MCP names. `dontAsk` is used because no undeclared
-capability may become an interactive permission question. The initial event must
-also report no slash commands, skills, or plugins and must identify the pinned
-Claude Code version; any mismatch is stream-protocol boundary loss, not a
-relaxed invocation.
+surface; `--disallowedTools` also names every built-in the pinned executable
+reports in any configuration it offers (`Task`, `Bash`, the `Cron*` tools,
+`DesignSync`, `Edit`, worktree, file search, cross-session discovery and
+messaging, monitoring, notebook, notification, shells,
+read/remote/report/scheduling/feedback, skill, `Task*`, `ToolSearch`, web,
+workflow, and write); and `--allowedTools` contains only the qualified declared
+MCP names. The inventory is not limited to what this invocation would otherwise
+reach, because it is the second of two independent controls: an entry the empty
+surface already withholds costs nothing and covers the case where that first
+control regresses. Cross-session discovery and messaging are named for a
+distinct reason — they address other Claude Code sessions on the same host
+through the CLI's own messaging socket, which is reach beyond the process this
+adapter owns. The reported built-in set is configuration-dependent rather than
+fixed, so the inventory is reconciled against the exact pinned version by
+reading the executable's own initial event, and a version marker beside the
+inventory records which version that was; a pin bump that leaves the marker
+behind fails offline. `dontAsk` is used because no undeclared capability may
+become an interactive permission question. The initial event must also report no
+slash commands, skills, or plugins and must identify the pinned Claude Code
+version; any mismatch is stream-protocol boundary loss, not a relaxed
+invocation.
 
 The pinned stream establishes correlation and reported-model evidence through
 `system/init`. Nonterminal `system/status`, `system/hook_started`,

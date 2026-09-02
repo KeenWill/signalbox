@@ -27,6 +27,7 @@ mod wire;
 pub use config::ClaudeCliConfig;
 pub use runtime::{
     CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY, ClaudeCliConstructionError, ClaudeCliPreparedRequest,
-    ClaudeCliRuntime, DISABLED_CLAUDE_CLI_BUILTIN_TOOLS, SUPPORTED_CLAUDE_CLI_VERSION,
+    ClaudeCliRuntime, DISABLED_CLAUDE_CLI_BUILTIN_TOOLS,
+    RECONCILED_CLAUDE_CLI_BUILTIN_INVENTORY_VERSION, SUPPORTED_CLAUDE_CLI_VERSION,
     validate_model_settings,
 };
