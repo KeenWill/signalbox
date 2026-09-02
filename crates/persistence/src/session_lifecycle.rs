@@ -102,6 +102,9 @@ pub enum SessionLifecycleRejection {
     GoalOutcomeMismatch,
     /// A failed closure names a cause the park it closes does not hold.
     StandingCauseMismatch,
+    /// `abandoned` is an operator write-off (§2), so no other classification
+    /// may record one.
+    AbandonRequiresOperator,
 }
 
 impl fmt::Display for SessionLifecycleRejection {
@@ -120,6 +123,7 @@ impl fmt::Display for SessionLifecycleRejection {
                 "the session outcome contradicts its goal's terminal state"
             }
             Self::StandingCauseMismatch => "the closure cause is not the park's standing cause",
+            Self::AbandonRequiresOperator => "only an operator writes a session off",
         };
         formatter.write_str(detail)
     }
@@ -306,10 +310,15 @@ impl SessionLifecycleRepository {
     ) -> Result<(), SessionLifecycleRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         for (kind, bound) in bounds.rows() {
+            // Upsert, not update: a missing policy row reads as `none` in the
+            // arming trigger, so an update that matched nothing would turn a
+            // configured bound into an unbounded one without saying so.
             sqlx::query(
-                "UPDATE session_lifecycle_bound
-                    SET bound = $2, updated_at = statement_timestamp()
-                  WHERE deadline_kind = $1",
+                "INSERT INTO session_lifecycle_bound (deadline_kind, bound)
+                 VALUES ($1, $2)
+                 ON CONFLICT (deadline_kind) DO UPDATE
+                    SET bound = EXCLUDED.bound,
+                        updated_at = statement_timestamp()",
             )
             .bind(kind)
             .bind(bound)
@@ -374,10 +383,12 @@ impl SessionLifecycleRepository {
     /// The mapping is recomputed rather than remembered: the turn kept its
     /// phase through the park, so the phase is what says where the session
     /// belongs now.
+    ///
+    /// The lift records `operator`: §7 makes leaving a park an operator or
+    /// coordinator action, so the classification is fixed rather than supplied.
     pub async fn resume(
         &self,
         session: SessionId,
-        actor: LifecycleActor,
     ) -> Result<SessionLifecycleState, SessionLifecycleRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let held = load_locked(&mut transaction, session).await?;
@@ -392,7 +403,7 @@ impl SessionLifecycleRepository {
             &mut transaction,
             &held,
             SessionLifecycleState::Active,
-            actor,
+            LifecycleActor::Operator,
         )
         .await?;
         sqlx::query("SELECT project_session_lifecycle($1, true)")
@@ -530,6 +541,13 @@ impl SessionLifecycleRepository {
         if held.ownership == transition.ownership() {
             return Err(reject(transaction, SessionLifecycleRejection::OwnershipUnchanged).await);
         }
+        if held.state.is_terminal() {
+            return Err(reject(
+                transaction,
+                SessionLifecycleRejection::TransitionNotAdmitted,
+            )
+            .await);
+        }
         if held.state.is_parked() && transition == SessionOwnershipTransition::Released {
             return Err(reject(transaction, SessionLifecycleRejection::ReleaseWhileParked).await);
         }
@@ -635,6 +653,11 @@ pub(crate) async fn close_in_transaction(
     if !closure_carries_standing_cause(&held.state, outcome) {
         return Err(SessionLifecycleRepositoryError::Rejected(
             SessionLifecycleRejection::StandingCauseMismatch,
+        ));
+    }
+    if outcome == SessionTerminalOutcome::Abandoned && actor != LifecycleActor::Operator {
+        return Err(SessionLifecycleRepositoryError::Rejected(
+            SessionLifecycleRejection::AbandonRequiresOperator,
         ));
     }
     // A committed handoff is the decision that started tearing the turn down,

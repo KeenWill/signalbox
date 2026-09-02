@@ -34,6 +34,22 @@ ALTER TABLE session
 -- pre-alpha rule owes a live database. Nothing else about these rows changes.
 --
 
+-- The old CHECKs come off first. Disabling the append-only triggers does not
+-- disable a CHECK, and every one of them admits only the retired spelling, so
+-- the rewrite below would be rejected by the constraint it exists to escape.
+
+ALTER TABLE session
+    DROP CONSTRAINT session_creation_cause_closed;
+
+ALTER TABLE session
+    DROP CONSTRAINT session_delegated_cause_shape;
+
+ALTER TABLE create_session_command
+    DROP CONSTRAINT create_session_command_creation_cause_closed;
+
+ALTER TABLE create_session_from_imported_frontier_command
+    DROP CONSTRAINT create_session_from_imported_frontier_command_cause_closed;
+
 ALTER TABLE session DISABLE TRIGGER session_is_append_only;
 ALTER TABLE create_session_command DISABLE TRIGGER create_session_command_is_append_only;
 ALTER TABLE create_session_from_imported_frontier_command
@@ -54,9 +70,6 @@ ALTER TABLE create_session_from_imported_frontier_command
     ENABLE TRIGGER create_session_from_imported_frontier_command_is_append_only;
 
 ALTER TABLE session
-    DROP CONSTRAINT session_creation_cause_closed;
-
-ALTER TABLE session
     ADD CONSTRAINT session_creation_cause_closed CHECK (
         creation_cause = ANY (ARRAY[
             'interactive'::text,
@@ -64,9 +77,6 @@ ALTER TABLE session
             'delegated'::text
         ])
     );
-
-ALTER TABLE session
-    DROP CONSTRAINT session_delegated_cause_shape;
 
 ALTER TABLE session
     ADD CONSTRAINT session_creation_cause_shape CHECK (
@@ -1162,11 +1172,20 @@ ALTER TABLE goal_event
         AND ((event_kind = 'session_closed'::text)
              OR ((session_outcome_kind IS NULL)
                  AND (closure_actor_kind IS NULL)
-                 AND (closure_actor_module IS NULL)))
+                 AND (closure_actor_module IS NULL)
+                 AND (closure_actor_turn_id IS NULL)
+                 AND (closure_actor_tool_request_id IS NULL)))
         AND ((closure_actor_module IS NULL) OR (closure_actor_module = ANY (ARRAY[
             'repo_watch'::text,
             'commissioned_dispatch'::text
         ])))
+        -- A core closure keeps at most one acting identity, and no other
+        -- classification keeps any: the reader rejects the combinations this
+        -- would otherwise let commit, leaving the goal unreadable.
+        AND ((closure_actor_turn_id IS NULL) OR (closure_actor_tool_request_id IS NULL))
+        AND ((closure_actor_kind = 'core'::text)
+             OR ((closure_actor_turn_id IS NULL)
+                 AND (closure_actor_tool_request_id IS NULL)))
     );
 
 --
@@ -1301,6 +1320,11 @@ SELECT kind, NULL
         'blocked',
         'parked_renotify'
        ]) AS kind;
+
+-- Losing a policy row silently turns a configured bound into `none`.
+CREATE TRIGGER session_lifecycle_bound_truncate_is_rejected
+    BEFORE TRUNCATE ON session_lifecycle_bound
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_session_lifecycle_table_truncate();
 
 --
 -- Arming. The satellite's state decides which deadline is armed, and the
@@ -1697,6 +1721,10 @@ ALTER TABLE ONLY session_cleanup_obligation
         FOREIGN KEY (session_id) REFERENCES session(session_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT;
 
+CREATE TRIGGER session_cleanup_obligation_truncate_is_rejected
+    BEFORE TRUNCATE ON session_cleanup_obligation
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_session_lifecycle_table_truncate();
+
 CREATE INDEX session_cleanup_obligation_outstanding
     ON session_cleanup_obligation (recorded_at, session_id)
     WHERE discharged_at IS NULL;
@@ -1707,9 +1735,6 @@ CREATE INDEX session_cleanup_obligation_outstanding
 -- vocabulary widens with the session's. Delegated creation still has no
 -- writer on this command family.
 --
-
-ALTER TABLE create_session_command
-    DROP CONSTRAINT create_session_command_creation_cause_closed;
 
 ALTER TABLE create_session_command
     ADD CONSTRAINT create_session_command_creation_cause_closed CHECK (
@@ -1724,9 +1749,6 @@ ALTER TABLE create_session_command
 -- conversation is a user-initiated act, so its cause moves with the spelling
 -- rather than acquiring a fourth one.
 --
-
-ALTER TABLE create_session_from_imported_frontier_command
-    DROP CONSTRAINT create_session_from_imported_frontier_command_cause_closed;
 
 ALTER TABLE create_session_from_imported_frontier_command
     ADD CONSTRAINT create_session_from_imported_frontier_command_cause_closed CHECK (

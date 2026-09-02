@@ -6127,6 +6127,7 @@ impl SessionLifecycleState {
 pub struct SessionLifecycleTransitionError { /* private */ }
 impl SessionLifecycleTransitionError {
     // accessors: from(), to()
+    // + Display + Error
 }
 
 pub enum SessionDeadlineExpiry {

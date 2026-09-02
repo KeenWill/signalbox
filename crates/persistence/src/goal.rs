@@ -395,7 +395,7 @@ impl GoalRepository {
         // An operator's own resume names no expected head and still lifts it.
         if session_exists
             && expected_head.is_some()
-            && session_is_parked(&mut transaction, command.session()).await?
+            && !session_admits_automatic_resume(&mut transaction, command.session()).await?
         {
             transaction.rollback().await?;
             return Ok(GoalCommandHandlingOutcome::LineageMoved);
@@ -1001,18 +1001,24 @@ pub(crate) async fn record_execution_failure_recovery_cause(
     Ok(())
 }
 
-/// Whether the session is suspended in place.
-async fn session_is_parked(
+/// Whether the session still admits the automatic resume that named its block.
+///
+/// Both facts are read under the session lock the caller already holds: an
+/// in-memory timer armed before either changed would otherwise resume a
+/// conversation that has since been released, or lift a park that has since
+/// been taken.
+async fn session_admits_automatic_resume(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<bool, GoalRepositoryError> {
-    let parked: Option<bool> = sqlx::query_scalar(
-        "SELECT state_kind = 'parked' FROM session_lifecycle WHERE session_id = $1",
+    let admits: Option<bool> = sqlx::query_scalar(
+        "SELECT owned AND state_kind <> 'parked'
+           FROM session_lifecycle WHERE session_id = $1",
     )
     .bind(session_id_to_uuid(session))
     .fetch_optional(&mut *connection)
     .await?;
-    Ok(parked.unwrap_or(false))
+    Ok(admits.unwrap_or(false))
 }
 
 fn recorded_scheduler_failure(goal: &Goal, turn: TurnId) -> Option<&GoalEvent> {

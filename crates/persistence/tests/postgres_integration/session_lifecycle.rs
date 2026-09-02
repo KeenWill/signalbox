@@ -574,7 +574,7 @@ async fn leaving_a_park_re_enters_the_mapped_state() -> Result<(), Box<dyn Error
         )
         .await?;
 
-    let resumed = repository.resume(session, LifecycleActor::Operator).await?;
+    let resumed = repository.resume(session).await?;
 
     assert_eq!(resumed, SessionLifecycleState::Active);
     assert_eq!(
@@ -2133,13 +2133,15 @@ async fn a_park_cannot_contradict_a_committed_closure() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// A closure attributed to a tool records its own provenance columns, so the
+/// A closure records its acting identity in its own provenance columns, so the
 /// committed model-declaration rules — which validate every non-null
 /// `model_tool_request_id` as a `goal_declare` request and hold it globally
-/// unique — never see it.
+/// unique — never see it. Both core identities share these columns; the model
+/// one is exercised here because a same-session tool request needs a tool loop
+/// this fixture does not run.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn a_tool_attributed_closure_records_its_own_provenance() -> Result<(), Box<dyn Error>> {
+async fn a_closure_records_its_acting_identity_in_its_own_columns() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = creation_session(48);
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
@@ -2151,7 +2153,7 @@ async fn a_tool_attributed_closure_records_its_own_provenance() -> Result<(), Bo
     SessionLifecycleRepository::new(pool.clone())
         .close(
             session,
-            SessionTerminalOutcome::Abandoned,
+            SessionTerminalOutcome::FailedUnknown,
             LifecycleActor::Core {
                 agency: CoreAgency::Model { turn: acting_turn },
             },
@@ -2167,6 +2169,36 @@ async fn a_tool_attributed_closure_records_its_own_provenance() -> Result<(), Bo
     .fetch_one(&pool)
     .await?;
     assert_eq!(recorded, (Some(acting_turn.into_uuid()), None, None));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// §2 makes `abandoned` an operator write-off, so no other classification
+/// records one.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn only_an_operator_writes_a_session_off() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(49);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(49))
+        .await?;
+
+    let error = SessionLifecycleRepository::new(pool.clone())
+        .close(
+            session,
+            SessionTerminalOutcome::Abandoned,
+            LifecycleActor::Watchdog,
+        )
+        .await
+        .expect_err("a watchdog does not write a session off");
+
+    assert_eq!(
+        lifecycle_rejection(error),
+        SessionLifecycleRejection::AbandonRequiresOperator
+    );
 
     pool.close().await;
     drop(container);
