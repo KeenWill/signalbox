@@ -554,7 +554,7 @@ INV-tagged test names and attached doc comments.
 
 - **User intent:** Explore an alternative from an earlier point without changing
   the source session.
-- **Durable commands:** Create a session with the baseline `UserInitiated` cause
+- **Durable commands:** Create a session with the baseline `Interactive` cause
   independent from ancestry `(source session, immutable frontier)`.
 - **State transitions:** New session absent → session durably created with its
   immutable source-session and `TranscriptFrontier` reference. After the fork's

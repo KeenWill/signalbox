@@ -1,5 +1,8 @@
 # Persistence protocol
 
+The session-lifecycle satellite's place in the lock order is verified against
+this PR (`agent/lifecycle-t2-state-machine`).
+
 The workspace-instruction discovery, registration, empty turn-start manifest,
 and model-call correlation were verified against PR #810
 (`agent/agent-docs-skills-model-call-followup`).

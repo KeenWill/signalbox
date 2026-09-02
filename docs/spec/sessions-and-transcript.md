@@ -1,5 +1,8 @@
 # Sessions and the transcript
 
+The widened creation-cause vocabulary and its typed module dispatch are verified
+against this PR (`agent/lifecycle-t2-state-machine`).
+
 The bounded browser session descriptor and historical timeline foundation are
 verified against this PR (`agent/web-session-timeline`). The bounded
 lexical-search projection and query boundary are verified against this PR
@@ -143,8 +146,8 @@ discarded.
 Application orchestration (`crates/application/src/create_session.rs`):
 
 - rejects nil/max sentinel command identities before canonical construction;
-- fixes cause `Interactive` and ancestry `None` — the request type has no
-  cause or ancestry inputs;
+- fixes cause `Interactive` and ancestry `None` — the request type has no cause
+  or ancestry inputs;
 - mints one fresh UUIDv7 `SessionId` candidate per invocation (the UUID
   timestamp confers no domain order or authority); and
 - calls one atomic transaction port exactly once, with no retry.
@@ -620,9 +623,9 @@ bounded keyset page of its own. It adds no session state and changes none of the
 rules above.
 
 Because no current session-creation boundary carries actor attribution, the
-implemented default view is exactly all non-archived sessions. No visibility taxonomy,
-creation-time override, or inference from missing attribution is stored. The
-dependency for future creation-derived visibility is recorded in
+implemented default view is exactly all non-archived sessions. No visibility
+taxonomy, creation-time override, or inference from missing attribution is
+stored. The dependency for future creation-derived visibility is recorded in
 [open-questions.md](../open-questions.md#session-organization-visibility-and-retention).
 
 **Committed unimplemented functionality.** No present surface constructs a

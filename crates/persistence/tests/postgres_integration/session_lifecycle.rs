@@ -106,8 +106,61 @@ async fn admitted_spellings(
     Ok(spellings.into_iter().collect())
 }
 
-/// Queues and activates one turn for a session that already exists.
-async fn activate_first_turn(
+/// Terminalizes one queued goal turn by statement.
+///
+/// The commissioned goal's turn is queued and never activates here, and
+/// `retired` — the disposition §10 gives exactly this shape — lands with the
+/// event-vocabulary change. The fixture states the disposition the committed
+/// vocabulary has for a turn that produced nothing, so the closure under test
+/// meets a settled turn rather than a live one.
+async fn settle_queued_turn_by_statement(
+    pool: &PgPool,
+    session: SessionId,
+    turn: TurnId,
+    seed: u128,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal', start_lineage_kind = 'first_in_session',
+                immediate_predecessor_turn_id = NULL, starting_frontier_id = $3,
+                terminal_frontier_id = $4, terminal_disposition_kind = 'failed',
+                terminal_cause_kind = 'unclassified_failure'
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(Uuid::from_u128(seed))
+    .bind(Uuid::from_u128(seed + 1))
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Parks one session by statement, standing in for the module-park path.
+async fn park_by_statement(pool: &PgPool, session: SessionId) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE session_lifecycle
+            SET state_kind = 'parked',
+                state_entered_at = statement_timestamp(),
+                parked_cause = 'module_park',
+                parked_owner = 'repo_watch',
+                parked_since = statement_timestamp()
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Queues one turn for a session that already exists.
+async fn queue_first_turn(
     pool: &PgPool,
     session: SessionId,
     seed: u128,
@@ -128,6 +181,16 @@ async fn activate_first_turn(
             Some(turn),
         )
         .await?;
+    Ok(turn)
+}
+
+/// Queues and activates one turn for a session that already exists.
+async fn activate_first_turn(
+    pool: &PgPool,
+    session: SessionId,
+    seed: u128,
+) -> Result<TurnId, Box<dyn Error>> {
+    let turn = queue_first_turn(pool, session, seed).await?;
     activate_earliest_queued_turn(
         pool,
         EarliestQueuedTurnActivation {
@@ -153,8 +216,8 @@ fn lifecycle_rejection(error: SessionLifecycleRepositoryError) -> SessionLifecyc
 /// deadline on a person's chat window is exactly what §6 forbids.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn an_interactive_creation_is_unmonitored_and_arms_no_deadline()
--> Result<(), Box<dyn Error>> {
+async fn an_interactive_creation_is_unmonitored_and_arms_no_deadline() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = creation_session(1);
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
@@ -243,8 +306,7 @@ async fn a_dispatched_creation_is_owned_and_holds_its_admission_deadline()
 /// state re-arms the deadline that state defines, from the configured policy.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn the_mapping_follows_the_turn_from_dispatch_to_activation()
--> Result<(), Box<dyn Error>> {
+async fn the_mapping_follows_the_turn_from_dispatch_to_activation() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = SessionLifecycleRepository::new(pool.clone());
     repository
@@ -271,7 +333,9 @@ async fn the_mapping_follows_the_turn_from_dispatch_to_activation()
                 },
             ),
             AcceptedInputId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 3 + 0x600)),
-            Some(TurnId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 3 + 0x400))),
+            Some(TurnId::from_uuid(Uuid::from_u128(
+                LIFECYCLE_SEED + 3 + 0x400,
+            ))),
         )
         .await?;
 
@@ -311,21 +375,18 @@ async fn the_mapping_follows_the_turn_from_dispatch_to_activation()
     Ok(())
 }
 
-/// §1: `parked` overrides the mapping. The park suspends the live turn in
-/// place, the eligibility sweep stops treating the session as a candidate, and
-/// both liveness scans stop seeing its turn — which is what keeps a watchdog
-/// from reaping work an operator is deliberately holding.
+/// §1: a parked session's rows are not eligibility-sweep candidates. Parking
+/// suspends the session's work in place, so a sweep that still hinted it would
+/// hand the scheduler a session no pass may run.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn a_parked_session_leaves_the_sweep_and_the_liveness_scans()
--> Result<(), Box<dyn Error>> {
+async fn a_parked_session_leaves_the_eligibility_sweep() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let repository = SessionLifecycleRepository::new(pool.clone());
     let session = creation_session(4);
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(dispatched_creation(4))
         .await?;
-    activate_first_turn(&pool, session, 4).await?;
+    queue_first_turn(&pool, session, 4).await?;
 
     let (before_park, _, _) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
@@ -333,20 +394,12 @@ async fn a_parked_session_leaves_the_sweep_and_the_liveness_scans()
         .into_parts();
     assert!(before_park.contains(&session));
 
-    let parked = repository
-        .park(
-            session,
-            SessionParkCause::OperatorHold,
-            SessionParkOwner::Operator,
-            None,
-            LifecycleActor::Operator,
-        )
-        .await?;
-    assert!(parked.is_parked());
-    assert_eq!(
-        armed_deadline(&pool, session).await?,
-        Some((String::from("parked_renotify"), true))
-    );
+    // The dispatched session is parked by statement rather than through the
+    // store: §1 admits a park only from the states the turn mapping derives,
+    // and the module-park unification that drives a dispatched session to core
+    // `parked` lands with the expiry engine. The sweep's exclusion is what this
+    // test is about, and it reads the state column either way.
+    park_by_statement(&pool, session).await?;
 
     let (after_park, _, _) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
@@ -354,6 +407,24 @@ async fn a_parked_session_leaves_the_sweep_and_the_liveness_scans()
         .into_parts();
     assert!(!after_park.contains(&session));
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// §1: a parked session's turn is not a liveness-watchdog candidate either.
+/// Parking keeps the turn's phase, so a watchdog that still saw it would read
+/// a deliberately held turn as a stalled one and reap the work an operator is
+/// holding — the §13 safety-backfire class this conjunct exists to prevent.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_parked_session_leaves_the_liveness_scans() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(20);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(20))
+        .await?;
+    activate_first_turn(&pool, session, 20).await?;
     let liveness = PostgresTurnLivenessRepository::new(
         pool.clone(),
         TurnLivenessPersistenceBounds::new(
@@ -363,11 +434,43 @@ async fn a_parked_session_leaves_the_sweep_and_the_liveness_scans()
         ),
     );
     assert_eq!(
-        liveness.quiescent_active_turns(None).await?.candidates().len(),
+        liveness
+            .quiescent_active_turns(None)
+            .await?
+            .candidates()
+            .len(),
+        1
+    );
+
+    let parked = SessionLifecycleRepository::new(pool.clone())
+        .park(
+            session,
+            SessionParkCause::OperatorHold,
+            SessionParkOwner::Operator,
+            None,
+            LifecycleActor::Operator,
+        )
+        .await?;
+
+    assert!(parked.is_parked());
+    assert_eq!(
+        armed_deadline(&pool, session).await?,
+        Some((String::from("parked_renotify"), true))
+    );
+    assert_eq!(
+        liveness
+            .quiescent_active_turns(None)
+            .await?
+            .candidates()
+            .len(),
         0
     );
     assert_eq!(
-        liveness.slot_held_active_turns(None).await?.candidates().len(),
+        liveness
+            .slot_held_active_turns(None)
+            .await?
+            .candidates()
+            .len(),
         0
     );
 
@@ -426,7 +529,11 @@ async fn a_closure_over_a_live_turn_is_refused() -> Result<(), Box<dyn Error>> {
     activate_first_turn(&pool, session, 6).await?;
 
     let error = SessionLifecycleRepository::new(pool.clone())
-        .close(session, SessionTerminalOutcome::Abandoned, LifecycleActor::Operator)
+        .close(
+            session,
+            SessionTerminalOutcome::Abandoned,
+            LifecycleActor::Operator,
+        )
         .await
         .expect_err("a terminal session cannot leave a live turn behind");
     assert!(matches!(
@@ -476,6 +583,14 @@ async fn a_closure_settles_the_live_goal_generation() -> Result<(), Box<dyn Erro
         )
         .await?;
 
+    settle_queued_turn_by_statement(
+        &pool,
+        session,
+        TurnId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 7 + 0xc00)),
+        LIFECYCLE_SEED + 7 + 0xd00,
+    )
+    .await?;
+
     let terminal = SessionLifecycleRepository::new(pool.clone())
         .close(
             session,
@@ -524,8 +639,7 @@ async fn a_closure_settles_the_live_goal_generation() -> Result<(), Box<dyn Erro
 /// rather than recording the same closure twice.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn an_achievement_closure_over_an_open_generation_is_refused()
--> Result<(), Box<dyn Error>> {
+async fn an_achievement_closure_over_an_open_generation_is_refused() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = creation_session(8);
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
@@ -638,7 +752,9 @@ async fn ownership_flips_arm_and_disarm_the_deadline_and_journal_themselves()
         Some((String::from("first_input"), true))
     );
 
-    repository.release(session, LifecycleActor::Operator).await?;
+    repository
+        .release(session, LifecycleActor::Operator)
+        .await?;
     assert_eq!(armed_deadline(&pool, session).await?, None);
 
     assert_eq!(
@@ -723,7 +839,13 @@ async fn an_owned_session_cannot_commit_without_the_deadline_its_state_defines()
         .execute(&pool)
         .await
         .expect_err("an owned non-terminal session cannot lose its armed deadline");
-    assert_eq!(removed.as_database_error().and_then(DatabaseError::code).as_deref(), Some("23514"));
+    assert_eq!(
+        removed
+            .as_database_error()
+            .and_then(DatabaseError::code)
+            .as_deref(),
+        Some("23514")
+    );
 
     let wrong_kind = sqlx::query(
         "UPDATE session_deadline SET deadline_kind = 'active_stall',
@@ -735,7 +857,10 @@ async fn an_owned_session_cannot_commit_without_the_deadline_its_state_defines()
     .await
     .expect_err("a created session cannot hold an active-stall deadline");
     assert_eq!(
-        wrong_kind.as_database_error().and_then(DatabaseError::code).as_deref(),
+        wrong_kind
+            .as_database_error()
+            .and_then(DatabaseError::code)
+            .as_deref(),
         Some("23514")
     );
 
@@ -767,7 +892,10 @@ async fn an_unmonitored_session_cannot_hold_an_armed_deadline() -> Result<(), Bo
     .expect_err("an unmonitored session carries no deadline");
 
     assert_eq!(
-        error.as_database_error().and_then(DatabaseError::code).as_deref(),
+        error
+            .as_database_error()
+            .and_then(DatabaseError::code)
+            .as_deref(),
         Some("23514")
     );
 
@@ -923,6 +1051,7 @@ async fn the_satellite_lock_position_survives_interleaving() -> Result<(), Box<d
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(dispatched_creation(17))
         .await?;
+    activate_first_turn(&pool, session, 17).await?;
 
     let mut scheduler_first = pool.begin().await?;
     sqlx::query(
@@ -976,8 +1105,8 @@ async fn the_sweep_reports_which_candidates_are_unmonitored() -> Result<(), Box<
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(dispatched_creation(19))
         .await?;
-    activate_first_turn(&pool, conversation, 18).await?;
-    activate_first_turn(&pool, dispatched, 19).await?;
+    queue_first_turn(&pool, conversation, 18).await?;
+    queue_first_turn(&pool, dispatched, 19).await?;
 
     let batch = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
@@ -997,8 +1126,7 @@ async fn the_sweep_reports_which_candidates_are_unmonitored() -> Result<(), Box<
 /// path that could disagree with the first.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn the_dispatch_slot_release_gate_admits_a_session_closure()
--> Result<(), Box<dyn Error>> {
+async fn the_dispatch_slot_release_gate_admits_a_session_closure() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
 
     let definition: String = sqlx::query_scalar(

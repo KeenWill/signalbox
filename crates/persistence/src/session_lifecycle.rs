@@ -289,7 +289,7 @@ impl SessionLifecycleRepository {
         for (kind, bound) in bounds.rows() {
             sqlx::query(
                 "UPDATE session_lifecycle_bound
-                    SET bound = $2, updated_at = clock_timestamp()
+                    SET bound = $2, updated_at = statement_timestamp()
                   WHERE deadline_kind = $1",
             )
             .bind(kind)
@@ -701,7 +701,7 @@ async fn write_state(
     sqlx::query(
         "UPDATE session_lifecycle
             SET state_kind = $2,
-                state_entered_at = clock_timestamp(),
+                state_entered_at = statement_timestamp(),
                 actor_kind = $3,
                 actor_module = $4,
                 actor_turn_id = $5,

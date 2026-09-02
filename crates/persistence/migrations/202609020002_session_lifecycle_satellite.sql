@@ -92,7 +92,7 @@ ALTER TABLE session
 CREATE TABLE session_lifecycle (
     session_id uuid NOT NULL,
     state_kind text NOT NULL,
-    state_entered_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    state_entered_at timestamp with time zone DEFAULT statement_timestamp() NOT NULL,
     owned boolean NOT NULL,
 
     -- §6 actor classification of the transition that produced this state.
@@ -446,7 +446,7 @@ CREATE TABLE session_deadline (
     deadline_kind text NOT NULL,
     on_expiry_kind text NOT NULL,
     expires_at timestamp with time zone,
-    armed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    armed_at timestamp with time zone DEFAULT statement_timestamp() NOT NULL,
 
     CONSTRAINT session_deadline_pkey PRIMARY KEY (session_id),
 
@@ -513,7 +513,7 @@ CREATE TABLE session_ownership_event (
     owned_after boolean NOT NULL,
     actor_kind text NOT NULL,
     actor_module text,
-    recorded_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    recorded_at timestamp with time zone DEFAULT statement_timestamp() NOT NULL,
 
     CONSTRAINT session_ownership_event_pkey
         PRIMARY KEY (session_id, event_ordinal),
@@ -853,7 +853,7 @@ ALTER TABLE goal_event
 CREATE TABLE session_lifecycle_bound (
     deadline_kind text NOT NULL,
     bound interval,
-    updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    updated_at timestamp with time zone DEFAULT statement_timestamp() NOT NULL,
 
     CONSTRAINT session_lifecycle_bound_pkey PRIMARY KEY (deadline_kind),
 
@@ -977,8 +977,8 @@ BEGIN
             NEW.session_id,
             required,
             session_deadline_expiry_for_kind(required),
-            CASE WHEN policy IS NULL THEN NULL ELSE clock_timestamp() + policy END,
-            clock_timestamp()
+            CASE WHEN policy IS NULL THEN NULL ELSE statement_timestamp() + policy END,
+            statement_timestamp()
          )
     ON CONFLICT (session_id) DO UPDATE
        SET deadline_kind = EXCLUDED.deadline_kind,
@@ -1127,7 +1127,7 @@ BEGIN
 
     UPDATE session_lifecycle
        SET state_kind = next_state,
-           state_entered_at = clock_timestamp(),
+           state_entered_at = statement_timestamp(),
            waiting_kind = next_waiting_kind,
            waiting_waker = next_waiting_waker,
            waiting_subject_session_id = child,
@@ -1203,7 +1203,7 @@ $$;
 CREATE TABLE session_cleanup_obligation (
     session_id uuid NOT NULL,
     outcome_kind text NOT NULL,
-    recorded_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    recorded_at timestamp with time zone DEFAULT statement_timestamp() NOT NULL,
     discharged_at timestamp with time zone,
 
     CONSTRAINT session_cleanup_obligation_pkey PRIMARY KEY (session_id),
@@ -1321,3 +1321,79 @@ ALTER TABLE ONLY create_session_command
         REFERENCES session(session_id, creation_cause, ancestry_kind,
                            dispatching_module, dispatch_ref)
         ON UPDATE RESTRICT ON DELETE RESTRICT;
+
+--
+-- The committed goal-event continuity trigger enumerates every transition, so
+-- the new terminal kind joins it: a pursuing or blocked generation admits a
+-- session closure, and a generation already closed by one admits nothing —
+-- not even a later commission, because the session that would run it is gone.
+--
+
+CREATE OR REPLACE FUNCTION require_goal_event_continuity() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    prior_ordinal numeric(20, 0);
+    prior_generation numeric(20, 0);
+    prior_kind text;
+    current_generation numeric(20, 0);
+BEGIN
+    PERFORM 1 FROM session WHERE session_id = NEW.session_id FOR NO KEY UPDATE;
+    SELECT event_ordinal, generation, event_kind
+      INTO prior_ordinal, prior_generation, prior_kind
+      FROM goal_event
+     WHERE session_id = NEW.session_id
+     ORDER BY event_ordinal DESC
+     LIMIT 1;
+
+    IF NOT FOUND THEN
+        IF NEW.event_ordinal <> 1 OR NEW.generation <> 1
+            OR NEW.event_kind <> 'commissioned' THEN
+            RAISE EXCEPTION 'first goal event must commission generation one at ordinal one'
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    IF NEW.event_ordinal <> prior_ordinal + 1 THEN
+        RAISE EXCEPTION 'goal event ordinal must be contiguous'
+            USING ERRCODE = '23514';
+    END IF;
+    current_generation := prior_generation
+        + CASE
+            WHEN prior_kind = 'superseded' THEN 1
+            WHEN prior_kind IN ('achieved', 'user_stopped')
+                AND NEW.event_kind = 'commissioned' THEN 1
+            ELSE 0
+          END;
+    IF NEW.generation <> current_generation THEN
+        RAISE EXCEPTION 'goal event generation does not name the current statement'
+            USING ERRCODE = '23514';
+    END IF;
+    IF prior_kind IN ('achieved', 'user_stopped') AND NEW.event_kind <> 'commissioned' THEN
+        RAISE EXCEPTION 'terminal goal generation admits only a later commission'
+            USING ERRCODE = '23514';
+    END IF;
+    IF prior_kind = 'session_closed' THEN
+        RAISE EXCEPTION 'a generation closed with its session admits no further event'
+            USING ERRCODE = '23514';
+    END IF;
+    IF prior_kind = 'blocked'
+        AND NEW.event_kind NOT IN ('resumed', 'user_stopped', 'superseded', 'session_closed') THEN
+        RAISE EXCEPTION 'blocked goal admits only resume, stop, supersede, or session closure'
+            USING ERRCODE = '23514';
+    END IF;
+    IF prior_kind IN ('commissioned', 'resumed', 'superseded')
+        AND NEW.event_kind NOT IN
+            ('blocked', 'achieved', 'user_stopped', 'superseded', 'session_closed') THEN
+        RAISE EXCEPTION 'pursuing goal transition is invalid'
+            USING ERRCODE = '23514';
+    END IF;
+    IF NEW.event_kind = 'superseded'
+        AND NEW.generation = 18446744073709551615 THEN
+        RAISE EXCEPTION 'goal generation exhausted'
+            USING ERRCODE = '22003';
+    END IF;
+    RETURN NEW;
+END;
+$$;
