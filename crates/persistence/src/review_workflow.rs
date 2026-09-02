@@ -3461,8 +3461,18 @@ fn projected<'row, T>(
 where
     T: sqlx::Decode<'row, Postgres> + sqlx::Type<Postgres>,
 {
-    row.try_get(column)
-        .map_err(|error| corruption(aggregate, format!("column {column}: {error}")))
+    row.try_get(column).map_err(|error| {
+        // The driver's `Display` output is unstable prose and nothing downstream
+        // can match on it, so the classification carries labels instead: the
+        // aggregate, the static column name, and which of the ways a row that
+        // was returned can still fail to answer for one of its columns.
+        let failure = match error {
+            sqlx::Error::ColumnNotFound(_) => "absent",
+            sqlx::Error::ColumnDecode { .. } => "undecodable",
+            _ => "unreadable",
+        };
+        corruption(aggregate, format!("{failure} column {column}"))
+    })
 }
 
 /// Decodes one turn outcome, reporting corruption against the reading table.

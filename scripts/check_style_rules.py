@@ -256,10 +256,16 @@ SQL_TABLE_REFERENCE = re.compile(
 )
 # `pub(crate) mod tests` and `pub(super) mod tests` are the same inline test
 # module a bare `mod tests` is, and this repository writes both — a visibility
-# the pattern did not admit would scan an exempted fixture as production.
+# the pattern did not admit would scan an exempted fixture as production. The
+# predicate is captured rather than spelled `test`, because a module gated on
+# `all(test, unix)` is a test module too and this repository writes that as well.
 CFG_TEST_MODULE = re.compile(
-    r"#\[cfg\(test\)\]\s*(?:pub\s*(?:\([^)]*\))?\s+)?mod\s+[A-Za-z0-9_]+\s*\{"
+    r"#\[cfg\((?P<predicate>[^\]]*)\)\]"
+    r"\s*(?:pub\s*(?:\([^)]*\))?\s+)?mod\s+[A-Za-z0-9_]+\s*\{"
 )
+QUOTED_VALUE = re.compile(r'"[^"]*"')
+NOT_TEST = re.compile(r"\bnot\s*\(\s*test\s*\)")
+BARE_TEST = re.compile(r"\btest\b")
 
 
 def check_app_sql_table_access(repository: Repository) -> Iterator[Finding]:
@@ -313,14 +319,28 @@ def _string_literals(source: Source) -> Iterator[tuple[int, str]]:
 
 
 def _inline_test_spans(code: str) -> list[tuple[int, int]]:
-    """The spans of the `#[cfg(test)]` modules in a file's code view."""
+    """The spans of the test-gated inline modules in a file's code view."""
     spans: list[tuple[int, int]] = []
     for match in CFG_TEST_MODULE.finditer(code):
+        if not _selects_a_test_build(match.group("predicate")):
+            continue
         opening = code.rindex("{", match.start(), match.end())
         closing = _matching_brace(code, opening)
         if closing is not None:
             spans.append((match.start(), closing))
     return spans
+
+
+def _selects_a_test_build(predicate: str) -> bool:
+    """Whether a `cfg` predicate holds only under `cargo test`.
+
+    A quoted value is dropped first, so a feature named `test` is not mistaken
+    for the `test` cfg, and `not(test)` is production code wearing the word.
+    """
+    bare = QUOTED_VALUE.sub("", predicate)
+    if NOT_TEST.search(bare):
+        return False
+    return BARE_TEST.search(bare) is not None
 
 
 def _matching_brace(text: str, opening: int) -> int | None:

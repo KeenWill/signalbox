@@ -109,6 +109,41 @@ class AppSqlTableAccessTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout)
 
+    def test_sql_inside_a_compound_cfg_test_module_passes(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "pub fn run() {}\n"
+            "#[cfg(all(test, unix))]\n"
+            "mod tests {\n"
+            '    const READ: &str = "SELECT id FROM turn_lifecycle";\n'
+            "}\n"
+        )
+
+        result = check(
+            "SR-8",
+            {APP: source, MIGRATION: "CREATE TABLE turn_lifecycle (id uuid);\n"},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_sql_in_a_module_gated_against_test_reports(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "pub fn run() {}\n"
+            "#[cfg(not(test))]\n"
+            "mod production {\n"
+            '    const READ: &str = "SELECT id FROM turn_lifecycle";\n'
+            "}\n"
+        )
+
+        result = check(
+            "SR-8",
+            {APP: source, MIGRATION: "CREATE TABLE turn_lifecycle (id uuid);\n"},
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("turn_lifecycle", result.stdout)
+
     def test_app_calling_a_repository_method_passes(self) -> None:
         source = "//! Owned.\npub async fn read(store: &Store) {\n    store.turn(id).await;\n}\n"
 

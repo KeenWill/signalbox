@@ -444,9 +444,12 @@ zero — never as a side effect of a change that merely reduces a count.
 
 The checker once carried thirteen rules report-only, with about a thousand
 findings it could never act on; ten of them are gone, because a step that always
-reports gates nothing and its findings go unread. The conventions those rules
-restated are unchanged — only their mechanical scan is gone, and review enforces
-them like the rest of this guide.
+reports gates nothing and its findings go unread. Nine of those conventions are
+unchanged — only their mechanical scan is gone, and review enforces them like
+the rest of this guide. SR-9 is the exception, and the two halves of it part
+ways: the filename-ordering policy stands, stated above, while the
+supersession-naming ceremony is retired outright with the migration reset rather
+than merely unscanned.
 
 Each rule below names the convention it decides:
 
