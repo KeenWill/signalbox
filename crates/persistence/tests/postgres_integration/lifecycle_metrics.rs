@@ -409,7 +409,12 @@ async fn the_headline_counts_released_and_failure_driven_closures() -> Result<()
     repository
         .close(
             conversation,
-            SessionTerminalOutcome::Abandoned,
+            // §2 reserves `abandoned` for an operator writing off a parked
+            // session, and §6 refuses to park an unmonitored one; a stop is
+            // how a conversation ends.
+            SessionTerminalOutcome::Stopped {
+                sticky: StopStickiness::Redispatchable,
+            },
             LifecycleActor::Operator,
         )
         .await?;
@@ -1105,7 +1110,12 @@ async fn ownership_taken_after_the_closure_joins_no_cohort() -> Result<(), Box<d
     repository
         .close(
             conversation,
-            SessionTerminalOutcome::Abandoned,
+            // §2 reserves `abandoned` for an operator writing off a parked
+            // session, and §6 refuses to park an unmonitored one; a stop is
+            // how a conversation ends.
+            SessionTerminalOutcome::Stopped {
+                sticky: StopStickiness::Redispatchable,
+            },
             LifecycleActor::Operator,
         )
         .await?;
@@ -1207,26 +1217,20 @@ async fn a_committed_supersession_keeps_its_cause_across_a_resume() -> Result<()
             },
         )
         .await?;
+    // The closure keeps the actor that decided it, so the settlement names
+    // neither an actor nor an outcome of its own.
     repository
-        .commit_pending_terminal(respawned, SessionTerminalOutcome::Superseded { by: None })
-        .await?;
-    repository
-        .resume(
+        .commit_pending_terminal(
             respawned,
+            SessionTerminalOutcome::Superseded { by: None },
             LifecycleActor::Core {
                 agency: CoreAgency::Daemon,
             },
         )
         .await?;
+    repository.resume(respawned).await?;
     settle_turn_with_cause(&pool, respawned, turn, 0x1900, "context_compaction_wall").await?;
-    repository
-        .settle_pending_terminal(
-            respawned,
-            LifecycleActor::Core {
-                agency: CoreAgency::Daemon,
-            },
-        )
-        .await?;
+    repository.settle_pending_terminal(respawned).await?;
 
     let report = LifecycleMetricsRepository::new(pool.clone()).read().await?;
     let week = latest_populated_week(report.weeks());
