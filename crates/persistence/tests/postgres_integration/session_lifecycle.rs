@@ -248,6 +248,45 @@ async fn an_interactive_creation_is_unmonitored_and_arms_no_deadline() -> Result
     Ok(())
 }
 
+/// The command records the dispatch it created its session for, and the two
+/// cannot disagree. The committed composite foreign key cannot say this — its
+/// dispatch members are null for every interactive creation, and a composite
+/// key with a null member checks nothing — so a deferred trigger says it and
+/// fires whether or not the pair is null.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_command_naming_another_dispatch_than_its_session_is_rejected()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(21);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(21))
+        .await?;
+
+    let error = sqlx::query(
+        "UPDATE create_session_command
+            SET dispatch_ref = $2
+          WHERE created_session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .bind(Uuid::from_u128(LIFECYCLE_SEED + 0xdead))
+    .execute(&pool)
+    .await
+    .expect_err("a command cannot name a dispatch its session does not");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(DatabaseError::code)
+            .as_deref(),
+        Some("23514")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// §6: a module-dispatched creation records the module and its exact dispatch,
 /// is owned, and arms the first-input deadline §10 gives an owned creation.
 /// The unbounded default records the deadline explicitly rather than omitting

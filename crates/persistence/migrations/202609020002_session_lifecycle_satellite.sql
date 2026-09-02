@@ -1307,20 +1307,48 @@ ALTER TABLE create_session_command
         ])))
     );
 
-ALTER TABLE session
-    ADD CONSTRAINT session_dispatch_provenance_key
-        UNIQUE (session_id, creation_cause, ancestry_kind, dispatching_module, dispatch_ref);
+--
+-- The committed composite foreign key still ties the command's cause to its
+-- session's. It cannot carry the dispatch pair as well: those columns are null
+-- for every interactive creation, and `MATCH SIMPLE` skips a composite foreign
+-- key entirely when any member is null — so widening the key would silently
+-- stop checking the cause it checks today. A deferred constraint trigger
+-- states the agreement instead, and it fires whether or not the pair is null.
+--
 
-ALTER TABLE create_session_command
-    DROP CONSTRAINT create_session_command_provenance_fk;
+CREATE FUNCTION require_create_session_command_dispatch_matches() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    stored_module text;
+    stored_dispatch uuid;
+BEGIN
+    SELECT dispatching_module, dispatch_ref
+      INTO stored_module, stored_dispatch
+      FROM session
+     WHERE session_id = NEW.created_session_id;
 
-ALTER TABLE ONLY create_session_command
-    ADD CONSTRAINT create_session_command_provenance_fk
-        FOREIGN KEY (created_session_id, creation_cause, ancestry_kind,
-                     dispatching_module, dispatch_ref)
-        REFERENCES session(session_id, creation_cause, ancestry_kind,
-                           dispatching_module, dispatch_ref)
-        ON UPDATE RESTRICT ON DELETE RESTRICT;
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+
+    IF stored_module IS DISTINCT FROM NEW.dispatching_module
+       OR stored_dispatch IS DISTINCT FROM NEW.dispatch_ref
+    THEN
+        RAISE EXCEPTION
+            'create-session command % names a dispatch its session does not',
+            NEW.command_id
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER create_session_command_dispatch_matches_session
+    AFTER INSERT OR UPDATE ON create_session_command
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION require_create_session_command_dispatch_matches();
 
 --
 -- The committed goal-event continuity trigger enumerates every transition, so

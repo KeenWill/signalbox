@@ -490,6 +490,7 @@ async fn insert_raw_delegation(
     .bind(fixture.child.into_uuid())
     .execute(&mut *connection)
     .await?;
+    insert_raw_session_lifecycle(&mut *connection, fixture.child.into_uuid()).await?;
     sqlx::query("INSERT INTO session_scheduler(session_id) VALUES ($1)")
         .bind(fixture.child.into_uuid())
         .execute(&mut *connection)
