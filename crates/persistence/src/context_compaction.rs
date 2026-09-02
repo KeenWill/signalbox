@@ -393,7 +393,7 @@ impl ContextCompactionRepository {
         let rows = sqlx::query(
             "UPDATE context_compaction_model_call
                 SET state_kind = 'in_flight',
-                    in_flight_at = clock_timestamp()
+                    in_flight_at = statement_timestamp()
               WHERE model_call_id = $1
                 AND session_id = $2
                 AND state_kind = 'prepared'",
@@ -478,7 +478,7 @@ impl ContextCompactionRepository {
         let call_rows = sqlx::query(
             "UPDATE context_compaction_model_call
                 SET state_kind = 'terminal',
-                    terminal_at = clock_timestamp(),
+                    terminal_at = statement_timestamp(),
                     terminal_disposition_kind = 'completed',
                     input_tokens = $1,
                     output_tokens = $2,
@@ -675,7 +675,7 @@ impl ContextCompactionRepository {
         }
         let call_rows = sqlx::query(
             "UPDATE context_compaction_model_call
-                SET state_kind = 'terminal', terminal_at = clock_timestamp(),
+                SET state_kind = 'terminal', terminal_at = statement_timestamp(),
                     terminal_disposition_kind = $1,
                     input_tokens = $2, output_tokens = $3,
                     cache_creation_input_tokens = $4,

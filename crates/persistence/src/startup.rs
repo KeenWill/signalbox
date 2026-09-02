@@ -867,15 +867,24 @@ where
         },
     };
 
-    let failed = insert_prepared_failure(connection, prepared).await?;
+    let failed =
+        insert_prepared_failure(connection, prepared, TurnTerminalCause::AbandonedAtRestart)
+            .await?;
     Ok(TransactionDecision::Commit(
         StartupScanSessionOutcome::Recovered(Box::new(failed)),
     ))
 }
 
+/// Commits one prepared failed-turn transition, recording `cause` as why the
+/// turn ended.
+///
+/// The startup scan and the liveness watchdog commit the identical transition,
+/// which is what keeps every terminal trigger firing for both; the cause is
+/// what makes the two distinguishable in the rows rather than only in a log.
 pub(crate) async fn insert_prepared_failure(
     connection: &mut PgConnection,
     prepared: PreparedAcceptedInputTurnFailure,
+    cause: TurnTerminalCause,
 ) -> Result<signalbox_domain::FailedAcceptedInputTurn, StartupScanRepositoryError> {
     let (failed, failure_entry, terminal_snapshot) = prepared.into_parts();
     let session = failed.session();
@@ -966,9 +975,7 @@ pub(crate) async fn insert_prepared_failure(
     ))
     .bind(failed.start().frontier().snapshot().into_uuid())
     .bind(attempt.id().into_uuid())
-    .bind(turn_terminal_cause_to_str(
-        TurnTerminalCause::AbandonedAtRestart,
-    ))
+    .bind(turn_terminal_cause_to_str(cause))
     .execute(&mut *connection)
     .await?
     .rows_affected();
@@ -1055,7 +1062,7 @@ async fn recover_context_compaction(
     };
     let call_rows = sqlx::query(
         "UPDATE context_compaction_model_call
-            SET state_kind = 'terminal', terminal_at = clock_timestamp(),
+            SET state_kind = 'terminal', terminal_at = statement_timestamp(),
                 terminal_disposition_kind = $1
           WHERE session_id = $2
             AND model_call_id = $3

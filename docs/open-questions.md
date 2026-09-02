@@ -206,17 +206,6 @@ per-turn provenance. The following extensions remain undecided:
   ordinary shape. Leaning: give the transition the reclassification the other
   terminal paths already perform, since the constraint forcing it is a lifecycle
   rule rather than a property of how the turn ended. Later scope. (S02, S07)
-- **Durable terminal cause for a failed turn.** The turn-liveness watchdog and
-  startup recovery commit the identical failed-turn transition
-  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)),
-  which is what keeps every terminal trigger firing for both, but the
-  `TurnFailed` shape carries no cause column — so the two are distinguishable
-  only in the operator log, and only while it is retained. Whether a terminal
-  turn should carry a stored cause, and whether that vocabulary is shared with
-  the operator cause codes or separate from them, is undecided; adding one is a
-  migration on a table several transitions write. Leaning: a cause belongs in
-  the rows, because an operator reconstructing why a session stopped should not
-  depend on log retention. Later scope. (S02, S07)
 - **Direct interrupt-only reconciliation from a running attempt.**
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) adds
   direct reconciliation only for fatal mismatch at a closed aggregate boundary;

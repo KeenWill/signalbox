@@ -37,6 +37,7 @@ ALTER TABLE turn_lifecycle
             'credential_pool_exhausted'::text,
             'headless_approval_escalation'::text,
             'abandoned_at_restart'::text,
+            'watchdog_stale_turn'::text,
             'context_headroom_exhausted'::text,
             'context_compaction_wall'::text,
             'context_compaction_failed'::text,

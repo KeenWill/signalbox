@@ -17,7 +17,7 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, ModelCallId, SessionId,
-    TurnAttemptId,
+    TurnAttemptId, TurnTerminalCause,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Decimal, types::Uuid};
 use tokio::time::timeout;
@@ -936,7 +936,7 @@ async fn terminalize_in_transaction(
                 }
             },
         };
-    insert_prepared_failure(connection, prepared).await?;
+    insert_prepared_failure(connection, prepared, TurnTerminalCause::WatchdogStaleTurn).await?;
     Ok(StaleTurnOutcome::Terminalized)
 }
 

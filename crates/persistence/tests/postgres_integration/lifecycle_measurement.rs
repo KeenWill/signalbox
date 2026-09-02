@@ -48,7 +48,10 @@ fn required_and_defaulted(columns: &[(&str, &str)]) -> BTreeMap<String, Stamping
         .map(|(table, column)| {
             (
                 format!("{table}.{column}"),
-                (String::from("NO"), Some(String::from("clock_timestamp()"))),
+                (
+                    String::from("NO"),
+                    Some(String::from("statement_timestamp()")),
+                ),
             )
         })
         .collect()
@@ -103,6 +106,47 @@ async fn admitted_cause_spellings(pool: &PgPool) -> Result<BTreeSet<String>, sql
     Ok(spellings.into_iter().collect())
 }
 
+/// Proves `EVERY_TERMINAL_CAUSE` still lists the whole vocabulary.
+///
+/// The match is exhaustive, so a variant added to `TurnTerminalCause` without
+/// being added to the array above stops this file compiling. Without it the
+/// comparison below would keep passing against the old subset while the new
+/// cause was absent from storage — a tripwire that cannot trip.
+const fn listed_position(cause: TurnTerminalCause) -> usize {
+    match cause {
+        TurnTerminalCause::Completed => 0,
+        TurnTerminalCause::ModelRefusal => 1,
+        TurnTerminalCause::InterruptApplied => 2,
+        TurnTerminalCause::ModelCallAmbiguous => 3,
+        TurnTerminalCause::ToolAttemptAmbiguous => 4,
+        TurnTerminalCause::ModelCallFailed => 5,
+        TurnTerminalCause::ModelTargetUnavailable => 6,
+        TurnTerminalCause::AttachmentPreparationFailed => 7,
+        TurnTerminalCause::CapabilityPreparationFailed => 8,
+        TurnTerminalCause::ToolRoundLimitReached => 9,
+        TurnTerminalCause::ToolAttemptLost => 10,
+        TurnTerminalCause::CredentialPoolExhausted => 11,
+        TurnTerminalCause::HeadlessApprovalEscalation => 12,
+        TurnTerminalCause::AbandonedAtRestart => 13,
+        TurnTerminalCause::WatchdogStaleTurn => 14,
+        TurnTerminalCause::ContextHeadroomExhausted => 15,
+        TurnTerminalCause::ContextCompactionWall => 16,
+        TurnTerminalCause::ContextCompactionFailed => 17,
+        TurnTerminalCause::ReportedUsageContextCompactionExhausted => 18,
+        TurnTerminalCause::ReportedUsageContextStillExceeded => 19,
+        TurnTerminalCause::UnclassifiedFailure => 20,
+    }
+}
+
+/// Each listed variant's own position, so a variant given a fresh position by
+/// the match above but never added to the array shows up as a gap.
+fn listed_positions() -> Vec<usize> {
+    EVERY_TERMINAL_CAUSE
+        .into_iter()
+        .map(listed_position)
+        .collect()
+}
+
 /// Every variant the domain vocabulary carries, encoded for storage.
 fn encoded_cause_spellings() -> BTreeSet<String> {
     EVERY_TERMINAL_CAUSE
@@ -111,7 +155,7 @@ fn encoded_cause_spellings() -> BTreeSet<String> {
         .collect()
 }
 
-const EVERY_TERMINAL_CAUSE: [TurnTerminalCause; 20] = [
+const EVERY_TERMINAL_CAUSE: [TurnTerminalCause; 21] = [
     TurnTerminalCause::Completed,
     TurnTerminalCause::ModelRefusal,
     TurnTerminalCause::InterruptApplied,
@@ -126,6 +170,7 @@ const EVERY_TERMINAL_CAUSE: [TurnTerminalCause; 20] = [
     TurnTerminalCause::CredentialPoolExhausted,
     TurnTerminalCause::HeadlessApprovalEscalation,
     TurnTerminalCause::AbandonedAtRestart,
+    TurnTerminalCause::WatchdogStaleTurn,
     TurnTerminalCause::ContextHeadroomExhausted,
     TurnTerminalCause::ContextCompactionWall,
     TurnTerminalCause::ContextCompactionFailed,
@@ -496,6 +541,10 @@ async fn the_stored_cause_vocabulary_matches_the_encoder() -> Result<(), Box<dyn
 
     let admitted = admitted_cause_spellings(&pool).await?;
 
+    assert_eq!(
+        listed_positions(),
+        (0..EVERY_TERMINAL_CAUSE.len()).collect::<Vec<_>>()
+    );
     assert_eq!(admitted, encoded_cause_spellings());
     pool.close().await;
     drop(container);
@@ -557,6 +606,42 @@ async fn terminalizing_a_compaction_call_cannot_erase_its_in_flight_stamp()
             .as_database_error()
             .map(sqlx::error::DatabaseError::message),
         Some("compaction call in-flight time is write-once")
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A compaction call is inserted carrying only its preparation time, so no
+/// writer can fabricate an authorization transition that never happened.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_compaction_call_cannot_be_inserted_already_in_flight() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7220;
+    let fixture = checkpoint_restart_model_call(&pool, seed, true).await?;
+
+    let rejection = sqlx::query(
+        "INSERT INTO context_compaction_model_call
+            (model_call_id, session_id, direct_model_selection_id,
+             resolved_provider_model_identity_id, source_frontier_id,
+             credential_reference, state_kind, in_flight_at)
+         VALUES ($1, $2, $3, $4, $5, 'fabricated', 'prepared', statement_timestamp())",
+    )
+    .bind(Uuid::from_u128(seed + 0x90))
+    .bind(fixture.session.into_uuid())
+    .bind(Uuid::from_u128(seed + 5))
+    .bind(Uuid::from_u128(seed + 6))
+    .bind(Uuid::from_u128(seed + 11))
+    .execute(&pool)
+    .await
+    .expect_err("a prepared compaction call cannot carry an in-flight stamp");
+
+    assert_eq!(
+        rejection
+            .as_database_error()
+            .map(sqlx::error::DatabaseError::message),
+        Some("compaction call begins with only its preparation time")
     );
     pool.close().await;
     drop(container);

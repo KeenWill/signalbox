@@ -21,8 +21,9 @@ use signalbox_application::{
     CredentialPoolExhaustedOutcome, FailPreparedModelCallTransaction, ModelCallAuthorizationReread,
     ModelCallCredentialReference, ModelCallObservationCommitOutcome,
     ModelCallTerminalIdentityCandidates, OperatorFailureClass, PrepareModelCallOutcome,
-    PrepareModelCallTransaction, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
-    RetainedModelCallObservationStatus, RetainedPreparedFailureStatus,
+    PrepareModelCallTransaction, PrepareToolContinuationOutcome, PreparedModelCallFailureCause,
+    ResolvedToolConversationEntry, RetainedModelCallObservationStatus,
+    RetainedPreparedFailureStatus,
 };
 use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, ActiveTurnPhase,
@@ -1995,7 +1996,7 @@ impl PostgresModelCallRepository {
         &self,
         session: SessionId,
         call: ModelCallId,
-        cause: TurnTerminalCause,
+        cause: PreparedModelCallFailureCause,
         attachment_failure: Option<AttachmentPreparationFailure>,
         identities: FailedModelCallTurnIdentities,
         mut next_reclassified_turn: NextTurn,
@@ -2024,7 +2025,7 @@ impl PostgresModelCallRepository {
             persist_failed_with_delegated_child_result(
                 &mut transaction,
                 &failed,
-                cause,
+                prepared_failure_cause(cause, attachment_failure),
                 ProviderReportedTokenUsage::unreported(),
                 None,
                 attachment_failure,
@@ -3481,7 +3482,7 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
         &mut self,
         session: SessionId,
         call: ModelCallId,
-        cause: signalbox_application::PreparedModelCallFailureCause,
+        cause: PreparedModelCallFailureCause,
         attachment_failure: Option<AttachmentPreparationFailure>,
         identities: FailedModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
@@ -3489,26 +3490,11 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
     {
-        // Attachment preparation is the more specific evidence: when it
-        // produced the failure it names the cause, and the application's
-        // pre-send vocabulary names it otherwise.
-        let terminal_cause = if attachment_failure.is_some() {
-            TurnTerminalCause::AttachmentPreparationFailed
-        } else {
-            match cause {
-                signalbox_application::PreparedModelCallFailureCause::CapabilityKnownFailure => {
-                    TurnTerminalCause::CapabilityPreparationFailed
-                }
-                signalbox_application::PreparedModelCallFailureCause::ToolRoundLimitReached => {
-                    TurnTerminalCause::ToolRoundLimitReached
-                }
-            }
-        };
         PostgresModelCallRepository::fail_prepared_call(
             self,
             session,
             call,
-            terminal_cause,
+            cause,
             attachment_failure,
             identities,
             next_reclassified_turn,
@@ -9851,6 +9837,28 @@ pub(crate) async fn insert_snapshot(
             ModelCallCorruption::Inconsistent("frontier member position").into()
         }
     })
+}
+
+/// Classifies one pre-send prepared-call failure as a turn-terminal cause.
+///
+/// Attachment preparation is the more specific evidence: when it produced the
+/// failure it names the cause, and the application's pre-send vocabulary names
+/// it otherwise. Taking that vocabulary rather than a bare terminal cause is
+/// what keeps a caller from pairing a `failed` disposition with a cause that
+/// contradicts it.
+const fn prepared_failure_cause(
+    cause: PreparedModelCallFailureCause,
+    attachment_failure: Option<AttachmentPreparationFailure>,
+) -> TurnTerminalCause {
+    match (attachment_failure, cause) {
+        (Some(_), _) => TurnTerminalCause::AttachmentPreparationFailed,
+        (None, PreparedModelCallFailureCause::CapabilityKnownFailure) => {
+            TurnTerminalCause::CapabilityPreparationFailed
+        }
+        (None, PreparedModelCallFailureCause::ToolRoundLimitReached) => {
+            TurnTerminalCause::ToolRoundLimitReached
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

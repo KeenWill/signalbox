@@ -893,7 +893,7 @@ async fn definitive_attachment_failure_closes_its_call_with_a_durable_cause()
         .fail_prepared_call(
             fixture.session,
             fixture.call,
-            TurnTerminalCause::AttachmentPreparationFailed,
+            PreparedModelCallFailureCause::CapabilityKnownFailure,
             Some(AttachmentPreparationFailure::Missing),
             FailedModelCallTurnIdentities::new(
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 14)),
@@ -1047,7 +1047,7 @@ async fn inv006_model_call_prepared_failure_reread_distinguishes_pending_and_com
         .fail_prepared_call(
             fixture.session,
             fixture.call,
-            TurnTerminalCause::CapabilityPreparationFailed,
+            PreparedModelCallFailureCause::CapabilityKnownFailure,
             None,
             FailedModelCallTurnIdentities::new(
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 14)),

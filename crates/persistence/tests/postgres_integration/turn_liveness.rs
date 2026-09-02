@@ -6,8 +6,9 @@ use signalbox_application::{
     ClassifyOperatorFailure, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence,
     UuidV7StartupScanIdGenerator,
 };
-use signalbox_persistence::turn_liveness::{
-    PostgresTurnLivenessRepository, TurnLivenessPersistenceBounds,
+use signalbox_persistence::{
+    mapping::turn_terminal_cause_to_str,
+    turn_liveness::{PostgresTurnLivenessRepository, TurnLivenessPersistenceBounds},
 };
 
 /// Starvation allowance for an uncontended pool checkout: generous, not a
@@ -180,9 +181,10 @@ async fn a_quiescent_active_turn_terminalizes_as_failed() -> Result<(), Box<dyn 
         .await?;
     assert_eq!(outcome, StaleTurnOutcome::Terminalized);
 
-    let terminal: (String, Option<String>, i64) = sqlx::query_as(
+    let terminal: (String, Option<String>, Option<String>, i64) = sqlx::query_as(
         "SELECT lifecycle.state_kind,
                 lifecycle.terminal_disposition_kind,
+                lifecycle.terminal_cause_kind,
                 (SELECT count(*)
                    FROM semantic_transcript_entry AS entry
                   WHERE entry.failed_turn_id = lifecycle.turn_id)
@@ -194,7 +196,14 @@ async fn a_quiescent_active_turn_terminalizes_as_failed() -> Result<(), Box<dyn 
     .await?;
     assert_eq!(
         terminal,
-        (String::from("terminal"), Some(String::from("failed")), 1)
+        (
+            String::from("terminal"),
+            Some(String::from("failed")),
+            Some(String::from(turn_terminal_cause_to_str(
+                TurnTerminalCause::WatchdogStaleTurn
+            ))),
+            1
+        )
     );
     assert_eq!(
         repository.quiescent_active_turns(None).await?.candidates(),
