@@ -2790,7 +2790,7 @@ the latest session credential snapshot entry for that target's family. A
 prepared or in-flight predecessor retains its call pin (INV-046).
 
 Dollar cost is derived only while reading a terminal call: the call's pinned
-target, the channel pinned on it, and its recorded timestamp select the one
+target, the channel pinned on it, and its execution timestamp select the one
 configured rate window covering that instant, and the exact credential profile
 stored on that call selects `api_metered` or `subscription`. An API-metered
 profile produces `real`; a subscription profile produces `metered_equivalent`,
