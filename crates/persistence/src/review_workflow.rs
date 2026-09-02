@@ -434,8 +434,8 @@ impl ReviewWorkflowStore {
         let Some(row) = row else {
             return Ok(None);
         };
-        let session: Uuid = row.try_get("session_id")?;
-        let origin_turn: Option<Uuid> = row.try_get("origin_turn_id")?;
+        let session: Uuid = projected(&row, "accepted_input", "session_id")?;
+        let origin_turn: Option<Uuid> = projected(&row, "accepted_input", "origin_turn_id")?;
         Ok(Some(ReviewAcceptedInputOrigin {
             session: session_id(session),
             origin_turn: origin_turn.map(turn_id),
@@ -464,11 +464,13 @@ impl ReviewWorkflowStore {
         let Some(row) = row else {
             return Ok(None);
         };
-        let session: Uuid = row.try_get("session_id")?;
-        let accepted_input: Option<Uuid> = row.try_get("origin_accepted_input_id")?;
-        let state: String = row.try_get("state_kind")?;
-        let disposition: Option<String> = row.try_get("terminal_disposition_kind")?;
-        let frontier: Option<Uuid> = row.try_get("terminal_frontier_id")?;
+        let session: Uuid = projected(&row, "turn_lifecycle", "session_id")?;
+        let accepted_input: Option<Uuid> =
+            projected(&row, "turn_lifecycle", "origin_accepted_input_id")?;
+        let state: String = projected(&row, "turn_lifecycle", "state_kind")?;
+        let disposition: Option<String> =
+            projected(&row, "turn_lifecycle", "terminal_disposition_kind")?;
+        let frontier: Option<Uuid> = projected(&row, "turn_lifecycle", "terminal_frontier_id")?;
         Ok(Some(ReviewTurnLifecycle {
             session: session_id(session),
             accepted_input: accepted_input.map(accepted_input_id),
@@ -3442,6 +3444,25 @@ fn decode_pass_turn_evidence(
             String::from("torn canonical turn evidence"),
         )),
     }
+}
+
+/// Reads one column of a returned row, reporting a decode failure as corruption.
+///
+/// The fetch keeps `?`: a connection that dropped mid-query is retryable, and
+/// `mutation_unavailable` is the honest answer. A column read on a row the
+/// query already returned is not — a type or a name the projection and the
+/// schema disagree about is a fault no retry repairs, and the handlers these
+/// projections replaced answered it with the internal projection diagnostic.
+fn projected<'row, T>(
+    row: &'row PgRow,
+    aggregate: &'static str,
+    column: &'static str,
+) -> Result<T, ReviewWorkflowStoreError>
+where
+    T: sqlx::Decode<'row, Postgres> + sqlx::Type<Postgres>,
+{
+    row.try_get(column)
+        .map_err(|error| corruption(aggregate, format!("column {column}: {error}")))
 }
 
 /// Decodes one turn outcome, reporting corruption against the reading table.

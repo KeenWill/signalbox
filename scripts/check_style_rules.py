@@ -254,7 +254,12 @@ SQL_TABLE_REFERENCE = re.compile(
     r"\"?([a-z_][a-z0-9_]*)\"?",
     re.IGNORECASE,
 )
-CFG_TEST_MODULE = re.compile(r"#\[cfg\(test\)\]\s*(?:pub\s+)?mod\s+[A-Za-z0-9_]+\s*\{")
+# `pub(crate) mod tests` and `pub(super) mod tests` are the same inline test
+# module a bare `mod tests` is, and this repository writes both — a visibility
+# the pattern did not admit would scan an exempted fixture as production.
+CFG_TEST_MODULE = re.compile(
+    r"#\[cfg\(test\)\]\s*(?:pub\s*(?:\([^)]*\))?\s+)?mod\s+[A-Za-z0-9_]+\s*\{"
+)
 
 
 def check_app_sql_table_access(repository: Repository) -> Iterator[Finding]:
