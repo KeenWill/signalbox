@@ -135,15 +135,18 @@ database constraint makes the two co-extensive rather than the cause optional
 vocabulary; `crates/persistence/src/mapping.rs` holds its one encoder and
 decoder. `unclassified_failure` is the sole catch-all spelling, so the share of
 terminal turns carrying a cause outside it measures classification quality
-rather than mere presence. The domain `TurnDisposition` algebra carries all five
-accepted variants — `Completed`, `Refused`, `Failed`, `Cancelled { cause }`,
-`ReconciliationRequired { marker }` — but `Cancelled` is constructible only from
-an `AppliedInterruptProof`. `ReconciliationRequired` remains constructible only
-from a sealed `ReconciliationMarker`. Committed transitions produce every
-variant: interrupted physical ambiguity produces proof-bearing
-`ReconciliationRequired`, and confirmed interrupted cancellation produces
-proof-bearing `Cancelled`. Runner abandonment creates no additional turn-ending
-authority.
+rather than mere presence. The liveness watchdog and startup recovery commit the
+identical failed-turn transition, which is what keeps every terminal trigger
+firing for both; the cause is what tells them apart in the rows rather than only
+in an operator log that is retained for a while. The domain `TurnDisposition`
+algebra carries all five accepted variants — `Completed`, `Refused`, `Failed`,
+`Cancelled { cause }`, `ReconciliationRequired { marker }` — but `Cancelled` is
+constructible only from an `AppliedInterruptProof`. `ReconciliationRequired`
+remains constructible only from a sealed `ReconciliationMarker`. Committed
+transitions produce every variant: interrupted physical ambiguity produces
+proof-bearing `ReconciliationRequired`, and confirmed interrupted cancellation
+produces proof-bearing `Cancelled`. Runner abandonment creates no additional
+turn-ending authority.
 
 The domain `ActiveTurnPhase` algebra is `Running { current_attempt }`,
 `AwaitingApproval { request }`,

@@ -3,10 +3,12 @@
 --
 -- Every column lands NOT NULL outright. The unconstrained dogfood-database
 -- reset is ratified, so no row predates these columns and no backfill marker
--- or `CHECK ... NOT VALID` scaffolding is owed. `clock_timestamp()` is the
--- statement clock, so a stamp records when its own row was written rather than
--- when the enclosing transaction opened; the repository writes never restate
--- it, which is what makes the stamp impossible for a new write path to skip.
+-- or `CHECK ... NOT VALID` scaffolding is owed. `statement_timestamp()` is
+-- stable across the rows one statement writes and advances between statements,
+-- so a stamp records when its own write happened rather than when the enclosing
+-- transaction opened, and rows written together never acquire an artificial
+-- order. The repository writes never restate it, which is what makes the stamp
+-- impossible for a new write path to skip.
 --
 
 --
@@ -15,11 +17,11 @@
 
 ALTER TABLE outbox_event
     ADD COLUMN recorded_at timestamp with time zone
-        DEFAULT clock_timestamp() NOT NULL;
+        DEFAULT statement_timestamp() NOT NULL;
 
 ALTER TABLE delegation_outbox_event
     ADD COLUMN recorded_at timestamp with time zone
-        DEFAULT clock_timestamp() NOT NULL;
+        DEFAULT statement_timestamp() NOT NULL;
 
 --
 -- Session creation. `session` is append-only, so the row's insert time is its
@@ -28,7 +30,7 @@ ALTER TABLE delegation_outbox_event
 
 ALTER TABLE session
     ADD COLUMN created_at timestamp with time zone
-        DEFAULT clock_timestamp() NOT NULL;
+        DEFAULT statement_timestamp() NOT NULL;
 
 --
 -- The five lifecycle rows §3 names. Each is stamped when the row is written;
@@ -39,23 +41,23 @@ ALTER TABLE session
 
 ALTER TABLE turn_lifecycle
     ADD COLUMN recorded_at timestamp with time zone
-        DEFAULT clock_timestamp() NOT NULL;
+        DEFAULT statement_timestamp() NOT NULL;
 
 ALTER TABLE turn_attempt
     ADD COLUMN recorded_at timestamp with time zone
-        DEFAULT clock_timestamp() NOT NULL;
+        DEFAULT statement_timestamp() NOT NULL;
 
 ALTER TABLE model_call
     ADD COLUMN recorded_at timestamp with time zone
-        DEFAULT clock_timestamp() NOT NULL;
+        DEFAULT statement_timestamp() NOT NULL;
 
 ALTER TABLE tool_attempt
     ADD COLUMN recorded_at timestamp with time zone
-        DEFAULT clock_timestamp() NOT NULL;
+        DEFAULT statement_timestamp() NOT NULL;
 
 ALTER TABLE goal_event
     ADD COLUMN recorded_at timestamp with time zone
-        DEFAULT clock_timestamp() NOT NULL;
+        DEFAULT statement_timestamp() NOT NULL;
 
 --
 -- Compaction lifecycle. §3 requires the command's acceptance to carry its own
@@ -65,7 +67,7 @@ ALTER TABLE goal_event
 
 ALTER TABLE compact_session_command
     ADD COLUMN requested_at timestamp with time zone
-        DEFAULT clock_timestamp() NOT NULL;
+        DEFAULT statement_timestamp() NOT NULL;
 
 --
 -- The compaction call's three transitions. `prepared_at` is the insert stamp;
@@ -77,7 +79,7 @@ ALTER TABLE compact_session_command
 
 ALTER TABLE context_compaction_model_call
     ADD COLUMN prepared_at timestamp with time zone
-        DEFAULT clock_timestamp() NOT NULL,
+        DEFAULT statement_timestamp() NOT NULL,
     ADD COLUMN in_flight_at timestamp with time zone,
     ADD COLUMN terminal_at timestamp with time zone;
 
@@ -93,7 +95,7 @@ ALTER TABLE context_compaction_model_call
 
 ALTER TABLE context_compaction
     ADD COLUMN applied_at timestamp with time zone
-        DEFAULT clock_timestamp() NOT NULL;
+        DEFAULT statement_timestamp() NOT NULL;
 
 --
 -- Stamps do not move.
@@ -156,6 +158,13 @@ CREATE FUNCTION reject_context_compaction_stamp_change() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.in_flight_at IS NOT NULL OR NEW.terminal_at IS NOT NULL THEN
+            RAISE EXCEPTION 'compaction call begins with only its preparation time'
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+    END IF;
     IF OLD.prepared_at IS DISTINCT FROM NEW.prepared_at THEN
         RAISE EXCEPTION 'compaction call preparation time is immutable'
             USING ERRCODE = '23514';
@@ -166,8 +175,15 @@ BEGIN
         RAISE EXCEPTION 'compaction call in-flight time is write-once'
             USING ERRCODE = '23514';
     END IF;
+    IF OLD.in_flight_at IS NULL
+       AND NEW.in_flight_at IS NOT NULL
+       AND NEW.state_kind <> 'in_flight'
+    THEN
+        RAISE EXCEPTION 'compaction call in-flight time is written by authorization'
+            USING ERRCODE = '23514';
+    END IF;
     RETURN NEW;
 END;
 $$;
 
-CREATE TRIGGER context_compaction_model_call_stamps_are_write_once BEFORE UPDATE ON context_compaction_model_call FOR EACH ROW EXECUTE FUNCTION reject_context_compaction_stamp_change();
+CREATE TRIGGER context_compaction_model_call_stamps_are_write_once BEFORE INSERT OR UPDATE ON context_compaction_model_call FOR EACH ROW EXECUTE FUNCTION reject_context_compaction_stamp_change();

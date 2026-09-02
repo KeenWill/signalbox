@@ -457,6 +457,8 @@ pub enum TurnTerminalCause {
     HeadlessApprovalEscalation,
     /// A restart found the turn's work with no live process owning it.
     AbandonedAtRestart,
+    /// The liveness watchdog closed the turn on repeated staleness evidence.
+    WatchdogStaleTurn,
     /// Reserved context headroom could not admit the turn's continuation.
     ContextHeadroomExhausted,
     /// Context compaction could not fit the input it was asked to compact.

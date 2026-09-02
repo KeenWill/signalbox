@@ -3084,6 +3084,7 @@ pub enum TurnTerminalCause {
     CredentialPoolExhausted,
     HeadlessApprovalEscalation,
     AbandonedAtRestart,
+    WatchdogStaleTurn,
     ContextHeadroomExhausted,
     ContextCompactionWall,
     ContextCompactionFailed,

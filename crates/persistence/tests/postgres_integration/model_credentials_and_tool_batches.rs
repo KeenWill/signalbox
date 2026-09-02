@@ -260,7 +260,7 @@ async fn model_call_usage_keeps_credential_pin_after_update_event() -> Result<()
         .fail_prepared_call(
             session,
             call,
-            TurnTerminalCause::CapabilityPreparationFailed,
+            PreparedModelCallFailureCause::CapabilityKnownFailure,
             None,
             FailedModelCallTurnIdentities::new(
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcf11)),
