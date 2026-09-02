@@ -961,6 +961,11 @@ prunable_tables!(
 
 /// Highest sequence this pass may delete through: the registry floor, further
 /// bounded to the contiguous prefix whose headers all predate the window.
+///
+/// The prefix is well defined because the allocator's row lock is held to
+/// commit, so a header's `recorded_at` never decreases as its sequence rises:
+/// one sequence below the oldest header inside the window is the last one
+/// outside it.
 const PRUNE_BOUND_SQL: &str = "SELECT least(
     outbox_retention_floor(),
     coalesce(
