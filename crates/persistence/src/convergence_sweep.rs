@@ -3,6 +3,7 @@
 use std::{
     error::Error,
     fmt,
+    num::NonZeroU16,
     time::{Duration, SystemTime},
 };
 
@@ -355,11 +356,21 @@ impl ConvergenceSweepStoreError {
 #[derive(Clone, Debug)]
 pub struct PostgresConvergenceSweepStore {
     pool: PgPool,
+    retry_budget: NonZeroU16,
 }
 
 impl PostgresConvergenceSweepStore {
     pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            retry_budget: NonZeroU16::MIN.saturating_add(4),
+        }
+    }
+
+    /// Applies the deployment's positive failure-lineage budget.
+    pub const fn with_retry_budget(mut self, retry_budget: NonZeroU16) -> Self {
+        self.retry_budget = retry_budget;
+        self
     }
 
     /// Reconciles durable operator-visible membership with configured targets.
@@ -372,7 +383,13 @@ impl PostgresConvergenceSweepStore {
             .execute(&mut *transaction)
             .await?;
         for (repository, pull_request) in configured {
-            ensure_target(&mut transaction, repository, *pull_request).await?;
+            ensure_target(
+                &mut transaction,
+                repository,
+                *pull_request,
+                self.retry_budget,
+            )
+            .await?;
         }
         transaction.commit().await?;
         Ok(())
@@ -385,7 +402,13 @@ impl PostgresConvergenceSweepStore {
         pull_request: PullRequestNumber,
     ) -> Result<(), ConvergenceSweepStoreError> {
         let mut transaction = self.pool.begin().await?;
-        ensure_target(&mut transaction, repository, pull_request).await?;
+        ensure_target(
+            &mut transaction,
+            repository,
+            pull_request,
+            self.retry_budget,
+        )
+        .await?;
         sqlx::query(
             "UPDATE convergence_sweep_target
                 SET state_kind = $3, failure_kind = NULL,
@@ -428,7 +451,13 @@ impl PostgresConvergenceSweepStore {
         cool_off: std::time::Duration,
     ) -> Result<Option<ConvergenceSweepTargetState>, ConvergenceSweepStoreError> {
         let mut transaction = self.pool.begin().await?;
-        ensure_target(&mut transaction, repository, pull_request).await?;
+        ensure_target(
+            &mut transaction,
+            repository,
+            pull_request,
+            self.retry_budget,
+        )
+        .await?;
         let row: Option<TargetStateRow> = sqlx::query_as(
             "SELECT target.state_kind, target.failure_kind,
                     target.consecutive_failures,
@@ -554,7 +583,13 @@ impl PostgresConvergenceSweepStore {
         proposed_command: DurableCommandId,
     ) -> Result<DurableCommandId, ConvergenceSweepStoreError> {
         let mut transaction = self.pool.begin().await?;
-        ensure_target(&mut transaction, repository, pull_request).await?;
+        ensure_target(
+            &mut transaction,
+            repository,
+            pull_request,
+            self.retry_budget,
+        )
+        .await?;
         let command: Uuid = sqlx::query_scalar(
             "UPDATE convergence_sweep_target
                 SET pending_command_id = CASE
@@ -622,7 +657,13 @@ impl PostgresConvergenceSweepStore {
         session_id: SessionId,
     ) -> Result<(), ConvergenceSweepStoreError> {
         let mut transaction = self.pool.begin().await?;
-        ensure_target(&mut transaction, repository, pull_request).await?;
+        ensure_target(
+            &mut transaction,
+            repository,
+            pull_request,
+            self.retry_budget,
+        )
+        .await?;
         let updated = sqlx::query(
             "UPDATE convergence_sweep_target
                 SET state_kind = $7, failure_kind = NULL,
@@ -707,7 +748,13 @@ impl PostgresConvergenceSweepStore {
         decision: ConvergenceSweepDecision,
     ) -> Result<(), ConvergenceSweepStoreError> {
         let mut transaction = self.pool.begin().await?;
-        ensure_target(&mut transaction, repository, pull_request).await?;
+        ensure_target(
+            &mut transaction,
+            repository,
+            pull_request,
+            self.retry_budget,
+        )
+        .await?;
         sqlx::query(
             "UPDATE convergence_sweep_target
                 SET state_kind = $5, failure_kind = NULL,
@@ -770,7 +817,13 @@ impl PostgresConvergenceSweepStore {
     ) -> Result<(), ConvergenceSweepStoreError> {
         let (dispatch_id, session_id) = dispatch;
         let mut transaction = self.pool.begin().await?;
-        ensure_target(&mut transaction, repository, pull_request).await?;
+        ensure_target(
+            &mut transaction,
+            repository,
+            pull_request,
+            self.retry_budget,
+        )
+        .await?;
         let updated = sqlx::query(
             "UPDATE convergence_sweep_target
                 SET state_kind = $7, failure_kind = NULL,
@@ -921,7 +974,13 @@ impl PostgresConvergenceSweepStore {
             retry_policy,
         } = record;
         let mut transaction = self.pool.begin().await?;
-        ensure_target(&mut transaction, repository, pull_request).await?;
+        ensure_target(
+            &mut transaction,
+            repository,
+            pull_request,
+            self.retry_budget,
+        )
+        .await?;
         if expected_inactive_session.is_some() {
             crate::commissioned_dispatch::lock_pull_request_target(
                 &mut transaction,
@@ -970,9 +1029,8 @@ impl PostgresConvergenceSweepStore {
                     .await?;
             }
         }
-        let budget: i16 = sqlx::query_scalar("SELECT convergence_sweep_retry_budget()")
-            .fetch_one(&mut *transaction)
-            .await?;
+        let budget = i16::try_from(self.retry_budget.get())
+            .map_err(|_| ConvergenceSweepStoreError::Corruption("retry budget"))?;
         let (head, threads) = observation
             .map(|value| {
                 (
@@ -1203,15 +1261,17 @@ async fn ensure_target(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     repository: &RepositorySlug,
     pull_request: PullRequestNumber,
+    retry_budget: NonZeroU16,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO convergence_sweep_target (repository, pull_request_number)
-         VALUES ($1, $2)
+        "INSERT INTO convergence_sweep_target (repository, pull_request_number, retry_budget)
+         VALUES ($1, $2, $3)
          ON CONFLICT (repository, pull_request_number)
-         DO UPDATE SET enrolled = true",
+         DO UPDATE SET enrolled = true, retry_budget = EXCLUDED.retry_budget",
     )
     .bind(repository.as_str())
     .bind(Decimal::from(pull_request.get()))
+    .bind(i32::from(retry_budget.get()))
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -1248,12 +1308,14 @@ async fn insert_event(
         "INSERT INTO convergence_sweep_event
             (event_id, repository, pull_request_number, outcome_kind,
              failure_kind, head_sha, unresolved_threads, dispatch_id, session_id,
-             consecutive_failures, retry_not_before, operator_need)
+             consecutive_failures, retry_not_before, operator_need, retry_budget)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
             CASE WHEN $10 > 0 AND $11 IS NULL
                  THEN (SELECT retry_not_before FROM convergence_sweep_target
                         WHERE repository = $2 AND pull_request_number = $3)
-                 ELSE NULL END, $11)",
+                 ELSE NULL END, $11,
+            (SELECT retry_budget FROM convergence_sweep_target
+              WHERE repository = $2 AND pull_request_number = $3))",
     )
     .bind(event_id)
     .bind(repository.as_str())

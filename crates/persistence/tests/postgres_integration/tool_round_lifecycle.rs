@@ -1,6 +1,7 @@
 //! Tool round continuation reloads, interrupts, and durable closure of tool execution.
 
 use crate::*;
+use std::time::Duration;
 
 /// Registers one verified replica so a fixture attachment names a catalogued blob.
 ///
@@ -2513,6 +2514,84 @@ async fn inv006_inv025_inv029_inv037_automatic_tool_reconciliation_releases_the_
         (issuing_attempt, tool_attempt)
     );
     assert_eq!(closed_tool_request(snapshot.entries()), request);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A tool ambiguity spends its configured class budget without inheriting the
+/// longer model-call budget.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn automatic_tool_reconciliation_honors_its_class_budget() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x74d8;
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, "external-tool", "{}").await?;
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 24)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 23)),
+        )
+        .await?;
+    let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 25));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            tool_attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?;
+    tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
+        .await?;
+    let mut recovery_ids = FixedStartupScanIds::new([], []);
+    assert_ambiguous_tool_recovery(
+        PostgresStartupScanRepository::new(pool.clone())
+            .recover(
+                fixture.session,
+                signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 26)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 27)),
+                ),
+                &mut recovery_ids,
+            )
+            .await?,
+    );
+    let repository = PostgresAutomaticReconciliationRepository::new(pool.clone())
+        .with_class_policies(
+            5,
+            Some(Duration::ZERO),
+            Some(Duration::ZERO),
+            1,
+            Some(Duration::ZERO),
+            Some(Duration::ZERO),
+        );
+    let first = repository.claim_due_tool_attempt().await?;
+    repository
+        .record_failure(
+            first.claimed()[0],
+            AutomaticReconciliationFailureKind::Infrastructure,
+        )
+        .await?;
+
+    let exhausted = repository.claim_due_tool_attempt().await?;
+
+    assert_eq!(first.claimed().len(), 1);
+    assert_eq!(first.claimed()[0].attempt().get(), 1);
+    assert_eq!(exhausted.claimed(), &[]);
+    assert_eq!(exhausted.exhausted().len(), 1);
+    assert_eq!(
+        exhausted.exhausted()[0].operation(),
+        AutomaticReconciliationOperation::ToolAttempt(tool_attempt)
+    );
 
     pool.close().await;
     drop(container);

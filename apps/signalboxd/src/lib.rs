@@ -102,7 +102,7 @@ pub use context_guard::{
     ReportedUsageCompactionError,
 };
 pub use convergence_sweep_runtime::{
-    ConvergenceSweepNumericBounds, ConvergenceSweepRuntime,
+    ConvergenceSweepNumericBounds, ConvergenceSweepRetryBounds, ConvergenceSweepRuntime,
     ConvergenceSweepRuntimeConstructionError,
 };
 pub use conversation_introspection::{
@@ -212,7 +212,10 @@ pub use telemetry::{
     TelemetryConfiguration, TelemetryConfigurationError, TelemetryConfigurationFailure,
     TelemetryExportFilter, TelemetryExportLayer, TelemetryMetrics,
 };
-pub use turn_liveness_runtime::{TurnLivenessNumericBounds, TurnLivenessRuntime};
+pub use turn_liveness_runtime::{
+    AutomaticReconciliationNumericBounds, AutomaticReconciliationRuntimePolicy,
+    SlowSubstrateNumericBounds, TurnLivenessNumericBounds, TurnLivenessRuntime,
+};
 pub use web_blob_runtime::{
     WebBlobRuntime, WebImageDerivativeKind, run_web_image_derivative_worker_if_requested,
 };

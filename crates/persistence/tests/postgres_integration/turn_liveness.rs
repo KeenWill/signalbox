@@ -3,7 +3,8 @@
 use crate::*;
 
 use signalbox_application::{
-    ClassifyOperatorFailure, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence,
+    ClassifyOperatorFailure, StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome,
+    TurnLivenessEvidence, TurnLivenessGuardKind, TurnLivenessLedger, TurnLivenessScanInterval,
     UuidV7StartupScanIdGenerator,
 };
 use signalbox_persistence::{
@@ -78,6 +79,43 @@ async fn activated_watchdog_session(
         turn,
         selection,
     })
+}
+
+/// A daemon replacement reads and advances the same durable observation ordinal.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn restart_mid_observation_retains_staleness_evidence() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = activated_watchdog_session(&pool, 0x10_000).await?;
+    let first_repository =
+        PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
+    let candidates = first_repository
+        .quiescent_active_turns(None)
+        .await?
+        .into_candidates();
+    let first = first_repository
+        .record_complete_observation(TurnLivenessGuardKind::Quiescent, &candidates)
+        .await?;
+    drop(first_repository);
+    let restarted_repository =
+        PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
+
+    let second = restarted_repository
+        .record_complete_observation(TurnLivenessGuardKind::Quiescent, &candidates)
+        .await?;
+    let interval = TurnLivenessScanInterval::try_new(std::time::Duration::from_secs(60))?;
+    let bound = StaleActiveTurnBound::try_new(std::time::Duration::from_secs(60))?;
+    let due =
+        TurnLivenessLedger::new(bound, interval).reconcile(&second, std::num::NonZeroU32::MIN);
+
+    assert_eq!(first[0].ordinal().get(), 1);
+    assert_eq!(second[0].ordinal().get(), 2);
+    assert_eq!(due.as_ref(), &[second[0].candidate()]);
+    assert_eq!(second[0].candidate().turn(), fixture.turn);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
 }
 
 /// Leaves the session's active turn holding a checkpointed, not yet observed

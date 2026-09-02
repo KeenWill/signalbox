@@ -13,7 +13,7 @@ use std::{
     ffi::OsString,
     fmt, fs,
     future::Future,
-    num::NonZeroUsize,
+    num::{NonZeroU16, NonZeroU32, NonZeroUsize},
     path::{Component, Path, PathBuf},
     process::ExitCode,
     sync::Arc,
@@ -62,9 +62,10 @@ use signalboxd::runner_protocol_runtime::{
     RunnerRegistrationFailureCause,
 };
 use signalboxd::{
-    ActivatedTurnPass, AttachmentPreparingModelCallProvider, BaseDaemonCredentialInputs,
-    BlobStoreRegistry, BlobTools, CODE_HOST_CREDENTIAL_REFERENCE, CodeHostNumericBounds,
-    ConfiguredApprovalPostureError, ConvergenceSweepNumericBounds, ConvergenceSweepRuntime,
+    ActivatedTurnPass, AttachmentPreparingModelCallProvider, AutomaticReconciliationNumericBounds,
+    AutomaticReconciliationRuntimePolicy, BaseDaemonCredentialInputs, BlobStoreRegistry, BlobTools,
+    CODE_HOST_CREDENTIAL_REFERENCE, CodeHostNumericBounds, ConfiguredApprovalPostureError,
+    ConvergenceSweepNumericBounds, ConvergenceSweepRetryBounds, ConvergenceSweepRuntime,
     DaemonToolCatalog, DaemonToolComposition, DaemonTools, DaemonToolsConstructionError,
     ExpiredPassRecoveryPolicy, FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError,
     FencedPoolFloorReconciliation, FileCredentialAccess, GitHubCodeHostTransport,
@@ -74,9 +75,9 @@ use signalboxd::{
     ProcessRuntime, ProcessRuntimeError, PrometheusServer, ReportedUsageCompaction,
     RepositoryWatchNumericBounds, RepositoryWatchRuntime, RepositoryWatchRuntimeError,
     SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
-    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
-    TelemetryExportFilter, TelemetryMetrics, TurnLivenessNumericBounds, TurnLivenessRuntime,
-    WebBlobRuntime, WorkspaceInstructionRuntime,
+    SlowSubstrateNumericBounds, SystemCurrentTimeClock, TelemetryConfiguration,
+    TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
+    TurnLivenessNumericBounds, TurnLivenessRuntime, WebBlobRuntime, WorkspaceInstructionRuntime,
     model_adapter::ConfiguredModelRuntime,
     reconcile_fenced_pool_floor, run_web_image_derivative_worker_if_requested,
     usage_limits::UsageLimitedModelCallProvider,
@@ -1411,13 +1412,22 @@ async fn run_hub(
         model_exchange_timeout,
         configured_duration("graceful_shutdown_cleanup_window"),
     );
-    let stale_active_turn_bound = configured_duration("stale_active_turn_bound")
+    let quiescent_turn_staleness_bound = configured_duration("quiescent_turn_staleness_bound")
         .map(StaleActiveTurnBound::try_new)
         .transpose()
         .map_err(|_| {
             erase_startup_cause(
                 RuntimePhase::Configuration,
-                SanitizedStartupCause::Static("invalid_stale_active_turn_bound"),
+                SanitizedStartupCause::Static("invalid_quiescent_turn_staleness_bound"),
+            )
+        })?;
+    let slot_held_turn_staleness_bound = configured_duration("slot_held_turn_staleness_bound")
+        .map(StaleActiveTurnBound::try_new)
+        .transpose()
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("invalid_slot_held_turn_staleness_bound"),
             )
         })?;
     let turn_liveness_scan_interval = configured_duration("turn_liveness_scan_interval")
@@ -1448,38 +1458,33 @@ async fn run_hub(
         None => None,
     };
     let scheduler_pass_admission_cap = configured_usize("scheduler_pass_admission_cap")?;
-    let automatic_reconciliation_attempt_budget = numeric_bounds
-        .integer("automatic_reconciliation_attempt_budget")
-        .flatten()
-        .map(u32::try_from)
-        .transpose()
-        .map_err(|_| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static(
-                    "automatic_reconciliation_attempt_budget_exceeds_platform",
-                ),
-            )
-        })?;
-    if automatic_reconciliation_attempt_budget.is_some_and(|budget| i32::try_from(budget).is_err())
+    let automatic_model_call_reconciliation_attempt_budget =
+        configured_u32("automatic_model_call_reconciliation_attempt_budget")?
+            .and_then(NonZeroU32::new)
+            .ok_or_else(|| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static(
+                        "invalid_model_call_reconciliation_attempt_budget",
+                    ),
+                )
+            })?
+            .get();
+    let automatic_tool_reconciliation_attempt_budget =
+        configured_u32("automatic_tool_reconciliation_attempt_budget")?
+            .and_then(NonZeroU32::new)
+            .ok_or_else(|| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("invalid_tool_reconciliation_attempt_budget"),
+                )
+            })?
+            .get();
+    if usize::try_from(automatic_model_call_reconciliation_attempt_budget)
+        .is_ok_and(|budget| budget > RETRY_LADDER_ARITY)
+        || usize::try_from(automatic_tool_reconciliation_attempt_budget)
+            .is_ok_and(|budget| budget > RETRY_LADDER_ARITY)
     {
-        return Err(erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Static(
-                "automatic_reconciliation_attempt_budget_exceeds_storage",
-            ),
-        ));
-    }
-    // The claim statement schedules one `CASE` arm per admitted attempt and ends
-    // in an `ELSE`, so a budget above that arity is admitted silently and then
-    // reuses the last rung's deadline for every attempt past it while the
-    // failure path schedules the true exponential. The claim side is the shorter
-    // of the two, so the abandonment sweep would settle attempts that are still
-    // running. Refusing the budget here keeps the arity a configuration fact
-    // rather than something a deployment discovers from a mis-settled attempt.
-    if automatic_reconciliation_attempt_budget.is_some_and(|budget| {
-        usize::try_from(budget).is_ok_and(|budget| budget > RETRY_LADDER_ARITY)
-    }) {
         return Err(erase_startup_cause(
             RuntimePhase::Configuration,
             SanitizedStartupCause::Static(
@@ -1487,10 +1492,40 @@ async fn run_hub(
             ),
         ));
     }
-    let automatic_reconciliation_base_backoff =
-        configured_duration("automatic_reconciliation_base_backoff");
-    let automatic_reconciliation_backoff_cap =
-        configured_duration("automatic_reconciliation_backoff_cap");
+    let automatic_model_call_reconciliation_base_backoff =
+        configured_duration("automatic_model_call_reconciliation_base_backoff");
+    let automatic_model_call_reconciliation_backoff_cap =
+        configured_duration("automatic_model_call_reconciliation_backoff_cap");
+    let automatic_tool_reconciliation_base_backoff =
+        configured_duration("automatic_tool_reconciliation_base_backoff");
+    let automatic_tool_reconciliation_backoff_cap =
+        configured_duration("automatic_tool_reconciliation_backoff_cap");
+    let slow_substrate_factor = configured_u32("slow_substrate_staleness_factor")?
+        .and_then(NonZeroU32::new)
+        .ok_or_else(|| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("invalid_slow_substrate_staleness_factor"),
+            )
+        })?;
+    let slow_substrate_enabled = |field| match configured_u32(field)? {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        Some(_) | None => Err(erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static("invalid_slow_substrate_condition_flag"),
+        )),
+    };
+    let convergence_sweep_failure_retry_budget =
+        configured_u32("convergence_sweep_failure_retry_budget")?
+            .and_then(|budget| u16::try_from(budget).ok())
+            .and_then(NonZeroU16::new)
+            .ok_or_else(|| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("invalid_convergence_sweep_failure_retry_budget"),
+                )
+            })?;
     let expired_pass_recovery_policy = ExpiredPassRecoveryPolicy::new(
         configured_u32("expired_pass_recovery_attempts")?,
         configured_duration("expired_pass_recovery_attempt_bound"),
@@ -1505,10 +1540,13 @@ async fn run_hub(
         configured_duration("convergence_sweep_request_timeout"),
         configured_usize("max_convergence_sweep_connection_pages")?,
         configured_usize("max_concurrent_convergence_sweep_targets")?,
-        configured_usize("max_convergence_sweep_request_attempts")?,
-        configured_duration("convergence_sweep_request_retry_delay"),
-        configured_duration("convergence_sweep_retry_backoff_base"),
-        configured_duration("convergence_sweep_retry_backoff_cap"),
+        ConvergenceSweepRetryBounds::new(
+            configured_usize("max_convergence_sweep_request_attempts")?,
+            configured_duration("convergence_sweep_request_retry_delay"),
+            configured_duration("convergence_sweep_retry_backoff_base"),
+            configured_duration("convergence_sweep_retry_backoff_cap"),
+            convergence_sweep_failure_retry_budget,
+        ),
     );
     let turn_liveness_persistence_bounds = TurnLivenessPersistenceBounds::new(
         configured_duration("terminalization_lock_wait"),
@@ -1517,9 +1555,21 @@ async fn run_hub(
     );
     let turn_liveness_numeric_bounds = TurnLivenessNumericBounds::new(
         configured_usize("terminalizations_per_liveness_scan")?,
-        configured_duration("turn_liveness_recovery_attempt_bound"),
-        configured_usize("automatic_reconciliations_per_liveness_scan")?,
-        configured_duration("automatic_reconciliation_attempt_bound"),
+        configured_duration("slot_held_turn_recovery_attempt_bound"),
+        AutomaticReconciliationNumericBounds::new(
+            configured_usize("automatic_model_call_reconciliations_per_liveness_scan")?,
+            configured_duration("automatic_model_call_reconciliation_attempt_bound"),
+        ),
+        AutomaticReconciliationNumericBounds::new(
+            configured_usize("automatic_tool_reconciliations_per_liveness_scan")?,
+            configured_duration("automatic_tool_reconciliation_attempt_bound"),
+        ),
+        SlowSubstrateNumericBounds::new(
+            slow_substrate_enabled("slow_substrate_backup_enabled")?,
+            slow_substrate_enabled("slow_substrate_restart_enabled")?,
+            slow_substrate_enabled("slow_substrate_lock_convoy_enabled")?,
+            slow_substrate_factor,
+        ),
         turn_liveness_persistence_bounds,
     );
     let goal_mode_numeric_bounds = GoalModeNumericBounds::new(
@@ -2340,7 +2390,8 @@ async fn run_hub(
         },
         None => None,
     };
-    let convergence_sweep_store = PostgresConvergenceSweepStore::new(pool.clone());
+    let convergence_sweep_store = PostgresConvergenceSweepStore::new(pool.clone())
+        .with_retry_budget(convergence_sweep_failure_retry_budget);
     let convergence_target_admission =
         convergence_sweep_store.reconcile_configured_targets(&configured_convergence_targets);
     match await_while_guarded(&mut database, convergence_target_admission).await {
@@ -2523,11 +2574,19 @@ async fn run_hub(
     );
     let turn_liveness_runtime = TurnLivenessRuntime::new(
         scheduler_pool.clone(),
-        stale_active_turn_bound,
+        quiescent_turn_staleness_bound,
+        slot_held_turn_staleness_bound,
         turn_liveness_scan_interval,
-        automatic_reconciliation_attempt_budget,
-        automatic_reconciliation_base_backoff,
-        automatic_reconciliation_backoff_cap,
+        AutomaticReconciliationRuntimePolicy::new(
+            automatic_model_call_reconciliation_attempt_budget,
+            automatic_model_call_reconciliation_base_backoff,
+            automatic_model_call_reconciliation_backoff_cap,
+        ),
+        AutomaticReconciliationRuntimePolicy::new(
+            automatic_tool_reconciliation_attempt_budget,
+            automatic_tool_reconciliation_base_backoff,
+            automatic_tool_reconciliation_backoff_cap,
+        ),
         turn_liveness_numeric_bounds,
     );
     let goal_disposition = PostgresGoalPassDisposition::new(

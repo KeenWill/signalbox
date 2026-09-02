@@ -1,11 +1,10 @@
 # Session lifecycle
 
-**Proposed for owner decision; design only.** Nothing on this page is
-implemented. Normative paragraphs are marked **Proposed behavior** and describe
-what the daemon must do once this specification is ratified; unmarked prose is
-context. The proposal is grounded in the owner's 2026-09-01 live-database census
-and failure taxonomy; provenance is held in the owner's records. Owner rulings
-restated here are binding and are not re-argued.
+**Proposed for owner decision.** Normative paragraphs are marked **Proposed
+behavior** or **Implemented behavior**; unmarked prose is context. The proposal
+is grounded in the owner's 2026-09-01 live-database census and failure taxonomy;
+provenance is held in the owner's records. Owner rulings restated here are
+binding and are not re-argued.
 
 This specification changes when capabilities land, not which capabilities exist:
 reliability work lands first, and no wanted feature is removed. Goal mode,
@@ -214,7 +213,8 @@ recovery as normative behavior:
   wired to the pool machinery: 1,552 `quota_exhausted` calls and zero
   credential-pool actions.) Retries charge the cycle budget only under §9's
   fault attribution: a provider transient, quota exhaustion, or infrastructure
-  blip the session did not cause charges nothing.
+  blip the session did not cause charges nothing. The configured quota action is
+  recorded by the credential pool before a replacement call is prepared.
 - `failed_structural{cause}` — the same input will fail again: compaction wall,
   broken toolchain, moderation block whose resume re-trips the same flag.
   Recovery: never auto-resume. The session parks with the structural cause
@@ -267,15 +267,12 @@ the command's acceptance as a durable `requested_at` —
 stands in for it — then the call's `prepared`, `in_flight`, and `terminal`
 transitions, and the application row written at apply time.
 
-**Proposed behavior.** Watchdog state survives restarts: staleness evidence is
-durable, never a process-local ledger. The committed watchdog decides staleness
-by repeated observation, deliberately storing no clock — sound under clock
-adjustment, but its observation ledger is process-local, and a daemon restart
-resets every staleness clock exactly when restarts are the leading creator of
-stuck sessions. This proposal keeps the repeated-observation structure and its
-clock-skew argument — ordering authority stays with commit-ordered sequences,
-and no wall-clock comparison alone ends work — and makes the observations
-durable, so a restart costs nothing instead of one more bound per wedge.
+**Implemented behavior.** Watchdog state survives restarts: staleness evidence
+is durable, never a process-local ledger. The committed watchdog decides
+staleness by repeated observation: ordering authority stays with commit-ordered
+sequences, elapsed time derives from persisted scan ordinals and the configured
+scan interval, and no wall-clock comparison alone ends work. A restart costs no
+staleness bound.
 
 **Proposed behavior.** `web_usage_call_projection.recorded_at` is fixed. The
 defect: today every one of the 149,773 backfilled rows carries a migration-day
@@ -743,7 +740,7 @@ wedged turn as failed, blocking its goal with `execution_failure` — is not
 session terminalization and stays: this section governs session disposition, not
 the committed turn watchdog's disposition of dead work.
 
-**Proposed behavior.** Recovery bounds are sized per operation class and are
+**Implemented behavior.** Recovery bounds are sized per operation class and are
 config-sourced. A single bound applied across operation classes is what produced
 the 1-second-versus-10-minute backfire. Where a budget is closed today by a
 schema CHECK — the five-attempt ceilings on recovery and reconciliation budgets
@@ -754,6 +751,10 @@ active — a running backup, a restart in progress, a detected lock convoy —
 staleness bounds multiply by a config-sourced factor; the condition list and the
 factor live in config. A slow substrate therefore does not read as a dead
 session (eight healthy turns reaped during a 6.9 GB backup).
+
+**Implemented behavior.** Shutdown stops watchdog decisions; the first scan
+after restart applies the declared restart multiplier and startup recovery does
+not fail active turns.
 
 **Proposed behavior.** Every deadline expiry is a transition. For a session past
 admission, the escalation target is `parked` — the single enumerable

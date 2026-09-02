@@ -116,11 +116,12 @@ use signalbox_process_protocol::{
     TurnState, UserInputContent, decode_server_line, encode_client_line,
 };
 use signalboxd::{
-    ActivatedTurnPass, BlobStorageClass, BlobStoreRegistry, ContextGuardedTurnPass,
-    ContextGuardedTurnPassError, ExpiredPassRecoveryPolicy, FatalExecutionSupervisor,
-    HubModelConfiguration, LocalProcessListener, PostgresProviderModelExecution,
-    ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError, ReportedUsageCompaction,
-    ReportedUsageCompactionError, SessionTemplateConfiguration, TurnLivenessNumericBounds,
+    ActivatedTurnPass, AutomaticReconciliationNumericBounds, AutomaticReconciliationRuntimePolicy,
+    BlobStorageClass, BlobStoreRegistry, ContextGuardedTurnPass, ContextGuardedTurnPassError,
+    ExpiredPassRecoveryPolicy, FatalExecutionSupervisor, HubModelConfiguration,
+    LocalProcessListener, PostgresProviderModelExecution, ProcessProviderTextDeltaSink,
+    ProcessRuntime, ProcessRuntimeError, ReportedUsageCompaction, ReportedUsageCompactionError,
+    SessionTemplateConfiguration, SlowSubstrateNumericBounds, TurnLivenessNumericBounds,
     TurnLivenessRuntime,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -2810,19 +2811,49 @@ fn start_fleet_scheduler(
             .flatten()
             .and_then(|value| usize::try_from(value).ok()),
         bounds
-            .duration("turn_liveness_recovery_attempt_bound")
+            .duration("slot_held_turn_recovery_attempt_bound")
             .flatten(),
-        bounds
-            .integer("automatic_reconciliations_per_liveness_scan")
-            .flatten()
-            .and_then(|value| usize::try_from(value).ok()),
-        bounds
-            .duration("automatic_reconciliation_attempt_bound")
-            .flatten(),
+        AutomaticReconciliationNumericBounds::new(
+            bounds
+                .integer("automatic_model_call_reconciliations_per_liveness_scan")
+                .flatten()
+                .and_then(|value| usize::try_from(value).ok()),
+            bounds
+                .duration("automatic_model_call_reconciliation_attempt_bound")
+                .flatten(),
+        ),
+        AutomaticReconciliationNumericBounds::new(
+            bounds
+                .integer("automatic_tool_reconciliations_per_liveness_scan")
+                .flatten()
+                .and_then(|value| usize::try_from(value).ok()),
+            bounds
+                .duration("automatic_tool_reconciliation_attempt_bound")
+                .flatten(),
+        ),
+        SlowSubstrateNumericBounds::new(
+            bounds.integer("slow_substrate_backup_enabled").flatten() == Some(1),
+            bounds.integer("slow_substrate_restart_enabled").flatten() == Some(1),
+            bounds
+                .integer("slow_substrate_lock_convoy_enabled")
+                .flatten()
+                == Some(1),
+            bounds
+                .integer("slow_substrate_staleness_factor")
+                .flatten()
+                .and_then(|value| u32::try_from(value).ok())
+                .and_then(std::num::NonZeroU32::new)
+                .expect("fixture slow-substrate factor is positive"),
+        ),
         turn_liveness_persistence_bounds,
     );
-    let stale_active_turn_bound = bounds
-        .duration("stale_active_turn_bound")
+    let quiescent_turn_staleness_bound = bounds
+        .duration("quiescent_turn_staleness_bound")
+        .flatten()
+        .map(StaleActiveTurnBound::try_new)
+        .transpose()?;
+    let slot_held_turn_staleness_bound = bounds
+        .duration("slot_held_turn_staleness_bound")
         .flatten()
         .map(StaleActiveTurnBound::try_new)
         .transpose()?;
@@ -2831,15 +2862,27 @@ fn start_fleet_scheduler(
         .flatten()
         .map(TurnLivenessScanInterval::try_new)
         .transpose()?;
-    let automatic_reconciliation_attempt_budget = bounds
-        .integer("automatic_reconciliation_attempt_budget")
+    let automatic_model_call_reconciliation_attempt_budget = bounds
+        .integer("automatic_model_call_reconciliation_attempt_budget")
         .flatten()
-        .and_then(|value| u32::try_from(value).ok());
-    let automatic_reconciliation_base_backoff = bounds
-        .duration("automatic_reconciliation_base_backoff")
+        .and_then(|value| u32::try_from(value).ok())
+        .expect("fixture model-call attempt budget is present");
+    let automatic_tool_reconciliation_attempt_budget = bounds
+        .integer("automatic_tool_reconciliation_attempt_budget")
+        .flatten()
+        .and_then(|value| u32::try_from(value).ok())
+        .expect("fixture tool attempt budget is present");
+    let automatic_model_call_reconciliation_base_backoff = bounds
+        .duration("automatic_model_call_reconciliation_base_backoff")
         .flatten();
-    let automatic_reconciliation_backoff_cap = bounds
-        .duration("automatic_reconciliation_backoff_cap")
+    let automatic_model_call_reconciliation_backoff_cap = bounds
+        .duration("automatic_model_call_reconciliation_backoff_cap")
+        .flatten();
+    let automatic_tool_reconciliation_base_backoff = bounds
+        .duration("automatic_tool_reconciliation_base_backoff")
+        .flatten();
+    let automatic_tool_reconciliation_backoff_cap = bounds
+        .duration("automatic_tool_reconciliation_backoff_cap")
         .flatten();
     let provider =
         RuntimeModelCallProvider::new(model, configuration.runtime_model_catalog(), None)
@@ -2876,11 +2919,19 @@ fn start_fleet_scheduler(
         SchedulerLoop::new(runtime.take_work_source(), pass).with_occupancy_bound(occupancy_bound);
     let turn_liveness = TurnLivenessRuntime::new(
         runtime.pool.clone(),
-        stale_active_turn_bound,
+        quiescent_turn_staleness_bound,
+        slot_held_turn_staleness_bound,
         turn_liveness_scan_interval,
-        automatic_reconciliation_attempt_budget,
-        automatic_reconciliation_base_backoff,
-        automatic_reconciliation_backoff_cap,
+        AutomaticReconciliationRuntimePolicy::new(
+            automatic_model_call_reconciliation_attempt_budget,
+            automatic_model_call_reconciliation_base_backoff,
+            automatic_model_call_reconciliation_backoff_cap,
+        ),
+        AutomaticReconciliationRuntimePolicy::new(
+            automatic_tool_reconciliation_attempt_budget,
+            automatic_tool_reconciliation_base_backoff,
+            automatic_tool_reconciliation_backoff_cap,
+        ),
         turn_liveness_numeric_bounds,
     );
     let (shutdown, shutdown_receiver) = watch::channel(false);

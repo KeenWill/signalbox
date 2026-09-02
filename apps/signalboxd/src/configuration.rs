@@ -829,15 +829,23 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
         NumericBoundKind::Integer,
     ),
     (
-        "turn_liveness_recovery_attempt_bound",
+        "slot_held_turn_recovery_attempt_bound",
         NumericBoundKind::Duration,
     ),
     (
-        "automatic_reconciliations_per_liveness_scan",
+        "automatic_model_call_reconciliations_per_liveness_scan",
         NumericBoundKind::Integer,
     ),
     (
-        "automatic_reconciliation_attempt_bound",
+        "automatic_tool_reconciliations_per_liveness_scan",
+        NumericBoundKind::Integer,
+    ),
+    (
+        "automatic_model_call_reconciliation_attempt_bound",
+        NumericBoundKind::Duration,
+    ),
+    (
+        "automatic_tool_reconciliation_attempt_bound",
         NumericBoundKind::Duration,
     ),
     ("max_convergence_sweep_targets", NumericBoundKind::Integer),
@@ -855,18 +863,42 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
         NumericBoundKind::Duration,
     ),
     ("post_kill_reap_bound", NumericBoundKind::Duration),
-    ("stale_active_turn_bound", NumericBoundKind::Duration),
+    ("quiescent_turn_staleness_bound", NumericBoundKind::Duration),
+    ("slot_held_turn_staleness_bound", NumericBoundKind::Duration),
     ("turn_liveness_scan_interval", NumericBoundKind::Duration),
     (
-        "automatic_reconciliation_base_backoff",
+        "automatic_model_call_reconciliation_base_backoff",
         NumericBoundKind::Duration,
     ),
     (
-        "automatic_reconciliation_backoff_cap",
+        "automatic_model_call_reconciliation_backoff_cap",
         NumericBoundKind::Duration,
     ),
     (
-        "automatic_reconciliation_attempt_budget",
+        "automatic_model_call_reconciliation_attempt_budget",
+        NumericBoundKind::Integer,
+    ),
+    (
+        "automatic_tool_reconciliation_base_backoff",
+        NumericBoundKind::Duration,
+    ),
+    (
+        "automatic_tool_reconciliation_backoff_cap",
+        NumericBoundKind::Duration,
+    ),
+    (
+        "automatic_tool_reconciliation_attempt_budget",
+        NumericBoundKind::Integer,
+    ),
+    ("slow_substrate_backup_enabled", NumericBoundKind::Integer),
+    ("slow_substrate_restart_enabled", NumericBoundKind::Integer),
+    (
+        "slow_substrate_lock_convoy_enabled",
+        NumericBoundKind::Integer,
+    ),
+    ("slow_substrate_staleness_factor", NumericBoundKind::Integer),
+    (
+        "convergence_sweep_failure_retry_budget",
         NumericBoundKind::Integer,
     ),
     ("terminal_input_channel_capacity", NumericBoundKind::Integer),
@@ -4693,9 +4725,11 @@ convergence_sweep_request_retry_delay = "250ms"
 convergence_sweep_retry_backoff_base = "60s"
 convergence_sweep_retry_backoff_cap = "900s"
 terminalizations_per_liveness_scan = 64
-turn_liveness_recovery_attempt_bound = "10s"
-automatic_reconciliations_per_liveness_scan = 64
-automatic_reconciliation_attempt_bound = "60s"
+slot_held_turn_recovery_attempt_bound = "10s"
+automatic_model_call_reconciliations_per_liveness_scan = 32
+automatic_tool_reconciliations_per_liveness_scan = 32
+automatic_model_call_reconciliation_attempt_bound = "600s"
+automatic_tool_reconciliation_attempt_bound = "60s"
 max_convergence_sweep_targets = 256
 max_convergence_sweep_interval = "300s"
 max_convergence_sweep_cool_off = "1800s"
@@ -4705,11 +4739,20 @@ automatic_resume_attempt_budget = 20
 automatic_resume_attempt_ceiling = 100
 automatic_resume_startup_retry_delay = "1s"
 post_kill_reap_bound = "5s"
-stale_active_turn_bound = "1800s"
+quiescent_turn_staleness_bound = "1800s"
+slot_held_turn_staleness_bound = "900s"
 turn_liveness_scan_interval = "60s"
-automatic_reconciliation_base_backoff = "120s"
-automatic_reconciliation_backoff_cap = "1800s"
-automatic_reconciliation_attempt_budget = 5
+automatic_model_call_reconciliation_base_backoff = "120s"
+automatic_model_call_reconciliation_backoff_cap = "1800s"
+automatic_model_call_reconciliation_attempt_budget = 5
+automatic_tool_reconciliation_base_backoff = "30s"
+automatic_tool_reconciliation_backoff_cap = "300s"
+automatic_tool_reconciliation_attempt_budget = 3
+slow_substrate_backup_enabled = 1
+slow_substrate_restart_enabled = 1
+slow_substrate_lock_convoy_enabled = 1
+slow_substrate_staleness_factor = 4
+convergence_sweep_failure_retry_budget = 5
 terminal_input_channel_capacity = 1
 max_message_utf8_bytes = 1048576
 min_metadata_page_size = 1

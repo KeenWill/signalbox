@@ -514,10 +514,6 @@ mod tests {
         StaleTurnCandidate::new(session(), turn(1), evidence(frontier))
     }
 
-    fn other_candidate() -> StaleTurnCandidate {
-        StaleTurnCandidate::new(session(), turn(2), evidence(1))
-    }
-
     fn ledger() -> TurnLivenessLedger {
         TurnLivenessLedger::new(
             StaleActiveTurnBound::try_new(BOUND).expect("fixture bound is valid"),
@@ -647,6 +643,30 @@ mod tests {
         let due = ledger().reconcile(&[observation(1, 31)], factor);
 
         assert!(due.is_empty());
+    }
+
+    /// Independent guard classes become due according to their own configured bounds.
+    #[test]
+    fn per_class_staleness_bounds_are_honored() {
+        let interval = TurnLivenessScanInterval::try_new(Duration::from_secs(60))
+            .expect("fixture interval is valid");
+        let quiescent = TurnLivenessLedger::new(
+            StaleActiveTurnBound::try_new(Duration::from_secs(60))
+                .expect("quiescent fixture bound is valid"),
+            interval,
+        );
+        let slot_held = TurnLivenessLedger::new(
+            StaleActiveTurnBound::try_new(Duration::from_secs(120))
+                .expect("slot-held fixture bound is valid"),
+            interval,
+        );
+        let repeated = [observation(1, 2)];
+
+        assert_eq!(
+            quiescent.reconcile(&repeated, ordinary_factor()).as_ref(),
+            &[candidate(1)]
+        );
+        assert!(slot_held.reconcile(&repeated, ordinary_factor()).is_empty());
     }
 
     /// The validated configured bound is the one the ledger decides by.

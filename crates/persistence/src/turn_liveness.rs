@@ -309,7 +309,11 @@ impl PostgresTurnLivenessRepository {
                             EXCLUDED.current_attempt_id,
                             EXCLUDED.outbox_frontier_token
                         )
-                        THEN LEAST(observation.observation_ordinal + 1, 9223372036854775807)
+                        THEN CASE
+                            WHEN observation.observation_ordinal < 9223372036854775807
+                            THEN observation.observation_ordinal + 1
+                            ELSE observation.observation_ordinal
+                        END
                         ELSE 1
                     END,
                     recorded_at = statement_timestamp()
@@ -342,6 +346,19 @@ impl PostgresTurnLivenessRepository {
             .map(decode_durable_observation)
             .collect::<Result<Vec<_>, _>>()
             .map(Vec::into_boxed_slice)
+    }
+
+    /// Reads the database-owned slow-substrate signals used by the watchdog.
+    pub async fn slow_substrate_conditions(
+        &self,
+    ) -> Result<(bool, bool), TurnLivenessRepositoryError> {
+        sqlx::query_as::<_, (bool, bool)>(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_progress_basebackup),
+                    EXISTS (SELECT 1 FROM pg_locks WHERE NOT granted)",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(TurnLivenessRepositoryError::Observation)
     }
 
     /// Reads the current slot-held observation for one exact session.

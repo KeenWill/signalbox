@@ -76,14 +76,20 @@ convergence_sweep_request_retry_delay = "250ms"
 convergence_sweep_retry_backoff_base = "60s"
 # Longest retry delay after repeated convergence census failures.
 convergence_sweep_retry_backoff_cap = "900s"
+# Consecutive convergence failures before parking a target.
+convergence_sweep_failure_retry_budget = 5
 # Stale turns terminalized during one liveness scan.
 terminalizations_per_liveness_scan = 64
 # Time allowed for one slot-held liveness recovery transaction.
-turn_liveness_recovery_attempt_bound = "10s"
-# Automatic reconciliation transactions performed in one liveness scan.
-automatic_reconciliations_per_liveness_scan = 64
-# Time allowed for one automatic reconciliation transaction.
-automatic_reconciliation_attempt_bound = "60s"
+slot_held_turn_recovery_attempt_bound = "10s"
+# Model-call reconciliation transactions performed in one liveness scan.
+automatic_model_call_reconciliations_per_liveness_scan = 32
+# Tool reconciliation transactions performed in one liveness scan.
+automatic_tool_reconciliations_per_liveness_scan = 32
+# Time allowed for one model-call reconciliation transaction.
+automatic_model_call_reconciliation_attempt_bound = "600s"
+# Time allowed for one tool reconciliation transaction.
+automatic_tool_reconciliation_attempt_bound = "60s"
 # Credentialed targets retained by one convergence sweep.
 max_convergence_sweep_targets = 256
 # Longest configured convergence census interval.
@@ -102,16 +108,32 @@ automatic_resume_attempt_ceiling = 100
 automatic_resume_startup_retry_delay = "1s"
 # Time allowed to reap a killed model-provider child.
 post_kill_reap_bound = "5s"
-# Time without durable progress before an active turn is stale.
-stale_active_turn_bound = "1800s"
+# Time without durable progress before a quiescent turn is stale.
+quiescent_turn_staleness_bound = "1800s"
+# Time without durable progress before a slot-held turn is stale.
+slot_held_turn_staleness_bound = "900s"
 # Time between turn-liveness scans.
 turn_liveness_scan_interval = "60s"
-# Initial delay before ambiguous-operation reconciliation.
-automatic_reconciliation_base_backoff = "120s"
-# Longest delay between ambiguous-operation reconciliation attempts.
-automatic_reconciliation_backoff_cap = "1800s"
-# Automatic reconciliation attempts spent by one ambiguous operation.
-automatic_reconciliation_attempt_budget = 5
+# Initial delay before model-call reconciliation.
+automatic_model_call_reconciliation_base_backoff = "120s"
+# Longest delay between model-call reconciliation attempts.
+automatic_model_call_reconciliation_backoff_cap = "1800s"
+# Model-call reconciliation attempts spent by one ambiguous operation.
+automatic_model_call_reconciliation_attempt_budget = 5
+# Initial delay before tool reconciliation.
+automatic_tool_reconciliation_base_backoff = "30s"
+# Longest delay between tool reconciliation attempts.
+automatic_tool_reconciliation_backoff_cap = "300s"
+# Tool reconciliation attempts spent by one ambiguous operation.
+automatic_tool_reconciliation_attempt_budget = 3
+# Whether a running PostgreSQL base backup multiplies staleness bounds.
+slow_substrate_backup_enabled = 1
+# Whether the first post-restart scan multiplies staleness bounds.
+slow_substrate_restart_enabled = 1
+# Whether waiting PostgreSQL locks multiply staleness bounds.
+slow_substrate_lock_convoy_enabled = 1
+# Multiplier applied while an enabled slow-substrate condition is active.
+slow_substrate_staleness_factor = 4
 # Buffered terminal input messages.
 terminal_input_channel_capacity = 1
 # UTF-8 bytes admitted in one user message.

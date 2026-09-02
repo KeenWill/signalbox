@@ -57,6 +57,10 @@ const CLAIM_WINDOW: i64 = 1;
 // numeric-bound: not-a-bound - the claim statement's fixed CASE arity, which the ladder and the configured budget must match
 pub const RETRY_LADDER_ARITY: usize = 5;
 
+fn retry_ladder_arity_u32() -> u32 {
+    u32::try_from(RETRY_LADDER_ARITY).unwrap_or(u32::MAX)
+}
+
 /// How long any one reconciliation statement waits for a contended row.
 ///
 /// Every transaction here takes inventoried row locks unqualified: none skips a
@@ -396,12 +400,18 @@ impl From<sqlx::Error> for AutomaticReconciliationRepositoryError {
 }
 
 /// PostgreSQL adapter for durable automatic reconciliation attempts.
+#[derive(Clone, Copy, Debug)]
+struct AutomaticReconciliationClassPolicy {
+    attempt_budget: u32,
+    retry_backoff_base: Option<Duration>,
+    retry_backoff_cap: Option<Duration>,
+}
+
 #[derive(Clone, Debug)]
 pub struct PostgresAutomaticReconciliationRepository {
     pool: PgPool,
-    attempt_budget: Option<u32>,
-    retry_backoff_base: Option<Duration>,
-    retry_backoff_cap: Option<Duration>,
+    model_call_policy: AutomaticReconciliationClassPolicy,
+    tool_policy: AutomaticReconciliationClassPolicy,
 }
 
 impl PostgresAutomaticReconciliationRepository {
@@ -409,23 +419,70 @@ impl PostgresAutomaticReconciliationRepository {
     pub fn new(pool: PgPool) -> Self {
         Self {
             pool,
-            attempt_budget: None,
-            retry_backoff_base: None,
-            retry_backoff_cap: None,
+            model_call_policy: AutomaticReconciliationClassPolicy {
+                attempt_budget: retry_ladder_arity_u32(),
+                retry_backoff_base: None,
+                retry_backoff_cap: None,
+            },
+            tool_policy: AutomaticReconciliationClassPolicy {
+                attempt_budget: retry_ladder_arity_u32(),
+                retry_backoff_base: None,
+                retry_backoff_cap: None,
+            },
         }
     }
 
     /// Applies the deployment's attempt and retry-timing policies.
-    pub const fn with_policy(
+    pub fn with_policy(
         mut self,
         attempt_budget: Option<u32>,
         retry_backoff_base: Option<Duration>,
         retry_backoff_cap: Option<Duration>,
     ) -> Self {
-        self.attempt_budget = attempt_budget;
-        self.retry_backoff_base = retry_backoff_base;
-        self.retry_backoff_cap = retry_backoff_cap;
+        let policy = AutomaticReconciliationClassPolicy {
+            attempt_budget: match attempt_budget {
+                Some(budget) => budget,
+                None => retry_ladder_arity_u32(),
+            },
+            retry_backoff_base,
+            retry_backoff_cap,
+        };
+        self.model_call_policy = policy;
+        self.tool_policy = policy;
         self
+    }
+
+    /// Applies independent model-call and tool recovery policies.
+    pub const fn with_class_policies(
+        mut self,
+        model_call_attempt_budget: u32,
+        model_call_retry_backoff_base: Option<Duration>,
+        model_call_retry_backoff_cap: Option<Duration>,
+        tool_attempt_budget: u32,
+        tool_retry_backoff_base: Option<Duration>,
+        tool_retry_backoff_cap: Option<Duration>,
+    ) -> Self {
+        self.model_call_policy = AutomaticReconciliationClassPolicy {
+            attempt_budget: model_call_attempt_budget,
+            retry_backoff_base: model_call_retry_backoff_base,
+            retry_backoff_cap: model_call_retry_backoff_cap,
+        };
+        self.tool_policy = AutomaticReconciliationClassPolicy {
+            attempt_budget: tool_attempt_budget,
+            retry_backoff_base: tool_retry_backoff_base,
+            retry_backoff_cap: tool_retry_backoff_cap,
+        };
+        self
+    }
+
+    const fn policy(
+        &self,
+        operation: AutomaticReconciliationOperation,
+    ) -> AutomaticReconciliationClassPolicy {
+        match operation {
+            AutomaticReconciliationOperation::ModelCall(_) => self.model_call_policy,
+            AutomaticReconciliationOperation::ToolAttempt(_) => self.tool_policy,
+        }
     }
 
     /// Discovers exact ambiguity waits and claims one due window under the
@@ -433,23 +490,57 @@ impl PostgresAutomaticReconciliationRepository {
     pub async fn claim_due(
         &self,
     ) -> Result<AutomaticReconciliationBatch, AutomaticReconciliationRepositoryError> {
+        self.claim_due_for_class(None).await
+    }
+
+    /// Claims one due model-call reconciliation without consuming a tool slot.
+    pub async fn claim_due_model_call(
+        &self,
+    ) -> Result<AutomaticReconciliationBatch, AutomaticReconciliationRepositoryError> {
+        self.claim_due_for_class(Some(true)).await
+    }
+
+    /// Claims one due tool reconciliation without consuming a model-call slot.
+    pub async fn claim_due_tool_attempt(
+        &self,
+    ) -> Result<AutomaticReconciliationBatch, AutomaticReconciliationRepositoryError> {
+        self.claim_due_for_class(Some(false)).await
+    }
+
+    async fn claim_due_for_class(
+        &self,
+        model_call: Option<bool>,
+    ) -> Result<AutomaticReconciliationBatch, AutomaticReconciliationRepositoryError> {
         let mut transaction = begin_budgeted(&self.pool).await?;
-        discover_recoveries(&mut transaction, CLAIM_WINDOW).await?;
-        let attempt_budget = self
-            .attempt_budget
-            .map(i32::try_from)
-            .transpose()
+        let model_call_attempt_budget = i32::try_from(self.model_call_policy.attempt_budget)
             .map_err(|_| AutomaticReconciliationRepositoryError::Corruption("attempt budget"))?;
-        settle_abandoned_attempts(&mut transaction, attempt_budget, CLAIM_WINDOW).await?;
+        let tool_attempt_budget = i32::try_from(self.tool_policy.attempt_budget)
+            .map_err(|_| AutomaticReconciliationRepositoryError::Corruption("attempt budget"))?;
+        discover_recoveries(
+            &mut transaction,
+            CLAIM_WINDOW,
+            model_call_attempt_budget,
+            tool_attempt_budget,
+        )
+        .await?;
+        settle_abandoned_attempts(&mut transaction, CLAIM_WINDOW).await?;
         mark_superseded_recoveries(&mut transaction, CLAIM_WINDOW).await?;
-        let exhausted_rows =
-            mark_exhausted_recoveries(&mut transaction, attempt_budget, CLAIM_WINDOW).await?;
-        let mut claim = sqlx::query(crate::lock_inventory::AUTOMATIC_RECONCILIATION_CLAIM)
-            .bind(CLAIM_WINDOW)
-            .bind(attempt_budget.unwrap_or(i32::MAX));
-        for millis in self.retry_ladder_millis()? {
+        let exhausted_rows = mark_exhausted_recoveries(&mut transaction, CLAIM_WINDOW).await?;
+        let mut claim =
+            sqlx::query(crate::lock_inventory::AUTOMATIC_RECONCILIATION_CLAIM).bind(CLAIM_WINDOW);
+        for millis in retry_ladder_millis(
+            self.model_call_policy.retry_backoff_base,
+            self.model_call_policy.retry_backoff_cap,
+        )? {
             claim = claim.bind(millis);
         }
+        for millis in retry_ladder_millis(
+            self.tool_policy.retry_backoff_base,
+            self.tool_policy.retry_backoff_cap,
+        )? {
+            claim = claim.bind(millis);
+        }
+        claim = claim.bind(model_call);
         let rows = claim.fetch_all(&mut *transaction).await?;
         commit_uncancellable(transaction).await?;
 
@@ -729,12 +820,13 @@ impl PostgresAutomaticReconciliationRepository {
         .execute(&mut *transaction)
         .await?
         .rows_affected();
-        let retry_delay_millis = self
+        let policy = self.policy(claimed.operation());
+        let retry_delay_millis = policy
             .retry_backoff_base
             .map(|base| {
                 claimed
                     .attempt()
-                    .retry_backoff(base, self.retry_backoff_cap)
+                    .retry_backoff(base, policy.retry_backoff_cap)
             })
             .map(|delay| i64::try_from(delay.as_millis()))
             .transpose()
@@ -762,30 +854,6 @@ impl PostgresAutomaticReconciliationRepository {
         }
         commit_uncancellable(transaction).await?;
         Ok(())
-    }
-
-    /// Renders the deployment's retry policy as the claim statement's ladder.
-    ///
-    /// The claim statement carries one `CASE` arm per admitted attempt, so its
-    /// arity is part of the contract with this policy: the schedule the daemon
-    /// enforces lives in the deployment's configuration rather than in the SQL
-    /// string, which is what keeps the two from diverging silently.
-    ///
-    /// An unconfigured base backoff yields an all-`NULL` ladder, which the
-    /// statement reads as the chain's "no claimable deadline" semantics. Every
-    /// slot shares one base, so the statement tests only the first.
-    ///
-    /// Milliseconds, matching the unit [`Self::record_failure`] schedules in and
-    /// the unit the claim statement multiplies by. Whole seconds would truncate
-    /// every sub-second configured backoff to zero, and a zero claim-side
-    /// deadline is not a short wait but an immediate one: the very next scan's
-    /// abandonment sweep would settle an attempt that is still running, while
-    /// the failure path scheduled the true sub-second delay. One configured
-    /// policy has to produce one schedule on both paths.
-    fn retry_ladder_millis(
-        &self,
-    ) -> Result<[Option<i64>; RETRY_LADDER_ARITY], AutomaticReconciliationRepositoryError> {
-        retry_ladder_millis(self.retry_backoff_base, self.retry_backoff_cap)
     }
 }
 
@@ -821,9 +889,13 @@ fn retry_ladder_millis(
 async fn discover_recoveries(
     connection: &mut PgConnection,
     window: i64,
+    model_call_attempt_budget: i32,
+    tool_attempt_budget: i32,
 ) -> Result<(), AutomaticReconciliationRepositoryError> {
     sqlx::query(crate::lock_inventory::AUTOMATIC_RECONCILIATION_DISCOVERY)
         .bind(window)
+        .bind(model_call_attempt_budget)
+        .bind(tool_attempt_budget)
         .execute(connection)
         .await?;
     Ok(())
@@ -831,7 +903,6 @@ async fn discover_recoveries(
 
 async fn settle_abandoned_attempts(
     connection: &mut PgConnection,
-    attempt_budget: Option<i32>,
     window: i64,
 ) -> Result<(), AutomaticReconciliationRepositoryError> {
     sqlx::query(
@@ -841,7 +912,7 @@ async fn settle_abandoned_attempts(
              WHERE state_kind = 'attempting'
                AND next_attempt_at <= statement_timestamp()
              ORDER BY next_attempt_at, turn_id
-             LIMIT $2
+             LIMIT $1
          ), attempts AS (
             UPDATE automatic_reconciliation_attempt AS attempt
                SET outcome_kind = 'infrastructure_failure',
@@ -857,9 +928,8 @@ async fn settle_abandoned_attempts(
           WHERE recovery.turn_id = abandoned.turn_id
             AND recovery.state_kind = 'attempting'
             AND recovery.attempt_count = abandoned.attempt_count
-            AND ($1::integer IS NULL OR recovery.attempt_count < $1)",
+            AND recovery.attempt_count < recovery.attempt_ceiling",
     )
-    .bind(attempt_budget)
     .bind(window)
     .execute(connection)
     .await?;
@@ -888,41 +958,35 @@ async fn mark_superseded_recoveries(
 /// it bounded; successive scans drain the rest.
 ///
 /// The budget test is `>=`, the exact complement of the claim statement's
-/// `attempt_count < $2`. Equality only looked equivalent while the budget never
-/// moved: lowering it below a recovery's persisted `attempt_count` left that row
-/// matching neither predicate, so it was never claimed again and never reported
-/// exhausted — parked durably with nothing watching it. Complementary predicates
-/// mean every recovery is on exactly one side of the budget whatever it is set
-/// to next.
+/// `attempt_count < attempt_ceiling`. Persisting the ceiling on discovery keeps
+/// both predicates on one policy even if deployment configuration changes while
+/// the recovery is pending.
 async fn mark_exhausted_recoveries(
     connection: &mut PgConnection,
-    attempt_budget: Option<i32>,
     window: i64,
 ) -> Result<Vec<sqlx::postgres::PgRow>, AutomaticReconciliationRepositoryError> {
     let rows = sqlx::query(
         "WITH spent AS MATERIALIZED (
             SELECT turn_id
               FROM automatic_reconciliation
-             WHERE $1::integer IS NOT NULL
-               AND state_kind IN ('scheduled', 'attempting')
-               AND attempt_count >= $1
+             WHERE state_kind IN ('scheduled', 'attempting')
+               AND attempt_count >= attempt_ceiling
                AND (
                    state_kind = 'scheduled'
                    OR next_attempt_at <= statement_timestamp()
                )
              ORDER BY next_attempt_at, turn_id
-             LIMIT $2
+             LIMIT $1
          )
          UPDATE automatic_reconciliation AS recovery
             SET state_kind = 'exhausted', exhausted_at = statement_timestamp()
            FROM spent
           WHERE recovery.turn_id = spent.turn_id
             AND recovery.state_kind IN ('scheduled', 'attempting')
-            AND recovery.attempt_count >= $1
+            AND recovery.attempt_count >= recovery.attempt_ceiling
       RETURNING recovery.session_id, recovery.turn_id,
                 recovery.model_call_id, recovery.tool_attempt_id",
     )
-    .bind(attempt_budget)
     .bind(window)
     .fetch_all(connection)
     .await?;
@@ -1059,48 +1123,32 @@ mod tests {
     /// two drifted, the daemon would reject admissible budgets or admit ones the
     /// `ELSE` arm silently flattens.
     #[test]
-    fn the_published_arity_is_the_claim_statements_ladder_arity() {
+    fn the_published_arity_covers_each_class_claim_ladder() {
         let claim = crate::lock_inventory::AUTOMATIC_RECONCILIATION_CLAIM;
-        // The ladder occupies the parameters after the window ($1) and the
-        // attempt budget ($2).
-        const LADDER_FIRST_PARAMETER: usize = 3;
-        for offset in 0..RETRY_LADDER_ARITY {
-            let parameter = format!("${}::bigint", LADDER_FIRST_PARAMETER + offset);
-            assert!(
-                claim.contains(&parameter),
-                "the claim statement must bind {parameter}"
-            );
-        }
-        let beyond = format!("${}", LADDER_FIRST_PARAMETER + RETRY_LADDER_ARITY);
-        assert!(
-            !claim.contains(&beyond),
-            "the claim statement binds {beyond}, so the published arity is short"
-        );
+        assert_eq!(RETRY_LADDER_ARITY, 5);
+        assert!(claim.contains("WHEN 1 THEN $2::bigint"));
+        assert!(claim.contains("WHEN 4 THEN $5::bigint"));
+        assert!(claim.contains("ELSE $6::bigint"));
+        assert!(claim.contains("WHEN 1 THEN $7::bigint"));
+        assert!(claim.contains("WHEN 4 THEN $10::bigint"));
+        assert!(claim.contains("ELSE $11::bigint"));
+        assert!(claim.contains("$12::boolean"));
+        assert!(!claim.contains("$13"));
         // The schedule is expressed in the same unit the failure path uses.
         assert!(claim.contains("interval '1 millisecond'"));
         assert!(!claim.contains("interval '1 second'"));
     }
 
-    /// The claim statement admits attempts strictly below the budget and the
-    /// exhaustion sweep takes everything from the budget upward. The two have to
-    /// partition the space: a gap parks a recovery durably with nothing watching
-    /// it, which is what an equality test did the moment a budget was lowered.
+    /// Claims read the ceiling frozen onto each recovery at discovery time.
+    /// Configuration changes therefore cannot move an already-pending recovery
+    /// between the claim and exhaustion predicates.
     #[test]
-    fn the_claim_and_exhaustion_predicates_partition_the_budget() {
+    fn the_claim_uses_the_persisted_attempt_ceiling() {
         assert!(
-            crate::lock_inventory::AUTOMATIC_RECONCILIATION_CLAIM.contains("attempt_count < $2"),
-            "the claim statement must admit attempts below the budget"
+            crate::lock_inventory::AUTOMATIC_RECONCILIATION_CLAIM
+                .contains("attempt_count < attempt_ceiling"),
+            "the claim statement must read the recovery's persisted ceiling"
         );
-        for budget in [1_i64, 2, 5, 9] {
-            for attempt_count in 0..12_i64 {
-                let claimable = attempt_count < budget;
-                let exhausted = attempt_count >= budget;
-                assert!(
-                    claimable ^ exhausted,
-                    "attempt_count {attempt_count} under budget {budget} is on both sides or neither"
-                );
-            }
-        }
     }
 
     /// A deployment cannot configure a deadline that would expire inside the
