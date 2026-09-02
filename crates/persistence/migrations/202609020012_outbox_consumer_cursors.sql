@@ -119,7 +119,7 @@ BEGIN
                 NEW.delivered_through
                 USING ERRCODE = '23503';
         END IF;
-    ELSE
+    ELSIF NEW.consumer_name = 'session_timeline' THEN
         IF NOT EXISTS (
             SELECT 1 FROM session_timeline_item
              WHERE event_sequence = NEW.delivered_through
@@ -129,6 +129,9 @@ BEGIN
                 NEW.consumer_name, NEW.delivered_through
                 USING ERRCODE = '23503';
         END IF;
+    ELSE
+        RAISE EXCEPTION 'consumer % has no advance discipline', NEW.consumer_name
+            USING ERRCODE = '23514';
     END IF;
     NEW.updated_at := now();
     RETURN NEW;
