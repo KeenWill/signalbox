@@ -28,6 +28,31 @@ ALTER TABLE session
     ADD COLUMN dispatching_module text,
     ADD COLUMN dispatch_ref uuid;
 
+--
+-- Existing rows carry the retired spelling, and the append-only guards reject
+-- an ordinary UPDATE, so the one-time carry disables them for the rewrite the
+-- pre-alpha rule owes a live database. Nothing else about these rows changes.
+--
+
+ALTER TABLE session DISABLE TRIGGER session_is_append_only;
+ALTER TABLE create_session_command DISABLE TRIGGER create_session_command_is_append_only;
+ALTER TABLE create_session_from_imported_frontier_command
+    DISABLE TRIGGER create_session_from_imported_frontier_command_is_append_only;
+
+UPDATE session SET creation_cause = 'interactive'
+ WHERE creation_cause = 'user_initiated';
+
+UPDATE create_session_command SET creation_cause = 'interactive'
+ WHERE creation_cause = 'user_initiated';
+
+UPDATE create_session_from_imported_frontier_command SET creation_cause = 'interactive'
+ WHERE creation_cause = 'user_initiated';
+
+ALTER TABLE session ENABLE TRIGGER session_is_append_only;
+ALTER TABLE create_session_command ENABLE TRIGGER create_session_command_is_append_only;
+ALTER TABLE create_session_from_imported_frontier_command
+    ENABLE TRIGGER create_session_from_imported_frontier_command_is_append_only;
+
 ALTER TABLE session
     DROP CONSTRAINT session_creation_cause_closed;
 
@@ -493,6 +518,45 @@ ALTER TABLE ONLY session_lifecycle
         ON UPDATE RESTRICT ON DELETE RESTRICT;
 
 --
+-- The one-time carry for sessions that predate the satellite.
+--
+-- Every existing session gets its row before the back-reference below starts
+-- requiring one. They are recorded unmonitored: the daemon held no liveness
+-- obligation for work created before the obligation existed, and unmonitored
+-- arms no deadline and drives nothing, so the carry cannot retire or park
+-- anything. The state is read from the turns each session actually has, and
+-- the projection corrects it on that session's next turn or goal write.
+--
+-- Nothing is carried as terminal. A terminal row owes a settled goal and no
+-- live turn, and neither is known for a session that closed before any of this
+-- existed; §14's closure semantics decide those deliberately.
+--
+
+INSERT INTO session_lifecycle
+        (session_id, state_kind, owned, actor_kind)
+SELECT existing.session_id,
+       CASE
+           WHEN EXISTS (
+               SELECT 1 FROM turn_lifecycle AS live
+                WHERE live.session_id = existing.session_id
+                  AND live.state_kind = 'active'
+           ) THEN 'active'
+           WHEN EXISTS (
+               SELECT 1 FROM turn_lifecycle AS queued
+                WHERE queued.session_id = existing.session_id
+                  AND queued.state_kind = 'queued'
+           ) THEN 'dispatched'
+           ELSE 'created'
+       END,
+       false,
+       'core'
+  FROM session AS existing
+ WHERE NOT EXISTS (
+        SELECT 1 FROM session_lifecycle AS present
+         WHERE present.session_id = existing.session_id
+ );
+
+--
 -- Every session owns exactly one satellite, written in its own creating
 -- transaction. The deferred back-reference is how `session_current_defaults`
 -- already makes a satellite mandatory: a creation path that forgets the
@@ -671,6 +735,16 @@ CREATE TABLE session_ownership_event (
              OR ((actor_turn_id IS NULL) AND (actor_tool_request_id IS NULL)))
     )
 );
+
+-- The carried sessions get the journal entry their bit needs.
+INSERT INTO session_ownership_event
+        (session_id, event_ordinal, transition_kind, owned_after, actor_kind)
+SELECT lifecycle.session_id, 1, 'created_unmonitored', false, 'core'
+  FROM session_lifecycle AS lifecycle
+ WHERE NOT EXISTS (
+        SELECT 1 FROM session_ownership_event AS present
+         WHERE present.session_id = lifecycle.session_id
+ );
 
 ALTER TABLE ONLY session_ownership_event
     ADD CONSTRAINT session_ownership_event_session_id_fkey
@@ -1115,11 +1189,36 @@ ALTER TABLE goal_event
 -- tool-only actor leaves null by construction.
 --
 
-ALTER TABLE ONLY goal_event
-    ADD CONSTRAINT goal_event_closure_tool_request_fk
-        FOREIGN KEY (model_tool_request_id, session_id)
-        REFERENCES tool_request(request_id, session_id)
-        ON UPDATE RESTRICT ON DELETE RESTRICT;
+CREATE FUNCTION require_goal_closure_tool_request() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.event_kind <> 'session_closed' OR NEW.model_tool_request_id IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+          FROM tool_request AS request
+         WHERE request.request_id = NEW.model_tool_request_id
+           AND request.session_id = NEW.session_id
+    ) THEN
+        RAISE EXCEPTION
+            'session closure for % names tool request %, which is not its own',
+            NEW.session_id, NEW.model_tool_request_id
+            USING ERRCODE = '23503';
+    END IF;
+
+    RETURN NULL;
+END;
+$$;
+
+-- A trigger rather than a foreign key: the key would validate every historical
+-- `achieved` and `blocked` row, and this rule is about the closure kind alone.
+CREATE CONSTRAINT TRIGGER goal_event_closure_names_its_own_request
+    AFTER INSERT ON goal_event
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION require_goal_closure_tool_request();
 
 --
 -- Deployment policy for the armed deadlines.
