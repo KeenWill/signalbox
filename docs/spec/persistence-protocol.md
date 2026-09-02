@@ -1,5 +1,8 @@
 # Persistence protocol
 
+The outbox consumer registry, retention floor, and timeline projection are
+verified against this PR (`agent/lifecycle-t12-outbox-cursors`).
+
 The session-lifecycle satellite's place in the lock order is verified against
 this PR (`agent/lifecycle-t2-state-machine`).
 
@@ -1377,9 +1380,9 @@ Locks per transaction, in acquisition order:
   duplicate failure therefore wins the shared authority row and makes the loser
   reread the one committed terminal proof instead of committing both outcomes.
 
-- **Outbox dispatch**: `outbox_delivery_state` is locked `FOR UPDATE`, then
-  exactly `delivered_through + 1` and its typed record are read. Only an
-  accepted synchronous offer advances that same singleton inside the
+- **Outbox dispatch**: the consumer's `outbox_consumer_cursor` row is locked
+  `FOR UPDATE`, then exactly `delivered_through + 1` and its typed record are
+  read. Only an accepted synchronous offer advances that same row inside the
   transaction.
 
 - **Daemon-generation advance**: `hub_fence_state` is locked `FOR UPDATE`, then
@@ -1844,11 +1847,11 @@ storage below plus the delegation-stack extension identified inline:
   producing call and exactly one closed state shape: `proposed` names the
   yielded assistant/tool-use frontier, `results_projected` names the
   all-resolved result frontier, and `recovery_required` names the exact
-  ambiguous physical attempt. The header and typed record tables are append-only
-  (`reject_immutable_record_change`), and every outbox table rejects `TRUNCATE`.
-  A context-compacted record names the authoritative compaction, its completed
-  dedicated call, exact positive through position, appended summary, and result
-  frontier.
+  ambiguous physical attempt. The header and typed record tables admit no update
+  and no delete above the retention floor (`reject_outbox_record_change`), and
+  every outbox table rejects `TRUNCATE`. A context-compacted record names the
+  authoritative compaction, its completed dedicated call, exact positive through
+  position, appended summary, and result frontier.
 
 **Session-delegation foundation proposal.** Migration `202608020018` in the full
 delegation stack adds one version-one `delegation_outbox_event` header and one
@@ -1873,8 +1876,8 @@ parent-turn-command or parent-goal-command stop/cancel cascade evaluations;
 child-origin terminal events are delivered through `child_result` instead.
 Dispatch decodes both closed unions and rejects every other storage version. The
 delegation-header completeness trigger includes both record kinds; its header
-and both typed records are append-only and reject `TRUNCATE` with the rest of
-the family.
+and both typed records carry the same floor-bounded delete guard and reject
+`TRUNCATE` with the rest of the family.
 
 Every client-observable delegation transition appends its corresponding typed
 update record in the transaction that commits the relationship, wait,
@@ -1896,10 +1899,41 @@ without its state, is therefore unrepresentable.
   allocator row lock until commit makes committed sequences contiguous and
   commit-ordered, so a delivered prefix can never be discovered to have skipped
   a lower in-flight sequence.
-- `outbox_delivery_state`, a mutable singleton delivered-through cursor
-  (deletion rejected) whose trigger permits advancing by exactly one committed
-  sequence at a time and forbids mixing delivery with event production in one
-  transaction (and vice versa).
+- `outbox_consumer_cursor`, the authoritative consumer registry: one mutable
+  delivered-through cursor per named consumer (insertion and deletion rejected),
+  each advancing by exactly one committed sequence at a time. The
+  `process_protocol` cursor is the wire fan-out's, spans both header families,
+  and additionally forbids mixing delivery with event production in one
+  transaction (and vice versa). The `session_timeline` cursor is the timeline
+  projection's; it advances inside the appending transaction and only past a
+  sequence that already carries its `session_timeline_item` row.
+- `outbox_retention_state`, a mutable singleton (deletion rejected) recording
+  `pruned_through`, the highest sequence a prune has removed.
+
+The retention floor is `min(delivered_through)` over the registry, so a
+registered consumer that has not read cannot be outrun. The header and
+typed-record delete guards admit exactly the rows at or below that floor and
+raise on every other delete or update; typed records are deleted before their
+header, which is what the `ON DELETE RESTRICT` header foreign keys admit; and
+`TRUNCATE` stays rejected on every outbox table, because truncation is
+whole-table and cannot respect a floor. The floor is the database's invariant;
+the configured retention window is the policy above it, and the pruning pass
+deletes only the contiguous prefix whose headers are older than that window.
+`outbox_retention_state.pruned_through` records how far it has run and can never
+pass the floor.
+
+The session timeline is a durable projection. `session_timeline_item` carries
+one row per appended header — sequence, session, kind, turn disposition —
+written by the append trigger, and pruning does not touch it, so the timeline
+index outlives the events it indexes. Window and descriptor reads read that
+projection. Detail reads — per-address bodies and turn-scoped address
+enumeration — read the typed records and are bounded to `pruned_through`, below
+which there is no detail to read. That is the derived-state retention exemption:
+a consumer projecting durable state holds a cursor advanced only past projected
+rows, and a consumer reading raw rows on demand holds a bound instead.
+Delegation reconstitution, child-result admission, and artifact-address search
+still join raw headers with neither, so the configured retention window is
+`none` — pruning off — until they are dispositioned.
 
 Appends happen only through the crate-private `outbox::append` on the caller's
 existing connection; it never begins or commits a transaction, so the
@@ -2326,8 +2360,9 @@ surface provides it.
   calls and decisions. The existing
   [goal-mode compatibility constraint](goal-mode.md#compatibility-constraints)
   owns retention of both the provider-offered and repository-committed outcomes.
-- Deferred outbox retention, pruning, and multiple-daemon fan-out are cataloged
-  in [open questions](../open-questions.md#protocols-and-persistence).
+- Multiple-daemon outbox fan-out is cataloged in
+  [open questions](../open-questions.md#protocols-and-persistence); retention
+  and pruning are closed above.
 - Attempt continuation is presently admitted only for the tool-loop
   yield/approval path. The availability-successor producer described above is
   committed but unimplemented; no current producer can construct that second
