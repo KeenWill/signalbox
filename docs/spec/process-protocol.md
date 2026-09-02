@@ -1018,18 +1018,13 @@ unavailable candidate prevents a definitive integrity conclusion.
 
 **Committed unimplemented functionality.** The implemented request inventory
 above remains closed and rejects it. The implementing stack must add one
-authorized `reload_configuration` request carrying no members. It takes no
-`command_id`: the swap changes process memory alone and persists nothing, so
-there is no durable receipt to replay and a repeated request simply re-reads and
-re-validates. The one durable step a reload can take — the repository-watch
-activation reconciliation [repo-watch](repo-watch.md) owns — converges on the
-desired set the file names, so a repeat is a no-op rather than a second effect.
-Success returns `configuration_reloaded { reloaded_sections }`, an array of the
-closed values `model_catalog`, `session_templates`, and `repository_watch`, in
-that order and without repeats, naming exactly the sections the swap replaced.
-Failure returns `configuration_reload_failed { phase, reason }`, carrying the
-same sanitized operator failure class startup logs and no configuration value,
-path, or URL, and leaves the running configuration unchanged.
+authorized `reload_configuration` request carrying no members and no
+`command_id`: the swap changes process memory alone, so a repeat simply re-reads
+and re-validates. Success returns
+`configuration_reloaded { reloaded_sections }`, an array of the closed values
+`model_catalog`, `session_templates`, and `repository_watch`. Failure returns
+`configuration_reload_failed { phase, reason }`, sanitized exactly as startup
+logs are, and leaves the running configuration unchanged.
 [Configuration and credentials](configuration-and-credentials.md#configuration-reload)
 owns which sections are reloadable and the validate-then-swap rule.
 
