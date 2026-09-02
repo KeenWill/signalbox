@@ -192,9 +192,23 @@ fn the_builtin_inventory_denies_cross_session_messaging() {
     );
 }
 
+/// The agent-to-user channel is the reach the initial event does not report:
+/// `--brief` enables `SendUserMessage`, and only `--help` says so. A session
+/// this daemon drives speaks through the adapter's typed event stream, so a
+/// second channel out of the process is exactly what the inventory withholds.
+#[test]
+fn the_builtin_inventory_denies_the_agent_to_user_channel() {
+    assert!(
+        signalbox_model_runtime_claude_cli::DISABLED_CLAUDE_CLI_BUILTIN_TOOLS
+            .contains(&"SendUserMessage"),
+        "SendUserMessage speaks to the user outside the adapter's event stream \
+         and must stay denied"
+    );
+}
+
 /// A reconciliation appends, and an append is where a name gets added twice or
-/// dropped into the wrong place. The CLI reports `Task` first and the rest
-/// alphabetically, and holding the inventory to that shape is what makes the
+/// dropped into the wrong place. The CLI reports `Task` first and the rest in
+/// ascending order, and holding the inventory to that shape is what makes the
 /// next append reviewable as a diff rather than a re-reading of the whole list.
 #[test]
 fn the_builtin_inventory_keeps_the_order_the_cli_reports() {
@@ -204,7 +218,7 @@ fn the_builtin_inventory_keeps_the_order_the_cli_reports() {
 
     assert_eq!(
         reported_tail, sorted_tail,
-        "after the leading Task the inventory follows the CLI's own alphabetical \
+        "after the leading Task the inventory follows the CLI's own ascending \
          reporting order; an entry added out of place is an unreviewed append"
     );
 }

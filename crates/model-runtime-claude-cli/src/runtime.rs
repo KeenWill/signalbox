@@ -56,18 +56,24 @@ const CLAUDE_ENVIRONMENT: &[CliEnvironmentVariable] = &[
 /// The exact Claude Code CLI version the built-in inventory below was last
 /// reconciled against.
 ///
-/// Reconciliation reads the `tools` member of the executable's own
-/// `system/init` event once per configuration the CLI offers, because the
-/// reported set is configuration-dependent rather than fixed: credential
-/// delivery, `--restricted`, `--disable-slash-commands`, and
-/// `CLAUDE_CODE_USE_POWERSHELL_TOOL` each change it. A pin bump that leaves
-/// this marker behind fails `the_builtin_inventory_is_reconciled_with_the_pin`,
-/// so an upstream release that adds a built-in cannot reach a daemon-driven
-/// session merely because a dependency update landed unread.
+/// Reconciliation reads two exact surfaces of the installed executable. The
+/// first is the `tools` member of its own `system/init` event, once per
+/// configuration the CLI offers, because the reported set is
+/// configuration-dependent rather than fixed: credential delivery,
+/// `--restricted`, `--disable-slash-commands`, and
+/// `CLAUDE_CODE_USE_POWERSHELL_TOOL` each change it. The second is `--help`,
+/// which names built-ins that print mode never reports — `--brief` enables
+/// `SendUserMessage` and `--restricted` names `REPL` among the code-running
+/// tools it removes — so reading the initial event alone would miss them. A pin
+/// bump that leaves this marker behind fails
+/// `the_builtin_inventory_is_reconciled_with_the_pin`, so an upstream release
+/// that adds a built-in cannot reach a daemon-driven session merely because a
+/// dependency update landed unread.
 pub const RECONCILED_CLAUDE_CLI_BUILTIN_INVENTORY_VERSION: &str = "2.1.258";
 
-/// Every built-in tool the pinned Claude Code CLI reports in any configuration
-/// it offers, in the order the CLI itself reports them.
+/// Every built-in tool the pinned Claude Code CLI reports or documents, ordered
+/// by byte value after the leading `Task` — the order the CLI reports its own
+/// set in.
 ///
 /// The invocation both selects an empty built-in surface with `--tools` and
 /// explicitly passes this entire inventory through `--disallowedTools`, so the
@@ -75,14 +81,17 @@ pub const RECONCILED_CLAUDE_CLI_BUILTIN_INVENTORY_VERSION: &str = "2.1.258";
 /// one. It therefore names every built-in the executable can expose, not only
 /// the ones this adapter's own invocation would otherwise reach: `Glob`,
 /// `Grep`, `PowerShell`, and `Skill` are reported only under a flag or
-/// environment variable the adapter never passes, and naming them anyway is
+/// environment variable the adapter never passes, and `REPL` and
+/// `SendUserMessage` are documented rather than reported. Naming them anyway is
 /// what keeps a regression in that first control from being the whole defense.
 ///
-/// The cross-session pair is the reason the inventory is audited rather than
-/// appended to: `SendMessage` and `ListAgents` reach other Claude Code sessions
-/// on the same host through the CLI's own messaging socket, so a session this
-/// daemon drives could otherwise enumerate and message sessions it does not
-/// own.
+/// Two reaches beyond this process are the reason the inventory is audited
+/// rather than appended to. `SendMessage` and `ListAgents` address other Claude
+/// Code sessions on the same host through the CLI's own messaging socket, so a
+/// session this daemon drives could otherwise enumerate and message sessions it
+/// does not own. `SendUserMessage` opens an agent-to-user channel that is not
+/// the adapter's typed event stream, so a session could otherwise speak past
+/// the boundary this adapter reports through.
 pub const DISABLED_CLAUDE_CLI_BUILTIN_TOOLS: &[&str] = &[
     "Task",
     "Bash",
@@ -100,12 +109,14 @@ pub const DISABLED_CLAUDE_CLI_BUILTIN_TOOLS: &[&str] = &[
     "NotebookEdit",
     "PowerShell",
     "PushNotification",
+    "REPL",
     "Read",
     "RemoteTrigger",
     "ReportFindings",
     "ScheduleWakeup",
     "SendFeedback",
     "SendMessage",
+    "SendUserMessage",
     "Skill",
     "TaskCreate",
     "TaskGet",

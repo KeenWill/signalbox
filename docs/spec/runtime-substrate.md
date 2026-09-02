@@ -1125,26 +1125,29 @@ assistant content is admitted.
 The invocation excludes ambient settings, sessions, slash commands, browser
 integration, plugins, and built-in tools. `--tools` selects an empty built-in
 surface; `--disallowedTools` also names every built-in the pinned executable
-reports in any configuration it offers (`Task`, `Bash`, the `Cron*` tools,
-`DesignSync`, `Edit`, worktree, file search, cross-session discovery and
-messaging, monitoring, notebook, notification, shells,
-read/remote/report/scheduling/feedback, skill, `Task*`, `ToolSearch`, web,
-workflow, and write); and `--allowedTools` contains only the qualified declared
-MCP names. The inventory is not limited to what this invocation would otherwise
-reach, because it is the second of two independent controls: an entry the empty
-surface already withholds costs nothing and covers the case where that first
-control regresses. Cross-session discovery and messaging are named for a
-distinct reason — they address other Claude Code sessions on the same host
-through the CLI's own messaging socket, which is reach beyond the process this
-adapter owns. The reported built-in set is configuration-dependent rather than
-fixed, so the inventory is reconciled against the exact pinned version by
-reading the executable's own initial event, and a version marker beside the
-inventory records which version that was; a pin bump that leaves the marker
-behind fails offline. `dontAsk` is used because no undeclared capability may
-become an interactive permission question. The initial event must also report no
-slash commands, skills, or plugins and must identify the pinned Claude Code
-version; any mismatch is stream-protocol boundary loss, not a relaxed
-invocation.
+reports or documents (`Task`, `Bash`, the `Cron*` tools, `DesignSync`, `Edit`,
+worktree, file search, cross-session discovery and messaging, agent-to-user
+messaging, monitoring, notebook, notification, shells and the code-running
+`REPL`, read/remote/report/scheduling/feedback, skill, `Task*`, `ToolSearch`,
+web, workflow, and write); and `--allowedTools` contains only the qualified
+declared MCP names. The inventory is not limited to what this invocation would
+otherwise reach, because it is the second of two independent controls: an entry
+the empty surface already withholds costs nothing and covers the case where that
+first control regresses. Three entries are named for a distinct reason.
+Cross-session discovery and messaging address other Claude Code sessions on the
+same host through the CLI's own messaging socket, and agent-to-user messaging
+opens a channel that is not this adapter's typed event stream; both are reach
+beyond the process this adapter owns. The built-in set is
+configuration-dependent rather than fixed, so the inventory is reconciled
+against the exact pinned version from two surfaces of the executable itself —
+the `tools` member of its initial event under each configuration it offers, and
+the tool names its `--help` documents for configurations whose tools that event
+never reports — and a version marker beside the inventory records which version
+that was; a pin bump that leaves the marker behind fails offline. `dontAsk` is
+used because no undeclared capability may become an interactive permission
+question. The initial event must also report no slash commands, skills, or
+plugins and must identify the pinned Claude Code version; any mismatch is
+stream-protocol boundary loss, not a relaxed invocation.
 
 The pinned stream establishes correlation and reported-model evidence through
 `system/init`. Nonterminal `system/status`, `system/hook_started`,
