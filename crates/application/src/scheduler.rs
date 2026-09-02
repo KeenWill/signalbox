@@ -317,9 +317,10 @@ pub trait EligibilityWorkSource {
     /// Takes the ownership marker the source attached to this session's hint.
     ///
     /// An unmonitored session is a conversation. It still runs the turns a
-    /// person submits, but §6 gives it no watchdog and no place in occupancy
-    /// accounting, so the occupancy the daemon reports stays a measure of
-    /// driven work rather than of open chat windows.
+    /// person submits, and its turns keep every liveness guarantee; what it
+    /// has no place in is occupancy accounting, so the occupancy the daemon
+    /// reports stays a measure of driven work rather than of open chat
+    /// windows.
     ///
     /// The marker is taken, not read: it authorizes exactly the one admission
     /// the reconciliation that produced it described. A source with no durable
@@ -1276,24 +1277,19 @@ where
                     () = &mut shutdown => break,
                     () = ready(()) => {
                         if in_flight_sessions.insert(session) {
-                            // The occupancy bound is a watchdog: its expiry
-                            // cancels the pass and hands the turn to recovery.
-                            // An unmonitored session has none, so the marker
-                            // disables the bound, not just the metric.
+                            // The bound stays on every pass: its expiry is
+                            // turn-liveness recovery, which ownership does not
+                            // govern. What ownership governs is the
+                            // accounting, so the marker moves the metric only.
                             let counts_toward_occupancy =
                                 !self.work_source.take_returned_unmonitored(session);
-                            let bound = if counts_toward_occupancy {
-                                self.occupancy_bound
-                            } else {
-                                SchedulerPassOccupancyBound::unbounded()
-                            };
                             spawn_pass(
                                 &mut passes,
                                 &mut self.pass,
                                 session,
                                 priority,
                                 counts_toward_occupancy,
-                                bound,
+                                self.occupancy_bound,
                                 shutdown_drain_receiver.clone(),
                                 &mut task_sessions,
                                 &self.occupancy_observer,

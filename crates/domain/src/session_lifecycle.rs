@@ -124,8 +124,10 @@ impl LifecycleActor {
 ///
 /// Owned means one state, one armed deadline, and a driven path to a declared
 /// terminal outcome. Unmonitored means a conversation: no deadlines, no
-/// watchdogs, no auto-resume, no slot held, and no place in occupancy
-/// accounting.
+/// auto-resume, no slot held, and no place in occupancy accounting. Turn
+/// liveness is not on that list — a dead turn is recovered whoever owns the
+/// session, because leaving one active would block the next input every
+/// non-terminal session is promised.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SessionOwnership {
     /// The daemon drives this session to a declared terminal outcome.
@@ -587,19 +589,34 @@ impl SessionLifecycleState {
     /// Whether this state may close with `outcome`.
     ///
     /// `retired` says the session never did the work, so only the two
-    /// admission states reach it; every other outcome closes from any
-    /// non-terminal state, and the parked-only closures are commands (§7)
-    /// rather than shapes this algebra can distinguish.
+    /// admission states reach it — and only with the cause that state's own
+    /// deadline could have fired, since the recorded cause is what §12 reports.
+    /// Every other outcome closes from any non-terminal state, and the
+    /// parked-only closures are commands (§7) rather than shapes this algebra
+    /// can distinguish.
     const fn admits_outcome(&self, outcome: &SessionTerminalOutcome) -> bool {
         match outcome {
-            SessionTerminalOutcome::Retired { .. } => match self {
-                Self::Created | Self::Dispatched => true,
-                Self::Active
-                | Self::Waiting { .. }
-                | Self::Recovering { .. }
-                | Self::Blocked { .. }
-                | Self::Parked { .. }
-                | Self::Terminal { .. } => false,
+            SessionTerminalOutcome::Retired { cause } => match (self, cause) {
+                (
+                    Self::Created,
+                    SessionRetirementCause::FirstInputDeadlineExpired
+                    | SessionRetirementCause::StartGateDeadlineExpired,
+                )
+                | (
+                    Self::Dispatched,
+                    SessionRetirementCause::DispatchDeadlineExpired
+                    | SessionRetirementCause::StrandedQueuedTurn,
+                ) => true,
+                (Self::Created | Self::Dispatched, _) => false,
+                (
+                    Self::Active
+                    | Self::Waiting { .. }
+                    | Self::Recovering { .. }
+                    | Self::Blocked { .. }
+                    | Self::Parked { .. }
+                    | Self::Terminal { .. },
+                    _,
+                ) => false,
             },
             SessionTerminalOutcome::AchievedVerified
             | SessionTerminalOutcome::FailedRetryable { .. }
@@ -803,6 +820,14 @@ mod tests {
         }
     }
 
+    fn first_input_retired() -> SessionLifecycleState {
+        SessionLifecycleState::Terminal {
+            outcome: SessionTerminalOutcome::Retired {
+                cause: SessionRetirementCause::FirstInputDeadlineExpired,
+            },
+        }
+    }
+
     fn retired() -> SessionLifecycleState {
         SessionLifecycleState::Terminal {
             outcome: SessionTerminalOutcome::Retired {
@@ -910,10 +935,16 @@ mod tests {
 
     #[test]
     fn only_an_admission_state_retires() {
-        assert_admits(SessionLifecycleState::Created, retired());
+        assert_admits(SessionLifecycleState::Created, first_input_retired());
         assert_admits(dispatched(), retired());
         assert_rejects(SessionLifecycleState::Active, retired());
         assert_rejects(parked(), retired());
+    }
+
+    #[test]
+    fn a_retirement_names_the_cause_its_own_state_could_fire() {
+        assert_rejects(SessionLifecycleState::Created, retired());
+        assert_rejects(dispatched(), first_input_retired());
     }
 
     #[test]

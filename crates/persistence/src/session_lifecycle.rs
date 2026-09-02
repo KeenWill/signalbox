@@ -426,6 +426,13 @@ impl SessionLifecycleRepository {
             )
             .await);
         }
+        if !closure_carries_standing_cause(&held.state, outcome) {
+            return Err(reject(
+                transaction,
+                SessionLifecycleRejection::StandingCauseMismatch,
+            )
+            .await);
+        }
         match held.pending_terminal {
             Some(committed) if committed == outcome => {
                 return commit(transaction).await;
@@ -580,8 +587,8 @@ pub(crate) const fn creation_actor(cause: &SessionCreationCause) -> LifecycleAct
 ///
 /// A dispatched or delegated session is work the daemon drives to a declared
 /// outcome. An interactive creation is a conversation: §6's unmonitored bit,
-/// which is what keeps a person's chat window out of deadlines, watchdogs, and
-/// occupancy accounting.
+/// which is what keeps a person's chat window out of deadlines, auto-resume,
+/// and occupancy accounting.
 pub(crate) const fn creation_ownership(cause: &SessionCreationCause) -> SessionOwnership {
     match cause {
         SessionCreationCause::Interactive => SessionOwnership::Unmonitored,

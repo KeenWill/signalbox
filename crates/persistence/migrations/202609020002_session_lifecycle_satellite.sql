@@ -210,8 +210,14 @@ CREATE TABLE session_lifecycle (
     CONSTRAINT session_lifecycle_waiting_shape CHECK (
         ((state_kind = 'waiting'::text)
             = ((waiting_kind IS NOT NULL) AND (waiting_waker IS NOT NULL)))
-        AND ((waiting_subject_session_id IS NULL)
-             OR (waiting_kind = 'child'::text))
+        AND ((state_kind = 'waiting'::text)
+             OR ((waiting_kind IS NULL)
+                 AND (waiting_waker IS NULL)
+                 AND (waiting_subject_session_id IS NULL)))
+        -- A child wait names its child: the loader cannot rebuild one without
+        -- it, so a row missing it would commit and then be unreadable.
+        AND ((waiting_kind = 'child'::text)
+             = (waiting_subject_session_id IS NOT NULL))
         -- Each kind designates exactly one waker, so the pair is constrained
         -- rather than merely both present.
         AND ((waiting_kind IS NULL) OR ((waiting_kind, waiting_waker) = ANY (ARRAY[
@@ -249,9 +255,14 @@ CREATE TABLE session_lifecycle (
         ]))
     ),
 
+    -- Stated column by column, not as "the payload is complete": a partial
+    -- payload satisfies both sides of an equivalence and then survives on a
+    -- state that ignores it.
     CONSTRAINT session_lifecycle_blocked_shape CHECK (
         ((state_kind = 'blocked'::text)
             = ((blocked_reason IS NOT NULL) AND (blocked_cycle IS NOT NULL)))
+        AND ((state_kind = 'blocked'::text)
+             OR ((blocked_reason IS NULL) AND (blocked_cycle IS NULL)))
         AND ((blocked_cycle IS NULL) OR (blocked_cycle >= 0))
     ),
 
@@ -281,6 +292,11 @@ CREATE TABLE session_lifecycle (
             'repo_watch'::text,
             'commissioned_dispatch'::text
         ])))
+        AND ((state_kind = 'parked'::text)
+             OR ((parked_cause IS NULL)
+                 AND (parked_responder IS NULL)
+                 AND (parked_since IS NULL)
+                 AND (parked_standing_cause_kind IS NULL)))
         AND ((parked_standing_cause_kind IS NULL) OR (parked_cause IS NOT NULL))
     ),
 
@@ -415,6 +431,41 @@ CREATE TABLE session_lifecycle (
         -- settlement would reject can never be recorded.
         AND ((pending_terminal_superseded_by IS NULL)
              OR (pending_terminal_superseded_by <> session_id))
+        -- The cause is scoped to its outcome here too: a handoff whose cause
+        -- the terminal shape rejects can be committed and never settled.
+        AND (
+            (pending_terminal_outcome_kind IS NULL
+                AND pending_terminal_cause_kind IS NULL)
+            OR (pending_terminal_outcome_kind = ANY (ARRAY[
+                    'achieved_verified'::text,
+                    'failed_unknown'::text,
+                    'stopped'::text,
+                    'superseded'::text,
+                    'abandoned'::text
+                ]) AND pending_terminal_cause_kind IS NULL)
+            OR (pending_terminal_outcome_kind = 'failed_retryable'::text
+                AND pending_terminal_cause_kind = ANY (ARRAY[
+                    'provider_transient'::text,
+                    'provider_quota_exhausted'::text,
+                    'provider_overloaded'::text,
+                    'infrastructure_failure'::text,
+                    'retry_budget_exhausted'::text
+                ]))
+            OR (pending_terminal_outcome_kind = 'failed_structural'::text
+                AND pending_terminal_cause_kind = ANY (ARRAY[
+                    'context_compaction_wall'::text,
+                    'context_headroom_exhausted'::text,
+                    'broken_toolchain'::text,
+                    'moderation_block'::text
+                ]))
+            OR (pending_terminal_outcome_kind = 'retired'::text
+                AND pending_terminal_cause_kind = ANY (ARRAY[
+                    'dispatch_deadline_expired'::text,
+                    'start_gate_deadline_expired'::text,
+                    'first_input_deadline_expired'::text,
+                    'stranded_queued_turn'::text
+                ]))
+        )
     ),
 
     CONSTRAINT session_lifecycle_payload_measurements_nonnegative CHECK (
@@ -449,6 +500,26 @@ ALTER TABLE ONLY session_lifecycle
 ALTER TABLE ONLY session
     ADD CONSTRAINT session_lifecycle_fk
         FOREIGN KEY (session_id) REFERENCES session_lifecycle(session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
+
+--
+-- The recorded agency is this session's own. Both columns are session-scoped
+-- foreign keys, so a turn or request from another session cannot be recorded
+-- as this one's actor.
+--
+
+ALTER TABLE ONLY session_lifecycle
+    ADD CONSTRAINT session_lifecycle_actor_turn_fk
+        FOREIGN KEY (actor_turn_id, session_id)
+        REFERENCES turn_lifecycle(turn_id, session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE ONLY session_lifecycle
+    ADD CONSTRAINT session_lifecycle_actor_tool_request_fk
+        FOREIGN KEY (actor_tool_request_id, session_id)
+        REFERENCES tool_request(request_id, session_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED;
 
@@ -587,6 +658,20 @@ ALTER TABLE ONLY session_ownership_event
         FOREIGN KEY (session_id) REFERENCES session(session_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT;
 
+ALTER TABLE ONLY session_ownership_event
+    ADD CONSTRAINT session_ownership_event_actor_turn_fk
+        FOREIGN KEY (actor_turn_id, session_id)
+        REFERENCES turn_lifecycle(turn_id, session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE ONLY session_ownership_event
+    ADD CONSTRAINT session_ownership_event_actor_tool_request_fk
+        FOREIGN KEY (actor_tool_request_id, session_id)
+        REFERENCES tool_request(request_id, session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
+
 CREATE TRIGGER session_ownership_event_is_append_only
     BEFORE DELETE OR UPDATE ON session_ownership_event
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
@@ -604,6 +689,16 @@ $$;
 
 CREATE TRIGGER session_ownership_event_truncate_is_rejected
     BEFORE TRUNCATE ON session_ownership_event
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_session_lifecycle_table_truncate();
+
+-- The invariant triggers are row-level, so a truncation would disarm every
+-- deadline at once and fire none of them.
+CREATE TRIGGER session_deadline_truncate_is_rejected
+    BEFORE TRUNCATE ON session_deadline
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_session_lifecycle_table_truncate();
+
+CREATE TRIGGER session_lifecycle_truncate_is_rejected
+    BEFORE TRUNCATE ON session_lifecycle
     FOR EACH STATEMENT EXECUTE FUNCTION reject_session_lifecycle_table_truncate();
 
 --
@@ -879,6 +974,12 @@ ALTER TABLE goal_event
         AND ((closure_actor_kind IS NULL)
              OR ((closure_actor_kind = 'module'::text)
                  = (closure_actor_module IS NOT NULL)))
+        -- Column by column: requiring only that the pair is absent together
+        -- lets an ordinary event carry one of them, which replay ignores.
+        AND ((event_kind = 'session_closed'::text)
+             OR ((session_outcome_kind IS NULL)
+                 AND (closure_actor_kind IS NULL)
+                 AND (closure_actor_module IS NULL)))
         AND ((closure_actor_module IS NULL) OR (closure_actor_module = ANY (ARRAY[
             'repo_watch'::text,
             'commissioned_dispatch'::text
@@ -1103,6 +1204,9 @@ DECLARE
     held session_lifecycle%ROWTYPE;
     live_phase text;
     live_turn uuid;
+    goal_turn uuid;
+    goal_request uuid;
+    actor text;
     live_child_request uuid;
     child uuid;
     queued boolean;
@@ -1153,8 +1257,11 @@ BEGIN
     -- The goal lineage is read only when it can decide the state: a live turn
     -- outranks it, and this runs on every turn write.
     IF live_phase IS NULL THEN
-        SELECT event.event_kind, event.blocked_reason, event.generation
-          INTO goal_kind, goal_reason, goal_generation
+        SELECT event.event_kind, event.blocked_reason, event.generation,
+               COALESCE(event.model_turn_id, event.scheduler_turn_id),
+               event.model_tool_request_id
+          INTO goal_kind, goal_reason, goal_generation,
+               goal_turn, goal_request
           FROM goal_event AS event
          WHERE event.session_id = subject
          ORDER BY event.event_ordinal DESC
@@ -1234,13 +1341,32 @@ BEGIN
 
     -- A projected transition is core machinery, and the live turn is the
     -- agency behind it; the creating actor is not.
+    -- The agency is the live turn, or the goal event that decided the state
+    -- when no turn is live. A lift is the operator's own resume, so it keeps
+    -- that classification rather than reading as daemon machinery.
+    IF lifts_park THEN
+        actor := 'operator';
+        goal_turn := NULL;
+        goal_request := NULL;
+        live_turn := NULL;
+    ELSE
+        actor := 'core';
+        IF live_turn IS NOT NULL THEN
+            goal_turn := NULL;
+            goal_request := NULL;
+        END IF;
+    END IF;
+
     UPDATE session_lifecycle
        SET state_kind = next_state,
            state_entered_at = statement_timestamp(),
-           actor_kind = 'core',
+           actor_kind = actor,
            actor_module = NULL,
-           actor_turn_id = live_turn,
-           actor_tool_request_id = NULL,
+           actor_turn_id = COALESCE(live_turn, goal_turn),
+           actor_tool_request_id = CASE
+               WHEN COALESCE(live_turn, goal_turn) IS NULL THEN goal_request
+               ELSE NULL
+           END,
            waiting_kind = next_waiting_kind,
            waiting_waker = next_waiting_waker,
            waiting_subject_session_id = child,
