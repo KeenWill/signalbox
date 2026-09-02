@@ -10557,6 +10557,14 @@ mod tests {
             Err(FrameValidationError::OperatorStatusShape)
         ));
 
+        Ok(())
+    }
+
+    /// A session with no armed record has no expiry to be past, so the two
+    /// fields cannot both speak.
+    #[test]
+    fn operator_status_rejects_a_deadline_violation_that_contradicts_itself()
+    -> Result<(), Box<dyn std::error::Error>> {
         let contradictory_deadline = ServerFrame::try_new(
             request(1)?,
             ServerMessage::OperatorStatus(Box::new(
@@ -10570,6 +10578,7 @@ mod tests {
                 )),
             )),
         );
+
         assert!(matches!(
             contradictory_deadline,
             Err(FrameValidationError::OperatorStatusShape)

@@ -93,6 +93,9 @@ async fn backdate_closure(
     sqlx::query("ALTER TABLE session_lifecycle DISABLE TRIGGER ALL")
         .execute(pool)
         .await?;
+    sqlx::query("ALTER TABLE session_ownership_event DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
     sqlx::query(
         "UPDATE session_lifecycle
             SET ended_at = ended_at - make_interval(weeks => $2)
@@ -102,6 +105,21 @@ async fn backdate_closure(
     .bind(weeks_ago)
     .execute(pool)
     .await?;
+    // The ownership the cohort reads has to move with the closure. A session
+    // whose journal still stands at today would have ended before it was ever
+    // owned, which is not a session — the cohort excludes it, correctly.
+    sqlx::query(
+        "UPDATE session_ownership_event
+            SET recorded_at = recorded_at - make_interval(weeks => $2)
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .bind(weeks_ago)
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_ownership_event ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
     sqlx::query("ALTER TABLE session_lifecycle ENABLE TRIGGER ALL")
         .execute(pool)
         .await?;
@@ -1059,4 +1077,92 @@ fn one_wall_occurrence_week(weeks: &[LifecycleWeeklyMetrics]) -> PrimitiveDateTi
         .find(|week| week.wall_occurrences() > 0)
         .expect("the fixture recorded one wall")
         .week_start()
+}
+
+/// §12's cohort is sessions "owned at any point in their life", so ownership
+/// taken after the closure is not ownership during it.
+///
+/// An adoption recorded after `ended_at` would otherwise write an already-ended
+/// session into a week that had already been reported without it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn ownership_taken_after_the_closure_joins_no_cohort() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    apply_metric_bounds(&pool, LifecycleMetricBounds::default()).await?;
+
+    let conversation = unmonitored_session(&pool, 0x1800).await?;
+    repository
+        .close(
+            conversation,
+            SessionTerminalOutcome::Abandoned,
+            LifecycleActor::Operator,
+        )
+        .await?;
+    let closed = LifecycleMetricsRepository::new(pool.clone()).read().await?;
+    assert_eq!(
+        closed
+            .weeks()
+            .iter()
+            .map(|week| week.overflow_incidence().denominator())
+            .sum::<u64>(),
+        0
+    );
+
+    adopt_by_statement(&pool, conversation).await?;
+
+    let adopted = LifecycleMetricsRepository::new(pool.clone()).read().await?;
+    assert_eq!(
+        adopted
+            .weeks()
+            .iter()
+            .map(|week| week.overflow_incidence().denominator())
+            .sum::<u64>(),
+        0
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Journals an adoption for a session that has already ended.
+///
+/// The satellite refuses this shape — terminal is final and the journal head
+/// must match the ownership bit — so the fixture writes it around those guards.
+/// What is under test is the cohort: it holds even where a path around them
+/// exists.
+async fn adopt_by_statement(pool: &PgPool, session: SessionId) -> Result<(), sqlx::Error> {
+    sqlx::query("ALTER TABLE session_ownership_event DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE session_lifecycle DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO session_ownership_event (
+             session_id, event_ordinal, transition_kind, owned_after, actor_kind
+         )
+         SELECT $1,
+                COALESCE(max(event_ordinal), 0) + 1,
+                'adopted',
+                true,
+                'operator'
+           FROM session_ownership_event
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query("UPDATE session_lifecycle SET owned = true WHERE session_id = $1")
+        .bind(session.into_uuid())
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE session_lifecycle ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE session_ownership_event ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    Ok(())
 }

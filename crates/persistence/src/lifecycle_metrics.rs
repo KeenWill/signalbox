@@ -10,7 +10,9 @@ use std::{error::Error, fmt, time::Duration};
 use signalbox_domain::SessionId;
 use sqlx::{PgPool, Row, postgres::PgRow, types::Uuid, types::time::PrimitiveDateTime};
 
-use crate::mapping::session_id_from_uuid;
+use crate::mapping::{
+    SessionLifecycleStateKind, session_id_from_uuid, session_lifecycle_state_kind_from_str,
+};
 
 /// How many weekly cohorts one report carries by default.
 ///
@@ -732,15 +734,16 @@ pub(crate) fn decode_violation(
         .transpose()
         .map_err(|_| LifecycleMetricsCorruption::Invalid("deadline expiry age"))?;
     let state_kind = row.try_get::<String, _>("state_kind")?;
-    let state = match state_kind.as_str() {
-        "created" => LifecycleNonTerminalState::Created,
-        "dispatched" => LifecycleNonTerminalState::Dispatched,
-        "active" => LifecycleNonTerminalState::Active,
-        "waiting" => LifecycleNonTerminalState::Waiting,
-        "recovering" => LifecycleNonTerminalState::Recovering,
-        "blocked" => LifecycleNonTerminalState::Blocked,
-        "parked" => LifecycleNonTerminalState::Parked,
-        _ => {
+    let state = match session_lifecycle_state_kind_from_str(&state_kind) {
+        Some(SessionLifecycleStateKind::Created) => LifecycleNonTerminalState::Created,
+        Some(SessionLifecycleStateKind::Dispatched) => LifecycleNonTerminalState::Dispatched,
+        Some(SessionLifecycleStateKind::Active) => LifecycleNonTerminalState::Active,
+        Some(SessionLifecycleStateKind::Waiting) => LifecycleNonTerminalState::Waiting,
+        Some(SessionLifecycleStateKind::Recovering) => LifecycleNonTerminalState::Recovering,
+        Some(SessionLifecycleStateKind::Blocked) => LifecycleNonTerminalState::Blocked,
+        Some(SessionLifecycleStateKind::Parked) => LifecycleNonTerminalState::Parked,
+        // A terminal session owes no deadline, so the alarm cannot name one.
+        Some(SessionLifecycleStateKind::Terminal) | None => {
             return Err(LifecycleMetricsCorruption::Invalid("session lifecycle state").into());
         }
     };

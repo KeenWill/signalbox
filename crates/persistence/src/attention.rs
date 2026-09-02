@@ -13,7 +13,9 @@ use signalbox_application::{
 use signalbox_domain::{GoalBlockedReasonKind, SessionId, TurnId};
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
-use crate::mapping::goal_blocked_reason_from_str;
+use crate::mapping::{
+    SessionLifecycleStateKind, goal_blocked_reason_from_str, session_lifecycle_state_kind_from_str,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AttentionCorruption {
@@ -819,12 +821,18 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
     let session_state = row
         .try_get::<Option<String>, _>("session_state")?
         .ok_or(AttentionCorruption::Missing("session lifecycle state"))?;
+    let session_state = session_lifecycle_state_kind_from_str(&session_state).ok_or(
+        AttentionCorruption::Unsupported {
+            field: "session lifecycle state",
+            value: session_state.clone(),
+        },
+    )?;
     let waiting = row.try_get::<Option<String>, _>("session_waiting_kind")?;
     let recovering = row.try_get::<Option<String>, _>("session_recovering_op")?;
     let state = classify_state(
         runner.as_deref(),
         SessionLifecycleProjection {
-            state: &session_state,
+            state: session_state,
             waiting: waiting.as_deref(),
             recovering: recovering.as_deref(),
         },
@@ -931,7 +939,7 @@ fn attention_action(
 /// are the same kind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SessionLifecycleProjection<'row> {
-    state: &'row str,
+    state: SessionLifecycleStateKind,
     waiting: Option<&'row str>,
     recovering: Option<&'row str>,
 }
@@ -967,18 +975,14 @@ fn classify_state(
         }
     }
     match session.state {
-        "waiting" => classify_wait(session.waiting),
-        "recovering" => classify_recovery(session.recovering),
-        "blocked" => Ok(AttentionState::Blocked),
-        "terminal" => Ok(AttentionState::Idle),
-        "created" | "dispatched" | "active" | "parked" => {
-            classify_turn_phase(turn, phase, terminal)
-        }
-        value => Err(AttentionCorruption::Unsupported {
-            field: "session lifecycle state",
-            value: value.to_owned(),
-        }
-        .into()),
+        SessionLifecycleStateKind::Waiting => classify_wait(session.waiting),
+        SessionLifecycleStateKind::Recovering => classify_recovery(session.recovering),
+        SessionLifecycleStateKind::Blocked => Ok(AttentionState::Blocked),
+        SessionLifecycleStateKind::Terminal => Ok(AttentionState::Idle),
+        SessionLifecycleStateKind::Created
+        | SessionLifecycleStateKind::Dispatched
+        | SessionLifecycleStateKind::Active
+        | SessionLifecycleStateKind::Parked => classify_turn_phase(turn, phase, terminal),
     }
 }
 
@@ -1141,7 +1145,7 @@ mod tests {
         }
     }
 
-    const fn session(state: &str) -> SessionLifecycleProjection<'_> {
+    const fn session(state: SessionLifecycleStateKind) -> SessionLifecycleProjection<'static> {
         SessionLifecycleProjection {
             state,
             waiting: None,
@@ -1151,7 +1155,7 @@ mod tests {
 
     const fn waiting(kind: &str) -> SessionLifecycleProjection<'_> {
         SessionLifecycleProjection {
-            state: "waiting",
+            state: SessionLifecycleStateKind::Waiting,
             waiting: Some(kind),
             recovering: None,
         }
@@ -1159,7 +1163,7 @@ mod tests {
 
     const fn recovering(operation: &str) -> SessionLifecycleProjection<'_> {
         SessionLifecycleProjection {
-            state: "recovering",
+            state: SessionLifecycleStateKind::Recovering,
             waiting: None,
             recovering: Some(operation),
         }
@@ -1170,7 +1174,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 None,
-                session("active"),
+                session(SessionLifecycleStateKind::Active),
                 Some("active"),
                 Some("running"),
                 None
@@ -1181,7 +1185,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 None,
-                session("active"),
+                session(SessionLifecycleStateKind::Active),
                 Some("active"),
                 Some("running"),
                 None
@@ -1355,7 +1359,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 None,
-                session("blocked"),
+                session(SessionLifecycleStateKind::Blocked),
                 Some("terminal"),
                 None,
                 Some("failed")
@@ -1373,7 +1377,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 None,
-                session("blocked"),
+                session(SessionLifecycleStateKind::Blocked),
                 Some("terminal"),
                 None,
                 Some("failed")
@@ -1386,11 +1390,25 @@ mod tests {
     #[test]
     fn queued_turn_projects_the_same_state_the_classifier_gave() {
         assert_eq!(
-            classify_state(None, session("dispatched"), Some("queued"), None, None).unwrap(),
+            classify_state(
+                None,
+                session(SessionLifecycleStateKind::Dispatched),
+                Some("queued"),
+                None,
+                None
+            )
+            .unwrap(),
             legacy_classify_state(None, None, Some("queued"), None, None).unwrap()
         );
         assert_eq!(
-            classify_state(None, session("dispatched"), Some("queued"), None, None).unwrap(),
+            classify_state(
+                None,
+                session(SessionLifecycleStateKind::Dispatched),
+                Some("queued"),
+                None,
+                None
+            )
+            .unwrap(),
             AttentionState::Queued
         );
     }
@@ -1400,7 +1418,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 None,
-                session("active"),
+                session(SessionLifecycleStateKind::Active),
                 Some("terminal"),
                 None,
                 Some("reconciliation_required")
@@ -1418,7 +1436,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 None,
-                session("active"),
+                session(SessionLifecycleStateKind::Active),
                 Some("terminal"),
                 None,
                 Some("reconciliation_required")
@@ -1433,7 +1451,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 None,
-                session("active"),
+                session(SessionLifecycleStateKind::Active),
                 Some("terminal"),
                 None,
                 Some("completed")
@@ -1442,11 +1460,25 @@ mod tests {
             legacy_classify_state(None, None, Some("terminal"), None, Some("completed")).unwrap()
         );
         assert_eq!(
-            classify_state(None, session("created"), None, None, None).unwrap(),
+            classify_state(
+                None,
+                session(SessionLifecycleStateKind::Created),
+                None,
+                None,
+                None
+            )
+            .unwrap(),
             legacy_classify_state(None, None, None, None, None).unwrap()
         );
         assert_eq!(
-            classify_state(None, session("terminal"), None, None, None).unwrap(),
+            classify_state(
+                None,
+                session(SessionLifecycleStateKind::Terminal),
+                None,
+                None,
+                None
+            )
+            .unwrap(),
             AttentionState::Idle
         );
     }
@@ -1465,7 +1497,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 None,
-                session("active"),
+                session(SessionLifecycleStateKind::Active),
                 Some("active"),
                 Some("running"),
                 None
@@ -1480,7 +1512,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 Some("runner_lost"),
-                session("active"),
+                session(SessionLifecycleStateKind::Active),
                 Some("active"),
                 Some("running"),
                 None
@@ -1491,7 +1523,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 Some("runner_lost_before_pin"),
-                session("dispatched"),
+                session(SessionLifecycleStateKind::Dispatched),
                 Some("queued"),
                 None,
                 None
@@ -1502,7 +1534,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 Some("unpinned"),
-                session("active"),
+                session(SessionLifecycleStateKind::Active),
                 Some("active"),
                 Some("running"),
                 None
@@ -1513,7 +1545,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 Some("runner_abandoned"),
-                session("created"),
+                session(SessionLifecycleStateKind::Created),
                 None,
                 None,
                 None
@@ -1524,7 +1556,7 @@ mod tests {
 
         let error = classify_state(
             Some("future_runner_state"),
-            session("created"),
+            session(SessionLifecycleStateKind::Created),
             None,
             None,
             None,
@@ -1544,7 +1576,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 None,
-                session("parked"),
+                session(SessionLifecycleStateKind::Parked),
                 Some("active"),
                 Some("awaiting_tool_approval"),
                 None
@@ -1555,7 +1587,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 None,
-                session("parked"),
+                session(SessionLifecycleStateKind::Parked),
                 Some("active"),
                 Some("running"),
                 None
@@ -1565,24 +1597,27 @@ mod tests {
         );
     }
 
+    /// The state vocabulary is closed at the decoder, so a spelling the
+    /// database does not define never reaches the projection at all.
     #[test]
     fn unsupported_session_state_fails_closed() {
-        let error = classify_state(None, session("future_state"), None, None, None)
-            .expect_err("unknown session lifecycle states must fail closed");
-
-        assert!(matches!(
-            error,
-            AttentionRepositoryError::Corruption(AttentionCorruption::Unsupported {
-                field: "session lifecycle state",
-                ..
-            })
-        ));
+        assert_eq!(session_lifecycle_state_kind_from_str("future_state"), None);
+        assert_eq!(
+            session_lifecycle_state_kind_from_str("parked"),
+            Some(SessionLifecycleStateKind::Parked)
+        );
     }
 
     #[test]
     fn wait_without_its_kind_fails_closed() {
-        let error = classify_state(None, session("waiting"), None, None, None)
-            .expect_err("a wait with no kind cannot be projected");
+        let error = classify_state(
+            None,
+            session(SessionLifecycleStateKind::Waiting),
+            None,
+            None,
+            None,
+        )
+        .expect_err("a wait with no kind cannot be projected");
 
         assert!(matches!(
             error,
@@ -1592,8 +1627,14 @@ mod tests {
 
     #[test]
     fn recovery_without_its_operation_fails_closed() {
-        let error = classify_state(None, session("recovering"), None, None, None)
-            .expect_err("a recovery with no operation cannot be projected");
+        let error = classify_state(
+            None,
+            session(SessionLifecycleStateKind::Recovering),
+            None,
+            None,
+            None,
+        )
+        .expect_err("a recovery with no operation cannot be projected");
 
         assert!(matches!(
             error,
@@ -1605,8 +1646,14 @@ mod tests {
 
     #[test]
     fn supported_turn_with_invalid_shape_reports_shape_corruption() {
-        let error = classify_state(None, session("active"), Some("active"), None, None)
-            .expect_err("a supported state with a missing phase is corrupt");
+        let error = classify_state(
+            None,
+            session(SessionLifecycleStateKind::Active),
+            Some("active"),
+            None,
+            None,
+        )
+        .expect_err("a supported state with a missing phase is corrupt");
 
         assert!(matches!(
             error,

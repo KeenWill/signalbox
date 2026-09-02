@@ -10,6 +10,7 @@
 -- carry one.
 --
 
+-- Supersedes the definition in `202609020002_session_lifecycle_satellite.sql`.
 ALTER TABLE session_lifecycle
     DROP CONSTRAINT session_lifecycle_parked_shape;
 
@@ -156,6 +157,10 @@ SELECT lifecycle.session_id,
              FROM session_ownership_event AS journal
             WHERE journal.session_id = lifecycle.session_id
               AND journal.owned_after
+              -- Owned "at any point in their life", so an adoption recorded
+              -- after the closure would write a session into a week that had
+              -- already been reported without it.
+              AND journal.recorded_at <= lifecycle.ended_at
        );
 
 --
@@ -408,6 +413,7 @@ SELECT lifecycle.session_id,
 -- every follower back for the whole catalog, which a park is not.
 --
 
+-- Supersedes the definition in `202609010013_operator_attention.sql`.
 ALTER TABLE operator_attention_change
     DROP CONSTRAINT operator_attention_change_fact_kind_check;
 
