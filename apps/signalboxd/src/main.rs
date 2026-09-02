@@ -1798,7 +1798,11 @@ async fn run_hub(
     let scan_pool = pool.clone();
     let startup = migrate_scan_then_schedule(
         async move {
-            migrate(&migration_pool).await.map_err(|_| {
+            migrate(&migration_pool).await.map_err(|error| {
+                tracing::error!(
+                    migration_detail = %error,
+                    "database migration rejected"
+                );
                 erase_startup_cause(
                     RuntimePhase::Migration,
                     SanitizedStartupCause::Static("database_migration_failed"),

@@ -2699,16 +2699,47 @@ impl RepositoryWatchTask {
     /// Reports whether it had to, because a delivery projected against a
     /// freshly seeded baseline is the accepted cross-drain gap and carries that
     /// cause on its projections.
-    async fn seed_webhook_shadow(&mut self) -> Result<bool, RepositoryWatchAttemptError> {
+    async fn seed_webhook_shadow(
+        &mut self,
+        pending: &PendingRepoWatchWebhookDelivery,
+    ) -> Result<bool, RepositoryWatchAttemptError> {
         if self.webhook_shadow.is_some() {
             return Ok(false);
         }
-        let cursor = self
+        let loaded = self
             .store
             .load_cursor(&self.repository)
             .await
-            .map_err(|_| RepositoryWatchAttemptError::Persistence)?
-            .ok_or(RepositoryWatchAttemptError::Persistence)?;
+            .map_err(|error| {
+                tracing::warn!(
+                    repository = %self.repository.as_str(),
+                    hook_id = pending.key().hook_id().get(),
+                    delivery_id = %pending.key().delivery_id(),
+                    cause_code = RepositoryWatchAttemptError::Persistence.cause_code(),
+                    cause = %error,
+                    "repository-watch webhook drain could not read the cursor its shadow seeds from"
+                );
+                RepositoryWatchAttemptError::Persistence
+            })?;
+        // Warning level and delivery-keyed, matching what repo-watch requires of
+        // an individual failure record; the one error-level record stays the
+        // drain's own first-cause summary, so an error-only sink sees one
+        // incident.
+        //
+        // A repository with no cursor row reports the same sanitized cause as a
+        // failed read, and the read itself succeeded, so the absence is the
+        // whole evidence a deferred delivery leaves behind.
+        let Some(cursor) = loaded else {
+            tracing::warn!(
+                repository = %self.repository.as_str(),
+                hook_id = pending.key().hook_id().get(),
+                delivery_id = %pending.key().delivery_id(),
+                cause_code = RepositoryWatchAttemptError::Persistence.cause_code(),
+                cause = "the repository has no durable cursor row",
+                "repository-watch webhook drain has no cursor for its shadow to seed from"
+            );
+            return Err(RepositoryWatchAttemptError::Persistence);
+        };
         self.webhook_shadow = Some(WebhookShadowBaseline::from_cursor(&cursor));
         Ok(true)
     }
@@ -2792,7 +2823,7 @@ impl RepositoryWatchTask {
             }
             RepoWatchWebhookMappingV1::Patch(patch) => {
                 let cause = self
-                    .seed_webhook_shadow()
+                    .seed_webhook_shadow(pending)
                     .await?
                     .then_some(RepoWatchWebhookParityCauseV1::CrossDrainShadowGap);
                 let Some(shadow) = self.webhook_shadow.clone() else {
