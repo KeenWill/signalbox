@@ -545,6 +545,71 @@ fn each_provider_keeps_its_own_evidence_horizon() {
     assert_eq!(openai, ReferenceResolution::Unknown);
 }
 
+/// Refreshing one record's evidence must not answer for records nobody
+/// re-checked. Haiku 4.5's rates are open-ended and its newest evidence is the
+/// earlier audit, so the launch-day Fable 5.1 sources — which lifted the
+/// Anthropic horizon to that day — leave it `Unknown` rather than reporting an
+/// unaudited rate as still current.
+#[test]
+fn an_open_record_answers_only_through_its_own_newest_retrieval() {
+    let catalog = bundled_catalog().unwrap();
+
+    let refreshed = catalog
+        .resolve(
+            Provider::Anthropic,
+            "claude-fable-5-1",
+            "2026-09-01",
+            CommercialChannel::Api,
+        )
+        .unwrap();
+    let unrefreshed = catalog
+        .resolve(
+            Provider::Anthropic,
+            "claude-haiku-4-5",
+            "2026-09-01",
+            CommercialChannel::Api,
+        )
+        .unwrap();
+    let unrefreshed_within_its_own_evidence = catalog
+        .resolve(
+            Provider::Anthropic,
+            "claude-haiku-4-5",
+            "2026-08-24",
+            CommercialChannel::Api,
+        )
+        .unwrap();
+
+    assert_eq!(
+        refreshed.resolved_model_id(),
+        Some("anthropic:claude-fable-5-1")
+    );
+    assert_eq!(unrefreshed, ReferenceResolution::Unknown);
+    assert_eq!(
+        unrefreshed_within_its_own_evidence.resolved_model_id(),
+        Some("anthropic:claude-haiku-4-5")
+    );
+}
+
+/// A record whose window states its own end asserts that end, so it keeps
+/// answering across the days it covers regardless of when its evidence was
+/// last retrieved; only an open-ended claim is bounded by its retrieval.
+#[test]
+fn a_closed_record_still_answers_after_its_evidence_was_last_retrieved() {
+    let catalog = bundled_catalog().unwrap();
+
+    let resolution = catalog
+        .resolve(
+            Provider::Openai,
+            "gpt-4-0314",
+            "2023-03-14",
+            CommercialChannel::Api,
+        )
+        .unwrap();
+    let rate_set = &resolution.price().unwrap().resolved_rate_sets().unwrap()[0];
+
+    assert_eq!(rate_set.id, "oai-gpt4-launch");
+}
+
 /// A source is admitted against its own provider's horizon, so extending one
 /// provider's horizon cannot admit another provider's unaudited retrieval.
 #[test]
