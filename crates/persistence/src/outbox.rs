@@ -87,15 +87,16 @@ const fn storage_version_for(discriminator: OutboxEventDiscriminator) -> i16 {
     }
 }
 
-type OutboxSlotRow = (
-    Decimal,
-    bool,
-    Option<Decimal>,
-    Option<String>,
-    Option<i16>,
-    Option<Uuid>,
-    Option<String>,
-);
+#[derive(sqlx::FromRow)]
+struct OutboxSlotRow {
+    allocated: Decimal,
+    event_beyond_allocated: bool,
+    stored_sequence: Option<Decimal>,
+    event_kind: Option<String>,
+    storage_version: Option<i16>,
+    stored_session: Option<Uuid>,
+    turn_disposition: Option<String>,
+}
 
 pub(crate) struct ValidatedOutboxHeader {
     /// Absent exactly for a sessionless `command_settled`.
@@ -925,7 +926,7 @@ pub(crate) async fn load_event_header(
 ) -> Result<(u64, bool, Option<ValidatedOutboxHeader>), OutboxDispatchError> {
     let row: Option<OutboxSlotRow> = sqlx::query_as(
         "SELECT
-            allocator.last_sequence,
+            allocator.last_sequence AS allocated,
             EXISTS (
                 SELECT 1
                   FROM outbox_event AS unallocated
@@ -934,11 +935,11 @@ pub(crate) async fn load_event_header(
                 SELECT 1
                   FROM delegation_outbox_event AS unallocated
                  WHERE unallocated.event_sequence > allocator.last_sequence
-            ),
-            event.event_sequence,
+            ) AS event_beyond_allocated,
+            event.event_sequence AS stored_sequence,
             event.event_kind,
             event.storage_version,
-            event.session_id,
+            event.session_id AS stored_session,
             event.turn_disposition
            FROM outbox_sequence_state AS allocator
            LEFT JOIN (
@@ -956,7 +957,7 @@ pub(crate) async fn load_event_header(
     .bind(Decimal::from(expected_sequence))
     .fetch_optional(&mut **transaction)
     .await?;
-    let Some((
+    let Some(OutboxSlotRow {
         allocated,
         event_beyond_allocated,
         stored_sequence,
@@ -964,7 +965,7 @@ pub(crate) async fn load_event_header(
         storage_version,
         stored_session,
         turn_disposition,
-    )) = row
+    }) = row
     else {
         return Err(OutboxCorruption::MissingSequenceState.into());
     };
@@ -1928,7 +1929,7 @@ async fn load_goal_changed(
     expected_sequence: u64,
     stored_session: Uuid,
 ) -> Result<DispatchedOutboxEventKind, OutboxDispatchError> {
-    let row: Option<(Decimal, Decimal, String)> = sqlx::query_as(
+    let row = sqlx::query(
         "SELECT event.event_ordinal, goal.generation, goal.event_kind
            FROM goal_changed_outbox_event AS event
            JOIN goal_event AS goal
@@ -1940,8 +1941,11 @@ async fn load_goal_changed(
     .bind(Decimal::from(expected_sequence))
     .bind(stored_session)
     .fetch_optional(&mut **transaction)
-    .await?;
-    let (event_ordinal, generation, kind) = row.ok_or(OutboxCorruption::MissingTypedRecord)?;
+    .await?
+    .ok_or(OutboxCorruption::MissingTypedRecord)?;
+    let event_ordinal: Decimal = row.try_get("event_ordinal")?;
+    let generation: Decimal = row.try_get("generation")?;
+    let kind: String = row.try_get("event_kind")?;
     Ok(DispatchedOutboxEventKind::GoalChanged(
         DispatchedGoalChange {
             event_ordinal: decode_positive_sequence(event_ordinal)
@@ -1996,7 +2000,7 @@ async fn load_command_settled(
     expected_sequence: u64,
     stored_session: Option<Uuid>,
 ) -> Result<DispatchedOutboxEventKind, OutboxDispatchError> {
-    let row: Option<(Uuid, String, Option<String>)> = sqlx::query_as(
+    let row = sqlx::query(
         "SELECT event.command_id, event.result_kind, event.rejection_kind
            FROM command_settled_outbox_event AS event
            JOIN durable_command AS command
@@ -2007,8 +2011,11 @@ async fn load_command_settled(
     .bind(Decimal::from(expected_sequence))
     .bind(stored_session)
     .fetch_optional(&mut **transaction)
-    .await?;
-    let (command, result, rejection) = row.ok_or(OutboxCorruption::MissingTypedRecord)?;
+    .await?
+    .ok_or(OutboxCorruption::MissingTypedRecord)?;
+    let command: Uuid = row.try_get("command_id")?;
+    let result: String = row.try_get("result_kind")?;
+    let rejection: Option<String> = row.try_get("rejection_kind")?;
     let result = match (result.as_str(), rejection) {
         ("applied", None) => DispatchedCommandSettlement::Applied,
         ("rejected", Some(kind)) => DispatchedCommandSettlement::Rejected { kind },
@@ -2025,7 +2032,7 @@ async fn load_injection_settled(
     expected_sequence: u64,
     stored_session: Uuid,
 ) -> Result<DispatchedOutboxEventKind, OutboxDispatchError> {
-    let row: Option<(Uuid, String, Option<String>, Option<Uuid>)> = sqlx::query_as(
+    let row = sqlx::query(
         "SELECT event.command_id, event.outcome_kind, event.rejection_kind,
                 event.delivered_turn_id
            FROM injection_settled_outbox_event AS event
@@ -2037,8 +2044,12 @@ async fn load_injection_settled(
     .bind(Decimal::from(expected_sequence))
     .bind(stored_session)
     .fetch_optional(&mut **transaction)
-    .await?;
-    let (command, outcome, rejection, turn) = row.ok_or(OutboxCorruption::MissingTypedRecord)?;
+    .await?
+    .ok_or(OutboxCorruption::MissingTypedRecord)?;
+    let command: Uuid = row.try_get("command_id")?;
+    let outcome: String = row.try_get("outcome_kind")?;
+    let rejection: Option<String> = row.try_get("rejection_kind")?;
+    let turn: Option<Uuid> = row.try_get("delivered_turn_id")?;
     let outcome = match (outcome.as_str(), rejection, turn) {
         ("delivered", None, turn) => DispatchedInjectionOutcome::Delivered {
             turn: turn.map(TurnId::from_uuid),
