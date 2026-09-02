@@ -15,6 +15,14 @@ pub(crate) fn raw_json_is_object(raw: &serde_json::value::RawValue) -> bool {
 
 // --- Request ---
 
+/// Exact request accepted by `POST /v1/messages`.
+///
+/// The struct carries no `temperature`, `top_p`, or `top_k` member and no
+/// `thinking` member. The Claude generations this adapter targets reject every
+/// sampling control with a 400, and reject an explicit thinking configuration
+/// the same way; omitting the parameter is the accepted form, so there is no
+/// field for either to travel through. Preparation refuses a caller-set
+/// sampling control before a request is built rather than dropping it here.
 #[derive(Debug, Serialize)]
 pub(crate) struct MessagesRequest {
     pub model: String,
@@ -24,10 +32,6 @@ pub(crate) struct MessagesRequest {
     pub system: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stop_sequences: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_config: Option<OutputConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -82,16 +86,18 @@ pub(crate) struct WireTool {
     pub input_schema: Box<serde_json::value::RawValue>,
 }
 
+/// The only `tool_choice` shape this adapter emits.
+///
+/// The forced shapes — `{"type":"any"}` and `{"type":"tool","name":…}` — are
+/// unrepresentable here because the current Claude generation rejects both
+/// with a 400, on `/v1/messages` and on `/v1/messages/count_tokens` alike.
+/// `disable_parallel_tool_use` remains accepted alongside `auto` and still
+/// admits at most one call, which is what the exactly-one demands below need.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 pub(crate) enum WireToolChoice {
     #[serde(rename = "auto")]
-    Auto,
-    #[serde(rename = "any")]
-    Any,
-    #[serde(rename = "tool")]
-    Tool {
-        name: String,
+    Auto {
         #[serde(skip_serializing_if = "Option::is_none")]
         disable_parallel_tool_use: Option<bool>,
     },

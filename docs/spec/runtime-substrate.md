@@ -72,7 +72,10 @@ companion pages. This page also owns the shared
 [operator failure taxonomy](#operator-failure-taxonomy) — defined in
 `crates/application` and consumed by signalboxd telemetry. The required
 model-exchange deployment policy and its unbounded spelling are verified against
-this PR (`agent/bounds-required-config-gate`).
+this PR (`agent/bounds-required-config-gate`). The Anthropic adapter's unforced
+tool choice, its instruction-carried tool demands, and its refusal of every
+sampling control are verified against this PR
+(`agent/anthropic-adapter-claude5`).
 
 ## Boundary and crate layout
 
@@ -446,15 +449,22 @@ Guarantees:
 ## Structured output and tool decode
 
 `StructuredOutputContract` (name, description, JSON Schema, generated from a
-Rust type via schemars or supplied explicitly) is realized as one forced
-tool/function proposal. The direct adapters use their native request tools. The
-Codex CLI adapter renders the contract into the stateless prompt and requires
-the final CLI agent message to satisfy an outer response schema whose one
-contract-named proposal carries the value. That is a request constraint, not a
-response guarantee: a nonconforming or malformed response can still carry zero
-or several proposals, and the provider-independent decode below is what enforces
-the exactly-one contract. Why: one decode path across adapters beats
-provider-specific output values that require caller-side transformation.
+Rust type via schemars or supplied explicitly) is realized as one tool/function
+proposal under the contract's reserved name. The direct adapters use their
+native request tools; the OpenAI adapter forces that proposal through
+`tool_choice`, while the Anthropic adapter declares the tool, sends
+`tool_choice` `auto` with parallel tool use disabled, and states the exactly-one
+demand as a model-visible instruction, because the current Claude generation
+answers a forced `tool_choice` with a 400. The Codex CLI adapter renders the
+contract into the stateless prompt and requires the final CLI agent message to
+satisfy an outer response schema whose one contract-named proposal carries the
+value. In every case that is a request constraint, not a response guarantee: a
+nonconforming or malformed response can still carry zero or several proposals,
+and the provider-independent decode below is what enforces the exactly-one
+contract. Why: one decode path across adapters beats provider-specific output
+values that require caller-side transformation, and it is what lets an adapter
+change the mechanic it asks with — as the Anthropic adapter did — without moving
+the decode.
 
 `decode_structured` and `decode_structured_json` are pure functions over
 already-delivered response parts: exactly one proposal under the contract name
@@ -608,6 +618,27 @@ errors classified by native code.
 Usage is provider-stated only, never estimated; OpenAI's cache-read count comes
 from `prompt_tokens_details.cached_tokens` and no cache-creation count is
 fabricated.
+
+The Anthropic adapter emits no sampling control and no forced tool choice. The
+Messages API removed `temperature`, `top_p`, and `top_k` from the Claude
+generations this adapter targets, so `MessagesRequest` carries no field for one
+and preparation refuses an operation whose `ModelSettings` sets temperature or
+top-p rather than dropping the value; `validate_model_settings` refuses the same
+settings at configuration time. Why: a demand the provider cannot honor is
+reported to the caller, never presented as honored. The same generation removed
+the forced `tool_choice` shapes `{"type":"any"}` and `{"type":"tool"}`, on
+`/v1/messages` and on `/v1/messages/count_tokens`, so the adapter emits only
+`{"type":"auto"}` — with `disable_parallel_tool_use` wherever at most one
+proposal is wanted — and carries the demand itself as an adapter-authored
+instruction appended after the caller's system text, which is the provider's
+documented replacement. `ToolChoice::AnyTool`, `ToolChoice::Named`, and the
+structured-output contract are therefore advisory on this adapter: this
+paragraph is their recorded capability-limited exception to the
+provider-enforced settings rule. The response shape is unchanged, so the
+provider-independent decode classifies a missing or repeated proposal exactly as
+it did when the choice was forced. The adapter emits no `thinking` object at all
+— omitting the parameter is the accepted form on every current Claude model, and
+neither `budget_tokens` nor `{"type":"disabled"}` is representable.
 
 Anthropic preflight input counting preserves the generation request's
 prompt/cache-affecting `output_config` and same-target `speed` fields. A mapped

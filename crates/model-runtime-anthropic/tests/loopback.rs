@@ -23,8 +23,8 @@ use signalbox_model_runtime::{
     ModelCapabilityCatalog, ModelCapabilityDefinition, ModelInputTokenCounter, ModelOperation,
     ModelRuntime, ModelSettings, Observation, ObservationFact, PROVIDER_JSON_NESTING_LIMIT,
     PreparationFailure, PreparationOutcome, ProviderErrorKind, ProviderRequestId, ReasoningLevel,
-    RequestedTarget, ResolvedTarget, StreamInterruption, TerminalEvidence, TerminalReport,
-    UnsentCause,
+    RequestedTarget, ResolvedTarget, StreamInterruption, StructuredOutputContract,
+    TerminalEvidence, TerminalReport, ToolCallId, ToolCallProposal, ToolName, UnsentCause,
 };
 use signalbox_model_runtime::{
     CredentialAccess, CredentialAccessError, CredentialAccessFailure, CredentialReference,
@@ -187,6 +187,98 @@ async fn prepare<A: CredentialAccess>(
             panic!("loopback preparation was defective: {defect:?}")
         }
     }
+}
+
+/// The contract every structured-output loopback test below carries.
+fn verdict_contract() -> StructuredOutputContract {
+    StructuredOutputContract {
+        name: ToolName::new("verdict"),
+        description: "The verdict.".to_string(),
+        schema: serde_json::value::to_raw_value(&serde_json::json!({"type": "object"}))
+            .expect("fixture schema serializes"),
+    }
+}
+
+/// The tool-call identity the canned contract response proposes under.
+const CONTRACT_PROPOSAL_ID: &str = "toolu_c1";
+
+/// The argument object the canned contract response proposes, spelled once so
+/// a decode assertion reads the same bytes the response carried.
+const CONTRACT_PROPOSAL_ARGUMENTS: &str = r#"{"ok": true}"#;
+
+/// A canned buffered success whose one content block is the named tool use.
+fn contract_proposal_response(name: &str) -> Vec<u8> {
+    let body = format!(
+        r#"{{
+        "id": "msg_contract_1",
+        "type": "message",
+        "role": "assistant",
+        "model": "model-exact-1",
+        "content": [{{"type": "tool_use", "id": "{CONTRACT_PROPOSAL_ID}", "name": "{name}", "input": {CONTRACT_PROPOSAL_ARGUMENTS}}}],
+        "stop_reason": "tool_use",
+        "usage": {{"input_tokens": 4, "output_tokens": 2}}
+    }}"#
+    );
+    http_response(
+        "200 OK",
+        &[("content-type", "application/json")],
+        body.as_bytes(),
+    )
+}
+
+#[tokio::test]
+async fn a_structured_output_request_never_sends_a_forced_tool_choice() {
+    let contract = verdict_contract();
+    let server =
+        CannedServer::serving(vec![contract_proposal_response(contract.name.as_str())]).await;
+    let runtime = runtime_for(&server.base_url);
+    let mut operation = operation("call-contract-shape");
+    operation.output_contract = Some(contract.clone());
+
+    let (_report, _observations) = execute(&runtime, operation, CancellationSignal::never()).await;
+
+    let requests = server.recorded_requests();
+    let request = &requests[0];
+    let json_start = request.find("\r\n\r\n").expect("request has a body") + 4;
+    let sent: serde_json::Value =
+        serde_json::from_str(&request[json_start..]).expect("request body is JSON");
+    assert_eq!(
+        sent["tool_choice"],
+        serde_json::json!({"type": "auto", "disable_parallel_tool_use": true}),
+        "the current Claude generation answers a forced tool choice with a 400"
+    );
+    assert_eq!(
+        sent["tools"][0]["name"],
+        serde_json::json!(contract.name.as_str())
+    );
+    assert_eq!(sent["temperature"], serde_json::Value::Null);
+    assert_eq!(sent["top_p"], serde_json::Value::Null);
+    assert_eq!(sent["thinking"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn a_contract_named_tool_use_still_decodes_as_the_contract_proposal() {
+    let contract = verdict_contract();
+    let server =
+        CannedServer::serving(vec![contract_proposal_response(contract.name.as_str())]).await;
+    let runtime = runtime_for(&server.base_url);
+    let mut operation = operation("call-contract-decode");
+    operation.output_contract = Some(contract.clone());
+
+    let (report, _observations) = execute(&runtime, operation, CancellationSignal::never()).await;
+
+    let TerminalEvidence::Completed(completion) = report.evidence else {
+        panic!("a canned contract proposal must classify as completed");
+    };
+    assert_eq!(
+        completion.content,
+        vec![AssistantPart::ToolCall(ToolCallProposal {
+            id: ToolCallId::new(CONTRACT_PROPOSAL_ID),
+            name: contract.name.clone(),
+            arguments_json: CONTRACT_PROPOSAL_ARGUMENTS.to_string(),
+        })],
+        "the provider-independent structured decode reads the contract-named proposal"
+    );
 }
 
 #[tokio::test]
