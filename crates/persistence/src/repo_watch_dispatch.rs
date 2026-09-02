@@ -11,7 +11,7 @@ use std::{
 use rust_decimal::Decimal;
 use signalbox_application::{
     RepoWatchDispatchTransaction, RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
-    RepoWatchSingletonKey,
+    RepoWatchSingletonKey, SubmitInputIdGenerator,
 };
 use signalbox_domain::{
     DescendantTerminationScope, DurableCommandId, FrozenAliasDefinition, GoalUserAction,
@@ -1317,6 +1317,7 @@ impl PostgresRepoWatchDispatchStore {
     pub async fn handle_repo_watch_evaluation_with_alias_resolver<SelectDefinition>(
         &self,
         evaluation: RepoWatchRuleEvaluation,
+        ids: &mut impl SubmitInputIdGenerator,
         select_definition: SelectDefinition,
     ) -> Result<RepoWatchRuleEvaluationOutcome, RepoWatchDispatchRepositoryError>
     where
@@ -1324,6 +1325,7 @@ impl PostgresRepoWatchDispatchStore {
     {
         self.handle_repo_watch_evaluation_with_admission(
             evaluation,
+            ids,
             select_definition,
             EvaluationAdmission::Fresh,
         )
@@ -1335,6 +1337,7 @@ impl PostgresRepoWatchDispatchStore {
         &self,
         obligation: crate::repo_watch_dispatch_obligation::RepoWatchDispatchObligation,
         evaluation: RepoWatchRuleEvaluation,
+        ids: &mut impl SubmitInputIdGenerator,
         select_definition: SelectDefinition,
     ) -> Result<RepoWatchRuleEvaluationOutcome, RepoWatchDispatchRepositoryError>
     where
@@ -1342,6 +1345,7 @@ impl PostgresRepoWatchDispatchStore {
     {
         self.handle_repo_watch_evaluation_with_admission(
             evaluation,
+            ids,
             select_definition,
             EvaluationAdmission::Obligation(Box::new(obligation)),
         )
@@ -1351,6 +1355,7 @@ impl PostgresRepoWatchDispatchStore {
     async fn handle_repo_watch_evaluation_with_admission<SelectDefinition>(
         &self,
         evaluation: RepoWatchRuleEvaluation,
+        ids: &mut impl SubmitInputIdGenerator,
         select_definition: SelectDefinition,
         admission: EvaluationAdmission,
     ) -> Result<RepoWatchRuleEvaluationOutcome, RepoWatchDispatchRepositoryError>
@@ -1767,6 +1772,7 @@ impl PostgresRepoWatchDispatchStore {
                         &mut transaction,
                         initial_input,
                         principal,
+                        &mut *ids,
                         select_definition,
                     )
                     .await
@@ -1864,8 +1870,9 @@ impl RepoWatchDispatchTransaction for PostgresRepoWatchDispatchStore {
     async fn handle_repo_watch_evaluation(
         &mut self,
         evaluation: RepoWatchRuleEvaluation,
+        ids: &mut (impl SubmitInputIdGenerator + Send),
     ) -> Result<RepoWatchRuleEvaluationOutcome, Self::Error> {
-        self.handle_repo_watch_evaluation_with_alias_resolver(evaluation, |_| None)
+        self.handle_repo_watch_evaluation_with_alias_resolver(evaluation, ids, |_| None)
             .await
     }
 }

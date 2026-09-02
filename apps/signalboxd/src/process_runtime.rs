@@ -9683,7 +9683,7 @@ where
         .await;
     };
     let outcome = store
-        .commission(prepared, |alias| {
+        .commission(prepared, &mut UuidV7SubmitInputIdGenerator, |alias| {
             services.model_configuration.resolve_alias(alias)
         })
         .await;
@@ -15759,8 +15759,12 @@ where
         Ok(SessionLifecycleCommandHandlingOutcome::Recorded(
             SessionLifecycleCommandResult::Applied(application),
         )) => {
-            if let SessionLifecycleApplication::ClosurePending { live_turn, .. } = application
-                && interrupt_for_closure(services, &command, live_turn)
+            if let SessionLifecycleApplication::ClosurePending {
+                live_turn,
+                defaults_version,
+                ..
+            } = application
+                && interrupt_for_closure(services, &command, live_turn, defaults_version)
                     .await
                     .is_err()
             {
@@ -15851,6 +15855,7 @@ async fn interrupt_for_closure(
     services: &ConnectionServices,
     command: &SessionLifecycleCommand,
     live_turn: TurnId,
+    expected_version: SessionConfigurationDefaultsVersion,
 ) -> Result<(), ()> {
     let session = command.session();
     let descendant_scope = match command.operation() {
@@ -15859,30 +15864,10 @@ async fn interrupt_for_closure(
         } => *descendant_scope,
         _ => DescendantTerminationScope::ParentAlone,
     };
-    let defaults_version: Option<rust_decimal::Decimal> = match sqlx::query_scalar(
-        "SELECT current_version FROM session_current_defaults WHERE session_id = $1",
-    )
-    .bind(session.into_uuid())
-    .fetch_optional(&services.pool)
-    .await
-    {
-        Ok(version) => version,
-        Err(error) => {
-            tracing::warn!(session = %session.into_uuid(), cause = %error,
-                "closure interrupt could not read the session defaults version");
-            return Err(());
-        }
-    };
-    let Some(expected_version) = defaults_version
-        .and_then(|version| u64::try_from(version).ok())
-        .and_then(SessionConfigurationDefaultsVersion::try_from_u64)
-    else {
-        return Err(());
-    };
     let Ok(content) = UserContent::try_text(String::from("The session was closed.")) else {
         return Err(());
     };
-    let request = SubmitInputRequest::try_new_with_content_limit(
+    let request = SubmitInputRequest::try_new(
         DurableCommandId::from_uuid(closure_interrupt_identity(command.command_id())),
         session,
         content,
@@ -15894,7 +15879,6 @@ async fn interrupt_for_closure(
                 ModelSelectionOverride::UseSessionDefault,
             ),
         },
-        configured_usize(&services.model_configuration, "max_message_utf8_bytes"),
     );
     let Ok(request) = request else {
         return Err(());

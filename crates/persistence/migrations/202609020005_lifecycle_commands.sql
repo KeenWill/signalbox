@@ -101,6 +101,7 @@ CREATE TABLE session_lifecycle_command (
     rejection_kind text,
     applied_effect_kind text,
     live_turn_id uuid,
+    live_defaults_version numeric(20,0),
 
     CONSTRAINT session_lifecycle_command_pkey PRIMARY KEY (command_id),
     CONSTRAINT session_lifecycle_command_kind_closed
@@ -160,6 +161,10 @@ CREATE TABLE session_lifecycle_command (
             'closed'::text, 'closure_pending'::text, 'resumed'::text, 'ownership_changed'::text
         ])))
         AND ((applied_effect_kind = 'closure_pending'::text) = (live_turn_id IS NOT NULL))
+        AND ((applied_effect_kind = 'closure_pending'::text) = (live_defaults_version IS NOT NULL))
+        AND ((live_defaults_version IS NULL)
+             OR ((live_defaults_version >= (1)::numeric)
+                 AND (live_defaults_version <= '18446744073709551615'::numeric)))
     ),
     CONSTRAINT session_lifecycle_command_rejection_closed CHECK (
         (rejection_kind IS NULL)

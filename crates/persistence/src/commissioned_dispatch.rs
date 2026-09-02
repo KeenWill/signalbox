@@ -12,6 +12,7 @@ use std::{error::Error, fmt, time::Duration};
 use rust_decimal::Decimal;
 use signalbox_application::{
     CommissionDispatchRequest, CommissionedDispatchFence, PreparedCommissionedDispatch,
+    SubmitInputIdGenerator,
 };
 use signalbox_domain::{
     CommandPrincipal, CommissionedDispatchId, DispatchingModule, DurableCommandId,
@@ -208,12 +209,13 @@ impl PostgresCommissionedDispatchStore {
     pub async fn commission<SelectDefinition>(
         &self,
         prepared: PreparedCommissionedDispatch,
+        ids: &mut impl SubmitInputIdGenerator,
         select_definition: SelectDefinition,
     ) -> Result<CommissionDispatchOutcome, CommissionedDispatchRepositoryError>
     where
         SelectDefinition: Fn(ModelAlias) -> Option<FrozenAliasDefinition> + Copy + Send,
     {
-        self.commission_with_cool_off(prepared, None, select_definition)
+        self.commission_with_cool_off(prepared, ids, None, select_definition)
             .await
     }
 
@@ -221,19 +223,21 @@ impl PostgresCommissionedDispatchStore {
     pub async fn commission_after_cool_off<SelectDefinition>(
         &self,
         prepared: PreparedCommissionedDispatch,
+        ids: &mut impl SubmitInputIdGenerator,
         cool_off: Duration,
         select_definition: SelectDefinition,
     ) -> Result<CommissionDispatchOutcome, CommissionedDispatchRepositoryError>
     where
         SelectDefinition: Fn(ModelAlias) -> Option<FrozenAliasDefinition> + Copy + Send,
     {
-        self.commission_with_cool_off(prepared, Some(cool_off), select_definition)
+        self.commission_with_cool_off(prepared, ids, Some(cool_off), select_definition)
             .await
     }
 
     async fn commission_with_cool_off<SelectDefinition>(
         &self,
         prepared: PreparedCommissionedDispatch,
+        ids: &mut impl SubmitInputIdGenerator,
         cool_off: Option<Duration>,
         select_definition: SelectDefinition,
     ) -> Result<CommissionDispatchOutcome, CommissionedDispatchRepositoryError>
@@ -353,6 +357,7 @@ impl PostgresCommissionedDispatchStore {
             &mut transaction,
             initial_input,
             principal,
+            ids,
             select_definition,
         )
         .await

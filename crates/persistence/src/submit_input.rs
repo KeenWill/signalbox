@@ -9,7 +9,7 @@ use std::{
 
 use rust_decimal::Decimal;
 use serde_json::Value;
-use signalbox_application::{SubmitInputOutcome, SubmitInputTransaction};
+use signalbox_application::{SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputTransaction};
 use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
     AcceptedInputQueuePriority, AcceptedInputSchedulingProjection,
@@ -2685,18 +2685,20 @@ pub struct FreshInitialInput {
 /// A freshly inserted session has no active turn, so submit preparation cannot
 /// apply an interrupt. The reclassification and tool-cancellation callbacks
 /// are therefore unreachable and use the reserved identities as placeholders.
-/// Core mints every lifecycle identity here (session-lifecycle §7).
+/// The four identities are drawn from the submit slice's application-owned
+/// generator under the lock (session-lifecycle §7).
 pub(crate) async fn insert_fresh_initial_input(
     connection: &mut PgConnection,
     command: SubmitInput,
     principal: CommandPrincipal,
+    ids: &mut impl SubmitInputIdGenerator,
     select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
 ) -> Result<FreshInitialInput, SubmitInputRepositoryError> {
     let minted = FreshInitialInput {
-        accepted_input: AcceptedInputId::from_uuid(uuid::Uuid::now_v7()),
-        turn: TurnId::from_uuid(uuid::Uuid::now_v7()),
-        cancellation_entry: SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7()),
-        cancellation_frontier: ContextFrontierId::from_uuid(uuid::Uuid::now_v7()),
+        accepted_input: ids.next_accepted_input_id(),
+        turn: ids.next_turn_id(),
+        cancellation_entry: ids.next_semantic_entry_id(),
+        cancellation_frontier: ids.next_context_frontier_id(),
     };
     let FreshInitialInput {
         accepted_input,

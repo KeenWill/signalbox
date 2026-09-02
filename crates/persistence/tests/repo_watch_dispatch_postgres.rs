@@ -23,8 +23,9 @@ use signalbox_application::{
     RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate, RepoWatchReviewDecision,
     RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTemplateResolver,
     RepoWatchWorkflowRunObservation, StartEligibleTurnOutcome, StartEligibleTurnService,
-    UuidV7CommissionedDispatchIdGenerator, UuidV7RepoWatchDispatchIdGenerator,
-    UuidV7StartEligibleTurnIdGenerator,
+    SubmitInputIdGenerator, UuidV7CommissionedDispatchIdGenerator,
+    UuidV7RepoWatchDispatchIdGenerator, UuidV7StartEligibleTurnIdGenerator,
+    UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
     AcceptedInputId, ActiveTurnPhase, AssistantResponsePart, BranchName,
@@ -830,6 +831,7 @@ impl RepoWatchDispatchTransaction for ObligationTransaction {
     async fn handle_repo_watch_evaluation(
         &mut self,
         evaluation: RepoWatchRuleEvaluation,
+        ids: &mut (impl SubmitInputIdGenerator + Send),
     ) -> Result<RepoWatchRuleEvaluationOutcome, Self::Error> {
         let obligation =
             self.obligation
@@ -838,7 +840,7 @@ impl RepoWatchDispatchTransaction for ObligationTransaction {
                     "test obligation transaction was reused",
                 ))?;
         self.store
-            .handle_repo_watch_obligation_with_alias_resolver(obligation, evaluation, |_| None)
+            .handle_repo_watch_obligation_with_alias_resolver(obligation, evaluation, ids, |_| None)
             .await
     }
 }
@@ -2933,7 +2935,9 @@ async fn a_released_dispatch_escalates_resumed_work_to_its_operator() -> Result<
                 provenance,
                 defaults,
             )?;
-    let ownership = commissioned.commission(competing, |_| None).await?;
+    let ownership = commissioned
+        .commission(competing, &mut UuidV7SubmitInputIdGenerator, |_| None)
+        .await?;
     let (resumed_repository, resumed_prepared, resumed_turn, _resumed_requests) =
         checkpoint_dispatched_delegated_approval(&fixture, 0x50_300).await?;
     let resumed_approvals = resumed_repository.approval_judge_repository();
@@ -8040,8 +8044,9 @@ async fn commissioned_fixture() -> Result<CommissionedFixture, Box<dyn Error>> {
             provenance,
             defaults,
         )?;
-    let CommissionDispatchOutcome::Dispatched { dispatch, session } =
-        store.commission(prepared, |_| None).await?
+    let CommissionDispatchOutcome::Dispatched { dispatch, session } = store
+        .commission(prepared, &mut UuidV7SubmitInputIdGenerator, |_| None)
+        .await?
     else {
         panic!("the fixture commission dispatches fresh")
     };
@@ -8139,7 +8144,9 @@ async fn resume_started_before_release_retains_target_ownership() -> Result<(), 
         provenance,
         defaults,
     )?;
-    let ownership = store.commission(prepared, |_| None).await?;
+    let ownership = store
+        .commission(prepared, &mut UuidV7SubmitInputIdGenerator, |_| None)
+        .await?;
 
     assert_applied_goal_transition(blocked);
     assert_applied_goal_command(resumed);
@@ -8162,7 +8169,9 @@ async fn operator_commission_observes_repository_watch_target_ownership()
         )?;
 
     assert_eq!(
-        store.commission(prepared, |_| None).await?,
+        store
+            .commission(prepared, &mut UuidV7SubmitInputIdGenerator, |_| None)
+            .await?,
         CommissionDispatchOutcome::TargetBusy {
             session: fixture.session(0),
         }
@@ -8199,7 +8208,12 @@ async fn operator_commission_observes_repository_watch_dispatch_cool_off()
                 defaults,
             )?;
     let outcome = store
-        .commission_after_cool_off(prepared, Duration::from_secs(60), |_| None)
+        .commission_after_cool_off(
+            prepared,
+            &mut UuidV7SubmitInputIdGenerator,
+            Duration::from_secs(60),
+            |_| None,
+        )
         .await?;
 
     assert_applied_goal_command(stopped);
@@ -8257,7 +8271,12 @@ async fn operator_commission_uses_repository_watch_batch_admission_for_cool_off(
         defaults,
     )?;
     let outcome = store
-        .commission_after_cool_off(prepared, Duration::from_secs(60), |_| None)
+        .commission_after_cool_off(
+            prepared,
+            &mut UuidV7SubmitInputIdGenerator,
+            Duration::from_secs(60),
+            |_| None,
+        )
         .await?;
 
     assert_applied_goal_command(stopped);
@@ -8304,7 +8323,9 @@ async fn repository_watch_session_prevents_inactivity_parking() -> Result<(), Bo
     let CommissionDispatchOutcome::Dispatched {
         session: inactive_session,
         ..
-    } = commissioned.commission(prepared, |_| None).await?
+    } = commissioned
+        .commission(prepared, &mut UuidV7SubmitInputIdGenerator, |_| None)
+        .await?
     else {
         panic!("the inactive fixture commission dispatches fresh")
     };
@@ -8601,7 +8622,10 @@ async fn repository_watch_observes_operator_commission_target_ownership()
     let CommissionDispatchOutcome::Dispatched {
         session: replacement_session,
         ..
-    } = fixture.store.commission(replacement, |_| None).await?
+    } = fixture
+        .store
+        .commission(replacement, &mut UuidV7SubmitInputIdGenerator, |_| None)
+        .await?
     else {
         panic!("the replacement commission dispatches after the blocker stops")
     };
@@ -8834,7 +8858,10 @@ async fn a_replayed_commission_returns_its_committed_session() -> Result<(), Box
             defaults,
         )?;
     assert_eq!(
-        fixture.store.commission(replay, |_| None).await?,
+        fixture
+            .store
+            .commission(replay, &mut UuidV7SubmitInputIdGenerator, |_| None)
+            .await?,
         CommissionDispatchOutcome::Replayed {
             dispatch: fixture.dispatch_id,
             session: fixture.session,
@@ -8855,7 +8882,10 @@ async fn a_replayed_commission_returns_its_committed_session() -> Result<(), Box
         defaults,
     )?;
     assert_eq!(
-        fixture.store.commission(conflicting, |_| None).await?,
+        fixture
+            .store
+            .commission(conflicting, &mut UuidV7SubmitInputIdGenerator, |_| None)
+            .await?,
         CommissionDispatchOutcome::ConflictingReuse
     );
 
@@ -8897,7 +8927,10 @@ async fn a_replayed_commission_returns_its_committed_session() -> Result<(), Box
         defaults,
     )?;
     assert_eq!(
-        fixture.store.commission(changed, |_| None).await?,
+        fixture
+            .store
+            .commission(changed, &mut UuidV7SubmitInputIdGenerator, |_| None)
+            .await?,
         CommissionDispatchOutcome::ConflictingReuse
     );
 
@@ -8956,7 +8989,10 @@ async fn a_replayed_commission_returns_its_committed_session() -> Result<(), Box
         defaults,
     )?;
     assert_eq!(
-        fixture.store.commission(reused, |_| None).await?,
+        fixture
+            .store
+            .commission(reused, &mut UuidV7SubmitInputIdGenerator, |_| None)
+            .await?,
         CommissionDispatchOutcome::ConflictingReuse
     );
 

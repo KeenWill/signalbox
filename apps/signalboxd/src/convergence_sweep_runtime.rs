@@ -14,7 +14,8 @@ use signalbox_application::{
     CommissionDispatchRequest, CommissionedDispatchFence, EligibilityNudge,
     InProcessEligibilityNudge, PullRequestCheck, PullRequestCheckState, PullRequestConvergence,
     PullRequestConvergenceBlocker, PullRequestConvergenceFacts,
-    UuidV7CommissionedDispatchIdGenerator, evaluate_pull_request_convergence,
+    UuidV7CommissionedDispatchIdGenerator, UuidV7SubmitInputIdGenerator,
+    evaluate_pull_request_convergence,
 };
 use signalbox_domain::{
     BranchName, CommitSha, DurableCommandId, GoalStatement, MergeableState, PullRequestNumber,
@@ -601,9 +602,12 @@ impl ConvergenceSweepRuntime {
         };
         match self
             .commissioned
-            .commission_after_cool_off(prepared, self.cool_off, |alias| {
-                self.models.resolve_alias(alias)
-            })
+            .commission_after_cool_off(
+                prepared,
+                &mut UuidV7SubmitInputIdGenerator,
+                self.cool_off,
+                |alias| self.models.resolve_alias(alias),
+            )
             .await
         {
             Ok(
@@ -2396,7 +2400,10 @@ mod tests {
                 )?),
             ),
         )?;
-        let outcome = runtime.commissioned.commission(prepared, |_| None).await?;
+        let outcome = runtime
+            .commissioned
+            .commission(prepared, &mut UuidV7SubmitInputIdGenerator, |_| None)
+            .await?;
         let CommissionDispatchOutcome::Dispatched { dispatch, session } = outcome else {
             panic!("a fresh fixture must dispatch: {outcome:?}");
         };

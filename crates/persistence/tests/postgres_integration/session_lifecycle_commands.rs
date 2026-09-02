@@ -473,6 +473,21 @@ async fn a_held_start_gate_keeps_the_session_created() -> Result<(), Box<dyn Err
         .await?;
 
     queue_turn(&pool, session, 10, 1).await?;
+    let activation = StartEligibleTurnRepository::new(pool.clone())
+        .handle(
+            session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(SEED + 10 + 0x700)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(SEED + 10 + 0x701)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(SEED + 10 + 0x800)),
+                TurnAttemptId::from_uuid(Uuid::from_u128(SEED + 10 + 0x900)),
+            ),
+        )
+        .await?;
+    assert!(matches!(
+        activation,
+        StartEligibleTurnOutcome::NoEligibleTurn
+    ));
 
     let lifecycle = SessionLifecycleRepository::new(pool.clone())
         .load(session)
@@ -644,6 +659,7 @@ async fn a_closure_over_a_live_turn_settles_when_the_turn_does() -> Result<(), B
         SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::ClosurePending {
             outcome,
             live_turn: live,
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
         })
     );
     assert_eq!(pending.pending_terminal(), Some(outcome));
@@ -748,6 +764,7 @@ async fn a_park_closure_settles_the_suspended_turn_through_the_interrupt_machine
         SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::ClosurePending {
             outcome: SessionTerminalOutcome::FailedUnknown,
             live_turn: parked.turn,
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
         })
     );
     assert!(matches!(

@@ -5,8 +5,9 @@
 
 use crate::{
     Actor, DescendantTerminationScope, DispatchingModule, DurableCommandId,
-    FinishConditionStatement, LifecycleActor, SessionFailureCause, SessionId,
-    SessionLifecycleState, SessionTerminalOutcome, StopStickiness, TurnId,
+    FinishConditionStatement, LifecycleActor, SessionConfigurationDefaultsVersion,
+    SessionFailureCause, SessionId, SessionLifecycleState, SessionTerminalOutcome, StopStickiness,
+    TurnId,
 };
 
 /// The principal a command envelope carries, authenticated at the boundary
@@ -223,6 +224,8 @@ pub enum SessionLifecycleApplication {
         outcome: SessionTerminalOutcome,
         /// The turn the committed interrupt machinery settles.
         live_turn: TurnId,
+        /// The defaults epoch the closure's interrupt names, fixed at closure.
+        defaults_version: SessionConfigurationDefaultsVersion,
     },
     /// The park lifted.
     Resumed {

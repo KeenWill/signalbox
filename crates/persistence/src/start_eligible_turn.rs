@@ -954,6 +954,22 @@ async fn dispatch_start_lease_is_expired(
 }
 
 /// Whether the locked session is suspended in place.
+/// A held start gate keeps a `created` session's queued input from activating
+/// until `release_start`.
+async fn session_start_gate_is_held(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<bool, StartEligibleTurnRepositoryError> {
+    let held: Option<bool> = sqlx::query_scalar(
+        "SELECT start_gate_held AND state_kind = 'created'
+           FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?;
+    Ok(held.unwrap_or(false))
+}
+
 async fn session_is_parked(
     connection: &mut PgConnection,
     session: SessionId,
@@ -1002,7 +1018,9 @@ async fn handle_in_transaction(
     // queued before the park still reaches this transaction. The satellite row
     // is already locked by the scheduler statement above, so this reads under
     // that lock rather than racing it.
-    if session_is_parked(connection, requested_session).await? {
+    if session_is_parked(connection, requested_session).await?
+        || session_start_gate_is_held(connection, requested_session).await?
+    {
         return Ok(TransactionDecision::Rollback(
             StartEligibleTurnOutcome::NoEligibleTurn,
         ));

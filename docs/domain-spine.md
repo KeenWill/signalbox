@@ -6267,7 +6267,11 @@ pub enum SessionLifecycleCommandRejection {
 
 pub enum SessionLifecycleApplication {
     Closed { outcome: SessionTerminalOutcome },
-    ClosurePending { outcome: SessionTerminalOutcome, live_turn: TurnId },
+    ClosurePending {
+        outcome: SessionTerminalOutcome,
+        live_turn: TurnId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+    },
     Resumed { state: SessionLifecycleState },
     OwnershipChanged,
 }

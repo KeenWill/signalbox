@@ -7,19 +7,22 @@
 
 use std::{error::Error, fmt};
 
+use rust_decimal::Decimal;
 use signalbox_domain::{
     CommandPrincipal, DescendantTerminationScope, DurableCommandId, LifecycleActor,
-    SessionFailureCause, SessionId, SessionLifecycleApplication, SessionLifecycleCommand,
-    SessionLifecycleCommandRejection, SessionLifecycleCommandResult, SessionLifecycleOperation,
-    SessionLifecycleState, SessionTerminalOutcome, StopStickiness, TurnId,
+    SessionConfigurationDefaultsVersion, SessionFailureCause, SessionId,
+    SessionLifecycleApplication, SessionLifecycleCommand, SessionLifecycleCommandRejection,
+    SessionLifecycleCommandResult, SessionLifecycleOperation, SessionLifecycleState,
+    SessionTerminalOutcome, StopStickiness, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
 use crate::{
     command_registry::{self, CommandKind, RegistryInspectionError, SESSION_LIFECYCLE_KIND},
     mapping::{
-        durable_command_id_to_uuid, finish_condition_columns, finish_condition_from_columns,
-        session_id_from_uuid, session_id_to_uuid, session_lifecycle_command_rejection_from_str,
+        defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_to_uuid,
+        finish_condition_columns, finish_condition_from_columns, session_id_from_uuid,
+        session_id_to_uuid, session_lifecycle_command_rejection_from_str,
         session_lifecycle_command_rejection_to_str, session_lifecycle_operation_to_str,
         session_retryable_cause_from_str, session_retryable_cause_to_str,
         session_structural_cause_from_str, session_structural_cause_to_str, turn_id_from_uuid,
@@ -396,7 +399,12 @@ async fn close(
                 connection, session, outcome, actor,
             )
             .await?;
-            Ok(SessionLifecycleApplication::ClosurePending { outcome, live_turn })
+            let defaults_version = current_defaults_version(connection, session).await?;
+            Ok(SessionLifecycleApplication::ClosurePending {
+                outcome,
+                live_turn,
+                defaults_version,
+            })
         }
         None => {
             retire_queued_turns(connection, session).await?;
@@ -404,6 +412,25 @@ async fn close(
             Ok(SessionLifecycleApplication::Closed { outcome })
         }
     }
+}
+
+/// The defaults epoch a closure's interrupt names; read under the session lock
+/// so a retry replays the same interrupt.
+async fn current_defaults_version(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<SessionConfigurationDefaultsVersion, ApplyError> {
+    let version: Option<Decimal> = sqlx::query_scalar(
+        "SELECT current_version FROM session_current_defaults WHERE session_id = $1",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?;
+    version
+        .and_then(|version| defaults_version_from_numeric(version).ok())
+        .ok_or(ApplyError::Failed(
+            SessionLifecycleCommandRepositoryError::Corruption("session defaults version"),
+        ))
 }
 
 async fn live_active_turn(
@@ -506,29 +533,34 @@ async fn insert_command_record(
             Some(session_lifecycle_command_rejection_to_str(rejection)),
         ),
     };
-    let (effect, live_turn) = match result {
+    let (effect, live_turn, defaults_version) = match result {
         SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::Closed { .. }) => {
-            (Some("closed"), None)
+            (Some("closed"), None, None)
         }
         SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::ClosurePending {
             live_turn,
+            defaults_version,
             ..
-        }) => (Some("closure_pending"), Some(turn_id_to_uuid(live_turn))),
+        }) => (
+            Some("closure_pending"),
+            Some(turn_id_to_uuid(live_turn)),
+            Some(defaults_version_to_numeric(defaults_version)),
+        ),
         SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::Resumed { .. }) => {
-            (Some("resumed"), None)
+            (Some("resumed"), None, None)
         }
         SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::OwnershipChanged) => {
-            (Some("ownership_changed"), None)
+            (Some("ownership_changed"), None, None)
         }
-        SessionLifecycleCommandResult::Rejected(_) => (None, None),
+        SessionLifecycleCommandResult::Rejected(_) => (None, None, None),
     };
     sqlx::query(
         "INSERT INTO session_lifecycle_command
             (command_id, command_kind, storage_version, session_id, operation_kind,
              stop_sticky, descendant_scope, successor_session_id, failure_cause_kind,
              finish_condition_kind, finish_condition, result_kind, rejection_kind,
-             applied_effect_kind, live_turn_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+             applied_effect_kind, live_turn_id, live_defaults_version)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(SESSION_LIFECYCLE_KIND)
@@ -545,6 +577,7 @@ async fn insert_command_record(
     .bind(rejection)
     .bind(effect)
     .bind(live_turn)
+    .bind(defaults_version)
     .execute(&mut *connection)
     .await?;
     // A rejection naming a session that does not exist settles without one.
@@ -620,12 +653,14 @@ async fn replayed_application(
         RecordedEffect::Closed => SessionLifecycleApplication::Closed {
             outcome: outcome()?,
         },
-        RecordedEffect::ClosurePending { live_turn } => {
-            SessionLifecycleApplication::ClosurePending {
-                outcome: outcome()?,
-                live_turn,
-            }
-        }
+        RecordedEffect::ClosurePending {
+            live_turn,
+            defaults_version,
+        } => SessionLifecycleApplication::ClosurePending {
+            outcome: outcome()?,
+            live_turn,
+            defaults_version,
+        },
         RecordedEffect::Resumed => SessionLifecycleApplication::Resumed {
             state: record.state(),
         },
@@ -635,7 +670,10 @@ async fn replayed_application(
 
 enum RecordedEffect {
     Closed,
-    ClosurePending { live_turn: TurnId },
+    ClosurePending {
+        live_turn: TurnId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+    },
     Resumed,
     OwnershipChanged,
 }
@@ -654,7 +692,7 @@ async fn load_recorded(
         "SELECT session_id, operation_kind, stop_sticky, descendant_scope,
                 successor_session_id, failure_cause_kind, finish_condition_kind,
                 finish_condition, result_kind, rejection_kind, applied_effect_kind,
-                live_turn_id
+                live_turn_id, live_defaults_version
            FROM session_lifecycle_command
           WHERE command_id = $1",
     )
@@ -713,6 +751,7 @@ fn decode_recorded(
     let rejection: Option<String> = row.try_get("rejection_kind")?;
     let effect: Option<String> = row.try_get("applied_effect_kind")?;
     let live_turn: Option<Uuid> = row.try_get("live_turn_id")?;
+    let defaults_version: Option<Decimal> = row.try_get("live_defaults_version")?;
     let result = match (
         result_kind.as_str(),
         rejection,
@@ -723,6 +762,9 @@ fn decode_recorded(
         ("applied", None, Some("closure_pending"), Some(live_turn)) => {
             RecordedResult::Applied(RecordedEffect::ClosurePending {
                 live_turn: turn_id_from_uuid(live_turn),
+                defaults_version: defaults_version
+                    .and_then(|version| defaults_version_from_numeric(version).ok())
+                    .ok_or(corrupt("live defaults version"))?,
             })
         }
         ("applied", None, Some("resumed"), None) => {
