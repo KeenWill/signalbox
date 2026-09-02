@@ -1385,6 +1385,12 @@ Locks per transaction, in acquisition order:
   read. Only an accepted synchronous offer advances that same row inside the
   transaction.
 
+- **Outbox pruning**: `outbox_retention_state` is locked `FOR UPDATE`, then the
+  registry floor and the window's contiguous prefix bound are read, then typed
+  records are deleted before their headers, then the same singleton advances.
+  Appending takes the allocator singleton and then the `session_timeline`
+  cursor, never the other way.
+
 - **Daemon-generation advance**: `hub_fence_state` is locked `FOR UPDATE`, then
   the transaction takes the exclusive transaction-level advisory lock for the
   prior generation, updates the singleton to its successor, and also obtains the

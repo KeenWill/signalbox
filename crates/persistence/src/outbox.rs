@@ -904,13 +904,13 @@ impl OutboxDispatcher {
 
         let updated = sqlx::query(
             "UPDATE outbox_consumer_cursor
-                SET delivered_through = $1
-              WHERE consumer_name = $3
-                AND delivered_through = $2",
+                SET delivered_through = $2
+              WHERE consumer_name = $1
+                AND delivered_through = $3",
         )
+        .bind(WIRE_CONSUMER)
         .bind(Decimal::from(next))
         .bind(Decimal::from(delivered))
-        .bind(WIRE_CONSUMER)
         .execute(&mut *transaction)
         .await?;
         if updated.rows_affected() != 1 {
