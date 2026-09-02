@@ -74,7 +74,10 @@ impl LifecycleMetricsRuntime {
     async fn export(&self) {
         match self.repository.read().await {
             Ok(report) => self.metrics.observe_lifecycle_metrics(&report),
-            Err(error) => report_pass_failure(&error),
+            Err(error) => {
+                self.metrics.invalidate_lifecycle_metrics();
+                report_pass_failure(&error);
+            }
         }
     }
 }

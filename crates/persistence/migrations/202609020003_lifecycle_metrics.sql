@@ -402,16 +402,33 @@ SELECT lifecycle.session_id,
 -- state without writing a turn, goal, runner, or metadata fact, so a client
 -- following a cursor would keep the state it last read. The mapped
 -- transitions are excluded because the turn or goal write that produced them
--- journals its own change; entering these arms every time would turn an
--- ordinary turn transition into a fleet-wide resync.
+-- journals its own change.
 --
+-- The kind is its own: `session` means the fleet's membership moved and sends
+-- every follower back for the whole catalog, which a park is not.
+--
+
+ALTER TABLE operator_attention_change
+    DROP CONSTRAINT operator_attention_change_fact_kind_check;
+
+ALTER TABLE operator_attention_change
+    ADD CONSTRAINT operator_attention_change_fact_kind_check CHECK (
+        fact_kind = ANY (ARRAY[
+            'session'::text,
+            'lifecycle'::text,
+            'turn'::text,
+            'goal'::text,
+            'approval_judge'::text,
+            'runner'::text
+        ])
+    );
 
 CREATE FUNCTION record_operator_attention_lifecycle_change() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
     INSERT INTO operator_attention_change (session_id, fact_kind)
-    VALUES (NEW.session_id, 'session');
+    VALUES (NEW.session_id, 'lifecycle');
     RETURN NULL;
 END;
 $$;

@@ -1070,6 +1070,7 @@ pub struct TelemetryMetrics {
     scheduler_oldest: Arc<Mutex<Option<SchedulerOldestInFlightPass>>>,
     lifecycle_rate_ppm: IntGaugeVec,
     lifecycle_nonterminal_past_deadline: IntGauge,
+    lifecycle_export_fresh: IntGauge,
     lifecycle_alarm_breached: IntGaugeVec,
     lifecycle_substrate_v0_gate: IntGaugeVec,
 }
@@ -1110,6 +1111,11 @@ impl TelemetryMetrics {
         let lifecycle_nonterminal_past_deadline = IntGauge::with_opts(Opts::new(
             "signalbox_sessions_nonterminal_past_deadline",
             "Owned non-terminal sessions past their armed deadline obligation; target zero.",
+        ))
+        .map_err(|_| metrics_error())?;
+        let lifecycle_export_fresh = IntGauge::with_opts(Opts::new(
+            "signalbox_session_lifecycle_export_fresh",
+            "Whether the latest lifecycle metric export succeeded; alerts gate on this.",
         ))
         .map_err(|_| metrics_error())?;
         let lifecycle_alarm_breached = IntGaugeVec::new(
@@ -1163,6 +1169,9 @@ impl TelemetryMetrics {
             .register(Box::new(lifecycle_nonterminal_past_deadline.clone()))
             .map_err(|_| metrics_error())?;
         registry
+            .register(Box::new(lifecycle_export_fresh.clone()))
+            .map_err(|_| metrics_error())?;
+        registry
             .register(Box::new(lifecycle_alarm_breached.clone()))
             .map_err(|_| metrics_error())?;
         registry
@@ -1207,6 +1216,7 @@ impl TelemetryMetrics {
             scheduler_oldest: Arc::new(Mutex::new(None)),
             lifecycle_rate_ppm,
             lifecycle_nonterminal_past_deadline,
+            lifecycle_export_fresh,
             lifecycle_alarm_breached,
             lifecycle_substrate_v0_gate,
         })
@@ -1224,6 +1234,7 @@ impl TelemetryMetrics {
         self.set_gate_series(LifecycleGateVerdict::Met, verdict);
         self.set_gate_series(LifecycleGateVerdict::NotMet, verdict);
         self.set_gate_series(LifecycleGateVerdict::Indeterminate, verdict);
+        self.lifecycle_export_fresh.set(1);
         self.set_alarm("wall_rate", report.wall_rate_breached());
         self.set_alarm(
             "failed_unknown_share",
@@ -1257,6 +1268,32 @@ impl TelemetryMetrics {
             "model_call_cause_completeness",
             report.latest_measured(LifecycleWeeklyMetrics::model_call_cause_completeness),
         );
+    }
+
+    /// Withdraws every judgement the last report supported.
+    ///
+    /// A gate verdict and an alarm are claims about now. When the read behind
+    /// them fails, leaving the series in place would keep advertising `met`
+    /// and an unbreached alarm through an outage, so they are removed rather
+    /// than held; the rates stay, since a rate is a reading of a past week.
+    /// `..._export_fresh` is what an alert gates on.
+    pub(crate) fn invalidate_lifecycle_metrics(&self) {
+        self.lifecycle_export_fresh.set(0);
+        let _ = self
+            .lifecycle_substrate_v0_gate
+            .remove_label_values(&[lifecycle_gate_label(LifecycleGateVerdict::Met)]);
+        let _ = self
+            .lifecycle_substrate_v0_gate
+            .remove_label_values(&[lifecycle_gate_label(LifecycleGateVerdict::NotMet)]);
+        let _ = self
+            .lifecycle_substrate_v0_gate
+            .remove_label_values(&[lifecycle_gate_label(LifecycleGateVerdict::Indeterminate)]);
+        let _ = self
+            .lifecycle_alarm_breached
+            .remove_label_values(&["wall_rate"]);
+        let _ = self
+            .lifecycle_alarm_breached
+            .remove_label_values(&["failed_unknown_share"]);
     }
 
     /// Publishes one configured-threshold alarm as a zero-or-one series.
