@@ -64,10 +64,8 @@ authoritative. The state algebra is:
   a later explicit attach may start another; and
 - `superseded { by_generation }` — terminal for the replaced generation, while
   its same event starts the successor; and
-- `session_closed { outcome }` — the session beneath the generation reached a
-  terminal outcome, so the generation is settled with it. Terminal in every
-  direction: no resume, no supersession, and no later commission, because the
-  session that would run one is gone.
+- `session_closed { outcome }` — the session closed beneath the generation.
+  Terminal in every direction: no resume, no supersession, no later commission.
 
 **Implemented behavior.** The closed event vocabulary is `commissioned`,
 `blocked`, `resumed`, `achieved`, `user_stopped`, `superseded`, and

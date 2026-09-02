@@ -212,6 +212,16 @@ CREATE TABLE session_lifecycle (
             = ((waiting_kind IS NOT NULL) AND (waiting_waker IS NOT NULL)))
         AND ((waiting_subject_session_id IS NULL)
              OR (waiting_kind = 'child'::text))
+        -- Each kind designates exactly one waker, so the pair is constrained
+        -- rather than merely both present.
+        AND ((waiting_kind IS NULL) OR ((waiting_kind, waiting_waker) = ANY (ARRAY[
+            ('approval'::text, 'approval_decision'::text),
+            ('external'::text, 'external_recheck'::text),
+            ('child'::text, 'child_settlement'::text),
+            ('provider_retry'::text, 'provider_backoff'::text),
+            ('pipeline'::text, 'pipeline_drain'::text),
+            ('scheduler'::text, 'scheduler_sweep'::text)
+        ])))
     ),
 
     CONSTRAINT session_lifecycle_recovering_op_closed CHECK (
@@ -328,8 +338,16 @@ CREATE TABLE session_lifecycle (
     CONSTRAINT session_lifecycle_terminal_shape CHECK (
         ((state_kind = 'terminal'::text)
             = ((ended_at IS NOT NULL) AND (terminal_outcome_kind IS NOT NULL)))
-        AND ((terminal_outcome_kind = 'stopped'::text)
-             = (terminal_stop_sticky IS NOT NULL))
+        -- Guarded against a null outcome: `NULL = 'stopped'` is NULL, and a
+        -- CHECK accepts NULL.
+        AND ((terminal_outcome_kind IS NULL)
+             OR ((terminal_outcome_kind = 'stopped'::text)
+                 = (terminal_stop_sticky IS NOT NULL)))
+        AND ((terminal_outcome_kind IS NOT NULL)
+             OR ((terminal_stop_sticky IS NULL)
+                 AND (terminal_superseded_by IS NULL)
+                 AND (terminal_cause_kind IS NULL)
+                 AND (ended_at IS NULL)))
         AND ((terminal_superseded_by IS NULL)
              OR (terminal_outcome_kind = 'superseded'::text))
         AND ((terminal_superseded_by IS NULL)
@@ -393,6 +411,10 @@ CREATE TABLE session_lifecycle (
                  = (pending_terminal_stop_sticky IS NOT NULL)))
         AND ((pending_terminal_superseded_by IS NULL)
              OR (pending_terminal_outcome_kind = 'superseded'::text))
+        -- The pending shape carries the terminal shape's rules; a handoff
+        -- settlement would reject can never be recorded.
+        AND ((pending_terminal_superseded_by IS NULL)
+             OR (pending_terminal_superseded_by <> session_id))
     ),
 
     CONSTRAINT session_lifecycle_payload_measurements_nonnegative CHECK (
@@ -409,6 +431,12 @@ ALTER TABLE ONLY session_lifecycle
 ALTER TABLE ONLY session_lifecycle
     ADD CONSTRAINT session_lifecycle_superseded_by_fkey
         FOREIGN KEY (terminal_superseded_by) REFERENCES session(session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT;
+
+-- The pending successor is checked for the same reason.
+ALTER TABLE ONLY session_lifecycle
+    ADD CONSTRAINT session_lifecycle_pending_superseded_by_fkey
+        FOREIGN KEY (pending_terminal_superseded_by) REFERENCES session(session_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT;
 
 --
@@ -514,6 +542,8 @@ CREATE TABLE session_ownership_event (
     owned_after boolean NOT NULL,
     actor_kind text NOT NULL,
     actor_module text,
+    actor_turn_id uuid,
+    actor_tool_request_id uuid,
     recorded_at timestamp with time zone DEFAULT statement_timestamp() NOT NULL,
 
     CONSTRAINT session_ownership_event_pkey
@@ -545,6 +575,10 @@ CREATE TABLE session_ownership_event (
             'repo_watch'::text,
             'commissioned_dispatch'::text
         ])))
+        -- The exact model or tool identity behind a `core` classification.
+        AND ((actor_turn_id IS NULL) OR (actor_tool_request_id IS NULL))
+        AND ((actor_kind = 'core'::text)
+             OR ((actor_turn_id IS NULL) AND (actor_tool_request_id IS NULL)))
     )
 );
 
@@ -556,6 +590,21 @@ ALTER TABLE ONLY session_ownership_event
 CREATE TRIGGER session_ownership_event_is_append_only
     BEFORE DELETE OR UPDATE ON session_ownership_event
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
+
+-- Row triggers do not fire for TRUNCATE, so append-only needs its statement
+-- guard too.
+CREATE FUNCTION reject_session_lifecycle_table_truncate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'session lifecycle history cannot be truncated'
+        USING ERRCODE = '23514';
+END;
+$$;
+
+CREATE TRIGGER session_ownership_event_truncate_is_rejected
+    BEFORE TRUNCATE ON session_ownership_event
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_session_lifecycle_table_truncate();
 
 --
 -- Guards.
@@ -602,21 +651,18 @@ CREATE TRIGGER session_lifecycle_terminal_is_final
 -- either order.
 --
 
-CREATE FUNCTION require_session_deadline_invariant() RETURNS trigger
+CREATE FUNCTION require_session_deadline_invariant_for(subject uuid) RETURNS void
     LANGUAGE plpgsql
     AS $$
 DECLARE
-    subject uuid;
     lifecycle session_lifecycle%ROWTYPE;
     armed session_deadline%ROWTYPE;
     expected text;
 BEGIN
-    subject := COALESCE(NEW.session_id, OLD.session_id);
-
     SELECT * INTO lifecycle FROM session_lifecycle WHERE session_id = subject;
     IF NOT FOUND THEN
-        -- The session-level trigger above owns the missing-satellite case.
-        RETURN NULL;
+        -- The session-level back-reference owns the missing-satellite case.
+        RETURN;
     END IF;
 
     SELECT * INTO armed FROM session_deadline WHERE session_id = subject;
@@ -630,7 +676,7 @@ BEGIN
                 CASE WHEN lifecycle.owned THEN 'owned' ELSE 'unmonitored' END
                 USING ERRCODE = '23514';
         END IF;
-        RETURN NULL;
+        RETURN;
     END IF;
 
     IF NOT FOUND THEN
@@ -657,7 +703,7 @@ BEGIN
                 armed.deadline_kind
                 USING ERRCODE = '23514';
         END IF;
-        RETURN NULL;
+        RETURN;
     END IF;
 
     IF armed.deadline_kind IS DISTINCT FROM expected THEN
@@ -666,7 +712,21 @@ BEGIN
             lifecycle.state_kind, armed.deadline_kind, expected
             USING ERRCODE = '23514';
     END IF;
+END;
+$$;
 
+CREATE FUNCTION require_session_deadline_invariant() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    -- A move between sessions leaves two sessions to check: validating only
+    -- the destination would let the source lose its required deadline.
+    IF TG_OP <> 'INSERT' THEN
+        PERFORM require_session_deadline_invariant_for(OLD.session_id);
+    END IF;
+    IF TG_OP <> 'DELETE' THEN
+        PERFORM require_session_deadline_invariant_for(NEW.session_id);
+    END IF;
     RETURN NULL;
 END;
 $$;
@@ -697,10 +757,20 @@ BEGIN
         RETURN NULL;
     END IF;
 
-    SELECT turn_id INTO live
-      FROM turn_lifecycle
-     WHERE session_id = NEW.session_id
-       AND state_kind <> 'terminal'
+    -- A queued goal turn already published as retired is not live work. The
+    -- disposition that would let it reach `terminal` lands with the event
+    -- vocabulary; requiring it here would make every closure of a dispatched
+    -- goal session impossible.
+    SELECT lifecycle.turn_id INTO live
+      FROM turn_lifecycle AS lifecycle
+     WHERE lifecycle.session_id = NEW.session_id
+       AND lifecycle.state_kind <> 'terminal'
+       AND NOT EXISTS (
+            SELECT 1
+              FROM goal_turn_retired_outbox_event AS retired
+             WHERE retired.session_id = lifecycle.session_id
+               AND retired.turn_id = lifecycle.turn_id
+       )
      LIMIT 1;
 
     IF FOUND THEN
@@ -835,6 +905,18 @@ ALTER TABLE goal_event
         OR ((event_kind = 'superseded'::text) AND (statement IS NOT NULL) AND (blocked_reason IS NULL) AND (need IS NULL) AND (guidance IS NULL) AND (report IS NULL) AND (user_command_id IS NOT NULL) AND (model_turn_id IS NULL) AND (model_tool_request_id IS NULL) AND (scheduler_turn_id IS NULL))
         OR ((event_kind = 'session_closed'::text) AND (statement IS NULL) AND (blocked_reason IS NULL) AND (need IS NULL) AND (guidance IS NULL) AND (report IS NULL) AND (user_command_id IS NULL) AND (scheduler_turn_id IS NULL) AND ((model_turn_id IS NULL) OR (model_tool_request_id IS NULL)) AND ((closure_actor_kind = 'core'::text) OR ((model_turn_id IS NULL) AND (model_tool_request_id IS NULL)))))
     );
+
+--
+-- A tool-attributed closure names a real request in its own session. The
+-- committed composite key is skipped when its turn member is null, which a
+-- tool-only actor leaves null by construction.
+--
+
+ALTER TABLE ONLY goal_event
+    ADD CONSTRAINT goal_event_closure_tool_request_fk
+        FOREIGN KEY (model_tool_request_id, session_id)
+        REFERENCES tool_request(request_id, session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT;
 
 --
 -- Deployment policy for the armed deadlines.
@@ -1014,12 +1096,13 @@ CREATE TRIGGER session_lifecycle_arms_its_deadline
 -- scheduler prefix.
 --
 
-CREATE FUNCTION project_session_lifecycle(subject uuid) RETURNS void
+CREATE FUNCTION project_session_lifecycle(subject uuid, lifts_park boolean) RETURNS void
     LANGUAGE plpgsql
     AS $$
 DECLARE
     held session_lifecycle%ROWTYPE;
     live_phase text;
+    live_turn uuid;
     live_child_request uuid;
     child uuid;
     queued boolean;
@@ -1035,12 +1118,31 @@ DECLARE
     next_blocked_cycle bigint;
 BEGIN
     SELECT * INTO held FROM session_lifecycle WHERE session_id = subject;
-    IF NOT FOUND OR held.state_kind IN ('parked', 'terminal') THEN
+    IF NOT FOUND THEN
         RETURN;
     END IF;
 
-    SELECT live.active_phase_kind, live.child_wait_request_id
-      INTO live_phase, live_child_request
+    -- Terminal is final in both directions. As a projection no-op, a later
+    -- turn or goal write would land beneath a closed session and then
+    -- activate: the deferred terminal-turn constraint fires on lifecycle
+    -- writes, and nothing re-fires it for the turn.
+    IF held.state_kind = 'terminal' THEN
+        RAISE EXCEPTION
+            'session % is terminal and admits no further turn or goal work',
+            subject
+            USING ERRCODE = '23514';
+    END IF;
+
+    -- `parked` overrides the mapping. One write lifts it, the operator's goal
+    -- resume, and the caller says so: inferring it from the lineage would let
+    -- a park taken after an earlier resume be lifted by the next unrelated
+    -- turn write.
+    IF held.state_kind = 'parked' AND NOT lifts_park THEN
+        RETURN;
+    END IF;
+
+    SELECT live.active_phase_kind, live.turn_id, live.child_wait_request_id
+      INTO live_phase, live_turn, live_child_request
       FROM turn_lifecycle AS live
      WHERE live.session_id = subject
        AND live.state_kind = 'active'
@@ -1126,15 +1228,25 @@ BEGIN
         RETURN;
     END IF;
 
+    -- A projected transition is core machinery, and the live turn is the
+    -- agency behind it; the creating actor is not.
     UPDATE session_lifecycle
        SET state_kind = next_state,
            state_entered_at = statement_timestamp(),
+           actor_kind = 'core',
+           actor_module = NULL,
+           actor_turn_id = live_turn,
+           actor_tool_request_id = NULL,
            waiting_kind = next_waiting_kind,
            waiting_waker = next_waiting_waker,
            waiting_subject_session_id = child,
            recovering_op = next_recovering_op,
            blocked_reason = next_blocked_reason,
-           blocked_cycle = next_blocked_cycle
+           blocked_cycle = next_blocked_cycle,
+           parked_cause = NULL,
+           parked_responder = NULL,
+           parked_since = NULL,
+           parked_standing_cause_kind = NULL
      WHERE session_id = subject;
 END;
 $$;
@@ -1143,7 +1255,7 @@ CREATE FUNCTION project_session_lifecycle_from_turn() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    PERFORM project_session_lifecycle(NEW.session_id);
+    PERFORM project_session_lifecycle(NEW.session_id, false);
     RETURN NULL;
 END;
 $$;
@@ -1152,7 +1264,10 @@ CREATE FUNCTION project_session_lifecycle_from_goal() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    PERFORM project_session_lifecycle(NEW.session_id);
+    PERFORM project_session_lifecycle(
+        NEW.session_id,
+        NEW.event_kind = 'resumed'
+    );
     RETURN NULL;
 END;
 $$;

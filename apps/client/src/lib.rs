@@ -3527,6 +3527,12 @@ impl GoalHistoryReplay {
                     state: GoalLifecycleState::Pursuing {},
                 }
             }
+            (Some(mut current), GoalHistoryEvent::SessionClosed { outcome, .. })
+                if generation == current.generation && goal_state_is_open(&current.state) =>
+            {
+                current.state = GoalLifecycleState::SessionClosed { outcome: *outcome };
+                current
+            }
             _ => {
                 return Err(ClientError::Protocol(
                     "goal history contained an invalid lifecycle transition",

@@ -569,6 +569,13 @@ impl QuiescentActiveTurnPage {
 /// the turn keeps its phase and nothing about it proceeds — so a watchdog that
 /// still saw it would read a deliberately held turn as a stalled one and reap
 /// exactly the work an operator is holding.
+///
+/// The ownership bit is deliberately not a second conjunct here. §6 gives an
+/// unmonitored session no watchdog, and adding `owned` would honor that
+/// literally — but it withdraws stale-turn recovery from every conversation at
+/// once, and §13 admits a new guard or fence only with a written check against
+/// the recorded safety-caused incidents. That check belongs with the change
+/// that owns watchdog posture, not with the one that introduces the bit.
 const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
             active.turn_id,
             active.current_attempt_id,
@@ -639,6 +646,13 @@ const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
 /// the turn keeps its phase and nothing about it proceeds — so a watchdog that
 /// still saw it would read a deliberately held turn as a stalled one and reap
 /// exactly the work an operator is holding.
+///
+/// The ownership bit is deliberately not a second conjunct here. §6 gives an
+/// unmonitored session no watchdog, and adding `owned` would honor that
+/// literally — but it withdraws stale-turn recovery from every conversation at
+/// once, and §13 admits a new guard or fence only with a written check against
+/// the recorded safety-caused incidents. That check belongs with the change
+/// that owns watchdog posture, not with the one that introduces the bit.
 const SLOT_HELD_ACTIVE_TURNS: &str = "SELECT active.session_id,
             active.turn_id,
             active.current_attempt_id,

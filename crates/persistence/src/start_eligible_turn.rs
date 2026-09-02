@@ -953,6 +953,20 @@ async fn dispatch_start_lease_is_expired(
         .map_err(Into::into)
 }
 
+/// Whether the locked session is suspended in place.
+async fn session_is_parked(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<bool, StartEligibleTurnRepositoryError> {
+    let parked: Option<bool> = sqlx::query_scalar(
+        "SELECT state_kind = 'parked' FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?;
+    Ok(parked.unwrap_or(false))
+}
+
 async fn handle_in_transaction(
     connection: &mut PgConnection,
     requested_session: SessionId,
@@ -984,6 +998,16 @@ async fn handle_in_transaction(
             StartEligibleTurnOutcome::NoEligibleTurn,
         ));
     }
+    // The sweep's parked exclusion is a hint filter, not an authority: a hint
+    // queued before the park still reaches this transaction. The satellite row
+    // is already locked by the scheduler statement above, so this reads under
+    // that lock rather than racing it.
+    if session_is_parked(connection, requested_session).await? {
+        return Ok(TransactionDecision::Rollback(
+            StartEligibleTurnOutcome::NoEligibleTurn,
+        ));
+    }
+
     if dispatch_start_lease_is_expired(connection, requested_session).await? {
         return Ok(TransactionDecision::Rollback(
             StartEligibleTurnOutcome::NoEligibleTurn,
