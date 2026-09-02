@@ -221,12 +221,13 @@ CREATE VIEW session_lifecycle_weekly_metric AS
 WITH wall_occurrence AS (
     -- F9's immediate half: a wall belongs to the week it happened in. §2 parks
     -- a session on a wall and suspends its turn, so the park is the evidence
-    -- and `parked_since` the instant; terminalization carries both forward. A
-    -- turn cause is the evidence for a wall that ended a turn, at that row's
-    -- write week. One session's wall is one occurrence, at the earlier of the
-    -- two.
+    -- and `parked_since` the instant; terminalization carries both forward.
+    -- The park therefore dates the occurrence wherever it exists, and a later
+    -- terminal turn naming the same wall never moves it. A turn cause is the
+    -- fallback evidence, for a wall that ended a turn without parking the
+    -- session, at that row's write week. One session's wall is one occurrence.
     SELECT session_row.session_id,
-           LEAST(
+           COALESCE(
                (SELECT lifecycle.parked_since
                   FROM session_lifecycle AS lifecycle
                  WHERE lifecycle.session_id = session_row.session_id

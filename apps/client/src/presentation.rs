@@ -1372,29 +1372,35 @@ impl<'a> Output<'a> {
                      failed_unknown={} overflow={} finish_given_overflow={} wall={} \
                      wall_occurrences={} \
                      turn_cause_completeness={} model_call_cause_completeness={}",
-                    rate_label(
-                        completion_failure_numerator.value(),
-                        completion_failure_denominator.value()
-                    ),
-                    rate_label(
-                        failed_unknown_count.value(),
-                        completion_failure_denominator.value()
-                    ),
-                    rate_label(overflow_numerator.value(), overflow_denominator.value()),
-                    rate_label(
-                        finish_given_overflow_numerator.value(),
-                        overflow_numerator.value()
-                    ),
-                    rate_label(wall_numerator.value(), wall_denominator.value()),
+                    rate_label(RateCounts {
+                        numerator: completion_failure_numerator.value(),
+                        denominator: completion_failure_denominator.value(),
+                    }),
+                    rate_label(RateCounts {
+                        numerator: failed_unknown_count.value(),
+                        denominator: completion_failure_denominator.value(),
+                    }),
+                    rate_label(RateCounts {
+                        numerator: overflow_numerator.value(),
+                        denominator: overflow_denominator.value(),
+                    }),
+                    rate_label(RateCounts {
+                        numerator: finish_given_overflow_numerator.value(),
+                        denominator: overflow_numerator.value(),
+                    }),
+                    rate_label(RateCounts {
+                        numerator: wall_numerator.value(),
+                        denominator: wall_denominator.value(),
+                    }),
                     wall_occurrence_count.value(),
-                    rate_label(
-                        classified_terminal_turn_count.value(),
-                        terminal_turn_count.value()
-                    ),
-                    rate_label(
-                        classified_known_failed_call_count.value(),
-                        known_failed_call_count.value()
-                    ),
+                    rate_label(RateCounts {
+                        numerator: classified_terminal_turn_count.value(),
+                        denominator: terminal_turn_count.value(),
+                    }),
+                    rate_label(RateCounts {
+                        numerator: classified_known_failed_call_count.value(),
+                        denominator: known_failed_call_count.value(),
+                    }),
                 )?;
                 Ok(())
             }
@@ -3040,10 +3046,21 @@ const fn operator_status_lifecycle_state_label(
     }
 }
 
+/// One metric's two counts: how much of a population the metric names.
+#[derive(Clone, Copy)]
+struct RateCounts {
+    numerator: u64,
+    denominator: u64,
+}
+
 /// Renders one metric as its exact counts beside its parts-per-million rate.
 ///
 /// An empty population prints no rate rather than a zero.
-fn rate_label(numerator: u64, denominator: u64) -> String {
+fn rate_label(counts: RateCounts) -> String {
+    let RateCounts {
+        numerator,
+        denominator,
+    } = counts;
     if denominator == 0 {
         return format!("{numerator}/0");
     }

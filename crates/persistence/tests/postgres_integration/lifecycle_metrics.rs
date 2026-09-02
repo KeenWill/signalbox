@@ -843,9 +843,11 @@ async fn a_parked_wall_is_counted_in_the_week_it_happened() -> Result<(), Box<dy
 
     let walled = owned_session(&pool, 0x1700).await?;
     let turn = activate_first_turn(&pool, walled, 0x1700).await?;
-    // The turn began a week before the wall, which is the ordinary ordering:
-    // the park instant is what dates the occurrence, not the turn's own.
-    backdate_dispatch(&pool, walled, 1).await?;
+    // The turn began two weeks before the park, which is the ordinary
+    // ordering: a turn runs, then the wall parks the session. The park instant
+    // is what dates the occurrence, so the two weeks must stay distinct for
+    // this test to say anything.
+    backdate_dispatch(&pool, walled, 2).await?;
     repository
         .park(
             walled,
@@ -861,7 +863,7 @@ async fn a_parked_wall_is_counted_in_the_week_it_happened() -> Result<(), Box<dy
             },
         )
         .await?;
-    backdate_park(&pool, walled, 2).await?;
+    backdate_park(&pool, walled, 1).await?;
 
     let parked = LifecycleMetricsRepository::new(pool.clone()).read().await?;
     let parked_week = one_wall_occurrence_week(parked.weeks());
@@ -896,6 +898,10 @@ async fn a_parked_wall_is_counted_in_the_week_it_happened() -> Result<(), Box<dy
     let closed = LifecycleMetricsRepository::new(pool.clone()).read().await?;
     let closed_week = one_wall_occurrence_week(closed.weeks());
 
+    // The settled turn now also names the wall, and its row is two weeks old
+    // against the park's one. The park still dates the occurrence: reading the
+    // earlier of the two evidences instead would move the wall backwards into
+    // the week the turn started in.
     assert_eq!(closed_week, parked_week);
     assert_eq!(
         closed
