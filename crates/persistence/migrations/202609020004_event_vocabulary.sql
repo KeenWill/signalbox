@@ -204,6 +204,13 @@ CREATE TABLE turn_terminal_outbox_event (
     terminal_frontier_id uuid,
     CONSTRAINT turn_terminal_outbox_event_pkey PRIMARY KEY (event_sequence),
     CONSTRAINT turn_terminal_outbox_event_turn_id_key UNIQUE (turn_id),
+    CONSTRAINT turn_terminal_outbox_event_model_call_id_key UNIQUE (model_call_id),
+    CONSTRAINT turn_terminal_outbox_event_tool_attempt_id_key UNIQUE (tool_attempt_id),
+    CONSTRAINT turn_terminal_outbox_event_completion_entry_id_key UNIQUE (completion_entry_id),
+    CONSTRAINT turn_terminal_outbox_event_failure_entry_id_key UNIQUE (failure_entry_id),
+    CONSTRAINT turn_terminal_outbox_event_cancellation_entry_id_key
+        UNIQUE (cancellation_entry_id),
+    CONSTRAINT turn_terminal_outbox_event_terminal_frontier_id_key UNIQUE (terminal_frontier_id),
     CONSTRAINT turn_terminal_outbox_kind_closed
         CHECK (event_kind = 'turn_terminal'::text),
     CONSTRAINT turn_terminal_outbox_version_supported
@@ -328,6 +335,7 @@ CREATE TABLE session_state_changed_outbox_event (
         AND ((state_kind = 'parked'::text)
             = ((parked_cause IS NOT NULL) AND (parked_responder IS NOT NULL)
                AND (parked_since IS NOT NULL)))
+        AND ((state_kind = 'parked'::text) OR (parked_standing_cause_kind IS NULL))
     ),
     CONSTRAINT session_state_changed_outbox_header_fk
         FOREIGN KEY (event_sequence, event_kind, storage_version, session_id)

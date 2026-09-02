@@ -1754,6 +1754,10 @@ async fn load_session_created(
                 EXISTS (
                     SELECT 1
                       FROM session
+                      JOIN session_ownership_event AS journal
+                        ON journal.session_id = session.session_id
+                       AND journal.event_ordinal = 1
+                       AND journal.owned_after = event.owned
                      WHERE session.session_id = event.session_id
                        AND session.creation_cause = event.creation_cause
                        AND session.dispatching_module
