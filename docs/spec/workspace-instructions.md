@@ -94,18 +94,25 @@ identical trees yield candidates in identical order. Entries that cannot be read
 or classified produce typed discovery findings; they do not disappear as an
 empty successful result.
 
-The greedy walk is complete only within fixed daemon safety limits. Version one
-admits at most 100,000 classified directory entries, 4,096 findings, 64 MiB of
-candidate source bytes, and 30 seconds of elapsed scan time across all roots.
-These limits are not user-configurable discovery policy. The scan records the
-limit-set version, every consumed count, and a typed `limit_reached` finding
-naming the first exhausted dimension; it then stops without presenting the
-partial inventory as complete. Registration may retain the candidates already
-found, but session creation or turn preparation that requires a complete scan
-fails closed. An incomplete discovery may be retained as append-only diagnostic
-evidence, but no turn manifest names it; a later preparation retries with a new
-scan. Product ignore rules and configurable depth policy remain deferred. The
-4,096-finding bound reserves its final slot for this terminal limit finding.
+Discovery does not descend into VCS metadata directories (`.git`, `.hg`, `.svn`,
+`.jj`), workspace descendants containing one of those directories, or
+build/dependency outputs (`target`, `node_modules`, `.venv`, `dist`, `build`). A
+skipped directory entry counts toward the classified-entry bound, but its
+contents do not.
+
+The greedy walk is complete only within fixed daemon safety limits. The
+version-two limit set admits at most 100,000 classified directory entries, 4,096
+findings, 64 MiB of candidate source bytes, and 30 seconds of elapsed scan time
+across all roots. These limits are not user-configurable discovery policy. The
+scan records the limit-set version, every consumed count, and a typed
+`limit_reached` finding naming the first exhausted dimension; it then stops
+without presenting the partial inventory as complete. Registration may retain
+the candidates already found, but session creation or turn preparation that
+requires a complete scan fails closed. An incomplete discovery may be retained
+as append-only diagnostic evidence, but no turn manifest names it; a later
+preparation retries with a new scan. Product ignore rules and configurable depth
+policy remain deferred. The 4,096-finding bound reserves its final slot for this
+terminal limit finding.
 
 One scan emits a canonical source path only once even when workspace and
 configured roots overlap; the first read fixes its source hash for that scan.

@@ -372,10 +372,7 @@ async fn inv061_turn_instruction_snapshot_is_exact() -> Result<(), Box<dyn Error
     .bind(discovery.into_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(
-        persisted_usage.limit_set_version,
-        i16::try_from(snapshot.limit_set_version()).expect("fixture limit version fits smallint")
-    );
+    assert_eq!(persisted_usage.limit_set_version, 2);
     assert_eq!(
         persisted_usage.classified_entry_count,
         i64::try_from(snapshot.classified_entries()).expect("fixture entry count fits bigint")
