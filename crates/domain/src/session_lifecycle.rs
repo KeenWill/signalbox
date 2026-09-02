@@ -272,12 +272,14 @@ pub enum SessionParkCause {
     ModulePark,
 }
 
-/// Who owns one park.
+/// Who must act on one park.
 ///
-/// §1 requires a park to name an owner. The owner is who must act: the
-/// operator, or the module whose dispatch the session serves.
+/// §1's park carries a third member beside its cause and its instant: who is
+/// being waited on. That is the operator queue, or the module whose dispatch
+/// the session serves — and nothing else, because a park nobody answers is the
+/// stuck session this state exists to make visible.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum SessionParkOwner {
+pub enum SessionParkResponder {
     /// The operator queue.
     Operator,
     /// One exact module.
@@ -510,7 +512,7 @@ pub enum SessionLifecycleState {
         /// Why the session parked.
         cause: SessionParkCause,
         /// Who must act.
-        owner: SessionParkOwner,
+        responder: SessionParkResponder,
         /// The standing failure cause a closure would carry forward.
         standing: Option<SessionFailureCause>,
     },
@@ -772,9 +774,9 @@ mod tests {
     use super::{
         CoreAgency, DispatchingModule, LifecycleActor, ModuleDispatch, SessionClosureOutcome,
         SessionDeadlineExpiry, SessionDeadlineKind, SessionLifecycleState, SessionOwnership,
-        SessionOwnershipTransition, SessionParkCause, SessionParkOwner, SessionRecoveryOperation,
-        SessionRetirementCause, SessionStructuralCause, SessionTerminalOutcome, SessionWait,
-        SessionWaitKind, SessionWaker, StopStickiness,
+        SessionOwnershipTransition, SessionParkCause, SessionParkResponder,
+        SessionRecoveryOperation, SessionRetirementCause, SessionStructuralCause,
+        SessionTerminalOutcome, SessionWait, SessionWaitKind, SessionWaker, StopStickiness,
     };
     use crate::{
         Actor, CommissionedDispatchId, GoalBlockedReasonKind, RepoWatchDispatchId, SessionId,
@@ -788,7 +790,7 @@ mod tests {
     fn parked() -> SessionLifecycleState {
         SessionLifecycleState::Parked {
             cause: SessionParkCause::StructuralFailure,
-            owner: SessionParkOwner::Operator,
+            responder: SessionParkResponder::Operator,
             standing: None,
         }
     }
@@ -919,7 +921,7 @@ mod tests {
         assert_admits(
             SessionLifecycleState::Parked {
                 cause: SessionParkCause::StructuralFailure,
-                owner: SessionParkOwner::Module {
+                responder: SessionParkResponder::Module {
                     module: DispatchingModule::RepositoryWatch,
                 },
                 standing: None,

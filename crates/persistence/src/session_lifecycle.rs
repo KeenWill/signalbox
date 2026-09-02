@@ -23,7 +23,7 @@ use std::{error::Error, fmt, time::Duration};
 use signalbox_domain::{
     CoreAgency, Goal, LifecycleActor, SessionClosureOutcome, SessionCreationCause,
     SessionFailureCause, SessionId, SessionLifecycleState, SessionOwnership,
-    SessionOwnershipTransition, SessionParkCause, SessionParkOwner, SessionTerminalOutcome,
+    SessionOwnershipTransition, SessionParkCause, SessionParkResponder, SessionTerminalOutcome,
     SessionWait, SessionWaitKind, StopStickiness,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
@@ -318,7 +318,7 @@ impl SessionLifecycleRepository {
         &self,
         session: SessionId,
         cause: SessionParkCause,
-        owner: SessionParkOwner,
+        responder: SessionParkResponder,
         standing: Option<SessionFailureCause>,
         actor: LifecycleActor,
     ) -> Result<SessionLifecycleState, SessionLifecycleRepositoryError> {
@@ -326,7 +326,7 @@ impl SessionLifecycleRepository {
         let held = load_locked(&mut transaction, session).await?;
         let parked = SessionLifecycleState::Parked {
             cause,
-            owner,
+            responder,
             standing,
         };
         write_state(&mut transaction, &held, parked, actor).await?;
@@ -713,7 +713,7 @@ async fn write_state(
                 blocked_reason = $11,
                 blocked_cycle = $12,
                 parked_cause = $13,
-                parked_owner = $14,
+                parked_responder = $14,
                 parked_since = $15,
                 parked_standing_cause_kind = $16,
                 ended_at = $17,
@@ -740,7 +740,7 @@ async fn write_state(
     .bind(encoded.blocked_reason)
     .bind(encoded.blocked_cycle)
     .bind(encoded.parked_cause)
-    .bind(encoded.parked_owner)
+    .bind(encoded.parked_responder)
     .bind(encoded.parked_since)
     .bind(encoded.parked_standing)
     .bind(encoded.ended)
@@ -780,7 +780,7 @@ async fn load_optional(
         "SELECT session_id, state_kind, owned, actor_kind, actor_module,
                 actor_turn_id, actor_tool_request_id, waiting_kind,
                 waiting_subject_session_id, recovering_op, blocked_reason,
-                blocked_cycle, parked_cause, parked_owner,
+                blocked_cycle, parked_cause, parked_responder,
                 parked_standing_cause_kind, terminal_outcome_kind,
                 terminal_cause_kind, terminal_stop_sticky,
                 terminal_superseded_by, pending_terminal_outcome_kind,
@@ -890,7 +890,7 @@ struct EncodedState {
     actor_turn: Option<Uuid>,
     actor_request: Option<Uuid>,
     parked_cause: Option<&'static str>,
-    parked_owner: Option<&'static str>,
+    parked_responder: Option<&'static str>,
     parked_since: Option<sqlx::types::time::OffsetDateTime>,
     parked_standing: Option<&'static str>,
     ended: Option<sqlx::types::time::OffsetDateTime>,
@@ -914,7 +914,7 @@ impl EncodedState {
             actor_turn,
             actor_request,
             parked_cause: None,
-            parked_owner: None,
+            parked_responder: None,
             parked_since: None,
             parked_standing: None,
             ended: None,
@@ -942,11 +942,11 @@ impl EncodedState {
             }
             SessionLifecycleState::Parked {
                 cause,
-                owner,
+                responder,
                 standing,
             } => {
                 encoded.parked_cause = Some(crate::mapping::session_park_cause_to_str(cause));
-                encoded.parked_owner = Some(park_owner_to_str(owner));
+                encoded.parked_responder = Some(park_responder_to_str(responder));
                 encoded.parked_since = Some(now);
                 encoded.parked_standing = standing.map(failure_cause_to_str);
             }
@@ -962,10 +962,10 @@ impl EncodedState {
     }
 }
 
-const fn park_owner_to_str(owner: SessionParkOwner) -> &'static str {
-    match owner {
-        SessionParkOwner::Operator => "operator",
-        SessionParkOwner::Module { module } => dispatching_module_to_str(module),
+const fn park_responder_to_str(responder: SessionParkResponder) -> &'static str {
+    match responder {
+        SessionParkResponder::Operator => "operator",
+        SessionParkResponder::Module { module } => dispatching_module_to_str(module),
     }
 }
 
@@ -1076,7 +1076,7 @@ fn decode_state(row: &PgRow) -> Result<SessionLifecycleState, SessionLifecycleRe
         "parked" => Ok(SessionLifecycleState::Parked {
             cause: session_park_cause_from_str(&required::<String>(row, "parked_cause")?)
                 .ok_or(SessionLifecycleCorruption::Inconsistent("park cause"))?,
-            owner: decode_park_owner(&required::<String>(row, "parked_owner")?)?,
+            responder: decode_park_responder(&required::<String>(row, "parked_responder")?)?,
             standing: row
                 .try_get::<Option<String>, _>("parked_standing_cause_kind")?
                 .map(|cause| decode_failure_cause(&cause))
@@ -1121,15 +1121,17 @@ fn decode_wait(
     }
 }
 
-fn decode_park_owner(owner: &str) -> Result<SessionParkOwner, SessionLifecycleRepositoryError> {
-    match owner {
-        "operator" => Ok(SessionParkOwner::Operator),
+fn decode_park_responder(
+    responder: &str,
+) -> Result<SessionParkResponder, SessionLifecycleRepositoryError> {
+    match responder {
+        "operator" => Ok(SessionParkResponder::Operator),
         module => crate::mapping::dispatching_module_from_str(module)
-            .map(|module| SessionParkOwner::Module { module })
+            .map(|module| SessionParkResponder::Module { module })
             .ok_or_else(|| {
                 SessionLifecycleCorruption::Unsupported {
-                    field: "park owner",
-                    value: String::from(owner),
+                    field: "park responder",
+                    value: String::from(responder),
                 }
                 .into()
             }),

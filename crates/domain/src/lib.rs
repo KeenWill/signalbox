@@ -286,7 +286,7 @@ pub use session_lifecycle::{
     CoreAgency, DispatchingModule, LifecycleActor, ModuleDispatch, SessionClosureOutcome,
     SessionDeadlineExpiry, SessionDeadlineKind, SessionFailureCause, SessionLifecycleState,
     SessionLifecycleTransitionError, SessionOwnership, SessionOwnershipTransition,
-    SessionParkCause, SessionParkOwner, SessionRecoveryOperation, SessionRetirementCause,
+    SessionParkCause, SessionParkResponder, SessionRecoveryOperation, SessionRetirementCause,
     SessionRetryableCause, SessionStructuralCause, SessionTerminalOutcome, SessionWait,
     SessionWaitKind, SessionWaker, StopStickiness,
 };

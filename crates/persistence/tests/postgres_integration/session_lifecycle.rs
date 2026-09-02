@@ -9,7 +9,7 @@ use crate::*;
 use signalbox_domain::{
     GoalStatement, GoalUserAction, GoalUserCommand, LifecycleActor, ModuleDispatch,
     RepoWatchDispatchId, SessionCreationProvenance, SessionFailureCause, SessionLifecycleState,
-    SessionOwnership, SessionParkCause, SessionParkOwner, SessionRetirementCause,
+    SessionOwnership, SessionParkCause, SessionParkResponder, SessionRetirementCause,
     SessionStructuralCause, SessionTerminalOutcome, StopStickiness,
 };
 use signalbox_persistence::{
@@ -149,7 +149,7 @@ async fn park_by_statement(pool: &PgPool, session: SessionId) -> Result<(), sqlx
             SET state_kind = 'parked',
                 state_entered_at = statement_timestamp(),
                 parked_cause = 'module_park',
-                parked_owner = 'repo_watch',
+                parked_responder = 'repo_watch',
                 parked_since = statement_timestamp()
           WHERE session_id = $1",
     )
@@ -485,7 +485,7 @@ async fn a_parked_session_leaves_the_liveness_scans() -> Result<(), Box<dyn Erro
         .park(
             session,
             SessionParkCause::OperatorHold,
-            SessionParkOwner::Operator,
+            SessionParkResponder::Operator,
             None,
             LifecycleActor::Operator,
         )
@@ -535,7 +535,7 @@ async fn leaving_a_park_re_enters_the_mapped_state() -> Result<(), Box<dyn Error
         .park(
             session,
             SessionParkCause::ProgressBudgetExhausted,
-            SessionParkOwner::Operator,
+            SessionParkResponder::Operator,
             None,
             LifecycleActor::Operator,
         )
@@ -832,7 +832,7 @@ async fn releasing_a_parked_session_is_rejected() -> Result<(), Box<dyn Error>> 
         .park(
             session,
             SessionParkCause::StructuralFailure,
-            SessionParkOwner::Operator,
+            SessionParkResponder::Operator,
             Some(SessionFailureCause::Structural(
                 SessionStructuralCause::BrokenToolchain,
             )),
@@ -969,7 +969,7 @@ async fn a_terminal_session_admits_no_further_transition() -> Result<(), Box<dyn
         .park(
             session,
             SessionParkCause::OperatorHold,
-            SessionParkOwner::Operator,
+            SessionParkResponder::Operator,
             None,
             LifecycleActor::Operator,
         )
@@ -1112,7 +1112,7 @@ async fn the_satellite_lock_position_survives_interleaving() -> Result<(), Box<d
             .park(
                 session,
                 SessionParkCause::OperatorHold,
-                SessionParkOwner::Operator,
+                SessionParkResponder::Operator,
                 None,
                 LifecycleActor::Operator,
             )

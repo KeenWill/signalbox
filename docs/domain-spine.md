@@ -6040,7 +6040,7 @@ pub enum SessionParkCause {
     ModulePark,
 }
 
-pub enum SessionParkOwner {
+pub enum SessionParkResponder {
     Operator,
     Module { module: DispatchingModule },
 }
@@ -6112,7 +6112,7 @@ pub enum SessionLifecycleState {
     Blocked { reason: GoalBlockedReasonKind, cycle: u64 },
     Parked {
         cause: SessionParkCause,
-        owner: SessionParkOwner,
+        responder: SessionParkResponder,
         standing: Option<SessionFailureCause>,
     },
     Terminal { outcome: SessionTerminalOutcome },

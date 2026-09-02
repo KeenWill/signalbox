@@ -113,9 +113,10 @@ CREATE TABLE session_lifecycle (
     blocked_reason text,
     blocked_cycle bigint,
 
-    -- parked{cause, owner, since}
+    -- parked{cause, responder, since}: why it parked, who is being waited on,
+    -- and since when.
     parked_cause text,
-    parked_owner text,
+    parked_responder text,
     parked_since timestamp with time zone,
     parked_standing_cause_kind text,
 
@@ -263,9 +264,9 @@ CREATE TABLE session_lifecycle (
     CONSTRAINT session_lifecycle_parked_shape CHECK (
         ((state_kind = 'parked'::text)
             = ((parked_cause IS NOT NULL)
-               AND (parked_owner IS NOT NULL)
+               AND (parked_responder IS NOT NULL)
                AND (parked_since IS NOT NULL)))
-        AND ((parked_owner IS NULL) OR (parked_owner = ANY (ARRAY[
+        AND ((parked_responder IS NULL) OR (parked_responder = ANY (ARRAY[
             'operator'::text,
             'repo_watch'::text,
             'commissioned_dispatch'::text
