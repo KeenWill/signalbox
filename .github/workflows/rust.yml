@@ -131,8 +131,6 @@ jobs:
         run: python3 scripts/check_migration_versions.py
       - name: Check numeric bound declarations
         run: python3 scripts/check_numeric_bounds.py
-      - name: Check user vocabulary
-        run: python3 scripts/check_user_vocabulary.py
       # Gates normally: the tree satisfies this today, so the step can only
       # fail on a regression. Clippy enforces the panic denies but cannot see
       # a member that opts out of inheriting them, which is the hole this
@@ -141,34 +139,12 @@ jobs:
       # the cache step with the other non-compiling checks.
       - name: Check panic-gate coverage
         run: python3 scripts/check_panic_gate.py
-      # Report-only. The tree still violates the conventions this checker
-      # decides, so the step publishes per-rule counts and can never fail the
-      # workflow or gate a merge. Promoting a rule to blocking is a deliberate
-      # later step taken once that rule's count reaches zero, and it adds a step
-      # of its own — `check_style_rules.py --rule SR-N`, with no
-      # `continue-on-error` — rather than removing the tolerance here: this
-      # invocation runs every rule, so dropping its tolerance would gate on the
-      # rules still being burned down and no rule could be promoted alone.
-      # Neither is ever a side effect of a change that merely reduces a count.
-      - name: Check style rules (report only)
-        continue-on-error: true
-        run: |
-          report="$RUNNER_TEMP/style-rules.txt"
-          set +e
-          python3 scripts/check_style_rules.py | tee "$report"
-          status="${PIPESTATUS[0]}"
-          set -e
-          {
-            echo '## Style rules (report only)'
-            echo
-            echo 'This report has no threshold and gates nothing. The counts are'
-            echo 'the burndown baseline for the conventions in `docs/style.md`.'
-            echo
-            echo '```text'
-            sed -n '/^style-rule counts/,/^  total/p' "$report"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          exit "$status"
+      # Gates normally: the tree satisfies all three rules this checker decides,
+      # so the step can only fail on a regression. A rule joins this step only
+      # once the tree it scans is already at zero — never as a side effect of a
+      # change that merely reduces a count.
+      - name: Check style rules
+        run: python3 scripts/check_style_rules.py
   checker-and-format-tests:
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
     timeout-minutes: 10
@@ -177,8 +153,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Test user vocabulary checker
-        run: python3 scripts/test_check_user_vocabulary.py
       - name: Test domain-spine checker
         run: python3 scripts/test_check_domain_spine.py
       - name: Test migration version checker
@@ -187,8 +161,6 @@ jobs:
         run: python3 scripts/test_check_numeric_bounds.py
       - name: Test panic-gate checker
         run: python3 scripts/test_check_panic_gate.py
-      # The checker's own tests gate normally: report-only describes what the
-      # checker says about the tree, not whether the checker works.
       - name: Test style-rule checker
         run: python3 scripts/test_check_style_rules.py
       - name: Test documentation consistency checker

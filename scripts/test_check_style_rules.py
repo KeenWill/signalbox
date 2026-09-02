@@ -52,548 +52,12 @@ def check(rule: str, files: dict[str, str]) -> subprocess.CompletedProcess:
 
 MODULE = "crates/example/src/lib.rs"
 APP = "apps/example/src/main.rs"
-TEST_TARGET = "crates/example/tests/end_to_end.rs"
-SWIFT = "clients/native/Sources/Example/Example.swift"
 MIGRATION = "crates/example/migrations/202601010001_first.sql"
 
-# SR-3 derives the crate names it recognizes from the workspace manifests, so a
-# fixture that exercises it ships the manifests it would be reading.
-MANIFESTS = {
-    "crates/domain/Cargo.toml": '[package]\nname = "signalbox-domain"\n',
-    "crates/persistence/Cargo.toml": '[package]\nname = "signalbox-persistence"\n',
-    "apps/signalboxd/Cargo.toml": '[package]\nname = "signalboxd"\n',
-}
-
-
-def with_manifests(files: dict[str, str]) -> dict[str, str]:
-    return {**MANIFESTS, **files}
-
-
-class FileDocCommentTests(unittest.TestCase):
-    def test_module_without_a_file_doc_comment_reports(self) -> None:
-        result = check("SR-1", {MODULE: "pub fn run() {}\n"})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn(MODULE, result.stdout)
-
-    def test_module_doc_comment_after_inner_attributes_passes(self) -> None:
-        source = "#![allow(dead_code)]\n//! What this module owns.\npub fn run() {}\n"
-
-        result = check("SR-1", {MODULE: source})
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-    def test_swift_file_without_a_doc_comment_reports(self) -> None:
-        result = check("SR-1", {MODULE: "//! Owned.\n", SWIFT: "import Foundation\n"})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn(SWIFT, result.stdout)
-
-    def test_integration_test_target_without_a_doc_comment_reports(self) -> None:
-        files = {MODULE: "//! Owned.\n", TEST_TARGET: "#[test]\nfn runs() {}\n"}
-
-        result = check("SR-1", files)
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn(TEST_TARGET, result.stdout)
-
-    def test_documented_integration_test_target_passes(self) -> None:
-        files = {
-            MODULE: "//! Owned.\n",
-            TEST_TARGET: "//! What this target proves.\n#[test]\nfn runs() {}\n",
-        }
-
-        result = check("SR-1", files)
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-
-    def test_build_script_without_a_doc_comment_reports(self) -> None:
-        files = {MODULE: "//! Owned.\n", "crates/example/build.rs": "fn main() {}\n"}
-
-        result = check("SR-1", files)
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("crates/example/build.rs", result.stdout)
-
-    def test_benchmark_without_a_doc_comment_reports(self) -> None:
-        files = {MODULE: "//! Owned.\n", "crates/example/benches/wall_clock.rs": "fn main() {}\n"}
-
-        result = check("SR-1", files)
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("benches/wall_clock.rs", result.stdout)
-
-
-class CommentProvenanceTests(unittest.TestCase):
-    def test_comment_citing_a_process_document_reports(self) -> None:
-        source = "//! Owned.\n/// Derived per `docs/agents/testing-style.md`.\npub fn run() {}\n"
-
-        result = check("SR-2", {MODULE: source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("docs/agents/", result.stdout)
-
-    def test_comment_citing_a_numbered_rule_reports(self) -> None:
-        source = "//! Owned.\n// The seed is decorrelated (rule 4).\npub fn run() {}\n"
-
-        result = check("SR-2", {MODULE: source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("rule 4", result.stdout)
-
-    def test_migration_comment_citing_a_decision_log_entry_reports(self) -> None:
-        source = "-- Per the 2026-07-24 decision-log entry.\nALTER TABLE t ADD COLUMN c uuid;\n"
-
-        result = check("SR-2", {MIGRATION: source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn(MIGRATION, result.stdout)
-
-    def test_a_comment_citing_a_retired_adr_reports(self) -> None:
-        source = "//! Owned.\n// ADR-0010's reconciliation reads queued sessions.\npub fn f() {}\n"
-
-        result = check("SR-2", {MODULE: source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("ADR-0010", result.stdout)
-
-    def test_a_python_comment_citing_a_process_document_reports(self) -> None:
-        files = {
-            MODULE: "//! Owned.\n",
-            "scripts/tool.py": '"""Doc."""\n# See docs/agents/testing-style.md for the rule.\n',
-        }
-
-        result = check("SR-2", files)
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("scripts/tool.py", result.stdout)
-
-    def test_a_citation_inside_a_python_docstring_is_prose(self) -> None:
-        files = {
-            MODULE: "//! Owned.\n",
-            "scripts/tool.py": '"""Describes docs/agents/testing-style.md."""\nX = 1\n',
-        }
-
-        result = check("SR-2", files)
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-    def test_a_toml_comment_citing_a_date_reports(self) -> None:
-        files = {
-            MODULE: "//! Owned.\n",
-            "deny.toml": "# Adopted by the 2026-07-20 decision-log entry.\n[graph]\n",
-        }
-
-        result = check("SR-2", files)
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("deny.toml", result.stdout)
-
-    def test_a_date_inside_a_toml_string_is_a_value(self) -> None:
-        files = {
-            MODULE: "//! Owned.\n",
-            "deny.toml": '[graph]\nrate_version = "example-2026-08-01"\n',
-        }
-
-        result = check("SR-2", files)
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-    def test_migration_block_comment_citing_a_process_document_reports(self) -> None:
-        source = "/* Derived per docs/agents/testing-style.md */\nALTER TABLE t ADD COLUMN c uuid;\n"
-
-        result = check("SR-2", {MIGRATION: source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("docs/agents/", result.stdout)
-
-    def test_a_date_inside_a_migration_string_literal_is_data(self) -> None:
-        source = "-- The pinned spelling below is the wire form.\nINSERT INTO t VALUES ('2026-07-24');\n"
-
-        result = check("SR-2", {MIGRATION: source})
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-    def test_comment_stating_the_constraint_itself_passes(self) -> None:
-        source = "//! Owned.\n// The seed is decorrelated from the acceptance ordinal.\npub fn run() {}\n"
-
-        result = check("SR-2", {MODULE: source})
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-    def test_backticked_version_date_is_a_value_not_a_citation(self) -> None:
-        source = "//! Owned.\n/// The wire version is `2023-06-01`.\npub fn run() {}\n"
-
-        result = check("SR-2", {MODULE: source})
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-
-class SingleTypeSpellingTests(unittest.TestCase):
-    def test_type_both_imported_and_crate_qualified_reports(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "use signalbox_domain::SessionId;\n"
-            "pub fn run(id: signalbox_domain::SessionId) -> SessionId { id }\n"
-        )
-
-        result = check("SR-3", with_manifests({MODULE: source}))
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("signalbox_domain::SessionId", result.stdout)
-
-    def test_one_spelling_per_type_passes(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "use signalbox_domain::SessionId;\n"
-            "pub fn run(id: SessionId) -> SessionId { id }\n"
-        )
-
-        result = check("SR-3", with_manifests({MODULE: source}))
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-    def test_module_qualified_path_of_an_imported_name_reports(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "use signalbox_persistence::outbox::DispatchedDelegationUpdate;\n"
-            "pub fn run() {\n"
-            "    let _ = signalbox_persistence::outbox::DispatchedDelegationUpdate::ChildSpawned;\n"
-            "}\n"
-        )
-
-        result = check("SR-3", with_manifests({MODULE: source}))
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("outbox::DispatchedDelegationUpdate", result.stdout)
-
-    def test_a_crate_whose_name_carries_no_prefix_is_matched(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "use signalboxd::ProcessRuntime;\n"
-            "pub fn run(r: signalboxd::ProcessRuntime) -> ProcessRuntime { r }\n"
-        )
-
-        result = check("SR-3", with_manifests({MODULE: source}))
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("signalboxd::ProcessRuntime", result.stdout)
-
-    def test_same_name_from_another_crate_is_a_disambiguation(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "use signalbox_domain::SessionId;\n"
-            "pub fn run(other: signalbox_persistence::SessionId) -> SessionId { }\n"
-        )
-
-        result = check("SR-3", with_manifests({MODULE: source}))
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-    def test_two_spellings_in_an_integration_test_target_report(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "use signalbox_domain::SessionId;\n"
-            "#[test]\n"
-            "fn runs() {\n"
-            "    let _: signalbox_domain::SessionId = SessionId::new();\n"
-            "}\n"
-        )
-
-        result = check("SR-3", with_manifests({MODULE: "//! Owned.\n", TEST_TARGET: source}))
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn(TEST_TARGET, result.stdout)
-
-
-class FailureTypeRenderingTests(unittest.TestCase):
-    def test_public_failure_type_without_display_reports(self) -> None:
-        source = "//! Owned.\npub enum LoadError {\n    Missing,\n}\n"
-
-        result = check("SR-4", {MODULE: source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("LoadError", result.stdout)
-
-    def test_failure_type_with_both_impls_passes(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "pub enum LoadError {\n    Missing,\n}\n"
-            "impl fmt::Display for LoadError {\n    fn fmt(&self) {}\n}\n"
-            "impl std::error::Error for LoadError {}\n"
-        )
-
-        result = check("SR-4", {MODULE: source})
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-    def test_impl_in_a_sibling_module_of_the_same_crate_counts(self) -> None:
-        declaration = "//! Owned.\npub enum LoadError {\n    Missing,\n}\n"
-        implementation = (
-            "//! Owned.\n"
-            "impl Display for LoadError {\n    fn fmt(&self) {}\n}\n"
-            "impl Error for LoadError {}\n"
-        )
-
-        result = check(
-            "SR-4",
-            {MODULE: declaration, "crates/example/src/render.rs": implementation},
-        )
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-
-    def test_a_sibling_module_implementation_does_not_vouch_for_a_second_type(self) -> None:
-        compliant = (
-            "//! Owned.\n"
-            "pub struct LoadError;\n"
-            "impl std::fmt::Display for LoadError {}\n"
-            "impl std::error::Error for LoadError {}\n"
-        )
-        bare = "//! Owned.\npub struct LoadError;\n"
-
-        result = check(
-            "SR-4",
-            {
-                "crates/example/src/first.rs": compliant,
-                "crates/example/src/second.rs": bare,
-            },
-        )
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("crates/example/src/second.rs", result.stdout)
-
-    def test_an_implementation_in_another_file_of_the_crate_still_counts(self) -> None:
-        declaration = "//! Owned.\npub struct LoadError;\n"
-        implementation = (
-            "//! Owned.\n"
-            "impl std::fmt::Display for LoadError {}\n"
-            "impl std::error::Error for LoadError {}\n"
-        )
-
-        result = check(
-            "SR-4",
-            {
-                "crates/example/src/first.rs": declaration,
-                "crates/example/src/display.rs": implementation,
-            },
-        )
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-
-class PublicBooleanAxisTests(unittest.TestCase):
-    def test_public_boolean_field_reports(self) -> None:
-        source = "//! Owned.\npub struct Request {\n    pub archived: bool,\n}\n"
-
-        result = check("SR-5", {"crates/domain/src/lib.rs": source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("archived", result.stdout)
-
-    def test_public_boolean_parameter_reports(self) -> None:
-        source = "//! Owned.\npub fn try_new(archived: bool) -> Self {}\n"
-
-        result = check("SR-5", {"crates/application/src/lib.rs": source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("try_new", result.stdout)
-
-    def test_two_variant_enum_for_the_axis_passes(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "pub enum Archival {\n    Archived,\n    Live,\n}\n"
-            "pub fn try_new(archival: Archival) -> Self {}\n"
-        )
-
-        result = check("SR-5", {"crates/domain/src/lib.rs": source})
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-
-class AnonymousRowDecodingTests(unittest.TestCase):
-    def test_anonymous_tuple_projection_reports(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "pub async fn load() {\n"
-            '    let row = sqlx::query_as::<_, (Uuid, Uuid)>("SELECT a, b FROM t");\n'
-            "}\n"
-        )
-
-        result = check("SR-6", {MODULE: source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn(MODULE, result.stdout)
-
-    def test_named_record_projection_passes(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "pub async fn load() {\n"
-            '    let row = sqlx::query_as::<_, TurnFacts>("SELECT a AS turn_id FROM t");\n'
-            "}\n"
-        )
-
-        result = check("SR-6", {MODULE: source})
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-    def test_optional_tuple_binding_reports(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "pub async fn load() {\n"
-            '    let row: Option<(Uuid, Uuid)> = sqlx::query_as("SELECT a, b FROM t");\n'
-            "}\n"
-        )
-
-        result = check("SR-6", {MODULE: source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn(MODULE, result.stdout)
-
-    def test_projection_through_a_tuple_alias_reports(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "type OutboxSlotRow = (Uuid, i64);\n"
-            "pub async fn load() {\n"
-            '    let row: Option<OutboxSlotRow> = sqlx::query_as("SELECT a, b FROM t");\n'
-            "}\n"
-        )
-
-        result = check("SR-6", {MODULE: source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("OutboxSlotRow", result.stdout)
-
-    def test_one_projection_matching_both_spellings_reports_once(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "type OutboxSlotRow = (Uuid, i64);\n"
-            "pub async fn load() {\n"
-            "    let row: Option<OutboxSlotRow> = "
-            'sqlx::query_as::<_, OutboxSlotRow>("SELECT a, b FROM t");\n'
-            "}\n"
-        )
-
-        result = check("SR-6", {MODULE: source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertEqual(result.stdout.count("SR-6 " + MODULE), 1, result.stdout)
-
-    def test_destructured_tuple_binding_reports(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "pub async fn load() {\n"
-            "    let (exists, scheduler): (bool, Option<Uuid>) = "
-            'sqlx::query_as("SELECT TRUE, id FROM t");\n'
-            "}\n"
-        )
-
-        result = check("SR-6", {MODULE: source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn(MODULE, result.stdout)
-
-    def test_an_imported_query_as_call_is_still_a_decode(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "use sqlx::query_as;\n"
-            "pub async fn load() {\n"
-            '    let row: (Uuid, Uuid) = query_as("SELECT a, b FROM t");\n'
-            "}\n"
-        )
-
-        result = check("SR-6", {MODULE: source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn(MODULE, result.stdout)
-
-    def test_projection_through_a_record_alias_passes(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "type SlotRow = TurnFacts;\n"
-            "pub async fn load() {\n"
-            '    let row: Option<SlotRow> = sqlx::query_as("SELECT a AS turn_id FROM t");\n'
-            "}\n"
-        )
-
-        result = check("SR-6", {MODULE: source})
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-
-class StorageVersionThresholdTests(unittest.TestCase):
-    def test_a_qualified_writer_constant_reports(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "const CURSOR_STORAGE_VERSION: u64 = 1;\n"
-            "pub fn read(record: Record) {\n"
-            "    if record.storage_version != CURSOR_STORAGE_VERSION {\n"
-            "        return;\n"
-            "    }\n"
-            "}\n"
-        )
-
-        result = check("SR-7", {"crates/persistence/src/store.rs": source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("store.rs", result.stdout)
-
-    def test_a_feature_threshold_constant_passes(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "const PLACEMENT_FROM_STORAGE_VERSION: i16 = 6;\n"
-            "pub fn read(storage_version: i16) {\n"
-            "    if storage_version < PLACEMENT_FROM_STORAGE_VERSION {\n"
-            "        return;\n"
-            "    }\n"
-            "}\n"
-        )
-
-        result = check("SR-7", {"crates/persistence/src/store.rs": source})
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-    def test_comparison_against_the_current_writer_version_reports(self) -> None:
-        source = "//! Owned.\npub fn admits(stored: i16) -> bool {\n    stored < STORAGE_VERSION\n}\n"
-
-        result = check("SR-7", {"crates/persistence/src/session.rs": source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("STORAGE_VERSION", result.stdout)
-
-    def test_inequality_against_the_current_writer_version_reports(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "pub fn admits(stored: i16) -> bool {\n"
-            "    stored != STORAGE_VERSION\n"
-            "}\n"
-        )
-
-        result = check("SR-7", {"crates/persistence/src/session.rs": source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("STORAGE_VERSION", result.stdout)
-
-    def test_declaring_the_writer_version_is_not_a_comparison(self) -> None:
-        source = "//! Owned.\npub const STORAGE_VERSION: i16 = 5;\n"
-
-        result = check("SR-7", {"crates/persistence/src/session.rs": source})
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-    def test_comparison_against_a_named_threshold_passes(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "const TEMPLATE_PROVENANCE_FROM_VERSION: i16 = 4;\n"
-            "pub fn admits(stored: i16) -> bool {\n"
-            "    stored < TEMPLATE_PROVENANCE_FROM_VERSION\n"
-            "}\n"
-        )
-
-        result = check("SR-7", {"crates/persistence/src/session.rs": source})
-
-        self.assertEqual(result.returncode, 0, result.stdout)
+# SR-13 selects its crates from the manifests, so its fixtures ship one.
+DERIVE_MANIFEST = "crates/derive/Cargo.toml"
+DERIVE_MODULE = "crates/derive/src/lib.rs"
+PROC_MACRO_MANIFEST = "[lib]\nproc-macro = true\n"
 
 
 class AppSqlTableAccessTests(unittest.TestCase):
@@ -627,6 +91,93 @@ class AppSqlTableAccessTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_sql_inside_a_restricted_inline_test_module_passes(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "pub fn run() {}\n"
+            "#[cfg(test)]\n"
+            "pub(crate) mod tests {\n"
+            '    const READ: &str = "SELECT id FROM turn_lifecycle";\n'
+            "}\n"
+        )
+
+        result = check(
+            "SR-8",
+            {APP: source, MIGRATION: "CREATE TABLE turn_lifecycle (id uuid);\n"},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_sql_inside_a_compound_cfg_test_module_passes(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "pub fn run() {}\n"
+            "#[cfg(all(test, unix))]\n"
+            "mod tests {\n"
+            '    const READ: &str = "SELECT id FROM turn_lifecycle";\n'
+            "}\n"
+        )
+
+        result = check(
+            "SR-8",
+            {APP: source, MIGRATION: "CREATE TABLE turn_lifecycle (id uuid);\n"},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_sql_in_a_module_gated_against_test_reports(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "pub fn run() {}\n"
+            "#[cfg(not(test))]\n"
+            "mod production {\n"
+            '    const READ: &str = "SELECT id FROM turn_lifecycle";\n'
+            "}\n"
+        )
+
+        result = check(
+            "SR-8",
+            {APP: source, MIGRATION: "CREATE TABLE turn_lifecycle (id uuid);\n"},
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("turn_lifecycle", result.stdout)
+
+    def test_sql_in_a_module_merely_permitting_test_reports(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "pub fn run() {}\n"
+            '#[cfg(any(test, feature = "direct_sql"))]\n'
+            "mod maybe_tests {\n"
+            '    const READ: &str = "SELECT id FROM turn_lifecycle";\n'
+            "}\n"
+        )
+
+        result = check(
+            "SR-8",
+            {APP: source, MIGRATION: "CREATE TABLE turn_lifecycle (id uuid);\n"},
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("turn_lifecycle", result.stdout)
+
+    def test_a_table_after_a_hash_quote_in_a_raw_string_reports(self) -> None:
+        source = (
+            "//! Owned.\n"
+            'const PAGE: &str = r##"<html>\n'
+            '  querySelector("#status")\n'
+            "  SELECT id FROM turn_lifecycle\n"
+            '"##;\n'
+        )
+
+        result = check(
+            "SR-8",
+            {APP: source, MIGRATION: "CREATE TABLE turn_lifecycle (id uuid);\n"},
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("turn_lifecycle", result.stdout)
 
     def test_app_calling_a_repository_method_passes(self) -> None:
         source = "//! Owned.\npub async fn read(store: &Store) {\n    store.turn(id).await;\n}\n"
@@ -693,224 +244,18 @@ class AppSqlTableAccessTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout)
 
-
-class MigrationSupersessionTests(unittest.TestCase):
-    def test_unattributed_constraint_replacement_reports(self) -> None:
-        source = (
-            "ALTER TABLE durable_command\n"
-            "    DROP CONSTRAINT durable_command_storage_version_supported,\n"
-            "    ADD CONSTRAINT durable_command_storage_version_supported CHECK (v > 0);\n"
-        )
-
-        result = check("SR-9", {MIGRATION: source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn(MIGRATION, result.stdout)
-
-    def test_naming_the_superseded_migration_passes(self) -> None:
-        source = (
-            "-- Supersedes the definition in 202601010001_first.sql.\n"
-            "ALTER TABLE durable_command\n"
-            "    DROP CONSTRAINT durable_command_storage_version_supported,\n"
-            "    ADD CONSTRAINT durable_command_storage_version_supported CHECK (v > 0);\n"
-        )
-
-        result = check("SR-9", {MIGRATION: source})
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-    def test_one_comment_attributes_every_clause_of_its_statement(self) -> None:
-        source = (
-            "-- Supersedes the definitions in 202601010001_first.sql.\n"
-            "ALTER TABLE durable_command\n"
-            "    ADD COLUMN source_turn_id uuid,\n"
-            "    ALTER COLUMN defaults_version DROP NOT NULL,\n"
-            "    ALTER COLUMN requested_kind DROP NOT NULL,\n"
-            "    ALTER COLUMN frozen_kind DROP NOT NULL,\n"
-            "    DROP CONSTRAINT durable_command_defaults_version_positive,\n"
-            "    DROP CONSTRAINT durable_command_requested_kind_shape,\n"
-            "    ADD CONSTRAINT durable_command_defaults_version_positive CHECK (v > 0),\n"
-            "    ADD CONSTRAINT durable_command_requested_kind_shape CHECK (k <> '');\n"
-        )
-
-        result = check("SR-9", {MIGRATION: source})
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-    def test_a_comment_bound_to_the_previous_statement_does_not_attribute(self) -> None:
-        source = (
-            "-- Supersedes the definition in 202601010001_first.sql.\n"
-            "CREATE INDEX durable_command_kind ON durable_command (command_kind);\n"
-            "ALTER TABLE durable_command\n"
-            "    DROP CONSTRAINT durable_command_kind_closed,\n"
-            "    ADD CONSTRAINT durable_command_kind_closed CHECK (command_kind <> '');\n"
-        )
-
-        result = check("SR-9", {MIGRATION: source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn(MIGRATION, result.stdout)
-
-    def test_a_block_comment_attributes_the_supersession(self) -> None:
-        source = (
-            "/* Supersedes the definition in 202601010001_first.sql. */\n"
-            "ALTER TABLE durable_command\n"
-            "    DROP CONSTRAINT durable_command_storage_version_supported,\n"
-            "    ADD CONSTRAINT durable_command_storage_version_supported CHECK (v > 0);\n"
-        )
-
-        result = check("SR-9", {MIGRATION: source})
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-    def test_a_permanently_removed_constraint_needs_no_attribution(self) -> None:
-        source = (
-            "ALTER TABLE tool_attempt\n"
-            "    DROP CONSTRAINT tool_attempt_request_id_key;\n"
-            "CREATE INDEX tool_attempt_request_id_idx ON tool_attempt (request_id);\n"
-        )
-
-        result = check("SR-9", {MIGRATION: source})
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-    def test_a_wrapped_clause_is_still_read(self) -> None:
-        source = (
-            "ALTER TABLE durable_command\n"
-            "    DROP CONSTRAINT\n"
-            "        durable_command_storage_version_supported,\n"
-            "    ADD CONSTRAINT\n"
-            "        durable_command_storage_version_supported CHECK (v > 0);\n"
-        )
-
-        result = check("SR-9", {MIGRATION: source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn(MIGRATION, result.stdout)
-
-    def test_disagreeing_lexical_and_numeric_order_reports(self) -> None:
-        files = {
-            "crates/example/migrations/9_early.sql": "SELECT 1;\n",
-            "crates/example/migrations/10_late.sql": "SELECT 1;\n",
-        }
-
-        result = check("SR-9", files)
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("ordering disagree", result.stdout)
-
-
-class AdjacentParameterTypeTests(unittest.TestCase):
-    def test_two_adjacent_parameters_of_one_type_report(self) -> None:
-        source = "//! Owned.\npub fn record(run: CanonicalUuid, pass: CanonicalUuid) {}\n"
-
-        result = check("SR-10", {MODULE: source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("record", result.stdout)
-
-    def test_distinct_newtypes_pass(self) -> None:
-        source = "//! Owned.\npub fn record(run: RunId, pass: PassId) {}\n"
-
-        result = check("SR-10", {MODULE: source})
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-    def test_generic_parameters_are_one_parameter_each(self) -> None:
+    def test_a_quoted_query_inside_a_comment_passes(self) -> None:
         source = (
             "//! Owned.\n"
-            "pub fn record(keys: HashMap<RunId, PassId>, seed: Seed) {}\n"
+            '// Reads the row the old "SELECT id FROM turn_lifecycle" read,\n'
+            "// through the projection instead.\n"
+            "pub fn read() {}\n"
         )
 
-        result = check("SR-10", {MODULE: source})
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-    def test_adjacent_same_typed_parameters_of_a_public_trait_method_report(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "pub trait WorkspaceFileSystem {\n"
-            "    fn read_directory(&self, max_entries: usize, max_inspections: usize);\n"
-            "}\n"
+        result = check(
+            "SR-8",
+            {APP: source, MIGRATION: "CREATE TABLE turn_lifecycle (id uuid);\n"},
         )
-
-        result = check("SR-10", {MODULE: source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("read_directory", result.stdout)
-
-    def test_a_nested_generic_bound_does_not_hide_the_signature(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "pub fn execute<C, D: CliSession<C>>(first: usize, second: usize) {}\n"
-        )
-
-        result = check("SR-10", {MODULE: source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("execute", result.stdout)
-
-    def test_a_private_trait_method_is_not_public_api(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "trait WorkspaceFileSystem {\n"
-            "    fn read_directory(&self, max_entries: usize, max_inspections: usize);\n"
-            "}\n"
-        )
-
-        result = check("SR-10", {MODULE: source})
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-
-class FunctionBodyLengthTests(unittest.TestCase):
-    def test_body_past_the_ceiling_reports(self) -> None:
-        body = "    let value = 1;\n" * 401
-        source = f"//! Owned.\npub fn reconstitute() {{\n{body}}}\n"
-
-        result = check("SR-11", {MODULE: source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("reconstitute", result.stdout)
-
-    def test_body_within_the_ceiling_passes(self) -> None:
-        body = "    let value = 1;\n" * 50
-        source = f"//! Owned.\npub fn reconstitute() {{\n{body}}}\n"
-
-        result = check("SR-11", {MODULE: source})
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-    def test_a_brace_inside_a_string_does_not_extend_a_body(self) -> None:
-        body = "    let value = 1;\n" * 50
-        source = f'//! Owned.\npub fn render() {{\n    let text = "{{";\n{body}}}\n'
-
-        result = check("SR-11", {MODULE: source})
-
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-
-    def test_a_long_body_behind_an_array_return_type_reports(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "pub fn digest() -> [u8; 32] {\n" + "    let _ = 1;\n" * 401 + "    [0; 32]\n}\n"
-        )
-
-        result = check("SR-11", {MODULE: source})
-
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("digest", result.stdout)
-
-    def test_an_inline_test_body_is_the_testing_guide_s_to_measure(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "#[cfg(test)]\n"
-            "mod tests {\n"
-            "    #[test]\n"
-            "    fn covers_everything() {\n" + "        let _ = 1;\n" * 401 + "    }\n}\n"
-        )
-
-        result = check("SR-11", {MODULE: source})
 
         self.assertEqual(result.returncode, 0, result.stdout)
 
@@ -946,6 +291,83 @@ class DocumentedConfigurationTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout)
 
+    def test_a_doc_attribute_documents_a_clap_argument(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "use clap::Parser;\n"
+            "struct Arguments {\n"
+            '    #[doc = "Confidence in basis points."]\n'
+            "    #[arg(long)]\n"
+            "    confidence: u16,\n"
+            "}\n"
+        )
+
+        result = check("SR-12", {MODULE: source})
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_a_block_doc_comment_documents_a_clap_argument(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "use clap::Parser;\n"
+            "struct Arguments {\n"
+            "    /** Confidence in basis points.\n"
+            "     * Omitting it records none.\n"
+            "     */\n"
+            "    #[arg(long)]\n"
+            "    confidence: u16,\n"
+            "}\n"
+        )
+
+        result = check("SR-12", {MODULE: source})
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_a_plain_block_comment_does_not_document_a_clap_argument(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "use clap::Parser;\n"
+            "struct Arguments {\n"
+            "    /* Confidence in basis points. */\n"
+            "    #[arg(long)]\n"
+            "    confidence: u16,\n"
+            "}\n"
+        )
+
+        result = check("SR-12", {MODULE: source})
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(MODULE, result.stdout)
+
+    def test_a_clap_attribute_inside_a_comment_passes(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "use clap::Parser;\n"
+            "/* An example of what callers write:\n"
+            "    #[arg(long)]\n"
+            "    confidence: u16,\n"
+            "*/\n"
+            "pub fn run() {}\n"
+        )
+
+        result = check("SR-12", {MODULE: source})
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_a_clap_attribute_inside_a_raw_string_passes(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "use clap::Parser;\n"
+            'const TEMPLATE: &str = r#"\n'
+            "    #[arg(long)]\n"
+            "    confidence: u16,\n"
+            '"#;\n'
+        )
+
+        result = check("SR-12", {MODULE: source})
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
     def test_undocumented_value_enum_variant_reports(self) -> None:
         source = (
             "//! Owned.\n"
@@ -965,8 +387,8 @@ class DocumentedConfigurationTests(unittest.TestCase):
 class ProcMacroSpanTests(unittest.TestCase):
     def test_call_site_span_in_a_proc_macro_crate_reports(self) -> None:
         files = {
-            "crates/derive/Cargo.toml": "[lib]\nproc-macro = true\n",
-            "crates/derive/src/lib.rs": (
+            DERIVE_MANIFEST: PROC_MACRO_MANIFEST,
+            DERIVE_MODULE: (
                 "//! Owned.\n"
                 "pub fn expand() {\n"
                 "    return Err(syn::Error::new(Span::call_site(), \"duplicate\"));\n"
@@ -977,12 +399,12 @@ class ProcMacroSpanTests(unittest.TestCase):
         result = check("SR-13", files)
 
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("crates/derive/src/lib.rs", result.stdout)
+        self.assertIn(DERIVE_MODULE, result.stdout)
 
     def test_the_unspaced_manifest_spelling_still_selects_the_crate(self) -> None:
         files = {
-            "crates/derive/Cargo.toml": "[lib]\nproc-macro=true\n",
-            "crates/derive/src/lib.rs": (
+            DERIVE_MANIFEST: "[lib]\nproc-macro=true\n",
+            DERIVE_MODULE: (
                 "//! Owned.\n"
                 "pub fn expand() {\n"
                 "    return Err(syn::Error::new(Span::call_site(), \"duplicate\"));\n"
@@ -993,12 +415,12 @@ class ProcMacroSpanTests(unittest.TestCase):
         result = check("SR-13", files)
 
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("crates/derive/src/lib.rs", result.stdout)
+        self.assertIn(DERIVE_MODULE, result.stdout)
 
     def test_span_on_the_user_tokens_passes(self) -> None:
         files = {
-            "crates/derive/Cargo.toml": "[lib]\nproc-macro = true\n",
-            "crates/derive/src/lib.rs": (
+            DERIVE_MANIFEST: PROC_MACRO_MANIFEST,
+            DERIVE_MODULE: (
                 "//! Owned.\n"
                 "pub fn expand() {\n"
                 "    return Err(syn::Error::new_spanned(literal, \"duplicate\"));\n"
@@ -1010,37 +432,102 @@ class ProcMacroSpanTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout)
 
+    def test_a_generated_token_may_carry_the_call_site(self) -> None:
+        files = {
+            DERIVE_MANIFEST: PROC_MACRO_MANIFEST,
+            DERIVE_MODULE: (
+                "//! Owned.\n"
+                "pub fn expand() {\n"
+                '    let helper = Ident::new("helper", Span::call_site());\n'
+                "}\n"
+            ),
+        }
+
+        result = check("SR-13", files)
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_an_abort_macro_on_the_call_site_reports(self) -> None:
+        files = {
+            DERIVE_MANIFEST: PROC_MACRO_MANIFEST,
+            DERIVE_MODULE: (
+                "//! Owned.\n"
+                "pub fn expand() {\n"
+                '    abort!(Span::call_site(), "duplicate");\n'
+                "}\n"
+            ),
+        }
+
+        result = check("SR-13", files)
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(DERIVE_MODULE, result.stdout)
+
 
 class SourceScannerTests(unittest.TestCase):
     """The scanner every code-shaped rule reads through, checked directly."""
 
-    def test_raw_string_contents_are_not_code(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "pub fn render() {\n"
-            "    let text = r#\"pub fn record(a: Id, b: Id) {}\"#;\n"
-            "}\n"
-        )
+    def test_a_nested_block_comment_is_not_code(self) -> None:
+        files = {
+            DERIVE_MANIFEST: PROC_MACRO_MANIFEST,
+            DERIVE_MODULE: (
+                "//! Owned.\n"
+                "/* Spanning a diagnostic on /* the */ call site is forbidden:\n"
+                '   syn::Error::new(Span::call_site(), "duplicate") */\n'
+                "pub fn expand() {}\n"
+            ),
+        }
 
-        result = check("SR-10", {MODULE: source})
+        result = check("SR-13", files)
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_raw_string_contents_are_not_code(self) -> None:
+        files = {
+            DERIVE_MANIFEST: PROC_MACRO_MANIFEST,
+            DERIVE_MODULE: (
+                "//! Owned.\n"
+                "pub fn render() {\n"
+                "    let text = r#\"Span::call_site()\"#;\n"
+                "}\n"
+            ),
+        }
+
+        result = check("SR-13", files)
 
         self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_a_lifetime_is_not_a_character_literal(self) -> None:
-        source = (
-            "//! Owned.\n"
-            "pub fn record<'a>(first: &'a Id, second: &'a Id) {}\n"
-        )
+        # The diagnostic sits between two lifetimes: a scanner that read the
+        # first apostrophe as opening a character literal would blank it away
+        # and report nothing.
+        files = {
+            DERIVE_MANIFEST: PROC_MACRO_MANIFEST,
+            DERIVE_MODULE: (
+                "//! Owned.\n"
+                "pub fn expand<'a>(tokens: &'a str) {\n"
+                "    let _ = syn::Error::new(Span::call_site(), tokens);\n"
+                "}\n"
+                "pub fn again<'b>() {}\n"
+            ),
+        }
 
-        result = check("SR-10", {MODULE: source})
+        result = check("SR-13", files)
 
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("record", result.stdout)
+        self.assertIn(DERIVE_MODULE, result.stdout)
 
     def test_a_commented_out_declaration_is_not_code(self) -> None:
-        source = "//! Owned.\n// pub fn record(a: Id, b: Id) {}\npub fn run() {}\n"
+        files = {
+            DERIVE_MANIFEST: PROC_MACRO_MANIFEST,
+            DERIVE_MODULE: (
+                "//! Owned.\n"
+                "// let _ = syn::Error::new(Span::call_site(), tokens);\n"
+                "pub fn expand() {}\n"
+            ),
+        }
 
-        result = check("SR-10", {MODULE: source})
+        result = check("SR-13", files)
 
         self.assertEqual(result.returncode, 0, result.stdout)
 

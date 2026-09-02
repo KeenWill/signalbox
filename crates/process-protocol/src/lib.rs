@@ -3210,7 +3210,8 @@ pub enum LifecycleActorClass {
     Core,
     /// The single user's authority.
     Operator,
-    /// One exact module.
+    /// A module, without saying which: the classification is what the
+    /// boundary carries, and the durable goal event keeps the exact module.
     Module,
     /// The recovery scan or liveness watchdog.
     Watchdog,
@@ -10557,6 +10558,14 @@ mod tests {
             Err(FrameValidationError::OperatorStatusShape)
         ));
 
+        Ok(())
+    }
+
+    /// A session with no armed record has no expiry to be past, so the two
+    /// fields cannot both speak.
+    #[test]
+    fn operator_status_rejects_a_deadline_violation_that_contradicts_itself()
+    -> Result<(), Box<dyn std::error::Error>> {
         let contradictory_deadline = ServerFrame::try_new(
             request(1)?,
             ServerMessage::OperatorStatus(Box::new(
@@ -10570,6 +10579,7 @@ mod tests {
                 )),
             )),
         );
+
         assert!(matches!(
             contradictory_deadline,
             Err(FrameValidationError::OperatorStatusShape)

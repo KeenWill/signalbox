@@ -190,7 +190,9 @@ Mappings are exhaustive tables evaluated during preparation:
 Anthropic sends effort as `output_config.effort`, fast mode as `speed: "fast"`
 with the required public beta header, and its exact service-tier spelling. Fast
 mode defaults an absent tier to `standard_only`; explicit `auto` with fast mode
-is rejected because it can select incompatible Priority capacity.
+is rejected because it can select incompatible Priority capacity. Its sampling
+controls and tool-choice translation are owned by
+[runtime substrate](runtime-substrate.md#direct-http-adapters).
 
 OpenAI Chat Completions sends `reasoning_effort` and `service_tier` at the top
 level. Fast mode maps an absent tier to `fast`; an explicit `fast` tier agrees,

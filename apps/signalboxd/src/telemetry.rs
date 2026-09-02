@@ -1256,10 +1256,9 @@ impl TelemetryMetrics {
             "finish_given_overflow",
             report.latest_measured(LifecycleWeeklyMetrics::finish_given_overflow),
         );
-        self.set_rate(
-            "wall_rate",
-            report.latest_measured(LifecycleWeeklyMetrics::wall_rate),
-        );
+        // The same matured cohort the alarm reads: a gauge on an immature week
+        // would still be changing, and would disagree with its own alarm.
+        self.set_rate("wall_rate", report.latest_matured_wall_rate());
         self.set_rate(
             "turn_cause_completeness",
             report.latest_measured(LifecycleWeeklyMetrics::turn_cause_completeness),

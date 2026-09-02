@@ -1,0 +1,5 @@
+error: unsupported serde rename_all rule `Sentence case`
+ --> tests/ui/unsupported_rename_rule.rs:4:22
+  |
+4 | #[serde(rename_all = "Sentence case")]
+  |                      ^^^^^^^^^^^^^^^

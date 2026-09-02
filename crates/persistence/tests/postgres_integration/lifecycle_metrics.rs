@@ -93,6 +93,9 @@ async fn backdate_closure(
     sqlx::query("ALTER TABLE session_lifecycle DISABLE TRIGGER ALL")
         .execute(pool)
         .await?;
+    sqlx::query("ALTER TABLE session_ownership_event DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
     sqlx::query(
         "UPDATE session_lifecycle
             SET ended_at = ended_at - make_interval(weeks => $2)
@@ -102,6 +105,21 @@ async fn backdate_closure(
     .bind(weeks_ago)
     .execute(pool)
     .await?;
+    // The ownership the cohort reads has to move with the closure. A session
+    // whose journal still stands at today would have ended before it was ever
+    // owned, which is not a session — the cohort excludes it, correctly.
+    sqlx::query(
+        "UPDATE session_ownership_event
+            SET recorded_at = recorded_at - make_interval(weeks => $2)
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .bind(weeks_ago)
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_ownership_event ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
     sqlx::query("ALTER TABLE session_lifecycle ENABLE TRIGGER ALL")
         .execute(pool)
         .await?;
@@ -391,7 +409,12 @@ async fn the_headline_counts_released_and_failure_driven_closures() -> Result<()
     repository
         .close(
             conversation,
-            SessionTerminalOutcome::Abandoned,
+            // §2 reserves `abandoned` for an operator writing off a parked
+            // session, and §6 refuses to park an unmonitored one; a stop is
+            // how a conversation ends.
+            SessionTerminalOutcome::Stopped {
+                sticky: StopStickiness::Redispatchable,
+            },
             LifecycleActor::Operator,
         )
         .await?;
@@ -994,6 +1017,9 @@ async fn a_parked_wall_is_counted_in_the_week_it_happened() -> Result<(), Box<dy
 
     let walled = owned_session(&pool, 0x1700).await?;
     let turn = activate_first_turn(&pool, walled, 0x1700).await?;
+    // The turn began a week before the wall, which is the ordinary ordering:
+    // the park instant is what dates the occurrence, not the turn's own.
+    backdate_dispatch(&pool, walled, 1).await?;
     repository
         .park(
             walled,
@@ -1013,6 +1039,13 @@ async fn a_parked_wall_is_counted_in_the_week_it_happened() -> Result<(), Box<dy
 
     let parked = LifecycleMetricsRepository::new(pool.clone()).read().await?;
     let parked_week = one_wall_occurrence_week(parked.weeks());
+    let dispatch_week = parked
+        .weeks()
+        .iter()
+        .find(|week| week.wall_rate().denominator() > 0)
+        .map(LifecycleWeeklyMetrics::week_start)
+        .expect("the dispatch cohort has one member");
+    assert_ne!(parked_week, dispatch_week);
 
     // The suspended turn has terminalized nothing, so the park is the only
     // evidence the wall happened at all.
@@ -1059,4 +1092,155 @@ fn one_wall_occurrence_week(weeks: &[LifecycleWeeklyMetrics]) -> PrimitiveDateTi
         .find(|week| week.wall_occurrences() > 0)
         .expect("the fixture recorded one wall")
         .week_start()
+}
+
+/// §12's cohort is sessions "owned at any point in their life", so ownership
+/// taken after the closure is not ownership during it.
+///
+/// An adoption recorded after `ended_at` would otherwise write an already-ended
+/// session into a week that had already been reported without it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn ownership_taken_after_the_closure_joins_no_cohort() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    apply_metric_bounds(&pool, LifecycleMetricBounds::default()).await?;
+
+    let conversation = unmonitored_session(&pool, 0x1800).await?;
+    repository
+        .close(
+            conversation,
+            // §2 reserves `abandoned` for an operator writing off a parked
+            // session, and §6 refuses to park an unmonitored one; a stop is
+            // how a conversation ends.
+            SessionTerminalOutcome::Stopped {
+                sticky: StopStickiness::Redispatchable,
+            },
+            LifecycleActor::Operator,
+        )
+        .await?;
+    let closed = LifecycleMetricsRepository::new(pool.clone()).read().await?;
+    assert_eq!(
+        closed
+            .weeks()
+            .iter()
+            .map(|week| week.overflow_incidence().denominator())
+            .sum::<u64>(),
+        0
+    );
+
+    adopt_by_statement(&pool, conversation).await?;
+
+    let adopted = LifecycleMetricsRepository::new(pool.clone()).read().await?;
+    assert_eq!(
+        adopted
+            .weeks()
+            .iter()
+            .map(|week| week.overflow_incidence().denominator())
+            .sum::<u64>(),
+        0
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Journals an adoption for a session that has already ended.
+///
+/// The satellite refuses this shape — terminal is final and the journal head
+/// must match the ownership bit — so the fixture writes it around those guards.
+/// What is under test is the cohort: it holds even where a path around them
+/// exists.
+async fn adopt_by_statement(pool: &PgPool, session: SessionId) -> Result<(), sqlx::Error> {
+    sqlx::query("ALTER TABLE session_ownership_event DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE session_lifecycle DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO session_ownership_event (
+             session_id, event_ordinal, transition_kind, owned_after, actor_kind
+         )
+         SELECT $1,
+                COALESCE(max(event_ordinal), 0) + 1,
+                'adopted',
+                true,
+                'operator'
+           FROM session_ownership_event
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query("UPDATE session_lifecycle SET owned = true WHERE session_id = $1")
+        .bind(session.into_uuid())
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE session_lifecycle ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE session_ownership_event ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// §12 counts a supersession that closed a park holding a failure cause, and
+/// the committed closure survives a resume, so its cause must too.
+///
+/// The handoff deliberately outlives the resume between the decision and the
+/// turn's boundary. A cause cleared under it would reach settlement empty and
+/// the supersession would be trimmed as a non-failure, flattering the gate.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_committed_supersession_keeps_its_cause_across_a_resume() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    apply_metric_bounds(&pool, LifecycleMetricBounds::default()).await?;
+
+    let respawned = owned_session(&pool, 0x1900).await?;
+    let turn = activate_first_turn(&pool, respawned, 0x1900).await?;
+    repository
+        .park(
+            respawned,
+            SessionParkCause::StructuralFailure,
+            SessionParkResponder::Module {
+                module: DispatchingModule::RepositoryWatch,
+            },
+            Some(SessionFailureCause::Structural(
+                SessionStructuralCause::ContextCompactionWall,
+            )),
+            LifecycleActor::Core {
+                agency: CoreAgency::Daemon,
+            },
+        )
+        .await?;
+    // The closure keeps the actor that decided it, so the settlement names
+    // neither an actor nor an outcome of its own.
+    repository
+        .commit_pending_terminal(
+            respawned,
+            SessionTerminalOutcome::Superseded { by: None },
+            LifecycleActor::Core {
+                agency: CoreAgency::Daemon,
+            },
+        )
+        .await?;
+    repository.resume(respawned).await?;
+    settle_turn_with_cause(&pool, respawned, turn, 0x1900, "context_compaction_wall").await?;
+    repository.settle_pending_terminal(respawned).await?;
+
+    let report = LifecycleMetricsRepository::new(pool.clone()).read().await?;
+    let week = latest_populated_week(report.weeks());
+
+    // The supersession closed a failure, so it stays in both halves rather
+    // than being trimmed as withdrawn work.
+    assert_eq!(week.completion_failure().denominator(), 1);
+    assert_eq!(week.completion_failure().numerator(), 1);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
 }

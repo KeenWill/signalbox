@@ -53,10 +53,11 @@ const CLAUDE_ENVIRONMENT: &[CliEnvironmentVariable] = &[
     CliEnvironmentVariable::inherited("no_proxy"),
 ];
 
-/// Every built-in tool reported by the pinned isolated Claude Code CLI.
+/// Every built-in tool the pinned Claude Code CLI reports or documents.
 ///
-/// The invocation both selects an empty built-in surface with `--tools` and
-/// explicitly passes this entire inventory through `--disallowedTools`.
+/// `--tools ""` already selects an empty built-in surface; this inventory is
+/// the independent second control passed through `--disallowedTools`, so it
+/// names built-ins this invocation could not otherwise reach.
 pub const DISABLED_CLAUDE_CLI_BUILTIN_TOOLS: &[&str] = &[
     "Task",
     "Bash",
@@ -67,15 +68,30 @@ pub const DISABLED_CLAUDE_CLI_BUILTIN_TOOLS: &[&str] = &[
     "Edit",
     "EnterWorktree",
     "ExitWorktree",
+    // Reported only under `--restricted`.
+    "Glob",
+    // Reported only under `--restricted`.
+    "Grep",
+    // Enumerates other Claude Code sessions on this host.
+    "ListAgents",
     "Monitor",
     "NotebookEdit",
+    // Reported only under `CLAUDE_CODE_USE_POWERSHELL_TOOL`.
+    "PowerShell",
     "PushNotification",
+    // Named by `--restricted` among the code-running tools; never reported.
+    "REPL",
     "Read",
     "RemoteTrigger",
     "ReportFindings",
     "ScheduleWakeup",
     "SendFeedback",
+    // Delivers to other Claude Code sessions on this host.
     "SendMessage",
+    // Agent-to-user channel enabled by `--brief`; never reported.
+    "SendUserMessage",
+    // Reported only without `--disable-slash-commands`.
+    "Skill",
     "TaskCreate",
     "TaskGet",
     "TaskList",
@@ -88,7 +104,6 @@ pub const DISABLED_CLAUDE_CLI_BUILTIN_TOOLS: &[&str] = &[
     "Workflow",
     "Write",
 ];
-
 /// Claude Code protocol snapshot covered by this adapter's offline fixtures.
 ///
 /// Derived by `build.rs` from the exact pin in this crate's `package.json`, so
