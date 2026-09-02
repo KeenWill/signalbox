@@ -241,9 +241,9 @@ before replacing any text.
 ### (d) Historical decision entries
 
 All 309 ownership-family occurrences in `docs/decisions.md` are category (d).
-The ledger is append-only: none is edited. The later rename records one new
-terminology entry and leaves every earlier actor spelling, personal-owner
-statement, and technical-ownership statement intact.
+The ledger is append-only: none is edited. The later rename leaves every earlier
+actor spelling, personal-owner statement, and technical-ownership statement
+intact.
 
 ## 5. Ordered mechanical plan for the later pass
 
