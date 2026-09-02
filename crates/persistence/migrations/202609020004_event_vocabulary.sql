@@ -91,18 +91,26 @@ ALTER TABLE outbox_event
 
 DROP INDEX outbox_event_turn_progress_by_session;
 
+-- Written as exclusions, as the staleness contract requires: a kind added
+-- later reads as progress until it is classified.
 CREATE INDEX outbox_event_turn_progress_by_session
     ON outbox_event USING btree (session_id, event_sequence)
     WHERE (
-        (event_kind = ANY (ARRAY[
-            'turn_activated'::text,
-            'model_call_transition'::text,
-            'tool_batch_transition'::text,
-            'tool_approval_decided'::text,
-            'context_compacted'::text
+        (event_kind <> ALL (ARRAY[
+            'session_created'::text,
+            'session_model_settings_changed'::text,
+            'turn_model_settings_resolved'::text,
+            'input_accepted'::text,
+            'runner_state_transition'::text,
+            'session_state_changed'::text,
+            'session_terminal'::text,
+            'goal_changed'::text,
+            'command_settled'::text,
+            'injection_settled'::text,
+            'session_ownership_changed'::text
         ]))
-        OR ((event_kind = 'turn_terminal'::text)
-            AND (turn_disposition <> 'retired'::text))
+        AND NOT ((event_kind = 'turn_terminal'::text)
+                 AND (turn_disposition = 'retired'::text))
     );
 
 --

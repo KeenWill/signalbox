@@ -1866,19 +1866,44 @@ async fn load_session_terminal(
     stored_session: Uuid,
 ) -> Result<DispatchedOutboxEventKind, OutboxDispatchError> {
     let row = sqlx::query(
-        "SELECT prior_state_kind, actor_kind, actor_module, actor_turn_id,
-                actor_tool_request_id, terminal_outcome_kind, terminal_cause_kind,
-                terminal_stop_sticky, terminal_superseded_by,
-                parked_standing_cause_kind
-           FROM session_terminal_outbox_event
-          WHERE event_sequence = $1
-            AND session_id = $2",
+        "SELECT event.prior_state_kind, event.actor_kind, event.actor_module,
+                event.actor_turn_id, event.actor_tool_request_id,
+                event.terminal_outcome_kind, event.terminal_cause_kind,
+                event.terminal_stop_sticky, event.terminal_superseded_by,
+                event.parked_standing_cause_kind,
+                EXISTS (
+                    SELECT 1
+                      FROM session_lifecycle AS lifecycle
+                     WHERE lifecycle.session_id = event.session_id
+                       AND lifecycle.state_kind = 'terminal'
+                       AND lifecycle.ended_at = event.ended_at
+                       AND lifecycle.terminal_outcome_kind = event.terminal_outcome_kind
+                       AND lifecycle.terminal_cause_kind
+                           IS NOT DISTINCT FROM event.terminal_cause_kind
+                       AND lifecycle.terminal_stop_sticky
+                           IS NOT DISTINCT FROM event.terminal_stop_sticky
+                       AND lifecycle.terminal_superseded_by
+                           IS NOT DISTINCT FROM event.terminal_superseded_by
+                       AND lifecycle.parked_standing_cause_kind
+                           IS NOT DISTINCT FROM event.parked_standing_cause_kind
+                       AND lifecycle.actor_kind = event.actor_kind
+                       AND lifecycle.actor_module IS NOT DISTINCT FROM event.actor_module
+                       AND lifecycle.actor_turn_id IS NOT DISTINCT FROM event.actor_turn_id
+                       AND lifecycle.actor_tool_request_id
+                           IS NOT DISTINCT FROM event.actor_tool_request_id
+                ) AS correlated
+           FROM session_terminal_outbox_event AS event
+          WHERE event.event_sequence = $1
+            AND event.session_id = $2",
     )
     .bind(Decimal::from(expected_sequence))
     .bind(stored_session)
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(OutboxCorruption::MissingTypedRecord)?;
+    if !row.try_get::<bool, _>("correlated")? {
+        return Err(OutboxCorruption::InvalidLifecycleEvent.into());
+    }
     let prior: String = row.try_get("prior_state_kind")?;
     let standing: Option<String> = row.try_get("parked_standing_cause_kind")?;
     Ok(DispatchedOutboxEventKind::SessionTerminal(
