@@ -555,6 +555,13 @@ async fn insert_prepared(
     )
     .await?;
 
+    crate::session_lifecycle::insert_created(
+        connection,
+        session.id(),
+        &signalbox_domain::SessionCreationCause::Interactive,
+    )
+    .await?;
+
     sqlx::query("INSERT INTO session_scheduler (session_id) VALUES ($1)")
         .bind(session_id_to_uuid(session.id()))
         .execute(&mut *connection)

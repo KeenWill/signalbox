@@ -25,9 +25,11 @@ use signalbox_domain::{
     RepoWatchEventKindNameV1, RequestKind, ReviewState, RunnerPlacementLossSource,
     RunnerSandboxProfile, ScopeOperation, ServiceTier, SessionClosureOutcome,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId, SessionInputPosition,
-    SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture, ToolAttemptId,
-    ToolPermissionDefault, ToolRequestId, TurnId, TurnTerminalCause,
-    UpdateSessionPlacementRejectionKind, ValidatedModelSettings, WorkspaceOrigin,
+    SessionLifecycleState, SessionParkCause, SessionPlacementEventKind, SessionRecoveryOperation,
+    SessionRetirementCause, SessionRetryableCause, SessionStructuralCause, SessionWaitKind,
+    SessionWaker, SettingOverlay, ToolApprovalPosture, ToolAttemptId, ToolPermissionDefault,
+    ToolRequestId, TurnId, TurnTerminalCause, UpdateSessionPlacementRejectionKind,
+    ValidatedModelSettings, WorkspaceOrigin,
 };
 
 pub(crate) const SESSION_CREATED: &str = "session_created";
@@ -1249,6 +1251,176 @@ pub(crate) fn dispatching_module_from_str(value: &str) -> Option<DispatchingModu
     match value {
         "repo_watch" => Some(DispatchingModule::RepositoryWatch),
         "commissioned_dispatch" => Some(DispatchingModule::CommissionedDispatch),
+        _ => None,
+    }
+}
+
+/// Encodes one durable `session_lifecycle.state_kind` spelling.
+pub(crate) const fn session_lifecycle_state_to_str(value: &SessionLifecycleState) -> &'static str {
+    match value {
+        SessionLifecycleState::Created => "created",
+        SessionLifecycleState::Dispatched => "dispatched",
+        SessionLifecycleState::Active => "active",
+        SessionLifecycleState::Waiting { .. } => "waiting",
+        SessionLifecycleState::Recovering { .. } => "recovering",
+        SessionLifecycleState::Blocked { .. } => "blocked",
+        SessionLifecycleState::Parked { .. } => "parked",
+        SessionLifecycleState::Terminal { .. } => "terminal",
+    }
+}
+
+/// Encodes one durable `session_lifecycle.waiting_kind` spelling.
+pub(crate) const fn session_wait_kind_to_str(value: SessionWaitKind) -> &'static str {
+    match value {
+        SessionWaitKind::Approval => "approval",
+        SessionWaitKind::External => "external",
+        SessionWaitKind::Child => "child",
+        SessionWaitKind::ProviderRetry => "provider_retry",
+        SessionWaitKind::Pipeline => "pipeline",
+        SessionWaitKind::Scheduler => "scheduler",
+    }
+}
+
+/// Decodes one durable `session_lifecycle.waiting_kind` spelling.
+pub(crate) fn session_wait_kind_from_str(value: &str) -> Option<SessionWaitKind> {
+    match value {
+        "approval" => Some(SessionWaitKind::Approval),
+        "external" => Some(SessionWaitKind::External),
+        "child" => Some(SessionWaitKind::Child),
+        "provider_retry" => Some(SessionWaitKind::ProviderRetry),
+        "pipeline" => Some(SessionWaitKind::Pipeline),
+        "scheduler" => Some(SessionWaitKind::Scheduler),
+        _ => None,
+    }
+}
+
+/// Encodes the machinery that ends one wait.
+pub(crate) const fn session_waker_to_str(value: SessionWaker) -> &'static str {
+    match value {
+        SessionWaker::ApprovalDecision => "approval_decision",
+        SessionWaker::ExternalRecheck => "external_recheck",
+        SessionWaker::ChildSettlement => "child_settlement",
+        SessionWaker::ProviderBackoff => "provider_backoff",
+        SessionWaker::PipelineDrain => "pipeline_drain",
+        SessionWaker::SchedulerSweep => "scheduler_sweep",
+    }
+}
+
+/// Encodes the recovery one `recovering` session is waiting out.
+pub(crate) const fn session_recovery_operation_to_str(
+    value: SessionRecoveryOperation,
+) -> &'static str {
+    match value {
+        SessionRecoveryOperation::ModelCall => "model_call",
+        SessionRecoveryOperation::Tool => "tool",
+        SessionRecoveryOperation::Runner => "runner",
+    }
+}
+
+/// Decodes the recovery one `recovering` session is waiting out.
+pub(crate) fn session_recovery_operation_from_str(value: &str) -> Option<SessionRecoveryOperation> {
+    match value {
+        "model_call" => Some(SessionRecoveryOperation::ModelCall),
+        "tool" => Some(SessionRecoveryOperation::Tool),
+        "runner" => Some(SessionRecoveryOperation::Runner),
+        _ => None,
+    }
+}
+
+/// Encodes why an owned session waits on a human.
+pub(crate) const fn session_park_cause_to_str(value: SessionParkCause) -> &'static str {
+    match value {
+        SessionParkCause::ProgressBudgetExhausted => "progress_budget_exhausted",
+        SessionParkCause::RetryBudgetExhausted => "retry_budget_exhausted",
+        SessionParkCause::StructuralFailure => "structural_failure",
+        SessionParkCause::UnknownFailure => "unknown_failure",
+        SessionParkCause::ActiveStallDeadlineExpired => "active_stall_deadline_expired",
+        SessionParkCause::WaitingDeadlineExpired => "waiting_deadline_expired",
+        SessionParkCause::RecoveringDeadlineExpired => "recovering_deadline_expired",
+        SessionParkCause::BlockedDeadlineExpired => "blocked_deadline_expired",
+        SessionParkCause::OperatorHold => "operator_hold",
+        SessionParkCause::ModulePark => "module_park",
+    }
+}
+
+/// Decodes why an owned session waits on a human.
+pub(crate) fn session_park_cause_from_str(value: &str) -> Option<SessionParkCause> {
+    match value {
+        "progress_budget_exhausted" => Some(SessionParkCause::ProgressBudgetExhausted),
+        "retry_budget_exhausted" => Some(SessionParkCause::RetryBudgetExhausted),
+        "structural_failure" => Some(SessionParkCause::StructuralFailure),
+        "unknown_failure" => Some(SessionParkCause::UnknownFailure),
+        "active_stall_deadline_expired" => Some(SessionParkCause::ActiveStallDeadlineExpired),
+        "waiting_deadline_expired" => Some(SessionParkCause::WaitingDeadlineExpired),
+        "recovering_deadline_expired" => Some(SessionParkCause::RecoveringDeadlineExpired),
+        "blocked_deadline_expired" => Some(SessionParkCause::BlockedDeadlineExpired),
+        "operator_hold" => Some(SessionParkCause::OperatorHold),
+        "module_park" => Some(SessionParkCause::ModulePark),
+        _ => None,
+    }
+}
+
+/// Encodes a provider or infrastructure failure a retry could still clear.
+pub(crate) const fn session_retryable_cause_to_str(value: SessionRetryableCause) -> &'static str {
+    match value {
+        SessionRetryableCause::ProviderTransient => "provider_transient",
+        SessionRetryableCause::ProviderQuotaExhausted => "provider_quota_exhausted",
+        SessionRetryableCause::ProviderOverloaded => "provider_overloaded",
+        SessionRetryableCause::InfrastructureFailure => "infrastructure_failure",
+        SessionRetryableCause::RetryBudgetExhausted => "retry_budget_exhausted",
+    }
+}
+
+/// Decodes a provider or infrastructure failure a retry could still clear.
+pub(crate) fn session_retryable_cause_from_str(value: &str) -> Option<SessionRetryableCause> {
+    match value {
+        "provider_transient" => Some(SessionRetryableCause::ProviderTransient),
+        "provider_quota_exhausted" => Some(SessionRetryableCause::ProviderQuotaExhausted),
+        "provider_overloaded" => Some(SessionRetryableCause::ProviderOverloaded),
+        "infrastructure_failure" => Some(SessionRetryableCause::InfrastructureFailure),
+        "retry_budget_exhausted" => Some(SessionRetryableCause::RetryBudgetExhausted),
+        _ => None,
+    }
+}
+
+/// Encodes a failure the same input will hit again.
+pub(crate) const fn session_structural_cause_to_str(value: SessionStructuralCause) -> &'static str {
+    match value {
+        SessionStructuralCause::ContextCompactionWall => "context_compaction_wall",
+        SessionStructuralCause::ContextHeadroomExhausted => "context_headroom_exhausted",
+        SessionStructuralCause::BrokenToolchain => "broken_toolchain",
+        SessionStructuralCause::ModerationBlock => "moderation_block",
+    }
+}
+
+/// Decodes a failure the same input will hit again.
+pub(crate) fn session_structural_cause_from_str(value: &str) -> Option<SessionStructuralCause> {
+    match value {
+        "context_compaction_wall" => Some(SessionStructuralCause::ContextCompactionWall),
+        "context_headroom_exhausted" => Some(SessionStructuralCause::ContextHeadroomExhausted),
+        "broken_toolchain" => Some(SessionStructuralCause::BrokenToolchain),
+        "moderation_block" => Some(SessionStructuralCause::ModerationBlock),
+        _ => None,
+    }
+}
+
+/// Encodes which admission or closure predicate retired a session.
+pub(crate) const fn session_retirement_cause_to_str(value: SessionRetirementCause) -> &'static str {
+    match value {
+        SessionRetirementCause::DispatchDeadlineExpired => "dispatch_deadline_expired",
+        SessionRetirementCause::StartGateDeadlineExpired => "start_gate_deadline_expired",
+        SessionRetirementCause::FirstInputDeadlineExpired => "first_input_deadline_expired",
+        SessionRetirementCause::StrandedQueuedTurn => "stranded_queued_turn",
+    }
+}
+
+/// Decodes which admission or closure predicate retired a session.
+pub(crate) fn session_retirement_cause_from_str(value: &str) -> Option<SessionRetirementCause> {
+    match value {
+        "dispatch_deadline_expired" => Some(SessionRetirementCause::DispatchDeadlineExpired),
+        "start_gate_deadline_expired" => Some(SessionRetirementCause::StartGateDeadlineExpired),
+        "first_input_deadline_expired" => Some(SessionRetirementCause::FirstInputDeadlineExpired),
+        "stranded_queued_turn" => Some(SessionRetirementCause::StrandedQueuedTurn),
         _ => None,
     }
 }

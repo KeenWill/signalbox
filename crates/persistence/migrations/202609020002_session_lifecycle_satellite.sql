@@ -1161,3 +1161,161 @@ CREATE TRIGGER turn_lifecycle_projects_session_state
 CREATE TRIGGER goal_event_projects_session_state
     AFTER INSERT ON goal_event
     FOR EACH ROW EXECUTE FUNCTION project_session_lifecycle_from_goal();
+
+--
+-- §2 resource release.
+--
+-- Every terminal outcome releases the session's held dispatch slot. The
+-- release is already trigger-driven off a terminal goal event, so the closure's
+-- own `session_closed` event joins the gate rather than growing a second
+-- release path that could disagree with the first.
+--
+
+CREATE OR REPLACE FUNCTION repo_watch_release_completed_dispatch_batches_for_goal()
+RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.event_kind NOT IN
+        ('blocked', 'achieved', 'user_stopped', 'session_closed')
+    THEN
+        RETURN NULL;
+    END IF;
+    PERFORM repo_watch_release_completed_dispatch_batches_for_turn(
+        NULL::uuid,
+        NEW.session_id
+    );
+    RETURN NULL;
+END;
+$$;
+
+--
+-- What a closure cannot release by itself. §2 gives `abandoned` cleanup
+-- obligations for worktrees and containers: an operator write-off leaves live
+-- resources behind, unlike an achievement or a supersession, whose successor
+-- takes them. The obligation is recorded rather than performed here — the
+-- cleanup runs outside the closing transaction, and a record is what lets it
+-- be found.
+--
+
+CREATE TABLE session_cleanup_obligation (
+    session_id uuid NOT NULL,
+    outcome_kind text NOT NULL,
+    recorded_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    discharged_at timestamp with time zone,
+
+    CONSTRAINT session_cleanup_obligation_pkey PRIMARY KEY (session_id),
+
+    CONSTRAINT session_cleanup_obligation_outcome_closed CHECK (
+        outcome_kind = 'abandoned'::text
+    )
+);
+
+ALTER TABLE ONLY session_cleanup_obligation
+    ADD CONSTRAINT session_cleanup_obligation_session_id_fkey
+        FOREIGN KEY (session_id) REFERENCES session(session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT;
+
+CREATE INDEX session_cleanup_obligation_outstanding
+    ON session_cleanup_obligation (recorded_at, session_id)
+    WHERE discharged_at IS NULL;
+
+--
+-- The create-session command records the cause it created the session with,
+-- and a composite foreign key ties the two together, so the command's closed
+-- vocabulary widens with the session's. Delegated creation still has no
+-- writer on this command family.
+--
+
+ALTER TABLE create_session_command
+    DROP CONSTRAINT create_session_command_creation_cause_closed;
+
+ALTER TABLE create_session_command
+    ADD CONSTRAINT create_session_command_creation_cause_closed CHECK (
+        creation_cause = ANY (ARRAY[
+            'interactive'::text,
+            'module_dispatched'::text
+        ])
+    );
+
+--
+-- The imported-frontier command family records `interactive` too: importing a
+-- conversation is a user-initiated act, so its cause moves with the spelling
+-- rather than acquiring a fourth one.
+--
+
+ALTER TABLE create_session_from_imported_frontier_command
+    DROP CONSTRAINT create_session_from_imported_frontier_command_cause_closed;
+
+ALTER TABLE create_session_from_imported_frontier_command
+    ADD CONSTRAINT create_session_from_imported_frontier_command_cause_closed CHECK (
+        creation_cause = 'interactive'::text
+    );
+
+--
+-- Exactly one creation family per session, restated over the widened
+-- vocabulary. A module-dispatched creation goes through the native family: it
+-- is the same command, differing only in who issued it.
+--
+
+CREATE OR REPLACE FUNCTION require_session_creation_command() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE native_count bigint; imported_count bigint; delegated_count bigint;
+BEGIN
+    SELECT count(*) INTO native_count FROM create_session_command
+     WHERE created_session_id = NEW.session_id;
+    SELECT count(*) INTO imported_count FROM create_session_from_imported_frontier_command
+     WHERE created_session_id = NEW.session_id;
+    SELECT count(*) INTO delegated_count FROM session_delegation
+     WHERE child_session_id = NEW.session_id;
+    IF ((NEW.creation_cause IN ('interactive', 'module_dispatched'))
+            AND NEW.ancestry_kind = 'none'
+            AND (native_count, imported_count, delegated_count) <> (1, 0, 0))
+        OR (NEW.creation_cause = 'interactive' AND NEW.ancestry_kind = 'imported_conversation'
+            AND (native_count, imported_count, delegated_count) <> (0, 1, 0))
+        OR (NEW.creation_cause = 'delegated'
+            AND (native_count, imported_count, delegated_count) <> (0, 0, 1)) THEN
+        RAISE EXCEPTION 'session % requires exactly one matching creation family', NEW.session_id
+            USING ERRCODE = '23503', CONSTRAINT = 'session_requires_creation_command';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+--
+-- The command records the dispatch it created the session for, and the
+-- composite foreign key is widened to cover it, so the command and the session
+-- cannot disagree about which dispatch a session serves. Without the widened
+-- key the reference would live on one row only and the reconstitution
+-- comparison would be comparing a value against itself.
+--
+
+ALTER TABLE create_session_command
+    ADD COLUMN dispatching_module text,
+    ADD COLUMN dispatch_ref uuid;
+
+ALTER TABLE create_session_command
+    ADD CONSTRAINT create_session_command_dispatch_shape CHECK (
+        ((creation_cause = 'module_dispatched'::text)
+            = ((dispatching_module IS NOT NULL) AND (dispatch_ref IS NOT NULL)))
+        AND ((dispatching_module IS NULL) OR (dispatching_module = ANY (ARRAY[
+            'repo_watch'::text,
+            'commissioned_dispatch'::text
+        ])))
+    );
+
+ALTER TABLE session
+    ADD CONSTRAINT session_dispatch_provenance_key
+        UNIQUE (session_id, creation_cause, ancestry_kind, dispatching_module, dispatch_ref);
+
+ALTER TABLE create_session_command
+    DROP CONSTRAINT create_session_command_provenance_fk;
+
+ALTER TABLE ONLY create_session_command
+    ADD CONSTRAINT create_session_command_provenance_fk
+        FOREIGN KEY (created_session_id, creation_cause, ancestry_kind,
+                     dispatching_module, dispatch_ref)
+        REFERENCES session(session_id, creation_cause, ancestry_kind,
+                           dispatching_module, dispatch_ref)
+        ON UPDATE RESTRICT ON DELETE RESTRICT;

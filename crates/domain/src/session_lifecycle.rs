@@ -572,13 +572,12 @@ impl SessionLifecycleState {
     /// straight into recovery moves the session with it.
     pub const fn admits(&self, next: &Self) -> bool {
         match (self, next) {
-            (Self::Terminal { .. }, _) => false,
-            (Self::Created, Self::Dispatched) => true,
-            (Self::Dispatched, _) if next.is_mapped() => true,
-            (Self::Parked { .. }, _) if next.is_mapped() => true,
-            (_, Self::Parked { .. }) if self.is_mapped() => true,
             (Self::Terminal { .. }, _) | (_, Self::Created) => false,
             (_, Self::Terminal { outcome }) => self.admits_outcome(outcome),
+            (Self::Created, Self::Dispatched) => true,
+            (Self::Created, _) => false,
+            (Self::Dispatched | Self::Parked { .. }, _) => next.is_mapped(),
+            (_, Self::Parked { .. }) => self.is_mapped(),
             _ => self.is_mapped() && next.is_mapped(),
         }
     }

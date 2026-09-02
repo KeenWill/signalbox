@@ -15,11 +15,11 @@ use std::{error::Error, fmt};
 use signalbox_domain::{
     AcceptedInputId, BranchName, CommissionedDispatchId, CommitSha, ContextFrontierId,
     CreateSession, DeliveryRequest, DurableCommandId, GoalStatement, GoalUserAction,
-    GoalUserCommand, ModelSelectionOverride, PerInputConfigurationChoices, PreparedCreateSession,
-    PullRequestNumber, RepositorySlug, SemanticTranscriptEntryId, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, SessionTemplateName, SessionTemplateProvenance, SubmitInput, TranscriptAncestry,
-    TurnId, UserContent, UserContentPart,
+    GoalUserCommand, ModelSelectionOverride, ModuleDispatch, PerInputConfigurationChoices,
+    PreparedCreateSession, PullRequestNumber, RepositorySlug, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationProvenance,
+    SessionId, SessionTemplateName, SessionTemplateProvenance, SubmitInput, TurnId, UserContent,
+    UserContentPart,
 };
 
 use crate::create_session::InvalidDurableCommandId;
@@ -189,12 +189,12 @@ impl CommissionDispatchRequest {
         if template_provenance.name() != &self.template {
             return Err(CommissionDispatchPreparationError::TemplateMismatch);
         }
+        let dispatch_id = ids.next_dispatch_id();
         let command = CreateSession::new_from_template(
             self.command_id,
-            SessionCreationProvenance::new(
-                SessionCreationCause::Interactive,
-                TranscriptAncestry::None,
-            ),
+            SessionCreationProvenance::module_dispatched(ModuleDispatch::Commissioned {
+                dispatch: dispatch_id,
+            }),
             template_provenance,
             resolved_defaults,
         );
@@ -219,7 +219,7 @@ impl CommissionDispatchRequest {
             GoalUserAction::Attach(self.statement),
         );
         Ok(PreparedCommissionedDispatch {
-            dispatch_id: ids.next_dispatch_id(),
+            dispatch_id,
             fence: self.fence,
             prepared_session,
             initial_input,

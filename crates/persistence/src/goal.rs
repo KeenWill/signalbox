@@ -1613,6 +1613,18 @@ async fn insert_command(
     Ok(())
 }
 
+/// Appends the terminal goal event one session closure owes its generation.
+///
+/// The closure lives in the lifecycle store, but the event is a goal-lineage
+/// write, so its encoding stays here beside every other goal event's.
+pub(crate) async fn insert_event_for_session_closure(
+    connection: &mut PgConnection,
+    session: SessionId,
+    event: &GoalEvent,
+) -> Result<(), GoalRepositoryError> {
+    insert_event(connection, session, event).await
+}
+
 async fn insert_event(
     connection: &mut PgConnection,
     session: SessionId,
