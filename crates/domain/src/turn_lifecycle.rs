@@ -416,17 +416,8 @@ pub enum TurnDisposition {
 
 /// The mandatory typed reason one turn reached `terminal`.
 ///
-/// The disposition says how a turn ended; the cause says why. The set is
-/// closed, every terminalization names exactly one member, and no turn reaches
-/// `terminal` without one. `UnclassifiedFailure` is the sole catch-all: cause
-/// completeness is measured as the share of terminal turns carrying a cause
-/// outside that set, so admitting a second catch-all weakens the measure
-/// rather than the vocabulary.
-///
-/// A cause is not derived from its disposition. `Failed` alone is what the
-/// classification exists to replace, so the failing arms name the evidence
-/// that ended the turn — an ended model call, an unavailable target, an
-/// exhausted credential pool, a compaction that could not fit its input.
+/// The set is closed and every terminalization names exactly one member.
+/// `UnclassifiedFailure` is the only catch-all.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TurnTerminalCause {
     /// The turn produced its conversational outcome.

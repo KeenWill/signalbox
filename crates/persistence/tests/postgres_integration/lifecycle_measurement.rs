@@ -13,9 +13,9 @@ use signalbox_persistence::{
 };
 use sqlx::types::time::OffsetDateTime;
 
-/// One column's durable stamping contract: whether a row may omit it, and the
-/// expression that fills it when a writer does not.
-type StampingContract = (String, Option<String>);
+/// One column's durable stamping contract: whether a row may omit it, and
+/// whether the column itself fills it when a writer does not.
+type StampingContract = (String, bool);
 
 async fn stamping_contracts(
     pool: &PgPool,
@@ -37,7 +37,7 @@ async fn stamping_contracts(
     Ok(rows
         .into_iter()
         .map(|(table, column, nullable, default)| {
-            (format!("{table}.{column}"), (nullable, default))
+            (format!("{table}.{column}"), (nullable, default.is_some()))
         })
         .collect())
 }
@@ -45,15 +45,7 @@ async fn stamping_contracts(
 fn required_and_defaulted(columns: &[(&str, &str)]) -> BTreeMap<String, StampingContract> {
     columns
         .iter()
-        .map(|(table, column)| {
-            (
-                format!("{table}.{column}"),
-                (
-                    String::from("NO"),
-                    Some(String::from("statement_timestamp()")),
-                ),
-            )
-        })
+        .map(|(table, column)| (format!("{table}.{column}"), (String::from("NO"), true)))
         .collect()
 }
 
@@ -498,11 +490,20 @@ async fn a_nonterminal_turn_carrying_a_cause_is_rejected() -> Result<(), Box<dyn
             .await
             .expect_err("an active turn cannot state why it ended");
 
-    assert_eq!(
-        rejection
-            .as_database_error()
-            .and_then(sqlx::error::DatabaseError::constraint),
-        Some("turn_lifecycle_terminal_cause_required")
+    // Both cause rules reject this row, and which one PostgreSQL reports is
+    // not specified, so the assertion names neither in particular.
+    let constraint = rejection
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::constraint);
+    assert!(
+        matches!(
+            constraint,
+            Some(
+                "turn_lifecycle_terminal_cause_required"
+                    | "turn_lifecycle_terminal_cause_matches_disposition"
+            )
+        ),
+        "rejected by {constraint:?}, which is not a terminal-cause rule"
     );
     pool.close().await;
     drop(container);
@@ -663,6 +664,43 @@ async fn a_cause_its_disposition_does_not_admit_is_rejected() -> Result<(), Box<
     )
     .await
     .expect_err("a failed turn cannot record a completion cause");
+
+    assert_eq!(
+        rejection
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::constraint),
+        Some("turn_lifecycle_terminal_cause_matches_disposition")
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A terminal row cannot carry a cause with no disposition to admit it: the
+/// map is total, so the check decides rather than evaluating null (INV-093).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_cause_without_a_disposition_is_rejected() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = checkpoint_restart_model_call(&pool, 0x7240, true).await?;
+
+    let rejection = sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal',
+                terminal_frontier_id = starting_frontier_id,
+                terminal_disposition_kind = NULL,
+                active_phase_kind = NULL,
+                current_attempt_id = NULL,
+                terminal_cause_kind = $2
+          WHERE turn_id = $1",
+    )
+    .bind(fixture.turn.into_uuid())
+    .bind(turn_terminal_cause_to_str(
+        TurnTerminalCause::ModelCallFailed,
+    ))
+    .execute(&pool)
+    .await
+    .expect_err("a cause needs a disposition that admits it");
 
     assert_eq!(
         rejection
