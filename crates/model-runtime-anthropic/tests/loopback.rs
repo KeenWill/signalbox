@@ -208,6 +208,32 @@ fn completion_evidence(report: TerminalReport<String>) -> CompletionEvidence {
     }
 }
 
+/// The JSON body of the one request the canned server recorded.
+#[track_caller]
+fn sent_request_body(server: &CannedServer) -> serde_json::Value {
+    let requests = server.recorded_requests();
+    let request = &requests[0];
+    let json_start = request.find("\r\n\r\n").expect("request has a body") + 4;
+    serde_json::from_str(&request[json_start..]).expect("request body is JSON")
+}
+
+/// A canned buffered success whose one content block is ordinary text.
+fn text_response() -> Vec<u8> {
+    http_response(
+        "200 OK",
+        &[("content-type", "application/json")],
+        br#"{
+        "id": "msg_plain_1",
+        "type": "message",
+        "role": "assistant",
+        "model": "model-exact-1",
+        "content": [{"type": "text", "text": "hi"}],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 4, "output_tokens": 2}
+    }"#,
+    )
+}
+
 /// The tool-call identity the canned contract response proposes under.
 const CONTRACT_PROPOSAL_ID: &str = "toolu_c1";
 
@@ -246,11 +272,7 @@ async fn a_structured_output_request_never_sends_a_forced_tool_choice() {
 
     let (_report, _observations) = execute(&runtime, operation, CancellationSignal::never()).await;
 
-    let requests = server.recorded_requests();
-    let request = &requests[0];
-    let json_start = request.find("\r\n\r\n").expect("request has a body") + 4;
-    let sent: serde_json::Value =
-        serde_json::from_str(&request[json_start..]).expect("request body is JSON");
+    let sent = sent_request_body(&server);
     assert_eq!(
         sent["tool_choice"],
         serde_json::json!({"type": "auto", "disable_parallel_tool_use": true}),
@@ -260,6 +282,21 @@ async fn a_structured_output_request_never_sends_a_forced_tool_choice() {
         sent["tools"][0]["name"],
         serde_json::json!(contract.name.as_str())
     );
+}
+
+#[tokio::test]
+async fn a_request_carries_no_sampling_field() {
+    let server = CannedServer::serving(vec![text_response()]).await;
+    let runtime = runtime_for(&server.base_url);
+
+    let (_report, _observations) = execute(
+        &runtime,
+        operation("call-no-sampling"),
+        CancellationSignal::never(),
+    )
+    .await;
+
+    let sent = sent_request_body(&server);
     assert!(
         sent.get("temperature").is_none(),
         "an explicit null sampling control is rejected exactly as a value is"
@@ -268,8 +305,22 @@ async fn a_structured_output_request_never_sends_a_forced_tool_choice() {
         sent.get("top_p").is_none(),
         "an explicit null sampling control is rejected exactly as a value is"
     );
+}
+
+#[tokio::test]
+async fn a_request_carries_no_top_level_thinking_field() {
+    let server = CannedServer::serving(vec![text_response()]).await;
+    let runtime = runtime_for(&server.base_url);
+
+    let (_report, _observations) = execute(
+        &runtime,
+        operation("call-no-thinking"),
+        CancellationSignal::never(),
+    )
+    .await;
+
     assert!(
-        sent.get("thinking").is_none(),
+        sent_request_body(&server).get("thinking").is_none(),
         "omitting the parameter is the accepted form; an explicit null is not"
     );
 }
