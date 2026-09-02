@@ -53,45 +53,11 @@ const CLAUDE_ENVIRONMENT: &[CliEnvironmentVariable] = &[
     CliEnvironmentVariable::inherited("no_proxy"),
 ];
 
-/// The exact Claude Code CLI version the built-in inventory below was last
-/// reconciled against.
+/// Every built-in tool the pinned Claude Code CLI reports or documents.
 ///
-/// Reconciliation reads two exact surfaces of the installed executable. The
-/// first is the `tools` member of its own `system/init` event, once per
-/// configuration the CLI offers, because the reported set is
-/// configuration-dependent rather than fixed: credential delivery,
-/// `--restricted`, `--disable-slash-commands`, and
-/// `CLAUDE_CODE_USE_POWERSHELL_TOOL` each change it. The second is `--help`,
-/// which names built-ins that print mode never reports — `--brief` enables
-/// `SendUserMessage` and `--restricted` names `REPL` among the code-running
-/// tools it removes — so reading the initial event alone would miss them. A pin
-/// bump that leaves this marker behind fails
-/// `the_builtin_inventory_is_reconciled_with_the_pin`, so an upstream release
-/// that adds a built-in cannot reach a daemon-driven session merely because a
-/// dependency update landed unread.
-pub const RECONCILED_CLAUDE_CLI_BUILTIN_INVENTORY_VERSION: &str = "2.1.258";
-
-/// Every built-in tool the pinned Claude Code CLI reports or documents, ordered
-/// by byte value after the leading `Task` — the order the CLI reports its own
-/// set in.
-///
-/// The invocation both selects an empty built-in surface with `--tools` and
-/// explicitly passes this entire inventory through `--disallowedTools`, so the
-/// inventory is the second of two independent controls rather than the only
-/// one. It therefore names every built-in the executable can expose, not only
-/// the ones this adapter's own invocation would otherwise reach: `Glob`,
-/// `Grep`, `PowerShell`, and `Skill` are reported only under a flag or
-/// environment variable the adapter never passes, and `REPL` and
-/// `SendUserMessage` are documented rather than reported. Naming them anyway is
-/// what keeps a regression in that first control from being the whole defense.
-///
-/// Two reaches beyond this process are the reason the inventory is audited
-/// rather than appended to. `SendMessage` and `ListAgents` address other Claude
-/// Code sessions on the same host through the CLI's own messaging socket, so a
-/// session this daemon drives could otherwise enumerate and message sessions it
-/// does not own. `SendUserMessage` opens an agent-to-user channel that is not
-/// the adapter's typed event stream, so a session could otherwise speak past
-/// the boundary this adapter reports through.
+/// `--tools ""` already selects an empty built-in surface; this inventory is
+/// the independent second control passed through `--disallowedTools`, so it
+/// names built-ins this invocation could not otherwise reach.
 pub const DISABLED_CLAUDE_CLI_BUILTIN_TOOLS: &[&str] = &[
     "Task",
     "Bash",
@@ -102,21 +68,29 @@ pub const DISABLED_CLAUDE_CLI_BUILTIN_TOOLS: &[&str] = &[
     "Edit",
     "EnterWorktree",
     "ExitWorktree",
+    // Reported only under `--restricted`.
     "Glob",
+    // Reported only under `--restricted`.
     "Grep",
+    // Enumerates other Claude Code sessions on this host.
     "ListAgents",
     "Monitor",
     "NotebookEdit",
+    // Reported only under `CLAUDE_CODE_USE_POWERSHELL_TOOL`.
     "PowerShell",
     "PushNotification",
+    // Named by `--restricted` among the code-running tools; never reported.
     "REPL",
     "Read",
     "RemoteTrigger",
     "ReportFindings",
     "ScheduleWakeup",
     "SendFeedback",
+    // Delivers to other Claude Code sessions on this host.
     "SendMessage",
+    // Agent-to-user channel enabled by `--brief`; never reported.
     "SendUserMessage",
+    // Reported only without `--disable-slash-commands`.
     "Skill",
     "TaskCreate",
     "TaskGet",
@@ -130,7 +104,6 @@ pub const DISABLED_CLAUDE_CLI_BUILTIN_TOOLS: &[&str] = &[
     "Workflow",
     "Write",
 ];
-
 /// Claude Code protocol snapshot covered by this adapter's offline fixtures.
 ///
 /// Derived by `build.rs` from the exact pin in this crate's `package.json`, so

@@ -11,10 +11,7 @@ smoke, twice-daily schedule, and workflow-self-change trigger were verified
 through PR #468 (`agent/claude-cli-smoke`), including the credential-free
 version gate against the installed pinned executable. Its request-scoped file
 credential delivery and authenticated live smoke are verified against this PR
-(`agent/claude-cli-credential-delivery`). Its disallowed-built-in inventory and
-the marker recording which version that inventory was reconciled against are
-verified against the installed `2.1.258` executable through PR #1431
-(`renovate/anthropic-ai-claude-code-2.x`). The Codex CLI adapter stack comprises
+(`agent/claude-cli-credential-delivery`). The Codex CLI adapter stack comprises
 PR #264 (`agent/codex-cli-wrap`) and PR #268 (`agent/codex-cli-pin-smoke`); its
 escalation closeout is PR #317 (`agent/escalation-closeout`). The Codex CLI
 typed rate-limit and overload evidence, provider-directed retry delay, and
@@ -1130,24 +1127,15 @@ worktree, file search, cross-session discovery and messaging, agent-to-user
 messaging, monitoring, notebook, notification, shells and the code-running
 `REPL`, read/remote/report/scheduling/feedback, skill, `Task*`, `ToolSearch`,
 web, workflow, and write); and `--allowedTools` contains only the qualified
-declared MCP names. The inventory is not limited to what this invocation would
-otherwise reach, because it is the second of two independent controls: an entry
-the empty surface already withholds costs nothing and covers the case where that
-first control regresses. Three entries are named for a distinct reason.
-Cross-session discovery and messaging address other Claude Code sessions on the
-same host through the CLI's own messaging socket, and agent-to-user messaging
-opens a channel that is not this adapter's typed event stream; both are reach
-beyond the process this adapter owns. The built-in set is
-configuration-dependent rather than fixed, so the inventory is reconciled
-against the exact pinned version from two surfaces of the executable itself —
-the `tools` member of its initial event under each configuration it offers, and
-the tool names its `--help` documents for configurations whose tools that event
-never reports — and a version marker beside the inventory records which version
-that was; a pin bump that leaves the marker behind fails offline. `dontAsk` is
-used because no undeclared capability may become an interactive permission
-question. The initial event must also report no slash commands, skills, or
-plugins and must identify the pinned Claude Code version; any mismatch is
-stream-protocol boundary loss, not a relaxed invocation.
+declared MCP names. The cross-session and agent-to-user built-ins are denied
+because they address other Claude Code sessions on the host, or the user
+directly, rather than this adapter's own event stream. The inventory is the
+second of two independent controls, so it names built-ins this invocation could
+not otherwise reach. `dontAsk` is used because no undeclared capability may
+become an interactive permission question. The initial event must also report no
+slash commands, skills, or plugins and must identify the pinned Claude Code
+version; any mismatch is stream-protocol boundary loss, not a relaxed
+invocation.
 
 The pinned stream establishes correlation and reported-model evidence through
 `system/init`. Nonterminal `system/status`, `system/hook_started`,
