@@ -11,8 +11,8 @@ to bound or size a fixture.
 The live-line merge adds one model-exchange policy to the original audit and the
 automatic-resume lifetime ceiling one goal policy; the liveness watchdog's
 single recovery-attempt constant now answers to two configured policies because
-its two consumers need different ceilings. The 134 rows partition as 35 guards,
-8 derived bounds, 78 configuration policies, 9 representation facts, and 4 test
+its two consumers need different ceilings. The 141 rows partition as 35 guards,
+8 derived bounds, 85 configuration policies, 9 representation facts, and 4 test
 fixtures. Source locations are maintained with the implementation slices that
 move or delete declarations.
 
@@ -152,6 +152,13 @@ bound in either root fails closed.
 | `config/signalboxd.example.toml`     | `SESSION_RECOVERING_DEADLINE`                     | config | `numeric_bounds.session_recovering_deadline`                                         |
 | `config/signalboxd.example.toml`     | `SESSION_BLOCKED_DEADLINE`                        | config | `numeric_bounds.session_blocked_deadline`                                            |
 | `config/signalboxd.example.toml`     | `SESSION_PARKED_RENOTIFY_INTERVAL`                | config | `numeric_bounds.session_parked_renotify_interval`                                    |
+| `config/signalboxd.example.toml`     | `SESSION_DEADLINE_PROCESSING_GRACE`               | config | `numeric_bounds.session_deadline_processing_grace`                                   |
+| `config/signalboxd.example.toml`     | `SESSION_WALL_COHORT_MATURATION`                  | config | `numeric_bounds.session_wall_cohort_maturation`                                      |
+| `config/signalboxd.example.toml`     | `SESSION_LIFECYCLE_METRIC_SCAN_INTERVAL`          | config | `numeric_bounds.session_lifecycle_metric_scan_interval`                              |
+| `config/signalboxd.example.toml`     | `SESSION_GATE_WEEKS`                              | config | `numeric_bounds.session_gate_weeks`                                                  |
+| `config/signalboxd.example.toml`     | `SESSION_COMPLETION_FAILURE_RATE_THRESHOLD_PPM`   | config | `numeric_bounds.session_completion_failure_rate_threshold_ppm`                       |
+| `config/signalboxd.example.toml`     | `SESSION_WALL_RATE_THRESHOLD_PPM`                 | config | `numeric_bounds.session_wall_rate_threshold_ppm`                                     |
+| `config/signalboxd.example.toml`     | `SESSION_FAILED_UNKNOWN_SHARE_THRESHOLD_PPM`      | config | `numeric_bounds.session_failed_unknown_share_threshold_ppm`                          |
 
 ## Representation facts
 

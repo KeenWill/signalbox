@@ -7,10 +7,18 @@ use signalbox_application::{RepoWatchConvergenceVerdict, RepoWatchReviewDecision
 use signalbox_domain::MergeableState;
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
-use crate::mapping::{
-    RepoWatchSingletonScopeStorageKind, repo_watch_convergence_verdict_from_str,
-    repo_watch_mergeable_state_from_str, repo_watch_review_decision_from_str,
-    repo_watch_singleton_scope_from_str,
+use crate::{
+    lifecycle_metrics::{
+        DECLARE_DEADLINE_VIOLATIONS_CURSOR, DECLARE_WEEKLY_METRICS_CURSOR,
+        LifecycleDeadlineViolation, LifecycleGateVerdict, LifecycleMetricBounds,
+        LifecycleWeeklyMetrics, MAX_REPORTED_WEEKS, SELECT_BOUNDS, decode_bounds, decode_violation,
+        decode_week, gate_verdict,
+    },
+    mapping::{
+        RepoWatchSingletonScopeStorageKind, repo_watch_convergence_verdict_from_str,
+        repo_watch_mergeable_state_from_str, repo_watch_review_decision_from_str,
+        repo_watch_singleton_scope_from_str,
+    },
 };
 
 const REPEATABLE_READ_ONLY: &str = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY";
@@ -353,6 +361,10 @@ pub enum ProcessOperatorStatusItem {
     QueuedObligation(ProcessOperatorStatusQueuedObligation),
     PullRequestConvergence(ProcessOperatorStatusPullRequestConvergence),
     PendingStaleReviewClearance(ProcessOperatorStatusPendingStaleReviewClearance),
+    /// One calendar week's §12 metrics.
+    LifecycleWeek(LifecycleWeeklyMetrics),
+    /// One owned non-terminal session past its §1 deadline obligation.
+    LifecycleDeadlineViolation(LifecycleDeadlineViolation),
 }
 
 /// Counts committed after every status cursor has been exhausted.
@@ -362,6 +374,8 @@ pub struct ProcessOperatorStatusCounts {
     queued_obligations: u64,
     pull_request_convergences: u64,
     pending_stale_review_clearances: u64,
+    lifecycle_weeks: u64,
+    lifecycle_deadline_violations: u64,
 }
 
 impl ProcessOperatorStatusCounts {
@@ -379,6 +393,15 @@ impl ProcessOperatorStatusCounts {
 
     pub const fn pending_stale_review_clearances(self) -> u64 {
         self.pending_stale_review_clearances
+    }
+
+    pub const fn lifecycle_weeks(self) -> u64 {
+        self.lifecycle_weeks
+    }
+
+    /// Returns the `nonterminal_past_deadline` alarm value, target zero.
+    pub const fn lifecycle_deadline_violations(self) -> u64 {
+        self.lifecycle_deadline_violations
     }
 }
 
@@ -401,11 +424,24 @@ impl ProcessOperatorStatusRepository {
             .execute(&mut *transaction)
             .await?;
         declare_status_cursors(&mut transaction).await?;
+        // The configured §12 policy is read inside the same snapshot as the
+        // cohorts it grades, so a gate verdict can never pair one deployment's
+        // threshold with another's numbers.
+        let bounds = decode_bounds(
+            &sqlx::query(SELECT_BOUNDS)
+                .fetch_all(&mut *transaction)
+                .await
+                .map_err(ProcessOperatorStatusError::Database)?,
+        )
+        .map_err(|_| ProcessOperatorStatusCorruption::Inconsistent("lifecycle metric bound"))?;
         Ok(ProcessOperatorStatusReader {
             transaction: Some(transaction),
             phase: ProcessOperatorStatusPhase::HeldSlots,
             counts: ProcessOperatorStatusCounts::default(),
             committed_counts: None,
+            bounds,
+            weeks: Vec::new(),
+            gate: None,
         })
     }
 }
@@ -416,6 +452,8 @@ enum ProcessOperatorStatusPhase {
     QueuedObligations,
     PullRequestConvergences,
     PendingStaleReviewClearances,
+    LifecycleWeeks,
+    LifecycleDeadlineViolations,
     Complete,
 }
 
@@ -425,6 +463,9 @@ pub struct ProcessOperatorStatusReader {
     phase: ProcessOperatorStatusPhase,
     counts: ProcessOperatorStatusCounts,
     committed_counts: Option<ProcessOperatorStatusCounts>,
+    bounds: LifecycleMetricBounds,
+    weeks: Vec<LifecycleWeeklyMetrics>,
+    gate: Option<LifecycleGateVerdict>,
 }
 
 impl ProcessOperatorStatusReader {
@@ -454,6 +495,14 @@ impl ProcessOperatorStatusReader {
                 ),
                 ProcessOperatorStatusPhase::PendingStaleReviewClearances => (
                     "FETCH NEXT FROM operator_status_pending_stale_review_clearances",
+                    ProcessOperatorStatusPhase::LifecycleWeeks,
+                ),
+                ProcessOperatorStatusPhase::LifecycleWeeks => (
+                    "FETCH NEXT FROM operator_status_lifecycle_weeks",
+                    ProcessOperatorStatusPhase::LifecycleDeadlineViolations,
+                ),
+                ProcessOperatorStatusPhase::LifecycleDeadlineViolations => (
+                    "FETCH NEXT FROM operator_status_lifecycle_deadline_violations",
                     ProcessOperatorStatusPhase::Complete,
                 ),
                 ProcessOperatorStatusPhase::Complete => {
@@ -473,6 +522,11 @@ impl ProcessOperatorStatusReader {
                                 "operator status transaction",
                             ))?;
                     transaction.commit().await?;
+                    self.gate = Some(gate_verdict(
+                        &self.weeks,
+                        self.counts.lifecycle_deadline_violations,
+                        self.bounds,
+                    ));
                     self.committed_counts = Some(self.counts);
                     return Ok(None);
                 }
@@ -504,6 +558,28 @@ impl ProcessOperatorStatusReader {
                         decode_pending_clearance(&row)?,
                     )
                 }
+                ProcessOperatorStatusPhase::LifecycleWeeks => {
+                    self.counts.lifecycle_weeks =
+                        increment(self.counts.lifecycle_weeks, "lifecycle week count")?;
+                    let week = decode_week(&row).map_err(|_| {
+                        ProcessOperatorStatusCorruption::Inconsistent("lifecycle weekly metric")
+                    })?;
+                    self.weeks.push(week);
+                    ProcessOperatorStatusItem::LifecycleWeek(week)
+                }
+                ProcessOperatorStatusPhase::LifecycleDeadlineViolations => {
+                    self.counts.lifecycle_deadline_violations = increment(
+                        self.counts.lifecycle_deadline_violations,
+                        "lifecycle deadline violation count",
+                    )?;
+                    ProcessOperatorStatusItem::LifecycleDeadlineViolation(
+                        decode_violation(&row).map_err(|_| {
+                            ProcessOperatorStatusCorruption::Inconsistent(
+                                "lifecycle deadline violation",
+                            )
+                        })?,
+                    )
+                }
                 ProcessOperatorStatusPhase::Complete => {
                     return Err(ProcessOperatorStatusCorruption::Inconsistent(
                         "operator status cursor phase",
@@ -518,6 +594,15 @@ impl ProcessOperatorStatusReader {
     /// Returns counts only after all cursors committed successfully.
     pub const fn counts(&self) -> Option<ProcessOperatorStatusCounts> {
         self.committed_counts
+    }
+
+    /// Returns the substrate-v0 gate verdict for the committed snapshot.
+    ///
+    /// Absent until every cursor is exhausted, for the same reason the counts
+    /// are: a verdict over part of a snapshot would grade weeks it had not
+    /// read yet.
+    pub const fn gate_verdict(&self) -> Option<LifecycleGateVerdict> {
+        self.gate
     }
 }
 
@@ -606,6 +691,16 @@ async fn declare_status_cursors(
     )
     .execute(&mut **transaction)
     .await?;
+    // The two §12 sections read the same views the telemetry pass reads, in
+    // the same snapshot as the repository-watch sections above, so one status
+    // read cannot pair a cohort with an alarm from a different instant.
+    sqlx::query(DECLARE_WEEKLY_METRICS_CURSOR)
+        .bind(MAX_REPORTED_WEEKS)
+        .execute(&mut **transaction)
+        .await?;
+    sqlx::query(DECLARE_DEADLINE_VIOLATIONS_CURSOR)
+        .execute(&mut **transaction)
+        .await?;
     Ok(())
 }
 

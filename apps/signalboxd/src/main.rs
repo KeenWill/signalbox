@@ -46,6 +46,7 @@ use signalbox_persistence::{
     blob::BlobCatalogRepository,
     convergence_sweep::PostgresConvergenceSweepStore,
     hub_fence::FENCED_POOL_MAX_CONNECTIONS,
+    lifecycle_metrics::{LifecycleMetricBounds, LifecycleMetricsRepository},
     migrate,
     model_execution::PostgresModelCallRepository,
     repo_watch_dispatch::{PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError},
@@ -67,14 +68,15 @@ use signalboxd::{
     DaemonToolCatalog, DaemonToolComposition, DaemonTools, DaemonToolsConstructionError,
     ExpiredPassRecoveryPolicy, FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError,
     FencedPoolFloorReconciliation, FileCredentialAccess, GitHubCodeHostTransport,
-    GoalModeNumericBounds, HubModelConfiguration, HubModelConfigurationError, LocalProcessListener,
-    LocalSocketError, MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime,
-    PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
-    ProcessRuntimeError, PrometheusServer, ReportedUsageCompaction, RepositoryWatchNumericBounds,
-    RepositoryWatchRuntime, RepositoryWatchRuntimeError, SessionTemplateConfiguration,
-    SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
-    TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
-    TurnLivenessNumericBounds, TurnLivenessRuntime, WebBlobRuntime, WorkspaceInstructionRuntime,
+    GoalModeNumericBounds, HubModelConfiguration, HubModelConfigurationError,
+    LifecycleMetricsRuntime, LocalProcessListener, LocalSocketError, MappedDaemonCredentialInputs,
+    ModelAdapter, OtlpRuntime, PostgresGoalPassDisposition, PostgresProviderModelExecution,
+    ProcessRuntime, ProcessRuntimeError, PrometheusServer, ReportedUsageCompaction,
+    RepositoryWatchNumericBounds, RepositoryWatchRuntime, RepositoryWatchRuntimeError,
+    SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
+    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
+    TelemetryExportFilter, TelemetryMetrics, TurnLivenessNumericBounds, TurnLivenessRuntime,
+    WebBlobRuntime, WorkspaceInstructionRuntime,
     model_adapter::ConfiguredModelRuntime,
     reconcile_fenced_pool_floor, run_web_image_derivative_worker_if_requested,
     usage_limits::UsageLimitedModelCallProvider,
@@ -679,6 +681,7 @@ enum RuntimeTaskExit {
     ConvergenceSweep,
     WebHttp(Result<(), WebHttpRuntimeError>),
     TurnLiveness,
+    LifecycleMetrics,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -724,6 +727,7 @@ enum RuntimeTaskDefect {
     ConvergenceSweepCompletedBeforeShutdown,
     WebHttpCompletedBeforeShutdown,
     TurnLivenessCompletedBeforeShutdown,
+    LifecycleMetricsCompletedBeforeShutdown,
     TaskCancelled,
     TaskPanicked,
     TaskJoinFailed,
@@ -750,6 +754,9 @@ impl RuntimeTaskDefect {
             }
             Self::WebHttpCompletedBeforeShutdown => "web_http_completed_before_shutdown",
             Self::TurnLivenessCompletedBeforeShutdown => "turn_liveness_completed_before_shutdown",
+            Self::LifecycleMetricsCompletedBeforeShutdown => {
+                "lifecycle_metrics_completed_before_shutdown"
+            }
             Self::TaskCancelled => "runtime_task_cancelled",
             Self::TaskPanicked => "runtime_task_panicked",
             Self::TaskJoinFailed => "runtime_task_join_failed",
@@ -1146,7 +1153,8 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         | Ok(RuntimeTaskExit::RepositoryWatchLeaseExpiry(Ok(())))
         | Ok(RuntimeTaskExit::ConvergenceSweep)
         | Ok(RuntimeTaskExit::WebHttp(Ok(())))
-        | Ok(RuntimeTaskExit::TurnLiveness) => RuntimeTaskCompletion::Clean,
+        | Ok(RuntimeTaskExit::TurnLiveness)
+        | Ok(RuntimeTaskExit::LifecycleMetrics) => RuntimeTaskCompletion::Clean,
         Ok(RuntimeTaskExit::Process(Err(error))) => {
             report_process_runtime_failure(&error);
             RuntimeTaskCompletion::Failed
@@ -1350,6 +1358,7 @@ async fn run_hub(
                 )
             })
     };
+    let configured_u64 = |field| numeric_bounds.integer(field).flatten();
     let model_exchange_timeout = configured_duration("model_exchange_timeout");
     let codex_cli_version_probe_bound = configured_duration("codex_cli_version_probe_bound")
         .filter(|bound| !bound.is_zero())
@@ -1535,6 +1544,20 @@ async fn run_hub(
         blocked: configured_duration("session_blocked_deadline"),
         parked_renotify: configured_duration("session_parked_renotify_interval"),
     };
+    let lifecycle_metric_bounds = LifecycleMetricBounds {
+        deadline_processing_grace: configured_duration("session_deadline_processing_grace"),
+        wall_cohort_maturation: configured_duration("session_wall_cohort_maturation"),
+        gate_weeks: configured_u64("session_gate_weeks"),
+        completion_failure_rate_threshold_ppm: configured_u64(
+            "session_completion_failure_rate_threshold_ppm",
+        ),
+        wall_rate_threshold_ppm: configured_u64("session_wall_rate_threshold_ppm"),
+        failed_unknown_share_threshold_ppm: configured_u64(
+            "session_failed_unknown_share_threshold_ppm",
+        ),
+    };
+    let lifecycle_metric_scan_interval =
+        configured_duration("session_lifecycle_metric_scan_interval");
     let diagnostic_model_identity_limit = configured_usize("diagnostic_model_identity_limit")?;
     let automatic_tool_round_limit = configured_usize("max_automatic_tool_rounds_per_turn")?;
     let post_kill_reap_bound = configured_duration("post_kill_reap_bound");
@@ -1832,6 +1855,19 @@ async fn run_hub(
                     erase_startup_cause(
                         RuntimePhase::Migration,
                         SanitizedStartupCause::Static("session_deadline_policy_failed"),
+                    )
+                })?;
+            // §12's thresholds and windows land beside the definitions that
+            // read them, for the same reason the deadline bounds do: a metric
+            // whose policy lives in the query is a metric two readers can
+            // disagree about.
+            LifecycleMetricsRepository::new(migration_pool.clone())
+                .apply_configured_bounds(&lifecycle_metric_bounds)
+                .await
+                .map_err(|_| {
+                    erase_startup_cause(
+                        RuntimePhase::Migration,
+                        SanitizedStartupCause::Static("lifecycle_metric_policy_failed"),
                     )
                 })?;
             tracing::info!(
@@ -2504,6 +2540,16 @@ async fn run_hub(
         None => SchedulerLoop::new(work_source, pass),
     };
     scheduler = scheduler.with_occupancy_bound(scheduler_pass_occupancy_bound);
+    // The exported gauges exist only where Prometheus does; without a scrape
+    // listener there is nothing for the pass to publish to, and the operator
+    // status command still reads the same views.
+    let lifecycle_metrics_runtime = prometheus_runtime.as_ref().map(|(metrics, _server)| {
+        LifecycleMetricsRuntime::new(
+            pool.clone(),
+            Arc::new(metrics.clone()),
+            lifecycle_metric_scan_interval,
+        )
+    });
     if let Some((metrics, _server)) = prometheus_runtime.as_ref() {
         scheduler = scheduler.with_occupancy_observer(Arc::new(metrics.clone()));
     }
@@ -2525,6 +2571,7 @@ async fn run_hub(
     let (convergence_sweep_shutdown, convergence_sweep_shutdown_receiver) = watch::channel(false);
     let (web_http_shutdown, web_http_shutdown_receiver) = watch::channel(false);
     let (turn_liveness_shutdown, turn_liveness_shutdown_receiver) = watch::channel(false);
+    let (lifecycle_metrics_shutdown, lifecycle_metrics_shutdown_receiver) = watch::channel(false);
     let mut runtime_tasks = JoinSet::new();
     runtime_tasks.spawn(async move {
         RuntimeTaskExit::Scheduler(
@@ -2605,6 +2652,14 @@ async fn run_hub(
             .await;
         RuntimeTaskExit::TurnLiveness
     });
+    if let Some(lifecycle_metrics_runtime) = lifecycle_metrics_runtime {
+        runtime_tasks.spawn(async move {
+            lifecycle_metrics_runtime
+                .run(lifecycle_metrics_shutdown_receiver)
+                .await;
+            RuntimeTaskExit::LifecycleMetrics
+        });
+    }
     tracing::info!(phase = ?RuntimePhase::Scheduling, "daemon runtime started");
 
     let mut outcome = {
@@ -2684,6 +2739,12 @@ async fn run_hub(
                         );
                         RuntimeStopCause::RuntimeDefect
                     }
+                    Some(Ok(RuntimeTaskExit::LifecycleMetrics)) => {
+                        report_runtime_task_defect(
+                            RuntimeTaskDefect::LifecycleMetricsCompletedBeforeShutdown,
+                        );
+                        RuntimeStopCause::RuntimeDefect
+                    }
                     Some(Ok(RuntimeTaskExit::TurnLiveness)) => {
                         report_runtime_task_defect(
                             RuntimeTaskDefect::TurnLivenessCompletedBeforeShutdown,
@@ -2723,6 +2784,7 @@ async fn run_hub(
             let _ = convergence_sweep_shutdown.send(true);
             let _ = web_http_shutdown.send(true);
             let _ = turn_liveness_shutdown.send(true);
+            let _ = lifecycle_metrics_shutdown.send(true);
             let (drain, components_clean) = drain_runtime_tasks(
                 &mut runtime_tasks,
                 guard_loss.as_mut(),

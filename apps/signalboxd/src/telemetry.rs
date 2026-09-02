@@ -36,6 +36,9 @@ use opentelemetry_sdk::{
 use prometheus::{IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry, TextEncoder};
 use signalbox_application::{SchedulerOccupancyObserver, SchedulerOldestInFlightPass};
 use signalbox_model_provider_runtime::ModelCallCauseToken;
+use signalbox_persistence::lifecycle_metrics::{
+    LifecycleGateVerdict, LifecycleMetricsReport, LifecycleRate,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -1065,6 +1068,9 @@ pub struct TelemetryMetrics {
     scheduler_oldest_age_seconds: IntGauge,
     scheduler_oldest_info: IntGaugeVec,
     scheduler_oldest: Arc<Mutex<Option<SchedulerOldestInFlightPass>>>,
+    lifecycle_rate_ppm: IntGaugeVec,
+    lifecycle_nonterminal_past_deadline: IntGauge,
+    lifecycle_substrate_v0_gate: IntGaugeVec,
 }
 
 impl TelemetryMetrics {
@@ -1090,6 +1096,27 @@ impl TelemetryMetrics {
                 "Durably terminalized model calls by closed disposition.",
             ),
             &["disposition"],
+        )
+        .map_err(|_| metrics_error())?;
+        let lifecycle_rate_ppm = IntGaugeVec::new(
+            Opts::new(
+                "signalbox_session_lifecycle_rate_parts_per_million",
+                "Latest complete weekly session-lifecycle metric, in parts per million.",
+            ),
+            &["metric"],
+        )
+        .map_err(|_| metrics_error())?;
+        let lifecycle_nonterminal_past_deadline = IntGauge::with_opts(Opts::new(
+            "signalbox_sessions_nonterminal_past_deadline",
+            "Owned non-terminal sessions past their armed deadline obligation; target zero.",
+        ))
+        .map_err(|_| metrics_error())?;
+        let lifecycle_substrate_v0_gate = IntGaugeVec::new(
+            Opts::new(
+                "signalbox_substrate_v0_gate",
+                "Substrate-v0 gate verdict; exactly one verdict series is one.",
+            ),
+            &["verdict"],
         )
         .map_err(|_| metrics_error())?;
         let scheduler_occupancy = IntGauge::with_opts(Opts::new(
@@ -1118,6 +1145,15 @@ impl TelemetryMetrics {
             .map_err(|_| metrics_error())?;
         registry
             .register(Box::new(model_terminal.clone()))
+            .map_err(|_| metrics_error())?;
+        registry
+            .register(Box::new(lifecycle_rate_ppm.clone()))
+            .map_err(|_| metrics_error())?;
+        registry
+            .register(Box::new(lifecycle_nonterminal_past_deadline.clone()))
+            .map_err(|_| metrics_error())?;
+        registry
+            .register(Box::new(lifecycle_substrate_v0_gate.clone()))
             .map_err(|_| metrics_error())?;
         registry
             .register(Box::new(scheduler_occupancy.clone()))
@@ -1156,7 +1192,63 @@ impl TelemetryMetrics {
             scheduler_oldest_age_seconds,
             scheduler_oldest_info,
             scheduler_oldest: Arc::new(Mutex::new(None)),
+            lifecycle_rate_ppm,
+            lifecycle_nonterminal_past_deadline,
+            lifecycle_substrate_v0_gate,
         })
+    }
+
+    /// Publishes one §12 report onto the exported gauges.
+    ///
+    /// The rates come from the most recent week that has a population at all:
+    /// a week with an empty denominator states nothing, and carrying its
+    /// absence forward as a zero would export a reliability claim the durable
+    /// columns do not make. Such a metric's series is simply left where it
+    /// was, and the alarm and the gate — which are instantaneous rather than
+    /// weekly — always publish.
+    pub(crate) fn observe_lifecycle_metrics(&self, report: &LifecycleMetricsReport) {
+        self.lifecycle_nonterminal_past_deadline
+            .set(clamp_gauge(report.nonterminal_past_deadline()));
+        let verdict = report.gate_verdict();
+        self.set_gate_series(LifecycleGateVerdict::Met, verdict);
+        self.set_gate_series(LifecycleGateVerdict::NotMet, verdict);
+        self.set_gate_series(LifecycleGateVerdict::Indeterminate, verdict);
+        let Some(week) = report.latest_week() else {
+            return;
+        };
+        self.set_rate("session_completion_failure_rate", week.completion_failure());
+        self.set_rate("failed_unknown_share", week.failed_unknown_share());
+        self.set_rate("overflow_incidence", week.overflow_incidence());
+        self.set_rate("finish_given_overflow", week.finish_given_overflow());
+        self.set_rate("wall_rate", week.wall_rate());
+        self.set_rate("turn_cause_completeness", week.turn_cause_completeness());
+        self.set_rate(
+            "model_call_cause_completeness",
+            week.model_call_cause_completeness(),
+        );
+    }
+
+    fn set_rate(&self, metric: &str, rate: LifecycleRate) {
+        let Some(parts_per_million) = rate.parts_per_million() else {
+            return;
+        };
+        let Ok(gauge) = self
+            .lifecycle_rate_ppm
+            .get_metric_with_label_values(&[metric])
+        else {
+            return;
+        };
+        gauge.set(clamp_gauge(parts_per_million));
+    }
+
+    fn set_gate_series(&self, series: LifecycleGateVerdict, verdict: LifecycleGateVerdict) {
+        let Ok(gauge) = self
+            .lifecycle_substrate_v0_gate
+            .get_metric_with_label_values(&[lifecycle_gate_label(series)])
+        else {
+            return;
+        };
+        gauge.set(i64::from(series == verdict));
     }
 
     pub(crate) fn observe_turn_started(&self) {
@@ -1197,6 +1289,26 @@ impl TelemetryMetrics {
         );
         TextEncoder::new().encode_to_string(&self.registry.gather())
     }
+}
+
+const fn lifecycle_gate_label(verdict: LifecycleGateVerdict) -> &'static str {
+    match verdict {
+        LifecycleGateVerdict::Met => "met",
+        LifecycleGateVerdict::NotMet => "not_met",
+        LifecycleGateVerdict::Indeterminate => "indeterminate",
+    }
+}
+
+/// Presents one unsigned count on a signed gauge without wrapping it.
+///
+/// Prometheus gauges are signed; a population that could not fit would
+/// otherwise be exported as a negative reliability number, which reads as the
+/// opposite of what it is.
+const fn clamp_gauge(value: u64) -> i64 {
+    if value > i64::MAX as u64 {
+        return i64::MAX;
+    }
+    value as i64
 }
 
 impl SchedulerOccupancyObserver for TelemetryMetrics {

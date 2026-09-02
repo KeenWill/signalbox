@@ -62,10 +62,12 @@ import transport in PR #401 (`agent/import-chunks-protocol`), and the typed
 delegation session-follow events, queued task-origin projection, recipient
 routing, wake exclusion, delivered delegation transcript entries, and typed
 parent-terminated turn projection against this PR
-(`agent/delegation-persistence-schema`). This page is the normative boundary
-between a local client process and `signalboxd`; domain values, PostgreSQL
-records, and wire messages remain distinct representations. The path-scoped
-session-placement wire and terminal-client surface were verified through PR #400
+(`agent/delegation-persistence-schema`), and the session-lifecycle metric and
+deadline-violation sections of the operator-status snapshot against
+`agent/lifecycle-t3-metrics`. This page is the normative boundary between a
+local client process and `signalboxd`; domain values, PostgreSQL records, and
+wire messages remain distinct representations. The path-scoped session-placement
+wire and terminal-client surface were verified through PR #400
 (`agent/scoped-visibility-wiring`).
 
 The session-metadata last-writer actor inventory, its native and terminal-client
@@ -1304,15 +1306,40 @@ message and count validate. This avoids an aggregate frame-size limit.
 
 A successful `read_operator_status` response consists of `operator_status`
 messages: `kind=start`, zero or more rows from each section in this fixed order,
-then `kind=end` with one count per section. The row kinds are `held_slot`,
-`queued_obligation`, `pull_request_convergence`, and
-`pending_stale_review_clearance`. The daemon reads the four repository-watch
-views bearing those respective concepts in one read-only repeatable-read
-transaction. It streams their rows through server-side cursors into a
-temporary-file spool before writing the first response frame, so a database or
-encoding failure produces no partial successful snapshot and the request retains
-neither an unbounded row inventory nor a database transaction while the client
-reads.
+then `kind=end` with one count per section and the substrate-v0 gate verdict.
+The row kinds are `held_slot`, `queued_obligation`, `pull_request_convergence`,
+`pending_stale_review_clearance`, `lifecycle_week`, and
+`lifecycle_deadline_violation`. The daemon reads the four repository-watch views
+bearing those respective concepts and the two session-lifecycle metric views in
+one read-only repeatable-read transaction. It streams their rows through
+server-side cursors into a temporary-file spool before writing the first
+response frame, so a database or encoding failure produces no partial successful
+snapshot and the request retains neither an unbounded row inventory nor a
+database transaction while the client reads.
+
+A `lifecycle_week` row carries one calendar week's session-lifecycle metrics:
+the week's UTC start as an ISO-8601 date, and each metric as its exact numerator
+and denominator rather than as a ratio, so a week whose population is empty
+carries no rate at all instead of a zero. The pairs are the completion failure
+rate over the trimmed weekly terminal cohort, the `failed_unknown` count inside
+that numerator, overflow incidence over the untrimmed cohort, the finished share
+of exactly those overflow sessions, and the wall rate over the week's dispatch
+cohort, beside that cohort's maturity, the walls recorded in the week whatever
+cohort they belong to, and the two cause-completeness axes. Every numerator is
+at most its own denominator, the trimmed cohort is at most the untrimmed one,
+and `failed_unknown` is at most the completion-failure numerator, because each
+is a subset relation the definitions establish rather than a coincidence of one
+read.
+
+A `lifecycle_deadline_violation` row names one owned non-terminal session whose
+armed deadline obligation is unmet: its identity, the non-terminal state it
+holds, whether the deadline record is missing outright, and how long the armed
+expiry has been past. Exactly one of those last two is present — a session with
+no armed record has no expiry to be past — and the section's count is the
+`nonterminal_past_deadline` alarm value, whose target is zero. The end message's
+gate verdict is `met`, `not_met`, or `indeterminate`; it is `indeterminate` when
+no gate window is configured or fewer weekly cohorts with a population exist
+than the window requires.
 
 A held-slot row carries dispatch, repository, dispatch origin, rule, singleton,
 ordered session, whole-second held duration, and the independently failing
@@ -2655,11 +2682,15 @@ line.
 
 `status` sends exactly one `read_operator_status` request through the configured
 owner-only daemon socket; it never opens the database itself. It validates the
-fixed section order and all four terminal counts before printing anything. The
-first output line names those counts, followed by one human-scannable line per
-row with `held`, `queued`, `convergence`, or `stale_review_clearance` as its
-kind. A held line prints its dispatch origin as `origin=pull_request#<number>`
-or `origin=branch:<branch>`, naming the fact the slot was taken from under one
+fixed section order and all six terminal counts before printing anything. The
+first output line names those counts and the gate verdict, followed by one
+human-scannable line per row with `held`, `queued`, `convergence`,
+`stale_review_clearance`, `lifecycle_week`, or `nonterminal_past_deadline` as
+its kind. A `lifecycle_week` line prints each metric as `numerator/denominator`
+and, where the denominator is not zero, the derived rate in parts per million,
+so an absent rate is visibly absent rather than printed as zero. A held line
+prints its dispatch origin as `origin=pull_request#<number>` or
+`origin=branch:<branch>`, naming the fact the slot was taken from under one
 field whichever shape it has. A queued line prints an occupant blocked by an
 independently commissioned live session as `occupying=external:<sessions>`,
 distinguishing it from a watch dispatch, which prints its identity ahead of its

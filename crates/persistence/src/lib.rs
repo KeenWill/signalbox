@@ -26,6 +26,7 @@ pub mod create_session_from_imported_frontier;
 pub mod goal;
 pub mod goal_turn;
 pub mod hub_fence;
+pub mod lifecycle_metrics;
 pub mod mapping;
 pub mod model_execution;
 pub mod operator_status;

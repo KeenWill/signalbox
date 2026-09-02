@@ -1,15 +1,20 @@
 //! Scale and overflow proof for the bounded fleet attention projection.
 
 use crate::*;
+use signalbox_application::AttentionState;
 use signalbox_application::{
     AttentionChanges, AttentionContinuation, AttentionCursor, AttentionQuery, AttentionSort,
     max_attention_change_items, max_attention_snapshot_items,
 };
-use signalbox_domain::{ReplaceSessionMetadata, SessionMetadataContent};
+use signalbox_domain::{
+    CoreAgency, LifecycleActor, ReplaceSessionMetadata, SessionLifecycleState,
+    SessionMetadataContent, SessionParkCause, SessionParkResponder,
+};
 use signalbox_persistence::attention::{
     AttentionCorruption, AttentionRepository, AttentionRepositoryError,
     AutomaticResumeAttemptBounds,
 };
+use signalbox_persistence::session_lifecycle::SessionLifecycleRepository;
 use signalbox_persistence::session_metadata::SessionMetadataRepository;
 
 const FLEET_SIZE: u128 = 258;
@@ -552,6 +557,113 @@ async fn unknown_session_goal_rejection_is_recorded_and_publishes_no_attention()
     };
     assert_eq!(recorded, 1);
     assert_eq!(published, 0);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Section 1: the attention state is a projection of the durable session state
+/// plus the turn phase, never a machine of its own.
+///
+/// The page is read at each of three durable states, and each time it reports
+/// the state that state projects to. The park is the case that fixes the
+/// direction of the dependency: parking suspends the turn in place and the
+/// satellite stops following the mapping, and the page still reads the
+/// suspended phase — which is what section 1 says leaving the park re-enters.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn the_attention_state_projects_the_durable_session_state() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xa771_0000;
+    let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(
+            seed,
+            seed + 1,
+            ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(Uuid::from_u128(
+                seed + 2,
+            ))),
+        ))
+        .await?;
+    let attention = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS);
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+
+    let created = attention.snapshot(identity_query(None)).await?;
+    assert_eq!(created.summaries[0].state, AttentionState::Idle);
+    assert_eq!(
+        lifecycle
+            .load(session)
+            .await?
+            .expect("every session owns a lifecycle row")
+            .state(),
+        SessionLifecycleState::Created
+    );
+
+    let turn = TurnId::from_uuid(Uuid::from_u128(seed + 3));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 4)),
+                session,
+                UserContent::try_text(String::from("attention projection input"))
+                    .expect("fixture content is admitted"),
+                DeliveryRequest::StartWhenNoActiveTurn {
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 5)),
+            Some(turn),
+        )
+        .await?;
+
+    let dispatched = attention.snapshot(identity_query(None)).await?;
+    assert_eq!(dispatched.summaries[0].state, AttentionState::Queued);
+    assert_eq!(
+        lifecycle
+            .load(session)
+            .await?
+            .expect("every session owns a lifecycle row")
+            .state(),
+        SessionLifecycleState::Dispatched
+    );
+
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 6),
+            starting_frontier: Uuid::from_u128(seed + 7),
+            initial_attempt: Uuid::from_u128(seed + 8),
+        },
+    )
+    .await?;
+
+    let active = attention.snapshot(identity_query(None)).await?;
+    assert_eq!(active.summaries[0].state, AttentionState::Active);
+    assert_eq!(
+        lifecycle
+            .load(session)
+            .await?
+            .expect("every session owns a lifecycle row")
+            .state(),
+        SessionLifecycleState::Active
+    );
+
+    lifecycle
+        .park(
+            session,
+            SessionParkCause::ProgressBudgetExhausted,
+            SessionParkResponder::Operator,
+            None,
+            LifecycleActor::Core {
+                agency: CoreAgency::Daemon,
+            },
+        )
+        .await?;
+
+    let parked = attention.snapshot(identity_query(None)).await?;
+    assert_eq!(parked.summaries[0].state, AttentionState::Active);
 
     pool.close().await;
     drop(container);
