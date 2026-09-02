@@ -3466,7 +3466,8 @@ async fn persist_batch_decision(
 
 /// Settles a decision's injection receipt (§8): applied decisions deliver to
 /// the request's turn; a decision that arrives after its request was decided
-/// or its turn ended is `not_delivered`.
+/// or its turn ended is `not_delivered`. A decision naming no request has no
+/// session to carry a receipt.
 async fn settle_decision_injection(
     connection: &mut PgConnection,
     session: SessionId,
@@ -3482,9 +3483,7 @@ async fn settle_decision_injection(
         }) => outbox::InjectionOutcomeOutbox::NotDelivered,
         DecideToolRequestResult::Rejected(DecideToolRequestRejectedResult::RequestNotFound {
             ..
-        }) => outbox::InjectionOutcomeOutbox::Rejected {
-            kind: "request_not_found",
-        },
+        }) => return Ok(()),
         DecideToolRequestResult::Rejected(
             DecideToolRequestRejectedResult::NotEarliestUndecided { .. },
         ) => outbox::InjectionOutcomeOutbox::Rejected {

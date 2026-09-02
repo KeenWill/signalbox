@@ -195,7 +195,6 @@ ALTER TABLE injection_settled_outbox_event
             'acceptance_position_exhausted'::text,
             'interrupt_already_applied'::text,
             'interrupt_unavailable_while_awaiting_approval'::text,
-            'request_not_found'::text,
             'not_earliest_undecided'::text
         ])
     );
