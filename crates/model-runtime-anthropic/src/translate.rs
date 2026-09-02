@@ -396,22 +396,21 @@ fn tool_plan<C>(operation: &ModelOperation<C>) -> Result<ToolPlan, PreparationFa
             instruction: None,
         });
     }
-    let (disable_parallel_tool_use, demand) = match &operation.tool_choice {
-        ToolChoice::Automatic => (None, None),
-        ToolChoice::AnyTool => (None, Some(ToolDemand::AnyTool)),
-        // A named choice selects one tool, so more than one proposal could
-        // never satisfy it.
-        ToolChoice::Named(name) => (
-            Some(true),
-            Some(ToolDemand::Named {
-                name: name.as_str().to_string(),
-            }),
-        ),
+    // An ordinary tool choice admits several proposals — a named choice
+    // requires every proposal to carry the selected name, not that there be
+    // only one — so parallel tool use stays enabled for both. Only the
+    // contract above promises exactly one value.
+    let demand = match &operation.tool_choice {
+        ToolChoice::Automatic => None,
+        ToolChoice::AnyTool => Some(ToolDemand::AnyTool),
+        ToolChoice::Named(name) => Some(ToolDemand::Named {
+            name: name.as_str().to_string(),
+        }),
     };
     Ok(ToolPlan {
         tools: Some(tools),
         tool_choice: Some(WireToolChoice::Auto {
-            disable_parallel_tool_use,
+            disable_parallel_tool_use: None,
         }),
         instruction: demand.as_ref().map(tool_instruction),
     })
@@ -693,7 +692,6 @@ mod tests {
               "stream": false,
               "system": "Answer briefly.\n\nAnswer by calling the lookup tool rather than replying with text. Call no other tool.",
               "tool_choice": {
-                "disable_parallel_tool_use": true,
                 "type": "auto"
               },
               "tools": [
@@ -999,7 +997,7 @@ mod tests {
     }
 
     #[test]
-    fn a_named_tool_choice_becomes_auto_without_parallel_use_and_names_the_tool() {
+    fn a_named_tool_choice_becomes_auto_and_names_the_tool_in_the_instruction() {
         let mut operation = operation("call-named-tool");
         operation.tools = vec![ToolDefinition::with_schema(
             "lookup",
@@ -1013,10 +1011,8 @@ mod tests {
 
         assert_eq!(
             value["tool_choice"],
-            serde_json::json!({
-                "type": "auto",
-                "disable_parallel_tool_use": true
-            })
+            serde_json::json!({"type": "auto"}),
+            "a named choice admits several proposals, so parallel tool use stays enabled"
         );
         expect![[
             "Answer by calling the lookup tool rather than replying with text. Call no other tool."
