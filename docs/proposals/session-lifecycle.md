@@ -182,12 +182,16 @@ authority, an approval wait is denied before interruption as that machinery
 requires, and a possibly-executed operation terminalizes
 `reconciliation_required`, never `cancelled` — ambiguity evidence is never
 erased. The session records terminal only after the turn settles, so no terminal
-session leaves a non-terminal turn behind (§1). The park then closes with the
-outcome that matches its resolution: `superseded{by}` when a fresh respawn takes
-the work; `abandoned` on operator write-off; `failed_retryable{cause}`,
-`failed_structural{cause}`, or `failed_unknown` when it closes as failed with
-the cause standing. Each outcome carries its warranted recovery as normative
-behavior:
+session leaves a non-terminal turn behind (§1). Session terminalization likewise
+settles the current goal generation in the same closure — a terminal goal event
+matching the outcome — because goal state is the sole continuation-stopping
+condition in the committed goal contract: a pursuing or resumable goal must
+never survive beneath a terminal session, scheduling work no one owns. The park
+then closes with the outcome that matches its resolution: `superseded{by}` when
+a fresh respawn takes the work; `abandoned` on operator write-off;
+`failed_retryable{cause}`, `failed_structural{cause}`, or `failed_unknown` when
+it closes as failed with the cause standing. Each outcome carries its warranted
+recovery as normative behavior:
 
 - `achieved_verified` — recorded only after the session's declared finish check
   passes: for repo-watch work, the external gate re-checked on the exact head
@@ -605,14 +609,16 @@ and is improved later behind evals.
 
 ## 10. Retired and dispatch deadlines
 
-**Proposed behavior.** `retired` is a legal terminal disposition for goal turns.
-Today `goal_turn_retired` is published but the turn vocabulary cannot express
-it. All 52 non-terminal turns in the database are exactly this shape, and every
-published retirement is such a turn — the match holds in both directions. Adding
-`retired` closes all 52. A turn terminal with disposition `retired` contributes
-no terminal frontier and stays excluded from queue predecessor selection,
-exactly as retired queued work is excluded today: the disposition changes the
-vocabulary, never the lineage rules.
+**Proposed behavior.** `retired` is a legal terminal disposition for any queued
+turn that never activated — goal turns, and the queued admission turns whose
+expiry this section defines, an owned interactive first turn included. For goal
+turns, `goal_turn_retired` is published today but the turn vocabulary cannot
+express it: all 52 non-terminal turns in the database are exactly this shape,
+and every published retirement is such a turn — the match holds in both
+directions. Adding `retired` closes all 52. A turn terminal with disposition
+`retired` contributes no terminal frontier and stays excluded from queue
+predecessor selection, exactly as retired queued work is excluded today: the
+disposition changes the vocabulary, never the lineage rules.
 
 **Proposed behavior.** Every owned dispatched session carries a dispatch
 deadline on the `dispatched` to `active` transition, config-sourced; an
