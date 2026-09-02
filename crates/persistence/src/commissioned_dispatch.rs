@@ -14,7 +14,8 @@ use signalbox_application::{
     CommissionDispatchRequest, CommissionedDispatchFence, PreparedCommissionedDispatch,
 };
 use signalbox_domain::{
-    CommissionedDispatchId, DurableCommandId, FrozenAliasDefinition, ModelAlias, SessionId,
+    CommandPrincipal, CommissionedDispatchId, DispatchingModule, DurableCommandId,
+    FrozenAliasDefinition, ModelAlias, SessionId,
 };
 use sqlx::{PgPool, Row};
 
@@ -311,9 +312,16 @@ impl PostgresCommissionedDispatchStore {
                 "commissioned goal targets another session",
             ));
         }
-        if !crate::create_session::claim_create_session_command(&mut transaction, command_id)
-            .await
-            .map_err(CommissionedDispatchRepositoryError::SessionCreation)?
+        let principal = CommandPrincipal::Module {
+            module: DispatchingModule::CommissionedDispatch,
+        };
+        if !crate::create_session::claim_create_session_command(
+            &mut transaction,
+            command_id,
+            principal,
+        )
+        .await
+        .map_err(CommissionedDispatchRepositoryError::SessionCreation)?
         {
             // Lost the claim to a concurrent commit. Re-read the winner under
             // a fresh statement snapshot: an equal committed commission is a
@@ -354,6 +362,7 @@ impl PostgresCommissionedDispatchStore {
         crate::submit_input::insert_fresh_initial_input(
             &mut transaction,
             initial_input,
+            principal,
             accepted_input,
             turn,
             cancellation_entry,
@@ -366,9 +375,15 @@ impl PostgresCommissionedDispatchStore {
         // scheduling one of its own, so the session runs its template once,
         // against the operator's context, under the generation that turn is
         // recorded in — exactly as a repository-watch dispatch action does.
-        crate::goal::insert_fresh_commissioned_goal(&mut transaction, goal, accepted_input, turn)
-            .await
-            .map_err(CommissionedDispatchRepositoryError::GoalCommission)?;
+        crate::goal::insert_fresh_commissioned_goal(
+            &mut transaction,
+            goal,
+            principal,
+            accepted_input,
+            turn,
+        )
+        .await
+        .map_err(CommissionedDispatchRepositoryError::GoalCommission)?;
         transaction.commit().await.map_err(|error| {
             CommissionedDispatchRepositoryError::Database {
                 commit_ambiguous: commit_failure_is_ambiguous(&error),

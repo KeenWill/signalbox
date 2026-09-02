@@ -911,7 +911,10 @@ async fn s01_inv012_transaction_apply_replay_conflict_and_restart() -> Result<()
     let loaded_alias = repository
         .load(alias_creation.command().command_id())
         .await?
-        .expect("the applied alias creation must load");
+        .expect("the applied alias creation must load")
+        .applied()
+        .cloned()
+        .expect("the creation applied");
     assert_eq!(loaded_alias.command(), alias_creation.command());
     assert_eq!(
         loaded_alias.applied_result(),
@@ -940,7 +943,10 @@ async fn s01_inv012_transaction_apply_replay_conflict_and_restart() -> Result<()
     let reconstituted = restarted
         .load(first.command().command_id())
         .await?
-        .expect("committed creation must survive a new pool");
+        .expect("committed creation must survive a new pool")
+        .applied()
+        .cloned()
+        .expect("the creation applied");
     assert_eq!(reconstituted.command(), first.command());
     assert_eq!(reconstituted.session().id(), first.session().id());
     assert_eq!(reconstituted.applied_result(), first.applied_result());
@@ -1498,7 +1504,10 @@ async fn s01_inv002_inv008_inv012_defaults_apply_replay_stale_and_history()
     let receipt = create_repository
         .load(creation.command().command_id())
         .await?
-        .expect("creation history remains loadable");
+        .expect("creation history remains loadable")
+        .applied()
+        .cloned()
+        .expect("the creation applied");
     assert_eq!(
         receipt.session().configuration_defaults().version(),
         SessionConfigurationDefaultsVersion::first()
@@ -2315,7 +2324,10 @@ async fn s01_inv003_inv008_inv012_current_session_load_and_receipt_replay_remain
     let receipt = create_repository
         .load(direct_creation.command().command_id())
         .await?
-        .expect("creation receipt remains loadable after current defaults advance");
+        .expect("creation receipt remains loadable after current defaults advance")
+        .applied()
+        .cloned()
+        .expect("the creation applied");
     assert_eq!(receipt.command(), direct_creation.command());
     assert_eq!(
         receipt.session().configuration_defaults().version(),

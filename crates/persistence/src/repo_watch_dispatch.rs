@@ -1716,9 +1716,17 @@ impl PostgresRepoWatchDispatchStore {
                     let submit_command_id = initial_input.command_id();
                     let template_name = provenance.name().as_str().to_owned();
                     let template_digest = provenance.content_digest().as_bytes().to_vec();
-                    insert_fresh_prepared(&mut transaction, prepared_session, &self.credential_pin)
-                        .await
-                        .map_err(RepoWatchDispatchRepositoryError::SessionCreation)?;
+                    let principal = signalbox_domain::CommandPrincipal::Module {
+                        module: signalbox_domain::DispatchingModule::RepositoryWatch,
+                    };
+                    insert_fresh_prepared(
+                        &mut transaction,
+                        prepared_session,
+                        &self.credential_pin,
+                        principal,
+                    )
+                    .await
+                    .map_err(RepoWatchDispatchRepositoryError::SessionCreation)?;
                     sqlx::query(
                         "INSERT INTO repo_watch_dispatch_action
                             (dispatch_id, action_ordinal, event_id, session_id,
@@ -1761,6 +1769,7 @@ impl PostgresRepoWatchDispatchStore {
                     crate::submit_input::insert_fresh_initial_input(
                         &mut transaction,
                         initial_input,
+                        principal,
                         accepted_input,
                         turn,
                         cancellation_entry,
@@ -1805,6 +1814,7 @@ impl PostgresRepoWatchDispatchStore {
                     crate::goal::insert_fresh_commissioned_goal(
                         &mut transaction,
                         goal,
+                        principal,
                         accepted_input,
                         turn,
                     )

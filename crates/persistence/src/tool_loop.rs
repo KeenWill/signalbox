@@ -603,6 +603,7 @@ impl PostgresToolLoopRepository {
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
+                | CommandKind::SessionLifecycle
                 | CommandKind::OverrideDeniedToolRequest,
             ) => Err(ToolLoopRepositoryError::DifferentCommandKind),
         }
@@ -633,15 +634,21 @@ impl PostgresToolLoopRepository {
                 }
                 return Ok(receipt);
             }
+            let issuer = crate::command_registry::issuer_columns(
+                signalbox_domain::CommandPrincipal::Operator,
+            );
             let claimed = sqlx::query(
                 "INSERT INTO durable_command
-                    (command_id, command_kind, storage_version, claimed_at)
-                 VALUES ($1, $2, $3, transaction_timestamp())
+                    (command_id, command_kind, storage_version, claimed_at,
+                     issuer_kind, issuer_module)
+                 VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
                  ON CONFLICT DO NOTHING",
             )
             .bind(durable_command_id_to_uuid(command.command_id()))
             .bind(DECIDE_TOOL_REQUEST_KIND)
             .bind(STORAGE_VERSION)
+            .bind(issuer.0)
+            .bind(issuer.1)
             .execute(&mut *transaction)
             .await?
             .rows_affected()
@@ -678,12 +685,22 @@ impl PostgresToolLoopRepository {
                     lock_tool_session(&mut transaction, session).await?;
                     if decision_exists(&mut transaction, command.request()).await? {
                         let prepared = command.prepare_already_resolved();
-                        persist_decision_command(&mut transaction, &prepared).await?;
+                        persist_decision_command(
+                            &mut transaction,
+                            &prepared,
+                            signalbox_domain::CommandPrincipal::Operator,
+                        )
+                        .await?;
                         return Ok(prepared);
                     }
                     if request_closed_by_turn_end(&mut transaction, command.request()).await? {
                         let prepared = command.prepare_already_resolved();
-                        persist_decision_command(&mut transaction, &prepared).await?;
+                        persist_decision_command(
+                            &mut transaction,
+                            &prepared,
+                            signalbox_domain::CommandPrincipal::Operator,
+                        )
+                        .await?;
                         return Ok(prepared);
                     }
                     let batch = load_active_batch_from_connection(&mut transaction, session, turn)
@@ -712,7 +729,12 @@ impl PostgresToolLoopRepository {
                     return Ok(decision.prepared_command().clone());
                 }
             };
-            persist_decision_command(&mut transaction, &prepared).await?;
+            persist_decision_command(
+                &mut transaction,
+                &prepared,
+                signalbox_domain::CommandPrincipal::Operator,
+            )
+            .await?;
             Ok(prepared)
         }
         .await;
@@ -748,7 +770,8 @@ impl PostgresToolLoopRepository {
                 | CommandKind::UpdateSessionPlacement
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
-                | CommandKind::WithdrawGitRemote,
+                | CommandKind::WithdrawGitRemote
+                | CommandKind::SessionLifecycle,
             ) => Err(ToolLoopRepositoryError::DifferentCommandKind),
         }
     }
@@ -779,15 +802,21 @@ impl PostgresToolLoopRepository {
                 }
                 return Ok(receipt);
             }
+            let issuer = crate::command_registry::issuer_columns(
+                signalbox_domain::CommandPrincipal::Operator,
+            );
             let claimed = sqlx::query(
                 "INSERT INTO durable_command
-                    (command_id, command_kind, storage_version, claimed_at)
-                 VALUES ($1, $2, $3, transaction_timestamp())
+                    (command_id, command_kind, storage_version, claimed_at,
+                     issuer_kind, issuer_module)
+                 VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
                  ON CONFLICT DO NOTHING",
             )
             .bind(durable_command_id_to_uuid(command.command_id()))
             .bind(OVERRIDE_DENIED_TOOL_REQUEST_KIND)
             .bind(STORAGE_VERSION)
+            .bind(issuer.0)
+            .bind(issuer.1)
             .execute(&mut *transaction)
             .await?
             .rows_affected()
@@ -3340,7 +3369,12 @@ async fn persist_batch_decision(
     connection: &mut PgConnection,
     decision: &PreparedToolBatchDecision,
 ) -> Result<(), ToolLoopRepositoryError> {
-    persist_decision_command(connection, decision.prepared_command()).await?;
+    persist_decision_command(
+        connection,
+        decision.prepared_command(),
+        signalbox_domain::CommandPrincipal::Core,
+    )
+    .await?;
     let DecideToolRequestResult::Applied(applied) = decision.prepared_command().result() else {
         return Ok(());
     };
@@ -3461,6 +3495,7 @@ async fn persist_batch_decision(
 async fn persist_decision_command(
     connection: &mut PgConnection,
     prepared: &PreparedDecideToolRequest,
+    principal: signalbox_domain::CommandPrincipal,
 ) -> Result<(), ToolLoopRepositoryError> {
     let command = prepared.command();
     let (decision_kind, denial_reason) = encode_approval(command.decision());
@@ -3480,15 +3515,19 @@ async fn persist_decision_command(
             Some(tool_request_id_to_uuid(*earliest)),
         ),
     };
+    let issuer = crate::command_registry::issuer_columns(principal);
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, $2, $3, transaction_timestamp())
+            (command_id, command_kind, storage_version, claimed_at,
+             issuer_kind, issuer_module)
+         VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
          ON CONFLICT DO NOTHING",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(DECIDE_TOOL_REQUEST_KIND)
     .bind(STORAGE_VERSION)
+    .bind(issuer.0)
+    .bind(issuer.1)
     .execute(&mut *connection)
     .await?;
     sqlx::query(
@@ -3583,15 +3622,20 @@ async fn persist_override_command(
             signalbox_domain::OverrideDeniedToolRequestRejectedResult::AlreadyOverridden { .. },
         ) => ("rejected", Some("already_overridden")),
     };
+    let issuer =
+        crate::command_registry::issuer_columns(signalbox_domain::CommandPrincipal::Operator);
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, $2, $3, transaction_timestamp())
+            (command_id, command_kind, storage_version, claimed_at,
+             issuer_kind, issuer_module)
+         VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
          ON CONFLICT DO NOTHING",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(OVERRIDE_DENIED_TOOL_REQUEST_KIND)
     .bind(STORAGE_VERSION)
+    .bind(issuer.0)
+    .bind(issuer.1)
     .execute(&mut *connection)
     .await?;
     sqlx::query(

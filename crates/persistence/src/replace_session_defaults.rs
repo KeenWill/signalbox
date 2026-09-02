@@ -313,7 +313,8 @@ impl ReplaceSessionDefaultsRepository {
                 | CommandKind::UpdateSessionPlacement
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
-                | CommandKind::WithdrawGitRemote,
+                | CommandKind::WithdrawGitRemote
+                | CommandKind::SessionLifecycle,
             ) => {
                 transaction.rollback().await?;
                 return Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(
@@ -323,15 +324,20 @@ impl ReplaceSessionDefaultsRepository {
             None => {}
         }
 
+        let issuer =
+            crate::command_registry::issuer_columns(signalbox_domain::CommandPrincipal::Operator);
         let claimed = sqlx::query(
             "INSERT INTO durable_command
-                (command_id, command_kind, storage_version, claimed_at)
-             VALUES ($1, $2, $3, transaction_timestamp())
+                (command_id, command_kind, storage_version, claimed_at,
+                 issuer_kind, issuer_module)
+             VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
              ON CONFLICT DO NOTHING",
         )
         .bind(durable_command_id_to_uuid(command_id))
         .bind(REPLACE_SESSION_DEFAULTS_KIND)
         .bind(STORAGE_VERSION)
+        .bind(issuer.0)
+        .bind(issuer.1)
         .execute(&mut *transaction)
         .await?
         .rows_affected()
@@ -361,7 +367,8 @@ impl ReplaceSessionDefaultsRepository {
                     | CommandKind::UpdateSessionPlacement
                     | CommandKind::RegisterWorkspace
                     | CommandKind::MintGitRemote
-                    | CommandKind::WithdrawGitRemote,
+                    | CommandKind::WithdrawGitRemote
+                    | CommandKind::SessionLifecycle,
                 ) => ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
@@ -473,7 +480,8 @@ impl ReplaceSessionDefaultsRepository {
                 | CommandKind::UpdateSessionPlacement
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
-                | CommandKind::WithdrawGitRemote,
+                | CommandKind::WithdrawGitRemote
+                | CommandKind::SessionLifecycle,
             ) => Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { command_id }),
         }
     }

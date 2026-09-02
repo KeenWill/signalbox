@@ -1,6 +1,6 @@
 //! Daemon-owned scheduling and model declaration for commissioned goals.
 
-use std::{error::Error, fmt, time::Duration};
+use std::{error::Error, fmt, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use sha2::{Digest as _, Sha256};
 use signalbox_application::{
@@ -10,9 +10,10 @@ use signalbox_application::{
     ToolExecutorEvidence, ToolInputSchema,
 };
 use signalbox_domain::{
-    AcceptedInputId, DurableCommandId, Goal, GoalBlockProvenance, GoalCommandResult, GoalEvent,
-    GoalEventKind, GoalEventOrdinal, GoalGuidance, GoalModelBlockedReasonKind, GoalModelProvenance,
-    GoalNeed, GoalReport, GoalSchedulerProvenance, GoalTextError, GoalUserAction, GoalUserCommand,
+    AcceptedInputId, DurableCommandId, FinishCheckVerdict, FinishCondition, Goal,
+    GoalBlockProvenance, GoalCommandResult, GoalEvent, GoalEventKind, GoalEventOrdinal,
+    GoalGuidance, GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed, GoalReport,
+    GoalSchedulerProvenance, GoalTextError, GoalUserAction, GoalUserCommand,
     NormalizedToolArguments, SessionId, ToolEffectClass, ToolExecutionErrorDetail, ToolName,
     ToolPermissionDefault, TurnId,
 };
@@ -180,6 +181,7 @@ impl GoalDeclarationTool {
             catalog,
             executor: GoalDeclarationExecutor {
                 repository: GoalRepository::new(pool),
+                finish_check: Arc::new(UnverifiedFinishCheck),
                 rejected,
             },
         })
@@ -303,9 +305,36 @@ impl ClassifyOperatorFailure for GoalDeclarationExecutorError {
     }
 }
 
+/// Evaluates a session's finish condition against a declared achievement (§2).
+pub(crate) trait FinishCheck: Send + Sync + std::fmt::Debug {
+    fn check(
+        &self,
+        session: SessionId,
+        condition: &FinishCondition,
+        report: &GoalReport,
+    ) -> Pin<Box<dyn Future<Output = FinishCheckVerdict> + Send + '_>>;
+}
+
+/// No verifier is wired: every declared achievement stays unverified, and
+/// `achieved_verified` is never recorded.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct UnverifiedFinishCheck;
+
+impl FinishCheck for UnverifiedFinishCheck {
+    fn check(
+        &self,
+        _: SessionId,
+        _: &FinishCondition,
+        _: &GoalReport,
+    ) -> Pin<Box<dyn Future<Output = FinishCheckVerdict> + Send + '_>> {
+        Box::pin(std::future::ready(FinishCheckVerdict::Unverified))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct GoalDeclarationExecutor {
     repository: GoalRepository,
+    finish_check: Arc<dyn FinishCheck>,
     rejected: ToolExecutionErrorDetail,
 }
 
@@ -337,8 +366,21 @@ impl ToolExecutor for GoalDeclarationExecutor {
                         detail: Some(self.rejected.clone()),
                     }));
                 };
+                let verdict = match self
+                    .repository
+                    .load_finish_condition(correlation.session())
+                    .await
+                    .map_err(GoalDeclarationExecutorError::Repository)?
+                {
+                    None => FinishCheckVerdict::Unverified,
+                    Some(condition) => {
+                        self.finish_check
+                            .check(correlation.session(), &condition, &report)
+                            .await
+                    }
+                };
                 self.repository
-                    .declare_achieved(correlation.session(), report, provenance)
+                    .declare_achieved(correlation.session(), report, provenance, verdict)
                     .await
             }
             CheckedGoalDeclaration::Blocked { reason } => {
@@ -356,6 +398,14 @@ impl ToolExecutor for GoalDeclarationExecutor {
         let evidence = match outcome {
             GoalTransitionOutcome::Applied(_) => {
                 ToolExecutorEvidence::CompletedText(String::from(GOAL_DECLARE_RESULT))
+            }
+            GoalTransitionOutcome::FinishCheckFailed { detail } => {
+                ToolExecutorEvidence::KnownFailed {
+                    detail: Some(
+                        ToolExecutionErrorDetail::try_new(format!("finish check failed: {detail}"))
+                            .unwrap_or_else(|_| self.rejected.clone()),
+                    ),
+                }
             }
             GoalTransitionOutcome::GoalNotAttached
             | GoalTransitionOutcome::Rejected(_)
@@ -995,13 +1045,21 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
             let resumption = adapter
                 .plan_automatic_resumption(session, Some(turn))
                 .await?;
+            let need = resumption.need()?;
+            let need = match adapter
+                .repository
+                .latest_failed_finish_check(session, turn)
+                .await?
+            {
+                Some(detail) => {
+                    GoalNeed::try_new(format!("Finish check failed: {detail} {}", need.as_str()))
+                        .unwrap_or(need)
+                }
+                None => need,
+            };
             let outcome = match adapter
                 .repository
-                .block_execution_failure(
-                    session,
-                    resumption.need()?,
-                    GoalSchedulerProvenance::new(turn),
-                )
+                .block_execution_failure(session, need, GoalSchedulerProvenance::new(turn))
                 .await
             {
                 Ok(outcome) => outcome,
@@ -1015,7 +1073,8 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
                 GoalTransitionOutcome::Applied(event) => {
                     adapter.arm_automatic_resumption(session, event.ordinal(), resumption);
                 }
-                GoalTransitionOutcome::GoalNotAttached
+                GoalTransitionOutcome::FinishCheckFailed { .. }
+                | GoalTransitionOutcome::GoalNotAttached
                 | GoalTransitionOutcome::Rejected(_)
                 | GoalTransitionOutcome::NotCurrentGoalTurn => {}
             }

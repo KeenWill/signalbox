@@ -1001,6 +1001,10 @@ pub enum SessionCreationCause {
     ModuleDispatched { dispatch: ModuleDispatch },
     Delegated { spawning_request: ToolRequestId },
 }
+impl SessionCreationCause {
+    pub const fn default_ownership(&self) -> SessionOwnership;
+    pub const fn default_finish_condition(&self) -> Option<FinishCondition>;
+}
 
 pub struct TranscriptFrontier { /* private */ }
 // sealed: no public producer in this slice; the later semantic-history slice
@@ -1057,14 +1061,40 @@ impl CreateSession {
         resolved_configuration_defaults: SessionConfigurationDefaults,
         placement: SessionPlacement,
     ) -> Self;
+    pub fn with_lifecycle(
+        self,
+        start_gate: StartGate,
+        ownership: SessionOwnership,
+        finish_condition: Option<FinishCondition>,
+    ) -> Self;
+    pub const fn admission(&self) -> Result<(), CreateSessionRejection>;
     pub fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults;
     pub fn prepare(self, session: SessionId)
         -> Result<PreparedCreateSession, CreateSessionPreparationError>;
     // accessors: command_id(), provenance(), initial_configuration_defaults(),
-    //   template_provenance(), placement()
+    //   template_provenance(), placement(), start_gate(), ownership(),
+    //   finish_condition()
 }
 // Eq/Hash exclude command_id; explicit mode compares defaults, template mode
 // compares the requested template name, and the two modes differ.
+
+pub enum CreateSessionRejection {
+    FinishConditionRequired,
+    HeldGateRequiresOwnership,
+}
+
+pub enum CreateSessionResult {
+    Applied(CreateSessionAppliedResult),
+    Rejected(CreateSessionRejection),
+}
+
+pub enum RecordedSessionCreation {
+    Applied(Box<ReconstitutedSessionCreation>),
+    Rejected { command: Box<CreateSession>, rejection: CreateSessionRejection },
+}
+impl RecordedSessionCreation {
+    // accessors: applied(), command(), result()
+}
 
 pub struct CreateSessionFromImportedFrontier { /* private */ }
 impl CreateSessionFromImportedFrontier {
@@ -6168,6 +6198,85 @@ impl SessionOwnershipTransition {
 }
 ```
 
+## domain: session_lifecycle_command
+
+```rust
+pub enum CommandPrincipal {
+    Core,
+    Operator,
+    Module { module: DispatchingModule },
+    Watchdog,
+}
+impl CommandPrincipal {
+    pub const fn for_actor(actor: Actor) -> Self;
+    pub const fn classify(self, actor: Option<Actor>) -> LifecycleActor;
+}
+
+pub enum StartGate {
+    Open,
+    Held,
+}
+
+pub enum FinishCondition {
+    ExternalGate,
+    Declared(FinishConditionStatement),
+}
+
+pub enum FinishCheckVerdict {
+    Passed,
+    Failed { detail: String },
+    Unverified,
+}
+
+pub enum SessionLifecycleOperation {
+    Stop { sticky: StopStickiness, descendant_scope: DescendantTerminationScope },
+    Supersede { successor: SessionId },
+    Abandon,
+    CloseFailed { cause: Option<SessionFailureCause> },
+    Resume,
+    Adopt { finish_condition: Option<FinishCondition> },
+    Release,
+}
+
+pub struct SessionLifecycleCommand { /* private */ }
+impl SessionLifecycleCommand {
+    pub const fn new(
+        command_id: DurableCommandId,
+        session: SessionId,
+        operation: SessionLifecycleOperation,
+    ) -> Self;
+    // accessors: command_id(), session(), operation()
+}
+// Eq/Hash exclude command_id.
+
+pub enum SessionLifecycleCommandRejection {
+    SessionNotFound,
+    TransitionNotAdmitted,
+    RequiresParked,
+    ReleaseWhileParked,
+    OwnershipUnchanged,
+    FinishConditionRequired,
+    FinishConditionAlreadyDeclared,
+    StandingCauseMismatch,
+    SuccessorNotFound,
+    GoalResumeRequired,
+    GoalOutcomeMismatch,
+    PendingTerminalConflict,
+}
+
+pub enum SessionLifecycleApplication {
+    Closed { outcome: SessionTerminalOutcome },
+    ClosurePending { outcome: SessionTerminalOutcome, live_turn: TurnId },
+    Resumed { state: SessionLifecycleState },
+    OwnershipChanged,
+}
+
+pub enum SessionLifecycleCommandResult {
+    Applied(SessionLifecycleApplication),
+    Rejected(SessionLifecycleCommandRejection),
+}
+```
+
 ## domain: session_metadata
 
 ```rust
@@ -7354,7 +7463,14 @@ impl CreateSessionRequest {
         resolved_configuration_defaults: SessionConfigurationDefaults,
     ) -> Result<Self, InvalidDurableCommandId>;
     pub fn with_placement(self, placement: SessionPlacement) -> Self;
-    // accessors: command_id(), initial_configuration_defaults(), template_provenance(), placement()
+    pub fn with_lifecycle(
+        self,
+        start_gate: StartGate,
+        ownership: SessionOwnership,
+        finish_condition: Option<FinishCondition>,
+    ) -> Self;
+    // accessors: command_id(), initial_configuration_defaults(), template_provenance(),
+    //   placement(), start_gate(), ownership(), finish_condition()
 }
 
 pub trait SessionIdGenerator {
@@ -7365,6 +7481,7 @@ pub struct UuidV7SessionIdGenerator;  // Default; impl SessionIdGenerator
 
 pub enum CreateSessionOutcome {
     Applied(CreateSessionAppliedResult),
+    Rejected(CreateSessionRejection),
     ConflictingReuse { command_id: DurableCommandId },
 }
 
@@ -11966,6 +12083,7 @@ pub struct GoalStatement(/* private String */);
 pub struct GoalNeed(/* private String */);
 pub struct GoalGuidance(/* private String */);
 pub struct GoalReport(/* private String */);
+pub struct FinishConditionStatement(/* private String */);
 impl GoalStatement {
     pub fn try_new(value: String) -> Result<Self, GoalTextError>;
     // accessors: as_str(), into_string()
@@ -11979,6 +12097,10 @@ impl GoalGuidance {
     // accessors: as_str(), into_string()
 }
 impl GoalReport {
+    pub fn try_new(value: String) -> Result<Self, GoalTextError>;
+    // accessors: as_str(), into_string()
+}
+impl FinishConditionStatement {
     pub fn try_new(value: String) -> Result<Self, GoalTextError>;
     // accessors: as_str(), into_string()
 }
@@ -13452,9 +13574,10 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_template                           | 6                                |
 | domain: session_placement                          | 18                               |
 | domain: git_remote                                 | 4 (+2 free fn)                   |
-| domain: session                                    | 22                               |
+| domain: session                                    | 25                               |
 | domain: session_delegation                         | 37 (+3 free fn)                  |
 | domain: session_lifecycle                          | 23                               |
+| domain: session_lifecycle_command                  | 9                                |
 | domain: imported_session                           | 20                               |
 | domain: configuration                              | 24                               |
 | domain: model_settings                             | 25                               |
@@ -13479,14 +13602,14 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: applied_interrupt                          | 2                                |
 | domain: fatal_mismatch                             | 0                                |
 | domain: replace_session_defaults                   | 13                               |
-| domain: goal                                       | 25                               |
+| domain: goal                                       | 26                               |
 | domain: goal_command                               | 5                                |
 | domain: review_workflow                            | 83 (+1 free fn)                  |
 | domain: session_metadata                           | 15                               |
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
 | domain: workspace_instruction                      | 18                               |
-| **signalbox-domain total**                         | **883 (+12 free fn)**            |
+| **signalbox-domain total**                         | **896 (+12 free fn)**            |
 | application: repo_watch_operations                 | 33 (+2 free fn) (incl. 1 trait)  |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: attention                             | 16 (+6 free fn) (incl. 1 trait)  |

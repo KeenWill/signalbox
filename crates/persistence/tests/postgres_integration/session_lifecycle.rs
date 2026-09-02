@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use crate::*;
 use signalbox_domain::{
-    CoreAgency, DescendantTerminationScope, GoalEventOrdinal, GoalStatement, GoalUserAction,
-    GoalUserCommand, LifecycleActor, ModuleDispatch, RepoWatchDispatchId,
+    CoreAgency, DescendantTerminationScope, FinishCondition, GoalEventOrdinal, GoalStatement,
+    GoalUserAction, GoalUserCommand, LifecycleActor, ModuleDispatch, RepoWatchDispatchId,
     SessionCreationProvenance, SessionFailureCause, SessionLifecycleState, SessionOwnership,
     SessionParkCause, SessionParkResponder, SessionRetirementCause, SessionRetryableCause,
     SessionStructuralCause, SessionTerminalOutcome, StopStickiness,
@@ -822,7 +822,13 @@ async fn ownership_flips_arm_and_disarm_the_deadline_and_journal_themselves()
         .await?;
     assert_eq!(armed_deadline(&pool, session).await?, None);
 
-    repository.adopt(session, LifecycleActor::Operator).await?;
+    repository
+        .adopt(
+            session,
+            Some(FinishCondition::ExternalGate),
+            LifecycleActor::Operator,
+        )
+        .await?;
     assert_eq!(
         armed_deadline(&pool, session).await?,
         Some((String::from("first_input"), true))
@@ -1039,7 +1045,9 @@ async fn a_pending_terminal_settles_once_the_turn_does() -> Result<(), Box<dyn E
         sticky: StopStickiness::Sticky,
     };
 
-    repository.commit_pending_terminal(session, outcome).await?;
+    repository
+        .commit_pending_terminal(session, outcome, LifecycleActor::Operator)
+        .await?;
     let committed = repository
         .load(session)
         .await?
@@ -1250,14 +1258,18 @@ async fn a_second_pending_terminal_cannot_replace_the_first() -> Result<(), Box<
         sticky: StopStickiness::Sticky,
     };
     repository
-        .commit_pending_terminal(session, committed)
+        .commit_pending_terminal(session, committed, LifecycleActor::Operator)
         .await?;
 
     repository
-        .commit_pending_terminal(session, committed)
+        .commit_pending_terminal(session, committed, LifecycleActor::Operator)
         .await?;
     let error = repository
-        .commit_pending_terminal(session, SessionTerminalOutcome::Abandoned)
+        .commit_pending_terminal(
+            session,
+            SessionTerminalOutcome::Abandoned,
+            LifecycleActor::Operator,
+        )
         .await
         .expect_err("a second outcome cannot replace the committed decision");
 
@@ -1692,6 +1704,7 @@ async fn a_pending_supersession_names_a_successor_settlement_can_record()
         .commit_pending_terminal(
             session,
             SessionTerminalOutcome::Superseded { by: Some(session) },
+            LifecycleActor::Operator,
         )
         .await
         .expect_err("a session cannot supersede itself");
@@ -1703,6 +1716,7 @@ async fn a_pending_supersession_names_a_successor_settlement_can_record()
                     LIFECYCLE_SEED + 0xbeef,
                 ))),
             },
+            LifecycleActor::Operator,
         )
         .await
         .expect_err("a handoff cannot name a session that does not exist");
@@ -1799,6 +1813,7 @@ async fn a_pending_closure_must_carry_the_parks_standing_cause() -> Result<(), B
             SessionTerminalOutcome::FailedStructural {
                 cause: SessionStructuralCause::BrokenToolchain,
             },
+            LifecycleActor::Operator,
         )
         .await
         .expect_err("a handoff settlement would refuse is not recorded");
@@ -2029,7 +2044,7 @@ async fn a_park_between_decision_and_settlement_keeps_the_handoff() -> Result<()
     activate_first_turn(&pool, session, 45).await?;
     let committed = SessionTerminalOutcome::Abandoned;
     repository
-        .commit_pending_terminal(session, committed)
+        .commit_pending_terminal(session, committed, LifecycleActor::Operator)
         .await?;
 
     repository
@@ -2068,7 +2083,11 @@ async fn a_closure_cannot_override_a_committed_handoff() -> Result<(), Box<dyn E
         .handle(dispatched_creation(46))
         .await?;
     repository
-        .commit_pending_terminal(session, SessionTerminalOutcome::Abandoned)
+        .commit_pending_terminal(
+            session,
+            SessionTerminalOutcome::Abandoned,
+            LifecycleActor::Operator,
+        )
         .await?;
 
     let error = repository

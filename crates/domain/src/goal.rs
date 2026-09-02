@@ -46,6 +46,8 @@ goal_text!(/// Optional user guidance delivered when a blocked goal resumes.
     GoalGuidance);
 goal_text!(/// The final report supplied when the model declares achievement.
     GoalReport);
+goal_text!(/// A finish condition declared at creation or adoption.
+    FinishConditionStatement);
 
 fn validate_goal_text(value: &str) -> Result<(), GoalTextError> {
     if value.is_empty() {

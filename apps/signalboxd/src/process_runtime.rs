@@ -43,19 +43,21 @@ use signalbox_conversation_import_codex::{
     CodexRolloutJsonlConverter,
 };
 use signalbox_domain::{
-    AcceptedInputId, Actor, BranchName, CancelledModelCallTurnIdentities, CommitSha,
-    ContextCompactionId, ContextCompactionTokenUsage, ContextFrontierId, DangerousToolAutoApproval,
-    DecideToolRequest, DecideToolRequestRejectedResult, DecideToolRequestResult,
-    DelegationMessageDirection as DomainDelegationMessageDirection,
+    AcceptedInputId, Actor, BranchName, CancelledModelCallTurnIdentities, CommandPrincipal,
+    CommitSha, ContextCompactionId, ContextCompactionTokenUsage, ContextFrontierId,
+    CreateSessionRejection as DomainCreateSessionRejection, CreateSessionResult,
+    DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestRejectedResult,
+    DecideToolRequestResult, DelegationMessageDirection as DomainDelegationMessageDirection,
     DelegationOutcomeKind as DomainDelegationOutcomeKind,
     DelegationOutcomeReason as DomainDelegationOutcomeReason,
     DelegationProvenance as DomainDelegationProvenance, DelegationWait,
     DelegationWaitMode as DomainDelegationWaitMode, DeliveryRequest, DescendantTerminationScope,
     DirectModelSelection, DurableCommandId, FastMode as DomainFastMode,
-    FastModeOverlay as DomainFastModeOverlay, FrozenModelSelection, Goal, GoalBlockProvenance,
-    GoalBlockedReasonKind, GoalCommandRejection as DomainGoalCommandRejection, GoalCommandResult,
-    GoalEvent, GoalEventKind, GoalGuidance, GoalState, GoalStatement, GoalUserAction,
-    GoalUserCommand, ImportedConversation, ImportedConversationFormat, ImportedConversationId,
+    FastModeOverlay as DomainFastModeOverlay, FinishCondition, FinishConditionStatement,
+    FrozenModelSelection, Goal, GoalBlockProvenance, GoalBlockedReasonKind,
+    GoalCommandRejection as DomainGoalCommandRejection, GoalCommandResult, GoalEvent,
+    GoalEventKind, GoalGuidance, GoalState, GoalStatement, GoalUserAction, GoalUserCommand,
+    ImportedConversation, ImportedConversationFormat, ImportedConversationId,
     ImportedSessionRelationship as DomainImportedSessionRelationship, ImportedSourceAttestation,
     ImportedSpeaker as DomainImportedSpeaker, ImportedTranscriptContent,
     ImportedTranscriptEntryInput, ImportedTranscriptPosition, ModelAlias, ModelCallId,
@@ -65,14 +67,14 @@ use signalbox_domain::{
     ModelSettingsPrecedence as DomainModelSettingsPrecedence, OverrideDeniedToolRequest,
     OverrideDeniedToolRequestRejectedResult, OverrideDeniedToolRequestResult,
     ParentTerminationCommandSource, PerInputConfigurationChoices, PullRequestNumber,
-    ReasoningLevel as DomainReasoningLevel, ReplaceSessionDefaults as DomainReplaceSessionDefaults,
-    ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
-    ReplaceSessionMetadataRejectedResult, ReplaceSessionMetadataResult, RepositorySlug,
-    ReviewChangeRequestNumber, ReviewConfidence, ReviewEventOrdinal, ReviewExternalLink,
-    ReviewExternalLinkAssociation, ReviewExternalLinkAttachment,
-    ReviewExternalLinkAttachmentResult, ReviewExternalLinkId, ReviewExternalObjectKind,
-    ReviewFinding, ReviewFindingConfidenceAxes, ReviewFindingContent, ReviewFindingDiffSide,
-    ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
+    ReasoningLevel as DomainReasoningLevel, RecordedSessionCreation,
+    ReplaceSessionDefaults as DomainReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
+    ReplaceSessionDefaultsResult, ReplaceSessionMetadataRejectedResult,
+    ReplaceSessionMetadataResult, RepositorySlug, ReviewChangeRequestNumber, ReviewConfidence,
+    ReviewEventOrdinal, ReviewExternalLink, ReviewExternalLinkAssociation,
+    ReviewExternalLinkAttachment, ReviewExternalLinkAttachmentResult, ReviewExternalLinkId,
+    ReviewExternalObjectKind, ReviewFinding, ReviewFindingConfidenceAxes, ReviewFindingContent,
+    ReviewFindingDiffSide, ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
     ReviewFindingEventResultKind, ReviewFindingId, ReviewFindingLocation,
     ReviewFindingPendingExternalLinkRef, ReviewFindingProposal, ReviewFindingRef,
     ReviewFindingSeverity, ReviewKey, ReviewLineRange, ReviewPass, ReviewPassAcceptedInputEvidence,
@@ -82,16 +84,19 @@ use signalbox_domain::{
     ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText,
     ReviewWorkflowKind, RunnerSandboxProfile as DomainRunnerSandboxProfile, RunnerSelector,
     SemanticTranscriptEntryId, ServiceTier as DomainServiceTier, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent,
-    SessionMetadataLastWriter, SessionMetadataSnapshot,
-    SessionModelSettingsChanged as DomainSessionModelSettingsChanged,
-    SessionPlacement as DomainSessionPlacement, SessionPlacementPath, SessionPlacementVersion,
+    SessionConfigurationDefaultsVersion, SessionFailureCause as DomainSessionFailureCause,
+    SessionId, SessionLifecycleApplication, SessionLifecycleCommand,
+    SessionLifecycleCommandRejection as DomainLifecycleRejection, SessionLifecycleCommandResult,
+    SessionLifecycleOperation, SessionMetadataContent, SessionMetadataLastWriter,
+    SessionMetadataSnapshot, SessionModelSettingsChanged as DomainSessionModelSettingsChanged,
+    SessionOwnership as DomainSessionOwnership, SessionPlacement as DomainSessionPlacement,
+    SessionPlacementPath, SessionPlacementVersion, SessionRetryableCause, SessionStructuralCause,
     SessionTemplateName, SessionTemplateProvenance, SettingOverlay as DomainSettingOverlay,
-    SubmitInput, SubmitInputAppliedResult, SubmitInputRejectedResult, SubmitInputResult,
-    ToolApprovalDecision, ToolDenialReason, ToolRequestId, TurnId,
-    TurnModelSettingsResolved as DomainTurnModelSettingsResolved, UnsupportedModelSetting,
-    UpdateSessionPlacementRejectionKind, UpdateSessionPlacementResult, UserContent,
-    ValidatedModelSettings,
+    StartGate as DomainStartGate, StopStickiness, SubmitInput, SubmitInputAppliedResult,
+    SubmitInputRejectedResult, SubmitInputResult, ToolApprovalDecision, ToolDenialReason,
+    ToolRequestId, TurnId, TurnModelSettingsResolved as DomainTurnModelSettingsResolved,
+    UnsupportedModelSetting, UpdateSessionPlacementRejectionKind, UpdateSessionPlacementResult,
+    UserContent, ValidatedModelSettings,
 };
 use signalbox_model_provider_runtime::{
     ContextCompactionModel, ContextCompactionModelError, ContextCompactionModelRequest,
@@ -157,6 +162,10 @@ use signalbox_persistence::{
         DelegationOperationRejection, DelegationRequestExecutionState, ProcessDelegationOutcome,
         ProcessDelegationRequestRejection,
     },
+    session_lifecycle_command::{
+        SessionLifecycleCommandHandlingOutcome, SessionLifecycleCommandRepository,
+        SessionLifecycleCommandRepositoryError,
+    },
     session_metadata::{SessionMetadataRepository, SessionMetadataRepositoryError},
     session_placement::{SessionPlacementRepository, SessionPlacementRepositoryError},
     submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository, SubmitInputRepositoryError},
@@ -169,7 +178,8 @@ use signalbox_process_protocol::{
     ConversationCursor as WireConversationCursor, ConversationImportFormat,
     ConversationImportRejectionClass, ConversationOrigin as WireConversationOrigin,
     ConversationOriginFilter as WireConversationOriginFilter,
-    ConversationSummary as WireConversationSummary, CurrentModelCall, CurrentModelCallState,
+    ConversationSummary as WireConversationSummary,
+    CreateSessionRejection as WireCreateSessionRejection, CurrentModelCall, CurrentModelCallState,
     DelegationOutcome as WireDelegationOutcome, DelegationPolicy as WireDelegationPolicy,
     DelegationProvenance as WireDelegationProvenance, DelegationReason as WireDelegationReason,
     DelegationToolRequestState as WireDelegationToolRequestState,
@@ -221,9 +231,12 @@ use signalbox_process_protocol::{
     RunnerStateTransitionState as WireRunnerStateTransitionState,
     RunnerWorkingDirectory as WireRunnerWorkingDirectory, ServerFrame, ServerMessage,
     ServiceTier as WireServiceTier, SessionClosureOutcome, SessionEvent,
-    SessionMetadata as WireSessionMetadata, SessionPlacement as WireSessionPlacement,
-    SettingOverlay as WireSettingOverlay, SystemPromptMember, SystemPromptText,
-    ToolApprovalEventDecider as WireToolApprovalEventDecider,
+    SessionFailureCause as WireSessionFailureCause,
+    SessionLifecycleCommandRejection as WireLifecycleRejection, SessionLifecycleEffect,
+    SessionLifecycleMembers, SessionMetadata as WireSessionMetadata,
+    SessionOwnership as WireSessionOwnership, SessionPlacement as WireSessionPlacement,
+    SettingOverlay as WireSettingOverlay, StartGate as WireStartGate, SystemPromptMember,
+    SystemPromptText, ToolApprovalEventDecider as WireToolApprovalEventDecider,
     ToolApprovalEventDecision as WireToolApprovalEventDecision, ToolBatchState, ToolDecision,
     TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval,
     TurnModelSettingsSnapshot as WireTurnModelSettingsSnapshot, TurnState, UsageProvenance,
@@ -1324,6 +1337,13 @@ fn conversation_import_request_requires_permit(
         | ClientRequest::ReadGoal { .. }
         | ClientRequest::ResumeGoal { .. }
         | ClientRequest::StopGoal { .. }
+        | ClientRequest::StopSession { .. }
+        | ClientRequest::SupersedeSession { .. }
+        | ClientRequest::AbandonSession { .. }
+        | ClientRequest::CloseSessionFailed { .. }
+        | ClientRequest::ResumeSession { .. }
+        | ClientRequest::AdoptSession { .. }
+        | ClientRequest::ReleaseSession { .. }
         | ClientRequest::SupersedeGoal { .. }
         | ClientRequest::SubmitInput { .. }
         | ClientRequest::CompactSession { .. }
@@ -1527,6 +1547,13 @@ impl SnapshotReaderAdmission {
             | ClientRequest::AttachGoal { .. }
             | ClientRequest::ResumeGoal { .. }
             | ClientRequest::StopGoal { .. }
+            | ClientRequest::StopSession { .. }
+            | ClientRequest::SupersedeSession { .. }
+            | ClientRequest::AbandonSession { .. }
+            | ClientRequest::CloseSessionFailed { .. }
+            | ClientRequest::ResumeSession { .. }
+            | ClientRequest::AdoptSession { .. }
+            | ClientRequest::ReleaseSession { .. }
             | ClientRequest::SupersedeGoal { .. }
             | ClientRequest::SubmitInput { .. }
             | ClientRequest::CompactSession { .. }
@@ -1790,6 +1817,7 @@ where
             model_settings,
             system_prompt,
             placement,
+            lifecycle,
         } => {
             handle_create_session(
                 writer,
@@ -1801,6 +1829,7 @@ where
                     model_settings,
                     system_prompt,
                     placement,
+                    lifecycle,
                 },
                 services,
             )
@@ -1810,14 +1839,154 @@ where
             command_id,
             template_name,
             placement,
+            lifecycle,
         } => {
             handle_create_session_from_template(
                 writer,
                 version,
                 request_id,
+                WireCreateSessionFromTemplateRequest {
+                    command_uuid: command_id.into_uuid(),
+                    template_name,
+                    placement,
+                    lifecycle,
+                },
+                services,
+            )
+            .await
+        }
+        ClientRequest::StopSession {
+            command_id,
+            session_id,
+            sticky,
+            descendant_scope,
+        } => {
+            handle_session_lifecycle_command(
+                writer,
+                version,
+                request_id,
                 command_id.into_uuid(),
-                template_name,
-                placement,
+                session_id,
+                SessionLifecycleOperation::Stop {
+                    sticky: if sticky {
+                        StopStickiness::Sticky
+                    } else {
+                        StopStickiness::Redispatchable
+                    },
+                    descendant_scope: decode_descendant_scope(descendant_scope),
+                },
+                services,
+            )
+            .await
+        }
+        ClientRequest::SupersedeSession {
+            command_id,
+            session_id,
+            successor_session_id,
+        } => {
+            handle_session_lifecycle_command(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                session_id,
+                SessionLifecycleOperation::Supersede {
+                    successor: SessionId::from_uuid(successor_session_id.into_uuid()),
+                },
+                services,
+            )
+            .await
+        }
+        ClientRequest::AbandonSession {
+            command_id,
+            session_id,
+        } => {
+            handle_session_lifecycle_command(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                session_id,
+                SessionLifecycleOperation::Abandon,
+                services,
+            )
+            .await
+        }
+        ClientRequest::CloseSessionFailed {
+            command_id,
+            session_id,
+            cause,
+        } => {
+            handle_session_lifecycle_command(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                session_id,
+                SessionLifecycleOperation::CloseFailed {
+                    cause: cause.map(domain_session_failure_cause),
+                },
+                services,
+            )
+            .await
+        }
+        ClientRequest::ResumeSession {
+            command_id,
+            session_id,
+        } => {
+            handle_session_lifecycle_command(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                session_id,
+                SessionLifecycleOperation::Resume,
+                services,
+            )
+            .await
+        }
+        ClientRequest::AdoptSession {
+            command_id,
+            session_id,
+            finish_condition,
+        } => {
+            let finish_condition = match finish_condition
+                .map(FinishConditionStatement::try_new)
+                .transpose()
+            {
+                Ok(statement) => statement.map(FinishCondition::Declared),
+                Err(_) => {
+                    return write_error(
+                        writer,
+                        version,
+                        request_id,
+                        ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                    )
+                    .await;
+                }
+            };
+            handle_session_lifecycle_command(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                session_id,
+                SessionLifecycleOperation::Adopt { finish_condition },
+                services,
+            )
+            .await
+        }
+        ClientRequest::ReleaseSession {
+            command_id,
+            session_id,
+        } => {
+            handle_session_lifecycle_command(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                session_id,
+                SessionLifecycleOperation::Release,
                 services,
             )
             .await
@@ -8922,6 +9091,98 @@ struct WireCreateSessionRequest {
     model_settings: WireModelSettingsOverlay,
     system_prompt: SystemPromptMember,
     placement: WireSessionPlacement,
+    lifecycle: SessionLifecycleMembers,
+}
+
+/// The §7 lifecycle members of one creation, admitted into domain values.
+struct LifecycleMembers {
+    start_gate: DomainStartGate,
+    ownership: DomainSessionOwnership,
+    finish_condition: Option<FinishCondition>,
+}
+
+impl LifecycleMembers {
+    fn admit(wire: SessionLifecycleMembers) -> Result<Self, ()> {
+        Ok(Self {
+            start_gate: match wire.start_gate {
+                WireStartGate::Open => DomainStartGate::Open,
+                WireStartGate::Held => DomainStartGate::Held,
+            },
+            ownership: match wire.ownership {
+                WireSessionOwnership::Owned => DomainSessionOwnership::Owned,
+                WireSessionOwnership::Unmonitored => DomainSessionOwnership::Unmonitored,
+            },
+            finish_condition: wire
+                .finish_condition
+                .map(|statement| {
+                    FinishConditionStatement::try_new(statement).map(FinishCondition::Declared)
+                })
+                .transpose()
+                .map_err(|_| ())?,
+        })
+    }
+
+    /// Whether a recorded creation carries these members.
+    fn matches(&self, command: &signalbox_domain::CreateSession) -> bool {
+        command.start_gate() == self.start_gate
+            && command.ownership() == self.ownership
+            && command.finish_condition() == self.finish_condition.as_ref()
+    }
+}
+
+/// Answers a creation replay from its recorded result.
+async fn write_recorded_creation<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    recorded: &RecordedSessionCreation,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    match recorded.result() {
+        CreateSessionResult::Applied(result) => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::SessionCreated {
+                    session_id: wire_uuid(result.session().into_uuid()),
+                    model_settings: wire_model_settings(
+                        recorded
+                            .command()
+                            .initial_configuration_defaults()
+                            .model_settings(),
+                    ),
+                },
+            )
+            .await
+        }
+        CreateSessionResult::Rejected(reason) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::rejected(RejectionDetail::CreateSessionRejected {
+                    reason: wire_create_session_rejection(reason),
+                }),
+            )
+            .await
+        }
+    }
+}
+
+const fn wire_create_session_rejection(
+    value: DomainCreateSessionRejection,
+) -> WireCreateSessionRejection {
+    match value {
+        DomainCreateSessionRejection::FinishConditionRequired => {
+            WireCreateSessionRejection::FinishConditionRequired
+        }
+        DomainCreateSessionRejection::HeldGateRequiresOwnership => {
+            WireCreateSessionRejection::HeldGateRequiresOwnership
+        }
+    }
 }
 
 async fn handle_create_session<Writer>(
@@ -8940,7 +9201,17 @@ where
         model_settings,
         system_prompt,
         placement,
+        lifecycle,
     } = wire_request;
+    let Ok(lifecycle) = LifecycleMembers::admit(lifecycle) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
     let Ok(system_prompt) = domain_system_prompt(
         system_prompt,
         configured_usize(
@@ -8982,17 +9253,9 @@ where
                 && defaults.model_settings().precedence().session() == caller_model_settings
                 && command.template_provenance().is_none()
                 && command.placement() == &placement
+                && lifecycle.matches(command)
             {
-                return write_message(
-                    writer,
-                    version,
-                    request_id,
-                    ServerMessage::SessionCreated {
-                        session_id: wire_uuid(recorded.applied_result().session().into_uuid()),
-                        model_settings: wire_model_settings(defaults.model_settings()),
-                    },
-                )
-                .await;
+                return write_recorded_creation(writer, version, request_id, &recorded).await;
             }
             return write_error(
                 writer,
@@ -9074,7 +9337,13 @@ where
         .await;
     };
     let request = CreateSessionRequest::try_new(command_id, defaults);
-    let Ok(request) = request.map(|request| request.with_placement(placement)) else {
+    let Ok(request) = request.map(|request| {
+        request.with_placement(placement).with_lifecycle(
+            lifecycle.start_gate,
+            lifecycle.ownership,
+            lifecycle.finish_condition,
+        )
+    }) else {
         return write_error(
             writer,
             version,
@@ -9094,18 +9363,38 @@ where
     .await
 }
 
+struct WireCreateSessionFromTemplateRequest {
+    command_uuid: uuid::Uuid,
+    template_name: String,
+    placement: WireSessionPlacement,
+    lifecycle: SessionLifecycleMembers,
+}
+
 async fn handle_create_session_from_template<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
-    command_id: uuid::Uuid,
-    template_name: String,
-    placement: WireSessionPlacement,
+    request: WireCreateSessionFromTemplateRequest,
     services: &ConnectionServices,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
+    let WireCreateSessionFromTemplateRequest {
+        command_uuid: command_id,
+        template_name,
+        placement,
+        lifecycle,
+    } = request;
+    let Ok(lifecycle) = LifecycleMembers::admit(lifecycle) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
     let Ok(template_name) = SessionTemplateName::try_new(template_name) else {
         return write_error(
             writer,
@@ -9135,23 +9424,11 @@ where
                 .command()
                 .template_provenance()
                 .map(SessionTemplateProvenance::name);
-            if recorded_name == Some(&template_name) && recorded.command().placement() == &placement
+            if recorded_name == Some(&template_name)
+                && recorded.command().placement() == &placement
+                && lifecycle.matches(recorded.command())
             {
-                return write_message(
-                    writer,
-                    version,
-                    request_id,
-                    ServerMessage::SessionCreated {
-                        session_id: wire_uuid(recorded.applied_result().session().into_uuid()),
-                        model_settings: wire_model_settings(
-                            recorded
-                                .command()
-                                .initial_configuration_defaults()
-                                .model_settings(),
-                        ),
-                    },
-                )
-                .await;
+                return write_recorded_creation(writer, version, request_id, &recorded).await;
             }
             return write_error(
                 writer,
@@ -9217,7 +9494,13 @@ where
         template.provenance().clone(),
         template.defaults().clone(),
     );
-    let Ok(request) = request.map(|request| request.with_placement(placement)) else {
+    let Ok(request) = request.map(|request| {
+        request.with_placement(placement).with_lifecycle(
+            lifecycle.start_gate,
+            lifecycle.ownership,
+            lifecycle.finish_condition,
+        )
+    }) else {
         return write_error(
             writer,
             version,
@@ -9717,22 +10000,11 @@ where
             if command.initial_configuration_defaults() == request.initial_configuration_defaults()
                 && command.template_provenance() == request.template_provenance()
                 && command.placement() == request.placement()
+                && command.start_gate() == request.start_gate()
+                && command.ownership() == request.ownership()
+                && command.finish_condition() == request.finish_condition()
             {
-                return write_message(
-                    writer,
-                    version,
-                    request_id,
-                    ServerMessage::SessionCreated {
-                        session_id: wire_uuid(recorded.applied_result().session().into_uuid()),
-                        model_settings: wire_model_settings(
-                            recorded
-                                .command()
-                                .initial_configuration_defaults()
-                                .model_settings(),
-                        ),
-                    },
-                )
-                .await;
+                return write_recorded_creation(writer, version, request_id, &recorded).await;
             }
             return write_error(
                 writer,
@@ -9809,6 +10081,17 @@ where
                     session_id: wire_uuid(result.session().into_uuid()),
                     model_settings: wire_model_settings(model_settings),
                 },
+            )
+            .await
+        }
+        Ok(CreateSessionOutcome::Rejected(reason)) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::rejected(RejectionDetail::CreateSessionRejected {
+                    reason: wire_create_session_rejection(reason),
+                }),
             )
             .await
         }
@@ -14867,6 +15150,7 @@ enum InternalDiagnostic {
     ProcessReadCorruption,
     OperatorStatusCorruption,
     GoalRepositoryCorruption,
+    SessionLifecycleCommandCorruption,
 }
 
 impl InternalDiagnostic {
@@ -14936,7 +15220,8 @@ impl InternalDiagnostic {
             | Self::ToolLoopCorruption
             | Self::ProcessReadCorruption
             | Self::OperatorStatusCorruption
-            | Self::GoalRepositoryCorruption => OperatorFailureClass::FailClosedCorruption,
+            | Self::GoalRepositoryCorruption
+            | Self::SessionLifecycleCommandCorruption => OperatorFailureClass::FailClosedCorruption,
         }
     }
 
@@ -15015,6 +15300,7 @@ impl InternalDiagnostic {
             Self::ProcessReadCorruption => "process_read_corruption",
             Self::OperatorStatusCorruption => "operator_status_corruption",
             Self::GoalRepositoryCorruption => "goal_repository_corruption",
+            Self::SessionLifecycleCommandCorruption => "session_lifecycle_command_corruption",
         }
     }
 }
@@ -15448,6 +15734,263 @@ where
     }
 }
 
+async fn handle_session_lifecycle_command<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    command_uuid: uuid::Uuid,
+    session_id: CanonicalUuid,
+    operation: SessionLifecycleOperation,
+    services: &ConnectionServices,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let command = SessionLifecycleCommand::new(
+        DurableCommandId::from_uuid(command_uuid),
+        session,
+        operation,
+    );
+    let outcome = SessionLifecycleCommandRepository::new(services.pool.clone())
+        .handle(command.clone(), CommandPrincipal::Operator)
+        .await;
+    match outcome {
+        Ok(SessionLifecycleCommandHandlingOutcome::Recorded(
+            SessionLifecycleCommandResult::Applied(application),
+        )) => {
+            if let SessionLifecycleApplication::ClosurePending { live_turn, .. } = application {
+                interrupt_for_closure(services, &command, live_turn).await;
+            }
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::SessionLifecycleCommandApplied {
+                    session_id,
+                    effect: wire_lifecycle_effect(application),
+                },
+            )
+            .await
+        }
+        Ok(SessionLifecycleCommandHandlingOutcome::Recorded(
+            SessionLifecycleCommandResult::Rejected(reason),
+        )) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::rejected(RejectionDetail::SessionLifecycleCommandRejected {
+                    session_id,
+                    reason: wire_lifecycle_rejection(reason),
+                }),
+            )
+            .await
+        }
+        Ok(SessionLifecycleCommandHandlingOutcome::ConflictingReuse { .. }) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await
+        }
+        Err(SessionLifecycleCommandRepositoryError::Database(_)) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await
+        }
+        Err(SessionLifecycleCommandRepositoryError::CommitAmbiguous(_)) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(true),
+            )
+            .await
+        }
+        Err(
+            SessionLifecycleCommandRepositoryError::Corruption(_)
+            | SessionLifecycleCommandRepositoryError::Lifecycle(_),
+        ) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(
+                    Some(session_id.into_uuid()),
+                    InternalDiagnostic::SessionLifecycleCommandCorruption,
+                ),
+            )
+            .await
+        }
+    }
+}
+
+/// Hands a committed closure's live turn to the committed interrupt
+/// machinery (§2). The interrupt's identity derives from the closure command,
+/// so a retried closure replays the same interrupt.
+async fn interrupt_for_closure(
+    services: &ConnectionServices,
+    command: &SessionLifecycleCommand,
+    live_turn: TurnId,
+) {
+    const CLOSURE_INTERRUPT_MASK: u128 = 0x5e55_1001_c105_4e00_0000_0000_0000_0001;
+    let session = command.session();
+    let descendant_scope = match command.operation() {
+        SessionLifecycleOperation::Stop {
+            descendant_scope, ..
+        } => *descendant_scope,
+        _ => DescendantTerminationScope::ParentAlone,
+    };
+    let defaults_version: Option<rust_decimal::Decimal> = match sqlx::query_scalar(
+        "SELECT current_version FROM session_current_defaults WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_optional(&services.pool)
+    .await
+    {
+        Ok(version) => version,
+        Err(error) => {
+            tracing::warn!(session = %session.into_uuid(), cause = %error,
+                "closure interrupt could not read the session defaults version");
+            return;
+        }
+    };
+    let Some(expected_version) = defaults_version
+        .and_then(|version| u64::try_from(version).ok())
+        .and_then(SessionConfigurationDefaultsVersion::try_from_u64)
+    else {
+        return;
+    };
+    let Ok(content) = UserContent::try_text(String::from("The session was closed.")) else {
+        return;
+    };
+    let request = SubmitInputRequest::try_new_with_content_limit(
+        DurableCommandId::from_uuid(uuid::Uuid::from_u128(
+            command.command_id().as_uuid().as_u128() ^ CLOSURE_INTERRUPT_MASK,
+        )),
+        session,
+        content,
+        DeliveryRequest::Interrupt {
+            expected_active_turn: live_turn,
+            descendant_scope,
+            configuration: PerInputConfigurationChoices::new(
+                expected_version,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        },
+        configured_usize(&services.model_configuration, "max_message_utf8_bytes"),
+    );
+    let Ok(request) = request else {
+        return;
+    };
+    let mut service = SubmitInputService::new(
+        UuidV7SubmitInputIdGenerator,
+        ConfiguredSubmitInputTransaction {
+            repository: SubmitInputRepository::with_model_capabilities(
+                services.pool.clone(),
+                services.model_configuration.model_capability_catalog(),
+            ),
+            model_configuration: services.model_configuration.as_ref(),
+        },
+        services.eligibility_nudge.clone(),
+        services.tool_dispatch_gate.clone(),
+    );
+    match service.execute(request).await {
+        Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Applied(_))) => {}
+        Ok(other) => {
+            tracing::warn!(session = %session.into_uuid(), outcome = ?other,
+                "closure interrupt was not applied; the turn settles at its boundary");
+        }
+        Err(error) => {
+            tracing::warn!(session = %session.into_uuid(), cause = %error,
+                "closure interrupt failed; the turn settles at its boundary");
+        }
+    }
+}
+
+const fn wire_lifecycle_effect(value: SessionLifecycleApplication) -> SessionLifecycleEffect {
+    match value {
+        SessionLifecycleApplication::Closed { .. } => SessionLifecycleEffect::Closed {},
+        SessionLifecycleApplication::ClosurePending { live_turn, .. } => {
+            SessionLifecycleEffect::ClosurePending {
+                live_turn_id: CanonicalUuid::from_uuid(live_turn.into_uuid()),
+            }
+        }
+        SessionLifecycleApplication::Resumed { .. } => SessionLifecycleEffect::Resumed {},
+        SessionLifecycleApplication::OwnershipChanged => {
+            SessionLifecycleEffect::OwnershipChanged {}
+        }
+    }
+}
+
+const fn wire_lifecycle_rejection(value: DomainLifecycleRejection) -> WireLifecycleRejection {
+    match value {
+        DomainLifecycleRejection::SessionNotFound => WireLifecycleRejection::SessionNotFound,
+        DomainLifecycleRejection::TransitionNotAdmitted => {
+            WireLifecycleRejection::TransitionNotAdmitted
+        }
+        DomainLifecycleRejection::RequiresParked => WireLifecycleRejection::RequiresParked,
+        DomainLifecycleRejection::ReleaseWhileParked => WireLifecycleRejection::ReleaseWhileParked,
+        DomainLifecycleRejection::OwnershipUnchanged => WireLifecycleRejection::OwnershipUnchanged,
+        DomainLifecycleRejection::FinishConditionRequired => {
+            WireLifecycleRejection::FinishConditionRequired
+        }
+        DomainLifecycleRejection::FinishConditionAlreadyDeclared => {
+            WireLifecycleRejection::FinishConditionAlreadyDeclared
+        }
+        DomainLifecycleRejection::StandingCauseMismatch => {
+            WireLifecycleRejection::StandingCauseMismatch
+        }
+        DomainLifecycleRejection::SuccessorNotFound => WireLifecycleRejection::SuccessorNotFound,
+        DomainLifecycleRejection::GoalResumeRequired => WireLifecycleRejection::GoalResumeRequired,
+        DomainLifecycleRejection::GoalOutcomeMismatch => {
+            WireLifecycleRejection::GoalOutcomeMismatch
+        }
+        DomainLifecycleRejection::PendingTerminalConflict => {
+            WireLifecycleRejection::PendingTerminalConflict
+        }
+    }
+}
+
+const fn domain_session_failure_cause(value: WireSessionFailureCause) -> DomainSessionFailureCause {
+    match value {
+        WireSessionFailureCause::ProviderTransient => {
+            DomainSessionFailureCause::Retryable(SessionRetryableCause::ProviderTransient)
+        }
+        WireSessionFailureCause::ProviderQuotaExhausted => {
+            DomainSessionFailureCause::Retryable(SessionRetryableCause::ProviderQuotaExhausted)
+        }
+        WireSessionFailureCause::ProviderOverloaded => {
+            DomainSessionFailureCause::Retryable(SessionRetryableCause::ProviderOverloaded)
+        }
+        WireSessionFailureCause::InfrastructureFailure => {
+            DomainSessionFailureCause::Retryable(SessionRetryableCause::InfrastructureFailure)
+        }
+        WireSessionFailureCause::RetryBudgetExhausted => {
+            DomainSessionFailureCause::Retryable(SessionRetryableCause::RetryBudgetExhausted)
+        }
+        WireSessionFailureCause::ContextCompactionWall => {
+            DomainSessionFailureCause::Structural(SessionStructuralCause::ContextCompactionWall)
+        }
+        WireSessionFailureCause::ContextHeadroomExhausted => {
+            DomainSessionFailureCause::Structural(SessionStructuralCause::ContextHeadroomExhausted)
+        }
+        WireSessionFailureCause::BrokenToolchain => {
+            DomainSessionFailureCause::Structural(SessionStructuralCause::BrokenToolchain)
+        }
+        WireSessionFailureCause::ModerationBlock => {
+            DomainSessionFailureCause::Structural(SessionStructuralCause::ModerationBlock)
+        }
+    }
+}
+
 async fn handle_read_goal<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
@@ -15590,6 +16133,7 @@ fn wire_session_closure_outcome(
         signalbox_domain::SessionClosureOutcome::FailedUnknown => {
             SessionClosureOutcome::FailedUnknown
         }
+        signalbox_domain::SessionClosureOutcome::Stopped => SessionClosureOutcome::Stopped,
         signalbox_domain::SessionClosureOutcome::Superseded => SessionClosureOutcome::Superseded,
         signalbox_domain::SessionClosureOutcome::Abandoned => SessionClosureOutcome::Abandoned,
         signalbox_domain::SessionClosureOutcome::Retired => SessionClosureOutcome::Retired,

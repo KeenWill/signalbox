@@ -21,8 +21,8 @@
 use std::{error::Error, fmt, time::Duration};
 
 use signalbox_domain::{
-    CoreAgency, Goal, GoalState, LifecycleActor, SessionClosureOutcome, SessionCreationCause,
-    SessionFailureCause, SessionId, SessionLifecycleState, SessionOwnership,
+    CoreAgency, FinishCondition, Goal, GoalState, LifecycleActor, SessionClosureOutcome,
+    SessionCreationCause, SessionFailureCause, SessionId, SessionLifecycleState, SessionOwnership,
     SessionOwnershipTransition, SessionParkCause, SessionParkResponder, SessionTerminalOutcome,
     SessionWait, SessionWaitKind, StopStickiness,
 };
@@ -32,12 +32,13 @@ use crate::{
     goal::{self, GoalRepositoryError},
     lock_inventory,
     mapping::{
-        dispatching_module_to_str, goal_blocked_reason_from_str, goal_blocked_reason_to_str,
-        lifecycle_actor_to_str, session_id_from_uuid, session_id_to_uuid,
-        session_park_cause_from_str, session_recovery_operation_from_str,
-        session_recovery_operation_to_str, session_retirement_cause_from_str,
-        session_retryable_cause_from_str, session_structural_cause_from_str,
-        session_wait_kind_from_str, session_wait_kind_to_str, session_waker_to_str,
+        dispatching_module_to_str, finish_condition_columns, finish_condition_from_columns,
+        goal_blocked_reason_from_str, goal_blocked_reason_to_str, lifecycle_actor_to_str,
+        session_id_from_uuid, session_id_to_uuid, session_park_cause_from_str,
+        session_recovery_operation_from_str, session_recovery_operation_to_str,
+        session_retirement_cause_from_str, session_retryable_cause_from_str,
+        session_structural_cause_from_str, session_wait_kind_from_str, session_wait_kind_to_str,
+        session_waker_to_str,
     },
     outbox::{self, OutboxEvent},
 };
@@ -103,6 +104,10 @@ pub enum SessionLifecycleRejection {
     GoalOutcomeMismatch,
     /// A failed closure names a cause the park it closes does not hold.
     StandingCauseMismatch,
+    /// An adopt would leave an owned session with no finish condition (§7).
+    FinishConditionRequired,
+    /// An adopt declares a finish condition the session already carries.
+    FinishConditionAlreadyDeclared,
 }
 
 impl fmt::Display for SessionLifecycleRejection {
@@ -121,6 +126,10 @@ impl fmt::Display for SessionLifecycleRejection {
                 "the session outcome contradicts its goal's terminal state"
             }
             Self::StandingCauseMismatch => "the closure cause is not the park's standing cause",
+            Self::FinishConditionRequired => "an owned session must declare a finish condition",
+            Self::FinishConditionAlreadyDeclared => {
+                "the session already declares a finish condition"
+            }
         };
         formatter.write_str(detail)
     }
@@ -247,13 +256,14 @@ impl SessionLifecycleNumericBounds {
 }
 
 /// One session's durable lifecycle facts.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionLifecycleRecord {
     session: SessionId,
     state: SessionLifecycleState,
     ownership: SessionOwnership,
     actor: LifecycleActor,
     pending_terminal: Option<SessionTerminalOutcome>,
+    finish_condition: Option<FinishCondition>,
 }
 
 impl SessionLifecycleRecord {
@@ -280,6 +290,11 @@ impl SessionLifecycleRecord {
     /// Returns the outcome a closure committed to while a turn still settles.
     pub const fn pending_terminal(&self) -> Option<SessionTerminalOutcome> {
         self.pending_terminal
+    }
+
+    /// Borrows the finish condition the session declares (§2).
+    pub const fn finish_condition(&self) -> Option<&FinishCondition> {
+        self.finish_condition.as_ref()
     }
 }
 
@@ -368,26 +383,13 @@ impl SessionLifecycleRepository {
         actor: LifecycleActor,
     ) -> Result<SessionLifecycleState, SessionLifecycleRepositoryError> {
         let mut transaction = self.pool.begin().await?;
-        let held = load_locked(&mut transaction, session).await?;
-        if !held.state.is_parked() {
-            return Err(reject(
-                transaction,
-                SessionLifecycleRejection::TransitionNotAdmitted,
-            )
-            .await);
-        }
-        write_state(
-            &mut transaction,
-            &held,
-            SessionLifecycleState::Active,
-            actor,
-        )
-        .await?;
-        sqlx::query("SELECT project_session_lifecycle($1, true)")
-            .bind(session_id_to_uuid(session))
-            .execute(&mut *transaction)
-            .await?;
-        let resumed = load_locked(&mut transaction, session).await?.state;
+        let resumed = match resume_in_transaction(&mut transaction, session, actor).await {
+            Ok(resumed) => resumed,
+            Err(SessionLifecycleRepositoryError::Rejected(rejection)) => {
+                return Err(reject(transaction, rejection).await);
+            }
+            Err(error) => return Err(error),
+        };
         commit(transaction).await?;
         Ok(resumed)
     }
@@ -414,55 +416,19 @@ impl SessionLifecycleRepository {
         &self,
         session: SessionId,
         outcome: SessionTerminalOutcome,
+        actor: LifecycleActor,
     ) -> Result<(), SessionLifecycleRepositoryError> {
         let mut transaction = self.pool.begin().await?;
-        let held = load_locked(&mut transaction, session).await?;
-        if !held
-            .state
-            .admits(&SessionLifecycleState::Terminal { outcome })
+        if let Err(error) =
+            commit_pending_terminal_in_transaction(&mut transaction, session, outcome, actor).await
         {
-            return Err(reject(
-                transaction,
-                SessionLifecycleRejection::TransitionNotAdmitted,
-            )
-            .await);
+            return Err(match error {
+                SessionLifecycleRepositoryError::Rejected(rejection) => {
+                    reject(transaction, rejection).await
+                }
+                other => other,
+            });
         }
-        if !closure_carries_standing_cause(&held.state, outcome) {
-            return Err(reject(
-                transaction,
-                SessionLifecycleRejection::StandingCauseMismatch,
-            )
-            .await);
-        }
-        match held.pending_terminal {
-            Some(committed) if committed == outcome => {
-                return commit(transaction).await;
-            }
-            Some(_) => {
-                return Err(reject(
-                    transaction,
-                    SessionLifecycleRejection::PendingTerminalConflict,
-                )
-                .await);
-            }
-            None => {}
-        }
-        let encoded = EncodedTerminal::from_outcome(outcome);
-        sqlx::query(
-            "UPDATE session_lifecycle
-                SET pending_terminal_outcome_kind = $2,
-                    pending_terminal_cause_kind = $3,
-                    pending_terminal_stop_sticky = $4,
-                    pending_terminal_superseded_by = $5
-              WHERE session_id = $1",
-        )
-        .bind(session_id_to_uuid(session))
-        .bind(encoded.outcome)
-        .bind(encoded.cause)
-        .bind(encoded.sticky)
-        .bind(encoded.superseded_by)
-        .execute(&mut *transaction)
-        .await?;
         commit(transaction).await
     }
 
@@ -482,14 +448,26 @@ impl SessionLifecycleRepository {
         Ok(terminal)
     }
 
-    /// Takes the liveness obligation for one session.
+    /// Takes the liveness obligation for one session, declaring the finish
+    /// condition it owes when it carries none (§7).
     pub async fn adopt(
         &self,
         session: SessionId,
+        finish_condition: Option<FinishCondition>,
         actor: LifecycleActor,
     ) -> Result<(), SessionLifecycleRepositoryError> {
-        self.flip_ownership(session, SessionOwnershipTransition::Adopted, actor)
-            .await
+        let mut transaction = self.pool.begin().await?;
+        if let Err(error) =
+            adopt_in_transaction(&mut transaction, session, finish_condition, actor).await
+        {
+            return Err(match error {
+                SessionLifecycleRepositoryError::Rejected(rejection) => {
+                    reject(transaction, rejection).await
+                }
+                other => other,
+            });
+        }
+        commit(transaction).await
     }
 
     /// Drops the forward-looking obligations for one session.
@@ -503,32 +481,180 @@ impl SessionLifecycleRepository {
         session: SessionId,
         actor: LifecycleActor,
     ) -> Result<(), SessionLifecycleRepositoryError> {
-        self.flip_ownership(session, SessionOwnershipTransition::Released, actor)
-            .await
-    }
-
-    async fn flip_ownership(
-        &self,
-        session: SessionId,
-        transition: SessionOwnershipTransition,
-        actor: LifecycleActor,
-    ) -> Result<(), SessionLifecycleRepositoryError> {
         let mut transaction = self.pool.begin().await?;
-        let held = load_locked(&mut transaction, session).await?;
-        if held.ownership == transition.ownership() {
-            return Err(reject(transaction, SessionLifecycleRejection::OwnershipUnchanged).await);
+        if let Err(error) = release_in_transaction(&mut transaction, session, actor).await {
+            return Err(match error {
+                SessionLifecycleRepositoryError::Rejected(rejection) => {
+                    reject(transaction, rejection).await
+                }
+                other => other,
+            });
         }
-        if held.state.is_parked() && transition == SessionOwnershipTransition::Released {
-            return Err(reject(transaction, SessionLifecycleRejection::ReleaseWhileParked).await);
-        }
-        sqlx::query("UPDATE session_lifecycle SET owned = $2 WHERE session_id = $1")
-            .bind(session_id_to_uuid(session))
-            .bind(transition.ownership().is_owned())
-            .execute(&mut *transaction)
-            .await?;
-        journal_ownership(&mut transaction, session, transition, actor).await?;
         commit(transaction).await
     }
+}
+
+/// Lifts one park inside the caller's transaction.
+pub(crate) async fn resume_in_transaction(
+    connection: &mut PgConnection,
+    session: SessionId,
+    actor: LifecycleActor,
+) -> Result<SessionLifecycleState, SessionLifecycleRepositoryError> {
+    let held = load_locked(connection, session).await?;
+    if !held.state.is_parked() {
+        return Err(SessionLifecycleRepositoryError::Rejected(
+            SessionLifecycleRejection::TransitionNotAdmitted,
+        ));
+    }
+    write_state(connection, &held, SessionLifecycleState::Active, actor).await?;
+    sqlx::query("SELECT project_session_lifecycle($1, true)")
+        .bind(session_id_to_uuid(session))
+        .execute(&mut *connection)
+        .await?;
+    Ok(load_locked(connection, session).await?.state)
+}
+
+/// Commits a session to an outcome inside the caller's transaction.
+pub(crate) async fn commit_pending_terminal_in_transaction(
+    connection: &mut PgConnection,
+    session: SessionId,
+    outcome: SessionTerminalOutcome,
+    actor: LifecycleActor,
+) -> Result<(), SessionLifecycleRepositoryError> {
+    let held = load_locked(connection, session).await?;
+    if !held
+        .state
+        .admits(&SessionLifecycleState::Terminal { outcome })
+    {
+        return Err(SessionLifecycleRepositoryError::Rejected(
+            SessionLifecycleRejection::TransitionNotAdmitted,
+        ));
+    }
+    if !closure_carries_standing_cause(&held.state, outcome) {
+        return Err(SessionLifecycleRepositoryError::Rejected(
+            SessionLifecycleRejection::StandingCauseMismatch,
+        ));
+    }
+    match held.pending_terminal {
+        Some(committed) if committed == outcome => return Ok(()),
+        Some(_) => {
+            return Err(SessionLifecycleRepositoryError::Rejected(
+                SessionLifecycleRejection::PendingTerminalConflict,
+            ));
+        }
+        None => {}
+    }
+    let encoded = EncodedTerminal::from_outcome(outcome);
+    let (actor_kind, actor_module, _, _) = encode_actor(actor);
+    sqlx::query(
+        "UPDATE session_lifecycle
+            SET pending_terminal_outcome_kind = $2,
+                pending_terminal_cause_kind = $3,
+                pending_terminal_stop_sticky = $4,
+                pending_terminal_superseded_by = $5,
+                pending_terminal_actor_kind = $6,
+                pending_terminal_actor_module = $7
+          WHERE session_id = $1",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(encoded.outcome)
+    .bind(encoded.cause)
+    .bind(encoded.sticky)
+    .bind(encoded.superseded_by)
+    .bind(actor_kind)
+    .bind(actor_module)
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
+/// Takes the liveness obligation inside the caller's transaction.
+pub(crate) async fn adopt_in_transaction(
+    connection: &mut PgConnection,
+    session: SessionId,
+    finish_condition: Option<FinishCondition>,
+    actor: LifecycleActor,
+) -> Result<(), SessionLifecycleRepositoryError> {
+    let held = load_locked(connection, session).await?;
+    if held.ownership == SessionOwnership::Owned {
+        return Err(SessionLifecycleRepositoryError::Rejected(
+            SessionLifecycleRejection::OwnershipUnchanged,
+        ));
+    }
+    match (held.finish_condition.as_ref(), finish_condition) {
+        (None, None) => {
+            return Err(SessionLifecycleRepositoryError::Rejected(
+                SessionLifecycleRejection::FinishConditionRequired,
+            ));
+        }
+        (Some(_), Some(_)) => {
+            return Err(SessionLifecycleRepositoryError::Rejected(
+                SessionLifecycleRejection::FinishConditionAlreadyDeclared,
+            ));
+        }
+        (None, Some(declared)) => {
+            let (kind, statement) = finish_condition_columns(Some(&declared));
+            sqlx::query(
+                "UPDATE session_lifecycle
+                    SET finish_condition_kind = $2, finish_condition = $3
+                  WHERE session_id = $1",
+            )
+            .bind(session_id_to_uuid(session))
+            .bind(kind)
+            .bind(statement)
+            .execute(&mut *connection)
+            .await?;
+        }
+        (Some(_), None) => {}
+    }
+    flip_ownership(
+        connection,
+        session,
+        SessionOwnershipTransition::Adopted,
+        actor,
+    )
+    .await
+}
+
+/// Drops the liveness obligation inside the caller's transaction.
+pub(crate) async fn release_in_transaction(
+    connection: &mut PgConnection,
+    session: SessionId,
+    actor: LifecycleActor,
+) -> Result<(), SessionLifecycleRepositoryError> {
+    let held = load_locked(connection, session).await?;
+    if held.ownership == SessionOwnership::Unmonitored {
+        return Err(SessionLifecycleRepositoryError::Rejected(
+            SessionLifecycleRejection::OwnershipUnchanged,
+        ));
+    }
+    if held.state.is_parked() {
+        return Err(SessionLifecycleRepositoryError::Rejected(
+            SessionLifecycleRejection::ReleaseWhileParked,
+        ));
+    }
+    flip_ownership(
+        connection,
+        session,
+        SessionOwnershipTransition::Released,
+        actor,
+    )
+    .await
+}
+
+async fn flip_ownership(
+    connection: &mut PgConnection,
+    session: SessionId,
+    transition: SessionOwnershipTransition,
+    actor: LifecycleActor,
+) -> Result<(), SessionLifecycleRepositoryError> {
+    sqlx::query("UPDATE session_lifecycle SET owned = $2 WHERE session_id = $1")
+        .bind(session_id_to_uuid(session))
+        .bind(transition.ownership().is_owned())
+        .execute(&mut *connection)
+        .await?;
+    journal_ownership(connection, session, transition, actor).await?;
+    Ok(())
 }
 
 /// Writes the lifecycle satellite for one newly created session.
@@ -540,15 +666,18 @@ pub(crate) async fn insert_created(
     connection: &mut PgConnection,
     session: SessionId,
     cause: &SessionCreationCause,
+    ownership: SessionOwnership,
+    finish_condition: Option<&FinishCondition>,
 ) -> Result<(), sqlx::Error> {
-    let ownership = creation_ownership(cause);
     let actor = creation_actor(cause);
     let (actor_kind, actor_module, actor_turn, actor_request) = encode_actor(actor);
+    let (finish_kind, finish_statement) = finish_condition_columns(finish_condition);
     sqlx::query(
         "INSERT INTO session_lifecycle
             (session_id, state_kind, owned, actor_kind, actor_module,
-             actor_turn_id, actor_tool_request_id)
-         VALUES ($1, 'created', $2, $3, $4, $5, $6)",
+             actor_turn_id, actor_tool_request_id,
+             finish_condition_kind, finish_condition)
+         VALUES ($1, 'created', $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(session_id_to_uuid(session))
     .bind(ownership.is_owned())
@@ -556,6 +685,8 @@ pub(crate) async fn insert_created(
     .bind(actor_module)
     .bind(actor_turn)
     .bind(actor_request)
+    .bind(finish_kind)
+    .bind(finish_statement)
     .execute(&mut *connection)
     .await?;
     let transition = match ownership {
@@ -593,12 +724,7 @@ pub(crate) const fn creation_actor(cause: &SessionCreationCause) -> LifecycleAct
 /// which is what keeps a person's chat window out of deadlines, auto-resume,
 /// and occupancy accounting.
 pub(crate) const fn creation_ownership(cause: &SessionCreationCause) -> SessionOwnership {
-    match cause {
-        SessionCreationCause::Interactive => SessionOwnership::Unmonitored,
-        SessionCreationCause::ModuleDispatched { .. } | SessionCreationCause::Delegated { .. } => {
-            SessionOwnership::Owned
-        }
-    }
+    cause.default_ownership()
 }
 
 /// Closes one session inside the caller's transaction.
@@ -908,6 +1034,14 @@ async fn write_state(
                 pending_terminal_superseded_by = CASE
                     WHEN $2::text = 'terminal' THEN NULL
                     ELSE pending_terminal_superseded_by
+                END,
+                pending_terminal_actor_kind = CASE
+                    WHEN $2::text = 'terminal' THEN NULL
+                    ELSE pending_terminal_actor_kind
+                END,
+                pending_terminal_actor_module = CASE
+                    WHEN $2::text = 'terminal' THEN NULL
+                    ELSE pending_terminal_actor_module
                 END
           WHERE session_id = $1",
     )
@@ -935,7 +1069,7 @@ async fn write_state(
     Ok(())
 }
 
-async fn load_locked(
+pub(crate) async fn load_locked(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<SessionLifecycleRecord, SessionLifecycleRepositoryError> {
@@ -954,7 +1088,7 @@ async fn load_locked(
         .ok_or(SessionLifecycleRepositoryError::UnknownSession(session))
 }
 
-async fn load_optional(
+pub(crate) async fn load_optional(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<Option<SessionLifecycleRecord>, SessionLifecycleRepositoryError> {
@@ -967,7 +1101,8 @@ async fn load_optional(
                 terminal_cause_kind, terminal_stop_sticky,
                 terminal_superseded_by, pending_terminal_outcome_kind,
                 pending_terminal_cause_kind, pending_terminal_stop_sticky,
-                pending_terminal_superseded_by
+                pending_terminal_superseded_by, finish_condition_kind,
+                finish_condition
            FROM session_lifecycle
           WHERE session_id = $1",
     )
@@ -1201,6 +1336,11 @@ fn decode_record(row: &PgRow) -> Result<SessionLifecycleRecord, SessionLifecycle
         row.try_get("pending_terminal_stop_sticky")?,
         row.try_get("pending_terminal_superseded_by")?,
     )?;
+    let finish_condition = finish_condition_from_columns(
+        row.try_get("finish_condition_kind")?,
+        row.try_get("finish_condition")?,
+    )
+    .map_err(SessionLifecycleCorruption::Inconsistent)?;
     Ok(SessionLifecycleRecord {
         session,
         state: decode_state(row)?,
@@ -1216,6 +1356,7 @@ fn decode_record(row: &PgRow) -> Result<SessionLifecycleRecord, SessionLifecycle
             row.try_get("actor_tool_request_id")?,
         )?,
         pending_terminal,
+        finish_condition,
     })
 }
 

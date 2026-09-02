@@ -13,11 +13,12 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     AcceptedInputId, AnthropicServiceTier, BoundChildAction, CheckConclusion, ChecksOutcome,
-    CodexCliServiceTier, DangerousToolAutoApproval, DelegateApprovalRecommendation,
-    DelegationMessageDirection, DelegationOutcomeKind, DelegationOutcomeReason,
-    DelegationTransitionFailure, DelegationWaitMode, DeliveryKind, DescendantTerminationScope,
-    DirectModelSelection, DispatchingModule, DurableCommandId, EffectiveModelSettings, FastMode,
-    FastModeOverlay, FaultCause, GoalBlockedReasonKind, GoalCommandRejection, GoalEventKind,
+    CodexCliServiceTier, CommandPrincipal, DangerousToolAutoApproval,
+    DelegateApprovalRecommendation, DelegationMessageDirection, DelegationOutcomeKind,
+    DelegationOutcomeReason, DelegationTransitionFailure, DelegationWaitMode, DeliveryKind,
+    DescendantTerminationScope, DirectModelSelection, DispatchingModule, DurableCommandId,
+    EffectiveModelSettings, FastMode, FastModeOverlay, FaultCause, FinishCondition,
+    FinishConditionStatement, GoalBlockedReasonKind, GoalCommandRejection, GoalEventKind,
     GoalModelBlockedReasonKind, GoalUserAction, InstructionBundleKind,
     InstructionDiscoveryRootKind, LifecycleActor, MergeableState, ModelChangeAdjustment,
     ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier,
@@ -25,11 +26,12 @@ use signalbox_domain::{
     RepoWatchEventKindNameV1, RequestKind, ReviewState, RunnerPlacementLossSource,
     RunnerSandboxProfile, ScopeOperation, ServiceTier, SessionClosureOutcome,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId, SessionInputPosition,
-    SessionLifecycleState, SessionParkCause, SessionPlacementEventKind, SessionRecoveryOperation,
-    SessionRetirementCause, SessionRetryableCause, SessionStructuralCause, SessionWaitKind,
-    SessionWaker, SettingOverlay, ToolApprovalPosture, ToolAttemptId, ToolPermissionDefault,
-    ToolRequestId, TurnId, TurnTerminalCause, UpdateSessionPlacementRejectionKind,
-    ValidatedModelSettings, WorkspaceOrigin,
+    SessionLifecycleCommandRejection, SessionLifecycleOperation, SessionLifecycleState,
+    SessionParkCause, SessionPlacementEventKind, SessionRecoveryOperation, SessionRetirementCause,
+    SessionRetryableCause, SessionStructuralCause, SessionWaitKind, SessionWaker, SettingOverlay,
+    ToolApprovalPosture, ToolAttemptId, ToolPermissionDefault, ToolRequestId, TurnId,
+    TurnTerminalCause, UpdateSessionPlacementRejectionKind, ValidatedModelSettings,
+    WorkspaceOrigin,
 };
 
 pub(crate) const SESSION_CREATED: &str = "session_created";
@@ -1542,6 +1544,7 @@ pub(crate) const fn session_closure_outcome_to_str(value: SessionClosureOutcome)
         SessionClosureOutcome::FailedRetryable => "failed_retryable",
         SessionClosureOutcome::FailedStructural => "failed_structural",
         SessionClosureOutcome::FailedUnknown => "failed_unknown",
+        SessionClosureOutcome::Stopped => "stopped",
         SessionClosureOutcome::Superseded => "superseded",
         SessionClosureOutcome::Abandoned => "abandoned",
         SessionClosureOutcome::Retired => "retired",
@@ -1554,6 +1557,7 @@ pub(crate) fn session_closure_outcome_from_str(value: &str) -> Option<SessionClo
         "failed_retryable" => Some(SessionClosureOutcome::FailedRetryable),
         "failed_structural" => Some(SessionClosureOutcome::FailedStructural),
         "failed_unknown" => Some(SessionClosureOutcome::FailedUnknown),
+        "stopped" => Some(SessionClosureOutcome::Stopped),
         "superseded" => Some(SessionClosureOutcome::Superseded),
         "abandoned" => Some(SessionClosureOutcome::Abandoned),
         "retired" => Some(SessionClosureOutcome::Retired),
@@ -1568,6 +1572,116 @@ pub(crate) const fn lifecycle_actor_to_str(value: LifecycleActor) -> &'static st
         LifecycleActor::Operator => "operator",
         LifecycleActor::Module { .. } => "module",
         LifecycleActor::Watchdog => "watchdog",
+    }
+}
+
+/// Encodes the envelope principal of one durable command.
+pub(crate) const fn command_principal_to_str(value: CommandPrincipal) -> &'static str {
+    match value {
+        CommandPrincipal::Core => "core",
+        CommandPrincipal::Operator => "operator",
+        CommandPrincipal::Module { .. } => "module",
+        CommandPrincipal::Watchdog => "watchdog",
+    }
+}
+
+/// Encodes the module an envelope principal names.
+pub(crate) const fn command_principal_module_to_str(
+    value: CommandPrincipal,
+) -> Option<&'static str> {
+    match value {
+        CommandPrincipal::Module { module } => Some(dispatching_module_to_str(module)),
+        CommandPrincipal::Core | CommandPrincipal::Operator | CommandPrincipal::Watchdog => None,
+    }
+}
+
+/// Encodes one closed lifecycle-command operation spelling.
+pub(crate) const fn session_lifecycle_operation_to_str(
+    value: &SessionLifecycleOperation,
+) -> &'static str {
+    match value {
+        SessionLifecycleOperation::Stop { .. } => "stop",
+        SessionLifecycleOperation::Supersede { .. } => "supersede",
+        SessionLifecycleOperation::Abandon => "abandon",
+        SessionLifecycleOperation::CloseFailed { .. } => "close_failed",
+        SessionLifecycleOperation::Resume => "resume",
+        SessionLifecycleOperation::Adopt { .. } => "adopt",
+        SessionLifecycleOperation::Release => "release",
+    }
+}
+
+/// Encodes one closed lifecycle-command rejection.
+pub(crate) const fn session_lifecycle_command_rejection_to_str(
+    value: SessionLifecycleCommandRejection,
+) -> &'static str {
+    match value {
+        SessionLifecycleCommandRejection::SessionNotFound => "session_not_found",
+        SessionLifecycleCommandRejection::TransitionNotAdmitted => "transition_not_admitted",
+        SessionLifecycleCommandRejection::RequiresParked => "requires_parked",
+        SessionLifecycleCommandRejection::ReleaseWhileParked => "release_while_parked",
+        SessionLifecycleCommandRejection::OwnershipUnchanged => "ownership_unchanged",
+        SessionLifecycleCommandRejection::FinishConditionRequired => "finish_condition_required",
+        SessionLifecycleCommandRejection::FinishConditionAlreadyDeclared => {
+            "finish_condition_already_declared"
+        }
+        SessionLifecycleCommandRejection::StandingCauseMismatch => "standing_cause_mismatch",
+        SessionLifecycleCommandRejection::SuccessorNotFound => "successor_not_found",
+        SessionLifecycleCommandRejection::GoalResumeRequired => "goal_resume_required",
+        SessionLifecycleCommandRejection::GoalOutcomeMismatch => "goal_outcome_mismatch",
+        SessionLifecycleCommandRejection::PendingTerminalConflict => "pending_terminal_conflict",
+    }
+}
+
+/// Decodes one closed lifecycle-command rejection.
+pub(crate) fn session_lifecycle_command_rejection_from_str(
+    value: &str,
+) -> Option<SessionLifecycleCommandRejection> {
+    match value {
+        "session_not_found" => Some(SessionLifecycleCommandRejection::SessionNotFound),
+        "transition_not_admitted" => Some(SessionLifecycleCommandRejection::TransitionNotAdmitted),
+        "requires_parked" => Some(SessionLifecycleCommandRejection::RequiresParked),
+        "release_while_parked" => Some(SessionLifecycleCommandRejection::ReleaseWhileParked),
+        "ownership_unchanged" => Some(SessionLifecycleCommandRejection::OwnershipUnchanged),
+        "finish_condition_required" => {
+            Some(SessionLifecycleCommandRejection::FinishConditionRequired)
+        }
+        "finish_condition_already_declared" => {
+            Some(SessionLifecycleCommandRejection::FinishConditionAlreadyDeclared)
+        }
+        "standing_cause_mismatch" => Some(SessionLifecycleCommandRejection::StandingCauseMismatch),
+        "successor_not_found" => Some(SessionLifecycleCommandRejection::SuccessorNotFound),
+        "goal_resume_required" => Some(SessionLifecycleCommandRejection::GoalResumeRequired),
+        "goal_outcome_mismatch" => Some(SessionLifecycleCommandRejection::GoalOutcomeMismatch),
+        "pending_terminal_conflict" => {
+            Some(SessionLifecycleCommandRejection::PendingTerminalConflict)
+        }
+        _ => None,
+    }
+}
+
+/// Encodes one finish condition as its kind and declared text.
+pub(crate) fn finish_condition_columns(
+    value: Option<&FinishCondition>,
+) -> (Option<&'static str>, Option<&str>) {
+    match value {
+        None => (None, None),
+        Some(FinishCondition::ExternalGate) => (Some("external_gate"), None),
+        Some(FinishCondition::Declared(statement)) => (Some("declared"), Some(statement.as_str())),
+    }
+}
+
+/// Decodes one finish condition from its kind and declared text.
+pub(crate) fn finish_condition_from_columns(
+    kind: Option<String>,
+    statement: Option<String>,
+) -> Result<Option<FinishCondition>, &'static str> {
+    match (kind.as_deref(), statement) {
+        (None, None) => Ok(None),
+        (Some("external_gate"), None) => Ok(Some(FinishCondition::ExternalGate)),
+        (Some("declared"), Some(statement)) => FinishConditionStatement::try_new(statement)
+            .map(|statement| Some(FinishCondition::Declared(statement)))
+            .map_err(|_| "finish condition statement"),
+        _ => Err("finish condition shape"),
     }
 }
 
@@ -1738,6 +1852,8 @@ pub(crate) enum DurableCommandKind {
     MintGitRemote,
     /// Git remote withdrawal.
     WithdrawGitRemote,
+    /// Session lifecycle command.
+    SessionLifecycle,
 }
 
 /// Encodes a durable-command kind as its closed PostgreSQL spelling.
@@ -1760,6 +1876,7 @@ pub(crate) const fn durable_command_kind_to_str(value: DurableCommandKind) -> &'
         DurableCommandKind::RegisterWorkspace => "register_workspace",
         DurableCommandKind::MintGitRemote => "mint_git_remote",
         DurableCommandKind::WithdrawGitRemote => "withdraw_git_remote",
+        DurableCommandKind::SessionLifecycle => "session_lifecycle",
     }
 }
 
@@ -1783,6 +1900,7 @@ pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableComman
         "register_workspace" => Some(DurableCommandKind::RegisterWorkspace),
         "mint_git_remote" => Some(DurableCommandKind::MintGitRemote),
         "withdraw_git_remote" => Some(DurableCommandKind::WithdrawGitRemote),
+        "session_lifecycle" => Some(DurableCommandKind::SessionLifecycle),
         _ => None,
     }
 }

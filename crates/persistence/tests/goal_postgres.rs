@@ -1014,7 +1014,11 @@ async fn s_goal_inv048_expected_resume_binds_to_one_blocked_event() -> Result<()
     // reads the ownership bit, so the fixture states the ownership its subject
     // depends on rather than inheriting the interactive default.
     SessionLifecycleRepository::new(pool.clone())
-        .adopt(session(SESSION), signalbox_domain::LifecycleActor::Operator)
+        .adopt(
+            session(SESSION),
+            Some(signalbox_domain::FinishCondition::ExternalGate),
+            signalbox_domain::LifecycleActor::Operator,
+        )
         .await?;
     let pending = repository
         .pending_execution_failures_with_need(&scheduled_need)
@@ -2467,6 +2471,7 @@ async fn inv048_model_goal_declaration_is_the_final_response_part() -> Result<()
             session(SESSION),
             GoalReport::try_new(report_text).expect("fixture report is admitted"),
             provenance,
+            signalbox_domain::FinishCheckVerdict::Unverified,
         )
         .await
         .expect_err("a nonfinal declaration cannot source a goal event");
@@ -2529,6 +2534,7 @@ async fn inv048_model_goal_declaration_carries_full_report_bound() -> Result<(),
                 session(SESSION),
                 report,
                 GoalModelProvenance::new(attached_turn.turn(), request),
+                signalbox_domain::FinishCheckVerdict::Unverified,
             )
             .await?,
     );

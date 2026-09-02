@@ -1175,6 +1175,7 @@ async fn declare_session_goal_achieved(
                 session,
                 GoalReport::try_new(report).expect("fixture goal report is valid"),
                 GoalModelProvenance::new(turn, request),
+                signalbox_domain::FinishCheckVerdict::Unverified,
             )
             .await?,
     );

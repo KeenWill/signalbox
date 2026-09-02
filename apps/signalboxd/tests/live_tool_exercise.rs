@@ -1178,6 +1178,7 @@ async fn create_session(connection: &mut Connection) -> SmokeResult<CanonicalUui
             model_settings: ModelSettingsOverlay::inherit_all(),
             system_prompt: SystemPromptMember::present(None),
             placement: SessionPlacement::Pathless {},
+            lifecycle: signalbox_process_protocol::SessionLifecycleMembers::default(),
         })
         .await?;
     let response = connection.response_within().await?;

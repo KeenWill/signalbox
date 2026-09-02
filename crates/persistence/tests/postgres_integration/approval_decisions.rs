@@ -1009,6 +1009,7 @@ async fn approval_judge_completion_serializes_with_a_concurrent_goal_achievement
                 achievement_session,
                 achievement_report,
                 achievement_provenance,
+                signalbox_domain::FinishCheckVerdict::Unverified,
             )
             .await
     });

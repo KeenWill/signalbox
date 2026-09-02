@@ -3602,6 +3602,7 @@ const fn session_closure_outcome_label(outcome: SessionClosureOutcome) -> &'stat
         SessionClosureOutcome::FailedStructural => "failed_structural",
         SessionClosureOutcome::FailedUnknown => "failed_unknown",
         SessionClosureOutcome::Superseded => "superseded",
+        SessionClosureOutcome::Stopped => "stopped",
         SessionClosureOutcome::Abandoned => "abandoned",
         SessionClosureOutcome::Retired => "retired",
     }

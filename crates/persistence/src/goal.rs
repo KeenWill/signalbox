@@ -7,14 +7,15 @@ use std::{error::Error, fmt, num::NonZeroU64};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    AcceptedInputId, CoreAgency, DescendantTerminationScope, DurableCommandId,
-    FrozenAliasDefinition, Goal, GoalBlockProvenance, GoalBlockedReasonKind, GoalCommandRejection,
-    GoalCommandResult, GoalEvent, GoalEventKind, GoalEventOrdinal, GoalGeneration, GoalGuidance,
-    GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed, GoalReconstitutionFailure,
-    GoalReconstitutionInput, GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement,
-    GoalTextError, GoalTransitionError, GoalTransitionFailure, GoalTurnSource, GoalUserAction,
-    GoalUserCommand, GoalUserProvenance, LifecycleActor, ModelAlias, ModelSelectionOverride,
-    OriginConfiguration, ReconstitutedGoalCommand, SessionClosureOutcome, SessionId, TurnId,
+    AcceptedInputId, CommandPrincipal, CoreAgency, DescendantTerminationScope, DurableCommandId,
+    FinishCheckVerdict, FinishCondition, FrozenAliasDefinition, Goal, GoalBlockProvenance,
+    GoalBlockedReasonKind, GoalCommandRejection, GoalCommandResult, GoalEvent, GoalEventKind,
+    GoalEventOrdinal, GoalGeneration, GoalGuidance, GoalModelBlockedReasonKind,
+    GoalModelProvenance, GoalNeed, GoalReconstitutionFailure, GoalReconstitutionInput, GoalReport,
+    GoalSchedulerProvenance, GoalState, GoalStatement, GoalTextError, GoalTransitionError,
+    GoalTransitionFailure, GoalTurnSource, GoalUserAction, GoalUserCommand, GoalUserProvenance,
+    LifecycleActor, ModelAlias, ModelSelectionOverride, OriginConfiguration,
+    ReconstitutedGoalCommand, SessionClosureOutcome, SessionId, SessionTerminalOutcome, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
@@ -41,6 +42,7 @@ use crate::{
     },
     outbox::{self, OutboxEvent},
     session::SessionCorruption,
+    session_lifecycle::SessionLifecycleRepositoryError,
 };
 
 const STORAGE_VERSION: i16 = 1;
@@ -96,6 +98,11 @@ pub enum GoalCommandHandlingOutcome {
 pub enum GoalTransitionOutcome {
     /// The transition appended this event.
     Applied(GoalEvent),
+    /// The finish check refused the achievement; pursuit stays live (§2).
+    FinishCheckFailed {
+        /// The check result.
+        detail: String,
+    },
     /// The session has no attached goal.
     GoalNotAttached,
     /// The current state rejected the requested transition.
@@ -292,8 +299,14 @@ impl GoalRepository {
     where
         SelectDefinition: FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     {
-        self.handle_command(command, candidates, None, select_definition)
-            .await
+        self.handle_command(
+            command,
+            candidates,
+            None,
+            CommandPrincipal::Operator,
+            select_definition,
+        )
+        .await
     }
 
     /// Handles a user command only while the goal's last recorded event is
@@ -316,8 +329,14 @@ impl GoalRepository {
     where
         SelectDefinition: FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     {
-        self.handle_command(command, candidates, Some(expected_head), select_definition)
-            .await
+        self.handle_command(
+            command,
+            candidates,
+            Some(expected_head),
+            CommandPrincipal::Core,
+            select_definition,
+        )
+        .await
     }
 
     async fn handle_command<SelectDefinition>(
@@ -325,6 +344,7 @@ impl GoalRepository {
         command: GoalUserCommand,
         candidates: Option<GoalTurnCandidates>,
         expected_head: Option<GoalEventOrdinal>,
+        principal: CommandPrincipal,
         select_definition: SelectDefinition,
     ) -> Result<GoalCommandHandlingOutcome, GoalRepositoryError>
     where
@@ -349,15 +369,19 @@ impl GoalRepository {
             return Ok(GoalCommandHandlingOutcome::TargetBusy { session });
         }
 
+        let issuer = crate::command_registry::issuer_columns(principal);
         let claimed = sqlx::query(
             "INSERT INTO durable_command
-                (command_id, command_kind, storage_version, claimed_at)
-             VALUES ($1, $2, $3, transaction_timestamp())
+                (command_id, command_kind, storage_version, claimed_at,
+                 issuer_kind, issuer_module)
+             VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
              ON CONFLICT DO NOTHING",
         )
         .bind(durable_command_id_to_uuid(command_id))
         .bind(GOAL_KIND)
         .bind(STORAGE_VERSION)
+        .bind(issuer.0)
+        .bind(issuer.1)
         .execute(&mut *transaction)
         .await?
         .rows_affected()
@@ -558,7 +582,8 @@ impl GoalRepository {
                 | CommandKind::UpdateSessionPlacement
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
-                | CommandKind::WithdrawGitRemote,
+                | CommandKind::WithdrawGitRemote
+                | CommandKind::SessionLifecycle,
             ) => Err(GoalRepositoryError::DifferentCommandKind { command_id }),
         }
     }
@@ -799,15 +824,66 @@ impl GoalRepository {
         .await
     }
 
-    /// Appends a model-declared achievement and final report reference.
+    /// Appends a model-declared achievement gated on its finish check: a
+    /// passing verdict commits `achieved_verified` to the session's terminal
+    /// handoff, a failing verdict appends nothing.
     pub async fn declare_achieved(
         &self,
         session: SessionId,
         report: GoalReport,
         provenance: GoalModelProvenance,
+        verdict: FinishCheckVerdict,
     ) -> Result<GoalTransitionOutcome, GoalRepositoryError> {
-        self.handle_system_transition(session, SystemTransition::Achieved { report, provenance })
-            .await
+        self.handle_system_transition(
+            session,
+            SystemTransition::Achieved {
+                report,
+                provenance,
+                verdict,
+            },
+        )
+        .await
+    }
+
+    /// Loads the finish condition one session declares.
+    pub async fn load_finish_condition(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<FinishCondition>, GoalRepositoryError> {
+        let row = sqlx::query(
+            "SELECT finish_condition_kind, finish_condition
+               FROM session_lifecycle
+              WHERE session_id = $1",
+        )
+        .bind(session_id_to_uuid(session))
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        crate::mapping::finish_condition_from_columns(
+            row.try_get("finish_condition_kind")?,
+            row.try_get("finish_condition")?,
+        )
+        .map_err(|detail| GoalCorruption::Inconsistent(detail).into())
+    }
+
+    /// Returns the detail of the latest failed finish check on one turn.
+    pub async fn latest_failed_finish_check(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+    ) -> Result<Option<String>, GoalRepositoryError> {
+        Ok(sqlx::query_scalar(
+            "SELECT detail FROM goal_finish_check
+              WHERE session_id = $1 AND turn_id = $2 AND verdict_kind = 'failed'
+              ORDER BY recorded_at DESC
+              LIMIT 1",
+        )
+        .bind(session_id_to_uuid(session))
+        .bind(turn_id_to_uuid(turn))
+        .fetch_optional(&self.pool)
+        .await?)
     }
 
     /// Appends scheduler-only execution-failure blocking without retry.
@@ -870,13 +946,27 @@ impl GoalRepository {
                 }
             }
         }
+        let mut verified = None;
         let transitioned = match transition {
             SystemTransition::Blocked {
                 reason,
                 need,
                 provenance,
             } => goal.declare_blocked(reason, need, provenance),
-            SystemTransition::Achieved { report, provenance } => {
+            SystemTransition::Achieved {
+                report,
+                provenance,
+                verdict,
+            } => {
+                record_finish_check(&mut transaction, session, &goal, provenance, &verdict).await?;
+                match verdict {
+                    FinishCheckVerdict::Failed { detail } => {
+                        commit(transaction).await?;
+                        return Ok(GoalTransitionOutcome::FinishCheckFailed { detail });
+                    }
+                    FinishCheckVerdict::Passed => verified = Some(provenance),
+                    FinishCheckVerdict::Unverified => {}
+                }
                 goal.declare_achieved(report, provenance)
             }
             SystemTransition::ExecutionFailure { need, provenance } => {
@@ -892,6 +982,26 @@ impl GoalRepository {
         };
         let event = latest_event(&goal)?;
         insert_event(&mut transaction, session, &event).await?;
+        if let Some(provenance) = verified {
+            crate::session_lifecycle::commit_pending_terminal_in_transaction(
+                &mut transaction,
+                session,
+                SessionTerminalOutcome::AchievedVerified,
+                LifecycleActor::Core {
+                    agency: CoreAgency::Tool {
+                        request: provenance.tool_request(),
+                    },
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                SessionLifecycleRepositoryError::Database(error)
+                | SessionLifecycleRepositoryError::CommitAmbiguous(error) => {
+                    GoalRepositoryError::Database(error)
+                }
+                _ => GoalCorruption::Inconsistent("achieved session refused its handoff").into(),
+            })?;
+        }
         // A blocked or achieved transition retires the generation's queued
         // turns from the live-queue projection and the timeline work facts,
         // so the change must reach the process monitor as a durable outbox
@@ -1052,18 +1162,23 @@ fn scheduler_failure_rejection(
 pub(crate) async fn insert_fresh_commissioned_goal(
     connection: &mut PgConnection,
     command: GoalUserCommand,
+    principal: CommandPrincipal,
     accepted_input: AcceptedInputId,
     turn: TurnId,
 ) -> Result<(), GoalRepositoryError> {
+    let issuer = crate::command_registry::issuer_columns(principal);
     let claimed = sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, $2, $3, transaction_timestamp())
+            (command_id, command_kind, storage_version, claimed_at,
+             issuer_kind, issuer_module)
+         VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
          ON CONFLICT DO NOTHING",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(GOAL_KIND)
     .bind(STORAGE_VERSION)
+    .bind(issuer.0)
+    .bind(issuer.1)
     .execute(&mut *connection)
     .await?
     .rows_affected()
@@ -1131,15 +1246,22 @@ pub(crate) async fn insert_repo_watch_composed_stop(
     {
         return Ok(false);
     }
+    let issuer =
+        crate::command_registry::issuer_columns(signalbox_domain::CommandPrincipal::Module {
+            module: signalbox_domain::DispatchingModule::RepositoryWatch,
+        });
     let claimed = sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, $2, $3, transaction_timestamp())
+            (command_id, command_kind, storage_version, claimed_at,
+             issuer_kind, issuer_module)
+         VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
          ON CONFLICT DO NOTHING",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(GOAL_KIND)
     .bind(STORAGE_VERSION)
+    .bind(issuer.0)
+    .bind(issuer.1)
     .execute(&mut *connection)
     .await?
     .rows_affected()
@@ -1264,6 +1386,7 @@ enum SystemTransition {
     Achieved {
         report: GoalReport,
         provenance: GoalModelProvenance,
+        verdict: FinishCheckVerdict,
     },
     ExecutionFailure {
         need: GoalNeed,
@@ -1496,7 +1619,8 @@ async fn existing_or_conflicting(
         | CommandKind::UpdateSessionPlacement
         | CommandKind::RegisterWorkspace
         | CommandKind::MintGitRemote
-        | CommandKind::WithdrawGitRemote => {
+        | CommandKind::WithdrawGitRemote
+        | CommandKind::SessionLifecycle => {
             return Ok(GoalCommandHandlingOutcome::ConflictingReuse {
                 command_id: command.command_id(),
             });
@@ -1663,6 +1787,34 @@ async fn insert_event(
             event_ordinal: event.ordinal().get(),
         },
     )
+    .await?;
+    Ok(())
+}
+
+async fn record_finish_check(
+    connection: &mut PgConnection,
+    session: SessionId,
+    goal: &Goal,
+    provenance: GoalModelProvenance,
+    verdict: &FinishCheckVerdict,
+) -> Result<(), GoalRepositoryError> {
+    let (kind, detail) = match verdict {
+        FinishCheckVerdict::Passed => ("passed", None),
+        FinishCheckVerdict::Failed { detail } => ("failed", Some(detail.as_str())),
+        FinishCheckVerdict::Unverified => ("unverified", None),
+    };
+    sqlx::query(
+        "INSERT INTO goal_finish_check
+            (session_id, tool_request_id, turn_id, generation, verdict_kind, detail)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(tool_request_id_to_uuid(provenance.tool_request()))
+    .bind(turn_id_to_uuid(provenance.turn()))
+    .bind(Decimal::from(goal.current().generation().get()))
+    .bind(kind)
+    .bind(detail)
+    .execute(&mut *connection)
     .await?;
     Ok(())
 }

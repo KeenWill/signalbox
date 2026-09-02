@@ -19,22 +19,22 @@ use signalbox_domain::{
     ActiveTurnSchedulingReconstitutionInput, Actor, AppliedInterruptCommandResult, AssistantText,
     AttachmentDisplayFilename, AttachmentKind, AutomaticReconciliationAuthority, BlobDigest,
     CancellationStopDisposition, CancelledModelCallTurnIdentities,
-    CancelledTurnExecutionReconstitutionInput, ConsumedSteeringReconstitutionInput,
-    ContextCompactionId, ContextCompactionModelCallReconstitutionInput,
-    ContextCompactionModelCallState, ContextCompactionRange, ContextCompactionReconstitutionInput,
-    ContextCompactionTokenUsage, ContextFrontierId, ContextFrontierProjection,
-    ContinuationRoundReconstitutionInput, DelegatedTurnSchedulingFact,
-    DelegatedTurnSchedulingState, DelegationContent, DelegationMessageId, DelegationOutcome,
-    DelegationOutcomeKind, DelegationOutcomeReason, DelegationProvenanceReconstitutionInput,
-    DelegationWaitMode, DeliveryRequest, DescendantTerminationScope, DirectModelSelection,
-    DurableCommandId, FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition,
-    FrozenModelSelection, GoalEventOrdinal, GoalGeneration, GoalTurnOriginConstructionInput,
-    GoalTurnSource, IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId,
-    ModelCallInterruptOutcome, ModelCallReconstitutionInput, ModelCallReconstitutionState,
-    ModelCallTerminalOutcome, ModelCapabilityCatalog, ModelSelectionOverride,
-    ModelSelectionRequest, NonAcceptedTurnPredecessorReconstitutionInput,
-    NonEmptyUnicodeTextFailure, OriginConfiguration, OriginConfigurationReconstitutionInput,
-    OriginModelSettingsError, PerInputConfigurationChoices,
+    CancelledTurnExecutionReconstitutionInput, CommandPrincipal,
+    ConsumedSteeringReconstitutionInput, ContextCompactionId,
+    ContextCompactionModelCallReconstitutionInput, ContextCompactionModelCallState,
+    ContextCompactionRange, ContextCompactionReconstitutionInput, ContextCompactionTokenUsage,
+    ContextFrontierId, ContextFrontierProjection, ContinuationRoundReconstitutionInput,
+    DelegatedTurnSchedulingFact, DelegatedTurnSchedulingState, DelegationContent,
+    DelegationMessageId, DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason,
+    DelegationProvenanceReconstitutionInput, DelegationWaitMode, DeliveryRequest,
+    DescendantTerminationScope, DirectModelSelection, DurableCommandId,
+    FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition, FrozenModelSelection,
+    GoalEventOrdinal, GoalGeneration, GoalTurnOriginConstructionInput, GoalTurnSource,
+    IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId, ModelCallInterruptOutcome,
+    ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelCallTerminalOutcome,
+    ModelCapabilityCatalog, ModelSelectionOverride, ModelSelectionRequest,
+    NonAcceptedTurnPredecessorReconstitutionInput, NonEmptyUnicodeTextFailure, OriginConfiguration,
+    OriginConfigurationReconstitutionInput, OriginModelSettingsError, PerInputConfigurationChoices,
     PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
     ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
     ResolvedContextFrontierSnapshot, ResolvedProviderTarget, RunnerGeneration, RunnerId,
@@ -681,9 +681,11 @@ impl SubmitInputRepository {
             ) + Send,
     {
         let mut transaction = self.pool.begin().await?;
+        let principal = CommandPrincipal::for_actor(command.actor());
         let decision = Box::pin(handle_in_transaction(
             &mut transaction,
             command,
+            principal,
             accepted_input,
             turn,
             cancellation_identities,
@@ -741,7 +743,8 @@ impl SubmitInputRepository {
                 | CommandKind::UpdateSessionPlacement
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
-                | CommandKind::WithdrawGitRemote,
+                | CommandKind::WithdrawGitRemote
+                | CommandKind::SessionLifecycle,
             ) => Err(Self::wrong_kind(command_id)),
         }
     }
@@ -796,6 +799,7 @@ impl SubmitInputTransaction for SubmitInputRepository {
 async fn handle_in_transaction<NextTurn, NextToolCancellation>(
     connection: &mut PgConnection,
     command: SubmitInput,
+    principal: CommandPrincipal,
     accepted_input: AcceptedInputId,
     turn: Option<TurnId>,
     cancellation_identities: CancelledModelCallTurnIdentities,
@@ -836,7 +840,8 @@ where
             | CommandKind::UpdateSessionPlacement
             | CommandKind::RegisterWorkspace
             | CommandKind::MintGitRemote
-            | CommandKind::WithdrawGitRemote,
+            | CommandKind::WithdrawGitRemote
+            | CommandKind::SessionLifecycle,
         ) => {
             return Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },
@@ -845,15 +850,19 @@ where
         None => {}
     }
 
+    let issuer = crate::command_registry::issuer_columns(principal);
     let claimed = sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, $2, $3, transaction_timestamp())
+            (command_id, command_kind, storage_version, claimed_at,
+             issuer_kind, issuer_module)
+         VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
          ON CONFLICT DO NOTHING",
     )
     .bind(durable_command_id_to_uuid(command_id))
     .bind(SUBMIT_INPUT_KIND)
     .bind(STORAGE_VERSION)
+    .bind(issuer.0)
+    .bind(issuer.1)
     .execute(&mut *connection)
     .await?
     .rows_affected()
@@ -879,7 +888,8 @@ where
                 | CommandKind::UpdateSessionPlacement
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
-                | CommandKind::WithdrawGitRemote,
+                | CommandKind::WithdrawGitRemote
+                | CommandKind::SessionLifecycle,
             ) => Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },
             )),
@@ -2665,6 +2675,7 @@ async fn load_runner_recovery_yielded_attempt(
 pub(crate) async fn insert_fresh_initial_input(
     connection: &mut PgConnection,
     command: SubmitInput,
+    principal: CommandPrincipal,
     accepted_input: AcceptedInputId,
     turn: TurnId,
     cancellation_entry: SemanticTranscriptEntryId,
@@ -2674,6 +2685,7 @@ pub(crate) async fn insert_fresh_initial_input(
     let outcome = handle_in_transaction(
         connection,
         command,
+        principal,
         accepted_input,
         Some(turn),
         CancelledModelCallTurnIdentities::new(cancellation_entry, cancellation_frontier),

@@ -1551,6 +1551,7 @@ async fn create_alias_session_with(
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 system_prompt: SystemPromptMember::present(None),
                 placement,
+                lifecycle: signalbox_process_protocol::SessionLifecycleMembers::default(),
             },
         )
         .await?;
@@ -1577,6 +1578,7 @@ async fn create_direct_session_with_settings(
                 model_settings,
                 system_prompt: SystemPromptMember::present(None),
                 placement: SessionPlacement::Pathless {},
+                lifecycle: signalbox_process_protocol::SessionLifecycleMembers::default(),
             },
         )
         .await?;
@@ -1882,6 +1884,7 @@ async fn create_session_rejects_a_model_absent_from_the_static_mapping()
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 system_prompt: SystemPromptMember::present(None),
                 placement: SessionPlacement::Pathless {},
+                lifecycle: signalbox_process_protocol::SessionLifecycleMembers::default(),
             },
         )
         .await?;
@@ -7531,6 +7534,7 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 system_prompt: SystemPromptMember::present(Some(prompt.clone())),
                 placement: SessionPlacement::Pathless {},
+                lifecycle: signalbox_process_protocol::SessionLifecycleMembers::default(),
             },
         )
         .await?;
@@ -7807,6 +7811,7 @@ async fn s01_inv012_create_session_replays_after_capability_removal() -> Result<
                 model_settings: requested_settings,
                 system_prompt: SystemPromptMember::present(None),
                 placement: SessionPlacement::Pathless {},
+                lifecycle: signalbox_process_protocol::SessionLifecycleMembers::default(),
             },
         )
         .await?;
@@ -7830,6 +7835,7 @@ async fn s01_inv012_create_session_replays_after_capability_removal() -> Result<
                 model_settings: requested_settings,
                 system_prompt: SystemPromptMember::present(None),
                 placement: SessionPlacement::Pathless {},
+                lifecycle: signalbox_process_protocol::SessionLifecycleMembers::default(),
             },
         )
         .await?;
@@ -9891,6 +9897,7 @@ impl ReviewRuntimeDriver {
                     command_id: command()?,
                     template_name: String::from(template_name),
                     placement: SessionPlacement::Pathless {},
+                    lifecycle: signalbox_process_protocol::SessionLifecycleMembers::default(),
                 },
             )
             .await?;

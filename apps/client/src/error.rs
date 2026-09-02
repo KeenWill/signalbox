@@ -434,6 +434,13 @@ impl fmt::Display for RejectionDisplay {
                 "goal_command_rejected session={session_id} reason={}",
                 goal_command_rejection_name(reason)
             ),
+            RejectionDetail::SessionLifecycleCommandRejected { session_id, reason } => write!(
+                formatter,
+                "session_lifecycle_command_rejected session={session_id} reason={reason:?}"
+            ),
+            RejectionDetail::CreateSessionRejected { reason } => {
+                write!(formatter, "create_session_rejected reason={reason:?}")
+            }
             RejectionDetail::ActiveTurnPresent {
                 session_id,
                 active_turn_id,

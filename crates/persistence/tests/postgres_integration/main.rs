@@ -3909,6 +3909,9 @@ fn assert_goal_transition_applied(outcome: &GoalTransitionOutcome) {
         GoalTransitionOutcome::NotCurrentGoalTurn => {
             panic!("the goal transition named a turn outside the current goal generation")
         }
+        GoalTransitionOutcome::FinishCheckFailed { detail } => {
+            panic!("the finish check refused the achievement: {detail}")
+        }
     }
 }
 
