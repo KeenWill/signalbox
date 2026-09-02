@@ -638,29 +638,6 @@ impl Catalog {
         self.raw.models.len()
     }
 
-    /// Whether a record's own evidence still covers `date`.
-    ///
-    /// A record that records an end asserts that end and answers every day its
-    /// window covers. A record left open asserts something weaker — that
-    /// nothing has changed since someone last looked — which its evidence
-    /// supports only through the newest retrieval among the sources it cites.
-    /// While every source shared one audit day those two dates were the same
-    /// for every record, so a horizon alone was enough; they diverge the
-    /// moment one record is refreshed on its own, and an open record must not
-    /// answer on a day reached only by another record's evidence.
-    fn open_claim_is_evidenced(&self, source_ids: &[String], closes: bool, date: &str) -> bool {
-        if closes {
-            return true;
-        }
-        self.raw
-            .sources
-            .iter()
-            .filter(|source| source_ids.iter().any(|cited| cited == &source.id))
-            .map(|source| source.retrieved.as_str())
-            .max()
-            .is_none_or(|retrieved| date <= retrieved)
-    }
-
     /// Resolves one observed identity without consulting any runtime adapter or catalog.
     pub fn resolve(
         &self,
@@ -681,13 +658,6 @@ impl Catalog {
                 .filter(|model| model.provider == provider)
                 .filter(|model| model.provider_model_id.as_deref() == Some(model_hint))
                 .filter(|model| model_available(model, date))
-                .filter(|model| {
-                    self.open_claim_is_evidenced(
-                        &model.source_ids,
-                        model.available_until.is_some(),
-                        date,
-                    )
-                })
                 .collect::<Vec<_>>();
             return self.resolve_direct_candidates(candidates, date, commercial_channel);
         }
@@ -700,13 +670,6 @@ impl Catalog {
             .filter(|mapping| mapping.commercial_channel == commercial_channel)
             .filter(|mapping| mapping.observed_identity == model_hint)
             .filter(|mapping| mapping.window.contains(date))
-            .filter(|mapping| {
-                self.open_claim_is_evidenced(
-                    &mapping.source_ids,
-                    mapping.window.effective_until.is_some(),
-                    date,
-                )
-            })
             .collect::<Vec<_>>();
         if mappings.is_empty() {
             return Ok(ReferenceResolution::Unknown);
@@ -792,13 +755,6 @@ impl Catalog {
             .filter(|set| set.model_id == pricing_model)
             .filter(|set| set.commercial_channel == channel)
             .filter(|set| set.window.contains(date))
-            .filter(|set| {
-                self.open_claim_is_evidenced(
-                    &set.source_ids,
-                    set.window.effective_until.is_some(),
-                    date,
-                )
-            })
             .collect::<Vec<_>>();
         if !applicable.is_empty() {
             let mut resolved = applicable

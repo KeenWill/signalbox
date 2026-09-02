@@ -929,7 +929,7 @@ service_tiers = ["auto", "standard_only"]
 # reasoning_levels = ["low", "medium", "high", "xhigh"]
 
 # Claude Code catalog, extracted on 2026-08-06 from the model catalog embedded
-# in the pinned 2.1.220 command-line program, with the provider's published
+# in the pinned 2.1.258 command-line program, with the provider's published
 # documentation for the subscription behavior around it.
 #
 # These rows name the aliases the program accepts for `--model` — its own
