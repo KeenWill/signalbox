@@ -159,7 +159,6 @@ bound in either root fails closed.
 | `config/signalboxd.example.toml`     | `SESSION_COMPLETION_FAILURE_RATE_THRESHOLD_PPM`   | config | `numeric_bounds.session_completion_failure_rate_threshold_ppm`                       |
 | `config/signalboxd.example.toml`     | `SESSION_WALL_RATE_THRESHOLD_PPM`                 | config | `numeric_bounds.session_wall_rate_threshold_ppm`                                     |
 | `config/signalboxd.example.toml`     | `SESSION_FAILED_UNKNOWN_SHARE_THRESHOLD_PPM`      | config | `numeric_bounds.session_failed_unknown_share_threshold_ppm`                          |
-| `config/signalboxd.example.toml`     | `OUTBOX_RETENTION_WINDOW`                         | config | `numeric_bounds.outbox_retention_window`                                             |
 
 ## Representation facts
 

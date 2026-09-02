@@ -954,7 +954,6 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
         "session_failed_unknown_share_threshold_ppm",
         NumericBoundKind::Integer,
     ),
-    ("outbox_retention_window", NumericBoundKind::Duration),
 ];
 
 impl NumericBoundsConfiguration {
@@ -1006,17 +1005,6 @@ impl NumericBoundsConfiguration {
                 .ok_or(HubModelConfigurationError::InvalidNumericBound { field: name })?
             };
             values.insert(*name, value);
-        }
-        // Pruning below the retention floor is unsafe while delegation
-        // reconstitution, child-result admission, artifact-address search, the
-        // turn-liveness frontier, and model-call recovery evidence still read
-        // raw outbox headers with neither a projection nor a bound
-        // (docs/spec/persistence-protocol.md). The bound exists so the policy
-        // has a home; it accepts only the off setting until they do.
-        if values.get("outbox_retention_window") != Some(&NumericBoundValue::Unbounded) {
-            return Err(HubModelConfigurationError::InvalidNumericBound {
-                field: "outbox_retention_window",
-            });
         }
         Ok(Self { values })
     }
@@ -4765,7 +4753,6 @@ session_gate_weeks = 0
 session_completion_failure_rate_threshold_ppm = 0
 session_wall_rate_threshold_ppm = 0
 session_failed_unknown_share_threshold_ppm = 0
-outbox_retention_window = "none"
 
 [[credential_profiles]]
 name = "anthropic-primary"
@@ -4921,24 +4908,6 @@ selection_id = "10000000-0000-4000-8000-000000000001"
                 .numeric_bounds()
                 .duration("turn_liveness_scan_interval"),
             Some(None)
-        );
-    }
-
-    #[test]
-    fn configuration_refuses_a_finite_outbox_retention_window() {
-        let finite = CONFIGURATION.replace(
-            "outbox_retention_window = \"none\"",
-            "outbox_retention_window = \"604800s\"",
-        );
-
-        let error = HubModelConfiguration::parse(&finite)
-            .expect_err("pruning is refused while raw outbox readers hold no projection or bound");
-
-        assert_eq!(
-            error,
-            HubModelConfigurationError::InvalidNumericBound {
-                field: "outbox_retention_window",
-            }
         );
     }
 

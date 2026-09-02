@@ -1,8 +1,5 @@
 # Persistence protocol
 
-The outbox consumer registry, retention floor, and timeline projection are
-verified against this PR (`agent/lifecycle-t12-outbox-cursors`).
-
 The session-lifecycle satellite's place in the lock order is verified against
 this PR (`agent/lifecycle-t2-state-machine`).
 
@@ -1380,16 +1377,10 @@ Locks per transaction, in acquisition order:
   duplicate failure therefore wins the shared authority row and makes the loser
   reread the one committed terminal proof instead of committing both outcomes.
 
-- **Outbox dispatch**: the consumer's `outbox_consumer_cursor` row is locked
-  `FOR UPDATE`, then exactly `delivered_through + 1` and its typed record are
-  read. Only an accepted synchronous offer advances that same row inside the
+- **Outbox dispatch**: `outbox_delivery_state` is locked `FOR UPDATE`, then
+  exactly `delivered_through + 1` and its typed record are read. Only an
+  accepted synchronous offer advances that same singleton inside the
   transaction.
-
-- **Outbox pruning**: `outbox_retention_state` is locked `FOR UPDATE`, then the
-  registry floor and the window's contiguous prefix bound are read, then typed
-  records are deleted before their headers, then the same singleton advances.
-  Appending takes the allocator singleton and then the `session_timeline`
-  cursor, never the other way.
 
 - **Daemon-generation advance**: `hub_fence_state` is locked `FOR UPDATE`, then
   the transaction takes the exclusive transaction-level advisory lock for the
@@ -1814,17 +1805,16 @@ storage below plus the delegation-stack extension identified inline:
 
 - the baseline `outbox_event` header and delegation-owned
   `delegation_outbox_event` header (both carrying allocator-owned
-  `event_sequence`, closed `event_kind`, `storage_version`, `session_id` —
-  nullable for exactly `command_settled`, a receipt that can settle with no
-  session — a `turn_disposition` denormalized for exactly `turn_terminal`, and a
-  `recorded_at` statement stamp defaulted at insert, so an event's record time
-  is a property of the header rather than of a reader's arrival) plus one typed
-  record table per kind. The module-facing kinds are `session_created` (storage
-  version 2, carrying the creation cause and the ownership bit),
-  `session_state_changed`, `session_terminal`, `turn_terminal` (one record whose
-  `disposition_kind` — `completed`, `refused`, `failed`, `cancelled`,
-  `reconciliation_required`, `retired` — selects the evidence columns present),
-  `goal_changed`, `command_settled`, `injection_settled`, and
+  `event_sequence`, closed `event_kind`, `storage_version`, `session_id`, and a
+  `recorded_at` statement stamp defaulted at insert; on `outbox_event` alone,
+  `session_id` is nullable for exactly `command_settled`, a receipt that can
+  settle with no session, and a `turn_disposition` is denormalized for exactly
+  `turn_terminal`) plus one typed record table per kind. The module-facing kinds
+  are `session_created` (storage version 2, carrying the creation cause and the
+  ownership bit), `session_state_changed`, `session_terminal`, `turn_terminal`
+  (one record whose `disposition_kind` — `completed`, `refused`, `failed`,
+  `cancelled`, `reconciliation_required`, `retired` — selects the evidence
+  columns present), `goal_changed`, `command_settled`, `injection_settled`, and
   `session_ownership_changed`; the core-internal kinds are `input_accepted`,
   `session_model_settings_changed`, `turn_model_settings_resolved`,
   `turn_activated`, `model_call_transition`, `tool_batch_transition`,
@@ -1853,11 +1843,11 @@ storage below plus the delegation-stack extension identified inline:
   producing call and exactly one closed state shape: `proposed` names the
   yielded assistant/tool-use frontier, `results_projected` names the
   all-resolved result frontier, and `recovery_required` names the exact
-  ambiguous physical attempt. The header and typed record tables admit no update
-  and no delete above the retention floor (`reject_outbox_record_change`), and
-  every outbox table rejects `TRUNCATE`. A context-compacted record names the
-  authoritative compaction, its completed dedicated call, exact positive through
-  position, appended summary, and result frontier.
+  ambiguous physical attempt. The header and typed record tables are append-only
+  (`reject_immutable_record_change`), and every outbox table rejects `TRUNCATE`.
+  A context-compacted record names the authoritative compaction, its completed
+  dedicated call, exact positive through position, appended summary, and result
+  frontier.
 
 **Session-delegation foundation proposal.** Migration `202608020018` in the full
 delegation stack adds one version-one `delegation_outbox_event` header and one
@@ -1882,8 +1872,8 @@ parent-turn-command or parent-goal-command stop/cancel cascade evaluations;
 child-origin terminal events are delivered through `child_result` instead.
 Dispatch decodes both closed unions and rejects every other storage version. The
 delegation-header completeness trigger includes both record kinds; its header
-and both typed records carry the same floor-bounded delete guard and reject
-`TRUNCATE` with the rest of the family.
+and both typed records are append-only and reject `TRUNCATE` with the rest of
+the family.
 
 Every client-observable delegation transition appends its corresponding typed
 update record in the transaction that commits the relationship, wait,
@@ -1905,42 +1895,10 @@ without its state, is therefore unrepresentable.
   allocator row lock until commit makes committed sequences contiguous and
   commit-ordered, so a delivered prefix can never be discovered to have skipped
   a lower in-flight sequence.
-- `outbox_consumer_cursor`, the authoritative consumer registry: one mutable
-  delivered-through cursor per named consumer (insertion and deletion rejected),
-  each advancing by exactly one committed sequence at a time. The
-  `process_protocol` cursor is the wire fan-out's, spans both header families,
-  and additionally forbids mixing delivery with event production in one
-  transaction (and vice versa). The `session_timeline` cursor is the timeline
-  projection's; it advances inside the appending transaction and only past a
-  sequence that already carries its `session_timeline_item` row.
-- `outbox_retention_state`, a mutable singleton (deletion rejected) recording
-  `pruned_through`, the highest sequence a prune has removed.
-
-The retention floor is `min(delivered_through)` over the registry, so a
-registered consumer that has not read cannot be outrun. The header and
-typed-record delete guards admit exactly the rows at or below that floor and
-raise on every other delete or update; typed records are deleted before their
-header, which is what the `ON DELETE RESTRICT` header foreign keys admit; and
-`TRUNCATE` stays rejected on every outbox table, because truncation is
-whole-table and cannot respect a floor. The floor is the database's invariant;
-the configured retention window is the policy above it, and the pruning pass
-deletes only the contiguous prefix whose headers are older than that window.
-`outbox_retention_state.pruned_through` records how far it has run and can never
-pass the floor.
-
-The session timeline is a durable projection. `session_timeline_item` carries
-one row per appended header — sequence, session, kind, turn disposition —
-written by the append trigger, and pruning does not touch it, so the timeline
-index outlives the events it indexes. Window and descriptor reads read that
-projection. Detail reads — per-address bodies and turn-scoped address
-enumeration — read the typed records and are bounded to `pruned_through`, below
-which there is no detail to read. That is the derived-state retention exemption:
-a consumer projecting durable state holds a cursor advanced only past projected
-rows, and a consumer reading raw rows on demand holds a bound instead.
-Delegation reconstitution, child-result admission, artifact-address search, the
-turn-liveness frontier, and model-call recovery evidence still join raw headers
-with neither, so the configured retention window is `none` — pruning off — until
-they are dispositioned.
+- `outbox_delivery_state`, a mutable singleton delivered-through cursor
+  (deletion rejected) whose trigger permits advancing by exactly one committed
+  sequence at a time and forbids mixing delivery with event production in one
+  transaction (and vice versa).
 
 Appends happen only through the crate-private `outbox::append` on the caller's
 existing connection; it never begins or commits a transaction, so the
@@ -2367,9 +2325,8 @@ surface provides it.
   calls and decisions. The existing
   [goal-mode compatibility constraint](goal-mode.md#compatibility-constraints)
   owns retention of both the provider-offered and repository-committed outcomes.
-- Multiple-daemon outbox fan-out is cataloged in
-  [open questions](../open-questions.md#protocols-and-persistence); retention
-  and pruning are closed above.
+- Deferred outbox retention, pruning, and multiple-daemon fan-out are cataloged
+  in [open questions](../open-questions.md#protocols-and-persistence).
 - Attempt continuation is presently admitted only for the tool-loop
   yield/approval path. The availability-successor producer described above is
   committed but unimplemented; no current producer can construct that second
