@@ -329,13 +329,20 @@ CREATE TABLE session_state_changed_outbox_event (
     CONSTRAINT session_state_changed_outbox_detail_shape CHECK (
         ((state_kind = 'waiting'::text)
             = ((waiting_kind IS NOT NULL) AND (waiting_waker IS NOT NULL)))
+        AND ((state_kind = 'waiting'::text)
+             OR ((waiting_kind IS NULL) AND (waiting_waker IS NULL)
+                 AND (waiting_subject_session_id IS NULL)))
         AND ((state_kind = 'recovering'::text) = (recovering_op IS NOT NULL))
         AND ((state_kind = 'blocked'::text)
             = ((blocked_reason IS NOT NULL) AND (blocked_cycle IS NOT NULL)))
+        AND ((state_kind = 'blocked'::text)
+             OR ((blocked_reason IS NULL) AND (blocked_cycle IS NULL)))
         AND ((state_kind = 'parked'::text)
             = ((parked_cause IS NOT NULL) AND (parked_responder IS NOT NULL)
                AND (parked_since IS NOT NULL)))
-        AND ((state_kind = 'parked'::text) OR (parked_standing_cause_kind IS NULL))
+        AND ((state_kind = 'parked'::text)
+             OR ((parked_cause IS NULL) AND (parked_responder IS NULL)
+                 AND (parked_since IS NULL) AND (parked_standing_cause_kind IS NULL)))
     ),
     CONSTRAINT session_state_changed_outbox_header_fk
         FOREIGN KEY (event_sequence, event_kind, storage_version, session_id)
@@ -868,6 +875,15 @@ BEGIN
            AND state_kind = 'terminal'
            AND terminal_disposition_kind = 'retired'
     ) THEN
+        IF (
+            SELECT count(*)
+              FROM turn_terminal_outbox_event
+             WHERE turn_id = checked_turn_id
+               AND disposition_kind = 'retired'
+        ) <> 1 THEN
+            RAISE EXCEPTION 'retired turn % lacks its terminal event', checked_turn_id
+                USING ERRCODE = '23514';
+        END IF;
         RETURN;
     END IF;
 
