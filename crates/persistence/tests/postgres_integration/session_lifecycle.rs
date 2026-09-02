@@ -1044,7 +1044,9 @@ async fn a_pending_terminal_settles_once_the_turn_does() -> Result<(), Box<dyn E
         sticky: StopStickiness::Sticky,
     };
 
-    repository.commit_pending_terminal(session, outcome).await?;
+    repository
+        .commit_pending_terminal(session, outcome, LifecycleActor::Operator)
+        .await?;
     let committed = repository
         .load(session)
         .await?
@@ -1052,9 +1054,7 @@ async fn a_pending_terminal_settles_once_the_turn_does() -> Result<(), Box<dyn E
     assert_eq!(committed.pending_terminal(), Some(outcome));
     assert_eq!(committed.state(), SessionLifecycleState::Created);
 
-    let settled = repository
-        .settle_pending_terminal(session, LifecycleActor::Operator)
-        .await?;
+    let settled = repository.settle_pending_terminal(session).await?;
     assert_eq!(settled, SessionLifecycleState::Terminal { outcome });
 
     pool.close().await;
@@ -1255,14 +1255,18 @@ async fn a_second_pending_terminal_cannot_replace_the_first() -> Result<(), Box<
         sticky: StopStickiness::Sticky,
     };
     repository
-        .commit_pending_terminal(session, committed)
+        .commit_pending_terminal(session, committed, LifecycleActor::Operator)
         .await?;
 
     repository
-        .commit_pending_terminal(session, committed)
+        .commit_pending_terminal(session, committed, LifecycleActor::Operator)
         .await?;
     let error = repository
-        .commit_pending_terminal(session, SessionTerminalOutcome::FailedUnknown)
+        .commit_pending_terminal(
+            session,
+            SessionTerminalOutcome::FailedUnknown,
+            LifecycleActor::Operator,
+        )
         .await
         .expect_err("a second outcome cannot replace the committed decision");
 
@@ -1697,6 +1701,7 @@ async fn a_pending_supersession_names_a_successor_settlement_can_record()
         .commit_pending_terminal(
             session,
             SessionTerminalOutcome::Superseded { by: Some(session) },
+            LifecycleActor::Operator,
         )
         .await
         .expect_err("a session cannot supersede itself");
@@ -1708,6 +1713,7 @@ async fn a_pending_supersession_names_a_successor_settlement_can_record()
                     LIFECYCLE_SEED + 0xbeef,
                 ))),
             },
+            LifecycleActor::Operator,
         )
         .await
         .expect_err("a handoff cannot name a session that does not exist");
@@ -1804,6 +1810,7 @@ async fn a_pending_closure_must_carry_the_parks_standing_cause() -> Result<(), B
             SessionTerminalOutcome::FailedStructural {
                 cause: SessionStructuralCause::BrokenToolchain,
             },
+            LifecycleActor::Operator,
         )
         .await
         .expect_err("a handoff settlement would refuse is not recorded");
@@ -2036,7 +2043,7 @@ async fn a_park_between_decision_and_settlement_keeps_the_handoff() -> Result<()
         sticky: StopStickiness::Sticky,
     };
     repository
-        .commit_pending_terminal(session, committed)
+        .commit_pending_terminal(session, committed, LifecycleActor::Operator)
         .await?;
 
     repository
@@ -2080,6 +2087,7 @@ async fn a_closure_cannot_override_a_committed_handoff() -> Result<(), Box<dyn E
             SessionTerminalOutcome::Stopped {
                 sticky: StopStickiness::Sticky,
             },
+            LifecycleActor::Operator,
         )
         .await?;
 
@@ -2120,6 +2128,7 @@ async fn a_park_cannot_contradict_a_committed_closure() -> Result<(), Box<dyn Er
             SessionTerminalOutcome::FailedRetryable {
                 cause: SessionRetryableCause::ProviderTransient,
             },
+            LifecycleActor::Operator,
         )
         .await?;
 
@@ -2236,6 +2245,127 @@ async fn only_an_operator_writes_off_a_parked_session() -> Result<(), Box<dyn Er
         lifecycle_rejection(error),
         SessionLifecycleRejection::AbandonRequiresParkedOperator
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// §1/§10: a deployment that changes a bound changes the deadlines already
+/// armed under the previous one. Nothing else would reach them — the arming
+/// trigger fires on the satellite, and a session sitting in `created` has no
+/// transition coming — so a bound narrowed from `none` would never catch the
+/// stalled session it was configured for. The new expiry is measured from the
+/// instant the deadline was armed, not from the reconfiguration.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_changed_bound_re_arms_the_deadlines_already_armed() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    repository
+        .apply_configured_bounds(&SessionLifecycleNumericBounds::default())
+        .await?;
+    let session = creation_session(50);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(50))
+        .await?;
+    assert_eq!(
+        armed_deadline(&pool, session).await?,
+        Some((String::from("first_input"), true))
+    );
+
+    repository
+        .apply_configured_bounds(&SessionLifecycleNumericBounds {
+            first_input: Some(Duration::from_secs(1800)),
+            ..SessionLifecycleNumericBounds::default()
+        })
+        .await?;
+
+    let (armed_at, expires_at): (OffsetDateTime, Option<OffsetDateTime>) =
+        sqlx::query_as("SELECT armed_at, expires_at FROM session_deadline WHERE session_id = $1")
+            .bind(session.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    let served = expires_at.expect("the narrowed bound reaches the armed deadline") - armed_at;
+    assert_eq!(served.whole_seconds(), 1800);
+
+    // And widening back to `none` records the unbounded policy explicitly,
+    // rather than leaving the retired expiry standing.
+    repository
+        .apply_configured_bounds(&SessionLifecycleNumericBounds::default())
+        .await?;
+    assert_eq!(
+        armed_deadline(&pool, session).await?,
+        Some((String::from("first_input"), true))
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// §2/§6: the handoff carries the actor that decided, and the settlement
+/// records that actor rather than whichever caller observed the turn reach its
+/// boundary. The settlement takes no actor at all, which is what makes the
+/// attribution unforgeable across a worker change or a restart — and the
+/// abandonment gate applies to the deciding actor, at the decision.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_settlement_records_the_actor_that_decided() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    let session = creation_session(51);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(51))
+        .await?;
+    // Parked by statement: abandonment is a parked-session closure, and this
+    // session has no turn to settle, so the settlement below is the handoff's
+    // own write rather than a turn boundary.
+    park_by_statement(&pool, session).await?;
+
+    let refused = repository
+        .commit_pending_terminal(
+            session,
+            SessionTerminalOutcome::Abandoned,
+            LifecycleActor::Watchdog,
+        )
+        .await
+        .expect_err("a watchdog does not write a session off");
+    assert_eq!(
+        lifecycle_rejection(refused),
+        SessionLifecycleRejection::AbandonRequiresParkedOperator
+    );
+
+    repository
+        .commit_pending_terminal(
+            session,
+            SessionTerminalOutcome::Abandoned,
+            LifecycleActor::Operator,
+        )
+        .await?;
+    let committed = repository
+        .load(session)
+        .await?
+        .expect("the session keeps its lifecycle row");
+    assert_eq!(
+        committed.pending_terminal_actor(),
+        Some(LifecycleActor::Operator)
+    );
+
+    let settled = repository.settle_pending_terminal(session).await?;
+    assert_eq!(
+        settled,
+        SessionLifecycleState::Terminal {
+            outcome: SessionTerminalOutcome::Abandoned,
+        }
+    );
+    let terminal = repository
+        .load(session)
+        .await?
+        .expect("the session keeps its lifecycle row");
+    assert_eq!(terminal.actor(), LifecycleActor::Operator);
+    assert_eq!(terminal.pending_terminal(), None);
+    assert_eq!(terminal.pending_terminal_actor(), None);
 
     pool.close().await;
     drop(container);

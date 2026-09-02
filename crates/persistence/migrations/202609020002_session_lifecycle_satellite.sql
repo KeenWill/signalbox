@@ -136,6 +136,15 @@ CREATE TABLE session_lifecycle (
     pending_terminal_stop_sticky boolean,
     pending_terminal_superseded_by uuid,
 
+    -- The actor that made the decision, kept with it. A settlement runs later,
+    -- possibly in another worker or after a restart, and the §6 provenance the
+    -- terminal row records is the deciding actor's -- not whichever caller
+    -- happened to observe the turn reach its boundary.
+    pending_terminal_actor_kind text,
+    pending_terminal_actor_module text,
+    pending_terminal_actor_turn_id uuid,
+    pending_terminal_actor_tool_request_id uuid,
+
     -- §15 dispatch payload measurements. T11 records them on every dispatch
     -- path; the columns land here because they are per-session mutable values.
     payload_token_count bigint,
@@ -412,7 +421,32 @@ CREATE TABLE session_lifecycle (
         AND ((pending_terminal_outcome_kind IS NOT NULL)
              OR ((pending_terminal_cause_kind IS NULL)
                  AND (pending_terminal_stop_sticky IS NULL)
-                 AND (pending_terminal_superseded_by IS NULL)))
+                 AND (pending_terminal_superseded_by IS NULL)
+                 AND (pending_terminal_actor_kind IS NULL)))
+        -- A committed handoff always names its actor, and the actor's shape is
+        -- the state actor's: one module name, or one acting identity, never
+        -- both and never a bare classification that owes one.
+        AND ((pending_terminal_outcome_kind IS NULL)
+             = (pending_terminal_actor_kind IS NULL))
+        AND ((pending_terminal_actor_kind IS NULL)
+             OR (pending_terminal_actor_kind = ANY (ARRAY[
+                    'core'::text,
+                    'operator'::text,
+                    'module'::text,
+                    'watchdog'::text
+                ])))
+        AND ((pending_terminal_actor_kind IS NOT DISTINCT FROM 'module'::text)
+             = (pending_terminal_actor_module IS NOT NULL))
+        AND ((pending_terminal_actor_module IS NULL)
+             OR (pending_terminal_actor_module = ANY (ARRAY[
+                    'repo_watch'::text,
+                    'commissioned_dispatch'::text
+                ])))
+        AND ((pending_terminal_actor_turn_id IS NULL)
+             OR (pending_terminal_actor_tool_request_id IS NULL))
+        AND ((pending_terminal_actor_kind IS NOT DISTINCT FROM 'core'::text)
+             OR ((pending_terminal_actor_turn_id IS NULL)
+                 AND (pending_terminal_actor_tool_request_id IS NULL)))
         AND ((pending_terminal_outcome_kind IS NULL)
              OR (pending_terminal_outcome_kind = ANY (ARRAY[
                     'achieved_verified'::text,

@@ -257,6 +257,7 @@ pub struct SessionLifecycleRecord {
     ownership: SessionOwnership,
     actor: LifecycleActor,
     pending_terminal: Option<SessionTerminalOutcome>,
+    pending_terminal_actor: Option<LifecycleActor>,
 }
 
 impl SessionLifecycleRecord {
@@ -283,6 +284,11 @@ impl SessionLifecycleRecord {
     /// Returns the outcome a closure committed to while a turn still settles.
     pub const fn pending_terminal(&self) -> Option<SessionTerminalOutcome> {
         self.pending_terminal
+    }
+
+    /// Returns the actor that committed to that outcome.
+    pub const fn pending_terminal_actor(&self) -> Option<LifecycleActor> {
+        self.pending_terminal_actor
     }
 }
 
@@ -325,6 +331,28 @@ impl SessionLifecycleRepository {
             .execute(&mut *transaction)
             .await?;
         }
+        // A policy change reaches the deadlines already armed under the old
+        // one. Nothing else would: the arming trigger fires on the satellite,
+        // and a session sitting in `created` or `parked` has no transition
+        // coming -- so a bound narrowed from `none` would never catch the
+        // stalled session it was configured for. The expiry is recomputed from
+        // the instant each deadline was armed, so the change moves the
+        // deadline without granting the session fresh time.
+        sqlx::query(
+            "UPDATE session_deadline AS armed
+                SET expires_at = CASE
+                        WHEN policy.bound IS NULL THEN NULL
+                        ELSE armed.armed_at + policy.bound
+                    END
+               FROM session_lifecycle_bound AS policy
+              WHERE policy.deadline_kind = armed.deadline_kind
+                AND armed.expires_at IS DISTINCT FROM CASE
+                        WHEN policy.bound IS NULL THEN NULL
+                        ELSE armed.armed_at + policy.bound
+                    END",
+        )
+        .execute(&mut *transaction)
+        .await?;
         commit(transaction).await
     }
 
@@ -437,6 +465,7 @@ impl SessionLifecycleRepository {
         &self,
         session: SessionId,
         outcome: SessionTerminalOutcome,
+        actor: LifecycleActor,
     ) -> Result<(), SessionLifecycleRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let held = load_locked(&mut transaction, session).await?;
@@ -457,7 +486,7 @@ impl SessionLifecycleRepository {
             )
             .await);
         }
-        if !admits_abandonment(&held.state, outcome, LifecycleActor::Operator) {
+        if !admits_abandonment(&held.state, outcome, actor) {
             return Err(reject(
                 transaction,
                 SessionLifecycleRejection::AbandonRequiresParkedOperator,
@@ -478,12 +507,17 @@ impl SessionLifecycleRepository {
             None => {}
         }
         let encoded = EncodedTerminal::from_outcome(outcome);
+        let (actor_kind, actor_module, actor_turn, actor_request) = encode_actor(actor);
         sqlx::query(
             "UPDATE session_lifecycle
                 SET pending_terminal_outcome_kind = $2,
                     pending_terminal_cause_kind = $3,
                     pending_terminal_stop_sticky = $4,
-                    pending_terminal_superseded_by = $5
+                    pending_terminal_superseded_by = $5,
+                    pending_terminal_actor_kind = $6,
+                    pending_terminal_actor_module = $7,
+                    pending_terminal_actor_turn_id = $8,
+                    pending_terminal_actor_tool_request_id = $9
               WHERE session_id = $1",
         )
         .bind(session_id_to_uuid(session))
@@ -491,20 +525,28 @@ impl SessionLifecycleRepository {
         .bind(encoded.cause)
         .bind(encoded.sticky)
         .bind(encoded.superseded_by)
+        .bind(actor_kind)
+        .bind(actor_module)
+        .bind(actor_turn)
+        .bind(actor_request)
         .execute(&mut *transaction)
         .await?;
         commit(transaction).await
     }
 
     /// Records the outcome a closure committed to, now that the turn settled.
+    ///
+    /// The settlement takes no actor: the decision was already made, and §6's
+    /// provenance is the deciding actor's. A settlement running in another
+    /// worker or after a restart records what was committed, not itself.
     pub async fn settle_pending_terminal(
         &self,
         session: SessionId,
-        actor: LifecycleActor,
     ) -> Result<SessionLifecycleState, SessionLifecycleRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let held = load_locked(&mut transaction, session).await?;
-        let Some(outcome) = held.pending_terminal else {
+        let (Some(outcome), Some(actor)) = (held.pending_terminal, held.pending_terminal_actor)
+        else {
             return Err(reject(transaction, SessionLifecycleRejection::NoPendingTerminal).await);
         };
         let terminal = close_in_transaction(&mut transaction, session, outcome, actor).await?;
@@ -662,19 +704,22 @@ pub(crate) async fn close_in_transaction(
             SessionLifecycleRejection::StandingCauseMismatch,
         ));
     }
-    if !admits_abandonment(&held.state, outcome, actor) {
-        return Err(SessionLifecycleRepositoryError::Rejected(
-            SessionLifecycleRejection::AbandonRequiresParkedOperator,
-        ));
-    }
     // A committed handoff is the decision that started tearing the turn down,
-    // so the settlement records it rather than whatever the caller now names.
+    // so the settlement records it -- outcome and actor alike -- rather than
+    // whatever the caller now names. Without the actor, the same decision
+    // could be attributed to any worker that happened to settle the turn.
     if held
         .pending_terminal
         .is_some_and(|committed| committed != outcome)
     {
         return Err(SessionLifecycleRepositoryError::Rejected(
             SessionLifecycleRejection::PendingTerminalConflict,
+        ));
+    }
+    let actor = held.pending_terminal_actor.unwrap_or(actor);
+    if !admits_abandonment(&held.state, outcome, actor) {
+        return Err(SessionLifecycleRepositoryError::Rejected(
+            SessionLifecycleRejection::AbandonRequiresParkedOperator,
         ));
     }
     settle_goal(connection, session, outcome, actor).await?;
@@ -942,6 +987,22 @@ async fn write_state(
                 pending_terminal_superseded_by = CASE
                     WHEN $2::text = 'terminal' THEN NULL
                     ELSE pending_terminal_superseded_by
+                END,
+                pending_terminal_actor_kind = CASE
+                    WHEN $2::text = 'terminal' THEN NULL
+                    ELSE pending_terminal_actor_kind
+                END,
+                pending_terminal_actor_module = CASE
+                    WHEN $2::text = 'terminal' THEN NULL
+                    ELSE pending_terminal_actor_module
+                END,
+                pending_terminal_actor_turn_id = CASE
+                    WHEN $2::text = 'terminal' THEN NULL
+                    ELSE pending_terminal_actor_turn_id
+                END,
+                pending_terminal_actor_tool_request_id = CASE
+                    WHEN $2::text = 'terminal' THEN NULL
+                    ELSE pending_terminal_actor_tool_request_id
                 END
           WHERE session_id = $1",
     )
@@ -1001,7 +1062,9 @@ async fn load_optional(
                 terminal_cause_kind, terminal_stop_sticky,
                 terminal_superseded_by, pending_terminal_outcome_kind,
                 pending_terminal_cause_kind, pending_terminal_stop_sticky,
-                pending_terminal_superseded_by
+                pending_terminal_superseded_by, pending_terminal_actor_kind,
+                pending_terminal_actor_module, pending_terminal_actor_turn_id,
+                pending_terminal_actor_tool_request_id
            FROM session_lifecycle
           WHERE session_id = $1",
     )
@@ -1250,6 +1313,17 @@ fn decode_record(row: &PgRow) -> Result<SessionLifecycleRecord, SessionLifecycle
             row.try_get("actor_tool_request_id")?,
         )?,
         pending_terminal,
+        pending_terminal_actor: row
+            .try_get::<Option<String>, _>("pending_terminal_actor_kind")?
+            .map(|kind| {
+                decode_actor(
+                    kind,
+                    row.try_get("pending_terminal_actor_module")?,
+                    row.try_get("pending_terminal_actor_turn_id")?,
+                    row.try_get("pending_terminal_actor_tool_request_id")?,
+                )
+            })
+            .transpose()?,
     })
 }
 

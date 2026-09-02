@@ -3210,7 +3210,8 @@ pub enum LifecycleActorClass {
     Core,
     /// The single user's authority.
     Operator,
-    /// One exact module.
+    /// A module, without saying which: the classification is what the
+    /// boundary carries, and the durable goal event keeps the exact module.
     Module,
     /// The recovery scan or liveness watchdog.
     Watchdog,
