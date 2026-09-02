@@ -1945,10 +1945,9 @@ async fn load_session_ownership_changed(
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(OutboxCorruption::MissingTypedRecord)?;
+    // Creation records its bit on `session_created`; only a flip is a change.
     let transition: String = row.try_get("transition_kind")?;
     let transition = match transition.as_str() {
-        "created_owned" => SessionOwnershipTransition::CreatedOwned,
-        "created_unmonitored" => SessionOwnershipTransition::CreatedUnmonitored,
         "adopted" => SessionOwnershipTransition::Adopted,
         "released" => SessionOwnershipTransition::Released,
         _ => return Err(OutboxCorruption::InvalidLifecycleEvent.into()),

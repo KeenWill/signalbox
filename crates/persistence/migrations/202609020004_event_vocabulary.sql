@@ -195,6 +195,7 @@ CREATE TABLE turn_terminal_outbox_event (
     cancellation_entry_id uuid,
     terminal_frontier_id uuid,
     CONSTRAINT turn_terminal_outbox_event_pkey PRIMARY KEY (event_sequence),
+    CONSTRAINT turn_terminal_outbox_event_turn_id_key UNIQUE (turn_id),
     CONSTRAINT turn_terminal_outbox_kind_closed
         CHECK (event_kind = 'turn_terminal'::text),
     CONSTRAINT turn_terminal_outbox_version_supported

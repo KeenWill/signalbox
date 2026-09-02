@@ -1913,22 +1913,23 @@ applied `SubmitInput` that creates a turn origin appends `input_accepted`, while
 `PendingSteering` appends nothing until terminal reclassification mints its
 successor turn and appends that correlated `input_accepted`; an applied
 `StartEligibleTurn` appends `turn_activated`. Startup recovery appends
-`turn_failed` for a failed lost turn and `turn_reconciliation_required` when
-stopped issued work becomes ambiguous; terminal reclassification of pending
-steering appends its correlated `input_accepted`. Goal-owned turn creation
-appends the same correlated `input_accepted`; dispatch authenticates its exact
-`goal_turn` provenance instead of requiring a synthetic `SubmitInput` command.
-Binding an already-accepted turn to a generation appends nothing, because the
-command that accepted that turn appended its correlated `input_accepted`
-already; dispatch authenticates that command, and the `goal_turn` row recording
-which generation the turn runs under does not disqualify it. A stop or supersede
-that makes a queued goal turn ineligible moves it to `terminal{retired}` and
-appends `turn_terminal{retired}` in the same transaction; supersede appends
-retirement before the replacement `input_accepted`. Dispatch rechecks that the
-named turn is terminal under that disposition. Every goal event appends
-`goal_changed`; an adopt or release appends `session_ownership_changed`; a
-transition into `terminal` appends `session_terminal` from the satellite's own
-trigger. `session_state_changed`, `command_settled`, and `injection_settled` are
+`turn_terminal{failed}` for a failed lost turn and
+`turn_terminal{reconciliation_required}` when stopped issued work becomes
+ambiguous; terminal reclassification of pending steering appends its correlated
+`input_accepted`. Goal-owned turn creation appends the same correlated
+`input_accepted`; dispatch authenticates its exact `goal_turn` provenance
+instead of requiring a synthetic `SubmitInput` command. Binding an
+already-accepted turn to a generation appends nothing, because the command that
+accepted that turn appended its correlated `input_accepted` already; dispatch
+authenticates that command, and the `goal_turn` row recording which generation
+the turn runs under does not disqualify it. A stop or supersede that makes a
+queued goal turn ineligible moves it to `terminal{retired}` and appends
+`turn_terminal{retired}` in the same transaction; supersede appends retirement
+before the replacement `input_accepted`. Dispatch rechecks that the named turn
+is terminal under that disposition. Every goal event appends `goal_changed`; an
+adopt or release appends `session_ownership_changed`; a transition into
+`terminal` appends `session_terminal` from the satellite's own trigger.
+`session_state_changed`, `command_settled`, and `injection_settled` are
 committed unimplemented functionality: each has its typed record and decoder and
 no present surface appends it — the deadline engine, the command surface, and
 the injection contract will. Model-call state transitions append
