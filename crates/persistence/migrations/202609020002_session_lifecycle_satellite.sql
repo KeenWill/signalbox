@@ -601,6 +601,24 @@ ALTER TABLE ONLY session_lifecycle
         ON UPDATE RESTRICT ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED;
 
+-- The handoff's acting identity is scoped the same way: an identity belonging
+-- to another session loads back intact and then cannot settle, because the
+-- terminal write and the goal-closure trigger both reject it -- which strands
+-- the committed decision with no way to replace it.
+ALTER TABLE ONLY session_lifecycle
+    ADD CONSTRAINT session_lifecycle_pending_terminal_actor_turn_fk
+        FOREIGN KEY (pending_terminal_actor_turn_id, session_id)
+        REFERENCES turn_lifecycle(turn_id, session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE ONLY session_lifecycle
+    ADD CONSTRAINT session_lifecycle_pending_terminal_actor_request_fk
+        FOREIGN KEY (pending_terminal_actor_tool_request_id, session_id)
+        REFERENCES tool_request(request_id, session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
+
 --
 -- The operator queue is `SELECT * FROM session_lifecycle WHERE state = 'parked'`
 -- (§1), and the eligibility sweep and liveness watchdog now read the state to
@@ -1562,6 +1580,23 @@ BEGIN
        AND held.blocked_reason IS NOT DISTINCT FROM next_blocked_reason
        AND held.blocked_cycle IS NOT DISTINCT FROM next_blocked_cycle
     THEN
+        -- The state did not move, but an `active` session reaching here did so
+        -- because a turn transitioned -- one terminalized, or a successor
+        -- activated -- and that is the progress the stall deadline measures.
+        -- Only the deadline re-arms: the session entered `active` when its
+        -- first turn started, and `state_entered_at` says so.
+        IF held.state_kind = 'active' AND held.owned THEN
+            UPDATE session_deadline AS armed
+               SET armed_at = statement_timestamp(),
+                   expires_at = CASE
+                       WHEN policy.bound IS NULL THEN NULL
+                       ELSE statement_timestamp() + policy.bound
+                   END
+              FROM session_lifecycle_bound AS policy
+             WHERE armed.session_id = subject
+               AND armed.deadline_kind = 'active_stall'
+               AND policy.deadline_kind = 'active_stall';
+        END IF;
         RETURN;
     END IF;
 

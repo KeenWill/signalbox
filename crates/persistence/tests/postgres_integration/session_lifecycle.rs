@@ -2595,3 +2595,104 @@ async fn a_park_carries_the_standing_evidence_its_cause_names() -> Result<(), Bo
     drop(container);
     Ok(())
 }
+
+/// §10: the active-stall deadline measures a stall, not a session's whole
+/// working life. A turn terminalizing with a queued successor projects
+/// `active` again, and re-arming there is what keeps a continuously
+/// progressing session from tripping the deadline armed at its first turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn turn_progress_re_arms_the_active_stall_deadline() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    repository
+        .apply_configured_bounds(&SessionLifecycleNumericBounds {
+            active_stall: Some(Duration::from_secs(1800)),
+            ..SessionLifecycleNumericBounds::default()
+        })
+        .await?;
+    let session = creation_session(56);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(56))
+        .await?;
+    activate_first_turn(&pool, session, 56).await?;
+
+    let first: OffsetDateTime =
+        sqlx::query_scalar("SELECT armed_at FROM session_deadline WHERE session_id = $1")
+            .bind(session.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+
+    // Stands in for the turn-boundary write: a turn terminalizing or a
+    // successor activating fires this projection, and §1 keeps the session
+    // `active` across both, so the projected shape does not move with it.
+    sqlx::query("SELECT project_session_lifecycle($1, false, false)")
+        .bind(session.into_uuid())
+        .execute(&pool)
+        .await?;
+
+    let second: OffsetDateTime =
+        sqlx::query_scalar("SELECT armed_at FROM session_deadline WHERE session_id = $1")
+            .bind(session.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert!(second > first, "real progress re-arms the stall deadline");
+    assert_eq!(
+        armed_deadline(&pool, session).await?,
+        Some((String::from("active_stall"), false))
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// §1/§2: a committed closure freezes the session. Activating a successor
+/// beneath a handoff is what makes its settlement impossible — the terminal
+/// write would find a live turn, and the next queued turn would do it again.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_committed_handoff_takes_no_new_turn() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    let session = creation_session(57);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(57))
+        .await?;
+    queue_first_turn(&pool, session, 57).await?;
+    repository
+        .commit_pending_terminal(
+            session,
+            SessionTerminalOutcome::FailedUnknown,
+            LifecycleActor::Watchdog,
+        )
+        .await?;
+
+    let started = StartEligibleTurnRepository::new(pool.clone())
+        .handle(
+            session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 57 + 0x700)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 57 + 0x710)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 57 + 0x800)),
+                TurnAttemptId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 57 + 0x900)),
+            ),
+        )
+        .await?;
+    assert!(
+        matches!(started, StartEligibleTurnOutcome::NoEligibleTurn),
+        "a session already committed to an outcome starts nothing new"
+    );
+    assert_eq!(
+        repository
+            .load(session)
+            .await?
+            .expect("the session keeps its lifecycle row")
+            .state(),
+        SessionLifecycleState::Dispatched
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

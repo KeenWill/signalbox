@@ -671,6 +671,7 @@ impl GoalRepository {
                  ON lifecycle.session_id = event.session_id
                 AND lifecycle.owned
                 AND lifecycle.state_kind <> 'parked'
+                AND lifecycle.pending_terminal_outcome_kind IS NULL
               WHERE event.event_kind = 'blocked'
                 AND event.blocked_reason = 'execution_failure'
                 AND event.need = $1
@@ -1013,6 +1014,7 @@ async fn session_admits_automatic_resume(
 ) -> Result<bool, GoalRepositoryError> {
     let admits: Option<bool> = sqlx::query_scalar(
         "SELECT owned AND state_kind <> 'parked'
+                AND pending_terminal_outcome_kind IS NULL
            FROM session_lifecycle WHERE session_id = $1",
     )
     .bind(session_id_to_uuid(session))
