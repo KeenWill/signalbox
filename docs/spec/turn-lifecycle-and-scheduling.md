@@ -23,8 +23,8 @@ ceilings, the recovery transaction's write-lock budget, the handoff's bounded
 attempts across correlating and recovering, and expiry recovery for the
 pre-activation compaction window are verified against the same PR.
 
-Mandatory typed cause classification on turn terminalization is verified
-against this PR (`agent/lifecycle-t1-measurement`).
+Mandatory typed cause classification on turn terminalization is verified against
+this PR (`agent/lifecycle-t1-measurement`).
 
 The expired-pass recovery lock classification and retry budgets were re-verified
 against this PR (`agent/daemon-live-reconciliation-lock-cadence`). Exact
@@ -135,8 +135,8 @@ database constraint makes the two co-extensive rather than the cause optional
 vocabulary; `crates/persistence/src/mapping.rs` holds its one encoder and
 decoder. `unclassified_failure` is the sole catch-all spelling, so the share of
 terminal turns carrying a cause outside it measures classification quality
-rather than mere presence. The domain `TurnDisposition` algebra carries all five accepted
-variants — `Completed`, `Refused`, `Failed`, `Cancelled { cause }`,
+rather than mere presence. The domain `TurnDisposition` algebra carries all five
+accepted variants — `Completed`, `Refused`, `Failed`, `Cancelled { cause }`,
 `ReconciliationRequired { marker }` — but `Cancelled` is constructible only from
 an `AppliedInterruptProof`. `ReconciliationRequired` remains constructible only
 from a sealed `ReconciliationMarker`. Committed transitions produce every
