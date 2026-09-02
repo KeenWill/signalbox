@@ -234,6 +234,11 @@ SELECT dispatched.session_id,
 -- disposition the schema admits a cause on — with `unrecognized` and a null
 -- cause as its catch-all; an attachment-preparation cause counts as typed.
 --
+-- §12 defines both over their whole population rather than over a cohort. The
+-- week here is the row's own write week, since §3 stamps no terminalization
+-- instant, so a row's week says when the work was written and not when it
+-- settled.
+--
 
 CREATE VIEW session_lifecycle_terminal_turn_cause AS
 SELECT turn.session_id,
@@ -390,3 +395,33 @@ SELECT lifecycle.session_id,
             AND ((deadline.expires_at
                   + session_lifecycle_metric_interval('deadline_processing_grace'))
                  < clock_timestamp())));
+
+
+--
+-- A park, a resume, a closure, and an ownership flip change the attention
+-- state without writing a turn, goal, runner, or metadata fact, so a client
+-- following a cursor would keep the state it last read. The mapped
+-- transitions are excluded because the turn or goal write that produced them
+-- journals its own change; entering these arms every time would turn an
+-- ordinary turn transition into a fleet-wide resync.
+--
+
+CREATE FUNCTION record_operator_attention_lifecycle_change() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    INSERT INTO operator_attention_change (session_id, fact_kind)
+    VALUES (NEW.session_id, 'session');
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER session_lifecycle_records_operator_attention_change
+    AFTER UPDATE OF state_kind, owned ON session_lifecycle
+    FOR EACH ROW
+    WHEN (
+        (OLD.owned IS DISTINCT FROM NEW.owned)
+        OR (OLD.state_kind = 'parked'::text)
+        OR (NEW.state_kind = ANY (ARRAY['parked'::text, 'terminal'::text]))
+    )
+    EXECUTE FUNCTION record_operator_attention_lifecycle_change();

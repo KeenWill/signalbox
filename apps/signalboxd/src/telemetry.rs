@@ -37,7 +37,7 @@ use prometheus::{IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registr
 use signalbox_application::{SchedulerOccupancyObserver, SchedulerOldestInFlightPass};
 use signalbox_model_provider_runtime::ModelCallCauseToken;
 use signalbox_persistence::lifecycle_metrics::{
-    LifecycleGateVerdict, LifecycleMetricsReport, LifecycleRate,
+    LifecycleGateVerdict, LifecycleMetricsReport, LifecycleRate, LifecycleWeeklyMetrics,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -1229,18 +1229,33 @@ impl TelemetryMetrics {
             "failed_unknown_share",
             report.failed_unknown_share_breached(),
         );
-        let Some(week) = report.latest_complete_week() else {
-            return;
-        };
-        self.set_rate("session_completion_failure_rate", week.completion_failure());
-        self.set_rate("failed_unknown_share", week.failed_unknown_share());
-        self.set_rate("overflow_incidence", week.overflow_incidence());
-        self.set_rate("finish_given_overflow", week.finish_given_overflow());
-        self.set_rate("wall_rate", week.wall_rate());
-        self.set_rate("turn_cause_completeness", week.turn_cause_completeness());
+        self.set_rate(
+            "session_completion_failure_rate",
+            report.latest_measured(LifecycleWeeklyMetrics::completion_failure),
+        );
+        self.set_rate(
+            "failed_unknown_share",
+            report.latest_measured(LifecycleWeeklyMetrics::failed_unknown_share),
+        );
+        self.set_rate(
+            "overflow_incidence",
+            report.latest_measured(LifecycleWeeklyMetrics::overflow_incidence),
+        );
+        self.set_rate(
+            "finish_given_overflow",
+            report.latest_measured(LifecycleWeeklyMetrics::finish_given_overflow),
+        );
+        self.set_rate(
+            "wall_rate",
+            report.latest_measured(LifecycleWeeklyMetrics::wall_rate),
+        );
+        self.set_rate(
+            "turn_cause_completeness",
+            report.latest_measured(LifecycleWeeklyMetrics::turn_cause_completeness),
+        );
         self.set_rate(
             "model_call_cause_completeness",
-            week.model_call_cause_completeness(),
+            report.latest_measured(LifecycleWeeklyMetrics::model_call_cause_completeness),
         );
     }
 
@@ -1260,8 +1275,8 @@ impl TelemetryMetrics {
         gauge.set(i64::from(breached));
     }
 
-    fn set_rate(&self, metric: &str, rate: LifecycleRate) {
-        let Some(parts_per_million) = rate.parts_per_million() else {
+    fn set_rate(&self, metric: &str, rate: Option<LifecycleRate>) {
+        let Some(parts_per_million) = rate.and_then(LifecycleRate::parts_per_million) else {
             return;
         };
         let Ok(gauge) = self

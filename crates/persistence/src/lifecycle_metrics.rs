@@ -348,14 +348,22 @@ impl LifecycleMetricsReport {
         self.nonterminal_past_deadline
     }
 
-    /// Returns the most recent complete week's report.
+    /// Returns the most recent complete week that measures one metric.
     ///
-    /// A cohort that is still growing is not a cohort.
-    pub fn latest_complete_week(&self) -> Option<&LifecycleWeeklyMetrics> {
+    /// Each metric is searched for independently: a cohort that is still
+    /// growing is not a cohort, and a complete week that happens to have no
+    /// members for one metric says nothing about it while still saying
+    /// something about the others.
+    pub fn latest_measured<Select>(&self, select: Select) -> Option<LifecycleRate>
+    where
+        Select: Fn(&LifecycleWeeklyMetrics) -> LifecycleRate,
+    {
         self.weeks
             .iter()
             .rev()
-            .find(|week| week.week_start < self.current_week)
+            .filter(|week| week.week_start < self.current_week)
+            .map(select)
+            .find(|rate| rate.denominator() > 0)
     }
 
     /// Returns whether the wall rate breached its configured threshold.
@@ -363,14 +371,14 @@ impl LifecycleMetricsReport {
     /// Absent when no threshold is configured or no complete week measures one.
     pub fn wall_rate_breached(&self) -> Option<bool> {
         let threshold = self.bounds.wall_rate_threshold_ppm?;
-        self.latest_complete_week()?.wall_rate().breaches(threshold)
+        self.latest_measured(LifecycleWeeklyMetrics::wall_rate)?
+            .breaches(threshold)
     }
 
     /// Returns whether the `failed_unknown` share breached its threshold.
     pub fn failed_unknown_share_breached(&self) -> Option<bool> {
         let threshold = self.bounds.failed_unknown_share_threshold_ppm?;
-        self.latest_complete_week()?
-            .failed_unknown_share()
+        self.latest_measured(LifecycleWeeklyMetrics::failed_unknown_share)?
             .breaches(threshold)
     }
 

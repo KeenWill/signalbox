@@ -665,6 +665,11 @@ async fn the_attention_state_projects_the_durable_session_state() -> Result<(), 
     let parked = attention.snapshot(identity_query(None)).await?;
     assert_eq!(parked.summaries[0].state, AttentionState::Active);
 
+    // A park writes no turn, goal, runner, or metadata fact, so without the
+    // lifecycle journal entry a follower would keep the state it last read.
+    let followed = attention.changes_after(active.cursor).await?;
+    assert!(matches!(followed, AttentionChanges::ResyncRequired { .. }));
+
     pool.close().await;
     drop(container);
     Ok(())
