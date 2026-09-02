@@ -647,3 +647,30 @@ async fn a_compaction_call_cannot_be_inserted_already_in_flight() -> Result<(), 
     drop(container);
     Ok(())
 }
+
+/// A turn cannot say two contradictory things about how it ended: the cause a
+/// terminal turn records has to be one its own disposition admits.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_cause_its_disposition_does_not_admit_is_rejected() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = checkpoint_restart_model_call(&pool, 0x7230, true).await?;
+
+    let rejection = terminalize_with_cause(
+        &pool,
+        fixture.turn,
+        Some(turn_terminal_cause_to_str(TurnTerminalCause::Completed)),
+    )
+    .await
+    .expect_err("a failed turn cannot record a completion cause");
+
+    assert_eq!(
+        rejection
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::constraint),
+        Some("turn_lifecycle_terminal_cause_matches_disposition")
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

@@ -748,7 +748,8 @@ async fn mark_completed_goal_turn_failed(
         .await?;
     sqlx::query(
         "UPDATE turn_lifecycle
-            SET terminal_disposition_kind = 'failed'
+            SET terminal_disposition_kind = 'failed',
+                terminal_cause_kind = 'model_call_failed'
           WHERE session_id = $1 AND turn_id = $2",
     )
     .bind(Uuid::from_u128(SESSION))
