@@ -1936,10 +1936,16 @@ impl PostgresModelCallRepository {
                             "terminal observation does not match fresh issued state",
                         )
                     })?;
+                // Exhausting the pool's last member is why this turn ended,
+                // so the durable exhaustion record and the cause agree.
+                let terminal_cause = match pool_exhausted_name {
+                    Some(_) => TurnTerminalCause::CredentialPoolExhausted,
+                    None => TurnTerminalCause::ModelCallFailed,
+                };
                 persist_terminal_outcome_with_usage(
                     &mut transaction,
                     &outcome,
-                    Some(TurnTerminalCause::ModelCallFailed),
+                    Some(terminal_cause),
                     usage,
                     provider_failure_cause,
                 )

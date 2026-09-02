@@ -94,3 +94,80 @@ ALTER TABLE context_compaction_model_call
 ALTER TABLE context_compaction
     ADD COLUMN applied_at timestamp with time zone
         DEFAULT clock_timestamp() NOT NULL;
+
+--
+-- Stamps do not move.
+--
+-- The four mutable lifecycle state machines police their transitions column by
+-- column, so without these an otherwise valid transition could also rewrite a
+-- stamp and silently falsify every duration, queue wait, and funnel interval
+-- derived from it. The append-only families need nothing: `outbox_event`,
+-- `delegation_outbox_event`, `session`, `goal_event`, and `context_compaction`
+-- already reject every update.
+--
+
+CREATE FUNCTION reject_recorded_at_change() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF OLD.recorded_at IS DISTINCT FROM NEW.recorded_at THEN
+        RAISE EXCEPTION 'lifecycle row write time is immutable'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER turn_lifecycle_write_time_is_immutable BEFORE UPDATE ON turn_lifecycle FOR EACH ROW EXECUTE FUNCTION reject_recorded_at_change();
+
+CREATE TRIGGER turn_attempt_write_time_is_immutable BEFORE UPDATE ON turn_attempt FOR EACH ROW EXECUTE FUNCTION reject_recorded_at_change();
+
+CREATE TRIGGER model_call_write_time_is_immutable BEFORE UPDATE ON model_call FOR EACH ROW EXECUTE FUNCTION reject_recorded_at_change();
+
+CREATE TRIGGER tool_attempt_write_time_is_immutable BEFORE UPDATE ON tool_attempt FOR EACH ROW EXECUTE FUNCTION reject_recorded_at_change();
+
+--
+-- The compaction command's result changes exactly once; its acceptance time
+-- never does.
+--
+
+CREATE FUNCTION reject_requested_at_change() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF OLD.requested_at IS DISTINCT FROM NEW.requested_at THEN
+        RAISE EXCEPTION 'compaction request time is immutable'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER compact_session_command_request_time_is_immutable BEFORE UPDATE ON compact_session_command FOR EACH ROW EXECUTE FUNCTION reject_requested_at_change();
+
+--
+-- Each compaction transition stamp is written once, by the transition it
+-- records. The state constraint above cannot say this on its own: an
+-- `in_flight -> terminal` update satisfies it while clearing `in_flight_at`,
+-- which would erase the interval the funnel measures.
+--
+
+CREATE FUNCTION reject_context_compaction_stamp_change() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF OLD.prepared_at IS DISTINCT FROM NEW.prepared_at THEN
+        RAISE EXCEPTION 'compaction call preparation time is immutable'
+            USING ERRCODE = '23514';
+    END IF;
+    IF OLD.in_flight_at IS NOT NULL
+       AND NEW.in_flight_at IS DISTINCT FROM OLD.in_flight_at
+    THEN
+        RAISE EXCEPTION 'compaction call in-flight time is write-once'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER context_compaction_model_call_stamps_are_write_once BEFORE UPDATE ON context_compaction_model_call FOR EACH ROW EXECUTE FUNCTION reject_context_compaction_stamp_change();

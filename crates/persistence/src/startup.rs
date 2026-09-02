@@ -786,9 +786,13 @@ where
         ) {
             return Err(StartupScanCorruption::Inconsistent("model-call restart outcome").into());
         }
-        persist_terminal_outcome(connection, &outcome, None)
-            .await
-            .map_err(map_model_call_error)?;
+        persist_terminal_outcome(
+            connection,
+            &outcome,
+            Some(TurnTerminalCause::AbandonedAtRestart),
+        )
+        .await
+        .map_err(map_model_call_error)?;
         return Ok(TransactionDecision::Commit(
             StartupScanSessionOutcome::RecoveredModelCall(Box::new(outcome)),
         ));

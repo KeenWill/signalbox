@@ -230,15 +230,23 @@ async fn committed_lifecycle_rows_carry_their_own_write_time() -> Result<(), Box
     Ok(())
 }
 
-/// The compaction command's acceptance time is its own durable column, not the
-/// operational `durable_command.claimed_at` metadata, and each call transition
-/// stamps when it happened.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn compaction_stamps_its_request_and_every_call_transition() -> Result<(), Box<dyn Error>> {
-    let (container, pool, _database_url) = migrated_postgres().await?;
-    let seed = 0x71b0;
-    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+/// One authorized compaction call and the identities its stamps hang off.
+struct AuthorizedCompaction {
+    repository: ContextCompactionRepository,
+    prepared: Box<signalbox_persistence::context_compaction::PreparedContextCompaction>,
+    command: DurableCommandId,
+    call: ModelCallId,
+    compaction: ContextCompactionId,
+}
+
+/// Compacts one session as far as `in_flight`: a completed turn gives the
+/// session a compactable frontier, the command prepares the call, and
+/// authorization moves it in flight.
+async fn authorized_compaction_call(
+    pool: &PgPool,
+    seed: u128,
+) -> Result<AuthorizedCompaction, Box<dyn Error>> {
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(pool, seed).await?;
     let assistant = AssistantText::try_new(String::from("context before compaction"))
         .expect("fixture assistant text is admitted");
     let observation = authorized
@@ -288,13 +296,33 @@ async fn compaction_stamps_its_request_and_every_call_transition() -> Result<(),
         panic!("the completed turn has a compactable frontier")
     };
     compaction_repository.authorize(&prepared).await?;
-    compaction_repository
+    Ok(AuthorizedCompaction {
+        repository: compaction_repository,
+        prepared,
+        command,
+        call,
+        compaction,
+    })
+}
+
+/// The compaction command's acceptance time is its own durable column, not the
+/// operational `durable_command.claimed_at` metadata, and each call transition
+/// stamps when it happened.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn compaction_stamps_its_request_and_every_call_transition() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let compaction = authorized_compaction_call(&pool, 0x71b0).await?;
+    compaction
+        .repository
         .complete(
-            &prepared,
+            &compaction.prepared,
             "retained context summary",
             ContextCompactionTokenUsage::unreported().with_input_tokens(Some(91)),
         )
         .await?;
+    let command = compaction.command;
+    let call = compaction.call;
 
     let (claimed_at, requested_at): (OffsetDateTime, OffsetDateTime) = sqlx::query_as(
         "SELECT durable_command.claimed_at, compact_session_command.requested_at
@@ -320,7 +348,7 @@ async fn compaction_stamps_its_request_and_every_call_transition() -> Result<(),
     let applied_at: OffsetDateTime = sqlx::query_scalar(
         "SELECT applied_at FROM context_compaction WHERE context_compaction_id = $1",
     )
-    .bind(compaction.into_uuid())
+    .bind(compaction.compaction.into_uuid())
     .fetch_one(&pool)
     .await?;
 
@@ -469,6 +497,67 @@ async fn the_stored_cause_vocabulary_matches_the_encoder() -> Result<(), Box<dyn
     let admitted = admitted_cause_spellings(&pool).await?;
 
     assert_eq!(admitted, encoded_cause_spellings());
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A lifecycle row's write time does not move, so no later transition can
+/// rewrite the instant every duration and queue wait is measured from.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_lifecycle_row_write_time_cannot_be_moved() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = checkpoint_restart_model_call(&pool, 0x7200, true).await?;
+
+    let rejection =
+        sqlx::query("UPDATE turn_lifecycle SET recorded_at = clock_timestamp() WHERE turn_id = $1")
+            .bind(fixture.turn.into_uuid())
+            .execute(&pool)
+            .await
+            .expect_err("a lifecycle write time cannot be restamped");
+
+    assert_eq!(
+        rejection
+            .as_database_error()
+            .map(sqlx::error::DatabaseError::message),
+        Some("lifecycle row write time is immutable")
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Terminalizing a compaction call cannot erase the in-flight stamp it already
+/// recorded, so the funnel interval survives the transition that ends it. The
+/// state constraint alone admits this update: once the row is terminal its
+/// `in_flight` clause is vacuous.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminalizing_a_compaction_call_cannot_erase_its_in_flight_stamp()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let compaction = authorized_compaction_call(&pool, 0x7210).await?;
+
+    let rejection = sqlx::query(
+        "UPDATE context_compaction_model_call
+            SET state_kind = 'terminal',
+                terminal_at = clock_timestamp(),
+                terminal_disposition_kind = 'known_failed',
+                in_flight_at = NULL
+          WHERE model_call_id = $1",
+    )
+    .bind(compaction.call.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("terminalizing cannot erase the in-flight stamp");
+
+    assert_eq!(
+        rejection
+            .as_database_error()
+            .map(sqlx::error::DatabaseError::message),
+        Some("compaction call in-flight time is write-once")
+    );
     pool.close().await;
     drop(container);
     Ok(())
