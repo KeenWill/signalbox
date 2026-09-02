@@ -1931,9 +1931,10 @@ enumeration — read the typed records and are bounded to `pruned_through`, belo
 which there is no detail to read. That is the derived-state retention exemption:
 a consumer projecting durable state holds a cursor advanced only past projected
 rows, and a consumer reading raw rows on demand holds a bound instead.
-Delegation reconstitution, child-result admission, and artifact-address search
-still join raw headers with neither, so the configured retention window is
-`none` — pruning off — until they are dispositioned.
+Delegation reconstitution, child-result admission, artifact-address search, the
+turn-liveness frontier, and model-call recovery evidence still join raw headers
+with neither, so the configured retention window is `none` — pruning off — until
+they are dispositioned.
 
 Appends happen only through the crate-private `outbox::append` on the caller's
 existing connection; it never begins or commits a transaction, so the
