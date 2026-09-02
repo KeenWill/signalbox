@@ -240,6 +240,13 @@ SELECT session_row.session_id,
 -- only an all-terminal cohort matures — which is the conservative reading.
 --
 
+-- The dispatch instant is a grouped minimum over the largest table in the
+-- schema, and every metric read takes it. The existing session-prefixed
+-- indexes are keyed on acceptance position rather than write time, so without
+-- this the aggregate is a sequential scan of every turn ever written.
+CREATE INDEX turn_lifecycle_by_session_write_time
+    ON turn_lifecycle (session_id, recorded_at);
+
 CREATE VIEW session_lifecycle_dispatch_cohort AS
 SELECT dispatched.session_id,
        session_lifecycle_metric_week(dispatched.dispatched_at) AS dispatch_week,

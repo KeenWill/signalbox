@@ -22,6 +22,9 @@ use signalbox_persistence::{
         LifecycleGateVerdict, LifecycleMetricBounds, LifecycleMetricsRepository,
         LifecycleNonTerminalState, LifecycleWeeklyMetrics,
     },
+    operator_status::{
+        ProcessOperatorStatusCounts, ProcessOperatorStatusItem, ProcessOperatorStatusRepository,
+    },
     session_lifecycle::{SessionLifecycleNumericBounds, SessionLifecycleRepository},
 };
 
@@ -846,6 +849,91 @@ async fn a_breached_headline_fails_the_gate_on_its_configured_threshold()
     );
     assert_eq!(week.failed_unknown_share().numerator(), 1);
     assert_eq!(report.gate_verdict(), LifecycleGateVerdict::NotMet);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Drains one operator-status snapshot into its rows, counts, and verdict.
+async fn drain_operator_status(
+    pool: &PgPool,
+) -> Result<
+    (
+        Vec<ProcessOperatorStatusItem>,
+        ProcessOperatorStatusCounts,
+        LifecycleGateVerdict,
+    ),
+    Box<dyn Error>,
+> {
+    let mut reader = ProcessOperatorStatusRepository::new(pool.clone())
+        .open()
+        .await?;
+    let mut items = Vec::new();
+    while let Some(item) = reader.next_item().await? {
+        items.push(item);
+    }
+    let counts = reader
+        .counts()
+        .expect("an exhausted snapshot commits its counts");
+    let verdict = reader
+        .gate_verdict()
+        .expect("an exhausted snapshot commits its gate verdict");
+    Ok((items, counts, verdict))
+}
+
+/// §12: the operator-status snapshot carries the metrics and the alarm as two
+/// further sections of the same coherent read, and closes with the gate.
+///
+/// The snapshot and the telemetry pass run the same statements, which is what
+/// keeps the operator's number and the exported series from disagreeing about
+/// the gate; this reads them through the snapshot's own cursors to prove that
+/// path carries them.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn the_operator_status_snapshot_carries_the_metrics_and_the_alarm()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    apply_metric_bounds(
+        &pool,
+        LifecycleMetricBounds {
+            gate_weeks: Some(1),
+            completion_failure_rate_threshold_ppm: Some(100_000),
+            ..LifecycleMetricBounds::default()
+        },
+    )
+    .await?;
+
+    let (empty_items, empty_counts, empty_verdict) = drain_operator_status(&pool).await?;
+    assert!(empty_items.is_empty());
+    assert_eq!(empty_counts.lifecycle_weeks(), 0);
+    assert_eq!(empty_counts.lifecycle_deadline_violations(), 0);
+    assert_eq!(empty_verdict, LifecycleGateVerdict::Indeterminate);
+
+    let closed = owned_session(&pool, 0x1500).await?;
+    SessionLifecycleRepository::new(pool.clone())
+        .close(
+            closed,
+            SessionTerminalOutcome::AchievedVerified,
+            LifecycleActor::Operator,
+        )
+        .await?;
+    let stuck = owned_session(&pool, 0x1600).await?;
+    strand_deadline(&pool, stuck).await?;
+
+    let (items, counts, verdict) = drain_operator_status(&pool).await?;
+
+    assert_eq!(counts.lifecycle_weeks(), 1);
+    assert_eq!(counts.lifecycle_deadline_violations(), 1);
+    assert_eq!(verdict, LifecycleGateVerdict::NotMet);
+    assert!(matches!(
+        items.first(),
+        Some(ProcessOperatorStatusItem::LifecycleWeek(_))
+    ));
+    assert!(matches!(
+        items.last(),
+        Some(ProcessOperatorStatusItem::LifecycleDeadlineViolation(_))
+    ));
 
     pool.close().await;
     drop(container);
