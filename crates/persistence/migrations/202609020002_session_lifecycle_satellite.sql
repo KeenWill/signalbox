@@ -34,9 +34,18 @@ ALTER TABLE session
 -- pre-alpha rule owes a live database. Nothing else about these rows changes.
 --
 
--- The old CHECKs come off first. Disabling the append-only triggers does not
--- disable a CHECK, and every one of them admits only the retired spelling, so
--- the rewrite below would be rejected by the constraint it exists to escape.
+-- Three things hold the retired spelling in place, and all three come off
+-- before the rewrite.
+--
+-- The CHECKs, because disabling a trigger does not disable a CHECK. The two
+-- provenance foreign keys, because each pins a command row to its session's
+-- (cause, ancestry) and `ON UPDATE RESTRICT` refuses the parent update
+-- immediately — RESTRICT is not deferrable, so the imported family's
+-- `DEFERRABLE INITIALLY DEFERRED` does not postpone it either. And the
+-- append-only triggers, disabled as a set rather than by name: re-firing a
+-- baseline validation over history is exactly what this carry must not do.
+--
+-- `ENABLE TRIGGER USER` restores them without revalidating any row.
 
 ALTER TABLE session
     DROP CONSTRAINT session_creation_cause_closed;
@@ -50,10 +59,15 @@ ALTER TABLE create_session_command
 ALTER TABLE create_session_from_imported_frontier_command
     DROP CONSTRAINT create_session_from_imported_frontier_command_cause_closed;
 
-ALTER TABLE session DISABLE TRIGGER session_is_append_only;
-ALTER TABLE create_session_command DISABLE TRIGGER create_session_command_is_append_only;
+ALTER TABLE create_session_command
+    DROP CONSTRAINT create_session_command_provenance_fk;
+
 ALTER TABLE create_session_from_imported_frontier_command
-    DISABLE TRIGGER create_session_from_imported_frontier_command_is_append_only;
+    DROP CONSTRAINT create_session_from_imported_frontier_command_provenance_fk;
+
+ALTER TABLE session DISABLE TRIGGER USER;
+ALTER TABLE create_session_command DISABLE TRIGGER USER;
+ALTER TABLE create_session_from_imported_frontier_command DISABLE TRIGGER USER;
 
 UPDATE session SET creation_cause = 'interactive'
  WHERE creation_cause = 'user_initiated';
@@ -64,10 +78,9 @@ UPDATE create_session_command SET creation_cause = 'interactive'
 UPDATE create_session_from_imported_frontier_command SET creation_cause = 'interactive'
  WHERE creation_cause = 'user_initiated';
 
-ALTER TABLE session ENABLE TRIGGER session_is_append_only;
-ALTER TABLE create_session_command ENABLE TRIGGER create_session_command_is_append_only;
-ALTER TABLE create_session_from_imported_frontier_command
-    ENABLE TRIGGER create_session_from_imported_frontier_command_is_append_only;
+ALTER TABLE session ENABLE TRIGGER USER;
+ALTER TABLE create_session_command ENABLE TRIGGER USER;
+ALTER TABLE create_session_from_imported_frontier_command ENABLE TRIGGER USER;
 
 ALTER TABLE session
     ADD CONSTRAINT session_creation_cause_closed CHECK (
@@ -1754,6 +1767,29 @@ ALTER TABLE create_session_from_imported_frontier_command
     ADD CONSTRAINT create_session_from_imported_frontier_command_cause_closed CHECK (
         creation_cause = 'interactive'::text
     );
+
+--
+-- Both provenance keys go back exactly as they were, now that the two sides
+-- agree on the respelled cause. Re-adding validates the rows they cover, which
+-- is the check the carry owes and the only one it re-runs.
+--
+
+ALTER TABLE ONLY create_session_command
+    ADD CONSTRAINT create_session_command_provenance_fk
+        FOREIGN KEY (created_session_id, creation_cause, ancestry_kind)
+        REFERENCES session(session_id, creation_cause, ancestry_kind)
+        ON UPDATE RESTRICT ON DELETE RESTRICT;
+
+ALTER TABLE ONLY create_session_from_imported_frontier_command
+    ADD CONSTRAINT create_session_from_imported_frontier_command_provenance_fk
+        FOREIGN KEY (created_session_id, creation_cause, ancestry_kind,
+                     imported_conversation_id, imported_frontier_entry_id,
+                     imported_frontier_position, imported_relationship_kind)
+        REFERENCES session(session_id, creation_cause, ancestry_kind,
+                           imported_conversation_id, imported_frontier_entry_id,
+                           imported_frontier_position, imported_relationship_kind)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
 
 --
 -- Exactly one creation family per session, restated over the widened
