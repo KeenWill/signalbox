@@ -636,9 +636,11 @@ structured-output contract are therefore advisory on this adapter: this
 paragraph is their recorded capability-limited exception to the
 provider-enforced settings rule. The response shape is unchanged, so the
 provider-independent decode classifies a missing or repeated proposal exactly as
-it did when the choice was forced. The adapter emits no `thinking` object at all
-— omitting the parameter is the accepted form on every current Claude model, and
-neither `budget_tokens` nor `{"type":"disabled"}` is representable.
+it did when the choice was forced. The adapter emits no top-level `thinking`
+configuration object — omitting the parameter is the accepted form on every
+current Claude model, and neither `budget_tokens` nor `{"type":"disabled"}` is
+representable. Replayed `thinking` and `redacted_thinking` content blocks are
+unaffected and continue to travel inside assistant messages.
 
 Anthropic preflight input counting preserves the generation request's
 prompt/cache-affecting `output_config` and same-target `speed` fields. A mapped

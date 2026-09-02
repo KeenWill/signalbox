@@ -18,11 +18,13 @@ pub(crate) fn raw_json_is_object(raw: &serde_json::value::RawValue) -> bool {
 /// Exact request accepted by `POST /v1/messages`.
 ///
 /// The struct carries no `temperature`, `top_p`, or `top_k` member and no
-/// `thinking` member. The Claude generations this adapter targets reject every
-/// sampling control with a 400, and reject an explicit thinking configuration
-/// the same way; omitting the parameter is the accepted form, so there is no
-/// field for either to travel through. Preparation refuses a caller-set
-/// sampling control before a request is built rather than dropping it here.
+/// top-level `thinking` member. The Claude generations this adapter targets
+/// reject every sampling control with a 400, and reject an explicit thinking
+/// configuration the same way; omitting the parameter is the accepted form, so
+/// there is no field for either to travel through. Replayed thinking travels
+/// as a content block inside `messages`, which is unaffected. Preparation
+/// refuses a caller-set sampling control before a request is built rather than
+/// dropping it here.
 #[derive(Debug, Serialize)]
 pub(crate) struct MessagesRequest {
     pub model: String,

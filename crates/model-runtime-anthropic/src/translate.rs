@@ -74,7 +74,7 @@ pub(crate) fn build_request_with_fast_mode<C>(
             .iter()
             .map(wire_message)
             .collect::<Result<Vec<_>, _>>()?,
-        system: system_text(operation.system.as_deref(), plan.instruction.as_deref()),
+        system: plan.system_text(operation.system.as_deref()),
         stop_sequences: operation.settings.stop_sequences.clone(),
         output_config: effort.map(|effort| OutputConfig { effort }),
         service_tier,
@@ -106,20 +106,6 @@ fn validate_sampling_controls(settings: &ModelSettings) -> Result<(), Preparatio
         }
     }
     Ok(())
-}
-
-/// Joins the caller's system text with an adapter-authored instruction.
-///
-/// The caller's text stays first and unmodified; the instruction follows it,
-/// separated by a blank line, so the constraint the provider can no longer
-/// enforce as a request control is the last thing stated.
-fn system_text(system: Option<&str>, instruction: Option<&str>) -> Option<String> {
-    match (system, instruction) {
-        (Some(system), Some(instruction)) => Some(format!("{system}\n\n{instruction}")),
-        (Some(system), None) => Some(system.to_string()),
-        (None, Some(instruction)) => Some(instruction.to_string()),
-        (None, None) => None,
-    }
 }
 
 fn anthropic_effort(level: ReasoningLevel) -> Result<&'static str, PreparationFailure> {
@@ -297,6 +283,22 @@ struct ToolPlan {
     /// The adapter-authored instruction carrying a tool demand the provider
     /// no longer accepts as a request control, when the operation makes one.
     instruction: Option<String>,
+}
+
+impl ToolPlan {
+    /// Joins the caller's system text with this plan's instruction.
+    ///
+    /// The caller's text stays first and unmodified; the instruction follows
+    /// it, separated by a blank line, so the constraint the provider can no
+    /// longer enforce as a request control is the last thing stated.
+    fn system_text(&self, caller_system: Option<&str>) -> Option<String> {
+        match (caller_system, self.instruction.as_deref()) {
+            (Some(system), Some(instruction)) => Some(format!("{system}\n\n{instruction}")),
+            (Some(system), None) => Some(system.to_string()),
+            (None, Some(instruction)) => Some(instruction.to_string()),
+            (None, None) => None,
+        }
+    }
 }
 
 /// The instruction carrying a tool demand the provider dropped as a control.

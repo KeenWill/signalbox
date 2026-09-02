@@ -4,9 +4,7 @@ Verified against PR #436 (`agent/model-settings-domain`) for its foundation
 proposal and domain/runtime value shapes, and PR #437
 (`agent/model-settings-adapters`) for provider-adapter translation. Persistence
 evidence and its legacy cutover were verified through PR #441
-(`agent/model-settings-persistence`). The Anthropic adapter's refusal of every
-sampling control is verified against this PR
-(`agent/anthropic-adapter-claude5`).
+(`agent/model-settings-persistence`).
 
 This page is the foundation proposal at the bottom of the model-settings
 implementation stack. It specifies the cross-crate contract for model reasoning,
@@ -192,12 +190,9 @@ Mappings are exhaustive tables evaluated during preparation:
 Anthropic sends effort as `output_config.effort`, fast mode as `speed: "fast"`
 with the required public beta header, and its exact service-tier spelling. Fast
 mode defaults an absent tier to `standard_only`; explicit `auto` with fast mode
-is rejected because it can select incompatible Priority capacity. It enforces no
-sampling control for any model: the Messages API removed temperature, top-p, and
-top-k from the Claude generations it targets, so a caller-set temperature or
-top-p is refused during preparation and at configuration validation rather than
-dropped. Output-token ceiling and stop sequences remain provider-enforced.
-Tool-choice translation and its instruction-carried demands are owned by
+is rejected because it can select incompatible Priority capacity. Output-token
+ceiling and stop sequences remain provider-enforced. Its sampling controls,
+tool-choice translation, and the advisory exception those carry are owned by
 [runtime substrate](runtime-substrate.md#direct-http-adapters).
 
 OpenAI Chat Completions sends `reasoning_effort` and `service_tier` at the top
