@@ -208,6 +208,12 @@ impl From<SessionLifecycleRepositoryError> for ApplyError {
             SessionLifecycleRepositoryError::UnknownSession(_) => {
                 Self::Rejected(SessionLifecycleCommandRejection::SessionNotFound)
             }
+            SessionLifecycleRepositoryError::Database(error) => {
+                Self::Failed(SessionLifecycleCommandRepositoryError::Database(error))
+            }
+            SessionLifecycleRepositoryError::CommitAmbiguous(error) => Self::Failed(
+                SessionLifecycleCommandRepositoryError::CommitAmbiguous(error),
+            ),
             other => Self::Failed(SessionLifecycleCommandRepositoryError::Lifecycle(Box::new(
                 other,
             ))),

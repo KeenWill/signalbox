@@ -598,6 +598,17 @@ impl GoalRepository {
         load_goal_from_connection(&mut connection, session).await
     }
 
+    /// Whether the daemon holds the session's liveness obligation (§6): an
+    /// automatic resume is owed to an owned session only.
+    pub async fn session_owned(&self, session: SessionId) -> Result<bool, GoalRepositoryError> {
+        let owned: Option<bool> =
+            sqlx::query_scalar("SELECT owned FROM session_lifecycle WHERE session_id = $1")
+                .bind(session_id_to_uuid(session))
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(owned.unwrap_or(false))
+    }
+
     /// Loads the current turn in one goal generation.
     ///
     /// The daemon uses this only to associate a pre-block execution failure

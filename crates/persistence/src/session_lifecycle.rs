@@ -580,6 +580,11 @@ pub(crate) async fn adopt_in_transaction(
     actor: LifecycleActor,
 ) -> Result<(), SessionLifecycleRepositoryError> {
     let held = load_locked(connection, session).await?;
+    if held.state.is_terminal() {
+        return Err(SessionLifecycleRepositoryError::Rejected(
+            SessionLifecycleRejection::TransitionNotAdmitted,
+        ));
+    }
     if held.ownership == SessionOwnership::Owned {
         return Err(SessionLifecycleRepositoryError::Rejected(
             SessionLifecycleRejection::OwnershipUnchanged,
@@ -627,6 +632,11 @@ pub(crate) async fn release_in_transaction(
     actor: LifecycleActor,
 ) -> Result<(), SessionLifecycleRepositoryError> {
     let held = load_locked(connection, session).await?;
+    if held.state.is_terminal() {
+        return Err(SessionLifecycleRepositoryError::Rejected(
+            SessionLifecycleRejection::TransitionNotAdmitted,
+        ));
+    }
     if held.ownership == SessionOwnership::Unmonitored {
         return Err(SessionLifecycleRepositoryError::Rejected(
             SessionLifecycleRejection::OwnershipUnchanged,

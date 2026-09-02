@@ -79,6 +79,7 @@ pub const CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED: &str = "No safe context-co
 /// a durably rejected command, a daemon restart, an unreachable database —
 /// leaves this text as what the operator reads.
 const EXECUTION_FAILURE_RESUMING_PREAMBLE: &str = "The goal turn failed to execute and automatic resumption is scheduled. If the goal is still blocked here once resumption ends, it is waiting for an operator.";
+const EXECUTION_FAILURE_UNMONITORED_PREAMBLE: &str = "The goal turn failed to execute and the session is unmonitored, so no automatic resumption is scheduled.";
 /// Guidance for a failure the session caused and should not repeat unchanged.
 const CHARGEABLE_FAILURE_RESUME_GUIDANCE: &str = "Continue pursuing the commissioned goal. The preceding turn failed to execute. Inspect the durable session state and choose a different safe approach before repeating the failed operation.";
 /// Retries one armed attempt may spend on a database that answers nothing.
@@ -636,10 +637,28 @@ impl PostgresGoalPassDisposition {
             .repository
             .unchargeable_automatic_resume_turns(session, &spent_failures)
             .await?;
-        Ok(AutomaticResumption::after_spent_attempts(
-            SpentAutomaticResumeAttempts::over(&spent_failures, &unchargeable_failures),
-            self.numeric_bounds,
-        ))
+        self.owed_to_session(
+            session,
+            AutomaticResumption::after_spent_attempts(
+                SpentAutomaticResumeAttempts::over(&spent_failures, &unchargeable_failures),
+                self.numeric_bounds,
+            ),
+        )
+        .await
+    }
+
+    /// A scheduled resumption is owed to an owned session only (§6).
+    async fn owed_to_session(
+        &self,
+        session: SessionId,
+        resumption: AutomaticResumption,
+    ) -> Result<AutomaticResumption, PostgresGoalPassDispositionError> {
+        if matches!(resumption, AutomaticResumption::Scheduled { .. })
+            && !self.repository.session_owned(session).await?
+        {
+            return Ok(AutomaticResumption::Unmonitored);
+        }
+        Ok(resumption)
     }
 
     /// Owes one delayed resume attempt to an appended execution-failure block.
@@ -651,6 +670,7 @@ impl PostgresGoalPassDisposition {
     ) {
         let delay = match resumption {
             AutomaticResumption::Scheduled { delay } => delay,
+            AutomaticResumption::Unmonitored => return,
             AutomaticResumption::Exhausted { .. } => {
                 tracing::warn!(
                     session = %session.into_uuid(),
@@ -746,6 +766,27 @@ impl PostgresGoalPassDisposition {
         };
         if !awaits_automatic_resumption(&goal, blocked) {
             return ResumeAttempt::Settled;
+        }
+        match self.repository.session_owned(session).await {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::info!(
+                    session = %session.into_uuid(),
+                    event_ordinal = blocked.get(),
+                    "automatic goal resumption left a released session to its operator"
+                );
+                return ResumeAttempt::Settled;
+            }
+            Err(error) => {
+                tracing::error!(
+                    session = %session.into_uuid(),
+                    event_ordinal = blocked.get(),
+                    cause_code = "goal_automatic_resume_ownership_reread_failed",
+                    cause = %error,
+                    "automatic goal resumption cannot confirm the session is still owned"
+                );
+                return ResumeAttempt::InfrastructureUnsettled;
+            }
         }
         let Some(failed_turn) = goal.events().last().and_then(execution_failure_turn) else {
             tracing::error!(
@@ -1118,6 +1159,8 @@ enum AutomaticResumption {
         /// Exact recorded reason the automatic path cannot make progress.
         cause: GoalExecutionFailureRecoveryCause,
     },
+    /// The session is unmonitored (§6): no liveness obligation, no resumption.
+    Unmonitored,
 }
 
 impl AutomaticResumption {
@@ -1165,6 +1208,9 @@ impl AutomaticResumption {
             Self::OperatorRequired {
                 cause: GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit,
             } => String::from(CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED),
+            Self::Unmonitored => {
+                format!("{EXECUTION_FAILURE_UNMONITORED_PREAMBLE} {EXECUTION_FAILURE_NEED}")
+            }
         };
         GoalNeed::try_new(text).map_err(|_| PostgresGoalPassDispositionError::InvalidStaticNeed)
     }
@@ -1758,7 +1804,12 @@ mod tests {
         .need()
         .expect("the operator-required need is admitted");
 
+        let unmonitored = AutomaticResumption::Unmonitored
+            .need()
+            .expect("the unmonitored need is admitted");
+
         assert!(scheduled.as_str().ends_with(EXECUTION_FAILURE_NEED));
+        assert!(unmonitored.as_str().ends_with(EXECUTION_FAILURE_NEED));
         assert!(exhausted.as_str().ends_with(EXECUTION_FAILURE_NEED));
         assert!(ceiling_reached.as_str().ends_with(EXECUTION_FAILURE_NEED));
         assert_eq!(

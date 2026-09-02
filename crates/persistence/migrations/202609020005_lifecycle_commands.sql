@@ -93,6 +93,8 @@ CREATE TABLE session_lifecycle_command (
     operation_kind text NOT NULL,
     stop_sticky boolean,
     descendant_scope text,
+    -- The successor as the command named it: a rejection keeps an unknown or
+    -- self-naming successor on record, so no reference constrains it.
     successor_session_id uuid,
     failure_cause_kind text,
     finish_condition_kind text,
@@ -129,7 +131,6 @@ CREATE TABLE session_lifecycle_command (
         AND ((descendant_scope IS NULL) OR (descendant_scope = ANY (ARRAY[
             'parent_alone'::text, 'parent_and_descendants'::text
         ])))
-        AND ((successor_session_id IS NULL) OR (successor_session_id <> session_id))
     ),
     CONSTRAINT session_lifecycle_command_failure_cause_closed CHECK (
         (failure_cause_kind IS NULL)
@@ -219,9 +220,6 @@ CREATE TABLE session_lifecycle_command (
         FOREIGN KEY (command_id, command_kind, storage_version)
         REFERENCES durable_command (command_id, command_kind, storage_version)
         ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
-    CONSTRAINT session_lifecycle_command_successor_fk
-        FOREIGN KEY (successor_session_id) REFERENCES session (session_id)
-        ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT session_lifecycle_command_live_turn_fk
         FOREIGN KEY (live_turn_id, session_id) REFERENCES turn_lifecycle (turn_id, session_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT

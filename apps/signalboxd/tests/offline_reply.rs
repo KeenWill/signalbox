@@ -520,12 +520,11 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
     Ok(())
 }
 
-/// INV-048: a completed goal turn is followed without user input, and an
-/// unsuccessful successor blocks with scheduler provenance without a retry.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_retry()
--> Result<(), Box<dyn Error>> {
+/// Runs one goal to a completed turn and an unsuccessful successor under the
+/// named ownership, returning the blocked goal.
+async fn goal_failure_block_after_success(
+    ownership: signalbox_domain::SessionOwnership,
+) -> Result<Goal, Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x2001));
@@ -534,10 +533,18 @@ async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_re
         CreateSessionRepository::new(pool.clone(), configuration.session_credential_pin()),
     );
     let CreateSessionOutcome::Applied(created) = create
-        .execute(CreateSessionRequest::try_new(
-            DurableCommandId::from_uuid(Uuid::from_u128(0x2101)),
-            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
-        )?)
+        .execute(
+            CreateSessionRequest::try_new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x2101)),
+                SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+            )?
+            .with_lifecycle(
+                signalbox_domain::StartGate::Open,
+                ownership,
+                matches!(ownership, signalbox_domain::SessionOwnership::Owned)
+                    .then_some(signalbox_domain::FinishCondition::ExternalGate),
+            ),
+        )
         .await?
     else {
         panic!("the unique fixture command must create its session")
@@ -629,13 +636,41 @@ async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_re
             .fetch_one(&pool)
             .await?;
 
-    assert_execution_failure_blocked(&goal);
     assert_eq!(goal_turn_count, 2);
     assert_eq!(runtime.received_operations().len(), 2);
     assert_ne!(first_turn.turn(), execution_failure_turn(&goal));
 
     pool.close().await;
     drop(container);
+    Ok(goal)
+}
+
+/// INV-048: a completed goal turn is followed without user input, and an
+/// unsuccessful successor blocks with scheduler provenance without a retry.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_retry()
+-> Result<(), Box<dyn Error>> {
+    let goal = goal_failure_block_after_success(signalbox_domain::SessionOwnership::Owned).await?;
+    assert_execution_failure_blocked(&goal);
+    Ok(())
+}
+
+/// §6: an unmonitored session is owed no automatic resumption, and its failure
+/// block's need says so instead of promising one.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_unmonitored_sessions_failure_block_schedules_no_resumption()
+-> Result<(), Box<dyn Error>> {
+    let goal =
+        goal_failure_block_after_success(signalbox_domain::SessionOwnership::Unmonitored).await?;
+    let GoalState::Blocked { need, .. } = goal.current().state() else {
+        panic!("the unmonitored goal must be blocked");
+    };
+    assert_eq!(
+        need.as_str(),
+        "The goal turn failed to execute and the session is unmonitored, so no automatic resumption is scheduled. Resolve the failed goal turn's execution condition, then resume the goal."
+    );
     Ok(())
 }
 

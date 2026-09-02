@@ -162,6 +162,7 @@ use signalbox_persistence::{
         DelegationOperationRejection, DelegationRequestExecutionState, ProcessDelegationOutcome,
         ProcessDelegationRequestRejection,
     },
+    session_lifecycle::SessionLifecycleRepository,
     session_lifecycle_command::{
         SessionLifecycleCommandHandlingOutcome, SessionLifecycleCommandRepository,
         SessionLifecycleCommandRepositoryError,
@@ -15898,6 +15899,9 @@ async fn interrupt_for_closure(
     match service.execute(request).await {
         Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Applied(_))) => Ok(()),
         Ok(other) => {
+            if closure_settled(services, session).await {
+                return Ok(());
+            }
             tracing::warn!(session = %session.into_uuid(), outcome = ?other,
                 "closure interrupt was not applied");
             Err(())
@@ -15910,15 +15914,29 @@ async fn interrupt_for_closure(
     }
 }
 
-/// Derives the interrupt's identity from the closure command's, stepping past
-/// the two reserved identities.
+/// A closure whose live turn ended between the command and its interrupt has
+/// already settled through the deferred trigger; the interrupt's rejection is
+/// then not a failure to report.
+async fn closure_settled(services: &ConnectionServices, session: SessionId) -> bool {
+    matches!(
+        SessionLifecycleRepository::new(services.pool.clone())
+            .load(session)
+            .await,
+        Ok(Some(record)) if record.state().is_terminal()
+    )
+}
+
+const CLOSURE_INTERRUPT_MASK: u128 = 0x5e55_1001_c105_4e00_0000_0000_0000_0001;
+
+/// Derives the interrupt's identity from the closure command's. The two
+/// identities the mask would carry onto nil and max stay fixed instead, which
+/// keeps the derivation a bijection on the admitted identities.
 fn closure_interrupt_identity(command: DurableCommandId) -> uuid::Uuid {
-    const CLOSURE_INTERRUPT_MASK: u128 = 0x5e55_1001_c105_4e00_0000_0000_0000_0001;
-    let derived = uuid::Uuid::from_u128(command.as_uuid().as_u128() ^ CLOSURE_INTERRUPT_MASK);
-    if derived.is_nil() || derived.is_max() {
-        uuid::Uuid::from_u128(derived.as_u128() ^ 0b10)
+    let command = command.as_uuid().as_u128();
+    if command == CLOSURE_INTERRUPT_MASK || command == !CLOSURE_INTERRUPT_MASK {
+        uuid::Uuid::from_u128(command)
     } else {
-        derived
+        uuid::Uuid::from_u128(command ^ CLOSURE_INTERRUPT_MASK)
     }
 }
 
@@ -20989,5 +21007,26 @@ mod tests {
                 state: WireRunnerStateTransitionState::WorkingDirectoryChanged,
             }
         );
+    }
+
+    #[test]
+    fn closure_interrupt_identities_stay_distinct_at_the_reserved_fixed_points() {
+        let identity = |value: u128| {
+            super::closure_interrupt_identity(DurableCommandId::from_uuid(uuid::Uuid::from_u128(
+                value,
+            )))
+        };
+        let images = [
+            identity(super::CLOSURE_INTERRUPT_MASK),
+            identity(super::CLOSURE_INTERRUPT_MASK ^ 0b10),
+            identity(!super::CLOSURE_INTERRUPT_MASK),
+            identity(!super::CLOSURE_INTERRUPT_MASK ^ 0b10),
+        ];
+        assert!(
+            images
+                .iter()
+                .all(|image| !image.is_nil() && !image.is_max())
+        );
+        assert_eq!(images.iter().collect::<BTreeSet<_>>().len(), images.len());
     }
 }

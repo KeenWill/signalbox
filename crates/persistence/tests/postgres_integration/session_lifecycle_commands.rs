@@ -798,3 +798,133 @@ async fn a_park_closure_settles_the_suspended_turn_through_the_interrupt_machine
     drop(container);
     Ok(())
 }
+
+/// A supersession naming an unknown successor, or the session itself, is a
+/// recorded rejection that replays: the typed row keeps the successor as named.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_supersession_naming_no_successor_records_its_rejection() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(20);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(20))
+        .await?;
+    let unknown = || {
+        lifecycle_command(
+            20,
+            1,
+            session,
+            SessionLifecycleOperation::Supersede {
+                successor: SessionId::from_uuid(Uuid::from_u128(SEED + 0xf00d)),
+            },
+        )
+    };
+    let itself = lifecycle_command(
+        20,
+        2,
+        session,
+        SessionLifecycleOperation::Supersede { successor: session },
+    );
+
+    let refused = recorded(&pool, unknown()).await?;
+    let replay = recorded(&pool, unknown()).await?;
+    let self_named = recorded(&pool, itself.clone()).await?;
+
+    assert_eq!(
+        refused,
+        SessionLifecycleCommandResult::Rejected(
+            SessionLifecycleCommandRejection::SuccessorNotFound
+        )
+    );
+    assert_eq!(replay, refused);
+    assert_eq!(
+        self_named,
+        SessionLifecycleCommandResult::Rejected(SessionLifecycleCommandRejection::SuccessorIsSelf)
+    );
+    assert_eq!(
+        settlement(&pool, unknown().command_id()).await?,
+        (
+            String::from("rejected"),
+            Some(String::from("successor_not_found"))
+        )
+    );
+    assert_eq!(
+        settlement(&pool, itself.command_id()).await?,
+        (
+            String::from("rejected"),
+            Some(String::from("successor_is_self"))
+        )
+    );
+    assert!(
+        !SessionLifecycleRepository::new(pool.clone())
+            .load(session)
+            .await?
+            .expect("the session keeps its lifecycle row")
+            .state()
+            .is_terminal()
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Ownership cannot change on a closed session: `release` and `adopt` are
+/// recorded `transition_not_admitted` rejections rather than database failures.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn ownership_commands_on_a_closed_session_are_recorded_rejections()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(21);
+    let successor = creation_session(22);
+    let repository = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
+    repository.handle(dispatched_creation(21)).await?;
+    repository.handle(dispatched_creation(22)).await?;
+    recorded(
+        &pool,
+        lifecycle_command(
+            21,
+            1,
+            session,
+            SessionLifecycleOperation::Supersede { successor },
+        ),
+    )
+    .await?;
+    assert!(
+        SessionLifecycleRepository::new(pool.clone())
+            .load(session)
+            .await?
+            .expect("the session keeps its lifecycle row")
+            .state()
+            .is_terminal()
+    );
+    let release = lifecycle_command(21, 2, session, SessionLifecycleOperation::Release);
+    let adopt = lifecycle_command(
+        21,
+        3,
+        session,
+        SessionLifecycleOperation::Adopt {
+            finish_condition: None,
+        },
+    );
+
+    let not_admitted = SessionLifecycleCommandResult::Rejected(
+        SessionLifecycleCommandRejection::TransitionNotAdmitted,
+    );
+    assert_eq!(recorded(&pool, release.clone()).await?, not_admitted);
+    assert_eq!(recorded(&pool, adopt.clone()).await?, not_admitted);
+    for command in [release, adopt] {
+        assert_eq!(
+            settlement(&pool, command.command_id()).await?,
+            (
+                String::from("rejected"),
+                Some(String::from("transition_not_admitted"))
+            )
+        );
+    }
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
