@@ -92,7 +92,7 @@ async fn s24_inv032_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Err
         "the second allocation must wait while the first is uncommitted"
     );
 
-    let invisible_events: i64 = sqlx::query_scalar("SELECT count(*)::numeric FROM outbox_event")
+    let invisible_events: i64 = sqlx::query_scalar("SELECT count(*) FROM outbox_event")
         .fetch_one(&pool)
         .await?;
     assert_eq!(invisible_events, 0);
@@ -1403,10 +1403,9 @@ async fn s01_inv012_inv032_create_session_first_handling_appends_exactly_once()
             creation.applied_result().session().into_uuid(),
         )]
     );
-    let typed_events: i64 =
-        sqlx::query_scalar("SELECT count(*)::numeric FROM session_created_outbox_event")
-            .fetch_one(&pool)
-            .await?;
+    let typed_events: i64 = sqlx::query_scalar("SELECT count(*) FROM session_created_outbox_event")
+        .fetch_one(&pool)
+        .await?;
     assert_eq!(typed_events, 1);
 
     pool.close().await;
@@ -1543,7 +1542,7 @@ async fn s01_inv012_inv032_scheduling_transitions_dispatch_in_commit_order()
             (SELECT count(*) FROM turn_activated_outbox_event
               WHERE current_attempt_id = $2),
             (SELECT delivered_through FROM outbox_consumer_cursor
-              WHERE singleton)",
+              WHERE consumer_name = 'process_protocol')",
     )
     .bind(accepted_input.into_uuid())
     .bind(attempt.into_uuid())

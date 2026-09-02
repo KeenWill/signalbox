@@ -718,7 +718,14 @@ async fn empty_endpoint_and_around_windows_are_corruption() -> Result<(), Box<dy
     )
     .execute(&pool)
     .await?;
+    sqlx::query("DROP TRIGGER session_timeline_item_is_append_only ON session_timeline_item")
+        .execute(&pool)
+        .await?;
     sqlx::query("DELETE FROM outbox_event WHERE session_id = $1")
+        .bind(identity.into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM session_timeline_item WHERE session_id = $1")
         .bind(identity.into_uuid())
         .execute(&pool)
         .await?;
