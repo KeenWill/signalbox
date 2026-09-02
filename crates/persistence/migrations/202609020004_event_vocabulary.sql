@@ -269,9 +269,6 @@ CREATE TABLE turn_terminal_outbox_event (
         ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
 );
 
-CREATE INDEX turn_terminal_outbox_event_by_turn
-    ON turn_terminal_outbox_event USING btree (session_id, turn_id);
-
 CREATE TRIGGER turn_terminal_outbox_event_cannot_be_truncated
     BEFORE TRUNCATE ON turn_terminal_outbox_event
     FOR EACH STATEMENT EXECUTE FUNCTION reject_outbox_table_truncate();
@@ -811,6 +808,7 @@ ALTER TABLE turn_lifecycle
 ALTER TABLE turn_lifecycle
     ADD CONSTRAINT turn_lifecycle_terminal_cause_matches_disposition CHECK (
         (terminal_cause_kind IS NULL)
+        OR ((terminal_disposition_kind IS NOT NULL) AND (FALSE
         OR ((terminal_disposition_kind = 'completed'::text)
             AND (terminal_cause_kind = 'completed'::text))
         OR ((terminal_disposition_kind = 'refused'::text)
@@ -842,7 +840,7 @@ ALTER TABLE turn_lifecycle
                 'reported_usage_context_compaction_exhausted'::text,
                 'reported_usage_context_still_exceeded'::text,
                 'unclassified_failure'::text
-            ])))
+            ])))))
     );
 
 -- A retired turn never started, so the terminal final-state assertions, which
@@ -930,10 +928,13 @@ BEGIN
         RETURN NULL;
     END IF;
 
+    -- A turn the delegation cascade already terminated logically is not live
+    -- work either: its `state_kind` stays put by design.
     SELECT lifecycle.turn_id INTO live
       FROM turn_lifecycle AS lifecycle
      WHERE lifecycle.session_id = NEW.session_id
        AND lifecycle.state_kind <> 'terminal'
+       AND NOT lifecycle.delegation_runtime_terminal
      LIMIT 1;
 
     IF FOUND THEN
