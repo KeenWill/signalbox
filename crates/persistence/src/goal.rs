@@ -98,11 +98,6 @@ pub enum GoalCommandHandlingOutcome {
 pub enum GoalTransitionOutcome {
     /// The transition appended this event.
     Applied(GoalEvent),
-    /// The finish check refused the achievement; pursuit stays live (§2).
-    FinishCheckFailed {
-        /// The check result.
-        detail: String,
-    },
     /// The session's closure is pending; the closure settles the goal.
     SessionClosing,
     /// The session has no attached goal.
@@ -974,21 +969,22 @@ impl GoalRepository {
                 report,
                 provenance,
                 verdict,
-            } => {
-                match verdict {
-                    FinishCheckVerdict::Failed { detail } => {
-                        transaction.rollback().await?;
-                        return Ok(GoalTransitionOutcome::FinishCheckFailed { detail });
-                    }
-                    FinishCheckVerdict::Passed => {
-                        settled = Some((SessionTerminalOutcome::AchievedVerified, provenance));
-                    }
-                    FinishCheckVerdict::Unverified => {
-                        settled = Some((SessionTerminalOutcome::AchievedDeclared, provenance));
-                    }
+            } => match verdict {
+                FinishCheckVerdict::Failed { detail } => goal.block_finish_check(
+                    GoalNeed::try_new(detail).map_err(|_| {
+                        GoalCorruption::Inconsistent("finish check result is not need text")
+                    })?,
+                    provenance,
+                ),
+                FinishCheckVerdict::Passed => {
+                    settled = Some((SessionTerminalOutcome::AchievedVerified, provenance));
+                    goal.declare_achieved(report, provenance)
                 }
-                goal.declare_achieved(report, provenance)
-            }
+                FinishCheckVerdict::Unverified => {
+                    settled = Some((SessionTerminalOutcome::AchievedDeclared, provenance));
+                    goal.declare_achieved(report, provenance)
+                }
+            },
             SystemTransition::ExecutionFailure { need, provenance } => {
                 goal.block_execution_failure(need, provenance)
             }
@@ -1135,7 +1131,8 @@ fn recorded_scheduler_failure(goal: &Goal, turn: TurnId) -> Option<&GoalEvent> {
             signalbox_domain::GoalBlockProvenance::ExecutionFailure { provenance } => {
                 provenance.turn() == turn
             }
-            signalbox_domain::GoalBlockProvenance::Model { .. } => false,
+            signalbox_domain::GoalBlockProvenance::Model { .. }
+            | signalbox_domain::GoalBlockProvenance::FinishCheck { .. } => false,
         },
         GoalEventKind::Commissioned { .. }
         | GoalEventKind::Resumed { .. }
@@ -1871,7 +1868,8 @@ impl<'a> EncodedEvent<'a> {
                 encoded.blocked_reason = Some(goal_blocked_reason_to_str(block.reason_kind()));
                 encoded.need = Some(need.as_str());
                 match block {
-                    GoalBlockProvenance::Model { provenance, .. } => {
+                    GoalBlockProvenance::Model { provenance, .. }
+                    | GoalBlockProvenance::FinishCheck { provenance } => {
                         encoded.model_turn = Some(turn_id_to_uuid(provenance.turn()));
                         encoded.model_tool_request =
                             Some(tool_request_id_to_uuid(provenance.tool_request()));
@@ -2064,6 +2062,15 @@ fn decode_event(row: &sqlx::postgres::PgRow) -> Result<GoalEvent, GoalCorruption
                         tool_request_id_from_uuid(required(
                             model_tool_request,
                             "blocked model tool request",
+                        )?),
+                    ),
+                },
+                GoalBlockedReasonKind::FinishCheckFailed => GoalBlockProvenance::FinishCheck {
+                    provenance: GoalModelProvenance::new(
+                        turn_id_from_uuid(required(model_turn, "finish check model turn")?),
+                        tool_request_id_from_uuid(required(
+                            model_tool_request,
+                            "finish check model tool request",
                         )?),
                     ),
                 },

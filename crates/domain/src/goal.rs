@@ -254,6 +254,8 @@ pub enum GoalBlockedReasonKind {
     AuthorizationRequired,
     /// The preceding turn failed and was not silently retried.
     ExecutionFailure,
+    /// The declared finish check refused an achievement; the need is its result.
+    FinishCheckFailed,
 }
 
 impl From<GoalModelBlockedReasonKind> for GoalBlockedReasonKind {
@@ -281,6 +283,8 @@ pub enum GoalBlockProvenance {
         /// Exact source turn.
         provenance: GoalSchedulerProvenance,
     },
+    /// A failing finish check on the declaring request.
+    FinishCheck { provenance: GoalModelProvenance },
 }
 
 impl GoalBlockProvenance {
@@ -300,6 +304,7 @@ impl GoalBlockProvenance {
                 ..
             } => GoalBlockedReasonKind::AuthorizationRequired,
             Self::ExecutionFailure { .. } => GoalBlockedReasonKind::ExecutionFailure,
+            Self::FinishCheck { .. } => GoalBlockedReasonKind::FinishCheckFailed,
         }
     }
 }
@@ -613,6 +618,15 @@ impl Goal {
         self.block(GoalBlockProvenance::ExecutionFailure { provenance }, need)
     }
 
+    /// Blocks the goal on a failing finish check; the need is the check's result.
+    pub fn block_finish_check(
+        self,
+        need: GoalNeed,
+        provenance: GoalModelProvenance,
+    ) -> Result<Self, GoalTransitionError> {
+        self.block(GoalBlockProvenance::FinishCheck { provenance }, need)
+    }
+
     fn block(
         mut self,
         block: GoalBlockProvenance,
@@ -914,6 +928,10 @@ fn apply_stored_event(goal: Goal, event: &GoalEvent) -> Result<Goal, GoalTransit
             block: GoalBlockProvenance::ExecutionFailure { provenance },
             need,
         } => goal.block_execution_failure(need.clone(), *provenance),
+        GoalEventKind::Blocked {
+            block: GoalBlockProvenance::FinishCheck { provenance },
+            need,
+        } => goal.block_finish_check(need.clone(), *provenance),
         GoalEventKind::Resumed {
             guidance,
             provenance,

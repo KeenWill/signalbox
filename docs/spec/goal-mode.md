@@ -177,8 +177,8 @@ returns `NotCurrentGoalTurn` without appending an event. A tool-request identity
 can cause at most one goal declaration event. An achieved event stores the exact
 final report and derives its transcript reference from that same invocation. An
 achievement is gated on the session's finish check (session-lifecycle §2): a
-failing verdict appends no event and fails the tool with the detail, so pursuit
-stays live; a passing verdict commits `achieved_verified` to the session's
+failing verdict appends `blocked{finish_check_failed}` with the check's result
+as its need; a passing verdict commits `achieved_verified` to the session's
 terminal handoff in the same transaction, and a declaration no finish check
 verifies (no finish condition, or no verifier) commits `achieved_declared`. A
 goal command or model declaration on a session whose closure is committed to the
@@ -190,6 +190,10 @@ the generation.
 Every blocked event carries exact nonempty need text. `execution_failure` is the
 fourth stored reason and is scheduler-only: its provenance shape requires the
 source turn and cannot be constructed from a model declaration.
+`finish_check_failed` is the fifth: the block a failing finish check appends,
+with the declaring request's provenance and the check's result as its need.
+`finish_check_failed` is the fifth: the block a failing finish check appends,
+with the declaring request's provenance and the check's result as its need.
 
 **Implemented behavior.** Stop and supersede are explicit user authority. Stop
 yields `user_stopped`, distinct from model-declared achievement and blocking;

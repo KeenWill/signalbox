@@ -1872,6 +1872,7 @@ pub enum WebAttentionBlockedReason {
     ExternalChangeRequired,
     AuthorizationRequired,
     ExecutionFailure,
+    FinishCheckFailed,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]

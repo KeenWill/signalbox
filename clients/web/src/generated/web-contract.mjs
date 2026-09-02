@@ -101,7 +101,8 @@ const schemas = {
           "user_input_required",
           "external_change_required",
           "authorization_required",
-          "execution_failure"
+          "execution_failure",
+          "finish_check_failed"
         ],
         "type": "string"
       },
@@ -294,7 +295,8 @@ const schemas = {
           "user_input_required",
           "external_change_required",
           "authorization_required",
-          "execution_failure"
+          "execution_failure",
+          "finish_check_failed"
         ],
         "type": "string"
       },
@@ -2540,7 +2542,8 @@ const schemas = {
           "user_input_required",
           "external_change_required",
           "authorization_required",
-          "execution_failure"
+          "execution_failure",
+          "finish_check_failed"
         ],
         "type": "string"
       },
@@ -3795,7 +3798,8 @@ const schemas = {
           "user_input_required",
           "external_change_required",
           "authorization_required",
-          "execution_failure"
+          "execution_failure",
+          "finish_check_failed"
         ],
         "type": "string"
       },

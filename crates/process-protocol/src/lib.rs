@@ -3132,6 +3132,7 @@ pub enum GoalBlockedReason {
     AuthorizationRequired,
     /// The preceding goal turn failed and was not retried.
     ExecutionFailure,
+    FinishCheckFailed,
 }
 
 /// Provenance for one blocked event at the process boundary.
@@ -3311,7 +3312,8 @@ fn validate_goal_event(event: &GoalHistoryEvent) -> Result<(), FrameValidationEr
             let scheduler_reason = match reason {
                 GoalBlockedReason::UserInputRequired
                 | GoalBlockedReason::ExternalChangeRequired
-                | GoalBlockedReason::AuthorizationRequired => false,
+                | GoalBlockedReason::AuthorizationRequired
+                | GoalBlockedReason::FinishCheckFailed => false,
                 GoalBlockedReason::ExecutionFailure => true,
             };
             let scheduler_provenance = match provenance {
@@ -3514,13 +3516,6 @@ pub enum SessionLifecycleCommandRejection {
     GoalResumeRequired,
     GoalOutcomeMismatch,
     PendingTerminalConflict,
-}
-
-/// Closed create-session rejection vocabulary (§7).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CreateSessionRejection {
-    HeldGateRequiresOwnership,
 }
 
 /// What an applied lifecycle command did.
@@ -5052,11 +5047,6 @@ pub enum RejectionDetail {
         /// Closed reason.
         reason: SessionLifecycleCommandRejection,
     },
-    /// A claimed creation recorded a §7 rejection.
-    CreateSessionRejected {
-        /// Closed reason.
-        reason: CreateSessionRejection,
-    },
 }
 
 impl RejectionDetail {
@@ -5109,7 +5099,6 @@ impl RejectionDetail {
             | Self::SessionPlacementVersionExhausted { .. }
             | Self::GoalCommandRejected { .. }
             | Self::SessionLifecycleCommandRejected { .. }
-            | Self::CreateSessionRejected { .. }
             | Self::ActiveTurnPresent { .. }
             | Self::CommissionTargetBusy { .. }
             | Self::ActiveTurnMismatch { .. }
@@ -9432,7 +9421,6 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
         | RejectionDetail::UnsupportedServiceTier { .. }
         | RejectionDetail::GoalCommandRejected { .. }
         | RejectionDetail::SessionLifecycleCommandRejected { .. }
-        | RejectionDetail::CreateSessionRejected { .. }
         | RejectionDetail::ActiveTurnPresent { .. }
         | RejectionDetail::CommissionTargetBusy { .. }
         | RejectionDetail::ActiveTurnMismatch { .. }
@@ -9543,7 +9531,6 @@ fn validate_conversation_import_detail(
         | RejectionDetail::SessionPlacementVersionExhausted { .. }
         | RejectionDetail::GoalCommandRejected { .. }
         | RejectionDetail::SessionLifecycleCommandRejected { .. }
-        | RejectionDetail::CreateSessionRejected { .. }
         | RejectionDetail::ActiveTurnPresent { .. }
         | RejectionDetail::CommissionTargetBusy { .. }
         | RejectionDetail::ActiveTurnMismatch { .. }

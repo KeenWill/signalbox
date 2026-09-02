@@ -439,7 +439,6 @@ fn delegation_rejection_matches(
         | RejectionDetail::SessionPlacementVersionExhausted { .. }
         | RejectionDetail::GoalCommandRejected { .. }
         | RejectionDetail::SessionLifecycleCommandRejected { .. }
-        | RejectionDetail::CreateSessionRejected { .. }
         | RejectionDetail::ActiveTurnPresent { .. }
         | RejectionDetail::CommissionTargetBusy { .. }
         | RejectionDetail::ActiveTurnMismatch { .. }

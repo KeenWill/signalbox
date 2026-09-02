@@ -9,10 +9,9 @@ use std::{error::Error, fmt, future::Future};
 
 use signalbox_domain::{
     CreateSession as DomainCreateSession, CreateSessionAppliedResult,
-    CreateSessionPreparationFailure, CreateSessionRejection, DurableCommandId, FinishCondition,
-    PreparedCreateSession, SessionConfigurationDefaults, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SessionOwnership, SessionPlacement,
-    SessionTemplateProvenance, StartGate, TranscriptAncestry,
+    CreateSessionPreparationFailure, DurableCommandId, FinishCondition, PreparedCreateSession,
+    SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
+    SessionOwnership, SessionPlacement, SessionTemplateProvenance, StartGate, TranscriptAncestry,
 };
 
 /// Why a caller-supplied command identity cannot enter canonical construction.
@@ -190,8 +189,6 @@ pub enum CreateSessionOutcome {
     /// First application or equal replay returned the recorded receipt.
     Applied(CreateSessionAppliedResult),
     /// The command identity is already claimed by a different typed payload.
-    /// The claimed creation recorded a §7 rejection.
-    Rejected(CreateSessionRejection),
     ConflictingReuse {
         /// The user-global identity whose existing meaning remains intact.
         command_id: DurableCommandId,

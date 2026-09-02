@@ -309,8 +309,7 @@ lands; version 6 adds path-scoped placement, and version 7 composes model
 settings with that implemented shape. Each field is absent before its
 introducing version, so an older reader rejects a newer creation record instead
 of discarding either decision. `ReplaceSessionMetadata` and `DecideToolRequest`
-use version 1. `CreateSession` records applied results and the session-lifecycle
-§7 admission rejection `held_gate_requires_ownership` (its one preparation
+use version 1. `CreateSession` records applied results (its one preparation
 failure is an error, not a recorded rejection); `session_lifecycle` (version 1)
 carries `stop{sticky, descendant_scope}`, `supersede{successor}`, `abandon`,
 `close_failed{cause}`, `resume`, `adopt{finish_condition}`, and `release` in one

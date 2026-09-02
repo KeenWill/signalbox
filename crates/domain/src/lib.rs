@@ -262,12 +262,11 @@ pub use session::{
     CreateSession, CreateSessionAppliedResult, CreateSessionFromImportedFrontier,
     CreateSessionPreparationError, CreateSessionPreparationFailure,
     CreateSessionReconstitutionError, CreateSessionReconstitutionFailure,
-    CreateSessionReconstitutionInput, CreateSessionRejection, CreateSessionResult,
-    ImportedSessionRelationship, ImportedSessionSeed, InitialSession, PreparedCreateSession,
-    ReconstitutedSessionCreation, RecordedSessionCreation, Session, SessionCreationCause,
-    SessionCreationProvenance, SessionPlacementReconstitutionFacts, SessionReconstitutionError,
-    SessionReconstitutionFailure, SessionReconstitutionInput, TranscriptAncestry,
-    TranscriptFrontier,
+    CreateSessionReconstitutionInput, ImportedSessionRelationship, ImportedSessionSeed,
+    InitialSession, PreparedCreateSession, ReconstitutedSessionCreation, Session,
+    SessionCreationCause, SessionCreationProvenance, SessionPlacementReconstitutionFacts,
+    SessionReconstitutionError, SessionReconstitutionFailure, SessionReconstitutionInput,
+    TranscriptAncestry, TranscriptFrontier,
 };
 pub use session_delegation::{
     BoundChildAction, ChildRelationshipPolicy, ChildWait, DelegatedSpawnRequest,

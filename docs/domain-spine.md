@@ -1067,7 +1067,6 @@ impl CreateSession {
         ownership: SessionOwnership,
         finish_condition: Option<FinishCondition>,
     ) -> Self;
-    pub const fn admission(&self) -> Result<(), CreateSessionRejection>;
     pub fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults;
     pub fn prepare(self, session: SessionId)
         -> Result<PreparedCreateSession, CreateSessionPreparationError>;
@@ -1077,23 +1076,6 @@ impl CreateSession {
 }
 // Eq/Hash exclude command_id; explicit mode compares defaults, template mode
 // compares the requested template name, and the two modes differ.
-
-pub enum CreateSessionRejection {
-    HeldGateRequiresOwnership,
-}
-
-pub enum CreateSessionResult {
-    Applied(CreateSessionAppliedResult),
-    Rejected(CreateSessionRejection),
-}
-
-pub enum RecordedSessionCreation {
-    Applied(Box<ReconstitutedSessionCreation>),
-    Rejected { command: Box<CreateSession>, rejection: CreateSessionRejection },
-}
-impl RecordedSessionCreation {
-    // accessors: applied(), command(), result()
-}
 
 pub struct CreateSessionFromImportedFrontier { /* private */ }
 impl CreateSessionFromImportedFrontier {
@@ -6595,6 +6577,7 @@ pub enum AttentionBlockedReason {
     ExternalChangeRequired,
     AuthorizationRequired,
     ExecutionFailure,
+    FinishCheckFailed,
 }
 
 pub struct AttentionGoalBlock {
@@ -7477,7 +7460,6 @@ pub struct UuidV7SessionIdGenerator;  // Default; impl SessionIdGenerator
 
 pub enum CreateSessionOutcome {
     Applied(CreateSessionAppliedResult),
-    Rejected(CreateSessionRejection),
     ConflictingReuse { command_id: DurableCommandId },
 }
 
@@ -12145,10 +12127,12 @@ pub enum GoalBlockedReasonKind {
     ExternalChangeRequired,
     AuthorizationRequired,
     ExecutionFailure,
+    FinishCheckFailed,
 }
 pub enum GoalBlockProvenance {
     Model { reason: GoalModelBlockedReasonKind, provenance: GoalModelProvenance },
     ExecutionFailure { provenance: GoalSchedulerProvenance },
+    FinishCheck { provenance: GoalModelProvenance },
 }
 impl GoalBlockProvenance {
     // accessor: reason_kind()
@@ -12214,6 +12198,11 @@ impl Goal {
         self,
         need: GoalNeed,
         provenance: GoalSchedulerProvenance,
+    ) -> Result<Self, GoalTransitionError>;
+    pub fn block_finish_check(
+        self,
+        need: GoalNeed,
+        provenance: GoalModelProvenance,
     ) -> Result<Self, GoalTransitionError>;
     pub fn resume(
         self,
@@ -13563,7 +13552,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_template                           | 6                                |
 | domain: session_placement                          | 18                               |
 | domain: git_remote                                 | 4 (+2 free fn)                   |
-| domain: session                                    | 25                               |
+| domain: session                                    | 22                               |
 | domain: session_delegation                         | 37 (+3 free fn)                  |
 | domain: session_lifecycle                          | 23                               |
 | domain: session_lifecycle_command                  | 9                                |
@@ -13598,7 +13587,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
 | domain: workspace_instruction                      | 18                               |
-| **signalbox-domain total**                         | **896 (+12 free fn)**            |
+| **signalbox-domain total**                         | **893 (+12 free fn)**            |
 | application: repo_watch_operations                 | 33 (+2 free fn) (incl. 1 trait)  |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: attention                             | 16 (+6 free fn) (incl. 1 trait)  |

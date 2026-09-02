@@ -2082,6 +2082,7 @@ pub(crate) const fn goal_blocked_reason_to_str(value: GoalBlockedReasonKind) -> 
         GoalBlockedReasonKind::ExternalChangeRequired => "external_change_required",
         GoalBlockedReasonKind::AuthorizationRequired => "authorization_required",
         GoalBlockedReasonKind::ExecutionFailure => "execution_failure",
+        GoalBlockedReasonKind::FinishCheckFailed => "finish_check_failed",
     }
 }
 
@@ -2091,6 +2092,7 @@ pub(crate) fn goal_blocked_reason_from_str(value: &str) -> Option<GoalBlockedRea
         "external_change_required" => Some(GoalBlockedReasonKind::ExternalChangeRequired),
         "authorization_required" => Some(GoalBlockedReasonKind::AuthorizationRequired),
         "execution_failure" => Some(GoalBlockedReasonKind::ExecutionFailure),
+        "finish_check_failed" => Some(GoalBlockedReasonKind::FinishCheckFailed),
         _ => None,
     }
 }

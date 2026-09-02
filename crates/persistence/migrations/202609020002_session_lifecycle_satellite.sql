@@ -251,7 +251,8 @@ CREATE TABLE session_lifecycle (
             'user_input_required'::text,
             'external_change_required'::text,
             'authorization_required'::text,
-            'execution_failure'::text
+            'execution_failure'::text,
+            'finish_check_failed'::text
         ]))
     ),
 

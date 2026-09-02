@@ -6,13 +6,12 @@ use std::error::Error;
 
 use crate::*;
 use signalbox_domain::{
-    CommandPrincipal, CreateSessionRejection, DescendantTerminationScope, FinishCondition,
-    FinishConditionStatement, GoalCommandRejection, GoalCommandResult, GoalStatement,
-    GoalUserAction, GoalUserCommand, LifecycleActor, ModuleDispatch, RecordedSessionCreation,
-    RepoWatchDispatchId, SessionCreationProvenance, SessionLifecycleApplication,
-    SessionLifecycleCommand, SessionLifecycleCommandRejection, SessionLifecycleCommandResult,
-    SessionLifecycleOperation, SessionLifecycleState, SessionOwnership, SessionTerminalOutcome,
-    StartGate, StopStickiness,
+    CommandPrincipal, DescendantTerminationScope, FinishCondition, FinishConditionStatement,
+    GoalCommandRejection, GoalCommandResult, GoalStatement, GoalUserAction, GoalUserCommand,
+    LifecycleActor, ModuleDispatch, RepoWatchDispatchId, SessionCreationProvenance,
+    SessionLifecycleApplication, SessionLifecycleCommand, SessionLifecycleCommandRejection,
+    SessionLifecycleCommandResult, SessionLifecycleOperation, SessionLifecycleState,
+    SessionOwnership, SessionTerminalOutcome, StartGate, StopStickiness,
 };
 use signalbox_persistence::{
     create_session::CreateSessionHandlingOutcome,
@@ -355,7 +354,7 @@ async fn a_refused_command_records_its_rejection() -> Result<(), Box<dyn Error>>
 /// replays; an owned creation declaring its condition carries it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn an_owned_creation_needs_no_finish_condition() -> Result<(), Box<dyn Error>> {
+async fn creation_admits_every_lifecycle_shape() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     let creation = |seed: u128, gate, ownership, condition| {
@@ -400,40 +399,18 @@ async fn an_owned_creation_needs_no_finish_condition() -> Result<(), Box<dyn Err
         CreateSessionHandlingOutcome::Applied(_)
     ));
     assert_eq!(replay, unconditioned);
-    assert_eq!(
-        held,
-        CreateSessionHandlingOutcome::Rejected(CreateSessionRejection::HeldGateRequiresOwnership)
-    );
+    assert!(matches!(held, CreateSessionHandlingOutcome::Applied(_)));
     assert!(matches!(
         declared_creation,
         CreateSessionHandlingOutcome::Applied(_)
     ));
-    let created: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM session WHERE session_id = $1)")
-            .bind(creation_session(4).into_uuid())
-            .fetch_one(&pool)
-            .await?;
-    assert!(!created, "a rejected creation leaves no session row");
-    assert!(matches!(
-        repository
-            .load(DurableCommandId::from_uuid(Uuid::from_u128(SEED + 4)))
-            .await?,
-        Some(RecordedSessionCreation::Rejected {
-            rejection: CreateSessionRejection::HeldGateRequiresOwnership,
-            ..
-        })
-    ));
-    assert_eq!(
-        settlement(
-            &pool,
-            DurableCommandId::from_uuid(Uuid::from_u128(SEED + 4))
-        )
-        .await?,
-        (
-            String::from("rejected"),
-            Some(String::from("held_gate_requires_ownership"))
-        )
-    );
+    let held_gate: (String, bool) = sqlx::query_as(
+        "SELECT state_kind, start_gate_held FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(creation_session(4).into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(held_gate, (String::from("created"), true));
     let unconditioned = SessionLifecycleRepository::new(pool.clone())
         .load(creation_session(3))
         .await?
@@ -500,12 +477,6 @@ async fn a_held_start_gate_keeps_the_session_created() -> Result<(), Box<dyn Err
         .await?
         .expect("the session keeps its lifecycle row");
     assert_eq!(lifecycle.state(), SessionLifecycleState::Created);
-    let armed: (String,) =
-        sqlx::query_as("SELECT deadline_kind FROM session_deadline WHERE session_id = $1")
-            .bind(session.into_uuid())
-            .fetch_one(&pool)
-            .await?;
-    assert_eq!(armed.0, "start_gate");
 
     pool.close().await;
     drop(container);

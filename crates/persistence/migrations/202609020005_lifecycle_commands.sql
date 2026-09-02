@@ -302,21 +302,14 @@ END;
 $$;
 
 --
--- §7 create_session: `start_gate`, `ownership`, `finish_condition`, and the
--- recorded rejection.
+-- §7 create_session: `start_gate`, `ownership`, `finish_condition`.
 --
 
 ALTER TABLE create_session_command
     ADD COLUMN start_gate text NOT NULL,
     ADD COLUMN ownership text NOT NULL,
     ADD COLUMN finish_condition_kind text,
-    ADD COLUMN finish_condition text,
-    ADD COLUMN rejection_kind text,
-    ALTER COLUMN created_session_id DROP NOT NULL;
-
--- Supersedes 202609010001_sessions.
-ALTER TABLE create_session_command
-    DROP CONSTRAINT create_session_command_result_kind_closed;
+    ADD COLUMN finish_condition text;
 
 ALTER TABLE create_session_command
     ADD CONSTRAINT create_session_command_start_gate_closed
@@ -330,21 +323,6 @@ ALTER TABLE create_session_command
         AND ((finish_condition IS NULL)
              OR ((octet_length(finish_condition) >= 1)
                  AND (octet_length(finish_condition) <= 1048576)))
-    ),
-    ADD CONSTRAINT create_session_command_result_shape CHECK (
-        ((result_kind = 'applied'::text)
-            AND (created_session_id IS NOT NULL)
-            AND (rejection_kind IS NULL))
-        OR ((result_kind = 'rejected'::text)
-            AND (created_session_id IS NULL)
-            AND (rejection_kind = ANY (ARRAY[
-                'held_gate_requires_ownership'::text
-            ])))
-    ),
-    -- The validations §7 states, as the shape an applied row must have.
-    ADD CONSTRAINT create_session_command_applied_admission CHECK (
-        (result_kind = 'rejected'::text)
-        OR ((start_gate = 'open'::text) OR (ownership = 'owned'::text))
     );
 
 --
@@ -428,60 +406,6 @@ $$;
 CREATE TRIGGER session_lifecycle_start_gate_holds
     BEFORE UPDATE OF state_kind ON session_lifecycle
     FOR EACH ROW EXECUTE FUNCTION hold_session_start_gate();
-
--- Supersedes 202609020002_session_lifecycle_satellite.
-CREATE OR REPLACE FUNCTION arm_session_deadline() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-    required text;
-    policy interval;
-    armed text;
-BEGIN
-    required := CASE
-        WHEN NEW.state_kind = 'created' AND NEW.start_gate_held THEN 'start_gate'
-        ELSE session_deadline_kind_for_state(NEW.state_kind, NEW.waiting_kind)
-    END;
-
-    IF NOT NEW.owned OR required IS NULL THEN
-        DELETE FROM session_deadline WHERE session_id = NEW.session_id;
-        RETURN NULL;
-    END IF;
-
-    SELECT deadline_kind INTO armed
-      FROM session_deadline
-     WHERE session_id = NEW.session_id;
-
-    IF TG_OP = 'UPDATE'
-       AND armed IS NOT DISTINCT FROM required
-       AND OLD.owned = NEW.owned
-       AND OLD.state_entered_at = NEW.state_entered_at
-    THEN
-        RETURN NULL;
-    END IF;
-
-    SELECT bound INTO policy
-      FROM session_lifecycle_bound
-     WHERE deadline_kind = required;
-
-    INSERT INTO session_deadline
-            (session_id, deadline_kind, on_expiry_kind, expires_at, armed_at)
-         VALUES (
-            NEW.session_id,
-            required,
-            session_deadline_expiry_for_kind(required),
-            CASE WHEN policy IS NULL THEN NULL ELSE statement_timestamp() + policy END,
-            statement_timestamp()
-         )
-    ON CONFLICT (session_id) DO UPDATE
-       SET deadline_kind = EXCLUDED.deadline_kind,
-           on_expiry_kind = EXCLUDED.on_expiry_kind,
-           expires_at = EXCLUDED.expires_at,
-           armed_at = EXCLUDED.armed_at;
-
-    RETURN NULL;
-END;
-$$;
 
 --
 -- A goal command on a session whose closure is pending is refused
@@ -623,6 +547,110 @@ ALTER TABLE goal_event
             'commissioned_dispatch'::text
         ])))
     );
+
+--
+-- A failing finish check blocks the goal with its result as the need (§2).
+-- Supersedes 202609010006_goals.
+--
+
+ALTER TABLE goal_event
+    DROP CONSTRAINT goal_event_blocked_reason_check;
+
+ALTER TABLE goal_event
+    ADD CONSTRAINT goal_event_blocked_reason_check CHECK (
+        (blocked_reason IS NULL)
+        OR (blocked_reason = ANY (ARRAY[
+            'user_input_required'::text,
+            'external_change_required'::text,
+            'authorization_required'::text,
+            'execution_failure'::text,
+            'finish_check_failed'::text
+        ]))
+    );
+
+-- Supersedes 202609010006_goals.
+CREATE OR REPLACE FUNCTION enforce_goal_model_declaration_request() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    stored_tool_name text;
+    stored_arguments_kind text;
+    stored_arguments jsonb;
+    declared_text text;
+    expected_arguments jsonb;
+BEGIN
+    IF NEW.model_tool_request_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    IF NOT goal_event_names_current_goal_turn(
+        NEW.session_id, NEW.generation, NEW.model_turn_id
+    ) THEN
+        RAISE EXCEPTION 'goal model event must name the current goal turn'
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'goal_event_model_current_turn';
+    END IF;
+
+    SELECT
+        request.tool_name,
+        request.arguments_kind,
+        CASE
+            WHEN request.arguments_kind = 'json'
+                THEN request.arguments_text::jsonb
+        END,
+        declaration.assistant_text_value
+      INTO stored_tool_name, stored_arguments_kind, stored_arguments,
+           declared_text
+      FROM tool_request AS request
+      JOIN semantic_transcript_entry AS tool_use
+        ON tool_use.source_session_id = request.session_id
+       AND tool_use.producing_model_call_id = request.producing_model_call_id
+       AND tool_use.payload_kind = 'assistant_tool_use'
+       AND tool_use.assistant_tool_request_id = request.request_id
+      JOIN semantic_transcript_entry AS declaration
+        ON declaration.source_session_id = tool_use.source_session_id
+       AND declaration.producing_model_call_id = tool_use.producing_model_call_id
+       AND declaration.payload_kind = 'assistant_text'
+       AND declaration.assistant_response_part_ordinal + 1 =
+           tool_use.assistant_response_part_ordinal
+     WHERE request.request_id = NEW.model_tool_request_id
+       AND request.session_id = NEW.session_id
+       AND request.turn_id = NEW.model_turn_id
+       AND NOT EXISTS (
+           SELECT 1
+             FROM semantic_transcript_entry AS later_part
+            WHERE later_part.source_session_id = tool_use.source_session_id
+              AND later_part.producing_model_call_id =
+                  tool_use.producing_model_call_id
+              AND later_part.assistant_response_part_ordinal >
+                  tool_use.assistant_response_part_ordinal
+       );
+
+    -- A failing finish check blocks the goal from an `achieved` declaration:
+    -- the request declared achievement, and the need is the check's result.
+    expected_arguments := CASE
+        WHEN NEW.event_kind = 'achieved'
+          OR (NEW.event_kind = 'blocked' AND NEW.blocked_reason = 'finish_check_failed')
+            THEN jsonb_build_object('transition', 'achieved')
+        WHEN NEW.event_kind = 'blocked' THEN jsonb_build_object(
+            'transition', 'blocked',
+            'reason', NEW.blocked_reason
+        )
+    END;
+
+    IF stored_tool_name IS DISTINCT FROM 'goal_declare'
+        OR stored_arguments_kind IS DISTINCT FROM 'json'
+        OR stored_arguments IS DISTINCT FROM expected_arguments
+        OR (NOT (NEW.event_kind = 'blocked' AND NEW.blocked_reason = 'finish_check_failed')
+            AND declared_text IS DISTINCT FROM COALESCE(NEW.report, NEW.need))
+    THEN
+        RAISE EXCEPTION 'goal model event lacks its exact declaration request'
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'goal_event_model_declaration_request';
+    END IF;
+    RETURN NEW;
+END;
+$$;
 
 --
 -- §10: a closure retires the queued turns it strands.

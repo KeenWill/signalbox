@@ -4594,7 +4594,7 @@ async fn attach_and_declare(
 /// the goal pursuing, and leaves its detail for the failure that follows.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn a_failing_finish_check_leaves_pursuit_live() -> Result<(), Box<dyn Error>> {
+async fn a_failing_finish_check_blocks_the_goal_with_its_result() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -4613,17 +4613,23 @@ async fn a_failing_finish_check_leaves_pursuit_live() -> Result<(), Box<dyn Erro
         )
         .await?;
 
-    assert!(matches!(
-        outcome,
-        GoalTransitionOutcome::FinishCheckFailed { ref detail }
-            if detail == "two review threads are unresolved"
-    ));
+    assert_applied_transition(outcome);
     let goal = repository
         .load_goal(session(SESSION))
         .await?
         .expect("the goal stays attached");
-    assert_eq!(*goal.current().state(), GoalState::Pursuing);
-    assert_eq!(goal.events().len(), 1, "no achievement event was appended");
+    assert_eq!(
+        *goal.current().state(),
+        GoalState::Blocked {
+            reason: signalbox_domain::GoalBlockedReasonKind::FinishCheckFailed,
+            need: GoalNeed::try_new(String::from("two review threads are unresolved"))?,
+        }
+    );
+    assert_eq!(
+        goal.events().len(),
+        2,
+        "the failing check appended its block"
+    );
 
     pool.close().await;
     drop(container);

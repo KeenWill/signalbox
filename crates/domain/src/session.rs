@@ -440,20 +440,6 @@ impl CreateSession {
         self.finish_condition.as_ref()
     }
 
-    /// The §7 validations a creation records as an authoritative rejection.
-    pub const fn admission(&self) -> Result<(), CreateSessionRejection> {
-        match (
-            self.start_gate,
-            self.ownership,
-            self.finish_condition.is_some(),
-        ) {
-            (crate::StartGate::Held, crate::SessionOwnership::Unmonitored, _) => {
-                Err(CreateSessionRejection::HeldGateRequiresOwnership)
-            }
-            (_, _, _) => Ok(()),
-        }
-    }
-
     /// Establishes the first immutable defaults version this creation
     /// installs.
     ///
@@ -1128,62 +1114,6 @@ impl SessionReconstitutionError {
     /// Returns the complete unchanged input and failure.
     pub fn into_parts(self) -> (SessionReconstitutionInput, SessionReconstitutionFailure) {
         (*self.input, self.failure)
-    }
-}
-
-/// Why a claimed creation recorded a rejection instead of a session.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum CreateSessionRejection {
-    /// A held start gate on an unmonitored creation.
-    HeldGateRequiresOwnership,
-}
-
-/// The recorded result of one claimed creation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CreateSessionResult {
-    /// The creation applied.
-    Applied(CreateSessionAppliedResult),
-    /// The creation was refused with a closed reason.
-    Rejected(CreateSessionRejection),
-}
-
-/// One claimed creation reconstructed from its durable record.
-#[derive(Clone, Debug)]
-pub enum RecordedSessionCreation {
-    /// The command applied and created its session.
-    Applied(Box<ReconstitutedSessionCreation>),
-    /// The command recorded a rejection and created nothing.
-    Rejected {
-        /// The reconstructed canonical command.
-        command: Box<CreateSession>,
-        /// The recorded reason.
-        rejection: CreateSessionRejection,
-    },
-}
-
-impl RecordedSessionCreation {
-    /// Borrows the applied creation, or `None` for a recorded rejection.
-    pub const fn applied(&self) -> Option<&ReconstitutedSessionCreation> {
-        match self {
-            Self::Applied(recorded) => Some(recorded),
-            Self::Rejected { .. } => None,
-        }
-    }
-
-    /// Borrows the reconstructed canonical command.
-    pub const fn command(&self) -> &CreateSession {
-        match self {
-            Self::Applied(recorded) => recorded.command(),
-            Self::Rejected { command, .. } => command,
-        }
-    }
-
-    /// Returns the recorded result.
-    pub const fn result(&self) -> CreateSessionResult {
-        match self {
-            Self::Applied(recorded) => CreateSessionResult::Applied(recorded.applied_result()),
-            Self::Rejected { rejection, .. } => CreateSessionResult::Rejected(*rejection),
-        }
     }
 }
 

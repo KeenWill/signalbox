@@ -7,10 +7,10 @@ use serde_json::Value;
 use signalbox_application::{CreateSessionOutcome, CreateSessionTransaction};
 use signalbox_domain::{
     CommandPrincipal, CommissionedDispatchId, CreateSessionAppliedResult,
-    CreateSessionReconstitutionFailure, CreateSessionReconstitutionInput, CreateSessionRejection,
-    CreateSessionResult, DirectModelSelection, DispatchingModule, DurableCommandId, ModelAlias,
-    ModelSelectionRequest, ModuleDispatch, PreparedCreateSession, RecordedSessionCreation,
-    RepoWatchDispatchId, RootPlacementGlobalReadIntent, SessionConfigurationDefaults,
+    CreateSessionReconstitutionFailure, CreateSessionReconstitutionInput, DirectModelSelection,
+    DispatchingModule, DurableCommandId, ModelAlias, ModelSelectionRequest, ModuleDispatch,
+    PreparedCreateSession, ReconstitutedSessionCreation, RepoWatchDispatchId,
+    RootPlacementGlobalReadIntent, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
     SessionOwnership, SessionPlacement, SessionPlacementEventKind, SessionPlacementPath,
     SessionPlacementVersion, SessionTemplateContentDigest, SessionTemplateName,
@@ -41,15 +41,12 @@ const PLACEMENT_FROM_STORAGE_VERSION: i16 = 6;
 pub(crate) const MODEL_SETTINGS_FROM_STORAGE_VERSION: i16 = 7;
 const NO_ANCESTRY: &str = "none";
 const APPLIED: &str = "applied";
-const REJECTED: &str = "rejected";
 
 /// The committed outcome of handling one prepared creation command.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CreateSessionHandlingOutcome {
     /// First handling or equal replay returns the recorded applied result.
     Applied(CreateSessionAppliedResult),
-    /// First handling or equal replay returns the recorded rejection (§7).
-    Rejected(CreateSessionRejection),
     /// The identifier is already bound to a structurally different payload.
     ConflictingReuse {
         /// The user-global identifier whose earlier meaning is retained.
@@ -307,19 +304,6 @@ impl CreateSessionRepository {
             return Ok(outcome);
         }
 
-        if let Err(rejection) = prepared.command().admission() {
-            if let Err(error) =
-                insert_rejected(&mut transaction, prepared.command(), rejection).await
-            {
-                transaction.rollback().await?;
-                return Err(error);
-            }
-            transaction
-                .commit()
-                .await
-                .map_err(CreateSessionRepositoryError::from_commit_failure)?;
-            return Ok(CreateSessionHandlingOutcome::Rejected(rejection));
-        }
         let result = prepared.applied_result();
         if let Err(error) = insert_prepared(&mut transaction, prepared, &self.credential_pin).await
         {
@@ -338,7 +322,7 @@ impl CreateSessionRepository {
     pub async fn load(
         &self,
         command_id: DurableCommandId,
-    ) -> Result<Option<RecordedSessionCreation>, CreateSessionRepositoryError> {
+    ) -> Result<Option<ReconstitutedSessionCreation>, CreateSessionRepositoryError> {
         let mut connection = self.pool.acquire().await?;
         match inspect_registry(&mut connection, command_id).await? {
             None => Ok(None),
@@ -384,9 +368,6 @@ impl CreateSessionTransaction for CreateSessionRepository {
 
         Ok(match outcome {
             CreateSessionHandlingOutcome::Applied(result) => CreateSessionOutcome::Applied(result),
-            CreateSessionHandlingOutcome::Rejected(rejection) => {
-                CreateSessionOutcome::Rejected(rejection)
-            }
             CreateSessionHandlingOutcome::ConflictingReuse { command_id } => {
                 CreateSessionOutcome::ConflictingReuse { command_id }
             }
@@ -396,15 +377,10 @@ impl CreateSessionTransaction for CreateSessionRepository {
 
 fn existing_outcome(
     prepared: &PreparedCreateSession,
-    recorded: &RecordedSessionCreation,
+    recorded: &ReconstitutedSessionCreation,
 ) -> CreateSessionHandlingOutcome {
     if prepared.command() == recorded.command() {
-        match recorded.result() {
-            CreateSessionResult::Applied(result) => CreateSessionHandlingOutcome::Applied(result),
-            CreateSessionResult::Rejected(rejection) => {
-                CreateSessionHandlingOutcome::Rejected(rejection)
-            }
-        }
+        CreateSessionHandlingOutcome::Applied(recorded.applied_result())
     } else {
         CreateSessionHandlingOutcome::ConflictingReuse {
             command_id: prepared.command().command_id(),
@@ -439,11 +415,6 @@ pub(crate) async fn insert_fresh_prepared(
     principal: CommandPrincipal,
 ) -> Result<(), CreateSessionRepositoryError> {
     let command_id = prepared.command().command_id();
-    if prepared.command().admission().is_err() {
-        return Err(
-            CreateSessionCorruption::Inconsistent("fresh dispatch creation inadmissible").into(),
-        );
-    }
     if !claim_create_session_command(connection, command_id, principal).await? {
         return Err(CreateSessionCorruption::Inconsistent(
             "fresh repository-watch command identity collided",
@@ -604,12 +575,7 @@ pub(crate) async fn insert_prepared(
     .execute(&mut *connection)
     .await?;
 
-    insert_command_record(
-        connection,
-        command,
-        CreateSessionResult::Applied(prepared.applied_result()),
-    )
-    .await?;
+    insert_command_record(connection, command, prepared.applied_result()).await?;
 
     outbox::append(
         connection,
@@ -626,53 +592,19 @@ pub(crate) async fn insert_prepared(
 
 /// Records a claimed creation that §7 refuses: the typed row and its receipt,
 /// and no session row.
-async fn insert_rejected(
-    connection: &mut PgConnection,
-    command: &signalbox_domain::CreateSession,
-    rejection: CreateSessionRejection,
-) -> Result<(), CreateSessionRepositoryError> {
-    insert_command_record(
-        connection,
-        command,
-        CreateSessionResult::Rejected(rejection),
-    )
-    .await?;
-    outbox::append(
-        connection,
-        outbox::OutboxEvent::CommandSettled {
-            session: None,
-            command: command.command_id(),
-            result: outbox::CommandSettlementOutbox::Rejected {
-                kind: create_session_rejection_to_str(rejection),
-            },
-        },
-    )
-    .await?;
-    Ok(())
-}
-
 /// Writes the typed command record. `session_created` is an applied creation's
 /// receipt; a rejection appends `command_settled`.
 async fn insert_command_record(
     connection: &mut PgConnection,
     command: &signalbox_domain::CreateSession,
-    result: CreateSessionResult,
+    applied: CreateSessionAppliedResult,
 ) -> Result<(), CreateSessionRepositoryError> {
     let cause = command.provenance().cause();
     let (dispatching_module, dispatch_ref) = encode_module_dispatch(cause);
     let (placement_path, root_intent) = encode_placement(command.placement());
     let command_selection = encode_selection(command.initial_configuration_defaults().model());
     let (finish_kind, finish_statement) = finish_condition_columns(command.finish_condition());
-    let (result_kind, created_session, rejection_kind) = match result {
-        CreateSessionResult::Applied(applied) => {
-            (APPLIED, Some(session_id_to_uuid(applied.session())), None)
-        }
-        CreateSessionResult::Rejected(rejection) => (
-            REJECTED,
-            None,
-            Some(create_session_rejection_to_str(rejection)),
-        ),
-    };
+    let created_session = session_id_to_uuid(applied.session());
     sqlx::query(
         "INSERT INTO create_session_command
             (command_id, command_kind, storage_version,
@@ -683,10 +615,9 @@ async fn insert_command_record(
              placement_path, root_global_read_intent,
              result_kind, created_session_id,
              dispatching_module, dispatch_ref,
-             start_gate, ownership, finish_condition_kind, finish_condition,
-             rejection_kind)
+             start_gate, ownership, finish_condition_kind, finish_condition)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-                 $19, $20, $21, $22, $23, $24, $25)",
+                 $19, $20, $21, $22, $23, $24)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(COMMAND_KIND)
@@ -725,7 +656,7 @@ async fn insert_command_record(
     )
     .bind(placement_path)
     .bind(root_intent)
-    .bind(result_kind)
+    .bind(APPLIED)
     .bind(created_session)
     .bind(dispatching_module)
     .bind(dispatch_ref)
@@ -733,7 +664,6 @@ async fn insert_command_record(
     .bind(ownership_to_str(command.ownership()))
     .bind(finish_kind)
     .bind(finish_statement)
-    .bind(rejection_kind)
     .execute(&mut *connection)
     .await?;
     Ok(())
@@ -769,19 +699,6 @@ fn ownership_from_str(value: &str) -> Option<SessionOwnership> {
     }
 }
 
-const fn create_session_rejection_to_str(value: CreateSessionRejection) -> &'static str {
-    match value {
-        CreateSessionRejection::HeldGateRequiresOwnership => "held_gate_requires_ownership",
-    }
-}
-
-fn create_session_rejection_from_str(value: &str) -> Option<CreateSessionRejection> {
-    match value {
-        "held_gate_requires_ownership" => Some(CreateSessionRejection::HeldGateRequiresOwnership),
-        _ => None,
-    }
-}
-
 struct EncodedSelection {
     kind: &'static str,
     direct: Option<Uuid>,
@@ -806,7 +723,7 @@ fn encode_selection(selection: ModelSelectionRequest) -> EncodedSelection {
 async fn load_from_connection(
     connection: &mut PgConnection,
     command_id: DurableCommandId,
-) -> Result<Option<RecordedSessionCreation>, CreateSessionRepositoryError> {
+) -> Result<Option<ReconstitutedSessionCreation>, CreateSessionRepositoryError> {
     let row = sqlx::query(
         "SELECT
             d.command_kind AS registry_kind,
@@ -830,7 +747,6 @@ async fn load_from_connection(
             c.placement_path AS command_placement_path,
             c.root_global_read_intent AS command_root_intent,
             c.result_kind,
-            c.rejection_kind,
             c.start_gate,
             c.ownership,
             c.finish_condition_kind,
@@ -894,7 +810,7 @@ async fn load_from_connection(
 fn decode_complete(
     row: PgRow,
     command_id: DurableCommandId,
-) -> Result<RecordedSessionCreation, CreateSessionRepositoryError> {
+) -> Result<ReconstitutedSessionCreation, CreateSessionRepositoryError> {
     require_spelling(&row, "registry_kind", COMMAND_KIND)?;
     let registry_version = require_supported_version(&row, "registry_version")?;
     let _: Uuid = required(&row, "typed_command_id")?;
@@ -988,22 +904,6 @@ fn decode_complete(
         finish_condition,
     );
     let result_kind: String = required(&row, "result_kind")?;
-    if result_kind == REJECTED {
-        let rejection: String = required(&row, "rejection_kind")?;
-        let rejection = create_session_rejection_from_str(&rejection).ok_or(
-            CreateSessionCorruption::Unsupported {
-                field: "rejection_kind",
-                value: rejection,
-            },
-        )?;
-        if command.admission() != Err(rejection) {
-            return Err(CreateSessionCorruption::Inconsistent("recorded rejection").into());
-        }
-        return Ok(RecordedSessionCreation::Rejected {
-            command: Box::new(command),
-            rejection,
-        });
-    }
     if result_kind != APPLIED {
         return Err(CreateSessionCorruption::Unsupported {
             field: "result_kind",
@@ -1115,7 +1015,6 @@ fn decode_complete(
         VersionedSessionPlacement::reconstitute(stored_placement_version, stored_placement),
     )
     .reconstitute()
-    .map(|recorded| RecordedSessionCreation::Applied(Box::new(recorded)))
     .map_err(|error| CreateSessionCorruption::Domain(error.failure()).into())
 }
 

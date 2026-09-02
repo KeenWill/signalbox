@@ -45,7 +45,6 @@ use signalbox_conversation_import_codex::{
 use signalbox_domain::{
     AcceptedInputId, Actor, BranchName, CancelledModelCallTurnIdentities, CommandPrincipal,
     CommitSha, ContextCompactionId, ContextCompactionTokenUsage, ContextFrontierId,
-    CreateSessionRejection as DomainCreateSessionRejection, CreateSessionResult,
     DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestRejectedResult,
     DecideToolRequestResult, DelegationMessageDirection as DomainDelegationMessageDirection,
     DelegationOutcomeKind as DomainDelegationOutcomeKind,
@@ -67,7 +66,7 @@ use signalbox_domain::{
     ModelSettingsPrecedence as DomainModelSettingsPrecedence, OverrideDeniedToolRequest,
     OverrideDeniedToolRequestRejectedResult, OverrideDeniedToolRequestResult,
     ParentTerminationCommandSource, PerInputConfigurationChoices, PullRequestNumber,
-    ReasoningLevel as DomainReasoningLevel, RecordedSessionCreation,
+    ReasoningLevel as DomainReasoningLevel, ReconstitutedSessionCreation,
     ReplaceSessionDefaults as DomainReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
     ReplaceSessionDefaultsResult, ReplaceSessionMetadataRejectedResult,
     ReplaceSessionMetadataResult, RepositorySlug, ReviewChangeRequestNumber, ReviewConfidence,
@@ -179,8 +178,7 @@ use signalbox_process_protocol::{
     ConversationCursor as WireConversationCursor, ConversationImportFormat,
     ConversationImportRejectionClass, ConversationOrigin as WireConversationOrigin,
     ConversationOriginFilter as WireConversationOriginFilter,
-    ConversationSummary as WireConversationSummary,
-    CreateSessionRejection as WireCreateSessionRejection, CurrentModelCall, CurrentModelCallState,
+    ConversationSummary as WireConversationSummary, CurrentModelCall, CurrentModelCallState,
     DelegationOutcome as WireDelegationOutcome, DelegationPolicy as WireDelegationPolicy,
     DelegationProvenance as WireDelegationProvenance, DelegationReason as WireDelegationReason,
     DelegationToolRequestState as WireDelegationToolRequestState,
@@ -9136,51 +9134,26 @@ async fn write_recorded_creation<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
-    recorded: &RecordedSessionCreation,
+    recorded: &ReconstitutedSessionCreation,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
-    match recorded.result() {
-        CreateSessionResult::Applied(result) => {
-            write_message(
-                writer,
-                version,
-                request_id,
-                ServerMessage::SessionCreated {
-                    session_id: wire_uuid(result.session().into_uuid()),
-                    model_settings: wire_model_settings(
-                        recorded
-                            .command()
-                            .initial_configuration_defaults()
-                            .model_settings(),
-                    ),
-                },
-            )
-            .await
-        }
-        CreateSessionResult::Rejected(reason) => {
-            write_error(
-                writer,
-                version,
-                request_id,
-                ProtocolError::rejected(RejectionDetail::CreateSessionRejected {
-                    reason: wire_create_session_rejection(reason),
-                }),
-            )
-            .await
-        }
-    }
-}
-
-const fn wire_create_session_rejection(
-    value: DomainCreateSessionRejection,
-) -> WireCreateSessionRejection {
-    match value {
-        DomainCreateSessionRejection::HeldGateRequiresOwnership => {
-            WireCreateSessionRejection::HeldGateRequiresOwnership
-        }
-    }
+    write_message(
+        writer,
+        version,
+        request_id,
+        ServerMessage::SessionCreated {
+            session_id: wire_uuid(recorded.applied_result().session().into_uuid()),
+            model_settings: wire_model_settings(
+                recorded
+                    .command()
+                    .initial_configuration_defaults()
+                    .model_settings(),
+            ),
+        },
+    )
+    .await
 }
 
 async fn handle_create_session<Writer>(
@@ -10079,17 +10052,6 @@ where
                     session_id: wire_uuid(result.session().into_uuid()),
                     model_settings: wire_model_settings(model_settings),
                 },
-            )
-            .await
-        }
-        Ok(CreateSessionOutcome::Rejected(reason)) => {
-            write_error(
-                writer,
-                version,
-                request_id,
-                ProtocolError::rejected(RejectionDetail::CreateSessionRejected {
-                    reason: wire_create_session_rejection(reason),
-                }),
             )
             .await
         }
@@ -16217,7 +16179,8 @@ fn wire_goal_event(event: &GoalEvent) -> Result<GoalHistoryEvent, ProcessConnect
 
 fn wire_goal_blocked_provenance(value: GoalBlockProvenance) -> WireGoalBlockedProvenance {
     match value {
-        GoalBlockProvenance::Model { provenance, .. } => WireGoalBlockedProvenance::Model {
+        GoalBlockProvenance::Model { provenance, .. }
+        | GoalBlockProvenance::FinishCheck { provenance } => WireGoalBlockedProvenance::Model {
             turn_id: wire_uuid(provenance.turn().into_uuid()),
             tool_request_id: wire_uuid(provenance.tool_request().into_uuid()),
         },
@@ -16239,6 +16202,7 @@ const fn wire_goal_blocked_reason(value: GoalBlockedReasonKind) -> WireGoalBlock
             WireGoalBlockedReason::AuthorizationRequired
         }
         GoalBlockedReasonKind::ExecutionFailure => WireGoalBlockedReason::ExecutionFailure,
+        GoalBlockedReasonKind::FinishCheckFailed => WireGoalBlockedReason::FinishCheckFailed,
     }
 }
 

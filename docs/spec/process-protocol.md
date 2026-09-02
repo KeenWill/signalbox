@@ -376,10 +376,8 @@ that variant.
 `create_session` and `create_session_from_template` accept an optional
 `lifecycle` object: `start_gate` (`open`, the default, or `held`), `ownership`
 (`unmonitored`, the default, or `owned`), and `finish_condition` (string). A
-held gate requires `owned`; the violation is the recorded rejection
-`create_session_rejected`. A held gate is durable on the lifecycle satellite:
-the session stays `created` and arms the start-gate deadline; `release_start`
-lands with the deadline engine.
+held gate is durable on the lifecycle satellite: the session stays `created` and
+arms the start-gate deadline; `release_start` lands with the deadline engine.
 
 | Type                                 | Additional required members                                                                                                | Meaning                                                                  |
 | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
@@ -1053,8 +1051,7 @@ request, or blob-upload transport request — `create_session`,
 - `session_lifecycle_command_applied` with `session_id` and `effect` (`closed`,
   `closure_pending { live_turn_id }`, `resumed`, `ownership_changed`); a
   recorded rejection is `rejected` with
-  `session_lifecycle_command_rejected { session_id, reason }`, and a rejected
-  creation is `rejected` with `create_session_rejected { reason }`;
+  `session_lifecycle_command_rejected { session_id, reason }`;
 - `session_commissioned` with the created `session_id` and the `dispatch_id` of
   the append-only recorded fence; an equal replay of the same command identity
   re-emits the committed receipt, and the same identity naming a different

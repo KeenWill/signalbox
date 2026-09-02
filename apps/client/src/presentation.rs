@@ -3593,6 +3593,7 @@ const fn goal_blocked_reason_label(reason: GoalBlockedReason) -> &'static str {
         GoalBlockedReason::ExternalChangeRequired => "external_change_required",
         GoalBlockedReason::AuthorizationRequired => "authorization_required",
         GoalBlockedReason::ExecutionFailure => "execution_failure",
+        GoalBlockedReason::FinishCheckFailed => "finish_check_failed",
     }
 }
 

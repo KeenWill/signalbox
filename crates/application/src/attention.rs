@@ -252,6 +252,8 @@ pub enum AttentionBlockedReason {
     ExternalChangeRequired,
     AuthorizationRequired,
     ExecutionFailure,
+    /// A failing finish check blocked the goal; the need is its result.
+    FinishCheckFailed,
 }
 
 /// Current blocked-goal evidence.

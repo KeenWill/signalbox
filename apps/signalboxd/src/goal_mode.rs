@@ -396,20 +396,18 @@ impl ToolExecutor for GoalDeclarationExecutor {
         }
         .map_err(GoalDeclarationExecutorError::Repository)?;
         let evidence = match outcome {
-            GoalTransitionOutcome::Applied(_) => {
-                ToolExecutorEvidence::CompletedText(String::from(GOAL_DECLARE_RESULT))
-            }
+            GoalTransitionOutcome::Applied(event) => match event.kind() {
+                GoalEventKind::Blocked {
+                    block: GoalBlockProvenance::FinishCheck { .. },
+                    need,
+                } => ToolExecutorEvidence::CompletedText(
+                    serde_json::json!({ "status": "blocked", "need": need.as_str() }).to_string(),
+                ),
+                _ => ToolExecutorEvidence::CompletedText(String::from(GOAL_DECLARE_RESULT)),
+            },
             GoalTransitionOutcome::SessionClosing => ToolExecutorEvidence::KnownFailed {
                 detail: Some(self.rejected.clone()),
             },
-            GoalTransitionOutcome::FinishCheckFailed { detail } => {
-                ToolExecutorEvidence::KnownFailed {
-                    detail: Some(
-                        ToolExecutionErrorDetail::try_new(format!("finish check failed: {detail}"))
-                            .unwrap_or_else(|_| self.rejected.clone()),
-                    ),
-                }
-            }
             GoalTransitionOutcome::GoalNotAttached
             | GoalTransitionOutcome::Rejected(_)
             | GoalTransitionOutcome::NotCurrentGoalTurn => ToolExecutorEvidence::KnownFailed {
@@ -1105,8 +1103,7 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
                 GoalTransitionOutcome::Applied(event) => {
                     adapter.arm_automatic_resumption(session, event.ordinal(), resumption);
                 }
-                GoalTransitionOutcome::FinishCheckFailed { .. }
-                | GoalTransitionOutcome::SessionClosing
+                GoalTransitionOutcome::SessionClosing
                 | GoalTransitionOutcome::GoalNotAttached
                 | GoalTransitionOutcome::Rejected(_)
                 | GoalTransitionOutcome::NotCurrentGoalTurn => {}
@@ -1324,7 +1321,7 @@ fn execution_failure_turn(event: &GoalEvent) -> Option<TurnId> {
         GoalEventKind::Commissioned { .. }
         | GoalEventKind::Resumed { .. }
         | GoalEventKind::Blocked {
-            block: GoalBlockProvenance::Model { .. },
+            block: GoalBlockProvenance::Model { .. } | GoalBlockProvenance::FinishCheck { .. },
             ..
         }
         | GoalEventKind::Achieved { .. }

@@ -1065,6 +1065,7 @@ fn decode_goal_block(
             AttentionBlockedReason::AuthorizationRequired
         }
         Some(GoalBlockedReasonKind::ExecutionFailure) => AttentionBlockedReason::ExecutionFailure,
+        Some(GoalBlockedReasonKind::FinishCheckFailed) => AttentionBlockedReason::FinishCheckFailed,
         None => {
             return Err(AttentionCorruption::Unsupported {
                 field: "goal blocked reason",

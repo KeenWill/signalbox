@@ -721,9 +721,6 @@ async fn create_session(pool: &PgPool, ids: OperationIds) -> HarnessResult<TurnF
         CreateSessionHandlingOutcome::Applied(_) => {
             return Err(error("session creation returned a different session"));
         }
-        CreateSessionHandlingOutcome::Rejected(_) => {
-            return Err(error("fresh session creation was rejected"));
-        }
         CreateSessionHandlingOutcome::ConflictingReuse { .. } => {
             return Err(error("fresh session creation identity conflicted"));
         }
