@@ -817,9 +817,10 @@ liveness task idle until shutdown, while no staleness bound leaves automatic
 ambiguity reconciliation active without stale-turn terminalization. At startup,
 either disabled value clears both guards' observation rows. When the scan
 interval remains enabled, a failed clear makes no decision and retries at the
-next scan before ambiguity reconciliation. Finite values pass checked
-constructors that reject zero, subsecond precision, and an unrepresentable timer
-range; no compiled policy value remains.
+next scan before ambiguity reconciliation. Without a scan interval, the clear
+retries until it succeeds or shutdown arrives, then the runtime idles. Finite
+values pass checked constructors that reject zero, subsecond precision, and an
+unrepresentable timer range; no compiled policy value remains.
 
 **Terminalization.** A due turn ends through the same committed failed-turn
 transition startup recovery commits, through the same reviewed statement and so

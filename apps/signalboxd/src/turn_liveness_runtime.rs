@@ -393,10 +393,21 @@ impl TurnLivenessRuntime {
     /// lap is process-local and carries no authority.
     pub async fn run(self, shutdown: watch::Receiver<bool>) {
         let Some(scan_interval) = self.scan_interval else {
-            if let Err(error) = self.repository.clear_guard_observations().await {
-                report_turn_liveness_failure(&error);
-            }
             let mut shutdown = shutdown;
+            loop {
+                let Some(clear_result) = complete_before_shutdown(
+                    &mut shutdown,
+                    self.repository.clear_guard_observations(),
+                )
+                .await
+                else {
+                    return;
+                };
+                match clear_result {
+                    Ok(()) => break,
+                    Err(error) => report_turn_liveness_failure(&error),
+                }
+            }
             while !*shutdown.borrow() && shutdown.changed().await.is_ok() {}
             return;
         };
