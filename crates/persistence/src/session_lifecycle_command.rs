@@ -325,6 +325,11 @@ async fn apply(
         }
         SessionLifecycleOperation::CloseFailed { cause } => {
             let standing = require_parked(&held.state())?;
+            if cause.is_some() && standing.is_none() {
+                return Err(ApplyError::Rejected(
+                    SessionLifecycleCommandRejection::StandingCauseMismatch,
+                ));
+            }
             let outcome = match cause.or(standing) {
                 Some(SessionFailureCause::Retryable(cause)) => {
                     SessionTerminalOutcome::FailedRetryable { cause }
@@ -442,7 +447,9 @@ async fn live_active_turn(
 ) -> Result<Option<TurnId>, sqlx::Error> {
     let turn: Option<Uuid> = sqlx::query_scalar(
         "SELECT turn_id FROM turn_lifecycle
-          WHERE session_id = $1 AND state_kind = 'active'
+          WHERE session_id = $1
+            AND state_kind = 'active'
+            AND NOT delegation_runtime_terminal
           ORDER BY acceptance_position DESC
           LIMIT 1",
     )

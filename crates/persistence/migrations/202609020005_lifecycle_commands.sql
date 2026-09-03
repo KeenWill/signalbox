@@ -1232,7 +1232,9 @@ BEGIN
 
     IF EXISTS (
         SELECT 1 FROM turn_lifecycle
-         WHERE session_id = subject AND state_kind = 'active'
+         WHERE session_id = subject
+           AND state_kind = 'active'
+           AND NOT delegation_runtime_terminal
     ) THEN
         RETURN;
     END IF;

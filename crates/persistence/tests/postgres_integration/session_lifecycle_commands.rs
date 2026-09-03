@@ -9,9 +9,10 @@ use signalbox_domain::{
     CommandPrincipal, DescendantTerminationScope, FinishCondition, FinishConditionStatement,
     GoalCommandRejection, GoalCommandResult, GoalStatement, GoalUserAction, GoalUserCommand,
     LifecycleActor, ModuleDispatch, RepoWatchDispatchId, SessionCreationProvenance,
-    SessionLifecycleApplication, SessionLifecycleCommand, SessionLifecycleCommandRejection,
-    SessionLifecycleCommandResult, SessionLifecycleOperation, SessionLifecycleState,
-    SessionOwnership, SessionTerminalOutcome, StartGate, StopStickiness,
+    SessionFailureCause, SessionLifecycleApplication, SessionLifecycleCommand,
+    SessionLifecycleCommandRejection, SessionLifecycleCommandResult, SessionLifecycleOperation,
+    SessionLifecycleState, SessionOwnership, SessionRetryableCause, SessionTerminalOutcome,
+    StartGate, StopStickiness,
 };
 use signalbox_persistence::{
     create_session::CreateSessionHandlingOutcome,
@@ -973,6 +974,58 @@ async fn attaching_a_goal_confers_ownership() -> Result<(), Box<dyn Error>> {
         SessionLifecycleCommandResult::Rejected(
             SessionLifecycleCommandRejection::OwnershipUnchanged
         )
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A `close_failed` naming a cause the park does not hold is the recorded
+/// rejection `standing_cause_mismatch`; only an omitted cause closes a
+/// causeless park as `failed_unknown`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_supplied_cause_over_a_causeless_park_is_rejected() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(25);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(25))
+        .await?;
+    park_by_statement(&pool, session).await?;
+    let invented = lifecycle_command(
+        25,
+        1,
+        session,
+        SessionLifecycleOperation::CloseFailed {
+            cause: Some(SessionFailureCause::Retryable(
+                SessionRetryableCause::ProviderTransient,
+            )),
+        },
+    );
+
+    let refused = recorded(&pool, invented.clone()).await?;
+
+    assert_eq!(
+        refused,
+        SessionLifecycleCommandResult::Rejected(
+            SessionLifecycleCommandRejection::StandingCauseMismatch
+        )
+    );
+    assert_eq!(
+        settlement(&pool, invented.command_id()).await?,
+        (
+            String::from("rejected"),
+            Some(String::from("standing_cause_mismatch"))
+        )
+    );
+    assert!(
+        SessionLifecycleRepository::new(pool.clone())
+            .load(session)
+            .await?
+            .expect("the session keeps its lifecycle row")
+            .state()
+            .is_parked()
     );
 
     pool.close().await;
