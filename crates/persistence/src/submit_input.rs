@@ -2864,6 +2864,19 @@ async fn prepare_against_locked_state(
                 .into(),
         );
     }
+    let pending_terminal = sqlx::query_scalar::<_, bool>(
+        "SELECT pending_terminal_outcome_kind IS NOT NULL
+           FROM session_lifecycle
+          WHERE session_id = $1",
+    )
+    .bind(session_id_to_uuid(command.session()))
+    .fetch_one(&mut *connection)
+    .await?;
+    if pending_terminal {
+        return Err(
+            SubmitInputCorruption::Inconsistent("session has a pending terminal handoff").into(),
+        );
+    }
 
     let pointer_exists =
         sqlx::query_scalar::<_, Decimal>(crate::lock_inventory::SUBMIT_INPUT_DEFAULTS)

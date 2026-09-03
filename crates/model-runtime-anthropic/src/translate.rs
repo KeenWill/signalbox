@@ -18,11 +18,10 @@ use crate::wire::{
 /// returned before a one-shot capability exists. Nothing has touched the
 /// network.
 ///
-/// A structured-output contract is realized as a forced tool call: the
-/// contract joins the declared tools and `tool_choice` forces it with
-/// parallel tool use disabled, so exactly one contract value returns.
-/// [`ModelOperation::validate`] reserves the contract name from ordinary
-/// tools before anything is sent.
+/// A structured-output contract joins the declared tools, `tool_choice` is
+/// `auto` with parallel tool use disabled, and the exactly-one demand travels
+/// as a model-visible instruction. [`ModelOperation::validate`] reserves the
+/// contract name from ordinary tools before anything is sent.
 #[cfg(test)]
 pub(crate) fn build_request<C>(
     operation: &ModelOperation<C>,
@@ -54,24 +53,10 @@ pub(crate) fn build_request_with_fast_mode<C>(
             detail: "Anthropic accepts at most four stop sequences".to_string(),
         });
     }
-    // serde_json serializes a non-finite f64 as null, and the provider only
-    // accepts sampling controls in the inclusive unit interval. Reject both
-    // cases during preparation rather than relying on a post-send 4xx.
-    for (name, value) in [
-        ("temperature", operation.settings.temperature),
-        ("top_p", operation.settings.top_p),
-    ] {
-        if let Some(value) = value
-            && !(0.0..=1.0).contains(&value)
-        {
-            return Err(PreparationFailure::UnsupportedOperation {
-                detail: format!("{name} must be a finite number from 0 through 1"),
-            });
-        }
-    }
+    validate_sampling_controls(&operation.settings)?;
     validate_tool_names(operation)?;
     validate_tool_history(&operation.messages)?;
-    let (tools, tool_choice) = tools_and_choice(operation)?;
+    let plan = tool_plan(operation)?;
     let effort = operation
         .settings
         .reasoning_level
@@ -86,17 +71,33 @@ pub(crate) fn build_request_with_fast_mode<C>(
             .iter()
             .map(wire_message)
             .collect::<Result<Vec<_>, _>>()?,
-        system: operation.system.clone(),
+        system: plan.system_text(operation.system.as_deref()),
         stop_sequences: operation.settings.stop_sequences.clone(),
-        temperature: operation.settings.temperature,
-        top_p: operation.settings.top_p,
         output_config: effort.map(|effort| OutputConfig { effort }),
         service_tier,
         speed: (request_fast_mode == FastMode::Enabled).then_some("fast"),
-        tools,
-        tool_choice,
+        tools: plan.tools,
+        tool_choice: plan.tool_choice,
         stream: operation.delivery == DeliveryMode::Streamed,
     })
+}
+
+/// Refuses a caller-set sampling control before any request is built.
+///
+/// The Messages API answers `temperature`, `top_p`, or `top_k` with a 400.
+/// Refusing keeps a dropped demand from reading as an honored one.
+fn validate_sampling_controls(settings: &ModelSettings) -> Result<(), PreparationFailure> {
+    for (name, value) in [
+        ("temperature", settings.temperature),
+        ("top_p", settings.top_p),
+    ] {
+        if value.is_some() {
+            return Err(PreparationFailure::UnsupportedOperation {
+                detail: format!("Anthropic accepts no {name} sampling control"),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn anthropic_effort(level: ReasoningLevel) -> Result<&'static str, PreparationFailure> {
@@ -117,10 +118,12 @@ fn anthropic_effort(level: ReasoningLevel) -> Result<&'static str, PreparationFa
 /// Validates the complete settings combination enforced by this adapter.
 ///
 /// Capability-set validation remains the caller's responsibility. This check
-/// owns cross-knob constraints that independent capability sets cannot state.
+/// owns the cross-knob constraints that independent capability sets cannot
+/// state, and the sampling controls this adapter enforces for no model.
 pub fn validate_model_settings(settings: &ModelSettings) -> Result<(), PreparationFailure> {
     settings.reasoning_level.map(anthropic_effort).transpose()?;
     anthropic_service_tier(settings, settings.fast_mode)?;
+    validate_sampling_controls(settings)?;
     Ok(())
 }
 
@@ -263,9 +266,73 @@ fn validate_tool_history(messages: &[ConversationMessage]) -> Result<(), Prepara
     Ok(())
 }
 
-fn tools_and_choice<C>(
-    operation: &ModelOperation<C>,
-) -> Result<(Option<Vec<WireTool>>, Option<WireToolChoice>), PreparationFailure> {
+/// What one operation's tools, tool choice, and contract translate into.
+struct ToolPlan {
+    /// The declared tools, including the contract tool when one exists.
+    tools: Option<Vec<WireTool>>,
+    /// The emitted `tool_choice`, always the `auto` shape when present.
+    tool_choice: Option<WireToolChoice>,
+    /// The adapter-authored instruction carrying a tool demand the provider
+    /// no longer accepts as a request control, when the operation makes one.
+    instruction: Option<String>,
+}
+
+impl ToolPlan {
+    /// Joins the caller's system text with this plan's instruction.
+    ///
+    /// The caller's text stays first and unmodified, the instruction follows
+    /// after a blank line.
+    fn system_text(&self, caller_system: Option<&str>) -> Option<String> {
+        match (caller_system, self.instruction.as_deref()) {
+            (Some(system), Some(instruction)) => Some(format!("{system}\n\n{instruction}")),
+            (Some(system), None) => Some(system.to_string()),
+            (None, Some(instruction)) => Some(instruction.to_string()),
+            (None, None) => None,
+        }
+    }
+}
+
+/// The instruction carrying a tool demand the provider dropped as a control.
+///
+/// `tool_choice` `any` and `tool` answer with a 400 on `/v1/messages` and on
+/// `/v1/messages/count_tokens`. The documented replacement is `auto` plus an
+/// instruction naming the expected tool, which is this text: model-visible
+/// prompt text, not a transport control.
+fn tool_instruction(demand: &ToolDemand) -> String {
+    match demand {
+        ToolDemand::Contract { name } => format!(
+            "Answer by calling the {name} tool exactly once, passing the answer as its \
+             arguments. Call no other tool and add no other reply."
+        ),
+        ToolDemand::AnyTool => {
+            "Answer by calling at least one of the declared tools rather than replying \
+             with text."
+                .to_string()
+        }
+        ToolDemand::Named { name } => format!(
+            "Answer by calling the {name} tool rather than replying with text. Call no \
+             other tool."
+        ),
+    }
+}
+
+/// The tool demand an operation makes that `tool_choice` can no longer carry.
+enum ToolDemand {
+    /// Exactly one proposal under the structured-output contract's name.
+    Contract {
+        /// The contract's reserved tool name.
+        name: String,
+    },
+    /// At least one proposal under any declared tool.
+    AnyTool,
+    /// A proposal under one caller-selected tool.
+    Named {
+        /// The selected tool's name.
+        name: String,
+    },
+}
+
+fn tool_plan<C>(operation: &ModelOperation<C>) -> Result<ToolPlan, PreparationFailure> {
     for tool in &operation.tools {
         if !crate::wire::raw_json_is_object(&tool.input_schema) {
             return Err(PreparationFailure::UnsupportedOperation {
@@ -296,33 +363,47 @@ fn tools_and_choice<C>(
         })
         .collect();
     if let Some(contract) = &operation.output_contract {
+        let name = contract.name.as_str().to_string();
         tools.push(WireTool {
-            name: contract.name.as_str().to_string(),
+            name: name.clone(),
             description: contract.description.clone(),
             input_schema: contract.schema.clone(),
         });
-        return Ok((
-            Some(tools),
+        return Ok(ToolPlan {
+            tools: Some(tools),
             // The contract promises exactly one value; parallel tool use
-            // could return several proposals for the forced tool.
-            Some(WireToolChoice::Tool {
-                name: contract.name.as_str().to_string(),
+            // could return several proposals for the contract tool.
+            tool_choice: Some(WireToolChoice::Auto {
                 disable_parallel_tool_use: Some(true),
             }),
-        ));
+            instruction: Some(tool_instruction(&ToolDemand::Contract { name })),
+        });
     }
     if tools.is_empty() {
-        return Ok((None, None));
+        return Ok(ToolPlan {
+            tools: None,
+            tool_choice: None,
+            instruction: None,
+        });
     }
-    let choice = match &operation.tool_choice {
-        ToolChoice::Automatic => WireToolChoice::Auto,
-        ToolChoice::AnyTool => WireToolChoice::Any,
-        ToolChoice::Named(name) => WireToolChoice::Tool {
+    // An ordinary tool choice admits several proposals — a named choice
+    // requires every proposal to carry the selected name, not that there be
+    // only one — so parallel tool use stays enabled for both. Only the
+    // contract above promises exactly one value.
+    let demand = match &operation.tool_choice {
+        ToolChoice::Automatic => None,
+        ToolChoice::AnyTool => Some(ToolDemand::AnyTool),
+        ToolChoice::Named(name) => Some(ToolDemand::Named {
             name: name.as_str().to_string(),
-            disable_parallel_tool_use: None,
-        },
+        }),
     };
-    Ok((Some(tools), Some(choice)))
+    Ok(ToolPlan {
+        tools: Some(tools),
+        tool_choice: Some(WireToolChoice::Auto {
+            disable_parallel_tool_use: None,
+        }),
+        instruction: demand.as_ref().map(tool_instruction),
+    })
 }
 
 fn wire_message(message: &ConversationMessage) -> Result<WireMessage, PreparationFailure> {
@@ -518,32 +599,10 @@ mod tests {
         drop(operation);
     }
 
-    #[track_caller]
-    fn assert_temperature_is_rejected(value: f64) {
-        let mut candidate = operation("call-temperature");
-        candidate.settings.temperature = Some(value);
-        assert!(matches!(
-            build_request(&candidate),
-            Err(PreparationFailure::UnsupportedOperation { .. })
-        ));
-    }
-
-    #[track_caller]
-    fn assert_top_p_is_rejected(value: f64) {
-        let mut candidate = operation("call-top-p");
-        candidate.settings.top_p = Some(value);
-        assert!(matches!(
-            build_request(&candidate),
-            Err(PreparationFailure::UnsupportedOperation { .. })
-        ));
-    }
-
     #[test]
     fn full_operation_serializes_every_stated_fact() {
         let mut operation = operation("call-1");
         operation.system = Some("Answer briefly.".to_string());
-        operation.settings.temperature = Some(0.5);
-        operation.settings.top_p = Some(0.9);
         operation.settings.stop_sequences = vec!["END".to_string()];
         operation.messages = vec![
             ConversationMessage::user_text("look up Oslo"),
@@ -621,11 +680,9 @@ mod tests {
                 "END"
               ],
               "stream": false,
-              "system": "Answer briefly.",
-              "temperature": 0.5,
+              "system": "Answer briefly.\n\nAnswer by calling the lookup tool rather than replying with text. Call no other tool.",
               "tool_choice": {
-                "name": "lookup",
-                "type": "tool"
+                "type": "auto"
               },
               "tools": [
                 {
@@ -635,8 +692,7 @@ mod tests {
                   },
                   "name": "lookup"
                 }
-              ],
-              "top_p": 0.9
+              ]
             }"#]]
         .assert_eq(&request_json(&operation));
     }
@@ -809,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn output_contract_becomes_the_forced_only_tool() {
+    fn output_contract_declares_its_tool_and_never_forces_the_choice() {
         let mut operation = operation("call-5");
         operation.output_contract = Some(StructuredOutputContract {
             name: ToolName::new("verdict"),
@@ -824,12 +880,32 @@ mod tests {
         assert_eq!(
             value["tool_choice"],
             serde_json::json!({
-                "type": "tool",
-                "name": "verdict",
+                "type": "auto",
                 "disable_parallel_tool_use": true
-            })
+            }),
+            "a forced tool choice is answered with a 400 by the current Claude generation"
         );
         assert_eq!(value["tools"][0]["name"], serde_json::json!("verdict"));
+    }
+
+    #[test]
+    fn output_contract_asks_for_its_one_value_by_instruction() {
+        let mut operation = operation("call-contract-instruction");
+        operation.system = Some("Answer briefly.".to_string());
+        operation.output_contract = Some(StructuredOutputContract {
+            name: ToolName::new("verdict"),
+            description: "The verdict.".to_string(),
+            schema: serde_json::value::to_raw_value(&serde_json::json!({"type": "object"}))
+                .expect("fixture schema serializes"),
+        });
+
+        let request = build_request(&operation).expect("contract-bearing operation builds");
+
+        expect![[r#"
+            Answer briefly.
+
+            Answer by calling the verdict tool exactly once, passing the answer as its arguments. Call no other tool and add no other reply."#]]
+        .assert_eq(request.system.as_deref().expect("an instruction is stated"));
     }
 
     #[test]
@@ -864,7 +940,7 @@ mod tests {
     }
 
     #[test]
-    fn contract_combined_with_caller_tools_declares_both_and_forces_the_contract() {
+    fn contract_combined_with_caller_tools_declares_both_and_asks_for_the_contract() {
         let mut operation = operation("call-6");
         operation.output_contract = Some(StructuredOutputContract {
             name: ToolName::new("verdict"),
@@ -886,11 +962,72 @@ mod tests {
         assert_eq!(
             value["tool_choice"],
             serde_json::json!({
-                "type": "tool",
-                "name": "verdict",
+                "type": "auto",
                 "disable_parallel_tool_use": true
             })
         );
+    }
+
+    #[test]
+    fn an_any_tool_choice_becomes_auto_and_states_the_demand_as_an_instruction() {
+        let mut operation = operation("call-any-tool");
+        operation.tools = vec![ToolDefinition::with_schema(
+            "lookup",
+            "Looks up a city.",
+            serde_json::json!({"type": "object"}),
+        )];
+        operation.tool_choice = ToolChoice::AnyTool;
+
+        let request = build_request(&operation).expect("an any-tool choice translates");
+        let value = serde_json::to_value(&request).expect("wire request serializes");
+
+        assert_eq!(value["tool_choice"], serde_json::json!({"type": "auto"}));
+        expect![[
+            "Answer by calling at least one of the declared tools rather than replying with text."
+        ]]
+        .assert_eq(request.system.as_deref().expect("an instruction is stated"));
+    }
+
+    #[test]
+    fn a_named_tool_choice_becomes_auto_and_names_the_tool_in_the_instruction() {
+        let mut operation = operation("call-named-tool");
+        operation.tools = vec![ToolDefinition::with_schema(
+            "lookup",
+            "Looks up a city.",
+            serde_json::json!({"type": "object"}),
+        )];
+        operation.tool_choice = ToolChoice::Named(ToolName::new("lookup"));
+
+        let request = build_request(&operation).expect("a named choice translates");
+        let value = serde_json::to_value(&request).expect("wire request serializes");
+
+        assert_eq!(
+            value["tool_choice"],
+            serde_json::json!({"type": "auto"}),
+            "a named choice admits several proposals, so parallel tool use stays enabled"
+        );
+        expect![[
+            "Answer by calling the lookup tool rather than replying with text. Call no other tool."
+        ]]
+        .assert_eq(request.system.as_deref().expect("an instruction is stated"));
+    }
+
+    #[test]
+    fn an_automatic_tool_choice_adds_no_instruction_to_the_caller_system_text() {
+        let mut operation = operation("call-automatic-tool");
+        operation.system = Some("Answer briefly.".to_string());
+        operation.tools = vec![ToolDefinition::with_schema(
+            "lookup",
+            "Looks up a city.",
+            serde_json::json!({"type": "object"}),
+        )];
+        operation.tool_choice = ToolChoice::Automatic;
+
+        let request = build_request(&operation).expect("an automatic choice translates");
+        let value = serde_json::to_value(&request).expect("wire request serializes");
+
+        assert_eq!(value["tool_choice"], serde_json::json!({"type": "auto"}));
+        assert_eq!(request.system.as_deref(), Some("Answer briefly."));
     }
 
     #[test]
@@ -1025,12 +1162,12 @@ mod tests {
     }
 
     #[test]
-    fn non_finite_temperature_is_rejected_not_silently_nulled() {
+    fn a_set_temperature_is_rejected_rather_than_silently_dropped() {
         let mut operation = operation("call-10");
-        operation.settings.temperature = Some(f64::NAN);
+        operation.settings.temperature = Some(0.5);
 
         let failure = build_request(&operation)
-            .expect_err("serde_json would serialize a non-finite setting as null");
+            .expect_err("a sampling demand the provider rejects must not travel as silence");
 
         assert!(matches!(
             failure,
@@ -1039,17 +1176,28 @@ mod tests {
     }
 
     #[test]
-    fn temperature_outside_the_provider_domain_is_rejected_before_send() {
-        assert_temperature_is_rejected(-0.1);
-        assert_temperature_is_rejected(1.1);
-        assert_temperature_is_rejected(f64::INFINITY);
+    fn a_set_top_p_is_rejected_rather_than_silently_dropped() {
+        let mut operation = operation("call-top-p");
+        operation.settings.top_p = Some(0.9);
+
+        let failure = build_request(&operation)
+            .expect_err("a sampling demand the provider rejects must not travel as silence");
+
+        assert!(matches!(
+            failure,
+            PreparationFailure::UnsupportedOperation { .. }
+        ));
     }
 
     #[test]
-    fn top_p_outside_the_provider_domain_is_rejected_before_send() {
-        assert_top_p_is_rejected(-0.1);
-        assert_top_p_is_rejected(1.1);
-        assert_top_p_is_rejected(f64::INFINITY);
+    fn configured_settings_carrying_a_sampling_control_are_unsupported() {
+        let mut settings = ModelSettings::new(64);
+        settings.temperature = Some(0.5);
+
+        assert!(matches!(
+            validate_model_settings(&settings),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
     }
 
     #[test]

@@ -49,9 +49,9 @@ pub use approval_judge::{
 pub use attention::{
     AttentionAction, AttentionActivity, AttentionActivityKind, AttentionBlockedReason,
     AttentionChanges, AttentionContinuation, AttentionCursor, AttentionGoalBlock,
-    AttentionJudgeFacts, AttentionQuery, AttentionQueryError, AttentionReader, AttentionSnapshot,
-    AttentionSort, AttentionState, AttentionSummary, max_attention_change_items,
-    max_attention_filter_tags, max_attention_filter_utf8_bytes,
+    AttentionJudgeFacts, AttentionLifecycleState, AttentionQuery, AttentionQueryError,
+    AttentionReader, AttentionSnapshot, AttentionSort, AttentionState, AttentionSummary,
+    max_attention_change_items, max_attention_filter_tags, max_attention_filter_utf8_bytes,
     max_attention_goal_summary_characters, max_attention_snapshot_items,
     max_attention_title_characters,
 };

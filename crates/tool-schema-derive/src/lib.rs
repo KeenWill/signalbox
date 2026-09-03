@@ -54,8 +54,7 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
     let mut properties = Vec::new();
     let mut required = Vec::new();
     for field in fields {
-        let Some(derived) =
-            derive_field(field, container.rename_all.as_deref(), container.default)?
+        let Some(derived) = derive_field(field, container.rename_all.as_ref(), container.default)?
         else {
             continue;
         };
@@ -104,7 +103,7 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
 struct ContainerAttributes {
     default: bool,
     deny_unknown_fields: bool,
-    rename_all: Option<String>,
+    rename_all: Option<LitStr>,
 }
 
 fn parse_container_attributes(attributes: &[Attribute]) -> syn::Result<ContainerAttributes> {
@@ -135,8 +134,8 @@ fn parse_container_attributes(attributes: &[Attribute]) -> syn::Result<Container
             )))
         })?;
     }
-    if let Some(rule) = parsed.rename_all.as_deref() {
-        validate_rename_rule(rule, Span::call_site())?;
+    if let Some(rule) = parsed.rename_all.as_ref() {
+        validate_rename_rule(&rule.value(), rule.span())?;
     }
     Ok(parsed)
 }
@@ -148,7 +147,7 @@ struct DerivedField {
 
 fn derive_field(
     field: &Field,
-    rename_all: Option<&str>,
+    rename_all: Option<&LitStr>,
     container_default: bool,
 ) -> syn::Result<Option<DerivedField>> {
     let ident = field
@@ -211,7 +210,7 @@ fn derive_field(
     }
 
     let effective_name = match serde.rename {
-        Some(rename) => rename,
+        Some(rename) => rename.value(),
         None => apply_rename_rule(rust_name, rename_all)?,
     };
     if let Some(declared_name) = schema.name
@@ -272,7 +271,7 @@ struct FieldSerdeAttributes {
     custom_decoder: bool,
     default: bool,
     flatten: bool,
-    rename: Option<String>,
+    rename: Option<LitStr>,
     skip_deserializing: bool,
 }
 
@@ -357,27 +356,33 @@ fn parse_field_schema_attributes(
     {
         attribute.parse_nested_meta(|meta| {
             if meta.path.is_ident("description") {
+                let span = meta.path.span();
                 set_once(
                     &mut parsed.description,
                     meta.value()?.parse()?,
+                    span,
                     field_name,
                     "description",
                 )?;
                 return Ok(());
             }
             if meta.path.is_ident("name") {
+                let span = meta.path.span();
                 set_once(
                     &mut parsed.name,
                     meta.value()?.parse()?,
+                    span,
                     field_name,
                     "name",
                 )?;
                 return Ok(());
             }
             if meta.path.is_ident("with") {
+                let span = meta.path.span();
                 set_once(
                     &mut parsed.with,
                     meta.value()?.parse()?,
+                    span,
                     field_name,
                     "with",
                 )?;
@@ -394,12 +399,13 @@ fn parse_field_schema_attributes(
 fn set_once<Value>(
     target: &mut Option<Value>,
     value: Value,
+    span: Span,
     field_name: &str,
     attribute_name: &str,
 ) -> syn::Result<()> {
     if target.is_some() {
         return Err(syn::Error::new(
-            Span::call_site(),
+            span,
             format!("field `{field_name}`: duplicate tool_schema {attribute_name}"),
         ));
     }
@@ -410,14 +416,14 @@ fn set_once<Value>(
 fn parse_serde_name_value(
     meta: &syn::meta::ParseNestedMeta<'_>,
     attribute_name: &str,
-) -> syn::Result<Option<String>> {
+) -> syn::Result<Option<LitStr>> {
     if meta.input.peek(Token![=]) {
-        return Ok(Some(meta.value()?.parse::<LitStr>()?.value()));
+        return Ok(Some(meta.value()?.parse::<LitStr>()?));
     }
     let mut deserialize = None;
     meta.parse_nested_meta(|direction| {
         if direction.path.is_ident("deserialize") {
-            deserialize = Some(direction.value()?.parse::<LitStr>()?.value());
+            deserialize = Some(direction.value()?.parse::<LitStr>()?);
             return Ok(());
         }
         if direction.path.is_ident("serialize") {
@@ -441,12 +447,14 @@ fn ensure_supported_type(ty: &Type, field_name: &str) -> syn::Result<()> {
     }
 }
 
-fn apply_rename_rule(field_name: &str, rule: Option<&str>) -> syn::Result<String> {
+fn apply_rename_rule(field_name: &str, rule: Option<&LitStr>) -> syn::Result<String> {
     let Some(rule) = rule else {
         return Ok(String::from(field_name));
     };
-    validate_rename_rule(rule, Span::call_site())?;
-    Ok(match rule {
+    let span = rule.span();
+    let rule = rule.value();
+    validate_rename_rule(&rule, span)?;
+    Ok(match rule.as_str() {
         "lowercase" => String::from(field_name),
         "UPPERCASE" => field_name.to_ascii_uppercase(),
         "PascalCase" => pascal_case(field_name),

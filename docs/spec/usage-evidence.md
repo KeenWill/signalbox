@@ -136,13 +136,16 @@ be associated with the profile-partitioned group that represents it.
 
 Dollar cost is not stored in the projection. Signalboxd reconstructs the exact
 non-secret credential reference from the bounded profile label when it fits the
-configured-profile ceiling, then derives cost at read time from
-configuration-owned target rates; an over-ceiling reference derives unavailable
-configuration. Independently reported axes remain priceable when cache
+configured-profile ceiling, then derives cost at read time from the
+configuration-owned rate window covering the call's execution timestamp, not its
+projection `recorded_at`; an over-ceiling reference derives unavailable
+configuration. A timestamp no configured window covers yields no dollar figure,
+never zero. Independently reported axes remain priceable when cache
 normalization is incomplete; only a contradictory cache-inclusive breakdown is
 invalid. A derived amount prices every reported axis exactly: when any reported
 axis cannot be represented by exact decimal arithmetic, the whole cost is
 unavailable rather than an understated partial total. Each derived amount
-carries its rate version and `real` or `metered_equivalent` label. Unavailable
-cost carries one closed reason: no token evidence, unknown input semantics,
-incomplete cache axes, invalid cache breakdown, or unavailable configuration.
+carries the identity of the window that priced it and its `real` or
+`metered_equivalent` label. Unavailable cost carries one closed reason: no token
+evidence, unknown input semantics, incomplete cache axes, invalid cache
+breakdown, no covering rate window, or unavailable configuration.

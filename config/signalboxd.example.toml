@@ -158,50 +158,14 @@ max_code_host_result_text_bytes = 65536
 max_code_host_result_items = 100
 # Repository-file bytes retained in one code-host result.
 max_repository_file_content_bytes = 65536
-# Time a dispatched session has to activate its first turn before it is retired.
-session_dispatch_deadline = "900s"
-# Time a held start gate has to be released before its session is retired.
-session_start_gate_deadline = "900s"
-# Time an owned ungated creation has to receive its first input before it is retired.
-session_first_input_deadline = "3600s"
-# Time an active session may make no progress before it parks for a human.
+# Time an owned session has to start working before it is retired.
+session_admission_deadline = "900s"
+# Time an active or recovering session may make no progress before it parks.
 session_active_stall_deadline = "1800s"
-# Time an outstanding tool-approval decision may wait before its session parks.
-session_waiting_approval_deadline = "86400s"
-# Time an external gate may hold a session before it parks.
-session_waiting_external_deadline = "86400s"
-# Time a delegated child may run before its parent parks.
-session_waiting_child_deadline = "7200s"
-# Time a provider backoff may hold a session before it parks.
-session_waiting_provider_retry_deadline = "900s"
-# Time dispatch-pipeline backlog may hold a session before it parks.
-session_waiting_pipeline_deadline = "3600s"
-# Time a recorded scheduler fault may hold a session before it parks.
-session_waiting_scheduler_deadline = "1800s"
-# Time one recovery may run before its session parks.
-session_recovering_deadline = "1800s"
-# Time a blocked goal generation may sit before its session parks for a human.
-session_blocked_deadline = "259200s"
-# Interval at which a parked session re-raises its operator alert.
-session_parked_renotify_interval = "86400s"
-# Processing latency allowed past an armed expiry before the
-# `nonterminal_past_deadline` alarm counts it. Ordinary timer and commit latency
-# must never trip a zero-target alarm; a missing deadline record always counts.
-session_deadline_processing_grace = "120s"
-# How long a dispatched session may stay non-terminal before its week's wall-rate
-# cohort is treated as matured anyway. A cohort is gate-evaluable once no member
-# is both non-terminal and inside this window.
-session_wall_cohort_maturation = "604800s"
+# Time a waiting session may wait before it parks for a human.
+session_waiting_deadline = "86400s"
 # How often the daemon refreshes the exported lifecycle-metric gauges.
 session_lifecycle_metric_scan_interval = "300s"
-# Consecutive weekly cohorts the substrate-v0 gate requires below target.
-session_gate_weeks = 4
-# The gate's completion-failure threshold, in parts per million: 10%.
-session_completion_failure_rate_threshold_ppm = 100000
-# Wall-rate alarm threshold, in parts per million: 0.1%.
-session_wall_rate_threshold_ppm = 1000
-# `failed_unknown` share alarm threshold, in parts per million: 2%.
-session_failed_unknown_share_threshold_ppm = 20000
 
 # Blob bytes live outside PostgreSQL. Each deployment generates and then keeps
 # one namespace UUID per physical store. Both directories must already exist,
@@ -621,6 +585,27 @@ web_search = "human"
 # selection_id = "c70bd4e1-3699-458c-ae03-310a77763807"
 
 # Anthropic's most capable widely released model. Hard cap: 128000.
+#
+# This model rejects a forced tool choice, which is how the Anthropic adapter
+# realizes a structured-output contract, so every approval-judge call routed to
+# this row fails at the provider. That covers two paths, not one: naming this
+# row under [approval_judge], and — when that table is absent, as it is above —
+# any delegated tool request produced by a call on this row, because the judge
+# then reuses the producing call's own selection. Until the adapter declares
+# forced tool choice per model, deployments that delegate tool approval name a
+# different row under [approval_judge] rather than leaving the table absent.
+[[models]]
+selection_id = "3aa432ca-488e-4237-ac2b-7496a2ccc2b4"
+target_id = "ba705029-f367-4da8-a0bf-dbc6bf798e17"
+model_family = "anthropic"
+provider_model = "claude-fable-5-1"
+max_output_tokens = 8192
+context_window_tokens = 1000000
+reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+service_tiers = ["auto", "standard_only"]
+
+# The model the row above succeeds, still served at the same per-token
+# standard rates. Hard cap: 128000.
 [[models]]
 selection_id = "c70bd4e1-3699-458c-ae03-310a77763807"
 target_id = "c74d2c41-8c70-4537-ab5d-7bbeac25562a"
@@ -951,9 +936,9 @@ service_tiers = ["auto", "standard_only"]
 # context_window_tokens = 121600
 # reasoning_levels = ["low", "medium", "high", "xhigh"]
 
-# Claude Code catalog, extracted on 2026-08-06 from the model catalog embedded
-# in the pinned 2.1.220 command-line program, with the provider's published
-# documentation for the subscription behavior around it.
+# Claude Code catalog, extracted from the model catalog embedded in the pinned
+# 2.1.258 command-line program, with the provider's published documentation for
+# the subscription behavior around it.
 #
 # These rows name the aliases the program accepts for `--model` — its own
 # surface, unrelated to the client-facing `[[aliases]]` identities below —
@@ -975,7 +960,11 @@ service_tiers = ["auto", "standard_only"]
 # a deployment on a plan that does not include one lowers the value here.
 
 # [[models]]
-# # Resolves to claude-fable-5. Hard cap: 128000.
+# # Resolves to claude-fable-5-1 at the pinned 2.1.258 program, which moved
+# # this alias off claude-fable-5. That move is the general caution above made
+# # concrete: a deployment that needs the identity pinned spells
+# # claude-fable-5-1 here and drops the colliding Anthropic row above, because
+# # one provider-model spelling is served by one adapter. Hard cap: 128000.
 # selection_id = "2b7fc5c7-14b2-4030-9ed8-eab7602f908c"
 # target_id = "eb742137-caa4-48fb-be37-45d61265325c"
 # model_family = "claude_code"

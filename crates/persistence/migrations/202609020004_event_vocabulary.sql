@@ -91,18 +91,26 @@ ALTER TABLE outbox_event
 
 DROP INDEX outbox_event_turn_progress_by_session;
 
+-- Written as exclusions, as the staleness contract requires: a kind added
+-- later reads as progress until it is classified.
 CREATE INDEX outbox_event_turn_progress_by_session
     ON outbox_event USING btree (session_id, event_sequence)
     WHERE (
-        (event_kind = ANY (ARRAY[
-            'turn_activated'::text,
-            'model_call_transition'::text,
-            'tool_batch_transition'::text,
-            'tool_approval_decided'::text,
-            'context_compacted'::text
+        (event_kind <> ALL (ARRAY[
+            'session_created'::text,
+            'session_model_settings_changed'::text,
+            'turn_model_settings_resolved'::text,
+            'input_accepted'::text,
+            'runner_state_transition'::text,
+            'session_state_changed'::text,
+            'session_terminal'::text,
+            'goal_changed'::text,
+            'command_settled'::text,
+            'injection_settled'::text,
+            'session_ownership_changed'::text
         ]))
-        OR ((event_kind = 'turn_terminal'::text)
-            AND (turn_disposition <> 'retired'::text))
+        AND NOT ((event_kind = 'turn_terminal'::text)
+                 AND (turn_disposition = 'retired'::text))
     );
 
 --
@@ -196,6 +204,13 @@ CREATE TABLE turn_terminal_outbox_event (
     terminal_frontier_id uuid,
     CONSTRAINT turn_terminal_outbox_event_pkey PRIMARY KEY (event_sequence),
     CONSTRAINT turn_terminal_outbox_event_turn_id_key UNIQUE (turn_id),
+    CONSTRAINT turn_terminal_outbox_event_model_call_id_key UNIQUE (model_call_id),
+    CONSTRAINT turn_terminal_outbox_event_tool_attempt_id_key UNIQUE (tool_attempt_id),
+    CONSTRAINT turn_terminal_outbox_event_completion_entry_id_key UNIQUE (completion_entry_id),
+    CONSTRAINT turn_terminal_outbox_event_failure_entry_id_key UNIQUE (failure_entry_id),
+    CONSTRAINT turn_terminal_outbox_event_cancellation_entry_id_key
+        UNIQUE (cancellation_entry_id),
+    CONSTRAINT turn_terminal_outbox_event_terminal_frontier_id_key UNIQUE (terminal_frontier_id),
     CONSTRAINT turn_terminal_outbox_kind_closed
         CHECK (event_kind = 'turn_terminal'::text),
     CONSTRAINT turn_terminal_outbox_version_supported
@@ -261,9 +276,6 @@ CREATE TABLE turn_terminal_outbox_event (
         ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
 );
 
-CREATE INDEX turn_terminal_outbox_event_by_turn
-    ON turn_terminal_outbox_event USING btree (session_id, turn_id);
-
 CREATE TRIGGER turn_terminal_outbox_event_cannot_be_truncated
     BEFORE TRUNCATE ON turn_terminal_outbox_event
     FOR EACH STATEMENT EXECUTE FUNCTION reject_outbox_table_truncate();
@@ -317,12 +329,20 @@ CREATE TABLE session_state_changed_outbox_event (
     CONSTRAINT session_state_changed_outbox_detail_shape CHECK (
         ((state_kind = 'waiting'::text)
             = ((waiting_kind IS NOT NULL) AND (waiting_waker IS NOT NULL)))
+        AND ((state_kind = 'waiting'::text)
+             OR ((waiting_kind IS NULL) AND (waiting_waker IS NULL)
+                 AND (waiting_subject_session_id IS NULL)))
         AND ((state_kind = 'recovering'::text) = (recovering_op IS NOT NULL))
         AND ((state_kind = 'blocked'::text)
             = ((blocked_reason IS NOT NULL) AND (blocked_cycle IS NOT NULL)))
+        AND ((state_kind = 'blocked'::text)
+             OR ((blocked_reason IS NULL) AND (blocked_cycle IS NULL)))
         AND ((state_kind = 'parked'::text)
             = ((parked_cause IS NOT NULL) AND (parked_responder IS NOT NULL)
                AND (parked_since IS NOT NULL)))
+        AND ((state_kind = 'parked'::text)
+             OR ((parked_cause IS NULL) AND (parked_responder IS NULL)
+                 AND (parked_since IS NULL) AND (parked_standing_cause_kind IS NULL)))
     ),
     CONSTRAINT session_state_changed_outbox_header_fk
         FOREIGN KEY (event_sequence, event_kind, storage_version, session_id)
@@ -803,6 +823,7 @@ ALTER TABLE turn_lifecycle
 ALTER TABLE turn_lifecycle
     ADD CONSTRAINT turn_lifecycle_terminal_cause_matches_disposition CHECK (
         (terminal_cause_kind IS NULL)
+        OR ((terminal_disposition_kind IS NOT NULL) AND (FALSE
         OR ((terminal_disposition_kind = 'completed'::text)
             AND (terminal_cause_kind = 'completed'::text))
         OR ((terminal_disposition_kind = 'refused'::text)
@@ -834,7 +855,7 @@ ALTER TABLE turn_lifecycle
                 'reported_usage_context_compaction_exhausted'::text,
                 'reported_usage_context_still_exceeded'::text,
                 'unclassified_failure'::text
-            ])))
+            ])))))
     );
 
 -- A retired turn never started, so the terminal final-state assertions, which
@@ -854,6 +875,15 @@ BEGIN
            AND state_kind = 'terminal'
            AND terminal_disposition_kind = 'retired'
     ) THEN
+        IF (
+            SELECT count(*)
+              FROM turn_terminal_outbox_event
+             WHERE turn_id = checked_turn_id
+               AND disposition_kind = 'retired'
+        ) <> 1 THEN
+            RAISE EXCEPTION 'retired turn % lacks its terminal event', checked_turn_id
+                USING ERRCODE = '23514';
+        END IF;
         RETURN;
     END IF;
 
@@ -922,10 +952,13 @@ BEGIN
         RETURN NULL;
     END IF;
 
+    -- A turn the delegation cascade already terminated logically is not live
+    -- work either: its `state_kind` stays put by design.
     SELECT lifecycle.turn_id INTO live
       FROM turn_lifecycle AS lifecycle
      WHERE lifecycle.session_id = NEW.session_id
        AND lifecycle.state_kind <> 'terminal'
+       AND NOT lifecycle.delegation_runtime_terminal
      LIMIT 1;
 
     IF FOUND THEN

@@ -1813,17 +1813,16 @@ storage below plus the delegation-stack extension identified inline:
 
 - the baseline `outbox_event` header and delegation-owned
   `delegation_outbox_event` header (both carrying allocator-owned
-  `event_sequence`, closed `event_kind`, `storage_version`, `session_id` —
-  nullable for exactly `command_settled`, a receipt that can settle with no
-  session — a `turn_disposition` denormalized for exactly `turn_terminal`, and a
-  `recorded_at` statement stamp defaulted at insert, so an event's record time
-  is a property of the header rather than of a reader's arrival) plus one typed
-  record table per kind. The module-facing kinds are `session_created` (storage
-  version 2, carrying the creation cause and the ownership bit),
-  `session_state_changed`, `session_terminal`, `turn_terminal` (one record whose
-  `disposition_kind` — `completed`, `refused`, `failed`, `cancelled`,
-  `reconciliation_required`, `retired` — selects the evidence columns present),
-  `goal_changed`, `command_settled`, `injection_settled`, and
+  `event_sequence`, closed `event_kind`, `storage_version`, `session_id`, and a
+  `recorded_at` statement stamp defaulted at insert; on `outbox_event` alone,
+  `session_id` is nullable for exactly `command_settled`, a receipt that can
+  settle with no session, and a `turn_disposition` is denormalized for exactly
+  `turn_terminal`) plus one typed record table per kind. The module-facing kinds
+  are `session_created` (storage version 2, carrying the creation cause and the
+  ownership bit), `session_state_changed`, `session_terminal`, `turn_terminal`
+  (one record whose `disposition_kind` — `completed`, `refused`, `failed`,
+  `cancelled`, `reconciliation_required`, `retired` — selects the evidence
+  columns present), `goal_changed`, `command_settled`, `injection_settled`, and
   `session_ownership_changed`; the core-internal kinds are `input_accepted`,
   `session_model_settings_changed`, `turn_model_settings_resolved`,
   `turn_activated`, `model_call_transition`, `tool_batch_transition`,

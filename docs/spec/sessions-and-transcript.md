@@ -148,11 +148,11 @@ Application orchestration (`crates/application/src/create_session.rs`):
   timestamp confers no domain order or authority); and
 - calls one atomic transaction port exactly once, with no retry.
 
-Domain preparation admits only the user-initiated, no-ancestry pair. A
-`SingleSource` command is a valid canonical value but fails preparation with
-`TranscriptAncestryUnavailable` — a nonterminal error that claims no command
-identifier. Forks are therefore typed but not yet creatable. Import-seeded
-creation uses the separate command path below; it does not widen
+Domain preparation admits the interactive and module-dispatched no-ancestry
+pairs. A `SingleSource` command is a valid canonical value but fails preparation
+with `TranscriptAncestryUnavailable` — a nonterminal error that claims no
+command identifier. Forks are therefore typed but not yet creatable.
+Import-seeded creation uses the separate command path below; it does not widen
 `CreateSession`.
 
 The committing transaction atomically inserts the session row, the scheduler

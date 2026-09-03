@@ -1,11 +1,11 @@
 //! Scale and overflow proof for the bounded fleet attention projection.
 
 use crate::*;
-use signalbox_application::AttentionState;
 use signalbox_application::{
     AttentionChanges, AttentionContinuation, AttentionCursor, AttentionQuery, AttentionSort,
     max_attention_change_items, max_attention_snapshot_items,
 };
+use signalbox_application::{AttentionLifecycleState, AttentionState};
 use signalbox_domain::{
     CoreAgency, LifecycleActor, ModuleDispatch, ReplaceSessionMetadata, RepoWatchDispatchId,
     SessionCreationProvenance, SessionLifecycleState, SessionMetadataContent, SessionParkCause,
@@ -601,6 +601,10 @@ async fn the_attention_state_projects_the_durable_session_state() -> Result<(), 
     let created = attention.snapshot(identity_query(None)).await?;
     assert_eq!(created.summaries[0].state, AttentionState::Idle);
     assert_eq!(
+        created.summaries[0].lifecycle_state,
+        AttentionLifecycleState::Created
+    );
+    assert_eq!(
         lifecycle
             .load(session)
             .await?
@@ -651,6 +655,10 @@ async fn the_attention_state_projects_the_durable_session_state() -> Result<(), 
     let active = attention.snapshot(identity_query(None)).await?;
     assert_eq!(active.summaries[0].state, AttentionState::Active);
     assert_eq!(
+        active.summaries[0].lifecycle_state,
+        AttentionLifecycleState::Active
+    );
+    assert_eq!(
         lifecycle
             .load(session)
             .await?
@@ -662,7 +670,7 @@ async fn the_attention_state_projects_the_durable_session_state() -> Result<(), 
     lifecycle
         .park(
             session,
-            SessionParkCause::ProgressBudgetExhausted,
+            SessionParkCause::OperatorHold,
             SessionParkResponder::Operator,
             None,
             LifecycleActor::Core {
@@ -672,7 +680,11 @@ async fn the_attention_state_projects_the_durable_session_state() -> Result<(), 
         .await?;
 
     let parked = attention.snapshot(identity_query(None)).await?;
-    assert_eq!(parked.summaries[0].state, AttentionState::Active);
+    assert_eq!(parked.summaries[0].state, AttentionState::Parked);
+    assert_eq!(
+        parked.summaries[0].lifecycle_state,
+        AttentionLifecycleState::Parked
+    );
 
     // A park writes no turn, goal, runner, or metadata fact, so without the
     // lifecycle journal entry a follower would keep the state it last read.
