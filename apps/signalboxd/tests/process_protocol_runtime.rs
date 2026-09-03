@@ -2921,8 +2921,9 @@ fn start_fleet_scheduler(
         SchedulerLoop::new(runtime.take_work_source(), pass).with_occupancy_bound(occupancy_bound);
     let turn_liveness = TurnLivenessRuntime::new(
         runtime.pool.clone(),
-        quiescent_turn_staleness_bound,
-        slot_held_turn_staleness_bound,
+        signalboxd::TurnLivenessStalenessBounds::disabled()
+            .with_quiescent(quiescent_turn_staleness_bound)
+            .with_slot_held(slot_held_turn_staleness_bound),
         turn_liveness_scan_interval,
         AutomaticReconciliationRuntimePolicy::new(
             automatic_model_call_reconciliation_attempt_budget,

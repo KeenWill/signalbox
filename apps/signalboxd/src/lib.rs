@@ -215,6 +215,7 @@ pub use telemetry::{
 pub use turn_liveness_runtime::{
     AutomaticReconciliationNumericBounds, AutomaticReconciliationRuntimePolicy,
     SlowSubstrateNumericBounds, TurnLivenessNumericBounds, TurnLivenessRuntime,
+    TurnLivenessStalenessBounds,
 };
 pub use web_blob_runtime::{
     WebBlobRuntime, WebImageDerivativeKind, run_web_image_derivative_worker_if_requested,

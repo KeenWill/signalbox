@@ -477,6 +477,35 @@ pub struct TurnLivenessRuntime {
     numeric_bounds: TurnLivenessNumericBounds,
 }
 
+/// Independently labeled staleness policies for the two watchdog populations.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TurnLivenessStalenessBounds {
+    quiescent: Option<StaleActiveTurnBound>,
+    slot_held: Option<StaleActiveTurnBound>,
+}
+
+impl TurnLivenessStalenessBounds {
+    /// Starts with both stale-turn policies disabled.
+    pub const fn disabled() -> Self {
+        Self {
+            quiescent: None,
+            slot_held: None,
+        }
+    }
+
+    /// Applies the quiescent-turn staleness policy.
+    pub const fn with_quiescent(mut self, bound: Option<StaleActiveTurnBound>) -> Self {
+        self.quiescent = bound;
+        self
+    }
+
+    /// Applies the slot-held-turn staleness policy.
+    pub const fn with_slot_held(mut self, bound: Option<StaleActiveTurnBound>) -> Self {
+        self.slot_held = bound;
+        self
+    }
+}
+
 impl TurnLivenessRuntime {
     /// Supervises turn liveness with the supplied bound and cadence.
     ///
@@ -486,8 +515,7 @@ impl TurnLivenessRuntime {
     /// active.
     pub fn new(
         pool: PgPool,
-        quiescent_staleness_bound: Option<StaleActiveTurnBound>,
-        slot_held_staleness_bound: Option<StaleActiveTurnBound>,
+        staleness_bounds: TurnLivenessStalenessBounds,
         scan_interval: Option<TurnLivenessScanInterval>,
         model_call: AutomaticReconciliationRuntimePolicy,
         tool: AutomaticReconciliationRuntimePolicy,
@@ -515,8 +543,8 @@ impl TurnLivenessRuntime {
                         numeric_bounds.automatic_tool_reconciliation_attempt_bound,
                     ),
                 ),
-            quiescent_staleness_bound,
-            slot_held_staleness_bound,
+            quiescent_staleness_bound: staleness_bounds.quiescent,
+            slot_held_staleness_bound: staleness_bounds.slot_held,
             scan_interval,
             numeric_bounds,
         }

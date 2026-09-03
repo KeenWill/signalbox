@@ -77,7 +77,8 @@ use signalboxd::{
     SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
     SlowSubstrateNumericBounds, SystemCurrentTimeClock, TelemetryConfiguration,
     TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
-    TurnLivenessNumericBounds, TurnLivenessRuntime, WebBlobRuntime, WorkspaceInstructionRuntime,
+    TurnLivenessNumericBounds, TurnLivenessRuntime, TurnLivenessStalenessBounds, WebBlobRuntime,
+    WorkspaceInstructionRuntime,
     model_adapter::ConfiguredModelRuntime,
     reconcile_fenced_pool_floor, run_web_image_derivative_worker_if_requested,
     usage_limits::UsageLimitedModelCallProvider,
@@ -115,6 +116,10 @@ fn graceful_shutdown_window(
 
 fn validate_fenced_pool_min_connections(minimum: Option<u32>) -> Option<Option<u32>> {
     (!minimum.is_some_and(|minimum| minimum > FENCED_POOL_MAX_CONNECTIONS)).then_some(minimum)
+}
+
+fn duration_fits_postgres_milliseconds(bound: Option<Duration>) -> bool {
+    bound.is_none_or(|duration| i64::try_from(duration.as_millis()).is_ok())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1500,6 +1505,20 @@ async fn run_hub(
         configured_duration("automatic_tool_reconciliation_base_backoff");
     let automatic_tool_reconciliation_backoff_cap =
         configured_duration("automatic_tool_reconciliation_backoff_cap");
+    let automatic_model_call_reconciliation_attempt_bound =
+        configured_duration("automatic_model_call_reconciliation_attempt_bound");
+    let automatic_tool_reconciliation_attempt_bound =
+        configured_duration("automatic_tool_reconciliation_attempt_bound");
+    if !duration_fits_postgres_milliseconds(automatic_model_call_reconciliation_attempt_bound)
+        || !duration_fits_postgres_milliseconds(automatic_tool_reconciliation_attempt_bound)
+    {
+        return Err(erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static(
+                "automatic_reconciliation_attempt_bound_exceeds_postgres_milliseconds",
+            ),
+        ));
+    }
     let slow_substrate_factor = configured_u32("slow_substrate_staleness_factor")?
         .and_then(NonZeroU32::new)
         .ok_or_else(|| {
@@ -1559,11 +1578,11 @@ async fn run_hub(
         configured_duration("slot_held_turn_recovery_attempt_bound"),
         AutomaticReconciliationNumericBounds::new(
             configured_usize("automatic_model_call_reconciliations_per_liveness_scan")?,
-            configured_duration("automatic_model_call_reconciliation_attempt_bound"),
+            automatic_model_call_reconciliation_attempt_bound,
         ),
         AutomaticReconciliationNumericBounds::new(
             configured_usize("automatic_tool_reconciliations_per_liveness_scan")?,
-            configured_duration("automatic_tool_reconciliation_attempt_bound"),
+            automatic_tool_reconciliation_attempt_bound,
         ),
         SlowSubstrateNumericBounds::new(slow_substrate_factor)
             .with_backup_enabled(slow_substrate_enabled("slow_substrate_backup_enabled")?)
@@ -2575,8 +2594,9 @@ async fn run_hub(
     );
     let turn_liveness_runtime = TurnLivenessRuntime::new(
         scheduler_pool.clone(),
-        quiescent_turn_staleness_bound,
-        slot_held_turn_staleness_bound,
+        TurnLivenessStalenessBounds::disabled()
+            .with_quiescent(quiescent_turn_staleness_bound)
+            .with_slot_held(slot_held_turn_staleness_bound),
         turn_liveness_scan_interval,
         AutomaticReconciliationRuntimePolicy::new(
             automatic_model_call_reconciliation_attempt_budget,
@@ -3217,7 +3237,8 @@ mod tests {
         ShutdownOutcome, SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT,
         anthropic_construction_cause, combine_runtime_stop_cause, completed_runtime_outcome,
         credential_files_conflict, database_close_failure_outcome, drain_runtime_tasks,
-        erase_startup_cause, fenced_pool_floor_reconciliation_policy, graceful_shutdown_window,
+        duration_fits_postgres_milliseconds, erase_startup_cause,
+        fenced_pool_floor_reconciliation_policy, graceful_shutdown_window,
         migrate_scan_then_schedule, openai_construction_cause, operator_filter,
         process_runtime_failure_class, report_database_close_failure,
         repository_watch_rule_configuration_error, run_scheduler_until_shutdown,
@@ -3239,6 +3260,17 @@ mod tests {
             None
         );
         assert_eq!(validate_fenced_pool_min_connections(None), Some(None));
+    }
+
+    #[test]
+    fn automatic_reconciliation_attempt_bounds_fit_postgres_milliseconds() {
+        let maximum =
+            Duration::from_millis(u64::try_from(i64::MAX).expect("i64 maximum is positive"));
+        let above_maximum = maximum + Duration::from_millis(1);
+
+        assert!(duration_fits_postgres_milliseconds(None));
+        assert!(duration_fits_postgres_milliseconds(Some(maximum)));
+        assert!(!duration_fits_postgres_milliseconds(Some(above_maximum)));
     }
 
     #[test]

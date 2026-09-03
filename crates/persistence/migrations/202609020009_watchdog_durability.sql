@@ -34,6 +34,7 @@ CREATE TABLE turn_liveness_observation (
         FOREIGN KEY (current_attempt_id) REFERENCES turn_attempt(turn_attempt_id)
 );
 
+-- Supersedes the definition in 202609010002_turns.
 ALTER TABLE automatic_reconciliation
     DROP CONSTRAINT automatic_model_call_reconciliation_attempt_count,
     ADD COLUMN attempt_ceiling integer NOT NULL,
@@ -42,6 +43,7 @@ ALTER TABLE automatic_reconciliation
         attempt_count >= 0 AND attempt_count <= attempt_ceiling
     );
 
+-- Supersedes the definition in 202609010002_turns.
 ALTER TABLE automatic_reconciliation_attempt
     DROP CONSTRAINT automatic_model_call_reconciliation_attempt_ordinal,
     ADD COLUMN attempt_ceiling integer NOT NULL,
@@ -50,6 +52,7 @@ ALTER TABLE automatic_reconciliation_attempt
         attempt_ordinal >= 1 AND attempt_ordinal <= attempt_ceiling
     );
 
+-- Supersedes the definitions in 202609010009_repo_watch.
 ALTER TABLE convergence_sweep_event
     DROP CONSTRAINT convergence_sweep_event_check2,
     DROP CONSTRAINT convergence_sweep_event_consecutive_failures_check,
@@ -73,6 +76,7 @@ ALTER TABLE convergence_sweep_event
         )
     );
 
+-- Supersedes the definitions in 202609010009_repo_watch.
 ALTER TABLE convergence_sweep_target
     DROP CONSTRAINT convergence_sweep_target_check,
     DROP CONSTRAINT convergence_sweep_target_consecutive_failures_check,
