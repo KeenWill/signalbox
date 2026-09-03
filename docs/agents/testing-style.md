@@ -1,25 +1,22 @@
 # Testing style
 
-This document owns how tests are written and how a test's value is judged — how
-a test body reads, how fixtures are shaped, what an assertion may reference, how
-snapshot (expect) tests are used, and when a test is worth keeping; the
-[testing section of CONTRIBUTING.md](../../CONTRIBUTING.md#testing) owns the
-testing strategy — the test categories and their coverage obligations — and is
-not restated here. Test naming follows the rule stated in
+Rules for writing tests: how a test body reads, how fixtures are shaped, what an
+assertion may reference, how snapshot (expect) tests are used, and which tests
+to keep. The [testing section of CONTRIBUTING.md](../../CONTRIBUTING.md#testing)
+covers test categories and coverage; test naming is in
 [AGENTS.md](../../AGENTS.md).
 
-The numbered rules are normative for new and modified tests; cite them by number
-in review. Apply them to existing tests only when already changing those tests
-for another reason. Every bad→good rewrite below is condensed from a real diff
-in this repository's domain or application test sweep — identifiers are
-shortened for the page, not invented.
+The numbered rules apply to new and modified tests; cite them by number in
+review. Apply them to existing tests only when already changing those tests for
+another reason. Each bad→good rewrite below is condensed from a real diff in
+this repository, with identifiers shortened.
 
 ## Fixtures and assertions
 
-1. **A test's body contains its whole story.** A reader determines what is
-   verified, with which inputs, and why the expected result is correct from the
-   test body alone: complete (everything needed to understand the result is
-   present) and concise (nothing else is).
+1. **A test's body is self-contained.** A reader determines what is verified,
+   with which inputs, and why the expected result is correct from the test body
+   alone: complete (everything needed to understand the result is present) and
+   concise (nothing else is).
    ([Software Engineering at Google, ch. 12](https://abseil.io/resources/swe-book/html/ch12.html))
 
 2. **Tests are verified by inspection, not by tests of tests.** Test bodies are
@@ -36,21 +33,21 @@ shortened for the page, not invented.
 
 4. **One meaningful knob per fixture.** Fixture constructors and builders carry
    canonical defaults; each test states only the values the behavior depends on,
-   at the call site — never a helper taking five positional integers whose
-   meanings live at the definition. Where a fixture also needs an identity seed,
+   at the call site, not a helper taking five positional integers whose meanings
+   are only at the definition. Where a fixture also needs an identity seed,
    derive it from the one knob instead of adding a second free integer —
    decorrelated (for example, descending as the knob ascends), so an
    implementation reading identity where it should read the knob's value cannot
    accidentally pass. When the independence of two values is itself the behavior
    under test, the fixture takes both as named knobs.
 
-5. **A test that cares about a value states it.** State a value the test depends
+5. **A test that depends on a value states it.** State a value the test depends
    on explicitly even when the canonical default happens to match; a test's
    meaning must not depend on defaults defined elsewhere.
 
 6. **Assert against the fixture, not re-derived constants.** Write
-   `assert_eq!(chosen.origin(), earlier.accepted_input_id())`, never
-   `accepted_input_id(20)` re-encoding a magic seed from the setup.
+   `assert_eq!(chosen.origin(), earlier.accepted_input_id())`, not
+   `accepted_input_id(20)`, which re-encodes a seed from the setup.
    Fixture-based assertions follow the setup when it changes; re-encoded
    constants silently diverge from it.
 
@@ -63,7 +60,7 @@ shortened for the page, not invented.
    would catch and the false alarm it could raise. The ideal test fails only
    when observed behavior violates its requirement, and changes only when the
    requirement itself changes; a test that fails on behavior-preserving
-   refactors is a cost, not a safety net.
+   refactors is a cost, not a safeguard.
    ([Test suites as classifiers](https://blog.nelhage.com/post/test-suites-as-classifiers/))
 
 ### Rewrites from the test sweeps
@@ -96,7 +93,7 @@ let error = SessionReconstitutionInput::new(
 ).reconstitute().unwrap_err();
 assert_eq!(error.failure(), Failure::RequestedSessionMismatch);
 
-// Good: the test perturbs exactly the named fact it cares about.
+// Good: the test perturbs exactly the named fact it depends on.
 let requested_other_session = reconstitution_failure(CurrentSessionFacts {
     requested_session: session_id(2),
     ..CurrentSessionFacts::matching(session_id(1))
@@ -150,8 +147,7 @@ assert_eq!(
 ## Expect tests
 
 Snapshot assertions use
-[`expect-test`](https://github.com/rust-analyzer/expect-test), a domain-crate
-dev-dependency arriving with its first adopting tests.
+[`expect-test`](https://github.com/rust-analyzer/expect-test).
 `UPDATE_EXPECT=1 cargo test` re-blesses snapshots in place.
 
 09. **Use expect tests where the value's shape is the assertion:** matrix
@@ -163,22 +159,22 @@ dev-dependency arriving with its first adopting tests.
     [How to Test](https://matklad.github.io/2021/05/31/how-to-test.html)
     describes the single check-function, data-driven form these settle into.
 
-10. **Snapshots supplement invariant enforcement; they never replace it.** A
+10. **Snapshots supplement invariant enforcement; they do not replace it.** An
     INV-tagged test keeps its precise targeted asserts; a snapshot proves
     output-didn't-change, not invariant-holds.
 
-11. **Never bless a diff you haven't read.** Review a snapshot update with the
-    same care as a code change; the snapshot diff is the review surface.
+11. **Read every snapshot diff before blessing it.** Review a snapshot update as
+    you would a code change.
 
 12. **Curate snapshots for the reader.** Deterministic ordering, relevant fields
     only, rendered from the observed value under test. A snapshot of everything
-    asserts nothing and degenerates into a
+    asserts nothing; it is a
     [change-detector test](https://testing.googleblog.com/2015/01/testing-on-toilet-change-detector-tests.html).
     Table-shaped output uses the workspace's `signalbox-expect-table`
     dev-dependency (`crates/expect-table`), which renders any `Debug` rows as
     one box-drawn table with deterministic, right-trimmed lines that stay
-    byte-stable under re-blessing; test crates import it instead of hand-rolling
-    a variant. Prior art for tables in expect tests:
+    byte-stable under re-blessing; test crates import it rather than writing
+    their own. Prior art for tables in expect tests:
     [expectable](https://github.com/janestreet/expectable).
 
 Rules 2, 9, and 10 — a matrix whose expectation mirrors the code becomes
@@ -196,8 +192,8 @@ for d in all_cancellation_dispositions() {
 // rejection to return the attempt unchanged before its row reads
 // "rejected":
 //     Err(error) => { assert_eq!(error.current().id(), source_id); "rejected" }
-// so the table supplements the per-edge asserts (rule 10); it never
-// replaces them. The helper emits one `#[derive(Debug)]` row struct per
+// so the table supplements the per-edge asserts (rule 10); it does not
+// replace them. The helper emits one `#[derive(Debug)]` row struct per
 // edge; the struct's field names are the rendered column headers.
 assert!(prepared().end_after_cancellation(proof(1), Cancelled).is_ok());
 let rows = after_cancellation_rows(&prepared, proof(1));
@@ -222,37 +218,31 @@ expect![[r#"
     expresses a relation between observed values — equality, replay stability,
     identity preservation, terminal irreversibility, order-independence. A
     snapshot cannot state a relation; it can only display both sides and leave
-    the comparison to the reader. Use each instrument for what it can state: a
-    law gets an assert that fails when the relation breaks, a value gets a
-    snapshot that shows what it is. This distinction is the rationale behind
-    rules 9–12 — a snapshot proves output-didn't-change precisely because output
-    is all it states, which is why rule 10 keeps the law asserts and rule 9
-    sends value-shaped claims to expect tests.
+    the comparison to the reader. Use each for what it can state: a law gets an
+    assert that fails when the relation breaks, a value gets a snapshot that
+    shows what it is.
 
 ## Snapshot supplements and blessing
 
-14. **Prefer supplementary snapshots going forward.** On an error or rejection
+14. **Prefer supplementary snapshots in new tests.** On an error or rejection
     path, printing the complete error payload as a supplement to the decisive
     assert catches unintended changes no assert mentions; a transition-result
     snapshot alongside the law asserts documents the full result for the reader.
     Prefer this shape in new tests; existing tests are not obligated to retrofit
     it.
 
-15. **A pretty-printer owes the reader; a blessing owes the reviewer.**
-    Rendering helpers owe deterministic ordering, relevant fields only, and
-    right-trimmed lines — a printer that cannot promise byte-stability under
-    re-blessing is not finished. A bulk re-bless is reviewed row-by-row, never
-    skimmed: an unread blessing is exactly the
-    [change-detector](https://testing.googleblog.com/2015/01/testing-on-toilet-change-detector-tests.html)
-    failure mode that rule 11 exists to prevent — the suite keeps passing while
-    its meaning drifts.
+15. **Rendering helpers are deterministic; bulk re-blesses are reviewed row by
+    row.** A rendering helper produces deterministic ordering, relevant fields
+    only, and right-trimmed lines; a printer that is not byte-stable under
+    re-blessing is not finished. Review a bulk re-bless row by row (rule 11): an
+    unread blessing lets the suite keep passing while its meaning changes.
 
 ## Check helpers
 
-16. **A check helper hides plumbing, never meaning.** Mark it `#[track_caller]`
-    so a failure names the call site, not the helper's interior. It may absorb
-    service wiring, cloning, and error unwrapping; it never absorbs a
-    behavior-relevant value — those stay at the call site. Its name states what
+16. **A check helper hides plumbing, not meaning.** Mark it `#[track_caller]` so
+    a failure names the call site, not the helper's interior. It may absorb
+    service wiring, cloning, and error unwrapping; it does not absorb a
+    behavior-relevant value, which stays at the call site. Its name states what
     it checks (`assert_begin_running_rejects_unchanged`, not `check_case`), and
     a helper containing logic — branching, rendering, computation — gets its own
     tests (rule 2).
@@ -278,26 +268,26 @@ assert_recorded_result_passes_through(SubmitInputResult::Rejected(
 
 ## Split versus unroll
 
-17. **A loop leaves a test body one of two ways.** Few cases exercising one
-    behavior unroll in place into straight-line calls (rule 2); cases exercising
-    distinct behaviors split into separately named tests — one behavior per test
-    (rule 7). The exception is a requirement that is itself atomic: when one
-    contract conjoins correlated guarantees — such as the atomic guarantees the
-    [testing strategy](../../CONTRIBUTING.md#testing) requires of restart and
-    race tests — that conjunction is one behavior and stays in one test even
-    though its description contains "and". Splitting such guarantees across
-    separate executions lets each half pass under a different interleaving while
-    no test can detect a violation of the combined contract. Before renaming or
-    splitting any test, preserve its INV tags in the test name or attached doc
-    comment, then regenerate the [invariant test index](../invariants.md). Keep
-    names stable anyway — reviewers and diffs read them — but the binding
+17. **A loop is removed from a test body in one of two ways.** Few cases
+    exercising one behavior unroll in place into straight-line calls (rule 2);
+    cases exercising distinct behaviors split into separately named tests — one
+    behavior per test (rule 7). The exception is a requirement that is itself
+    atomic: when one contract conjoins correlated guarantees — such as the
+    atomic guarantees the [testing strategy](../../CONTRIBUTING.md#testing)
+    requires of restart and race tests — that conjunction is one behavior and
+    stays in one test even though its description contains "and". Splitting such
+    guarantees across separate executions lets each half pass under a different
+    interleaving while no test can detect a violation of the combined contract.
+    Before renaming or splitting any test, preserve its INV tags in the test
+    name or attached doc comment, then regenerate the
+    [invariant test index](../invariants.md). Keep names stable; the binding
     reference is the file plus its tags.
 
 From the application sweep, `replace_session_defaults.rs` — two behaviors, so a
 split, not an unroll:
 
 ```rust
-// Bad: two behaviors iterate behind one name.
+// Bad: one loop runs two behaviors under one test name.
 fn s01_inv008_inv012_recorded_applied_and_rejected_results_pass_through() {
     for (command, recorded) in [(applied_cmd, applied), (rejected_cmd, rejected)] { /* … */ }
 }
@@ -309,11 +299,11 @@ fn s01_inv008_inv012_recorded_rejected_result_passes_through() { /* … */ }
 
 ## Fixture and helper placement
 
-18. **Helpers live where their meaning lives.** Module-local helpers sit next to
-    the tests that read them; identity constructors used across a crate's test
+18. **Helpers live where they are used.** Module-local helpers sit next to the
+    tests that read them; identity constructors used across a crate's test
     modules stay in that crate's `test_support`. A one-knob constructor is named
     for the domain concept it produces — `accepted_ordinary(acceptance)`,
-    `pending_steering(source_turn)` — never for its mechanics.
+    `pending_steering(source_turn)`, not for its mechanics.
 
 ## What not to test
 
@@ -323,14 +313,10 @@ fn s01_inv008_inv012_recorded_rejected_result_passes_through() { /* … */ }
     without catching bugs. An accessor-wiring test on a multi-field type is
     different: constructing with distinct values and reading every getter back
     catches a getter cross-wired to the wrong field — a real bug that compiles —
-    and is legitimate. Judge every candidate as rule 8 judges it: if no real bug
-    makes it fail and a behavior-preserving refactor might, it is a cost, not a
-    safety net.
+    and is legitimate. Judge every candidate by rule 8.
 
-From the domain sweep, `turn_attempt.rs` — this rule deletes the tautological
-assert; the snapshot standing in its place is a rule 12 curation, reading the
-retained cause back from the observed value instead of matching it against
-itself:
+From the domain sweep, `turn_attempt.rs`: the tautological assert is deleted,
+and a rule 12 snapshot reads the retained cause back from the observed value:
 
 ```rust
 // Bad: constructs a value, then matches it against itself.
@@ -355,21 +341,20 @@ expect![[r#"
 
 ## Failure messages
 
-20. **A subtle law fails with its name attached.** When a targeted assert guards
-    a law a maintainer could plausibly "fix" away — replay stability, identity
-    preservation, terminal irreversibility — prefer an assert form or message
-    that names the violated expectation: matklad's "artisanally crafted error
-    message"
+20. **A failure names the expectation it violated.** When a targeted assert
+    guards a law a maintainer could plausibly "fix" away (replay stability,
+    identity preservation, terminal irreversibility), use an assert form or
+    message that names the violated expectation
     ([How to Test](https://matklad.github.io/2021/05/31/how-to-test.html)).
-    `expect_err("cross-wired current-session facts must fail closed")` teaches
-    at the failure site; a bare `unwrap()` teaches nothing.
+    `expect_err("cross-wired current-session facts must fail closed")` names it
+    at the failure site; a bare `unwrap()` does not.
 
 21. **Tests are explicit declarations, not macro-generated.** A Rust macro does
     not emit or forward `#[test]`, `#[tokio::test]`, or a conditional
-    equivalent. Explicit declarations keep each test's name and whole story
-    visible at its source location (rules 1 and 7), and let the
-    invariant-catalog checker bind every INV-tagged test file deterministically
-    without expanding arbitrary macros.
+    equivalent. Explicit declarations keep each test's name and body visible at
+    its source location (rules 1 and 7), and let the invariant-catalog checker
+    bind every INV-tagged test file deterministically without expanding
+    arbitrary macros.
 
 ## Example
 
@@ -445,5 +430,5 @@ expect![[r#"
 ```
 
 The rendering helper draws only the fields the derivation depends on, in derived
-order, through the shared `signalbox-expect-table` renderer; the snapshot is
-read, not regenerated blind, when it changes.
+order, through the shared `signalbox-expect-table` renderer; read the snapshot
+diff when it changes (rule 11).

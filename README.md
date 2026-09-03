@@ -8,9 +8,8 @@ clients connect to it from anywhere, and runners you operate execute tools on
 your own machines.
 
 The [vision](docs/vision.md) and [target model](docs/target-model.md) describe
-the purpose, deployment shape, and destination in full; the target model details
-these capabilities directionally — accepted records decide them — and several
-(fork selection, delegation, steering consumption) remain
+the purpose, deployment shape, and destination. The target model is directional;
+some of the capabilities it describes remain
 [open decisions](docs/open-questions.md).
 
 > **Status:** early implementation phase; APIs, protocols, and storage details
@@ -31,8 +30,8 @@ these capabilities directionally — accepted records decide them — and severa
 ```
 
 The daemon is the source of truth; a client device and an execution machine need
-not be the same machine. See [Architecture](docs/architecture.md) for the
-boundaries and important qualifications behind this sketch.
+not be the same machine. [Architecture](docs/architecture.md) describes the
+boundaries.
 
 ## Design documents
 
@@ -59,26 +58,20 @@ makes rustup select the pinned minimal stable toolchain with rustfmt and Clippy.
 Non-cargo tooling comes from the [devenv](https://devenv.sh/) environment. With
 Nix and the devenv CLI installed, use `devenv shell` to enter it; direnv users
 can instead allow the committed `.envrc`. The Postgres integration suite still
-needs a running Docker daemon. See [AGENTS.md](AGENTS.md) for the authoritative
-tooling, formatting, and validation workflow.
+needs a running Docker daemon. [AGENTS.md](AGENTS.md) lists the tooling and
+validation commands.
 
-The workspace contains the dependency chain `apps/signalboxd` →
-`crates/application` → `crates/domain`, with `crates/persistence` depending on
-both `crates/application` and `crates/domain`, and the dev-only
-`crates/expect-table` consumed by the domain crate's tests. Before finishing any
-change, run the repository-wide validation sequence in [AGENTS.md](AGENTS.md) —
-the canonical list of required commands and their setup notes — from the
-repository root.
+The core dependency chain is `apps/signalboxd` → `crates/application` →
+`crates/domain`, with `crates/persistence` depending on both
+`crates/application` and `crates/domain`. Run the validation sequence in
+[AGENTS.md](AGENTS.md) from the repository root before finishing a change.
 
 ### Dev instance
 
 `devenv up` starts a dev instance: a PostgreSQL cluster on loopback and one
 `signalboxd` built from the working tree. The cluster asks for port 54341 and
-devenv allocates upward from there if it is taken, so the port is resolved
-rather than fixed — `echo $PGPORT` inside `devenv shell` names the one in use,
-and the daemon is given the same resolved value. The devenv configuration owns
-what `devenv up` launches, in what order, and why test databases stay
-deliberately outside its scope; everything below is operational usage.
+devenv allocates upward from there if it is taken; `echo $PGPORT` inside
+`devenv shell` shows the port in use, and the daemon is given the same value.
 
 State lives under the gitignored `.devenv/state/`: the cluster in `postgres/`,
 and everything the daemon needs in `dev-instance/` — a locally generated
@@ -90,29 +83,26 @@ Both are left alone afterwards so local edits survive. Wipe the whole instance
 with `rm -rf .devenv/state`, or reseed one catalog by deleting its file under
 `.devenv/state/dev-instance/`.
 
-Two things are worth knowing before editing the seeded model catalog or reaching
-for the socket. Its seed is a copy of the checked-in example, so it carries that
-file's undated family names such as `claude-haiku-4-5`; the spelling a
+The seeded model catalog is a copy of the checked-in example, so it carries that
+file's undated family names such as `claude-haiku-4-5`. The spelling a
 `provider_model` must take is stated in
 [configuration and credentials](docs/spec/configuration-and-credentials.md#the-static-model-and-alias-catalog),
-and how a reported identity is related back to it — including the dated snapshot
-a family name resolves to — in
+and how a reported identity is related back to it, including the dated snapshot
+a family name resolves to, in
 [provider-target identity](docs/spec/model-call-execution.md#provider-target-identity).
-And the process socket lives at `$DEVENV_RUNTIME/signalbox/signalboxd.sock`
-rather than directly in the runtime directory, because the daemon accepts only a
-socket parent meeting the ownership and permission rules the
+
+The process socket is `$DEVENV_RUNTIME/signalbox/signalboxd.sock`, because the
+daemon accepts only a socket parent meeting the ownership and permission rules
+the
 [process protocol](docs/spec/process-protocol.md#transport-and-trust-boundary)
-states. The devenv dev-instance launcher creates that directory and sets mode
-`0700` before executing the daemon; the daemon then binds the socket there. The
-devenv shell exports that path as `SIGNALBOX_SOCKET_PATH` and provides a
-`signalbox <verb>` convenience. That convenience execs Cargo's resolved binary
-directly rather than through `cargo run`, so a shell carrying an ambient
-`-C prefer-dynamic` (in `RUSTFLAGS` or inherited Cargo configuration) produces
-an executable that needs Cargo's runtime library search path, which the direct
-`exec` does not set; the command then exits `127` naming the missing shared
-object. This is a recorded, loud failure under an unusual global setting, not a
-silent one, and is left as a known limitation rather than reproducing
-`cargo run`'s environment here.
+states; the dev-instance launcher creates that directory with mode `0700` before
+starting the daemon. The devenv shell exports the path as
+`SIGNALBOX_SOCKET_PATH` and provides a `signalbox <verb>` wrapper that execs
+Cargo's resolved binary directly rather than through `cargo run`. Under an
+ambient `-C prefer-dynamic` (in `RUSTFLAGS` or inherited Cargo configuration)
+that executable needs Cargo's runtime library search path, which the direct
+`exec` does not set, and the command exits `127` naming the missing shared
+object. This is a known limitation.
 
 The daemon's default Anthropic key path is
 `$HOME/.config/signalbox/anthropic-api-key`, written into the seeded model
@@ -125,9 +115,9 @@ code-host token path is `$HOME/.config/signalbox/github-token`, overridable with
 `SIGNALBOX_DEV_BRAVE_API_KEY_FILE`. No credential material is committed or
 generated. The
 [credential lifecycle](docs/spec/configuration-and-credentials.md#credential-lifecycle)
-owns when those files are read, what their bytes mean, and how absence is
-handled. Provision the default code-host path from the GitHub CLI, and create
-the Anthropic and Brave paths for editing, with these one-line commands:
+states when those files are read, what their bytes mean, and how absence is
+handled. These commands write the code-host token from the GitHub CLI and open
+the Anthropic and Brave key files for editing:
 
 ```console
 install -d -m 700 "$HOME/.config/signalbox" && (umask 077; destination="$HOME/.config/signalbox/github-token"; temporary="$(mktemp "$destination.XXXXXX")" || exit; trap 'rm -f "$temporary"' EXIT; gh auth token >"$temporary" && mv "$temporary" "$destination" && trap - EXIT)
@@ -135,20 +125,19 @@ install -d -m 700 "$HOME/.config/signalbox" && (umask 077; destination="$HOME/.c
 install -d -m 700 "$DEVENV_STATE/dev-instance" && (umask 077; destination="$DEVENV_STATE/dev-instance/brave-api-key"; temporary="$(mktemp "$destination.XXXXXX")" || exit; trap 'rm -f "$temporary"' EXIT; if [ -e "$destination" ]; then cp "$destination" "$temporary" || exit; fi; editor="${EDITOR:-vi}"; EDITOR="$editor" sh -c 'set -f; $EDITOR "$1"' sh "$temporary" && mv "$temporary" "$destination" && trap - EXIT)
 ```
 
-Most of `devenv.nix` exists to satisfy the ambient-configuration refusals that
+`devenv.nix` handles the ambient-configuration refusals that
 [configuration and credentials](docs/spec/configuration-and-credentials.md#process-configuration)
-specifies — the `PG*` and `SSL_CERT_*` scrub, the process-scoped home the
+specifies: the `PG*` and `SSL_CERT_*` scrub, the process-scoped home the
 passfile check reads, the generated authority that lets a loopback cluster pass
 full verification, and a fully stated `DATABASE_URL` exported to the daemon
-process alone — so that experiments stop re-deriving them. Each is commented in
-`devenv.nix` at the point it is handled.
+process alone. Each is commented in `devenv.nix` where it is handled.
 
 ### Terminal client
 
-The `signalbox` binary is the supported local terminal surface for the
+The `signalbox` binary is the supported local terminal client for the
 [process protocol](docs/spec/process-protocol.md). Point it at the daemon socket
-with `--socket` or `SIGNALBOX_SOCKET_PATH`; `signalbox --help` lists the closed
-command surface. For example:
+with `--socket` or `SIGNALBOX_SOCKET_PATH`; `signalbox --help` lists the
+commands. For example:
 
 ```console
 cargo run -p signalbox-client -- --socket /path/to/signalbox.sock list
@@ -168,7 +157,7 @@ cargo test -p signalbox-client --test end_to_end \
 The companion ignored real-Anthropic path makes a live provider request and may
 incur cost. The checked-in catalog names the production installation placeholder
 for the exec supervisor, so first materialize a runtime copy with the host
-executable that Cargo actually builds (inside `devenv shell`):
+executable that Cargo builds (inside `devenv shell`):
 
 ```console
 supervisor="$(tooling/resolve-cargo-bin.sh "$PWD/Cargo.toml" "$PWD/target" \
@@ -220,12 +209,10 @@ SIGNALBOX_CONFIG_FILE=target/signalboxd.live.toml \
   "Reply with exactly: signalbox smoke ok"
 ```
 
-Production process configuration is specified in
-[configuration and credentials](docs/spec/configuration-and-credentials.md#process-configuration).
-The process boundary is specified in the
-[process protocol](docs/spec/process-protocol.md); model configuration and
-credential delivery are specified in
-[configuration and credentials](docs/spec/configuration-and-credentials.md).
+Process configuration, model configuration, and credential delivery are
+specified in
+[configuration and credentials](docs/spec/configuration-and-credentials.md); the
+process boundary in the [process protocol](docs/spec/process-protocol.md).
 
 ## License
 

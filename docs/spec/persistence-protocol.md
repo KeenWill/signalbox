@@ -2,7 +2,7 @@
 
 The session-lifecycle satellite's place in the lock order is verified against
 this PR (`agent/lifecycle-t2-state-machine`). The `closed_not_delivered`
-disposition and `injection_settled` emission are verified against this PR
+disposition and `injection_settled` emission are verified against PR #1483
 (`agent/lifecycle-t7-injection`).
 
 The workspace-instruction discovery, registration, empty turn-start manifest,

@@ -60,8 +60,7 @@ one current GitHub snapshot:
    and every gating check is green.
 4. GitHub reports the pull request `MERGEABLE` against its current base.
 5. The current head contains every commit in the current base branch.
-6. The description contains at most 350 words and includes a
-   `Meaningfully changed lines:` count.
+6. The description contains at most 350 words.
 7. The pull request is not a draft.
 
 The escalation marker is valid at wave five only when no extension was taken,

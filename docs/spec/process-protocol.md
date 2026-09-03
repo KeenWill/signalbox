@@ -1,6 +1,6 @@
 # Process protocol
 
-Steering into a stopping turn is verified against this PR
+Steering into a stopping turn is verified against PR #1483
 (`agent/lifecycle-t7-injection`).
 
 Deployment-owned process limits and the `read_deployment_limits` projection are

@@ -156,7 +156,7 @@ async fn inv061_workspace_instruction_discovery_parent_seals_its_inventory()
             (instruction_discovery_id, session_id, turn_id, limit_set_version,
              classified_entry_count, finding_count,
              candidate_source_byte_count, elapsed_millis, scan_complete)
-         VALUES ($1, $2, $3, 1, 0, 0, 0, 0, true)",
+         VALUES ($1, $2, $3, 2, 0, 0, 0, 0, true)",
     )
     .bind(discovery)
     .bind(session.into_uuid())
@@ -274,7 +274,7 @@ async fn inv061_workspace_instruction_discovery_seal_rejects_a_finding_ordinal_g
             (instruction_discovery_id, session_id, turn_id, limit_set_version,
              classified_entry_count, finding_count,
              candidate_source_byte_count, elapsed_millis, scan_complete)
-         VALUES ($1, $2, $3, 1, 1, 1, 0, 0, true)",
+         VALUES ($1, $2, $3, 2, 1, 1, 0, 0, true)",
     )
     .bind(discovery)
     .bind(session.into_uuid())
@@ -317,7 +317,7 @@ async fn inv061_workspace_instruction_complete_discovery_rejects_a_limit_finding
             (instruction_discovery_id, session_id, turn_id, limit_set_version,
              classified_entry_count, finding_count,
              candidate_source_byte_count, elapsed_millis, scan_complete)
-         VALUES ($1, $2, $3, 1, 0, 1, 0, 1, true)",
+         VALUES ($1, $2, $3, 2, 0, 1, 0, 1, true)",
     )
     .bind(discovery)
     .bind(session.into_uuid())
@@ -352,7 +352,7 @@ async fn inv061_workspace_instruction_incomplete_discovery_requires_a_terminal_l
             (instruction_discovery_id, session_id, turn_id, limit_set_version,
              classified_entry_count, finding_count,
              candidate_source_byte_count, elapsed_millis, scan_complete)
-         VALUES ($1, $2, $3, 1, 0, 0, 0, 1, false)",
+         VALUES ($1, $2, $3, 2, 0, 0, 0, 1, false)",
     )
     .bind(discovery)
     .bind(session.into_uuid())
@@ -394,7 +394,7 @@ async fn inv061_workspace_instruction_manifest_requires_a_complete_discovery()
             (instruction_discovery_id, session_id, turn_id, limit_set_version,
              classified_entry_count, finding_count,
              candidate_source_byte_count, elapsed_millis, scan_complete)
-         VALUES ($1, $2, $3, 1, 0, 1, 0, 1, false)",
+         VALUES ($1, $2, $3, 2, 0, 1, 0, 1, false)",
     )
     .bind(discovery)
     .bind(session.into_uuid())
@@ -446,7 +446,7 @@ async fn inv061_workspace_instruction_manifest_requires_canonical_hashes()
             (instruction_discovery_id, session_id, turn_id, limit_set_version,
              classified_entry_count, finding_count,
              candidate_source_byte_count, elapsed_millis, scan_complete)
-         VALUES ($1, $2, $3, 1, 0, 0, 0, 0, true)",
+         VALUES ($1, $2, $3, 2, 0, 0, 0, 0, true)",
     )
     .bind(discovery)
     .bind(session.into_uuid())
@@ -498,7 +498,7 @@ async fn inv061_workspace_instruction_candidates_require_classified_entry_usage(
             (instruction_discovery_id, session_id, turn_id, limit_set_version,
              classified_entry_count, finding_count,
              candidate_source_byte_count, elapsed_millis, scan_complete)
-         VALUES ($1, $2, $3, 1, 0, 0, 1, 0, true)",
+         VALUES ($1, $2, $3, 2, 0, 0, 1, 0, true)",
     )
     .bind(discovery)
     .bind(session.into_uuid())
@@ -534,7 +534,7 @@ async fn inv061_workspace_instruction_candidates_require_source_byte_usage()
             (instruction_discovery_id, session_id, turn_id, limit_set_version,
              classified_entry_count, finding_count,
              candidate_source_byte_count, elapsed_millis, scan_complete)
-         VALUES ($1, $2, $3, 1, 1, 0, 0, 0, true)",
+         VALUES ($1, $2, $3, 2, 1, 0, 0, 0, true)",
     )
     .bind(discovery)
     .bind(session.into_uuid())
@@ -600,7 +600,7 @@ async fn inv061_workspace_instruction_discovery_seal_requires_the_candidate_root
             (instruction_discovery_id, session_id, turn_id, limit_set_version,
              classified_entry_count, finding_count,
              candidate_source_byte_count, elapsed_millis, scan_complete)
-         VALUES ($1, $2, $3, 1, 1, 0, 1, 0, true)",
+         VALUES ($1, $2, $3, 2, 1, 0, 1, 0, true)",
     )
     .bind(discovery)
     .bind(session.into_uuid())
