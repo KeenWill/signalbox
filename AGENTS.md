@@ -37,8 +37,7 @@ tree. Wire formats, schema types, and stored values change to their correct
 shape. Machinery protecting an old deployed version (compatibility shims,
 dual-read or dual-write paths, version-tolerant decoding, legacy-value aliases,
 data-upgrade scaffolding) protects deployments that do not exist and is a
-defect: do not add it, and do not request it in review (owner ruling
-2026-08-11).
+defect: do not add it, and do not request it in review.
 
 The one compatibility task owed is a one-time migration carrying a live database
 across a change that invalidates its stored data. Compatibility a `docs/spec/`
@@ -100,8 +99,7 @@ owner's private repositories may be named as provenance, not cited as rules.
 ## Pull requests
 
 - The owner merges every pull request. Deliver each one with CI green on its
-  final commit and open ready for review, not as a draft (owner ruling
-  2026-08-25). Keep it narrow.
+  final commit and open ready for review, not as a draft. Keep it narrow.
 - The description claims only what the code enforces; a contract binding future
   implementers is described as a contract. Keep it under 350 words.
 - Reply to every review comment in its thread: name the fixing commit, or state
