@@ -315,6 +315,8 @@ impl SessionLifecycleRepository {
     ///
     /// The lift records `operator`: §7 makes leaving a park an operator or
     /// coordinator action, so the classification is fixed rather than supplied.
+    /// A blocked goal must instead resume through its goal command so the goal
+    /// event and any guidance commit before the park is lifted.
     pub async fn resume(
         &self,
         session: SessionId,
@@ -335,6 +337,16 @@ impl SessionLifecycleRepository {
             return Err(reject(
                 transaction,
                 SessionLifecycleRejection::PendingTerminalConflict,
+            )
+            .await);
+        }
+        if goal::load_goal_from_connection(&mut transaction, session)
+            .await?
+            .is_some_and(|goal| matches!(goal.current().state(), GoalState::Blocked { .. }))
+        {
+            return Err(reject(
+                transaction,
+                SessionLifecycleRejection::TransitionNotAdmitted,
             )
             .await);
         }

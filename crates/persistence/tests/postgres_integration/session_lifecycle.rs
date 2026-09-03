@@ -931,6 +931,89 @@ async fn a_pending_terminal_settles_once_the_turn_does() -> Result<(), Box<dyn E
     Ok(())
 }
 
+/// §2: a committed closure disposes steering still pending on its live turn.
+/// The turn then settles without creating a successor that would hold the
+/// session open beneath its terminal handoff.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_closure_handoff_disposes_pending_steering_before_settlement()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    let session = creation_session(65);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(65))
+        .await?;
+    let turn = activate_first_turn(&pool, session, 65).await?;
+    let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 65 + 0xb00));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 65 + 0xa00)),
+                session,
+                UserContent::try_text(String::from("steer before closing"))
+                    .expect("fixture content is admitted"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: turn,
+                },
+            ),
+            accepted_input,
+            None,
+        )
+        .await?;
+    let outcome = SessionTerminalOutcome::Stopped {
+        sticky: StopStickiness::Sticky,
+    };
+
+    repository
+        .commit_pending_terminal(session, outcome, LifecycleActor::Operator)
+        .await?;
+    let disposition: String = sqlx::query_scalar(
+        "SELECT disposition_kind
+           FROM accepted_input
+          WHERE accepted_input_id = $1",
+    )
+    .bind(accepted_input.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(disposition, String::from("closed_not_delivered"));
+
+    let liveness = PostgresTurnLivenessRepository::new(
+        pool.clone(),
+        TurnLivenessPersistenceBounds::new(None, None, None),
+    );
+    let candidate = *liveness
+        .quiescent_active_turns(None)
+        .await?
+        .candidates()
+        .first()
+        .expect("the live turn is quiescent");
+    assert_eq!(candidate.turn(), turn);
+    assert_eq!(
+        liveness
+            .terminalize_stale_turn(
+                candidate,
+                signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                        LIFECYCLE_SEED + 65 + 0xc00,
+                    )),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 65 + 0xd00)),
+                ),
+                &mut signalbox_application::UuidV7StartupScanIdGenerator,
+            )
+            .await?,
+        signalbox_application::StaleTurnOutcome::Terminalized
+    );
+    assert_eq!(
+        repository.settle_pending_terminal(session).await?,
+        SessionLifecycleState::Terminal { outcome }
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// The state vocabulary the domain carries and the vocabulary the database
 /// admits are the same closed set, read from the constraint itself rather than
 /// restated by the reader.
@@ -1412,6 +1495,45 @@ async fn resuming_a_parked_goal_lifts_the_park() -> Result<(), Box<dyn Error>> {
         .expect("the session keeps its lifecycle row")
         .state();
     assert!(!resumed.is_parked());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// §7: a blocked goal resumes through its own command. Lifting the park
+/// directly would expose the blocked generation to automatic resumption
+/// without recording the goal's resume event or guidance.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_blocked_goal_refuses_a_direct_lifecycle_resume() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    let session = creation_session(64);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(64))
+        .await?;
+    attach_goal(&pool, session, 64).await?;
+    block_goal_by_statement(&pool, session, LIFECYCLE_SEED + 64 + 0xc00).await?;
+    park_by_statement(&pool, session).await?;
+
+    let error = repository
+        .resume(session)
+        .await
+        .expect_err("a blocked goal resumes only through its own command");
+
+    assert_eq!(
+        lifecycle_rejection(error),
+        SessionLifecycleRejection::TransitionNotAdmitted
+    );
+    assert!(
+        repository
+            .load(session)
+            .await?
+            .expect("the session keeps its lifecycle row")
+            .state()
+            .is_parked()
+    );
 
     pool.close().await;
     drop(container);

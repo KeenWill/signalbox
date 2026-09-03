@@ -7507,16 +7507,6 @@ fn reconstitute_active_acceptance_tail(
                                     && expected_active_turn == active
                             )
                     }
-                    AcceptedInputDisposition::ClosedNotDelivered => {
-                        !accepted_input_turns.contains_key(&accepted_input)
-                            && !origin_by_position.contains_key(&entry.position)
-                            && matches!(
-                                entry.delivery,
-                                DeliveryRequest::NextSafePoint {
-                                    expected_active_turn,
-                                } if expected_active_turn == active
-                            )
-                    }
                     AcceptedInputDisposition::ConsumedAsSteering { call } => {
                         let source_precedes_active = matches!(
                             entry.delivery,
@@ -7543,6 +7533,16 @@ fn reconstitute_active_acceptance_tail(
                                 DeliveryRequest::NextSafePoint {
                                     expected_active_turn,
                                 } if expected_active_turn == active || source_precedes_active
+                            )
+                    }
+                    AcceptedInputDisposition::ClosedNotDelivered => {
+                        !accepted_input_turns.contains_key(&accepted_input)
+                            && !origin_by_position.contains_key(&entry.position)
+                            && matches!(
+                                entry.delivery,
+                                DeliveryRequest::NextSafePoint {
+                                    expected_active_turn,
+                                } if expected_active_turn == active
                             )
                     }
                 }

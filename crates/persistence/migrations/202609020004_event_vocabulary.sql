@@ -347,6 +347,14 @@ CREATE TABLE session_state_changed_outbox_event (
     CONSTRAINT session_state_changed_outbox_header_fk
         FOREIGN KEY (event_sequence, event_kind, storage_version, session_id)
         REFERENCES outbox_event (event_sequence, event_kind, storage_version, session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT session_state_changed_outbox_actor_turn_fk
+        FOREIGN KEY (actor_turn_id, session_id)
+        REFERENCES turn_lifecycle (turn_id, session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT session_state_changed_outbox_actor_tool_request_fk
+        FOREIGN KEY (actor_tool_request_id, session_id)
+        REFERENCES tool_request (request_id, session_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
 );
 

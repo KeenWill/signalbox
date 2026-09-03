@@ -2,7 +2,7 @@
 
 The injection contract — steering accepted while stopping, watchdog
 reclassification, closure at a committed session terminal, and settlement
-receipts — is verified against this PR (`agent/lifecycle-t7-injection`).
+receipts — is verified against PR #1483 (`agent/lifecycle-t7-injection`).
 
 The scheduler occupancy ceiling and metrics, daemon-owned ambiguous-call
 reconciliation, and outer slot-held watchdog coverage were verified against this
@@ -1096,15 +1096,15 @@ The occupied-slot delivery outcomes implemented here are:
   position, and source turn. A reclassification path now exists: terminalization
   of the source turn reclassifies pending steering into a queued successor
   origin turn that inherits the source turn's configuration
-  (`queued_input_origin.source_configuration_turn_id`). At the next model-call
-  preparation, every pending input is consumed under the atomic boundary in
-  [model-call-execution](model-call-execution.md) (INV-036). A session closure
-  committed while steering is pending closes it `closed_not_delivered` instead;
-  no successor turn can exist. Every accepted input settles one
-  `injection_settled` receipt: an origin `delivered` to its turn at acceptance,
-  steering `delivered` when consumed or reclassified, `not_delivered` when
-  closed, and every recorded rejection `rejected` with its kind
-  ([session-lifecycle](../proposals/session-lifecycle.md) §8).
+  (`queued_input_origin.source_configuration_turn_id`), except under a committed
+  closure handoff, which closes it as `closed_not_delivered` rather than
+  reclassifying it. At the next model-call preparation, every pending input is
+  consumed under the atomic boundary in
+  [model-call-execution](model-call-execution.md) (INV-036). Every accepted
+  input settles one `injection_settled` receipt: an origin `delivered` to its
+  turn at acceptance, steering `delivered` when consumed or reclassified,
+  `not_delivered` when closed, and every recorded rejection `rejected` with its
+  kind ([session-lifecycle](../proposals/session-lifecycle.md) §8).
 - `AfterCurrentTurn` creates an ordinary queued origin turn with frozen
   configuration and an immutable acceptance position; it fixes no predecessor
   until eligibility. While the source turn holds the slot it cannot activate.

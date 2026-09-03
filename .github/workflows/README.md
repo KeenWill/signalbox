@@ -1,8 +1,7 @@
 # CI runner contract
 
-Which runner every workflow job uses, and why. This is the owning document for
-the routing rule the workflows repeat; change a job's `runs-on` and this file in
-the same pull request.
+Which runner every workflow job uses, and why. Change a job's `runs-on` and this
+file in the same pull request.
 
 ## Pools
 
@@ -36,8 +35,8 @@ runs-on: ${{ github.event_name == 'pull_request'
   the whole enforced condition: no other bot identity is excluded, nothing
   inspects who pushed a commit, and the pinned jobs in the next section enforce
   weaker gates or none.
-- The bot check keys on the **pull request author**
-  (`github.event.pull_request.user.login`), never `github.actor`: a human
+- The bot check keys on the pull request author
+  (`github.event.pull_request.user.login`), not `github.actor`: a human
   reopening or re-running a bot pull request would otherwise mask the bot and
   route its code to self-hosted hardware.
 

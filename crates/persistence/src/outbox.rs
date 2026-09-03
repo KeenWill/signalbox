@@ -2041,7 +2041,8 @@ async fn load_injection_settled(
            JOIN durable_command AS command
              ON command.command_id = event.command_id
           WHERE event.event_sequence = $1
-            AND event.session_id = $2",
+            AND event.session_id = $2
+            AND durable_command_belongs_to_session(event.command_id, event.session_id)",
     )
     .bind(Decimal::from(expected_sequence))
     .bind(stored_session)
