@@ -857,6 +857,12 @@ impl GoalRepository {
             transaction.rollback().await?;
             return Ok(GoalTransitionOutcome::GoalNotAttached);
         }
+        if matches!(&transition, SystemTransition::Achieved { .. })
+            && session_holds_committed_closure(&mut transaction, session).await?
+        {
+            transaction.rollback().await?;
+            return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
+        }
         let Some(goal) = load_goal_from_connection(&mut transaction, session).await? else {
             transaction.rollback().await?;
             return Ok(GoalTransitionOutcome::GoalNotAttached);
@@ -1184,6 +1190,9 @@ pub(crate) async fn insert_repo_watch_composed_stop(
     }
     if !lock_session(connection, command.session()).await? {
         return Err(GoalCorruption::Missing("dispatched cutoff session").into());
+    }
+    if session_holds_committed_closure(connection, command.session()).await? {
+        return Ok(false);
     }
     let Some(goal) = load_goal_from_connection(connection, command.session()).await? else {
         return Err(GoalCorruption::Missing("dispatched cutoff goal").into());
