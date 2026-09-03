@@ -1197,10 +1197,9 @@ impl TelemetryMetrics {
 
     /// Publishes one §12 report onto the exported gauges.
     ///
-    /// A rate with no population leaves its series where it was rather than
-    /// exporting a zero the durable columns do not claim. The deadline count
-    /// is instantaneous and always publishes, and a completed pass marks the
-    /// series fresh.
+    /// A rate with no population is withdrawn rather than exported as a zero
+    /// the durable columns do not claim. The deadline count is instantaneous
+    /// and always publishes, and a completed pass marks the series fresh.
     pub(crate) fn observe_lifecycle_metrics(&self, report: &LifecycleMetricsReport) {
         self.lifecycle_nonterminal_past_deadline
             .set(clamp_gauge(report.nonterminal_past_deadline()));
@@ -1243,6 +1242,10 @@ impl TelemetryMetrics {
 
     fn set_rate(&self, metric: &str, rate: Option<LifecycleRate>) {
         let Some(parts_per_million) = rate.and_then(LifecycleRate::parts_per_million) else {
+            // A rate the report no longer measures is withdrawn rather than
+            // left standing: the export is fresh, so a series it still carries
+            // would be read as a current value.
+            let _ = self.lifecycle_rate_ppm.remove_label_values(&[metric]);
             return;
         };
         let Ok(gauge) = self
