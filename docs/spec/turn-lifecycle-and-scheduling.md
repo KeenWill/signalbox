@@ -2,10 +2,9 @@
 
 The injection contract — steering accepted while stopping, watchdog
 reclassification, closure at a committed session terminal, and settlement
-receipts — is verified against this PR (`agent/lifecycle-t7-injection`). Durable
-watchdog observations, independent watchdog bounds, and class-specific
-reconciliation policies are verified against this PR
-(`agent/lifecycle-t9-watchdog`).
+receipts — is verified against this PR (`agent/lifecycle-t7-injection`).
+Durable watchdog observations and the non-advancing first post-restart scan are
+verified against this PR (`agent/lifecycle-t9-watchdog`).
 
 The scheduler occupancy ceiling and metrics, daemon-owned ambiguous-call
 reconciliation, and outer slot-held watchdog coverage were verified against this
@@ -686,24 +685,23 @@ session-keyed paging, progress evidence, repeated-observation ledger, and
 sixty-four-turn fair window as the quiescent inventory, but keeps an independent
 ledger and lap.
 
-A slot-held turn whose evidence remains unchanged for its independently
-configured staleness bound is handed to the existing startup-recovery
-transaction under the session scheduler lock. Each detached database attempt has
-its own configured wall-clock bound, which is not the wider ceiling automatic
-reconciliation spends below. That admits ordinary serialization through the
-shared outbox frontier after the session lock while the sixty-four-turn fair
-window still bounds how long a fully stalled database can delay the next
-watchdog wake — one ceiling shared between the two would multiply the wider of
-them across that window and carry the delay past the sixty-minute scheduler-pass
-ceiling this watchdog backstops. A timeout is commit-ambiguous and leaves the
-unchanged durable evidence due for a later observation. That transaction
-reconstitutes and classifies the exact current durable shape; the watchdog
-invents no parallel terminal transition. This is the outer backstop for
-pass-expiry recovery whose bounded database attempts all failed and for a
-prior-process running turn that survives startup classification. The
-sixty-minute scheduler-pass ceiling is a final same-process safety bound; the
-liveness watchdog remains responsible for reclaiming a wedged pass from
-unchanged durable evidence before that ceiling.
+A slot-held turn whose evidence remains unchanged for thirty minutes is handed
+to the existing startup-recovery transaction under the session scheduler lock.
+Each detached database attempt has its own ten-second wall-clock bound, which is
+not the wider ceiling automatic reconciliation spends below. That admits
+ordinary serialization through the shared outbox frontier after the session lock
+while the sixty-four-turn fair window still bounds how long a fully stalled
+database can delay the next watchdog wake — one ceiling shared between the two
+would multiply the wider of them across that window and carry the delay past the
+sixty-minute scheduler-pass ceiling this watchdog backstops. A timeout is
+commit-ambiguous and leaves the unchanged durable evidence due for a later
+observation. That transaction reconstitutes and classifies the exact current
+durable shape; the watchdog invents no parallel terminal transition. This is the
+outer backstop for pass-expiry recovery whose bounded database attempts all
+failed and for a prior-process running turn that survives startup
+classification. The sixty-minute scheduler-pass ceiling is a final same-process
+safety bound; the liveness watchdog remains responsible for reclaiming a wedged
+pass from unchanged durable evidence before that ceiling.
 
 **Staleness.** No lifecycle table stores an activity timestamp, and this page
 introduces none: a stored clock would be one more thing to keep true. Staleness
@@ -711,12 +709,12 @@ is decided by repeated observation instead. Each pass records, per candidate
 turn, its session's turn-progress frontier — the greatest `event_sequence` the
 session has emitted for an event that a turn's own execution produces — and the
 turn's current attempt. A turn is due only once that evidence has been observed
-unchanged for at least the bound governing its watchdog. The configured
-quiescent bound governs only the quiescent watchdog; the slot-held watchdog uses
-its separate configured bound so lowering the quiescent bound cannot classify
-live model-call, tool, or stop work as stale early. Any progress at all restarts
-the applicable bound, so a turn that resumed cannot be ended on the strength of
-its earlier silence.
+unchanged for at least the bound governing its watchdog. The composed
+`staleness_bound` governs only the quiescent watchdog; the slot-held watchdog
+always uses the separate thirty-minute hard ceiling so lowering the quiescent
+bound cannot classify live model-call, tool, or stop work as stale early. Any
+progress at all restarts the applicable bound, so a turn that resumed cannot be
+ended on the strength of its earlier silence.
 
 The frontier is the outbox's rather than the transcript's because the outbox
 assigns its sequence in commit order, and every session-scoped transition kind
@@ -750,10 +748,9 @@ partially on the live rows those checks name, so what is indexed is bounded by
 how much is happening at once rather than by how much has ever happened. No part
 of one inventory read scans a history. The staleness bound is also refused below
 whole-second precision, so the bound an audit line reports is exactly the bound
-in force. The durable ledger records commit-ordered evidence and scan ordinals.
-A restart preserves those observations but does not advance an existing ordinal
-until a complete post-restart observation has committed; each later ordinal is
-separated from the preceding commit by the configured scan interval.
+in force. The ledger persists commit-ordered evidence and scan ordinals. Its
+first complete observation after restart preserves an existing ordinal; later
+observations advance it only after the configured scan interval.
 
 **Coverage.** One scan observes the whole quiescent population, so the bound is
 a property of the binary rather than of how many sessions happen to be
@@ -935,9 +932,9 @@ wide enough for the shared outbox and deferred-validation convoy this
 transaction crosses, and separate from the slot-held watchdog's narrower
 recovery bound. A claimed attempt whose transaction is abandoned remains durably
 `attempting` until its recorded deadline makes it classifiable. An explicitly
-recorded final configured failure becomes exhausted on the next watchdog scan
-without waiting out that final ambiguity deadline; the deadline remains
-necessary when the daemon cannot tell whether the final attempt committed.
+recorded fifth failure becomes exhausted on the next watchdog scan without
+waiting out that final ambiguity deadline; the deadline remains necessary when
+the daemon cannot tell whether the fifth attempt committed.
 
 Each inventory, reconciliation, and failure-record stage observes daemon
 shutdown ahead of its deadline. A requested stop therefore ends the batch
@@ -946,8 +943,7 @@ ordinary transaction drop or durable attempt deadline remains the recovery
 authority. The slot-held watchdog applies the same shutdown preemption between
 and during its sequential recovery transactions.
 
-The automatic model-call budget is five attempts and the tool-attempt budget is
-three in the checked-in configuration. Each attempt locks the same session
+The automatic budget is five attempts. Each attempt locks the same session
 scheduler row as the operator path, reconstitutes the complete scheduling
 projection, and applies the existing reconciliation-required transition to the
 exact ambiguous operation and ended attempt. Tool recovery additionally rebuilds
@@ -955,7 +951,7 @@ the proposal-ordered result suffix. It neither claims what the provider or tool
 did nor rewrites the ambiguous operation, and it reclassifies pending steering
 through the same terminal boundary. A concurrent operator decision or other
 authoritative transition wins by ordinary row locking and records the automatic
-attempt as `superseded`. After its configured failures, the recovery row becomes
+attempt as `superseded`. After five failures, the recovery row becomes
 `exhausted`, the active wait remains unchanged, and the process transcript sets
 `operator_action_required`; only then is the wait an operator park.
 

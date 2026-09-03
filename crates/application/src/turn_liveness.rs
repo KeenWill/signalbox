@@ -80,7 +80,6 @@ pub struct ExhaustedAutomaticReconciliation {
     session: SessionId,
     turn: TurnId,
     operation: AutomaticReconciliationOperation,
-    attempt_ceiling: NonZeroU32,
 }
 
 impl ExhaustedAutomaticReconciliation {
@@ -89,13 +88,11 @@ impl ExhaustedAutomaticReconciliation {
         session: SessionId,
         turn: TurnId,
         operation: AutomaticReconciliationOperation,
-        attempt_ceiling: NonZeroU32,
     ) -> Self {
         Self {
             session,
             turn,
             operation,
-            attempt_ceiling,
         }
     }
 
@@ -112,11 +109,6 @@ impl ExhaustedAutomaticReconciliation {
     /// Returns the exact ambiguous operation.
     pub const fn operation(self) -> AutomaticReconciliationOperation {
         self.operation
-    }
-
-    /// Returns the durable ceiling exhausted by this recovery.
-    pub const fn attempt_ceiling(self) -> NonZeroU32 {
-        self.attempt_ceiling
     }
 }
 
@@ -467,18 +459,15 @@ impl TurnLivenessLedger {
     ///
     /// The first observation establishes the frontier. Each later equal
     /// observation contributes one configured scan interval, so system-clock
-    /// adjustment cannot add elapsed time. A slow-substrate factor increases
-    /// the required intervals without changing stored evidence.
+    /// adjustment cannot add elapsed time.
     pub fn reconcile(
         self,
         observations: &[DurableTurnLivenessObservation],
-        slow_substrate_factor: NonZeroU32,
     ) -> Box<[StaleTurnCandidate]> {
         let interval_nanos = self.scan_interval.get().as_nanos();
         let bound_nanos = self.bound.get().as_nanos();
-        let adjusted_bound = bound_nanos.saturating_mul(u128::from(slow_substrate_factor.get()));
         let intervals =
-            adjusted_bound.saturating_add(interval_nanos.saturating_sub(1)) / interval_nanos;
+            bound_nanos.saturating_add(interval_nanos.saturating_sub(1)) / interval_nanos;
         let required = intervals.saturating_add(1);
         observations
             .iter()
@@ -497,7 +486,7 @@ mod tests {
         TurnLivenessScanInterval,
     };
     use signalbox_domain::{SessionId, TurnAttemptId, TurnId};
-    use std::{num::NonZeroU32, num::NonZeroU64, time::Duration};
+    use std::{num::NonZeroU64, time::Duration};
 
     const BOUND: Duration = Duration::from_secs(1_800);
 
@@ -521,6 +510,10 @@ mod tests {
         StaleTurnCandidate::new(session(), turn(1), evidence(frontier))
     }
 
+    fn other_candidate() -> StaleTurnCandidate {
+        StaleTurnCandidate::new(session(), turn(2), evidence(1))
+    }
+
     fn ledger() -> TurnLivenessLedger {
         TurnLivenessLedger::new(
             StaleActiveTurnBound::try_new(BOUND).expect("fixture bound is valid"),
@@ -534,10 +527,6 @@ mod tests {
             candidate(frontier),
             NonZeroU64::new(ordinal).expect("fixture ordinal is positive"),
         )
-    }
-
-    fn ordinary_factor() -> NonZeroU32 {
-        NonZeroU32::MIN
     }
 
     /// The deployment may select any positive whole-second staleness bound.
@@ -614,7 +603,7 @@ mod tests {
     /// A first persisted observation establishes evidence but carries no elapsed scans.
     #[test]
     fn a_first_observation_is_never_due() {
-        let due = ledger().reconcile(&[observation(1, 1)], ordinary_factor());
+        let due = ledger().reconcile(&[observation(1, 1)]);
 
         assert!(due.is_empty());
     }
@@ -622,7 +611,7 @@ mod tests {
     /// Thirty elapsed minute scans plus the establishing observation cover a 30-minute bound.
     #[test]
     fn unchanged_evidence_across_the_bound_becomes_due() {
-        let due = ledger().reconcile(&[observation(1, 31)], ordinary_factor());
+        let due = ledger().reconcile(&[observation(1, 31)]);
 
         assert_eq!(due.as_ref(), &[candidate(1)]);
     }
@@ -630,7 +619,7 @@ mod tests {
     /// Persistence resets the ordinal when commit-ordered progress changes.
     #[test]
     fn changed_evidence_restarts_the_bound() {
-        let due = ledger().reconcile(&[observation(2, 2)], ordinary_factor());
+        let due = ledger().reconcile(&[observation(2, 2)]);
 
         assert!(due.is_empty());
     }
@@ -638,59 +627,9 @@ mod tests {
     /// A forward wall-clock jump supplies no input to the ordinal decision.
     #[test]
     fn forward_clock_jump_does_not_stale_live_work() {
-        let due = ledger().reconcile(&[observation(2, 1)], ordinary_factor());
+        let due = ledger().reconcile(&[observation(2, 1)]);
 
         assert!(due.is_empty());
-    }
-
-    /// A declared slow substrate multiplies the observation threshold.
-    #[test]
-    fn healthy_turn_survives_a_slow_substrate_window() {
-        let factor = NonZeroU32::new(4).expect("fixture factor is positive");
-        let due = ledger().reconcile(&[observation(1, 31)], factor);
-
-        assert!(due.is_empty());
-    }
-
-    /// A slow-substrate factor multiplies duration before scan rounding.
-    #[test]
-    fn slow_substrate_rounding_uses_the_adjusted_duration() {
-        let bound =
-            StaleActiveTurnBound::try_new(Duration::from_secs(61)).expect("fixture bound is valid");
-        let interval = TurnLivenessScanInterval::try_new(Duration::from_secs(60))
-            .expect("fixture interval is valid");
-        let ledger = TurnLivenessLedger::new(bound, interval);
-        let factor = NonZeroU32::new(4).expect("fixture factor is positive");
-
-        let before = ledger.reconcile(&[observation(1, 5)], factor);
-        let due = ledger.reconcile(&[observation(1, 6)], factor);
-
-        assert!(before.is_empty());
-        assert_eq!(due.as_ref(), &[candidate(1)]);
-    }
-
-    /// Independent guard classes become due according to their own configured bounds.
-    #[test]
-    fn per_class_staleness_bounds_are_honored() {
-        let interval = TurnLivenessScanInterval::try_new(Duration::from_secs(60))
-            .expect("fixture interval is valid");
-        let quiescent = TurnLivenessLedger::new(
-            StaleActiveTurnBound::try_new(Duration::from_secs(60))
-                .expect("quiescent fixture bound is valid"),
-            interval,
-        );
-        let slot_held = TurnLivenessLedger::new(
-            StaleActiveTurnBound::try_new(Duration::from_secs(120))
-                .expect("slot-held fixture bound is valid"),
-            interval,
-        );
-        let repeated = [observation(1, 2)];
-
-        assert_eq!(
-            quiescent.reconcile(&repeated, ordinary_factor()).as_ref(),
-            &[candidate(1)]
-        );
-        assert!(slot_held.reconcile(&repeated, ordinary_factor()).is_empty());
     }
 
     /// The validated configured bound is the one the ledger decides by.
@@ -702,7 +641,7 @@ mod tests {
             TurnLivenessScanInterval::try_new(Duration::from_secs(60))
                 .expect("fixture interval is valid"),
         );
-        let due = ledger.reconcile(&[observation(1, 2)], ordinary_factor());
+        let due = ledger.reconcile(&[observation(1, 2)]);
 
         assert_eq!(ledger.bound(), lowered);
         assert_eq!(due.as_ref(), &[candidate(1)]);

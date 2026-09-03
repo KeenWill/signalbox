@@ -4,8 +4,7 @@ This page is verified against PR #1056
 (`agent/daemon-live-commissioned-escalation-resume`; via PR #1194
 `agent/daemon-live-codex-tool-arg-stage`). The daemon-native convergence sweep,
 predicate, fenced commission, durable retry and park records, and explicit
-configuration throttle are its implementation scope. Configurable durable retry
-budgets are re-verified against this PR (`agent/lifecycle-t9-watchdog`).
+configuration throttle are its implementation scope.
 
 ## Authority and target selection
 
@@ -75,9 +74,9 @@ goal. This final guard covers races after the sweep's earlier liveness read.
 
 Facts-fetch failure, commission refusal, template drift, and recoverable sweep
 state-access failure each append a typed event and advance an independent
-consecutive-failure lineage. Automatic retry uses the configured exponential
-delay and ceiling. The configured consecutive-failure budget is persisted per
-lineage; reaching it parks the target and exposes an operator need through
+consecutive-failure lineage. Automatic retry uses exponential delays from a
+60-second base under a 900-second ceiling. The fifth consecutive failure parks
+the target and exposes an operator need through
 `convergence_sweep_parked_target`; a successful observation resets a transient
 lineage. A storage outage that also prevents the failure record is logged and
 retried at the next census because no system can durably record through an

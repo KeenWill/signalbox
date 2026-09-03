@@ -248,11 +248,9 @@ pub(crate) const AUTOMATIC_RECONCILIATION_DISCOVERY: &str = "WITH discovery AS (
              FOR NO KEY UPDATE OF turn_lifecycle
          ), inserted AS (
             INSERT INTO automatic_reconciliation
-                (turn_id, session_id, model_call_id, tool_attempt_id, attempt_ceiling)
+                (turn_id, session_id, model_call_id, tool_attempt_id)
             SELECT turn_id, session_id, recovery_model_call_id,
-                   recovery_tool_attempt_id,
-                   CASE WHEN recovery_model_call_id IS NOT NULL THEN $2 ELSE $3 END
-              FROM page
+                   recovery_tool_attempt_id FROM page
             ON CONFLICT (turn_id) DO NOTHING
             RETURNING turn_id
          )
@@ -270,40 +268,6 @@ pub(crate) const AUTOMATIC_RECONCILIATION_DISCOVERY: &str = "WITH discovery AS (
                     ELSE NULL
                 END
           WHERE singleton";
-
-/// Enrolls one not-yet-inventoried recovery of the requested operation class.
-pub(crate) const AUTOMATIC_RECONCILIATION_CLASS_DISCOVERY: &str = "WITH page AS (
-            SELECT turn_id, session_id, recovery_model_call_id,
-                   recovery_tool_attempt_id
-              FROM turn_lifecycle
-             WHERE state_kind = 'active'
-               AND active_phase_kind IN (
-                   'awaiting_model_call_recovery',
-                   'awaiting_tool_recovery'
-               )
-               AND NOT delegation_runtime_terminal
-               AND num_nonnulls(
-                   recovery_model_call_id,
-                   recovery_tool_attempt_id
-               ) = 1
-               AND (($4 AND recovery_model_call_id IS NOT NULL)
-                    OR (NOT $4 AND recovery_tool_attempt_id IS NOT NULL))
-               AND NOT EXISTS (
-                   SELECT 1
-                     FROM automatic_reconciliation AS recovery
-                    WHERE recovery.turn_id = turn_lifecycle.turn_id
-               )
-             ORDER BY turn_id
-             LIMIT $1
-             FOR NO KEY UPDATE OF turn_lifecycle
-         )
-         INSERT INTO automatic_reconciliation
-             (turn_id, session_id, model_call_id, tool_attempt_id, attempt_ceiling)
-         SELECT turn_id, session_id, recovery_model_call_id,
-                recovery_tool_attempt_id,
-                CASE WHEN recovery_model_call_id IS NOT NULL THEN $2 ELSE $3 END
-           FROM page
-         ON CONFLICT (turn_id) DO NOTHING";
 
 /// Retires the recoveries whose durable wait no longer exists, one bounded lap
 /// at a time.
@@ -402,9 +366,12 @@ pub(crate) const AUTOMATIC_RECONCILIATION_SUPERSESSION: &str = "WITH cursor AS (
 
 /// Claims one due window of automatic reconciliations.
 ///
-/// The model-call (`$2`..`$6`) and tool (`$7`..`$11`) retry ladders and their
-/// respective attempt leases (`$13`, `$14`), in milliseconds, are bound by the
-/// caller from deployment policy.
+/// The attempt budget (`$2`) and the retry ladder (`$3`..`$7`, in milliseconds)
+/// are bound by the caller from `AutomaticReconciliationAttempt` rather than
+/// written here. They were literals, which meant the schedule this daemon
+/// actually enforces lived only in this string: the Rust ladder had no
+/// production reader, so the two could diverge in either direction with nothing
+/// failing.
 ///
 /// Milliseconds rather than seconds because the failure path schedules its own
 /// retry in milliseconds. Seconds here truncated every sub-second configured
@@ -418,15 +385,10 @@ pub(crate) const AUTOMATIC_RECONCILIATION_SUPERSESSION: &str = "WITH cursor AS (
 /// The daemon refuses such a budget at configuration admission.
 pub(crate) const AUTOMATIC_RECONCILIATION_CLAIM: &str = "WITH due AS (
                 SELECT turn_id
-                 FROM automatic_reconciliation
+                  FROM automatic_reconciliation
                  WHERE state_kind = 'scheduled'
-                   AND attempt_count < attempt_ceiling
+                   AND attempt_count < $2
                    AND next_attempt_at <= statement_timestamp()
-                   AND (
-                        $12::boolean IS NULL
-                        OR ($12 AND model_call_id IS NOT NULL)
-                        OR (NOT $12 AND tool_attempt_id IS NOT NULL)
-                   )
                  ORDER BY next_attempt_at, turn_id
                  LIMIT $1
                  FOR UPDATE SKIP LOCKED
@@ -435,35 +397,15 @@ pub(crate) const AUTOMATIC_RECONCILIATION_CLAIM: &str = "WITH due AS (
                    SET attempt_count = recovery.attempt_count + 1,
                        state_kind = 'attempting',
                        next_attempt_at = CASE
-                           WHEN recovery.model_call_id IS NOT NULL THEN
-                               CASE WHEN $2::bigint IS NULL THEN statement_timestamp()
-                                       + ($13::bigint * interval '1 millisecond')
-                                    ELSE statement_timestamp()
-                                       + (greatest(
-                                            CASE recovery.attempt_count + 1
-                                                WHEN 1 THEN $2::bigint
-                                                WHEN 2 THEN $3::bigint
-                                                WHEN 3 THEN $4::bigint
-                                                WHEN 4 THEN $5::bigint
-                                                ELSE $6::bigint
-                                            END,
-                                            $13::bigint
-                                          ) * interval '1 millisecond')
-                               END
-                           ELSE CASE WHEN $7::bigint IS NULL THEN statement_timestamp()
-                                          + ($14::bigint * interval '1 millisecond')
-                                     ELSE statement_timestamp()
-                                        + (greatest(
-                                             CASE recovery.attempt_count + 1
-                                                 WHEN 1 THEN $7::bigint
-                                                 WHEN 2 THEN $8::bigint
-                                                 WHEN 3 THEN $9::bigint
-                                                 WHEN 4 THEN $10::bigint
-                                                 ELSE $11::bigint
-                                             END,
-                                             $14::bigint
-                                           ) * interval '1 millisecond')
-                                END
+                           WHEN $3::bigint IS NULL THEN 'infinity'::timestamptz
+                           ELSE statement_timestamp()
+                               + (CASE recovery.attempt_count + 1
+                                    WHEN 1 THEN $3::bigint
+                                    WHEN 2 THEN $4::bigint
+                                    WHEN 3 THEN $5::bigint
+                                    WHEN 4 THEN $6::bigint
+                                    ELSE $7::bigint
+                                  END * interval '1 millisecond')
                        END
                   FROM due
                  WHERE recovery.turn_id = due.turn_id
@@ -472,10 +414,8 @@ pub(crate) const AUTOMATIC_RECONCILIATION_CLAIM: &str = "WITH due AS (
                        recovery.attempt_count
              ), recorded AS (
                 INSERT INTO automatic_reconciliation_attempt
-                    (turn_id, attempt_ordinal, attempt_ceiling)
-                SELECT claimed.turn_id, claimed.attempt_count, recovery.attempt_ceiling
-                  FROM claimed
-                  JOIN automatic_reconciliation AS recovery USING (turn_id)
+                    (turn_id, attempt_ordinal)
+                SELECT turn_id, attempt_count FROM claimed
                 RETURNING turn_id
              )
              SELECT claimed.session_id, claimed.turn_id,

@@ -42,12 +42,6 @@ use crate::submit_input::load_scheduling_projection;
 /// bound holds whatever the population is.
 const QUIESCENT_INVENTORY_PAGE_SIZE: i64 = 256;
 
-#[derive(sqlx::FromRow)]
-struct SlowSubstrateConditionsRow {
-    backup_in_progress: bool,
-    lock_waiting: bool,
-}
-
 /// Deployment policy for liveness-terminalization database waits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TurnLivenessPersistenceBounds {
@@ -380,8 +374,7 @@ impl PostgresTurnLivenessRepository {
                             THEN observation.observation_ordinal + 1
                             ELSE observation.observation_ordinal
                         END
-                    END,
-                    recorded_at = statement_timestamp()
+                    END
              RETURNING turn_id, session_id, current_attempt_id,
                        outbox_frontier_token, observation_ordinal",
         )
@@ -420,22 +413,6 @@ impl PostgresTurnLivenessRepository {
             .collect::<Result<Vec<_>, _>>()?;
         observations.sort_unstable_by_key(|observation| observation.candidate().session());
         Ok(observations.into_boxed_slice())
-    }
-
-    /// Reads the database-owned slow-substrate signals used by the watchdog.
-    pub async fn slow_substrate_conditions(
-        &self,
-    ) -> Result<(bool, bool), TurnLivenessRepositoryError> {
-        let row = sqlx::query_as::<_, SlowSubstrateConditionsRow>(
-            "SELECT EXISTS (SELECT 1 FROM pg_stat_progress_basebackup)
-                        AS backup_in_progress,
-                    EXISTS (SELECT 1 FROM pg_locks WHERE NOT granted)
-                        AS lock_waiting",
-        )
-        .fetch_one(&self.pool)
-        .await
-        .map_err(TurnLivenessRepositoryError::observation)?;
-        Ok((row.backup_in_progress, row.lock_waiting))
     }
 
     /// Reads the current slot-held observation for one exact session.

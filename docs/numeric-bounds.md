@@ -90,66 +90,55 @@ bound in either root fails closed.
 | `config/signalboxd.example.toml:50`  | `EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND`             | config | `numeric_bounds.expired_pass_recovery_attempt_bound`                                 |
 | `config/signalboxd.example.toml:52`  | `EXPIRED_PASS_RECOVERY_LOCK_RETRY_DELAY`          | config | `numeric_bounds.expired_pass_recovery_lock_retry_delay`                              |
 | `config/signalboxd.example.toml:54`  | `EXPIRED_PASS_RECOVERY_CONSERVATIVE_RETRY_DELAY`  | config | `numeric_bounds.expired_pass_recovery_conservative_retry_delay`                      |
-| `config/signalboxd.example.toml:66`  | `REQUEST_TIMEOUT`                                 | config | `numeric_bounds.convergence_sweep_request_timeout`                                   |
-| `config/signalboxd.example.toml:68`  | `MAX_CONNECTION_PAGES`                            | config | `numeric_bounds.max_convergence_sweep_connection_pages`                              |
-| `config/signalboxd.example.toml:70`  | `MAX_CONCURRENT_TARGETS`                          | config | `numeric_bounds.max_concurrent_convergence_sweep_targets`                            |
-| `config/signalboxd.example.toml:72`  | `MAX_REQUEST_ATTEMPTS`                            | config | `numeric_bounds.max_convergence_sweep_request_attempts`                              |
-| `config/signalboxd.example.toml:74`  | `REQUEST_RETRY_DELAY`                             | config | `numeric_bounds.convergence_sweep_request_retry_delay`                               |
-| `config/signalboxd.example.toml:76`  | `RETRY_BACKOFF_BASE`                              | config | `numeric_bounds.convergence_sweep_retry_backoff_base`                                |
-| `config/signalboxd.example.toml:78`  | `RETRY_BACKOFF_CAP`                               | config | `numeric_bounds.convergence_sweep_retry_backoff_cap`                                 |
-| `config/signalboxd.example.toml:80`  | `FAILURE_RETRY_BUDGET`                            | config | `numeric_bounds.convergence_sweep_failure_retry_budget`                              |
-| `config/signalboxd.example.toml:82`  | `TERMINALIZATIONS_PER_SCAN`                       | config | `numeric_bounds.terminalizations_per_liveness_scan`                                  |
-| `config/signalboxd.example.toml:84`  | `SLOT_HELD_RECOVERY_ATTEMPT_BOUND`                | config | `numeric_bounds.slot_held_turn_recovery_attempt_bound`                               |
-| `config/signalboxd.example.toml:86`  | `MODEL_CALL_RECONCILIATIONS_PER_SCAN`             | config | `numeric_bounds.automatic_model_call_reconciliations_per_liveness_scan`              |
-| `config/signalboxd.example.toml:88`  | `TOOL_RECONCILIATIONS_PER_SCAN`                   | config | `numeric_bounds.automatic_tool_reconciliations_per_liveness_scan`                    |
-| `config/signalboxd.example.toml:90`  | `MODEL_CALL_RECONCILIATION_ATTEMPT_BOUND`         | config | `numeric_bounds.automatic_model_call_reconciliation_attempt_bound`                   |
-| `config/signalboxd.example.toml:92`  | `TOOL_RECONCILIATION_ATTEMPT_BOUND`               | config | `numeric_bounds.automatic_tool_reconciliation_attempt_bound`                         |
-| `config/signalboxd.example.toml:94`  | `MAX_CONVERGENCE_SWEEP_TARGETS`                   | config | `numeric_bounds.max_convergence_sweep_targets`                                       |
-| `config/signalboxd.example.toml:96`  | `MAX_CONVERGENCE_SWEEP_INTERVAL`                  | config | `numeric_bounds.max_convergence_sweep_interval`                                      |
-| `config/signalboxd.example.toml:98`  | `MAX_CONVERGENCE_SWEEP_COOL_OFF`                  | config | `numeric_bounds.max_convergence_sweep_cool_off`                                      |
-| `config/signalboxd.example.toml:100` | `AUTOMATIC_RESUME_BASE_BACKOFF`                   | config | `numeric_bounds.automatic_resume_base_backoff`                                       |
-| `config/signalboxd.example.toml:102` | `AUTOMATIC_RESUME_BACKOFF_CAP`                    | config | `numeric_bounds.automatic_resume_backoff_cap`                                        |
-| `config/signalboxd.example.toml:104` | `AUTOMATIC_RESUME_ATTEMPT_BUDGET`                 | config | `numeric_bounds.automatic_resume_attempt_budget`                                     |
-| `config/signalboxd.example.toml:106` | `AUTOMATIC_RESUME_ATTEMPT_CEILING`                | config | `numeric_bounds.automatic_resume_attempt_ceiling`                                    |
-| `config/signalboxd.example.toml:108` | `AUTOMATIC_RESUME_STARTUP_RETRY_DELAY`            | config | `numeric_bounds.automatic_resume_startup_retry_delay`                                |
-| `config/signalboxd.example.toml:110` | `POST_KILL_REAP_BOUND`                            | config | `numeric_bounds.post_kill_reap_bound`                                                |
-| `config/signalboxd.example.toml:112` | `QUIESCENT_TURN_STALENESS_BOUND`                  | config | `numeric_bounds.quiescent_turn_staleness_bound`                                      |
-| `config/signalboxd.example.toml:114` | `SLOT_HELD_TURN_STALENESS_BOUND`                  | config | `numeric_bounds.slot_held_turn_staleness_bound`                                      |
-| `config/signalboxd.example.toml:116` | `BASELINE_TURN_LIVENESS_SCAN_INTERVAL`            | config | `numeric_bounds.turn_liveness_scan_interval`                                         |
-| `config/signalboxd.example.toml:118` | `MODEL_CALL_RECONCILIATION_BASE_BACKOFF`          | config | `numeric_bounds.automatic_model_call_reconciliation_base_backoff`                    |
-| `config/signalboxd.example.toml:120` | `MODEL_CALL_RECONCILIATION_BACKOFF_CAP`           | config | `numeric_bounds.automatic_model_call_reconciliation_backoff_cap`                     |
-| `config/signalboxd.example.toml:122` | `MODEL_CALL_RECONCILIATION_ATTEMPT_BUDGET`        | config | `numeric_bounds.automatic_model_call_reconciliation_attempt_budget`                  |
-| `config/signalboxd.example.toml:124` | `TOOL_RECONCILIATION_BASE_BACKOFF`                | config | `numeric_bounds.automatic_tool_reconciliation_base_backoff`                          |
-| `config/signalboxd.example.toml:126` | `TOOL_RECONCILIATION_BACKOFF_CAP`                 | config | `numeric_bounds.automatic_tool_reconciliation_backoff_cap`                           |
-| `config/signalboxd.example.toml:128` | `TOOL_RECONCILIATION_ATTEMPT_BUDGET`              | config | `numeric_bounds.automatic_tool_reconciliation_attempt_budget`                        |
-| `config/signalboxd.example.toml:130` | `SLOW_SUBSTRATE_BACKUP_ENABLED`                   | config | `numeric_bounds.slow_substrate_backup_enabled`                                       |
-| `config/signalboxd.example.toml:132` | `SLOW_SUBSTRATE_RESTART_ENABLED`                  | config | `numeric_bounds.slow_substrate_restart_enabled`                                      |
-| `config/signalboxd.example.toml:134` | `SLOW_SUBSTRATE_LOCK_CONVOY_ENABLED`              | config | `numeric_bounds.slow_substrate_lock_convoy_enabled`                                  |
-| `config/signalboxd.example.toml:136` | `SLOW_SUBSTRATE_STALENESS_FACTOR`                 | config | `numeric_bounds.slow_substrate_staleness_factor`                                     |
-| `config/signalboxd.example.toml:138` | `TERMINAL_INPUT_CHANNEL_CAPACITY`                 | config | `numeric_bounds.terminal_input_channel_capacity` learned over the daemon connection. |
-| `config/signalboxd.example.toml:140` | `MAX_INPUT_CONTENT_BYTES`                         | config | `numeric_bounds.max_message_utf8_bytes` learned over the daemon connection.          |
-| `config/signalboxd.example.toml:142` | `MIN_METADATA_PAGE_SIZE`                          | config | `numeric_bounds.min_metadata_page_size` learned over the daemon connection.          |
-| `config/signalboxd.example.toml:144` | `MAX_METADATA_PAGE_SIZE`                          | config | `numeric_bounds.max_metadata_page_size` learned over the daemon connection.          |
-| `config/signalboxd.example.toml:146` | `MAX_REVIEW_FINDINGS_PER_RUN`                     | config | `numeric_bounds.max_review_findings_per_run` learned over the daemon connection.     |
-| `config/signalboxd.example.toml:148` | `MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN`              | config | `numeric_bounds.max_automatic_tool_rounds_per_turn`                                  |
-| `config/signalboxd.example.toml:150` | `MAX_REQUIRED_TAGS`                               | config | `numeric_bounds.max_required_tags`                                                   |
-| `config/signalboxd.example.toml:140` | `MAX_CONTENT_UTF8_BYTES`                          | config | `numeric_bounds.max_message_utf8_bytes`                                              |
-| `config/signalboxd.example.toml:152` | `BASELINE_RECONCILIATION_SWEEP_INTERVAL`          | config | `numeric_bounds.reconciliation_sweep_interval`                                       |
-| `config/signalboxd.example.toml:154` | `BASELINE_NUDGE_BUFFER_CAPACITY`                  | config | `numeric_bounds.nudge_buffer_capacity`                                               |
-| `config/signalboxd.example.toml:156` | `SCHEDULER_PASS_ADMISSION_CAP`                    | config | `numeric_bounds.scheduler_pass_admission_cap`                                        |
-| `config/signalboxd.example.toml:158` | `SCHEDULER_PASS_OCCUPANCY_BOUND`                  | config | `numeric_bounds.scheduler_pass_occupancy_bound`                                      |
-| `config/signalboxd.example.toml:160` | `MAX_NATIVE_MESSAGE_BYTES`                        | config | `numeric_bounds.max_native_message_bytes`                                            |
-| `config/signalboxd.example.toml:162` | `TERMINALIZATION_LOCK_WAIT`                       | config | `numeric_bounds.terminalization_lock_wait`                                           |
-| `config/signalboxd.example.toml:164` | `TERMINALIZATION_ACQUIRE_WAIT`                    | config | `numeric_bounds.terminalization_acquire_wait`                                        |
-| `config/signalboxd.example.toml:166` | `TERMINALIZATION_WRITE_LOCK_WAIT`                 | config | `numeric_bounds.terminalization_write_lock_wait`                                     |
-| `config/signalboxd.example.toml:168` | `DISPOSABLE_POSTGRES_STATE_CEILING_BYTES`         | config | `numeric_bounds.disposable_postgres_state_ceiling_bytes`                             |
-| `config/signalboxd.example.toml:170` | `DIAGNOSTIC_MODEL_IDENTITY_LIMIT`                 | config | `numeric_bounds.diagnostic_model_identity_limit`                                     |
-| `config/signalboxd.example.toml:172` | `DEFAULT_TIMEOUT`                                 | config | `numeric_bounds.code_host_request_timeout`                                           |
-| `config/signalboxd.example.toml:174` | `MAX_JOB_LOG_BYTES`                               | config | `numeric_bounds.max_job_log_bytes`                                                   |
-| `config/signalboxd.example.toml:176` | `MAX_STACK_COMPARISONS_IN_FLIGHT`                 | config | `numeric_bounds.max_stack_comparisons_in_flight`                                     |
-| `config/signalboxd.example.toml:178` | `MAX_RESULT_TEXT_BYTES`                           | config | `numeric_bounds.max_code_host_result_text_bytes`                                     |
-| `config/signalboxd.example.toml:180` | `MAX_RESULT_ITEMS`                                | config | `numeric_bounds.max_code_host_result_items`                                          |
-| `config/signalboxd.example.toml:182` | `MAX_REPOSITORY_FILE_CONTENT_BYTES`               | config | `numeric_bounds.max_repository_file_content_bytes`                                   |
+| `config/signalboxd.example.toml:56`  | `REQUEST_TIMEOUT`                                 | config | `numeric_bounds.convergence_sweep_request_timeout`                                   |
+| `config/signalboxd.example.toml:58`  | `MAX_CONNECTION_PAGES`                            | config | `numeric_bounds.max_convergence_sweep_connection_pages`                              |
+| `config/signalboxd.example.toml:60`  | `MAX_CONCURRENT_TARGETS`                          | config | `numeric_bounds.max_concurrent_convergence_sweep_targets`                            |
+| `config/signalboxd.example.toml:62`  | `MAX_REQUEST_ATTEMPTS`                            | config | `numeric_bounds.max_convergence_sweep_request_attempts`                              |
+| `config/signalboxd.example.toml:64`  | `REQUEST_RETRY_DELAY`                             | config | `numeric_bounds.convergence_sweep_request_retry_delay`                               |
+| `config/signalboxd.example.toml:66`  | `RETRY_BACKOFF_BASE`                              | config | `numeric_bounds.convergence_sweep_retry_backoff_base`                                |
+| `config/signalboxd.example.toml:68`  | `RETRY_BACKOFF_CAP`                               | config | `numeric_bounds.convergence_sweep_retry_backoff_cap`                                 |
+| `config/signalboxd.example.toml:70`  | `TERMINALIZATIONS_PER_SCAN`                       | config | `numeric_bounds.terminalizations_per_liveness_scan`                                  |
+| `config/signalboxd.example.toml:72`  | `RECOVERY_ATTEMPT_BOUND`                          | config | `numeric_bounds.turn_liveness_recovery_attempt_bound`                                |
+| `config/signalboxd.example.toml:74`  | `AUTOMATIC_RECONCILIATIONS_PER_SCAN`              | config | `numeric_bounds.automatic_reconciliations_per_liveness_scan`                         |
+| `config/signalboxd.example.toml:86`  | `RECOVERY_ATTEMPT_BOUND`                          | config | `numeric_bounds.automatic_reconciliation_attempt_bound`                              |
+| `config/signalboxd.example.toml:76`  | `MAX_CONVERGENCE_SWEEP_TARGETS`                   | config | `numeric_bounds.max_convergence_sweep_targets`                                       |
+| `config/signalboxd.example.toml:78`  | `MAX_CONVERGENCE_SWEEP_INTERVAL`                  | config | `numeric_bounds.max_convergence_sweep_interval`                                      |
+| `config/signalboxd.example.toml:80`  | `MAX_CONVERGENCE_SWEEP_COOL_OFF`                  | config | `numeric_bounds.max_convergence_sweep_cool_off`                                      |
+| `config/signalboxd.example.toml:82`  | `AUTOMATIC_RESUME_BASE_BACKOFF`                   | config | `numeric_bounds.automatic_resume_base_backoff`                                       |
+| `config/signalboxd.example.toml:84`  | `AUTOMATIC_RESUME_BACKOFF_CAP`                    | config | `numeric_bounds.automatic_resume_backoff_cap`                                        |
+| `config/signalboxd.example.toml:86`  | `AUTOMATIC_RESUME_ATTEMPT_BUDGET`                 | config | `numeric_bounds.automatic_resume_attempt_budget`                                     |
+| `config/signalboxd.example.toml:98`  | `AUTOMATIC_RESUME_ATTEMPT_CEILING`                | config | `numeric_bounds.automatic_resume_attempt_ceiling`                                    |
+| `config/signalboxd.example.toml:88`  | `AUTOMATIC_RESUME_STARTUP_RETRY_DELAY`            | config | `numeric_bounds.automatic_resume_startup_retry_delay`                                |
+| `config/signalboxd.example.toml:90`  | `POST_KILL_REAP_BOUND`                            | config | `numeric_bounds.post_kill_reap_bound`                                                |
+| `config/signalboxd.example.toml:92`  | `STALE_ACTIVE_TURN_BOUND`                         | config | `numeric_bounds.stale_active_turn_bound`                                             |
+| `config/signalboxd.example.toml:94`  | `BASELINE_TURN_LIVENESS_SCAN_INTERVAL`            | config | `numeric_bounds.turn_liveness_scan_interval`                                         |
+| `config/signalboxd.example.toml:96`  | `AUTOMATIC_RECONCILIATION_BASE_BACKOFF`           | config | `numeric_bounds.automatic_reconciliation_base_backoff`                               |
+| `config/signalboxd.example.toml:98`  | `AUTOMATIC_RECONCILIATION_BACKOFF_CAP`            | config | `numeric_bounds.automatic_reconciliation_backoff_cap`                                |
+| `config/signalboxd.example.toml:100` | `AUTOMATIC_RECONCILIATION_ATTEMPT_BUDGET`         | config | `numeric_bounds.automatic_reconciliation_attempt_budget`                             |
+| `config/signalboxd.example.toml:102` | `TERMINAL_INPUT_CHANNEL_CAPACITY`                 | config | `numeric_bounds.terminal_input_channel_capacity` learned over the daemon connection. |
+| `config/signalboxd.example.toml:104` | `MAX_INPUT_CONTENT_BYTES`                         | config | `numeric_bounds.max_message_utf8_bytes` learned over the daemon connection.          |
+| `config/signalboxd.example.toml:106` | `MIN_METADATA_PAGE_SIZE`                          | config | `numeric_bounds.min_metadata_page_size` learned over the daemon connection.          |
+| `config/signalboxd.example.toml:108` | `MAX_METADATA_PAGE_SIZE`                          | config | `numeric_bounds.max_metadata_page_size` learned over the daemon connection.          |
+| `config/signalboxd.example.toml:110` | `MAX_REVIEW_FINDINGS_PER_RUN`                     | config | `numeric_bounds.max_review_findings_per_run` learned over the daemon connection.     |
+| `config/signalboxd.example.toml:112` | `MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN`              | config | `numeric_bounds.max_automatic_tool_rounds_per_turn`                                  |
+| `config/signalboxd.example.toml:114` | `MAX_REQUIRED_TAGS`                               | config | `numeric_bounds.max_required_tags`                                                   |
+| `config/signalboxd.example.toml:104` | `MAX_CONTENT_UTF8_BYTES`                          | config | `numeric_bounds.max_message_utf8_bytes`                                              |
+| `config/signalboxd.example.toml:116` | `BASELINE_RECONCILIATION_SWEEP_INTERVAL`          | config | `numeric_bounds.reconciliation_sweep_interval`                                       |
+| `config/signalboxd.example.toml:118` | `BASELINE_NUDGE_BUFFER_CAPACITY`                  | config | `numeric_bounds.nudge_buffer_capacity`                                               |
+| `config/signalboxd.example.toml:120` | `SCHEDULER_PASS_ADMISSION_CAP`                    | config | `numeric_bounds.scheduler_pass_admission_cap`                                        |
+| `config/signalboxd.example.toml:122` | `SCHEDULER_PASS_OCCUPANCY_BOUND`                  | config | `numeric_bounds.scheduler_pass_occupancy_bound`                                      |
+| `config/signalboxd.example.toml:124` | `MAX_NATIVE_MESSAGE_BYTES`                        | config | `numeric_bounds.max_native_message_bytes`                                            |
+| `config/signalboxd.example.toml:126` | `TERMINALIZATION_LOCK_WAIT`                       | config | `numeric_bounds.terminalization_lock_wait`                                           |
+| `config/signalboxd.example.toml:128` | `TERMINALIZATION_ACQUIRE_WAIT`                    | config | `numeric_bounds.terminalization_acquire_wait`                                        |
+| `config/signalboxd.example.toml:130` | `TERMINALIZATION_WRITE_LOCK_WAIT`                 | config | `numeric_bounds.terminalization_write_lock_wait`                                     |
+| `config/signalboxd.example.toml:132` | `DISPOSABLE_POSTGRES_STATE_CEILING_BYTES`         | config | `numeric_bounds.disposable_postgres_state_ceiling_bytes`                             |
+| `config/signalboxd.example.toml:134` | `DIAGNOSTIC_MODEL_IDENTITY_LIMIT`                 | config | `numeric_bounds.diagnostic_model_identity_limit`                                     |
+| `config/signalboxd.example.toml:136` | `DEFAULT_TIMEOUT`                                 | config | `numeric_bounds.code_host_request_timeout`                                           |
+| `config/signalboxd.example.toml:138` | `MAX_JOB_LOG_BYTES`                               | config | `numeric_bounds.max_job_log_bytes`                                                   |
+| `config/signalboxd.example.toml:140` | `MAX_STACK_COMPARISONS_IN_FLIGHT`                 | config | `numeric_bounds.max_stack_comparisons_in_flight`                                     |
+| `config/signalboxd.example.toml:142` | `MAX_RESULT_TEXT_BYTES`                           | config | `numeric_bounds.max_code_host_result_text_bytes`                                     |
+| `config/signalboxd.example.toml:144` | `MAX_RESULT_ITEMS`                                | config | `numeric_bounds.max_code_host_result_items`                                          |
+| `config/signalboxd.example.toml:146` | `MAX_REPOSITORY_FILE_CONTENT_BYTES`               | config | `numeric_bounds.max_repository_file_content_bytes`                                   |
 | `config/signalboxd.example.toml`     | `SESSION_DISPATCH_DEADLINE`                       | config | `numeric_bounds.session_dispatch_deadline`                                           |
 | `config/signalboxd.example.toml`     | `SESSION_START_GATE_DEADLINE`                     | config | `numeric_bounds.session_start_gate_deadline`                                         |
 | `config/signalboxd.example.toml`     | `SESSION_FIRST_INPUT_DEADLINE`                    | config | `numeric_bounds.session_first_input_deadline`                                        |

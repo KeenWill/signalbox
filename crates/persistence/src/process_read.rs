@@ -1318,7 +1318,7 @@ pub struct ProcessTranscriptReader {
     entry_count: Option<u64>,
     next_entry_index: u64,
     summary: Option<ProcessTranscriptSummary>,
-    automatic_reconciliation_attempt_budgets: AutomaticReconciliationAttemptBudgets,
+    automatic_reconciliation_attempt_budget: Option<Option<u32>>,
 }
 
 impl ProcessTranscriptReader {
@@ -1357,7 +1357,7 @@ impl ProcessTranscriptReader {
                 .await?;
             if let Some(row) = row {
                 let decoded =
-                    decode_transcript_turn(&row, self.automatic_reconciliation_attempt_budgets)?;
+                    decode_transcript_turn(&row, self.automatic_reconciliation_attempt_budget)?;
                 match (decoded.start_lineage, decoded.latest_frontier) {
                     (None, None) => {}
                     (Some(_), Some(frontier)) => {
@@ -1629,13 +1629,7 @@ impl From<ProcessReadCorruption> for ProcessReadError {
 #[derive(Clone, Debug)]
 pub struct ProcessReadRepository {
     pool: PgPool,
-    automatic_reconciliation_attempt_budgets: AutomaticReconciliationAttemptBudgets,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct AutomaticReconciliationAttemptBudgets {
-    model_call: Option<Option<u32>>,
-    tool_attempt: Option<Option<u32>>,
+    automatic_reconciliation_attempt_budget: Option<Option<u32>>,
 }
 
 impl ProcessReadRepository {
@@ -1643,23 +1637,16 @@ impl ProcessReadRepository {
     pub const fn new(pool: PgPool) -> Self {
         Self {
             pool,
-            automatic_reconciliation_attempt_budgets: AutomaticReconciliationAttemptBudgets {
-                model_call: None,
-                tool_attempt: None,
-            },
+            automatic_reconciliation_attempt_budget: None,
         }
     }
 
-    /// Applies the deployment's per-class automatic reconciliation budgets.
-    pub const fn with_automatic_reconciliation_attempt_budgets(
+    /// Applies the deployment's optional automatic reconciliation budget.
+    pub const fn with_automatic_reconciliation_attempt_budget(
         mut self,
-        model_call: Option<u32>,
-        tool_attempt: Option<u32>,
+        budget: Option<u32>,
     ) -> Self {
-        self.automatic_reconciliation_attempt_budgets = AutomaticReconciliationAttemptBudgets {
-            model_call: Some(model_call),
-            tool_attempt: Some(tool_attempt),
-        };
+        self.automatic_reconciliation_attempt_budget = Some(budget);
         self
     }
 
@@ -2154,7 +2141,7 @@ impl ProcessReadRepository {
             open_transcript_in_transaction(
                 transaction,
                 requested_session,
-                self.automatic_reconciliation_attempt_budgets,
+                self.automatic_reconciliation_attempt_budget,
             )
             .await?,
         ))
@@ -2190,7 +2177,7 @@ impl ProcessReadRepository {
                 open_transcript_in_transaction(
                     transaction,
                     target_session,
-                    self.automatic_reconciliation_attempt_budgets,
+                    self.automatic_reconciliation_attempt_budget,
                 )
                 .await?,
             ))),
@@ -2231,7 +2218,7 @@ fn map_session_placement_read_error(
 async fn open_transcript_in_transaction(
     mut transaction: Transaction<'static, Postgres>,
     requested_session: SessionId,
-    automatic_reconciliation_attempt_budgets: AutomaticReconciliationAttemptBudgets,
+    automatic_reconciliation_attempt_budget: Option<Option<u32>>,
 ) -> Result<ProcessTranscriptReader, ProcessReadError> {
     let stored_cursor: Option<Decimal> = sqlx::query_scalar(
         "SELECT last_sequence
@@ -2276,7 +2263,7 @@ async fn open_transcript_in_transaction(
         entry_count: None,
         next_entry_index: 0,
         summary: None,
-        automatic_reconciliation_attempt_budgets,
+        automatic_reconciliation_attempt_budget,
     })
 }
 
@@ -3410,7 +3397,7 @@ fn admitted_automatic_reconciliation_attempts(
 
 fn decode_transcript_turn(
     row: &PgRow,
-    automatic_reconciliation_attempt_budgets: AutomaticReconciliationAttemptBudgets,
+    automatic_reconciliation_attempt_budget: Option<Option<u32>>,
 ) -> Result<DecodedTurn, ProcessReadError> {
     let turn = TurnId::from_uuid(required(row, "turn_id")?);
     let acceptance_position = decode_positive(
@@ -3585,11 +3572,6 @@ fn decode_transcript_turn(
             .into());
         }
         if terminal_reconciliation {
-            let attempt_budget = if automatic_reconciliation_model_call.is_some() {
-                automatic_reconciliation_attempt_budgets.model_call
-            } else {
-                automatic_reconciliation_attempt_budgets.tool_attempt
-            };
             let valid_terminal_automatic = matches!(
                 (
                     automatic_reconciliation_state.as_deref(),
@@ -3605,7 +3587,7 @@ fn decode_transcript_turn(
                 ) if admitted_automatic_reconciliation_attempts(
                         attempts,
                         false,
-                        attempt_budget,
+                        automatic_reconciliation_attempt_budget,
                     ).is_ok()
                     && model_call == terminal_call
                     && tool_attempt == terminal_tool_attempt
@@ -3881,7 +3863,7 @@ fn decode_transcript_turn(
                 admitted_automatic_reconciliation_attempts(
                     attempts,
                     false,
-                    automatic_reconciliation_attempt_budgets.tool_attempt,
+                    automatic_reconciliation_attempt_budget,
                 )?,
                 false,
             ),
@@ -3889,7 +3871,7 @@ fn decode_transcript_turn(
                 admitted_automatic_reconciliation_attempts(
                     attempts,
                     true,
-                    automatic_reconciliation_attempt_budgets.tool_attempt,
+                    automatic_reconciliation_attempt_budget,
                 )?,
                 true,
             ),
@@ -4117,7 +4099,7 @@ fn decode_transcript_turn(
                     admitted_automatic_reconciliation_attempts(
                         attempts,
                         false,
-                        automatic_reconciliation_attempt_budgets.model_call,
+                        automatic_reconciliation_attempt_budget,
                     )?,
                     false,
                 ),
@@ -4125,7 +4107,7 @@ fn decode_transcript_turn(
                     admitted_automatic_reconciliation_attempts(
                         attempts,
                         true,
-                        automatic_reconciliation_attempt_budgets.model_call,
+                        automatic_reconciliation_attempt_budget,
                     )?,
                     true,
                 ),

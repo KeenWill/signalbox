@@ -124,7 +124,7 @@ async fn restart_mid_observation_retains_staleness_evidence() -> Result<(), Box<
         )
         .await?;
     let bound = StaleActiveTurnBound::try_new(std::time::Duration::from_secs(60))?;
-    let due = TurnLivenessLedger::new(bound, interval).reconcile(&third, std::num::NonZeroU32::MIN);
+    let due = TurnLivenessLedger::new(bound, interval).reconcile(&third);
 
     assert_eq!(first[0].ordinal().get(), 1);
     assert_eq!(second[0].ordinal().get(), 1);

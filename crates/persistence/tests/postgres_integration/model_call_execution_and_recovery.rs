@@ -2536,10 +2536,9 @@ async fn s04_exhausted_automatic_reconciliation_is_visible_to_the_operator()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xD100;
-    let attempt_budget = 5;
     let parked = park_restart_ambiguity(&pool, seed).await?;
     let repository = PostgresAutomaticReconciliationRepository::new(pool.clone()).with_policy(
-        Some(attempt_budget),
+        Some(5),
         Some(Duration::ZERO),
         Some(Duration::ZERO),
     );
@@ -2564,10 +2563,6 @@ async fn s04_exhausted_automatic_reconciliation_is_visible_to_the_operator()
     assert_eq!(exhaustion.exhausted().len(), 1);
     assert_eq!(exhaustion.exhausted()[0].session(), parked.session);
     assert_eq!(exhaustion.exhausted()[0].turn(), parked.turn);
-    assert_eq!(
-        exhaustion.exhausted()[0].attempt_ceiling().get(),
-        attempt_budget
-    );
     assert_eq!(
         exhaustion.exhausted()[0].operation(),
         AutomaticReconciliationOperation::ModelCall(parked.call)

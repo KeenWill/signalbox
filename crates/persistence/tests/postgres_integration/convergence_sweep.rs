@@ -4,11 +4,7 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
-use std::{
-    error::Error,
-    num::{NonZeroU16, NonZeroU64},
-    time::Duration,
-};
+use std::{error::Error, num::NonZeroU64, time::Duration};
 
 use super::migrated_postgres;
 use signalbox_application::{
@@ -386,57 +382,6 @@ async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<()
     Ok(())
 }
 
-/// A changed deployment budget applies after, not inside, a retry lineage.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn active_retry_lineage_retains_its_opening_budget() -> Result<(), Box<dyn Error>> {
-    let (_container, pool, _database_url) = migrated_postgres().await?;
-    let repository = repository()?;
-    let observation = observation()?;
-    let initial = PostgresConvergenceSweepStore::new(pool.clone());
-    let lowered =
-        PostgresConvergenceSweepStore::new(pool.clone()).with_retry_budget(NonZeroU16::MIN);
-    let policy = ConvergenceSweepRetryPolicy {
-        backoff_base: Some(Duration::ZERO),
-        backoff_cap: Some(Duration::ZERO),
-    };
-
-    let first = initial
-        .record_failure(
-            Uuid::from_u128(0x5b_001),
-            &repository,
-            pull_request(),
-            Some(&observation),
-            ConvergenceSweepFailureKind::FactsFetch,
-            policy,
-        )
-        .await?;
-    let second = lowered
-        .record_failure(
-            Uuid::from_u128(0x5b_002),
-            &repository,
-            pull_request(),
-            Some(&observation),
-            ConvergenceSweepFailureKind::FactsFetch,
-            policy,
-        )
-        .await?;
-    let state: (i16, i16) = sqlx::query_as(
-        "SELECT consecutive_failures, retry_budget
-           FROM convergence_sweep_target
-          WHERE repository = $1 AND pull_request_number = $2",
-    )
-    .bind(repository.as_str())
-    .bind(rust_decimal::Decimal::from(pull_request().get()))
-    .fetch_one(&pool)
-    .await?;
-
-    assert_eq!(first, ConvergenceSweepFailureDisposition::RetryScheduled);
-    assert_eq!(second, ConvergenceSweepFailureDisposition::RetryScheduled);
-    assert_eq!(state, (2, RETRY_BUDGET));
-    Ok(())
-}
-
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn unbounded_retry_delay_has_no_claimable_deadline() -> Result<(), Box<dyn Error>> {
@@ -572,13 +517,11 @@ async fn retry_backoff_saturates_at_the_configured_cap() -> Result<(), Box<dyn E
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_different_failure_kind_starts_an_independent_lineage() -> Result<(), Box<dyn Error>> {
     let (_container, pool, _database_url) = migrated_postgres().await?;
-    let initial = PostgresConvergenceSweepStore::new(pool.clone());
-    let lowered =
-        PostgresConvergenceSweepStore::new(pool.clone()).with_retry_budget(NonZeroU16::MIN);
+    let store = PostgresConvergenceSweepStore::new(pool);
     let repository = repository()?;
     let observation = observation()?;
 
-    initial
+    store
         .record_failure(
             Uuid::from_u128(8),
             &repository,
@@ -591,7 +534,7 @@ async fn a_different_failure_kind_starts_an_independent_lineage() -> Result<(), 
             },
         )
         .await?;
-    initial
+    store
         .record_failure(
             Uuid::from_u128(9),
             &repository,
@@ -604,7 +547,7 @@ async fn a_different_failure_kind_starts_an_independent_lineage() -> Result<(), 
             },
         )
         .await?;
-    lowered
+    store
         .record_failure(
             Uuid::from_u128(10),
             &repository,
@@ -617,27 +560,16 @@ async fn a_different_failure_kind_starts_an_independent_lineage() -> Result<(), 
             },
         )
         .await?;
-    let state = lowered
+    let state = store
         .load_target(&repository, pull_request())
         .await?
         .expect("the failed target is durable");
-    let durable_lineage: (i16, i16) = sqlx::query_as(
-        "SELECT consecutive_failures, retry_budget
-           FROM convergence_sweep_target
-          WHERE repository = $1 AND pull_request_number = $2",
-    )
-    .bind(repository.as_str())
-    .bind(rust_decimal::Decimal::from(pull_request().get()))
-    .fetch_one(&pool)
-    .await?;
 
     assert_eq!(
         state.failure_kind(),
         Some(ConvergenceSweepFailureKind::CommissionRefused)
     );
     assert_eq!(state.consecutive_failures(), 1);
-    assert!(state.is_parked());
-    assert_eq!(durable_lineage, (1, 1));
     Ok(())
 }
 

@@ -11299,9 +11299,8 @@ impl ExhaustedAutomaticReconciliation {
         session: SessionId,
         turn: TurnId,
         operation: AutomaticReconciliationOperation,
-        attempt_ceiling: NonZeroU32,
     ) -> Self;
-    // accessors: session(), turn(), operation(), attempt_ceiling()
+    // accessors: session(), turn(), operation()
 }
 
 pub struct AutomaticReconciliationBatch { /* private */ }
@@ -11397,7 +11396,6 @@ impl TurnLivenessLedger {
     pub fn reconcile(
         self,
         observations: &[DurableTurnLivenessObservation],
-        slow_substrate_factor: NonZeroU32,
     ) -> Box<[StaleTurnCandidate]>;
 }
 ```

@@ -1,6 +1,6 @@
 //! Periodic convergence reconciliation for explicitly selected watched pull requests.
 
-use std::{error::Error, fmt, num::NonZeroU16, sync::Arc, time::Duration};
+use std::{error::Error, fmt, sync::Arc, time::Duration};
 
 use futures_util::{StreamExt, stream};
 use reqwest::{
@@ -47,35 +47,6 @@ const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 // numeric-bound: guard - prevents credential material from exhausting process memory
 const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
 
-/// Deployment policy for convergence retry scheduling.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ConvergenceSweepRetryBounds {
-    request_attempts: Option<usize>,
-    request_retry_delay: Option<Duration>,
-    retry_backoff_base: Option<Duration>,
-    retry_backoff_cap: Option<Duration>,
-    failure_retry_budget: NonZeroU16,
-}
-
-impl ConvergenceSweepRetryBounds {
-    /// Binds retry admission, timing, and failure lineage to configuration.
-    pub const fn new(
-        request_attempts: Option<usize>,
-        request_retry_delay: Option<Duration>,
-        retry_backoff_base: Option<Duration>,
-        retry_backoff_cap: Option<Duration>,
-        failure_retry_budget: NonZeroU16,
-    ) -> Self {
-        Self {
-            request_attempts,
-            request_retry_delay,
-            retry_backoff_base,
-            retry_backoff_cap,
-            failure_retry_budget,
-        }
-    }
-}
-
 /// Deployment policy for convergence census work and retry scheduling.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConvergenceSweepNumericBounds {
@@ -86,7 +57,6 @@ pub struct ConvergenceSweepNumericBounds {
     request_retry_delay: Option<Duration>,
     retry_backoff_base: Option<Duration>,
     retry_backoff_cap: Option<Duration>,
-    failure_retry_budget: NonZeroU16,
 }
 
 impl ConvergenceSweepNumericBounds {
@@ -95,17 +65,19 @@ impl ConvergenceSweepNumericBounds {
         request_timeout: Option<Duration>,
         connection_pages: Option<usize>,
         concurrent_targets: Option<usize>,
-        retry: ConvergenceSweepRetryBounds,
+        request_attempts: Option<usize>,
+        request_retry_delay: Option<Duration>,
+        retry_backoff_base: Option<Duration>,
+        retry_backoff_cap: Option<Duration>,
     ) -> Self {
         Self {
             request_timeout,
             connection_pages,
             concurrent_targets,
-            request_attempts: retry.request_attempts,
-            request_retry_delay: retry.request_retry_delay,
-            retry_backoff_base: retry.retry_backoff_base,
-            retry_backoff_cap: retry.retry_backoff_cap,
-            failure_retry_budget: retry.failure_retry_budget,
+            request_attempts,
+            request_retry_delay,
+            retry_backoff_base,
+            retry_backoff_cap,
         }
     }
 }
@@ -280,8 +252,7 @@ impl ConvergenceSweepRuntime {
                 pool.clone(),
                 models.session_credential_pin(),
             ),
-            state: PostgresConvergenceSweepStore::new(pool)
-                .with_retry_budget(numeric_bounds.failure_retry_budget),
+            state: PostgresConvergenceSweepStore::new(pool),
             eligibility_nudge,
             numeric_bounds,
         }))
@@ -1569,27 +1540,19 @@ mod tests {
                 .integer("max_concurrent_convergence_sweep_targets")
                 .flatten()
                 .and_then(|value| usize::try_from(value).ok()),
-            ConvergenceSweepRetryBounds::new(
-                bounds
-                    .integer("max_convergence_sweep_request_attempts")
-                    .flatten()
-                    .and_then(|value| usize::try_from(value).ok()),
-                bounds
-                    .duration("convergence_sweep_request_retry_delay")
-                    .flatten(),
-                bounds
-                    .duration("convergence_sweep_retry_backoff_base")
-                    .flatten(),
-                bounds
-                    .duration("convergence_sweep_retry_backoff_cap")
-                    .flatten(),
-                bounds
-                    .integer("convergence_sweep_failure_retry_budget")
-                    .flatten()
-                    .and_then(|value| u16::try_from(value).ok())
-                    .and_then(NonZeroU16::new)
-                    .expect("the example retry budget is positive"),
-            ),
+            bounds
+                .integer("max_convergence_sweep_request_attempts")
+                .flatten()
+                .and_then(|value| usize::try_from(value).ok()),
+            bounds
+                .duration("convergence_sweep_request_retry_delay")
+                .flatten(),
+            bounds
+                .duration("convergence_sweep_retry_backoff_base")
+                .flatten(),
+            bounds
+                .duration("convergence_sweep_retry_backoff_cap")
+                .flatten(),
         )
     }
 
