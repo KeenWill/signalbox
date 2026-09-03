@@ -179,7 +179,7 @@ async fn insert_empty_instruction_manifest(
             (instruction_discovery_id, session_id, turn_id,
              limit_set_version, classified_entry_count, finding_count,
              candidate_source_byte_count, elapsed_millis, scan_complete)
-         VALUES ($1, $2, $3, 1, 0, 0, 0, 0, true)",
+         VALUES ($1, $2, $3, 2, 0, 0, 0, 0, true)",
     )
     .bind(turn.into_uuid())
     .bind(session.into_uuid())
