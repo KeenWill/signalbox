@@ -3404,3 +3404,342 @@ async fn a_denied_matching_request_after_the_denial_keeps_the_override()
     drop(container);
     Ok(())
 }
+
+/// One `injection_settled` receipt as stored.
+#[derive(Debug, PartialEq, sqlx::FromRow)]
+struct InjectionReceipt {
+    outcome_kind: String,
+    rejection_kind: Option<String>,
+    delivered_turn_id: Option<Uuid>,
+}
+
+impl InjectionReceipt {
+    fn delivered(turn: TurnId) -> Self {
+        Self {
+            outcome_kind: String::from("delivered"),
+            rejection_kind: None,
+            delivered_turn_id: Some(turn.into_uuid()),
+        }
+    }
+
+    fn not_delivered() -> Self {
+        Self {
+            outcome_kind: String::from("not_delivered"),
+            rejection_kind: None,
+            delivered_turn_id: None,
+        }
+    }
+
+    fn rejected(kind: &str) -> Self {
+        Self {
+            outcome_kind: String::from("rejected"),
+            rejection_kind: Some(String::from(kind)),
+            delivered_turn_id: None,
+        }
+    }
+}
+
+async fn injection_receipt(
+    pool: &PgPool,
+    command: DurableCommandId,
+) -> Result<Option<InjectionReceipt>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT outcome_kind, rejection_kind, delivered_turn_id
+           FROM injection_settled_outbox_event
+          WHERE command_id = $1",
+    )
+    .bind(command.into_uuid())
+    .fetch_optional(pool)
+    .await
+}
+
+/// §8: an approval decision is a durable injection. It settles `delivered`
+/// to the request's turn, and a restart scan leaves the decided round intact
+/// for the ordinary scheduler to resume.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_decision_survives_restart_and_settles_delivered() -> Result<(), Box<dyn Error>> {
+    let (container, pool, database_url) = migrated_postgres().await?;
+    let seed = APPROVAL_FIXTURE_SEED + 0x700;
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, APPROVAL_TOOL_NAME, APPROVAL_ARGUMENTS)
+            .await?;
+    let command = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd0));
+    PostgresToolLoopRepository::new(pool.clone())
+        .decide(
+            decide_tool_request(command, request, ToolApprovalDecision::Approve),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xd1)),
+        )
+        .await?;
+    assert_eq!(
+        injection_receipt(&pool, command).await?,
+        Some(InjectionReceipt::delivered(fixture.turn))
+    );
+
+    pool.close().await;
+    let restarted_pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    let outcome = PostgresStartupScanRepository::new(restarted_pool.clone())
+        .recover(
+            fixture.session,
+            signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0xd2)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xd3)),
+            ),
+            &mut signalbox_application::UuidV7StartupScanIdGenerator,
+        )
+        .await?;
+    assert_eq!(
+        outcome,
+        StartupScanSessionOutcome::ResumableToolBatch { turn: fixture.turn }
+    );
+    let decided: (String, String) = sqlx::query_as(
+        "SELECT decision.decision_kind, turn.state_kind
+           FROM tool_approval_decision AS decision
+           JOIN tool_request AS request USING (request_id)
+           JOIN turn_lifecycle AS turn ON turn.turn_id = request.turn_id
+          WHERE decision.request_id = $1",
+    )
+    .bind(request.into_uuid())
+    .fetch_one(&restarted_pool)
+    .await?;
+    assert_eq!(decided, (String::from("approve"), String::from("active")));
+
+    restarted_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// §8: a drain that cuts a decision mid-transaction leaves no partial claim,
+/// so the same command applies after restart; decisions committed before the
+/// drain are all still there. Zero approvals are lost either way.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn drain_then_restart_loses_no_approvals() -> Result<(), Box<dyn Error>> {
+    let (container, pool, database_url) = migrated_postgres().await?;
+    let first = parked_approval(&pool, APPROVAL_FIXTURE_SEED + 0x800).await?;
+    let second = parked_approval(&pool, APPROVAL_FIXTURE_SEED + 0x900).await?;
+    let cut = parked_approval(&pool, APPROVAL_FIXTURE_SEED + 0xa00).await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    approve(&repository, &first).await?;
+    approve(&repository, &second).await?;
+    // The drain interrupts this decision after it claimed its command and
+    // before it committed: the transaction is dropped, not committed.
+    let mut interrupted = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp())",
+    )
+    .bind(cut.command.into_uuid())
+    .execute(&mut *interrupted)
+    .await?;
+    drop(interrupted);
+    drop(repository);
+    pool.close().await;
+
+    let restarted_pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    let mut scan = StartupScanService::new(
+        signalbox_application::UuidV7StartupScanIdGenerator,
+        PostgresStartupScanRepository::new(restarted_pool.clone()),
+    );
+    assert_eq!(scan.execute().await?.recovered_turn_count(), 0);
+    let replayed = approve(
+        &PostgresToolLoopRepository::new(restarted_pool.clone()),
+        &cut,
+    )
+    .await?;
+    assert!(matches!(
+        replayed.result(),
+        DecideToolRequestResult::Applied(_)
+    ));
+    assert_approved_and_delivered(&restarted_pool, &first).await?;
+    assert_approved_and_delivered(&restarted_pool, &second).await?;
+    assert_approved_and_delivered(&restarted_pool, &cut).await?;
+
+    restarted_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// One session parked on a single approval request, with the identities its
+/// decision will use.
+struct ParkedApproval {
+    fixture: RestartModelCallFixture,
+    request: ToolRequestId,
+    command: DurableCommandId,
+    next_attempt: TurnAttemptId,
+}
+
+async fn parked_approval(pool: &PgPool, seed: u128) -> Result<ParkedApproval, Box<dyn Error>> {
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(pool, seed, APPROVAL_TOOL_NAME, APPROVAL_ARGUMENTS).await?;
+    Ok(ParkedApproval {
+        fixture,
+        request,
+        command: DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd0)),
+        next_attempt: TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xd1)),
+    })
+}
+
+async fn approve(
+    repository: &PostgresToolLoopRepository,
+    parked: &ParkedApproval,
+) -> Result<signalbox_domain::PreparedDecideToolRequest, ToolLoopRepositoryError> {
+    repository
+        .decide(
+            decide_tool_request(
+                parked.command,
+                parked.request,
+                ToolApprovalDecision::Approve,
+            ),
+            || parked.next_attempt,
+        )
+        .await
+}
+
+async fn assert_approved_and_delivered(
+    pool: &PgPool,
+    parked: &ParkedApproval,
+) -> Result<(), Box<dyn Error>> {
+    let decided: (String, String) = sqlx::query_as(
+        "SELECT decision.decision_kind, turn.active_phase_kind
+           FROM tool_approval_decision AS decision
+           JOIN tool_request AS request USING (request_id)
+           JOIN turn_lifecycle AS turn ON turn.turn_id = request.turn_id
+          WHERE decision.request_id = $1",
+    )
+    .bind(parked.request.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(decided, (String::from("approve"), String::from("running")));
+    assert_eq!(
+        injection_receipt(pool, parked.command).await?,
+        Some(InjectionReceipt::delivered(parked.fixture.turn))
+    );
+    Ok(())
+}
+
+/// §8: a decision arriving after its request was decided settles
+/// `not_delivered` and is never applied to a different request.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn late_decision_settles_not_delivered() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = APPROVAL_FIXTURE_SEED + 0xb00;
+    let (_, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, APPROVAL_TOOL_NAME, APPROVAL_ARGUMENTS)
+            .await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let first = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd0));
+    repository
+        .decide(
+            decide_tool_request(first, request, ToolApprovalDecision::Approve),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xd1)),
+        )
+        .await?;
+    let late = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd2));
+    let outcome = repository
+        .decide(
+            decide_tool_request(
+                late,
+                request,
+                ToolApprovalDecision::Deny {
+                    reason: Some(
+                        ToolDenialReason::try_new(String::from("too late"))
+                            .expect("fixture denial reason is admitted"),
+                    ),
+                },
+            ),
+            || panic!("a late decision opens no attempt"),
+        )
+        .await?;
+    assert_eq!(
+        outcome.result(),
+        &DecideToolRequestResult::Rejected(
+            signalbox_domain::DecideToolRequestRejectedResult::AlreadyResolved { request }
+        )
+    );
+    assert_eq!(
+        injection_receipt(&pool, late).await?,
+        Some(InjectionReceipt::not_delivered())
+    );
+    let decisions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM tool_approval_decision WHERE request_id = $1")
+            .bind(request.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(decisions, 1);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// §8: the correlation contract stands. A decision naming a later request
+/// settles `rejected`, and one naming no request records its typed rejection
+/// with no session to carry a receipt.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn decision_correlation_mismatches_stay_typed_rejections() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = APPROVAL_FIXTURE_SEED + 0xc00;
+    let (_, _, _, requests) = checkpoint_confirmed_tool_batch(
+        &pool,
+        seed,
+        &[
+            (APPROVAL_TOOL_NAME, APPROVAL_ARGUMENTS),
+            ("second-tool", "{}"),
+        ],
+    )
+    .await?;
+    let [earliest, later] = requests.as_slice() else {
+        panic!("the fixture has two ordered approval requests")
+    };
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let out_of_order = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd0));
+    let outcome = repository
+        .decide(
+            decide_tool_request(out_of_order, *later, ToolApprovalDecision::Approve),
+            || panic!("a rejected decision opens no attempt"),
+        )
+        .await?;
+    assert_eq!(
+        outcome.result(),
+        &DecideToolRequestResult::Rejected(
+            signalbox_domain::DecideToolRequestRejectedResult::NotEarliestUndecided {
+                request: *later,
+                earliest: *earliest,
+            }
+        )
+    );
+    assert_eq!(
+        injection_receipt(&pool, out_of_order).await?,
+        Some(InjectionReceipt::rejected("not_earliest_undecided"))
+    );
+
+    let unknown = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd2));
+    let missing = ToolRequestId::from_uuid(Uuid::from_u128(seed + 0xd3));
+    let outcome = repository
+        .decide(
+            decide_tool_request(unknown, missing, ToolApprovalDecision::Approve),
+            || panic!("a rejected decision opens no attempt"),
+        )
+        .await?;
+    assert_eq!(
+        outcome.result(),
+        &DecideToolRequestResult::Rejected(
+            signalbox_domain::DecideToolRequestRejectedResult::RequestNotFound { request: missing }
+        )
+    );
+    assert_eq!(injection_receipt(&pool, unknown).await?, None);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

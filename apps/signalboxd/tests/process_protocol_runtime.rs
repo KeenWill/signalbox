@@ -937,7 +937,7 @@ impl RunningRuntime {
         configuration: &str,
         template_configuration: SessionTemplateConfiguration,
     ) -> Result<usize, Box<dyn Error>> {
-        self.shutdown.send(true)?;
+        self.shutdown.send_replace(true);
         let runtime_task = self
             .runtime_task
             .as_mut()
@@ -5979,7 +5979,7 @@ async fn process_runtime_reads_one_queued_transcript_snapshot() -> Result<(), Bo
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
     let content = "queued input".to_owned();
-    let expected_snapshot_cursor = 3;
+    let expected_snapshot_cursor = 4;
     let (accepted_input, turn) =
         submit_first_input(&mut connection, session_id, content.clone()).await?;
 
@@ -7270,6 +7270,61 @@ async fn s10_decide_tool_request_final_approval_opens_the_executing_phase()
         ),
         "the final approval opens the executing phase"
     );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// §8: a decision in flight when the daemon drains is either acknowledged and
+/// durable or unacknowledged and unclaimed; after the restart the same command
+/// replays to one applied decision with one `delivered` receipt.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn decide_tool_request_survives_a_drain_and_restart() -> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    let pending_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xE1));
+    park_turn_on_tool_approval(&runtime.pool, session_id, &[pending_request_id]).await?;
+
+    let decision_command = command()?;
+    let decision = ClientRequest::DecideToolRequest {
+        command_id: decision_command,
+        session_id,
+        tool_request_id: pending_request_id,
+        decision: ToolDecision::Approve {},
+    };
+    connection
+        .request_version(ProtocolVersion::One, 3, decision.clone())
+        .await?;
+    runtime.shutdown.send_replace(true);
+    // Whether the drain let this reply through or closed the socket first is
+    // the race under test; either way the replay below settles the decision.
+    let _acknowledgement = timeout(Duration::from_secs(5), connection.response()).await;
+    drop(connection);
+    runtime.restart().await?;
+
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    connection
+        .request_version(ProtocolVersion::One, 4, decision)
+        .await?;
+    assert_eq!(
+        decided_receipt(response_within(&mut connection).await?.message()),
+        (pending_request_id, ToolDecision::Approve {}),
+        "the drained decision replays as one applied decision"
+    );
+    let settled: (i64, String) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM tool_approval_decision WHERE request_id = $1),
+                receipt.outcome_kind
+           FROM injection_settled_outbox_event AS receipt
+          WHERE receipt.command_id = $2",
+    )
+    .bind(pending_request_id.into_uuid())
+    .bind(decision_command.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(settled, (1, String::from("delivered")));
 
     drop(connection);
     runtime.stop().await

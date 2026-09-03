@@ -4149,7 +4149,22 @@ fn reclassify_pending_steering(
     active_turn: &ActivatedTurn,
     identities: &[PendingSteeringReclassificationIdentity],
 ) -> Result<Box<[ReclassifiedPendingSteeringTurn]>, ModelCallClosureError> {
-    let pending = active_turn.pending_steering();
+    reclassify_pending_steering_inputs(
+        active_turn.session(),
+        active_turn.turn(),
+        active_turn.pending_steering(),
+        identities,
+        active_turn.configuration().effective(),
+    )
+}
+
+pub(crate) fn reclassify_pending_steering_inputs(
+    session: SessionId,
+    source_turn: TurnId,
+    pending: &[crate::PendingSteeringInput],
+    identities: &[PendingSteeringReclassificationIdentity],
+    effective_configuration: &EffectiveConfiguration,
+) -> Result<Box<[ReclassifiedPendingSteeringTurn]>, ModelCallClosureError> {
     if pending.len() != identities.len() {
         return Err(ModelCallClosureError::PendingSteeringReclassificationMismatch);
     }
@@ -4163,8 +4178,8 @@ fn reclassify_pending_steering(
             return Err(ModelCallClosureError::PendingSteeringReclassificationMismatch);
         };
         if pending.accepted_input() != identity.accepted_input
-            || binding.source_turn() != active_turn.turn()
-            || identity.turn == active_turn.turn()
+            || binding.source_turn() != source_turn
+            || identity.turn == source_turn
             || !turns.insert(identity.turn)
         {
             return Err(ModelCallClosureError::PendingSteeringReclassificationMismatch);
@@ -4178,13 +4193,13 @@ fn reclassify_pending_steering(
             )
             .map_err(|_| ModelCallClosureError::PendingSteeringReclassificationMismatch)?;
         reclassified.push(ReclassifiedPendingSteeringTurn {
-            session: active_turn.session(),
-            source_turn: active_turn.turn(),
+            session,
+            source_turn,
             accepted_input,
             turn: identity.turn,
             order: AcceptedInputQueueOrder::ordinary(pending.acceptance_position()),
             binding: *binding,
-            effective_configuration: active_turn.configuration().effective().clone(),
+            effective_configuration: effective_configuration.clone(),
         });
     }
     Ok(reclassified.into_boxed_slice())

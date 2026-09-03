@@ -602,18 +602,6 @@ impl SubmitInput {
                 })
             }
             DeliveryRequest::NextSafePoint { .. } => {
-                if let Some(existing) = existing_interrupt {
-                    return Ok(PreparedSubmitInput {
-                        command: self,
-                        result: SubmitInputResult::Rejected(
-                            SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
-                                session: target_session,
-                                active_turn: actual_active_turn,
-                                existing_command: existing.command(),
-                            },
-                        ),
-                    });
-                }
                 let acceptance_position = match next_acceptance_position(previous_position) {
                     Ok(position) => position,
                     Err(last) => {
@@ -828,18 +816,6 @@ impl SubmitInput {
                 }),
             }),
             DeliveryRequest::NextSafePoint { .. } => {
-                if let Some(existing) = existing_interrupt {
-                    return Ok(PreparedSubmitInput {
-                        command: self,
-                        result: SubmitInputResult::Rejected(
-                            SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
-                                session: target_session,
-                                active_turn: actual_active_turn,
-                                existing_command: existing,
-                            },
-                        ),
-                    });
-                }
                 let acceptance_position = match next_acceptance_position(previous_position) {
                     Ok(position) => position,
                     Err(last) => {
@@ -1386,6 +1362,9 @@ pub enum SubmitInputRejectedResult {
     },
     /// A safe-point request arrived after interruption had already stopped the
     /// active attempt from authorizing more semantic work.
+    ///
+    /// Recorded by earlier daemons only; a stopping turn now accepts steering,
+    /// and this variant survives for replay of those records.
     SafePointUnavailableWhileStopping {
         /// The target session.
         session: SessionId,

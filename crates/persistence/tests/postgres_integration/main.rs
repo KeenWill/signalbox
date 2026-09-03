@@ -148,10 +148,11 @@ use signalbox_persistence::{
     outbox::{
         DispatchedDelegationOutcome, DispatchedDelegationPolicy, DispatchedDelegationProvenance,
         DispatchedDelegationReason, DispatchedDelegationUpdate, DispatchedDelegationWaitMode,
-        DispatchedDelegationWake, DispatchedModelCallState, DispatchedOutboxEvent,
-        DispatchedOutboxEventKind, DispatchedReconciliationOperation, DispatchedSessionCreation,
-        DispatchedToolBatchState, DispatchedTurnTerminalDisposition, OutboxCorruption,
-        OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
+        DispatchedDelegationWake, DispatchedInjectionOutcome, DispatchedModelCallState,
+        DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedReconciliationOperation,
+        DispatchedSessionCreation, DispatchedToolBatchState, DispatchedTurnTerminalDisposition,
+        OutboxCorruption, OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome,
+        OutboxDispatcher,
     },
     plan::{SessionPlanCorruption, SessionPlanRepository, SessionPlanRepositoryError},
     process_read::{

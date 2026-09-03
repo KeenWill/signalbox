@@ -54,15 +54,6 @@ const STALE_TURN_SUPERSEDED_CAUSE: &str = "turn_liveness_candidate_superseded";
 /// under a cause an operator can tell apart from a committed terminalization.
 const STALE_TURN_AMBIGUOUS_CAUSE: &str = "turn_liveness_terminalization_ambiguous";
 
-/// Why a wedged turn could not be ended at all.
-///
-/// Steering pending on a turn must be closed before the turn terminalizes, and
-/// the failed-turn transition this pass reuses closes none — so this reports a
-/// turn that is wedged and that no present transition can release. It is a
-/// warning rather than an informational line because, unlike supersession,
-/// nothing about it is expected to resolve on its own.
-const STALE_TURN_STEERING_BLOCKED_CAUSE: &str = "turn_liveness_steering_blocks_terminalization";
-
 /// Why turns that came due were left for a later scan.
 const TERMINALIZATION_DEFERRED_CAUSE: &str = "turn_liveness_terminalization_deferred";
 
@@ -146,7 +137,6 @@ impl TurnLivenessNumericBounds {
 struct TerminalizationTally {
     terminalized: usize,
     superseded: usize,
-    steering_blocked: usize,
     lock_unavailable: usize,
     failed: usize,
 }
@@ -156,20 +146,13 @@ impl TerminalizationTally {
         match outcome {
             AttemptOutcome::Decided(StaleTurnOutcome::Terminalized) => self.terminalized += 1,
             AttemptOutcome::Decided(StaleTurnOutcome::Superseded) => self.superseded += 1,
-            AttemptOutcome::Decided(StaleTurnOutcome::BlockedByPendingSteering) => {
-                self.steering_blocked += 1;
-            }
             AttemptOutcome::LockUnavailable => self.lock_unavailable += 1,
             AttemptOutcome::Failed => self.failed += 1,
         }
     }
 
     const fn attempted(self) -> usize {
-        self.terminalized
-            + self.superseded
-            + self.steering_blocked
-            + self.lock_unavailable
-            + self.failed
+        self.terminalized + self.superseded + self.lock_unavailable + self.failed
     }
 }
 
@@ -281,7 +264,8 @@ impl StaleTurnTerminalizer for PostgresTurnLivenessRepository {
         candidate: StaleTurnCandidate,
         identities: AcceptedInputTurnFailureIdentities,
     ) -> Result<StaleTurnOutcome, TurnLivenessRepositoryError> {
-        self.terminalize_stale_turn(candidate, identities).await
+        self.terminalize_stale_turn(candidate, identities, &mut UuidV7StartupScanIdGenerator)
+            .await
     }
 }
 
@@ -962,7 +946,6 @@ where
             attempted_turns = tally.attempted(),
             terminalized_turns = tally.terminalized,
             superseded_turns = tally.superseded,
-            steering_blocked_turns = tally.steering_blocked,
             lock_unavailable_turns = tally.lock_unavailable,
             failed_turns = tally.failed,
             "more turns came due than one scan attempts; the rest wait for a later scan"
@@ -1068,16 +1051,6 @@ where
             );
             AttemptOutcome::Decided(outcome)
         }
-        Ok(outcome @ StaleTurnOutcome::BlockedByPendingSteering) => {
-            tracing::warn!(
-            cause_code = STALE_TURN_STEERING_BLOCKED_CAUSE,
-            session_id = %candidate.session().as_uuid(),
-            turn_id = %candidate.turn().as_uuid(),
-            staleness_bound_seconds = staleness_bound.as_secs(),
-            "stale active turn holds pending steering that no present transition can close"
-            );
-            AttemptOutcome::Decided(outcome)
-        }
         // An ambiguous commit is the one failure whose durable effect is
         // unknown from here: if it landed, the turn is terminal and no later
         // scan reports it; if it did not, the candidate is unchanged and a
@@ -1159,12 +1132,11 @@ mod tests {
     use super::{
         InventoryPage, PASS_FAILURE_CAUSE, QUIESCENT_ROTATION_PAGE_CEILING, QuiescentInventory,
         ROTATION_CEILING_CAUSE, SLOT_HELD_PAGE_TIMEOUT_CAUSE, STALE_TURN_AMBIGUOUS_CAUSE,
-        STALE_TURN_LOCK_UNAVAILABLE_CAUSE, STALE_TURN_STEERING_BLOCKED_CAUSE,
-        STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE, StaleTurnTerminalizer,
-        TERMINALIZATION_DEFERRED_CAUSE, TerminalizationWindow, TurnLivenessNumericBounds,
-        TurnLivenessWake, batch_admits_another_reconciliation, complete_before_shutdown,
-        drain_quiescent_rotation, next_turn_liveness_wake, reconcile_turn_liveness,
-        reconciliation_deadline,
+        STALE_TURN_LOCK_UNAVAILABLE_CAUSE, STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE,
+        StaleTurnTerminalizer, TERMINALIZATION_DEFERRED_CAUSE, TerminalizationWindow,
+        TurnLivenessNumericBounds, TurnLivenessWake, batch_admits_another_reconciliation,
+        complete_before_shutdown, drain_quiescent_rotation, next_turn_liveness_wake,
+        reconcile_turn_liveness, reconciliation_deadline,
     };
     use signalbox_application::{
         StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence,
@@ -1282,9 +1254,7 @@ mod tests {
     /// terminal turn is no longer active.
     struct CountingRepository {
         remaining: Mutex<Vec<StaleTurnCandidate>>,
-        undrainable: Vec<TurnId>,
         busy: Vec<TurnId>,
-        attempted: Mutex<Vec<TurnId>>,
         terminalized: AtomicUsize,
     }
 
@@ -1292,9 +1262,7 @@ mod tests {
         fn new(candidates: Vec<StaleTurnCandidate>) -> Self {
             Self {
                 remaining: Mutex::new(candidates),
-                undrainable: Vec::new(),
                 busy: Vec::new(),
-                attempted: Mutex::new(Vec::new()),
                 terminalized: AtomicUsize::new(0),
             }
         }
@@ -1306,22 +1274,6 @@ mod tests {
                 busy,
                 ..Self::new(candidates)
             }
-        }
-
-        /// Every attempt on these turns reports pending steering, so they stay
-        /// due for as long as the daemon runs.
-        fn with_undrainable(candidates: Vec<StaleTurnCandidate>, undrainable: Vec<TurnId>) -> Self {
-            Self {
-                undrainable,
-                ..Self::new(candidates)
-            }
-        }
-
-        fn attempted(&self) -> Vec<TurnId> {
-            self.attempted
-                .lock()
-                .expect("the fixture is not poisoned")
-                .clone()
         }
 
         fn terminalized(&self) -> usize {
@@ -1360,19 +1312,10 @@ mod tests {
             candidate: StaleTurnCandidate,
             _identities: AcceptedInputTurnFailureIdentities,
         ) -> Result<StaleTurnOutcome, TurnLivenessRepositoryError> {
-            self.attempted
-                .lock()
-                .expect("the fixture is not poisoned")
-                .push(candidate.turn());
             if self.busy.contains(&candidate.turn()) {
                 return Err(TurnLivenessRepositoryError::TerminalizationLockUnavailable(
                     sqlx::Error::PoolTimedOut,
                 ));
-            }
-            if self.undrainable.contains(&candidate.turn()) {
-                // A turn holding pending steering: attempted every time it is
-                // reached, ended never.
-                return Ok(StaleTurnOutcome::BlockedByPendingSteering);
             }
             self.terminalized.fetch_add(1, Ordering::Relaxed);
             self.remaining
@@ -1547,56 +1490,6 @@ mod tests {
         assert_eq!(closing, vec![remains]);
     }
 
-    /// A turn that can never be ended must not hold the window against turns
-    /// behind it: with a cap of one, the second scan reaches the blocked turn
-    /// and the third resumes past it rather than starting over.
-    #[tokio::test(start_paused = true)]
-    async fn an_undrainable_turn_does_not_starve_the_turn_behind_it() {
-        let bound = fixture_staleness_bound();
-        let blocked = candidate(1);
-        let behind = candidate(2);
-        let repository =
-            CountingRepository::with_undrainable(vec![blocked, behind], vec![blocked.turn()]);
-        let mut ledger = TurnLivenessLedger::new(bound);
-        let mut window = TerminalizationWindow::new(Some(1));
-        let _ = reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
-        tokio::time::advance(bound.get()).await;
-        let _ = reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
-
-        let _ = reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
-
-        assert_eq!(
-            repository.attempted(),
-            vec![blocked.turn(), behind.turn()],
-            "the second scan resumed past the turn the first could not end"
-        );
-        assert_eq!(repository.terminalized(), 1);
-    }
-
-    /// An attempt is not an ending. A window holding one turn that terminalizes
-    /// and one that steering blocks reports one of each, not two of either.
-    #[tokio::test(start_paused = true)]
-    async fn the_phase_counts_endings_apart_from_attempts() {
-        let bound = fixture_staleness_bound();
-        let blocked = candidate(1);
-        let ends = candidate(2);
-        let repository =
-            CountingRepository::with_undrainable(vec![blocked, ends], vec![blocked.turn()]);
-        let mut ledger = TurnLivenessLedger::new(bound);
-        let mut window = TerminalizationWindow::new(Some(2));
-        let _ = reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
-        tokio::time::advance(bound.get()).await;
-
-        let tally = reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
-
-        assert_eq!(tally.attempted(), 2);
-        assert_eq!(tally.terminalized, 1);
-        assert_eq!(tally.steering_blocked, 1);
-        assert_eq!(tally.superseded, 0);
-        assert_eq!(tally.lock_unavailable, 0);
-        assert_eq!(tally.failed, 0);
-    }
-
     /// A session held by another transaction is counted apart from a failure,
     /// and its turn stays due for the lap to reach again — ordinary contention
     /// is not a fault, and it is evidence the turn may not be wedged.
@@ -1700,10 +1593,6 @@ mod tests {
             "turn_liveness_terminalization_ambiguous"
         );
         assert_eq!(
-            STALE_TURN_STEERING_BLOCKED_CAUSE,
-            "turn_liveness_steering_blocks_terminalization"
-        );
-        assert_eq!(
             TERMINALIZATION_DEFERRED_CAUSE,
             "turn_liveness_terminalization_deferred"
         );
@@ -1717,7 +1606,6 @@ mod tests {
         );
         assert_ne!(STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE);
         assert_ne!(STALE_TURN_AMBIGUOUS_CAUSE, STALE_TURN_TERMINAL_CAUSE);
-        assert_ne!(STALE_TURN_STEERING_BLOCKED_CAUSE, STALE_TURN_TERMINAL_CAUSE);
         assert_ne!(PASS_FAILURE_CAUSE, STALE_TURN_TERMINAL_CAUSE);
         assert_ne!(ROTATION_CEILING_CAUSE, STALE_TURN_TERMINAL_CAUSE);
         assert_ne!(TERMINALIZATION_DEFERRED_CAUSE, STALE_TURN_TERMINAL_CAUSE);

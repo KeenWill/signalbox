@@ -301,7 +301,7 @@ async fn s24_inv032_process_transcript_is_one_authoritative_snapshot() -> Result
         .expect("the committed session has a transcript projection");
 
     assert_eq!(queued_snapshot.session(), session);
-    assert_eq!(queued_snapshot.cursor(), 3);
+    assert_eq!(queued_snapshot.cursor(), 4);
     assert_eq!(queued_snapshot.turns().len(), 1);
     assert_eq!(queued_snapshot.turns()[0].turn(), turn);
     assert_eq!(queued_snapshot.turns()[0].acceptance_position(), 1);
@@ -352,7 +352,7 @@ async fn s24_inv032_process_transcript_is_one_authoritative_snapshot() -> Result
         .expect("the committed session has a transcript projection");
 
     assert_eq!(snapshot.session(), session);
-    assert_eq!(snapshot.cursor(), 4);
+    assert_eq!(snapshot.cursor(), 5);
     assert_eq!(snapshot.turns().len(), 1);
     assert_eq!(snapshot.turns()[0].turn(), turn);
     assert_eq!(snapshot.turns()[0].acceptance_position(), 1);
@@ -1506,6 +1506,25 @@ async fn s01_inv012_inv032_scheduling_transitions_dispatch_in_commit_order()
             content: user_content("durable process input"),
         }
     );
+    let mut settled = None;
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|event| {
+                settled = Some(event.clone());
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 4 }
+    );
+    assert_eq!(
+        settled
+            .expect("the accepted origin settles its injection")
+            .kind(),
+        &DispatchedOutboxEventKind::InjectionSettled {
+            command: DurableCommandId::from_uuid(Uuid::from_u128(0xe66)),
+            outcome: DispatchedInjectionOutcome::Delivered { turn: Some(turn) },
+        }
+    );
 
     let mut activation = None;
     assert_eq!(
@@ -1515,7 +1534,7 @@ async fn s01_inv012_inv032_scheduling_transitions_dispatch_in_commit_order()
                 OutboxDeliveryDecision::Delivered
             })
             .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 4 }
+        OutboxDispatchOutcome::Delivered { sequence: 5 }
     );
     let activation = activation.expect("the turn activation event was offered");
     assert_eq!(activation.session(), Some(session));
@@ -1546,7 +1565,7 @@ async fn s01_inv012_inv032_scheduling_transitions_dispatch_in_commit_order()
     .bind(attempt.into_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(durable_counts, (1, 1, Decimal::from(4)));
+    assert_eq!(durable_counts, (1, 1, Decimal::from(5)));
 
     pool.close().await;
     drop(container);
@@ -1618,6 +1637,12 @@ async fn s01_inv032_turn_activation_dispatch_requires_authoritative_attempt()
             .await?,
         OutboxDispatchOutcome::Delivered { sequence: 3 }
     );
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 4 }
+    );
     let mut activation = None;
     assert_eq!(
         dispatcher
@@ -1626,7 +1651,7 @@ async fn s01_inv032_turn_activation_dispatch_requires_authoritative_attempt()
                 OutboxDeliveryDecision::Delivered
             })
             .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 4 }
+        OutboxDispatchOutcome::Delivered { sequence: 5 }
     );
     assert_eq!(
         activation
@@ -1667,7 +1692,7 @@ async fn s01_inv032_turn_activation_dispatch_requires_authoritative_attempt()
     .await?;
     sqlx::query(
         "UPDATE outbox_delivery_state
-            SET delivered_through = 3,
+            SET delivered_through = 4,
                 last_delivery_xid = pg_current_xact_id()
           WHERE singleton",
     )
@@ -1743,6 +1768,12 @@ async fn s01_inv032_terminal_model_call_dispatch_requires_exact_disposition()
             .await?,
         OutboxDispatchOutcome::Delivered { sequence: 4 }
     );
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 5 }
+    );
     let mut prepared_transition = None;
     assert_eq!(
         dispatcher
@@ -1751,7 +1782,7 @@ async fn s01_inv032_terminal_model_call_dispatch_requires_exact_disposition()
                 OutboxDeliveryDecision::Delivered
             })
             .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 5 }
+        OutboxDispatchOutcome::Delivered { sequence: 6 }
     );
     assert_eq!(
         prepared_transition
@@ -1777,7 +1808,7 @@ async fn s01_inv032_terminal_model_call_dispatch_requires_exact_disposition()
                 OutboxDeliveryDecision::Delivered
             })
             .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 6 }
+        OutboxDispatchOutcome::Delivered { sequence: 7 }
     );
 
     sqlx::query("ALTER TABLE model_call_transition_outbox_event DISABLE TRIGGER USER")
@@ -1852,6 +1883,12 @@ async fn s01_inv032_model_call_dispatch_rejects_an_unreached_transition()
             .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
             .await?,
         OutboxDispatchOutcome::Delivered { sequence: 4 }
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 5 }
     );
 
     sqlx::query("ALTER TABLE model_call_transition_outbox_event DISABLE TRIGGER USER")
