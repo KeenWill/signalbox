@@ -510,10 +510,6 @@ mod tests {
         StaleTurnCandidate::new(session(), turn(1), evidence(frontier))
     }
 
-    fn other_candidate() -> StaleTurnCandidate {
-        StaleTurnCandidate::new(session(), turn(2), evidence(1))
-    }
-
     fn ledger() -> TurnLivenessLedger {
         TurnLivenessLedger::new(
             StaleActiveTurnBound::try_new(BOUND).expect("fixture bound is valid"),

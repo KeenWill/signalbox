@@ -2,9 +2,9 @@
 
 The injection contract — steering accepted while stopping, watchdog
 reclassification, closure at a committed session terminal, and settlement
-receipts — is verified against this PR (`agent/lifecycle-t7-injection`).
-Durable watchdog observations and the non-advancing first post-restart scan are
-verified against this PR (`agent/lifecycle-t9-watchdog`).
+receipts — is verified against this PR (`agent/lifecycle-t7-injection`). Durable
+watchdog observations and the non-advancing first post-restart scan are verified
+against this PR (`agent/lifecycle-t9-watchdog`).
 
 The scheduler occupancy ceiling and metrics, daemon-owned ambiguous-call
 reconciliation, and outer slot-held watchdog coverage were verified against this
