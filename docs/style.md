@@ -255,13 +255,14 @@ needed at runtime. This is principle 5 at a seam rather than inside a module.
 
 ### Signatures carry labels, not runs
 
-Two adjacent parameters of one function that carry different sanitization,
-provenance, or trust contracts do not share a type: group them into a struct
-with named fields or give them distinct newtypes, so a transposition cannot
-compile. This extends principle 2 from tuples and test fixtures to production
-signatures, where a transposition is most costly and the parameter names are
-invisible at the call site. An `#[allow(clippy::too_many_arguments)]` is a
-signal the rule is being broken, not a licence to break it.
+Two adjacent parameters of one function do not share a type. Group them into a
+struct with named fields or give them distinct newtypes, so a transposition
+cannot compile, and do so in every case where the parameters carry different
+sanitization, provenance, or trust contracts. This extends principle 2 from
+tuples and test fixtures to production signatures, where a transposition is most
+costly and the parameter names are invisible at the call site. An
+`#[allow(clippy::too_many_arguments)]` is a signal the rule is being broken, not
+a licence to break it.
 
 `bool` does not appear as a public struct field or a public function parameter
 in the domain and application crates. Express each such axis as a two-variant
@@ -370,8 +371,9 @@ it decodes, which makes a missing decoder visible by inspection.
 Every public item in the domain and application crates — including enum variants
 and public struct fields — carries a doc comment. `DelegationTransitionFailure`
 and `DelegationTransitionError` in `crates/domain/src/session_delegation.rs` are
-undocumented; document them when next changing that file. `missing_docs` is
-enabled once they are cleared (see mechanical enforcement).
+undocumented; document them when next changing that file. `missing_docs` stays
+off until the workspace has no undocumented public items (see mechanical
+enforcement).
 
 Every arm of a tagged wire decoder in the native client names its complete
 admitted field set, through the shared rejection helper or a hand-written

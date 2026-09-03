@@ -37,8 +37,8 @@ what you chose not to build.
 
 In review, a finding that a mechanism can be removed is valid. A finding that
 asks for a guard, handler, or check the task does not name is declined ("not
-enforced; deferred") unless the gap corrupts stored data or breaks a
-`docs/spec/` contract.
+enforced; deferred") unless the gap corrupts stored data or breaks a committed
+contract.
 
 ## Pre-alpha compatibility
 

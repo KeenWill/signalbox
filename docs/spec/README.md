@@ -29,11 +29,24 @@ integration branch's own run once the stack lands, while a primary with its own
 merge commit or a reference naming itself as carrier rejects even when
 inherited. `scripts/check_docs_consistency.py` enforces this form.
 
+Every paragraph on a page belongs to exactly one of three categories; a page
+that cannot say which category a paragraph is in has a defect:
+
+- **Implemented behavior**: what a page states by default.
+- **Committed unimplemented functionality**: a capability the owner has decided
+  will exist, recorded because it constrains what a present change may do. Such
+  a paragraph names itself unimplemented, states that no present surface
+  provides it, and carries only that compatibility constraint. It is neither a
+  description of the system nor an open question, and it is admitted only where
+  a present contract must stay compatible with it.
+- **Deferred or undecided work**: recorded in
+  [open-questions.md](../open-questions.md), its one home; a page's "Open edges"
+  section points to it and carries no speculative prose.
+
 Conventions: pages state implemented behavior, plus the committed unimplemented
-functionality that constrains it, per the three prose categories
-[AGENTS.md](../../AGENTS.md) defines and normatively owns; pages state behavior,
-not rationale — a load-bearing choice may carry one "Why:" sentence; invariant
-references use INV tags resolved through the generated
+functionality that constrains it, per the three categories above; pages state
+behavior, not rationale — a load-bearing choice may carry one "Why:" sentence;
+invariant references use INV tags resolved through the generated
 [invariants.md](../invariants.md) index; deferred or undecided items are
 recorded in [open-questions.md](../open-questions.md) and surfaced as pointers
 in each page's "Open edges" section; a topic normatively owned by a sibling page
