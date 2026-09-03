@@ -13,20 +13,22 @@ use signalbox_process_protocol::{
     DelegationReason, DelegationWaitMode, DescendantTerminationScope, FailedModelCallCause,
     FailedModelCallDisposition, GoalBlockedProvenance, GoalBlockedReason, GoalHistoryEvent,
     GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker,
-    ImportedTextPreview, MAX_RATE_VERSION_UTF8_BYTES, MetadataActor, MetadataLastWriter,
-    ModelCallCostLabel, ModelCallDisposition, ModelCallState, OperatorStatusConvergenceSeal,
-    OperatorStatusConvergenceVerdict, OperatorStatusHeldSlotBlocker, OperatorStatusHeldSlotMessage,
-    OperatorStatusHeldSlotOrigin, OperatorStatusMergeableState, OperatorStatusMessage,
-    OperatorStatusPendingStaleReviewClearanceMessage, OperatorStatusPullRequestConvergenceMessage,
-    OperatorStatusQueuedObligationMessage, OperatorStatusReviewDecision,
-    OperatorStatusSingletonScope, ReviewDiffSide, ReviewFindingSnapshot, ReviewFindingStatus,
-    ReviewOrchestrationConcernStatus, ReviewOrchestrationSnapshot, ReviewOrchestrationState,
-    ReviewPassKind, ReviewPassLifecycle, ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity,
-    ReviewTargetSnapshot, ReviewTargetSubject, ReviewWorkflow, RunnerConnectionHealth,
-    RunnerProjection, RunnerProjectionSelector, RunnerProjectionState, RunnerSandboxProfile,
-    RunnerStateTransitionState, ServerMessage, SessionEvent, ToolApprovalEventDecider,
-    ToolApprovalEventDecision, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry,
-    TurnState, UsageProvenance, UserInputContent, UserInputPart,
+    ImportedTextPreview, LifecycleActorClass, MAX_RATE_VERSION_UTF8_BYTES, MetadataActor,
+    MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition, ModelCallState,
+    OperatorStatusConvergenceSeal, OperatorStatusConvergenceVerdict, OperatorStatusHeldSlotBlocker,
+    OperatorStatusHeldSlotMessage, OperatorStatusHeldSlotOrigin, OperatorStatusMergeableState,
+    OperatorStatusMessage, OperatorStatusPendingStaleReviewClearanceMessage,
+    OperatorStatusPullRequestConvergenceMessage, OperatorStatusQueuedObligationMessage,
+    OperatorStatusReviewDecision, OperatorStatusSingletonScope, ReviewDiffSide,
+    ReviewFindingSnapshot, ReviewFindingStatus, ReviewOrchestrationConcernStatus,
+    ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassKind, ReviewPassLifecycle,
+    ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot,
+    ReviewTargetSubject, ReviewWorkflow, RunnerConnectionHealth, RunnerProjection,
+    RunnerProjectionSelector, RunnerProjectionState, RunnerSandboxProfile,
+    RunnerStateTransitionState, ServerMessage, SessionClosureOutcome, SessionEvent,
+    ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState, ToolDecision,
+    TranscriptEntry, TranscriptTextEntry, TurnState, UsageProvenance, UserInputContent,
+    UserInputPart,
 };
 
 use crate::{
@@ -838,6 +840,11 @@ impl<'a> Output<'a> {
                 "goal session={session_id} generation={generation} state=superseded by_generation={}",
                 by_generation.value()
             )?,
+            GoalLifecycleState::SessionClosed { outcome } => writeln!(
+                self.stdout,
+                "goal session={session_id} generation={generation} state=session_closed outcome={}",
+                session_closure_outcome_label(*outcome)
+            )?,
         }
         self.goal_text_field("statement", statement)?;
         match state {
@@ -845,7 +852,8 @@ impl<'a> Output<'a> {
             GoalLifecycleState::Pursuing {}
             | GoalLifecycleState::Achieved { .. }
             | GoalLifecycleState::UserStopped {}
-            | GoalLifecycleState::Superseded { .. } => {}
+            | GoalLifecycleState::Superseded { .. }
+            | GoalLifecycleState::SessionClosed { .. } => {}
         }
         Ok(())
     }
@@ -932,6 +940,12 @@ impl<'a> Output<'a> {
                 )?;
                 self.goal_text_field("replacement_statement", replacement_statement)
             }
+            GoalHistoryEvent::SessionClosed { outcome, actor } => writeln!(
+                self.stdout,
+                "event={ordinal} generation={generation} type=session_closed outcome={} actor={}",
+                session_closure_outcome_label(*outcome),
+                lifecycle_actor_label(*actor)
+            ),
         }
     }
 
@@ -3462,6 +3476,26 @@ const fn goal_blocked_reason_label(reason: GoalBlockedReason) -> &'static str {
         GoalBlockedReason::ExternalChangeRequired => "external_change_required",
         GoalBlockedReason::AuthorizationRequired => "authorization_required",
         GoalBlockedReason::ExecutionFailure => "execution_failure",
+    }
+}
+
+const fn session_closure_outcome_label(outcome: SessionClosureOutcome) -> &'static str {
+    match outcome {
+        SessionClosureOutcome::FailedRetryable => "failed_retryable",
+        SessionClosureOutcome::FailedStructural => "failed_structural",
+        SessionClosureOutcome::FailedUnknown => "failed_unknown",
+        SessionClosureOutcome::Superseded => "superseded",
+        SessionClosureOutcome::Abandoned => "abandoned",
+        SessionClosureOutcome::Retired => "retired",
+    }
+}
+
+const fn lifecycle_actor_label(actor: LifecycleActorClass) -> &'static str {
+    match actor {
+        LifecycleActorClass::Core => "core",
+        LifecycleActorClass::Operator => "operator",
+        LifecycleActorClass::Module => "module",
+        LifecycleActorClass::Watchdog => "watchdog",
     }
 }
 

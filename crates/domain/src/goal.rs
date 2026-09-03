@@ -6,7 +6,9 @@
 
 use std::{error::Error, fmt, num::NonZeroU64};
 
-use crate::{DurableCommandId, SessionId, ToolRequestId, TurnId};
+use crate::{
+    DurableCommandId, LifecycleActor, SessionClosureOutcome, SessionId, ToolRequestId, TurnId,
+};
 
 const MAX_GOAL_TEXT_UTF8_BYTES: usize = 1_048_576;
 
@@ -324,6 +326,16 @@ pub enum GoalState {
         /// The successor commissioned by the same event.
         by_generation: GoalGeneration,
     },
+    /// The session closed beneath this generation.
+    ///
+    /// Goal state is the sole continuation-stopping condition in this
+    /// contract, so a terminal session settles its live generation here. The
+    /// state is terminal in every direction: no resume, no supersession, and
+    /// no later commission, because the session that would run them is gone.
+    SessionClosed {
+        /// The session outcome that closed it.
+        outcome: SessionClosureOutcome,
+    },
 }
 
 impl GoalState {
@@ -333,7 +345,8 @@ impl GoalState {
             Self::Blocked { .. }
             | Self::Achieved { .. }
             | Self::UserStopped
-            | Self::Superseded { .. } => false,
+            | Self::Superseded { .. }
+            | Self::SessionClosed { .. } => false,
         }
     }
 
@@ -343,7 +356,8 @@ impl GoalState {
             Self::Pursuing
             | Self::Achieved { .. }
             | Self::UserStopped
-            | Self::Superseded { .. } => false,
+            | Self::Superseded { .. }
+            | Self::SessionClosed { .. } => false,
         }
     }
 
@@ -354,14 +368,20 @@ impl GoalState {
     pub const fn is_open(&self) -> bool {
         match self {
             Self::Pursuing | Self::Blocked { .. } => true,
-            Self::Achieved { .. } | Self::UserStopped | Self::Superseded { .. } => false,
+            Self::Achieved { .. }
+            | Self::UserStopped
+            | Self::Superseded { .. }
+            | Self::SessionClosed { .. } => false,
         }
     }
 
     fn admits_later_commission(&self) -> bool {
         match self {
             Self::Achieved { .. } | Self::UserStopped => true,
-            Self::Pursuing | Self::Blocked { .. } | Self::Superseded { .. } => false,
+            Self::Pursuing
+            | Self::Blocked { .. }
+            | Self::Superseded { .. }
+            | Self::SessionClosed { .. } => false,
         }
     }
 }
@@ -471,6 +491,18 @@ pub enum GoalEventKind {
         replacement_statement: GoalStatement,
         /// Durable user-command provenance for both effects.
         provenance: GoalUserProvenance,
+    },
+    /// The session closed, settling the live generation beneath it.
+    ///
+    /// The session outcomes that reach this event are the ones with no
+    /// existing goal spelling: a stop settles as `user_stopped` and a verified
+    /// achievement as `achieved`, because those are the same act seen from the
+    /// goal's side.
+    SessionClosed {
+        /// The outcome the session recorded.
+        outcome: SessionClosureOutcome,
+        /// The classified actor that closed it.
+        provenance: LifecycleActor,
     },
 }
 
@@ -674,6 +706,37 @@ impl Goal {
         Ok(self)
     }
 
+    /// Settles an open generation because its session reached a terminal
+    /// outcome.
+    ///
+    /// Rejected for a closed generation: an achieved or stopped generation is
+    /// already settled, and settling it again would record a second terminal
+    /// event for one lineage.
+    pub fn close_with_session(
+        mut self,
+        outcome: SessionClosureOutcome,
+        provenance: LifecycleActor,
+    ) -> Result<Self, GoalTransitionError> {
+        if !self.current().state.is_open() {
+            return Err(GoalTransitionError::new(
+                self,
+                GoalTransitionFailure::RequiresPursuingOrBlocked,
+            ));
+        }
+        let ordinal = self.next_ordinal()?;
+        let generation = self.current().generation;
+        self.current_mut().state = GoalState::SessionClosed { outcome };
+        self.events.push(GoalEvent {
+            ordinal,
+            generation,
+            kind: GoalEventKind::SessionClosed {
+                outcome,
+                provenance,
+            },
+        });
+        Ok(self)
+    }
+
     /// Atomically supersedes an open generation and commissions its successor.
     pub fn supersede(
         mut self,
@@ -806,7 +869,8 @@ impl GoalReconstitutionInput {
             | GoalEventKind::Resumed { .. }
             | GoalEventKind::Achieved { .. }
             | GoalEventKind::UserStopped { .. }
-            | GoalEventKind::Superseded { .. } => {
+            | GoalEventKind::Superseded { .. }
+            | GoalEventKind::SessionClosed { .. } => {
                 return Err(GoalReconstitutionError::new(
                     GoalReconstitutionFailure::MissingCommission,
                 ));
@@ -860,6 +924,10 @@ fn apply_stored_event(goal: Goal, event: &GoalEvent) -> Result<Goal, GoalTransit
             replacement_statement,
             provenance,
         } => goal.supersede(replacement_statement.clone(), *provenance),
+        GoalEventKind::SessionClosed {
+            outcome,
+            provenance,
+        } => goal.close_with_session(*outcome, *provenance),
     }
 }
 

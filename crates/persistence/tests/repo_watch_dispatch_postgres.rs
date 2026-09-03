@@ -33,8 +33,8 @@ use signalbox_domain::{
     DelegateApprovalRecommendation, DeliveryRequest, DescendantTerminationScope,
     DirectModelSelection, DurableCommandId, FailedModelCallTurnIdentities, GitHubObjectId,
     GoalCommandResult, GoalModelProvenance, GoalNeed, GoalReport, GoalSchedulerProvenance,
-    GoalState, GoalStatement, GoalUserAction, GoalUserCommand, InitialToolApproval, MergeableState,
-    ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
+    GoalState, GoalStatement, GoalUserAction, GoalUserCommand, InitialToolApproval, LifecycleActor,
+    MergeableState, ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
     ModelCallTerminalOutcome, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
     NormalizedToolArguments, ProviderModelIdentity, ProviderReportedTokenUsage, PullRequestBody,
     PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
@@ -44,11 +44,11 @@ use signalbox_domain::{
     RepoWatchRuleId, RepoWatchRuleIdentityField, RepoWatchRuleVersion, RepoWatchSingletonScope,
     RepoWatchWorkflowRunAttempt, RepositorySlug, ResolvedProviderTarget, SemanticTranscriptEntryId,
     SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
-    SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
-    SessionTemplateProvenance, SubmitInput, ToolCallProposal, ToolDecisionRationale, ToolName,
-    ToolRequestId, ToolResponsePartIdentity, ToolRoundModelCallIdentities,
-    ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
-    WorkflowName,
+    SessionRetryableCause, SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
+    SessionTemplateProvenance, SessionTerminalOutcome, SubmitInput, ToolCallProposal,
+    ToolDecisionRationale, ToolName, ToolRequestId, ToolResponsePartIdentity,
+    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId,
+    TurnId, UserContent, WorkflowName,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -88,6 +88,7 @@ use signalbox_persistence::{
     },
     repo_watch_operations::PostgresRepoWatchOperations,
     scheduler::PostgresEligibilitySweep,
+    session_lifecycle::SessionLifecycleRepository,
     start_eligible_turn::StartEligibleTurnRepository,
     submit_input::SubmitInputRepository,
     test_support::{OperatorStatusConvergenceFixture, OperatorStatusFixtureRepository},
@@ -4018,6 +4019,38 @@ async fn restart_invalidated_dispatch_recovery_leaves_an_obligation() -> Result<
 
     assert_eq!(obligation.latest_event(), &fixture.event);
     assert_eq!(obligation.matched_event_count(), 1);
+    Ok(())
+}
+
+/// A failed closure ends the dispatched generation without converging it, so
+/// the singleton is freed and the work stays owed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_failed_session_closure_releases_its_batch_and_owes_a_requeue()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let session = fixture.session(0);
+    let turn = TurnId::from_uuid(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT turn_id FROM repo_watch_dispatch_delivery WHERE dispatch_id = $1",
+        )
+        .bind(fixture.dispatch_id.as_uuid())
+        .fetch_one(&fixture.pool)
+        .await?,
+    );
+    mark_queued_turn_failed(&fixture.pool, session, turn, 0x50_900).await?;
+    SessionLifecycleRepository::new(fixture.pool.clone())
+        .close(
+            session,
+            SessionTerminalOutcome::FailedRetryable {
+                cause: SessionRetryableCause::ProviderTransient,
+            },
+            LifecycleActor::Watchdog,
+        )
+        .await?;
+
+    assert_eq!(release_count(&fixture).await?, 1);
+    assert_eq!(outstanding_obligation_count(&fixture.pool).await?, 1);
     Ok(())
 }
 
@@ -8891,10 +8924,7 @@ async fn a_replayed_commission_returns_its_committed_session() -> Result<(), Box
     let (provenance, defaults) = commissioned_template();
     let ordinary = CreateSession::new_from_template(
         DurableCommandId::from_uuid(Uuid::from_u128(COMMISSION_COMMAND_ID)),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         provenance,
         defaults,
     )

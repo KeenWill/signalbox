@@ -7447,7 +7447,8 @@ fn reconstitute_active_acceptance_tail(
                     }
                     AcceptedInputDisposition::PendingSteering { .. }
                     | AcceptedInputDisposition::ConsumedAsSteering { .. }
-                    | AcceptedInputDisposition::ReclassifiedAsTurnOrigin { .. } => false,
+                    | AcceptedInputDisposition::ReclassifiedAsTurnOrigin { .. }
+                    | AcceptedInputDisposition::ClosedNotDelivered => false,
                 }
             }
             SessionAcceptanceTailEntryState::RuntimeRelevant => {
@@ -7504,6 +7505,16 @@ fn reconstitute_active_acceptance_tail(
                                 DeliveryRequest::NextSafePoint {
                                     expected_active_turn,
                                 } if expected_active_turn == active || source_precedes_active
+                            )
+                    }
+                    AcceptedInputDisposition::ClosedNotDelivered => {
+                        !accepted_input_turns.contains_key(&accepted_input)
+                            && !origin_by_position.contains_key(&entry.position)
+                            && matches!(
+                                entry.delivery,
+                                DeliveryRequest::NextSafePoint {
+                                    expected_active_turn,
+                                } if expected_active_turn == active
                             )
                     }
                 }
@@ -8582,7 +8593,7 @@ mod tests {
             session,
             session,
             SessionCreationProvenance::new(
-                SessionCreationCause::UserInitiated,
+                SessionCreationCause::Interactive,
                 TranscriptAncestry::None,
             ),
             session,
@@ -16050,7 +16061,7 @@ mod tests {
             ancestral,
             ancestral,
             SessionCreationProvenance::new(
-                SessionCreationCause::UserInitiated,
+                SessionCreationCause::Interactive,
                 TranscriptAncestry::SingleSource {
                     source_session: session_id(9),
                     source_frontier: transcript_frontier(9),

@@ -3177,6 +3177,44 @@ pub enum GoalLifecycleState {
         /// Successor generation commissioned by the same event.
         by_generation: CanonicalU64,
     },
+    /// The session closed beneath this generation.
+    SessionClosed {
+        /// Closed session outcome that settled it.
+        outcome: SessionClosureOutcome,
+    },
+}
+
+/// The closed session outcomes that settle a live goal generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionClosureOutcome {
+    /// Closed with a retryable cause standing.
+    FailedRetryable,
+    /// Closed with a structural cause standing.
+    FailedStructural,
+    /// Closed with no classified cause.
+    FailedUnknown,
+    /// A newer session owns the work, or the work is gone.
+    Superseded,
+    /// An operator wrote the session off.
+    Abandoned,
+    /// The session never did the work and never will.
+    Retired,
+}
+
+/// The closed actor classification recorded with a lifecycle transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleActorClass {
+    /// Daemon core.
+    Core,
+    /// The single user's authority.
+    Operator,
+    /// A module, without saying which: the classification is what the
+    /// boundary carries, and the durable goal event keeps the exact module.
+    Module,
+    /// The recovery scan or liveness watchdog.
+    Watchdog,
 }
 
 /// One append-only goal event payload at the process boundary.
@@ -3228,6 +3266,13 @@ pub enum GoalHistoryEvent {
         /// Durable user command provenance.
         command_id: CommandId,
     },
+    /// The session closed, settling this generation.
+    SessionClosed {
+        /// Closed session outcome that settled it.
+        outcome: SessionClosureOutcome,
+        /// Classified actor that closed the session.
+        actor: LifecycleActorClass,
+    },
 }
 
 fn validate_goal_text(value: &str) -> Result<(), FrameValidationError> {
@@ -3246,7 +3291,8 @@ fn validate_goal_state(state: &GoalLifecycleState) -> Result<(), FrameValidation
         GoalLifecycleState::Pursuing {}
         | GoalLifecycleState::Achieved { .. }
         | GoalLifecycleState::UserStopped {}
-        | GoalLifecycleState::Superseded { .. } => Ok(()),
+        | GoalLifecycleState::Superseded { .. }
+        | GoalLifecycleState::SessionClosed { .. } => Ok(()),
     }
 }
 
@@ -3283,9 +3329,9 @@ fn validate_goal_event(event: &GoalHistoryEvent) -> Result<(), FrameValidationEr
             replacement_statement,
             ..
         } => validate_goal_text(replacement_statement),
-        GoalHistoryEvent::Resumed { guidance: None, .. } | GoalHistoryEvent::UserStopped { .. } => {
-            Ok(())
-        }
+        GoalHistoryEvent::Resumed { guidance: None, .. }
+        | GoalHistoryEvent::UserStopped { .. }
+        | GoalHistoryEvent::SessionClosed { .. } => Ok(()),
     }
 }
 

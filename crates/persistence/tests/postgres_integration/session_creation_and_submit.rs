@@ -124,7 +124,7 @@ async fn s01_inv003_creation_readers_reject_spawning_request_on_user_session()
         .await?;
     sqlx::query(
         "ALTER TABLE session
-         DROP CONSTRAINT session_delegated_cause_shape,
+         DROP CONSTRAINT session_creation_cause_shape,
          DROP CONSTRAINT session_spawning_request_fk,
          DROP CONSTRAINT session_delegation_relation_fk",
     )
@@ -420,7 +420,21 @@ async fn s01_inv003_inv008_inv012_create_session_schema_preserves_typed_facts()
         "INSERT INTO session (session_id, creation_cause, ancestry_kind)
          VALUES
             ('70000000-0000-7000-8000-000000000001',
-             'user_initiated', 'none')",
+             'interactive', 'none')",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_lifecycle
+            (session_id, state_kind, owned, actor_kind)
+         VALUES ('70000000-0000-7000-8000-000000000001', 'created', false, 'operator')",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_ownership_event
+            (session_id, event_ordinal, transition_kind, owned_after, actor_kind)
+         VALUES ('70000000-0000-7000-8000-000000000001', 1, 'created_unmonitored', false, 'operator')",
     )
     .execute(&mut *transaction)
     .await?;
@@ -454,7 +468,7 @@ async fn s01_inv003_inv008_inv012_create_session_schema_preserves_typed_facts()
              result_kind, created_session_id)
          VALUES
             ('10000000-0000-4000-8000-000000000001',
-             'create_session', 1, 'user_initiated', 'none', 1,
+             'create_session', 1, 'interactive', 'none', 1,
              'direct', '70000000-0000-7000-8000-000000000002', NULL,
              'applied', '70000000-0000-7000-8000-000000000001')",
     )
@@ -477,7 +491,7 @@ async fn s01_inv003_inv008_inv012_create_session_schema_preserves_typed_facts()
     assert_eq!(
         stored,
         (
-            "user_initiated".to_owned(),
+            "interactive".to_owned(),
             "none".to_owned(),
             "direct".to_owned(),
             "applied".to_owned()
@@ -571,7 +585,21 @@ async fn inv012_registry_and_create_session_constraints_reject_torn_or_conflicti
         "INSERT INTO session (session_id, creation_cause, ancestry_kind)
          VALUES
             ('70000000-0000-7000-8000-000000000021',
-             'user_initiated', 'none')",
+             'interactive', 'none')",
+    )
+    .execute(&mut *session_without_command)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_lifecycle
+            (session_id, state_kind, owned, actor_kind)
+         VALUES ('70000000-0000-7000-8000-000000000021', 'created', false, 'operator')",
+    )
+    .execute(&mut *session_without_command)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_ownership_event
+            (session_id, event_ordinal, transition_kind, owned_after, actor_kind)
+         VALUES ('70000000-0000-7000-8000-000000000021', 1, 'created_unmonitored', false, 'operator')",
     )
     .execute(&mut *session_without_command)
     .await?;
@@ -642,7 +670,7 @@ async fn s01_schema_rejects_invalid_provenance_defaults_and_mutation() -> Result
         "INSERT INTO session (session_id, creation_cause, ancestry_kind)
          VALUES
             ('70000000-0000-7000-8000-000000000012',
-             'user_initiated', 'single_source')",
+             'interactive', 'single_source')",
     )
     .execute(&pool)
     .await
@@ -669,7 +697,21 @@ async fn s01_schema_rejects_invalid_provenance_defaults_and_mutation() -> Result
         "INSERT INTO session (session_id, creation_cause, ancestry_kind)
          VALUES
             ('70000000-0000-7000-8000-000000000013',
-             'user_initiated', 'none')",
+             'interactive', 'none')",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_lifecycle
+            (session_id, state_kind, owned, actor_kind)
+         VALUES ('70000000-0000-7000-8000-000000000013', 'created', false, 'operator')",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_ownership_event
+            (session_id, event_ordinal, transition_kind, owned_after, actor_kind)
+         VALUES ('70000000-0000-7000-8000-000000000013', 1, 'created_unmonitored', false, 'operator')",
     )
     .execute(&mut *transaction)
     .await?;
@@ -703,7 +745,7 @@ async fn s01_schema_rejects_invalid_provenance_defaults_and_mutation() -> Result
              result_kind, created_session_id)
          VALUES
             ('10000000-0000-4000-8000-000000000013',
-             'create_session', 1, 'user_initiated', 'none', 1,
+             'create_session', 1, 'interactive', 'none', 1,
              'alias', NULL, '70000000-0000-7000-8000-000000000014',
              'applied', '70000000-0000-7000-8000-000000000013')",
     )
@@ -2397,7 +2439,7 @@ async fn inv002_inv003_inv008_current_session_corruption_fails_closed() -> Resul
     sqlx::query(
         "ALTER TABLE session
          DROP CONSTRAINT session_creation_cause_closed,
-         DROP CONSTRAINT session_delegated_cause_shape,
+         DROP CONSTRAINT session_creation_cause_shape,
          DISABLE TRIGGER session_is_append_only",
     )
     .execute(&pool)

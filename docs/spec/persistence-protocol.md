@@ -1,5 +1,8 @@
 # Persistence protocol
 
+The session-lifecycle satellite's place in the lock order is verified against
+this PR (`agent/lifecycle-t2-state-machine`).
+
 The workspace-instruction discovery, registration, empty turn-start manifest,
 and model-call correlation were verified against PR #810
 (`agent/agent-docs-skills-model-call-followup`).
@@ -923,7 +926,15 @@ Locks per transaction, in acquisition order:
   registry and receipt without taking a session lifecycle lock or resolving
   current configuration.
 
+- **Session lifecycle satellite**: the mutable per-session lifecycle row is
+  acquired after the `session` row and before the `session_scheduler` row, never
+  after it. Every inventory statement that locks a scheduler row locks the
+  satellite first, in a common table expression the scheduler predicate reads.
+  Session creation and the lifecycle store's own park, closure, and ownership
+  writes take it holding no scheduler row.
+
 - **SubmitInput** (`prepare_against_locked_state`): session row
+  `FOR NO KEY UPDATE`, then the session lifecycle satellite row
   `FOR NO KEY UPDATE`, then `session_scheduler` row `FOR UPDATE`, then
   `session_current_defaults` row `FOR UPDATE`; only then does it read the
   scheduling projection and assign the next acceptance position. A

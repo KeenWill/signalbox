@@ -247,6 +247,7 @@ pub trait EligibilitySweep {
 pub struct EligibilitySweepBatch {
     sessions: Vec<SessionId>,
     dispatch_starts: HashSet<SessionId>,
+    unmonitored: HashSet<SessionId>,
     continuation: bool,
 }
 
@@ -256,6 +257,7 @@ impl EligibilitySweepBatch {
         Self {
             sessions,
             dispatch_starts: HashSet::new(),
+            unmonitored: HashSet::new(),
             continuation,
         }
     }
@@ -269,13 +271,30 @@ impl EligibilitySweepBatch {
         Self {
             sessions,
             dispatch_starts,
+            unmonitored: HashSet::new(),
             continuation,
         }
+    }
+
+    /// Marks the hinted sessions the daemon holds no liveness obligation for.
+    ///
+    /// An unmonitored session is a conversation: it still runs the turns a
+    /// person submits, but it is excluded from occupancy accounting, so a
+    /// person's open chat window never reads as driven work in flight.
+    #[must_use]
+    pub fn with_unmonitored(mut self, unmonitored: HashSet<SessionId>) -> Self {
+        self.unmonitored = unmonitored;
+        self
     }
 
     /// Splits the hints, durable priorities, and continuation marker.
     pub fn into_parts(self) -> (Vec<SessionId>, HashSet<SessionId>, bool) {
         (self.sessions, self.dispatch_starts, self.continuation)
+    }
+
+    /// Borrows the hinted sessions excluded from occupancy accounting.
+    pub const fn unmonitored(&self) -> &HashSet<SessionId> {
+        &self.unmonitored
     }
 }
 
@@ -292,6 +311,23 @@ pub trait EligibilityWorkSource {
     /// Sources that do not carry a class retain ordinary scheduling. The
     /// scheduler calls this immediately after each successful next result.
     fn take_returned_dispatch_start(&mut self, _session: SessionId) -> bool {
+        false
+    }
+
+    /// Takes the ownership marker the source attached to this session's hint.
+    ///
+    /// An unmonitored session is a conversation. It still runs the turns a
+    /// person submits, and its turns keep every liveness guarantee; what it
+    /// has no place in is occupancy accounting, so the occupancy the daemon
+    /// reports stays a measure of driven work rather than of open chat
+    /// windows.
+    ///
+    /// The marker is taken, not read: it authorizes exactly the one admission
+    /// the reconciliation that produced it described. A source with no durable
+    /// ownership hint — and any session admitted from a nudge rather than that
+    /// reconciliation — reports owned, which is the answer that keeps the
+    /// session's watchdog rather than removing it.
+    fn take_returned_unmonitored(&mut self, _session: SessionId) -> bool {
         false
     }
 
@@ -736,6 +772,7 @@ where
     initial_sweep_due: bool,
     pending_sweep_hints: VecDeque<SessionId>,
     pending_sweep_dispatch_starts: HashSet<SessionId>,
+    unmonitored_sessions: HashSet<SessionId>,
     nudge_preferred_over_sweep_hint: bool,
     sweep_preferred_over_pending_hint: bool,
     sweep_continuation_due: bool,
@@ -841,6 +878,7 @@ where
             initial_sweep_due: true,
             pending_sweep_hints: VecDeque::new(),
             pending_sweep_dispatch_starts: HashSet::new(),
+            unmonitored_sessions: HashSet::new(),
             nudge_preferred_over_sweep_hint: true,
             sweep_preferred_over_pending_hint: false,
             sweep_continuation_due: false,
@@ -933,7 +971,9 @@ where
         let (sweep, result) = completion;
         self.sweep_in_progress = None;
         self.sweep = Some(sweep);
-        let (hints, dispatch_starts, continuation) = result?.into_parts();
+        let batch = result?;
+        self.unmonitored_sessions = batch.unmonitored().clone();
+        let (hints, dispatch_starts, continuation) = batch.into_parts();
         self.extend_pending_sweep_hints(hints, dispatch_starts);
         self.sweep_continuation_due = continuation;
         self.sweep_preferred_over_pending_hint = false;
@@ -1029,6 +1069,10 @@ where
                 }
             }
         }
+    }
+
+    fn take_returned_unmonitored(&mut self, session: SessionId) -> bool {
+        self.unmonitored_sessions.remove(&session)
     }
 
     fn take_returned_dispatch_start(&mut self, session: SessionId) -> bool {
@@ -1233,11 +1277,18 @@ where
                     () = &mut shutdown => break,
                     () = ready(()) => {
                         if in_flight_sessions.insert(session) {
+                            // The bound stays on every pass: its expiry is
+                            // turn-liveness recovery, which ownership does not
+                            // govern. What ownership governs is the
+                            // accounting, so the marker moves the metric only.
+                            let counts_toward_occupancy =
+                                !self.work_source.take_returned_unmonitored(session);
                             spawn_pass(
                                 &mut passes,
                                 &mut self.pass,
                                 session,
                                 priority,
+                                counts_toward_occupancy,
                                 self.occupancy_bound,
                                 shutdown_drain_receiver.clone(),
                                 &mut task_sessions,
@@ -1543,6 +1594,7 @@ struct InFlightPass {
     session: SessionId,
     priority: EligibilityHintPriority,
     started_at: Instant,
+    counts_toward_occupancy: bool,
 }
 
 enum PassTaskOutcome<PassError> {
@@ -1657,6 +1709,7 @@ fn spawn_pass<Pass>(
     pass: &mut Pass,
     session: SessionId,
     priority: EligibilityHintPriority,
+    counts_toward_occupancy: bool,
     bound: SchedulerPassOccupancyBound,
     shutdown_drain: watch::Receiver<bool>,
     task_sessions: &mut HashMap<Id, InFlightPass>,
@@ -1684,6 +1737,7 @@ fn spawn_pass<Pass>(
             session,
             priority,
             started_at: Instant::now(),
+            counts_toward_occupancy,
         },
     );
     observe_occupancy(observer, task_sessions);
@@ -1739,9 +1793,14 @@ fn observe_occupancy(
     };
     let oldest = passes
         .values()
+        .filter(|pass| pass.counts_toward_occupancy)
         .min_by_key(|pass| pass.started_at)
         .map(|pass| SchedulerOldestInFlightPass::new(pass.session, pass.started_at));
-    observer.observe(passes.len(), oldest);
+    let occupancy = passes
+        .values()
+        .filter(|pass| pass.counts_toward_occupancy)
+        .count();
+    observer.observe(occupancy, oldest);
 }
 
 /// One retired pass's scheduler-visible outcome.

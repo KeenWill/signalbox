@@ -135,10 +135,7 @@ fn credential_pin() -> SessionCredentialPin {
 fn creation(session_seed: u128, command_seed: u128) -> PreparedCreateSession {
     CreateSession::new(
         command(command_seed),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
             DirectModelSelection::from_uuid(Uuid::from_u128(ARBITRARY_MODEL_SELECTION_SEED)),
         )),

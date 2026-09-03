@@ -6,8 +6,10 @@ state, user commands, model declarations, scheduler continuation, process wire,
 and terminal-client verbs. The domain and persistence surface was verified
 through PR #384 (`agent/goal-mode-runtime`). The scheduling, model-tool,
 process, and terminal surfaces were verified through PR #384
-(`agent/goal-mode-runtime`). Dispatch-composed commissions and the generation a
-turn's authority resolves to were verified through PR #562
+(`agent/goal-mode-runtime`). The session-closure event that settles a live
+generation beneath a terminal session is verified against this PR
+(`agent/lifecycle-t2-state-machine`). Dispatch-composed commissions and the
+generation a turn's authority resolves to were verified through PR #562
 (`agent/dispatch-session-goals`). The binding of an already-accepted turn to a
 generation was verified through PR #578 (`agent/commission-binding`). Resolving
 that authority again when a consumer commits is verified against this PR
@@ -61,14 +63,29 @@ authoritative. The state algebra is:
 - `achieved { report_ref }` and `user_stopped` — each ends that generation, and
   a later explicit attach may start another; and
 - `superseded { by_generation }` — terminal for the replaced generation, while
-  its same event starts the successor.
+  its same event starts the successor; and
+- `session_closed { outcome }` — the session closed beneath the generation.
+  Terminal in every direction: no resume, no supersession, no later commission.
 
 **Implemented behavior.** The closed event vocabulary is `commissioned`,
-`blocked`, `resumed`, `achieved`, `user_stopped`, and `superseded`. Positive
-event ordinals are contiguous within one session, and positive statement
-generations are contiguous across commission and supersession. Domain replay
-rejects a missing first commission, a noncontiguous event, or a transition that
-is invalid from the preceding derived state (INV-048).
+`blocked`, `resumed`, `achieved`, `user_stopped`, `superseded`, and
+`session_closed`. Positive event ordinals are contiguous within one session, and
+positive statement generations are contiguous across commission and
+supersession. Domain replay rejects a missing first commission, a noncontiguous
+event, or a transition that is invalid from the preceding derived state
+(INV-048).
+
+**Implemented behavior.** Goal state is the sole continuation-stopping condition
+in this contract, so a terminal session settles its live generation in the same
+transaction that closes it: a pursuing or blocked generation records
+`session_closed`, carrying the closed outcome class that closed the session and
+the actor classification behind it. A generation the contract already settles by
+its own event does not gain a second one — a verified achievement is `achieved`
+and a session stop is `user_stopped`, and a closure naming either over a still
+open generation is rejected rather than recording one closure twice. The member
+each session outcome carries — the standing failure cause, the successor, the
+retirement predicate — stays on the session's own lifecycle record, so the goal
+lineage holds no second copy that could disagree with it.
 
 ## Transition authority and provenance
 

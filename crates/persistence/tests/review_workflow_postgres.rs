@@ -689,10 +689,7 @@ async fn insert_active_turn_with_offset(
 ) {
     let create = CreateSession::new(
         DurableCommandId::from_uuid(uuid(0x101 + offset)),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
             DirectModelSelection::from_uuid(uuid(0x102 + offset)),
         )),

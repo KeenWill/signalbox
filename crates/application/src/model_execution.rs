@@ -3494,7 +3494,7 @@ mod tests {
             session_id,
             session_id,
             SessionCreationProvenance::new(
-                SessionCreationCause::UserInitiated,
+                SessionCreationCause::Interactive,
                 TranscriptAncestry::None,
             ),
             session_id,
@@ -3713,7 +3713,7 @@ mod tests {
             session_id,
             session_id,
             SessionCreationProvenance::new(
-                SessionCreationCause::UserInitiated,
+                SessionCreationCause::Interactive,
                 TranscriptAncestry::None,
             ),
             session_id,

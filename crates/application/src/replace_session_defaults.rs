@@ -289,7 +289,7 @@ mod tests {
             id,
             id,
             SessionCreationProvenance::new(
-                SessionCreationCause::UserInitiated,
+                SessionCreationCause::Interactive,
                 TranscriptAncestry::None,
             ),
             id,

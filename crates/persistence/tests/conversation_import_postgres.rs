@@ -329,7 +329,7 @@ async fn insert_catalogued_raw_source(
 /// insert would fail before the migration under test could run. A fixture
 /// seeding a fully migrated database writes the current spelling for the
 /// mirror-image reason.
-const CURRENT_CREATION_CAUSE: &str = "user_initiated";
+const CURRENT_CREATION_CAUSE: &str = "interactive";
 async fn insert_imported_session_scaffolding(
     transaction: &mut Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), sqlx::Error> {
@@ -363,6 +363,21 @@ async fn insert_imported_session_scaffolding_with_creation_cause(
              '20000000-0000-4000-8000-000000000040', 2, 'resume')",
     )
     .bind(creation_cause)
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_lifecycle
+            (session_id, state_kind, owned, actor_kind)
+         VALUES ('40000000-0000-4000-8000-000000000039', 'created', false, 'operator')",
+    )
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_ownership_event
+            (session_id, event_ordinal, transition_kind, owned_after, actor_kind)
+         VALUES ('40000000-0000-4000-8000-000000000039', 1,
+                 'created_unmonitored', false, 'operator')",
+    )
     .execute(&mut **transaction)
     .await?;
     sqlx::raw_sql(

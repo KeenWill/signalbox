@@ -14,16 +14,15 @@ use signalbox_domain::{
     AcceptedInputId, BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha,
     ContextFrontierId, CreateSession, DeliveryRequest, DurableCommandId, GitHubObjectId,
     GoalTextError, GoalUserAction, GoalUserCommand, LabelName, MergeableState,
-    ModelSelectionOverride, PerInputConfigurationChoices, PreparedCreateSession,
+    ModelSelectionOverride, ModuleDispatch, PerInputConfigurationChoices, PreparedCreateSession,
     PullRequestEventContext, PullRequestNumber, ReactionChange, ReactionContent, ReactionSubject,
     RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchDispatchContextError, RepoWatchDispatchId,
     RepoWatchEvent, RepoWatchEventConstructionError, RepoWatchEventId, RepoWatchEventKindNameV1,
     RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchRule, RepoWatchRuleId,
     RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchWorkflowRunAttempt, RepositorySlug,
     ReviewState, ReviewThreadId, SemanticTranscriptEntryId, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, SessionTemplateName, SessionTemplateProvenance, SubmitInput, TranscriptAncestry,
-    TurnId, UserContent, WorkflowName,
+    SessionConfigurationDefaultsVersion, SessionCreationProvenance, SessionId, SessionTemplateName,
+    SessionTemplateProvenance, SubmitInput, TurnId, UserContent, WorkflowName,
 };
 
 /// Supplies identities in the exact order in which the differ emits facts.
@@ -3318,6 +3317,7 @@ where
         let singleton = singleton_key(rule.singleton_per(), &event, observation)
             .ok_or(RepoWatchDispatchPreparationError::InvalidSingletonTarget)
             .map_err(RepoWatchDispatchServiceError::Preparation)?;
+        let dispatch_id = self.ids.next_dispatch_id();
         let mut prepared_actions = Vec::with_capacity(actions.len());
         for action in actions {
             let RepoWatchActionV1::DispatchSession(dispatch) = &action;
@@ -3329,10 +3329,9 @@ where
                 .map_err(RepoWatchDispatchServiceError::Preparation)?;
             let command = CreateSession::new_from_template(
                 self.ids.next_command_id(),
-                SessionCreationProvenance::new(
-                    SessionCreationCause::UserInitiated,
-                    TranscriptAncestry::None,
-                ),
+                SessionCreationProvenance::module_dispatched(ModuleDispatch::RepositoryWatch {
+                    dispatch: dispatch_id,
+                }),
                 template.provenance,
                 template.defaults,
             );
@@ -3378,7 +3377,7 @@ where
         }
         self.transaction
             .handle_repo_watch_evaluation(RepoWatchRuleEvaluation::Matched {
-                dispatch_id: self.ids.next_dispatch_id(),
+                dispatch_id,
                 event,
                 rule_id: rule.id().clone(),
                 rule_version: rule.version(),

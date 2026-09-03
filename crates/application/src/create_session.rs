@@ -42,7 +42,7 @@ impl Error for InvalidDurableCommandId {}
 /// The complete admitted application request for user-initiated creation.
 ///
 /// The request deliberately has no cause or ancestry input: this slice fixes
-/// them to `UserInitiated` and `None`. Its private fields ensure sentinel
+/// them to `Interactive` and `None`. Its private fields ensure sentinel
 /// command identities cannot reach the use case through this boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreateSessionRequest {
@@ -257,7 +257,7 @@ where
             placement,
         } = request;
         let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::None,
         );
         let command = match template_provenance {
@@ -339,7 +339,7 @@ mod tests {
         DomainCreateSession::new(
             request.command_id(),
             SessionCreationProvenance::new(
-                SessionCreationCause::UserInitiated,
+                SessionCreationCause::Interactive,
                 TranscriptAncestry::None,
             ),
             request.initial_configuration_defaults().clone(),
@@ -519,7 +519,7 @@ mod tests {
         assert_eq!(prepared.command().command_id(), request.command_id());
         assert_eq!(
             prepared.command().provenance().cause(),
-            SessionCreationCause::UserInitiated
+            SessionCreationCause::Interactive
         );
         assert_eq!(
             prepared.command().provenance().ancestry(),

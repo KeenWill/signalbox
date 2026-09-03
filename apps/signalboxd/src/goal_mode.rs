@@ -1232,7 +1232,8 @@ fn execution_failure_turn(event: &GoalEvent) -> Option<TurnId> {
         }
         | GoalEventKind::Achieved { .. }
         | GoalEventKind::UserStopped { .. }
-        | GoalEventKind::Superseded { .. } => None,
+        | GoalEventKind::Superseded { .. }
+        | GoalEventKind::SessionClosed { .. } => None,
     }
 }
 

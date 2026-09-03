@@ -6,14 +6,14 @@ use rust_decimal::Decimal;
 use serde_json::Value;
 use signalbox_application::{CreateSessionOutcome, CreateSessionTransaction};
 use signalbox_domain::{
-    CreateSessionAppliedResult, CreateSessionReconstitutionFailure,
-    CreateSessionReconstitutionInput, DirectModelSelection, DurableCommandId, ModelAlias,
-    ModelSelectionRequest, PreparedCreateSession, ReconstitutedSessionCreation,
-    RootPlacementGlobalReadIntent, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionPlacement, SessionPlacementEventKind, SessionPlacementPath, SessionPlacementVersion,
-    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
-    TranscriptAncestry, VersionedSessionPlacement,
+    CommissionedDispatchId, CreateSessionAppliedResult, CreateSessionReconstitutionFailure,
+    CreateSessionReconstitutionInput, DirectModelSelection, DispatchingModule, DurableCommandId,
+    ModelAlias, ModelSelectionRequest, ModuleDispatch, PreparedCreateSession,
+    ReconstitutedSessionCreation, RepoWatchDispatchId, RootPlacementGlobalReadIntent,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, SessionPlacement, SessionPlacementEventKind, SessionPlacementPath,
+    SessionPlacementVersion, SessionTemplateContentDigest, SessionTemplateName,
+    SessionTemplateProvenance, TranscriptAncestry, VersionedSessionPlacement,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -449,16 +449,17 @@ pub(crate) async fn insert_prepared(
     let command_selection = encode_selection(command.initial_configuration_defaults().model());
     let stored_selection = encode_selection(defaults.defaults().model());
 
+    let cause = command.provenance().cause();
+    let (dispatching_module, dispatch_ref) = encode_module_dispatch(cause);
     sqlx::query(
         "INSERT INTO session
             (session_id, creation_cause, ancestry_kind,
-             template_name, template_content_digest)
-         VALUES ($1, $2, $3, $4, $5)",
+             template_name, template_content_digest,
+             dispatching_module, dispatch_ref)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(session_id_to_uuid(session.id()))
-    .bind(session_creation_cause_to_str(
-        &SessionCreationCause::UserInitiated,
-    ))
+    .bind(session_creation_cause_to_str(&cause))
     .bind(NO_ANCESTRY)
     .bind(
         session
@@ -470,8 +471,11 @@ pub(crate) async fn insert_prepared(
             .template_provenance()
             .map(|value| value.content_digest().as_bytes().to_vec()),
     )
+    .bind(dispatching_module)
+    .bind(dispatch_ref)
     .execute(&mut *connection)
     .await?;
+    crate::session_lifecycle::insert_created(connection, session.id(), &cause).await?;
 
     let (placement_path, root_intent) = encode_placement(session.placement().placement());
     sqlx::query(
@@ -556,15 +560,15 @@ pub(crate) async fn insert_prepared(
              dangerous_tool_auto_approval, system_prompt, model_settings,
              template_name, template_content_digest,
              placement_path, root_global_read_intent,
-             result_kind, created_session_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
+             result_kind, created_session_id,
+             dispatching_module, dispatch_ref)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
+                 $19, $20)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(COMMAND_KIND)
     .bind(WRITTEN_STORAGE_VERSION)
-    .bind(session_creation_cause_to_str(
-        &SessionCreationCause::UserInitiated,
-    ))
+    .bind(session_creation_cause_to_str(&cause))
     .bind(NO_ANCESTRY)
     .bind(defaults_version_to_numeric(defaults.version()))
     .bind(command_selection.kind)
@@ -598,6 +602,8 @@ pub(crate) async fn insert_prepared(
     .bind(root_intent)
     .bind(APPLIED)
     .bind(session_id_to_uuid(prepared.applied_result().session()))
+    .bind(dispatching_module)
+    .bind(dispatch_ref)
     .execute(&mut *connection)
     .await?;
 
@@ -646,6 +652,8 @@ async fn load_from_connection(
             c.storage_version AS typed_version,
             c.creation_cause AS command_cause,
             c.ancestry_kind AS command_ancestry,
+            c.dispatching_module AS command_dispatching_module,
+            c.dispatch_ref AS command_dispatch_ref,
             c.initial_defaults_version,
             c.model_selection_kind AS command_model_kind,
             c.direct_model_selection_id AS command_direct_id,
@@ -663,6 +671,8 @@ async fn load_from_connection(
             s.creation_cause AS stored_cause,
             s.ancestry_kind AS stored_ancestry,
             s.spawning_tool_request_id AS stored_spawning_request_id,
+            s.dispatching_module AS stored_dispatching_module,
+            s.dispatch_ref AS stored_dispatch_ref,
             s.template_name AS stored_template_name,
             s.template_content_digest AS stored_template_digest,
             v.session_id AS defaults_session_id,
@@ -728,6 +738,8 @@ fn decode_complete(
         required(&row, "command_cause")?,
         required(&row, "command_ancestry")?,
         None,
+        row.try_get("command_dispatching_module")?,
+        row.try_get("command_dispatch_ref")?,
     )?;
     let initial_version = decode_ordinal(&row, "initial_defaults_version")?;
     if initial_version != SessionConfigurationDefaultsVersion::first() {
@@ -797,6 +809,8 @@ fn decode_complete(
         required(&row, "stored_cause")?,
         required(&row, "stored_ancestry")?,
         row.try_get("stored_spawning_request_id")?,
+        row.try_get("stored_dispatching_module")?,
+        row.try_get("stored_dispatch_ref")?,
     )?;
     let stored_template_provenance = decode_template_provenance(
         row.try_get("stored_template_name")?,
@@ -1014,18 +1028,31 @@ fn decode_ordinal(
         .map_err(|reason| CreateSessionCorruption::InvalidOrdinal { field, reason }.into())
 }
 
+/// Encodes the module and dispatch a module-dispatched creation names.
+fn encode_module_dispatch(cause: SessionCreationCause) -> (Option<&'static str>, Option<Uuid>) {
+    match cause {
+        SessionCreationCause::ModuleDispatched { dispatch } => (
+            Some(crate::mapping::dispatching_module_to_str(dispatch.module())),
+            Some(module_dispatch_reference(dispatch)),
+        ),
+        SessionCreationCause::Interactive | SessionCreationCause::Delegated { .. } => (None, None),
+    }
+}
+
+fn module_dispatch_reference(dispatch: ModuleDispatch) -> Uuid {
+    match dispatch {
+        ModuleDispatch::RepositoryWatch { dispatch } => dispatch.into_uuid(),
+        ModuleDispatch::Commissioned { dispatch } => dispatch.into_uuid(),
+    }
+}
+
 fn decode_provenance(
     cause: String,
     ancestry: String,
     spawning_request: Option<Uuid>,
+    dispatching_module: Option<String>,
+    dispatch_ref: Option<Uuid>,
 ) -> Result<SessionCreationProvenance, CreateSessionRepositoryError> {
-    if cause != session_creation_cause_to_str(&SessionCreationCause::UserInitiated) {
-        return Err(CreateSessionCorruption::Unsupported {
-            field: "creation cause",
-            value: cause,
-        }
-        .into());
-    }
     if ancestry != NO_ANCESTRY {
         return Err(CreateSessionCorruption::Unsupported {
             field: "ancestry kind",
@@ -1036,10 +1063,44 @@ fn decode_provenance(
     if spawning_request.is_some() {
         return Err(CreateSessionCorruption::Inconsistent("creation cause provenance").into());
     }
-    Ok(SessionCreationProvenance::new(
-        SessionCreationCause::UserInitiated,
-        TranscriptAncestry::None,
-    ))
+    match (cause.as_str(), dispatching_module, dispatch_ref) {
+        ("interactive", None, None) => Ok(SessionCreationProvenance::new(
+            SessionCreationCause::Interactive,
+            TranscriptAncestry::None,
+        )),
+        ("module_dispatched", Some(module), Some(dispatch)) => {
+            decode_module_dispatch(&module, dispatch)
+                .map(SessionCreationProvenance::module_dispatched)
+        }
+        ("interactive" | "module_dispatched", _, _) => {
+            Err(CreateSessionCorruption::Inconsistent("creation cause provenance").into())
+        }
+        _ => Err(CreateSessionCorruption::Unsupported {
+            field: "creation cause",
+            value: cause,
+        }
+        .into()),
+    }
+}
+
+/// Rebuilds the exact dispatch a module-dispatched creation names.
+fn decode_module_dispatch(
+    module: &str,
+    dispatch: Uuid,
+) -> Result<ModuleDispatch, CreateSessionRepositoryError> {
+    match crate::mapping::dispatching_module_from_str(module) {
+        Some(DispatchingModule::RepositoryWatch) => Ok(ModuleDispatch::RepositoryWatch {
+            dispatch: RepoWatchDispatchId::from_uuid(dispatch),
+        }),
+        Some(DispatchingModule::CommissionedDispatch) => Ok(ModuleDispatch::Commissioned {
+            dispatch: CommissionedDispatchId::from_uuid(dispatch),
+        }),
+        None => Err(CreateSessionCorruption::Unsupported {
+            field: "dispatching module",
+            value: String::from(module),
+        }
+        .into()),
+    }
 }
 
 struct StoredConfigurationFields {
@@ -1181,17 +1242,19 @@ mod tests {
     }
 
     /// S01 / INV-003: the ordinary creation reader cannot silently discard a
-    /// delegated spawning identity from a user-initiated session row.
+    /// delegated spawning identity from an interactive session row.
     #[test]
-    fn s01_inv003_user_initiated_creation_rejects_spawning_request() {
+    fn s01_inv003_interactive_creation_rejects_spawning_request() {
         let error = decode_provenance(
             String::from(session_creation_cause_to_str(
-                &SessionCreationCause::UserInitiated,
+                &SessionCreationCause::Interactive,
             )),
             String::from(NO_ANCESTRY),
             Some(Uuid::from_u128(1)),
+            None,
+            None,
         )
-        .expect_err("user-initiated creation cannot carry a spawning request");
+        .expect_err("interactive creation cannot carry a spawning request");
 
         assert_eq!(
             corruption(error),

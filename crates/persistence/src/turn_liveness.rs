@@ -564,6 +564,17 @@ impl QuiescentActiveTurnPage {
 /// index lookup whatever a session's history weighs. Every observation this
 /// statement reports is bounded that way: the `LIMIT` caps returned rows, and
 /// nothing per row scans a history.
+///
+/// A parked session is not a candidate. Parking suspends its turn in place —
+/// the turn keeps its phase and nothing about it proceeds — so a watchdog that
+/// still saw it would read a deliberately held turn as a stalled one and reap
+/// exactly the work an operator is holding.
+///
+/// Ownership is deliberately not a second conjunct. Turn-liveness recovery
+/// applies to every turn whoever owns the session; ownership governs lifecycle
+/// driving — retry, park, escalation, auto-resume — not liveness. A dead turn
+/// left active in a conversation would block its next input, and injection is
+/// available in every non-terminal state.
 const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
             active.turn_id,
             active.current_attempt_id,
@@ -599,6 +610,12 @@ const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
         AND ($2::uuid IS NULL OR active.session_id > $2)
         AND NOT EXISTS (
             SELECT 1
+              FROM session_lifecycle AS parked
+             WHERE parked.session_id = active.session_id
+               AND parked.state_kind = 'parked'
+        )
+        AND NOT EXISTS (
+            SELECT 1
               FROM model_call AS live
              WHERE live.session_id = active.session_id
                AND live.state_kind <> 'terminal'
@@ -623,6 +640,17 @@ const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
 /// durable waits are excluded by the phase predicate; live calls and tools are
 /// intentionally retained because their containing pass has its own tighter
 /// occupancy ceiling.
+///
+/// A parked session is not a candidate. Parking suspends its turn in place —
+/// the turn keeps its phase and nothing about it proceeds — so a watchdog that
+/// still saw it would read a deliberately held turn as a stalled one and reap
+/// exactly the work an operator is holding.
+///
+/// Ownership is deliberately not a second conjunct. Turn-liveness recovery
+/// applies to every turn whoever owns the session; ownership governs lifecycle
+/// driving — retry, park, escalation, auto-resume — not liveness. A dead turn
+/// left active in a conversation would block its next input, and injection is
+/// available in every non-terminal state.
 const SLOT_HELD_ACTIVE_TURNS: &str = "SELECT active.session_id,
             active.turn_id,
             active.current_attempt_id,
@@ -673,6 +701,12 @@ const SLOT_HELD_ACTIVE_TURNS: &str = "SELECT active.session_id,
         )
         AND ($1::uuid IS NULL OR active.session_id = $1)
         AND ($2::uuid IS NULL OR active.session_id > $2)
+        AND NOT EXISTS (
+            SELECT 1
+              FROM session_lifecycle AS parked
+             WHERE parked.session_id = active.session_id
+               AND parked.state_kind = 'parked'
+        )
       ORDER BY active.session_id
       LIMIT $3";
 

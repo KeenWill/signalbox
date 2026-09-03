@@ -1,5 +1,8 @@
 # Sessions and the transcript
 
+The widened creation-cause vocabulary and its typed module dispatch are verified
+against this PR (`agent/lifecycle-t2-state-machine`).
+
 The bounded browser session descriptor and historical timeline foundation are
 verified against this PR (`agent/web-session-timeline`). The bounded
 lexical-search projection and query boundary are verified against this PR
@@ -72,9 +75,13 @@ records two required, independent, immutable creation facts, paired as
 `SessionCreationProvenance` (INV-003):
 
 - **Creation cause** — why the session exists. The constructible variants are
-  `UserInitiated` and `Delegated { spawning_request }`. The delegated variant is
-  produced only by the spawning-request path and fixes ancestry to `None`;
-  application and schedule causes are not represented as placeholders.
+  `Interactive`, `ModuleDispatched { dispatch }`, and
+  `Delegated { spawning_request }`. `ModuleDispatched` carries one typed
+  `ModuleDispatch` naming the dispatching module and that module's own durable
+  dispatch identity, and fixes ancestry to `None`. The delegated variant is
+  produced only by the spawning-request path and likewise fixes ancestry to
+  `None`. The imported-frontier creation family records `Interactive`.
+  Application and schedule causes are not represented as placeholders.
 - **Transcript ancestry** — where initial semantic context came from: `None`
   (explicitly no prior transcript), `SingleSource` naming one source `SessionId`
   and one opaque `TranscriptFrontier`, or `ImportedConversation` naming one
@@ -135,17 +142,17 @@ discarded.
 Application orchestration (`crates/application/src/create_session.rs`):
 
 - rejects nil/max sentinel command identities before canonical construction;
-- fixes cause `UserInitiated` and ancestry `None` — the request type has no
-  cause or ancestry inputs;
+- fixes cause `Interactive` and ancestry `None` — the request type has no cause
+  or ancestry inputs;
 - mints one fresh UUIDv7 `SessionId` candidate per invocation (the UUID
   timestamp confers no domain order or authority); and
 - calls one atomic transaction port exactly once, with no retry.
 
-Domain preparation admits only the user-initiated, no-ancestry pair. A
-`SingleSource` command is a valid canonical value but fails preparation with
-`TranscriptAncestryUnavailable` — a nonterminal error that claims no command
-identifier. Forks are therefore typed but not yet creatable. Import-seeded
-creation uses the separate command path below; it does not widen
+Domain preparation admits the interactive and module-dispatched no-ancestry
+pairs. A `SingleSource` command is a valid canonical value but fails preparation
+with `TranscriptAncestryUnavailable` — a nonterminal error that claims no
+command identifier. Forks are therefore typed but not yet creatable.
+Import-seeded creation uses the separate command path below; it does not widen
 `CreateSession`.
 
 The committing transaction atomically inserts the session row, the scheduler
@@ -611,11 +618,10 @@ current defaults version — alongside imported-conversation headers, in one
 bounded keyset page of its own. It adds no session state and changes none of the
 rules above.
 
-Because `UserInitiated` is the only constructible creation cause and every
-current session-creation boundary lacks actor attribution, the implemented
-default view is exactly all non-archived sessions. No visibility taxonomy,
-creation-time override, or inference from missing attribution is stored. The
-dependency for future creation-derived visibility is recorded in
+Because no current session-creation boundary carries actor attribution, the
+implemented default view is exactly all non-archived sessions. No visibility
+taxonomy, creation-time override, or inference from missing attribution is
+stored. The dependency for future creation-derived visibility is recorded in
 [open-questions.md](../open-questions.md#session-organization-visibility-and-retention).
 
 **Committed unimplemented functionality.** No present surface constructs a
@@ -624,10 +630,11 @@ and `eval` variants for sessions created by registered programs under the
 [program substrate](program-substrate.md): each names the creating program run
 (and, for `eval`, the trial identity the [evaluation system](eval-system.md)
 defines), is constructible only by the substrate's host-side session capability,
-and joins the stored closed-discriminator convention beside `user_initiated` and
-`delegated`. This constrains present change: creation-cause readers must not
-assume the two-variant vocabulary is final, and the stored discriminator's
-decode surface must stay extensible without reinterpreting existing spellings.
+and joins the stored closed-discriminator convention beside `interactive`,
+`module_dispatched`, and `delegated`. This constrains present change:
+creation-cause readers must not assume the present vocabulary is final, and the
+stored discriminator's decode surface must stay extensible without
+reinterpreting existing spellings.
 
 ## The session aggregate
 

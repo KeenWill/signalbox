@@ -27,6 +27,7 @@ mod outbox_dispatch_and_process_read;
 mod restart_recovery_and_submit;
 mod search;
 mod session_creation_and_submit;
+mod session_lifecycle;
 mod session_live;
 mod session_plan;
 mod session_timeline;
@@ -489,6 +490,8 @@ async fn insert_raw_delegation(
     .bind(fixture.child.into_uuid())
     .execute(&mut *connection)
     .await?;
+    // Delegated creation is owned in production.
+    insert_raw_session_lifecycle(&mut *connection, fixture.child.into_uuid(), true).await?;
     sqlx::query("INSERT INTO session_scheduler(session_id) VALUES ($1)")
         .bind(fixture.child.into_uuid())
         .execute(&mut *connection)
@@ -2202,10 +2205,7 @@ fn prepared(
 ) -> PreparedCreateSession {
     CreateSession::new(
         DurableCommandId::from_uuid(Uuid::from_u128(command)),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         SessionConfigurationDefaults::new(selection),
     )
     .prepare(SessionId::from_uuid(Uuid::from_u128(session)))
@@ -2243,10 +2243,7 @@ fn prepared_with_low_reasoning(
     .expect("the fixture settings belong to the direct selection");
     CreateSession::new(
         DurableCommandId::from_uuid(Uuid::from_u128(command)),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         defaults,
     )
     .prepare(SessionId::from_uuid(Uuid::from_u128(session)))
@@ -2526,11 +2523,49 @@ async fn rewind_outbox_delivery_before(
 /// Inserts the complete pre-outbox session record family for allocator tests.
 ///
 /// The command and model identities derive from the one session seed.
+/// Gives one raw-SQL session fixture the lifecycle row every session owns.
+///
+/// `session` carries a deferred foreign key to its satellite, so a fixture
+/// that inserts a session row by statement owes the same row a creation path
+/// writes — including the ownership its creation cause establishes, since an
+/// owned fixture that recorded itself unmonitored would run with a posture
+/// production never produces.
+async fn insert_raw_session_lifecycle(
+    connection: &mut sqlx::PgConnection,
+    session: Uuid,
+    owned: bool,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO session_lifecycle
+            (session_id, state_kind, owned, actor_kind)
+         VALUES ($1, 'created', $2, 'operator')",
+    )
+    .bind(session)
+    .bind(owned)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_ownership_event
+            (session_id, event_ordinal, transition_kind, owned_after, actor_kind)
+         VALUES ($1, 1, $2, $3, 'operator')",
+    )
+    .bind(session)
+    .bind(if owned {
+        "created_owned"
+    } else {
+        "created_unmonitored"
+    })
+    .bind(owned)
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
 async fn insert_outbox_session_fixture(
     pool: &PgPool,
     session_seed: u128,
 ) -> Result<Uuid, sqlx::Error> {
-    insert_outbox_session_fixture_with_creation_cause(pool, session_seed, "user_initiated").await
+    insert_outbox_session_fixture_with_creation_cause(pool, session_seed, "interactive").await
 }
 
 /// Seeds the outbox session fixture with an explicit `creation_cause`.
@@ -2565,6 +2600,7 @@ async fn insert_outbox_session_fixture_with_creation_cause(
     .bind(creation_cause)
     .execute(&mut *transaction)
     .await?;
+    insert_raw_session_lifecycle(&mut transaction, session, false).await?;
     sqlx::query("INSERT INTO session_scheduler (session_id) VALUES ($1)")
         .bind(session)
         .execute(&mut *transaction)

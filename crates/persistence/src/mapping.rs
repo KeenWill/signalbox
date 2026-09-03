@@ -16,17 +16,20 @@ use signalbox_domain::{
     CodexCliServiceTier, DangerousToolAutoApproval, DelegateApprovalRecommendation,
     DelegationMessageDirection, DelegationOutcomeKind, DelegationOutcomeReason,
     DelegationTransitionFailure, DelegationWaitMode, DeliveryKind, DescendantTerminationScope,
-    DirectModelSelection, DurableCommandId, EffectiveModelSettings, FastMode, FastModeOverlay,
-    FaultCause, GoalBlockedReasonKind, GoalCommandRejection, GoalEventKind,
+    DirectModelSelection, DispatchingModule, DurableCommandId, EffectiveModelSettings, FastMode,
+    FastModeOverlay, FaultCause, GoalBlockedReasonKind, GoalCommandRejection, GoalEventKind,
     GoalModelBlockedReasonKind, GoalUserAction, InstructionBundleKind,
-    InstructionDiscoveryRootKind, MergeableState, ModelChangeAdjustment, ModelSettingSource,
-    ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier, ProgramCapability,
-    ReactionChange, ReactionSubject, ReasoningLevel, RejectReason, RepoWatchEventKindNameV1,
-    RequestKind, ReviewState, RunnerPlacementLossSource, RunnerSandboxProfile, ScopeOperation,
-    ServiceTier, SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId,
-    SessionInputPosition, SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture,
-    ToolAttemptId, ToolPermissionDefault, ToolRequestId, TurnId, TurnTerminalCause,
-    UpdateSessionPlacementRejectionKind, ValidatedModelSettings, WorkspaceOrigin,
+    InstructionDiscoveryRootKind, LifecycleActor, MergeableState, ModelChangeAdjustment,
+    ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier,
+    ProgramCapability, ReactionChange, ReactionSubject, ReasoningLevel, RejectReason,
+    RepoWatchEventKindNameV1, RequestKind, ReviewState, RunnerPlacementLossSource,
+    RunnerSandboxProfile, ScopeOperation, ServiceTier, SessionClosureOutcome,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId, SessionInputPosition,
+    SessionLifecycleState, SessionParkCause, SessionPlacementEventKind, SessionRecoveryOperation,
+    SessionRetirementCause, SessionRetryableCause, SessionStructuralCause, SessionWaitKind,
+    SessionWaker, SettingOverlay, ToolApprovalPosture, ToolAttemptId, ToolPermissionDefault,
+    ToolRequestId, TurnId, TurnTerminalCause, UpdateSessionPlacementRejectionKind,
+    ValidatedModelSettings, WorkspaceOrigin,
 };
 
 pub(crate) const SESSION_CREATED: &str = "session_created";
@@ -1211,14 +1214,16 @@ pub(crate) fn delegation_outcome_reason_from_str(value: &str) -> Option<Delegati
 /// Closed session-creation cause discriminators stored in PostgreSQL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SessionCreationCauseStorageKind {
-    UserInitiated,
+    Interactive,
+    ModuleDispatched,
     Delegated,
 }
 
 /// Encodes a session-creation cause as its closed PostgreSQL spelling.
 pub(crate) const fn session_creation_cause_to_str(value: &SessionCreationCause) -> &'static str {
     match value {
-        SessionCreationCause::UserInitiated => "user_initiated",
+        SessionCreationCause::Interactive => "interactive",
+        SessionCreationCause::ModuleDispatched { .. } => "module_dispatched",
         SessionCreationCause::Delegated { .. } => "delegated",
     }
 }
@@ -1228,9 +1233,226 @@ pub(crate) fn session_creation_cause_from_str(
     value: &str,
 ) -> Option<SessionCreationCauseStorageKind> {
     match value {
-        "user_initiated" => Some(SessionCreationCauseStorageKind::UserInitiated),
+        "interactive" => Some(SessionCreationCauseStorageKind::Interactive),
+        "module_dispatched" => Some(SessionCreationCauseStorageKind::ModuleDispatched),
         "delegated" => Some(SessionCreationCauseStorageKind::Delegated),
         _ => None,
+    }
+}
+
+/// Encodes the dispatching module of a module-dispatched creation.
+pub(crate) const fn dispatching_module_to_str(value: DispatchingModule) -> &'static str {
+    match value {
+        DispatchingModule::RepositoryWatch => "repo_watch",
+        DispatchingModule::CommissionedDispatch => "commissioned_dispatch",
+    }
+}
+
+/// Decodes the dispatching module of a module-dispatched creation.
+pub(crate) fn dispatching_module_from_str(value: &str) -> Option<DispatchingModule> {
+    match value {
+        "repo_watch" => Some(DispatchingModule::RepositoryWatch),
+        "commissioned_dispatch" => Some(DispatchingModule::CommissionedDispatch),
+        _ => None,
+    }
+}
+
+/// Encodes one durable `session_lifecycle.state_kind` spelling.
+pub(crate) const fn session_lifecycle_state_to_str(value: &SessionLifecycleState) -> &'static str {
+    match value {
+        SessionLifecycleState::Created => "created",
+        SessionLifecycleState::Dispatched => "dispatched",
+        SessionLifecycleState::Active => "active",
+        SessionLifecycleState::Waiting { .. } => "waiting",
+        SessionLifecycleState::Recovering { .. } => "recovering",
+        SessionLifecycleState::Blocked { .. } => "blocked",
+        SessionLifecycleState::Parked { .. } => "parked",
+        SessionLifecycleState::Terminal { .. } => "terminal",
+    }
+}
+
+/// Encodes one durable `session_lifecycle.waiting_kind` spelling.
+pub(crate) const fn session_wait_kind_to_str(value: SessionWaitKind) -> &'static str {
+    match value {
+        SessionWaitKind::Approval => "approval",
+        SessionWaitKind::External => "external",
+        SessionWaitKind::Child => "child",
+        SessionWaitKind::ProviderRetry => "provider_retry",
+        SessionWaitKind::Pipeline => "pipeline",
+        SessionWaitKind::Scheduler => "scheduler",
+    }
+}
+
+/// Decodes one durable `session_lifecycle.waiting_kind` spelling.
+pub(crate) fn session_wait_kind_from_str(value: &str) -> Option<SessionWaitKind> {
+    match value {
+        "approval" => Some(SessionWaitKind::Approval),
+        "external" => Some(SessionWaitKind::External),
+        "child" => Some(SessionWaitKind::Child),
+        "provider_retry" => Some(SessionWaitKind::ProviderRetry),
+        "pipeline" => Some(SessionWaitKind::Pipeline),
+        "scheduler" => Some(SessionWaitKind::Scheduler),
+        _ => None,
+    }
+}
+
+/// Encodes the machinery that ends one wait.
+pub(crate) const fn session_waker_to_str(value: SessionWaker) -> &'static str {
+    match value {
+        SessionWaker::ApprovalDecision => "approval_decision",
+        SessionWaker::ExternalRecheck => "external_recheck",
+        SessionWaker::ChildSettlement => "child_settlement",
+        SessionWaker::ProviderBackoff => "provider_backoff",
+        SessionWaker::PipelineDrain => "pipeline_drain",
+        SessionWaker::SchedulerSweep => "scheduler_sweep",
+    }
+}
+
+/// Encodes the recovery one `recovering` session is waiting out.
+pub(crate) const fn session_recovery_operation_to_str(
+    value: SessionRecoveryOperation,
+) -> &'static str {
+    match value {
+        SessionRecoveryOperation::ModelCall => "model_call",
+        SessionRecoveryOperation::Tool => "tool",
+        SessionRecoveryOperation::Runner => "runner",
+    }
+}
+
+/// Decodes the recovery one `recovering` session is waiting out.
+pub(crate) fn session_recovery_operation_from_str(value: &str) -> Option<SessionRecoveryOperation> {
+    match value {
+        "model_call" => Some(SessionRecoveryOperation::ModelCall),
+        "tool" => Some(SessionRecoveryOperation::Tool),
+        "runner" => Some(SessionRecoveryOperation::Runner),
+        _ => None,
+    }
+}
+
+/// Encodes why an owned session waits on a human.
+pub(crate) const fn session_park_cause_to_str(value: SessionParkCause) -> &'static str {
+    match value {
+        SessionParkCause::RetryBudgetExhausted => "retry_budget_exhausted",
+        SessionParkCause::StructuralFailure => "structural_failure",
+        SessionParkCause::UnknownFailure => "unknown_failure",
+        SessionParkCause::ActiveStallDeadlineExpired => "active_stall_deadline_expired",
+        SessionParkCause::WaitingDeadlineExpired => "waiting_deadline_expired",
+        SessionParkCause::RecoveringDeadlineExpired => "recovering_deadline_expired",
+        SessionParkCause::OperatorHold => "operator_hold",
+        SessionParkCause::ModulePark => "module_park",
+    }
+}
+
+/// Decodes why an owned session waits on a human.
+pub(crate) fn session_park_cause_from_str(value: &str) -> Option<SessionParkCause> {
+    match value {
+        "retry_budget_exhausted" => Some(SessionParkCause::RetryBudgetExhausted),
+        "structural_failure" => Some(SessionParkCause::StructuralFailure),
+        "unknown_failure" => Some(SessionParkCause::UnknownFailure),
+        "active_stall_deadline_expired" => Some(SessionParkCause::ActiveStallDeadlineExpired),
+        "waiting_deadline_expired" => Some(SessionParkCause::WaitingDeadlineExpired),
+        "recovering_deadline_expired" => Some(SessionParkCause::RecoveringDeadlineExpired),
+        "operator_hold" => Some(SessionParkCause::OperatorHold),
+        "module_park" => Some(SessionParkCause::ModulePark),
+        _ => None,
+    }
+}
+
+/// Encodes a provider or infrastructure failure a retry could still clear.
+pub(crate) const fn session_retryable_cause_to_str(value: SessionRetryableCause) -> &'static str {
+    match value {
+        SessionRetryableCause::ProviderTransient => "provider_transient",
+        SessionRetryableCause::ProviderQuotaExhausted => "provider_quota_exhausted",
+        SessionRetryableCause::ProviderOverloaded => "provider_overloaded",
+        SessionRetryableCause::InfrastructureFailure => "infrastructure_failure",
+        SessionRetryableCause::RetryBudgetExhausted => "retry_budget_exhausted",
+    }
+}
+
+/// Decodes a provider or infrastructure failure a retry could still clear.
+pub(crate) fn session_retryable_cause_from_str(value: &str) -> Option<SessionRetryableCause> {
+    match value {
+        "provider_transient" => Some(SessionRetryableCause::ProviderTransient),
+        "provider_quota_exhausted" => Some(SessionRetryableCause::ProviderQuotaExhausted),
+        "provider_overloaded" => Some(SessionRetryableCause::ProviderOverloaded),
+        "infrastructure_failure" => Some(SessionRetryableCause::InfrastructureFailure),
+        "retry_budget_exhausted" => Some(SessionRetryableCause::RetryBudgetExhausted),
+        _ => None,
+    }
+}
+
+/// Encodes a failure the same input will hit again.
+pub(crate) const fn session_structural_cause_to_str(value: SessionStructuralCause) -> &'static str {
+    match value {
+        SessionStructuralCause::ContextCompactionWall => "context_compaction_wall",
+        SessionStructuralCause::ContextHeadroomExhausted => "context_headroom_exhausted",
+        SessionStructuralCause::BrokenToolchain => "broken_toolchain",
+        SessionStructuralCause::ModerationBlock => "moderation_block",
+    }
+}
+
+/// Decodes a failure the same input will hit again.
+pub(crate) fn session_structural_cause_from_str(value: &str) -> Option<SessionStructuralCause> {
+    match value {
+        "context_compaction_wall" => Some(SessionStructuralCause::ContextCompactionWall),
+        "context_headroom_exhausted" => Some(SessionStructuralCause::ContextHeadroomExhausted),
+        "broken_toolchain" => Some(SessionStructuralCause::BrokenToolchain),
+        "moderation_block" => Some(SessionStructuralCause::ModerationBlock),
+        _ => None,
+    }
+}
+
+/// Encodes which admission or closure predicate retired a session.
+pub(crate) const fn session_retirement_cause_to_str(value: SessionRetirementCause) -> &'static str {
+    match value {
+        SessionRetirementCause::DispatchDeadlineExpired => "dispatch_deadline_expired",
+        SessionRetirementCause::StartGateDeadlineExpired => "start_gate_deadline_expired",
+        SessionRetirementCause::StrandedQueuedTurn => "stranded_queued_turn",
+    }
+}
+
+/// Decodes which admission or closure predicate retired a session.
+pub(crate) fn session_retirement_cause_from_str(value: &str) -> Option<SessionRetirementCause> {
+    match value {
+        "dispatch_deadline_expired" => Some(SessionRetirementCause::DispatchDeadlineExpired),
+        "start_gate_deadline_expired" => Some(SessionRetirementCause::StartGateDeadlineExpired),
+        "stranded_queued_turn" => Some(SessionRetirementCause::StrandedQueuedTurn),
+        _ => None,
+    }
+}
+
+/// Encodes the outcome that settled a goal generation beneath its session.
+pub(crate) const fn session_closure_outcome_to_str(value: SessionClosureOutcome) -> &'static str {
+    match value {
+        SessionClosureOutcome::FailedRetryable => "failed_retryable",
+        SessionClosureOutcome::FailedStructural => "failed_structural",
+        SessionClosureOutcome::FailedUnknown => "failed_unknown",
+        SessionClosureOutcome::Superseded => "superseded",
+        SessionClosureOutcome::Abandoned => "abandoned",
+        SessionClosureOutcome::Retired => "retired",
+    }
+}
+
+/// Decodes the outcome that settled a goal generation beneath its session.
+pub(crate) fn session_closure_outcome_from_str(value: &str) -> Option<SessionClosureOutcome> {
+    match value {
+        "failed_retryable" => Some(SessionClosureOutcome::FailedRetryable),
+        "failed_structural" => Some(SessionClosureOutcome::FailedStructural),
+        "failed_unknown" => Some(SessionClosureOutcome::FailedUnknown),
+        "superseded" => Some(SessionClosureOutcome::Superseded),
+        "abandoned" => Some(SessionClosureOutcome::Abandoned),
+        "retired" => Some(SessionClosureOutcome::Retired),
+        _ => None,
+    }
+}
+
+/// Encodes the §6 actor classification of one lifecycle transition.
+pub(crate) const fn lifecycle_actor_to_str(value: LifecycleActor) -> &'static str {
+    match value {
+        LifecycleActor::Core { .. } => "core",
+        LifecycleActor::Operator => "operator",
+        LifecycleActor::Module { .. } => "module",
+        LifecycleActor::Watchdog => "watchdog",
     }
 }
 
@@ -1593,6 +1815,7 @@ pub(crate) enum GoalEventDiscriminator {
     Achieved,
     UserStopped,
     Superseded,
+    SessionClosed,
 }
 
 pub(crate) const fn goal_event_kind_to_str(value: &GoalEventKind) -> &'static str {
@@ -1603,6 +1826,7 @@ pub(crate) const fn goal_event_kind_to_str(value: &GoalEventKind) -> &'static st
         GoalEventKind::Achieved { .. } => "achieved",
         GoalEventKind::UserStopped { .. } => "user_stopped",
         GoalEventKind::Superseded { .. } => "superseded",
+        GoalEventKind::SessionClosed { .. } => "session_closed",
     }
 }
 
@@ -1614,6 +1838,7 @@ pub(crate) fn goal_event_kind_from_str(value: &str) -> Option<GoalEventDiscrimin
         "achieved" => Some(GoalEventDiscriminator::Achieved),
         "user_stopped" => Some(GoalEventDiscriminator::UserStopped),
         "superseded" => Some(GoalEventDiscriminator::Superseded),
+        "session_closed" => Some(GoalEventDiscriminator::SessionClosed),
         _ => None,
     }
 }
@@ -3848,9 +4073,9 @@ mod tests {
     fn session_creation_cause_mapping_is_closed() {
         assert_eq!(
             session_creation_cause_from_str(session_creation_cause_to_str(
-                &SessionCreationCause::UserInitiated,
+                &SessionCreationCause::Interactive,
             )),
-            Some(SessionCreationCauseStorageKind::UserInitiated)
+            Some(SessionCreationCauseStorageKind::Interactive)
         );
         assert_eq!(
             session_creation_cause_from_str(session_creation_cause_to_str(
@@ -3911,8 +4136,8 @@ mod tests {
     #[test]
     fn storage_spells_the_human_principal_user() {
         assert_eq!(
-            session_creation_cause_to_str(&SessionCreationCause::UserInitiated),
-            "user_initiated"
+            session_creation_cause_to_str(&SessionCreationCause::Interactive),
+            "interactive"
         );
         assert_eq!(
             tool_approval_decision_source_to_str(

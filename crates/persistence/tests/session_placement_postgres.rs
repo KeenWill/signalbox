@@ -382,10 +382,7 @@ fn creation(
 ) -> signalbox_domain::PreparedCreateSession {
     CreateSession::new_with_placement(
         command_id,
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
             DirectModelSelection::from_uuid(Uuid::from_u128(
                 ARBITRARY_DEFAULT_MODEL_SELECTION_ID_SEED,

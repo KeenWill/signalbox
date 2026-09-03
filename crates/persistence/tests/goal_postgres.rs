@@ -28,14 +28,15 @@ use signalbox_domain::{
     FailedModelCallTurnIdentities, FrozenAliasDefinition, Goal, GoalCommandRejection,
     GoalCommandResult, GoalGuidance, GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed,
     GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement, GoalUserAction, GoalUserCommand,
-    GoalUserProvenance, ModelAlias, ModelCallId, ModelCallTerminalIdentities,
+    GoalUserProvenance, LifecycleActor, ModelAlias, ModelCallId, ModelCallTerminalIdentities,
     ModelCallTerminalObservation, ModelSelectionOverride, ModelSelectionRequest,
     ModelTargetCatalog, ModelTargetDefinition, PerInputConfigurationChoices, PreparedCreateSession,
     ProviderModelIdentity, ReplaceSessionDefaults, ResolvedProviderTarget,
     SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput,
-    SubmitInputAppliedResult, SubmitInputResult, ToolRequestId, TranscriptAncestry, TurnAttemptId,
-    TurnId, TurnModelSettingsResolved, TurnTerminalCause, UserContent,
+    SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition,
+    SessionTerminalOutcome, SubmitInput, SubmitInputAppliedResult, SubmitInputResult,
+    ToolRequestId, TranscriptAncestry, TurnAttemptId, TurnId, TurnModelSettingsResolved,
+    TurnTerminalCause, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -63,6 +64,7 @@ use signalbox_persistence::{
         ReplaceSessionDefaultsHandlingOutcome, ReplaceSessionDefaultsRepository,
     },
     scheduler::PostgresEligibilitySweep,
+    session_lifecycle::SessionLifecycleRepository,
     start_eligible_turn::{CommitCompactionFailurePreviewOutcome, StartEligibleTurnRepository},
     startup::PostgresStartupScanRepository,
     submit_input::SubmitInputRepository,
@@ -146,10 +148,7 @@ fn creation() -> PreparedCreateSession {
 fn creation_with_model(model: ModelSelectionRequest) -> PreparedCreateSession {
     CreateSession::new(
         command(CREATE_COMMAND),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         SessionConfigurationDefaults::new(model),
     )
     .prepare(session(SESSION))
@@ -159,10 +158,7 @@ fn creation_with_model(model: ModelSelectionRequest) -> PreparedCreateSession {
 fn creation_fixture(command_id: u128, session_id: u128, selection: u128) -> PreparedCreateSession {
     CreateSession::new(
         command(command_id),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
             DirectModelSelection::from_uuid(Uuid::from_u128(selection)),
         )),
@@ -981,6 +977,12 @@ async fn s_goal_inv048_expected_resume_binds_to_one_blocked_event() -> Result<()
     let GoalTransitionOutcome::Applied(blocked) = blocked else {
         panic!("fixture execution-failure block must apply");
     };
+    // Automatic resumption is an owned-session obligation (§6): the inventory
+    // reads the ownership bit, so the fixture states the ownership its subject
+    // depends on rather than inheriting the interactive default.
+    SessionLifecycleRepository::new(pool.clone())
+        .adopt(session(SESSION), signalbox_domain::LifecycleActor::Operator)
+        .await?;
     let pending = repository
         .pending_execution_failures_with_need(&scheduled_need)
         .await?;
@@ -2446,6 +2448,77 @@ async fn inv048_model_goal_declaration_is_the_final_response_part() -> Result<()
         .await
         .expect_err("a nonfinal declaration cannot source a goal event");
     assert_model_declaration_request_rejected(error);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// §2: a committed closure makes a later model achievement non-current, so
+/// settlement cannot be stranded behind a contradictory terminal goal event.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_committed_closure_refuses_late_model_achievement() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let attached_turn = turn_candidates(0xba6);
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(0x9a6),
+                    session(SESSION),
+                    GoalUserAction::Attach(statement("finish before the closure commits")),
+                ),
+                Some(attached_turn),
+                |_| None,
+            )
+            .await?,
+    );
+    assert_eq!(
+        activate_goal_turn(&pool, 0xda6).await?,
+        attached_turn.turn()
+    );
+    let report = String::from("late achievement");
+    let declaration_request = tool_request(0xfa6);
+    insert_goal_tool_request(
+        &pool,
+        attached_turn.turn(),
+        declaration_request,
+        "goal_declare",
+        r#"{"transition":"achieved"}"#,
+        &report,
+    )
+    .await?;
+    SessionLifecycleRepository::new(pool.clone())
+        .commit_pending_terminal(
+            session(SESSION),
+            SessionTerminalOutcome::FailedUnknown,
+            LifecycleActor::Watchdog,
+        )
+        .await?;
+
+    let outcome = repository
+        .declare_achieved(
+            session(SESSION),
+            GoalReport::try_new(report).expect("fixture report is admitted"),
+            GoalModelProvenance::new(attached_turn.turn(), declaration_request),
+        )
+        .await?;
+
+    assert_eq!(outcome, GoalTransitionOutcome::NotCurrentGoalTurn);
+    assert_eq!(
+        repository
+            .load_goal(session(SESSION))
+            .await?
+            .expect("the goal remains attached")
+            .current()
+            .state(),
+        &GoalState::Pursuing
+    );
 
     pool.close().await;
     drop(container);

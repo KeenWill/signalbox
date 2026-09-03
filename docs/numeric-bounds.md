@@ -11,8 +11,8 @@ to bound or size a fixture.
 The live-line merge adds one model-exchange policy to the original audit and the
 automatic-resume lifetime ceiling one goal policy; the liveness watchdog's
 single recovery-attempt constant now answers to two configured policies because
-its two consumers need different ceilings. The 121 rows partition as 35 guards,
-8 derived bounds, 65 configuration policies, 9 representation facts, and 4 test
+its two consumers need different ceilings. The 124 rows partition as 35 guards,
+8 derived bounds, 68 configuration policies, 9 representation facts, and 4 test
 fixtures. Source locations are maintained with the implementation slices that
 move or delete declarations.
 
@@ -139,6 +139,9 @@ bound in either root fails closed.
 | `config/signalboxd.example.toml:142` | `MAX_RESULT_TEXT_BYTES`                           | config | `numeric_bounds.max_code_host_result_text_bytes`                                     |
 | `config/signalboxd.example.toml:144` | `MAX_RESULT_ITEMS`                                | config | `numeric_bounds.max_code_host_result_items`                                          |
 | `config/signalboxd.example.toml:146` | `MAX_REPOSITORY_FILE_CONTENT_BYTES`               | config | `numeric_bounds.max_repository_file_content_bytes`                                   |
+| `config/signalboxd.example.toml`     | `SESSION_ADMISSION_DEADLINE`                      | config | `numeric_bounds.session_admission_deadline`                                          |
+| `config/signalboxd.example.toml`     | `SESSION_ACTIVE_STALL_DEADLINE`                   | config | `numeric_bounds.session_active_stall_deadline`                                       |
+| `config/signalboxd.example.toml`     | `SESSION_WAITING_DEADLINE`                        | config | `numeric_bounds.session_waiting_deadline`                                            |
 
 ## Representation facts
 

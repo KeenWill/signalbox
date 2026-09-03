@@ -13,9 +13,9 @@ use crate::mapping::{session_id_from_uuid, session_id_to_uuid};
 const RECONCILIATION_PAGE_SIZE: i64 = 16;
 
 fn next_page_state(
-    rows: &[(SessionId, SessionId, bool)],
+    rows: &[(SessionId, SessionId, bool, bool)],
 ) -> (Option<SessionId>, Option<SessionId>) {
-    let Some((last_session, scan_through, _)) = rows.last().copied() else {
+    let Some((last_session, scan_through, _, _)) = rows.last().copied() else {
         return (None, None);
     };
     if rows.len() == RECONCILIATION_PAGE_SIZE as usize && last_session != scan_through {
@@ -88,8 +88,8 @@ impl PostgresEligibilitySweep {
     ) -> Result<EligibilitySweepBatch, PostgresEligibilitySweepError> {
         let after = self.after.map(session_id_to_uuid);
         let scan_through = self.scan_through.map(session_id_to_uuid);
-        let rows = sqlx::query_as::<_, (Uuid, Uuid, bool)>(
-            "WITH candidates AS (
+        let rows = sqlx::query_as::<_, (Uuid, Uuid, bool, bool)>(
+            "WITH swept AS (
                 SELECT queued.session_id
                   FROM turn_lifecycle AS queued
                  WHERE queued.state_kind = 'queued'
@@ -211,6 +211,21 @@ impl PostgresEligibilitySweep {
                             )
                         )
                    )
+             ), candidates AS (
+                -- §1: a parked session's rows are neither sweep candidates nor
+                -- watchdog candidates until it leaves `parked`. The exclusion
+                -- is inside the candidate set rather than on the outer filter
+                -- because the rotation's high-water mark is derived from this
+                -- set: a parked session chosen as `scan_through` would stall
+                -- the cycle on a session no pass may run.
+                SELECT swept.session_id
+                  FROM swept
+                 WHERE NOT EXISTS (
+                        SELECT 1
+                          FROM session_lifecycle AS lifecycle
+                         WHERE lifecycle.session_id = swept.session_id
+                           AND lifecycle.state_kind = 'parked'
+                 )
              ), bounded AS (
                 SELECT COALESCE(
                     $2::uuid,
@@ -221,6 +236,11 @@ impl PostgresEligibilitySweep {
                 ) AS scan_through
              )
              SELECT candidates.session_id, bounded.scan_through,
+                    COALESCE((
+                        SELECT lifecycle.owned
+                          FROM session_lifecycle AS lifecycle
+                         WHERE lifecycle.session_id = candidates.session_id
+                    ), true) AS owned,
                     EXISTS (
                         SELECT 1
                           FROM repo_watch_dispatch_start_lease AS lease
@@ -247,10 +267,11 @@ impl PostgresEligibilitySweep {
 
         let rows = rows
             .into_iter()
-            .map(|(session, scan_through, dispatch_start)| {
+            .map(|(session, scan_through, owned, dispatch_start)| {
                 (
                     session_id_from_uuid(session),
                     session_id_from_uuid(scan_through),
+                    owned,
                     dispatch_start,
                 )
             })
@@ -260,13 +281,18 @@ impl PostgresEligibilitySweep {
         (self.after, self.scan_through) = next_state;
         let dispatch_starts = rows
             .iter()
-            .filter_map(|(session, _, priority)| (*priority).then_some(*session))
+            .filter_map(|(session, _, _, priority)| (*priority).then_some(*session))
+            .collect::<HashSet<_>>();
+        let unmonitored = rows
+            .iter()
+            .filter_map(|(session, _, owned, _)| (!*owned).then_some(*session))
             .collect::<HashSet<_>>();
         Ok(EligibilitySweepBatch::with_dispatch_starts(
-            rows.into_iter().map(|(session, _, _)| session).collect(),
+            rows.into_iter().map(|(session, _, _, _)| session).collect(),
             dispatch_starts,
             continuation,
-        ))
+        )
+        .with_unmonitored(unmonitored))
     }
 }
 
@@ -299,12 +325,19 @@ mod tests {
         let continuing = sessions
             .iter()
             .copied()
-            .map(|session| (session, beyond_page, false))
+            .map(|session| (session, beyond_page, true, false))
             .collect::<Vec<_>>();
         let cycle_end = sessions
             .iter()
             .copied()
-            .map(|session| (session, *sessions.last().expect("page is nonempty"), false))
+            .map(|session| {
+                (
+                    session,
+                    *sessions.last().expect("page is nonempty"),
+                    true,
+                    false,
+                )
+            })
             .collect::<Vec<_>>();
 
         assert_eq!(

@@ -266,7 +266,7 @@ impl CreateSessionFromImportedFrontier {
             }
         };
         let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::ImportedConversation {
                 source_frontier: self.imported_frontier(),
                 relationship: self.relationship(),
@@ -1657,7 +1657,7 @@ impl CreateSessionFromImportedFrontierReconstitutionInput {
             ));
         }
         let expected_provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::ImportedConversation {
                 source_frontier: self.command.imported_frontier(),
                 relationship: self.command.relationship(),
@@ -2087,7 +2087,7 @@ mod tests {
         BoundedImportedSessionReconstitutionInput::from_stored_imported_parts(
             prepared.session().id(),
             prepared.session().id(),
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             imported_frontier.conversation(),
             imported_frontier.through_entry(),
             imported_frontier.through_position(),
@@ -2542,7 +2542,7 @@ mod tests {
 
         let mut ancestry = bounded_input(&prepared);
         ancestry.provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::None,
         );
         assert_bounded_failure(
@@ -2816,7 +2816,7 @@ mod tests {
 
         let mut ancestry_not_imported = current_input(&imported_conversation, &prepared);
         ancestry_not_imported.provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::None,
         );
         assert_seed_reconstitution_failure(
@@ -2826,7 +2826,7 @@ mod tests {
 
         let mut conversation_mismatch = current_input(&imported_conversation, &prepared);
         conversation_mismatch.provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::ImportedConversation {
                 source_frontier: other_conversation
                     .frontiers()
@@ -2979,7 +2979,7 @@ mod tests {
 
         let mut provenance_mismatch = creation_input(&conversation, command.clone(), &prepared);
         provenance_mismatch.provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::ImportedConversation {
                 source_frontier: command.imported_frontier(),
                 relationship: crate::ImportedSessionRelationship::Fork,
@@ -3023,7 +3023,7 @@ mod tests {
         let (conversation, _, prepared) = prepared_fixture();
         let mut input = current_input(&conversation, &prepared);
         input.provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::ImportedConversation {
                 source_frontier: conversation.frontiers().next().expect("first frontier"),
                 relationship: crate::ImportedSessionRelationship::Resume,
