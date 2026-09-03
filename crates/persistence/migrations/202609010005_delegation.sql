@@ -376,10 +376,10 @@ $$;
 
 
 --
--- Name: materialize_session_delegation_termination_cascade(uuid, text); Type: FUNCTION; Schema: public
+-- Name: materialize_session_delegation_termination_cascade(uuid); Type: FUNCTION; Schema: public
 --
 
-CREATE FUNCTION materialize_session_delegation_termination_cascade(checked_root_command uuid, checked_root_kind text) RETURNS void
+CREATE FUNCTION materialize_session_delegation_termination_cascade(checked_root_command uuid) RETURNS void
     LANGUAGE plpgsql
     AS $$
 DECLARE
@@ -422,7 +422,7 @@ BEGIN
             'goal_command'::text AS root_source_kind,
             NULL::uuid AS root_turn_id,
             event.generation AS root_goal_generation,
-            checked_root_kind AS termination_kind
+            'stopped'::text AS termination_kind
           FROM goal_command AS command
           JOIN goal_event AS event
             ON event.session_id = command.session_id
@@ -432,44 +432,18 @@ BEGIN
            AND command.result_kind = 'applied'
            AND command.descendant_scope = 'parent_and_descendants'
            AND event.event_kind = 'user_stopped'
-           AND checked_root_kind = 'stopped'
         UNION ALL
         SELECT
             command.session_id,
             'turn_command'::text,
             command.expected_active_turn_id,
             NULL::numeric(20, 0),
-            checked_root_kind
+            'cancelled'::text
           FROM submit_input_command AS command
          WHERE command.command_id = checked_root_command
            AND command.delivery_kind = 'interrupt'
            AND command.result_kind = 'applied'
            AND command.descendant_scope = 'parent_and_descendants'
-           AND checked_root_kind = ANY (ARRAY['stopped'::text, 'cancelled'::text])
-           AND (checked_root_kind = 'cancelled' OR EXISTS (
-                SELECT 1
-                  FROM session_lifecycle_command AS lifecycle
-                 WHERE lifecycle.session_id = command.session_id
-                   AND lifecycle.operation_kind = 'stop'
-                   AND lifecycle.result_kind = 'applied'
-                   AND lifecycle.applied_effect_kind = 'closure_pending'
-                   AND lifecycle.live_turn_id = command.expected_active_turn_id
-                   AND lifecycle.descendant_scope = command.descendant_scope
-           ))
-        UNION ALL
-        SELECT
-            command.session_id,
-            'lifecycle_command'::text,
-            NULL::uuid,
-            NULL::numeric(20, 0),
-            checked_root_kind
-          FROM session_lifecycle_command AS command
-         WHERE command.command_id = checked_root_command
-           AND command.operation_kind = 'stop'
-           AND command.result_kind = 'applied'
-           AND command.applied_effect_kind = 'closed'
-           AND command.descendant_scope = 'parent_and_descendants'
-           AND checked_root_kind = 'stopped'
       ) AS root;
     IF root_session IS NULL THEN
         RETURN;
@@ -485,7 +459,6 @@ BEGIN
     provenance_kind := CASE root_source_kind
         WHEN 'goal_command' THEN 'parent_goal_command'
         WHEN 'turn_command' THEN 'parent_turn_command'
-        WHEN 'lifecycle_command' THEN 'parent_lifecycle_command'
     END;
 
     INSERT INTO session_delegation_termination_cascade
@@ -808,45 +781,6 @@ $$;
 
 
 --
--- Name: require_applied_lifecycle_command_delegation_cascade(); Type: FUNCTION; Schema: public
---
-
-CREATE FUNCTION require_applied_lifecycle_command_delegation_cascade() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    IF NEW.operation_kind <> 'stop'
-       OR NEW.result_kind <> 'applied'
-       OR NEW.applied_effect_kind <> 'closed'
-       OR NEW.descendant_scope <> 'parent_and_descendants' THEN
-        RETURN NULL;
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM session_delegation AS relation
-         WHERE relation.parent_session_id = NEW.session_id
-    ) THEN
-        RETURN NULL;
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM session_delegation_termination_cascade AS cascade
-         WHERE cascade.root_command_id = NEW.command_id
-           AND cascade.root_session_id = NEW.session_id
-           AND cascade.root_source_kind = 'lifecycle_command'
-           AND cascade.root_turn_id IS NULL
-           AND cascade.root_goal_generation IS NULL
-           AND cascade.termination_kind = 'stopped'
-           AND cascade.descendant_scope = NEW.descendant_scope
-    ) THEN
-        RAISE EXCEPTION 'applied descendant-scoped lifecycle command lacks its cascade proof'
-            USING ERRCODE = '23514',
-                CONSTRAINT = 'session_lifecycle_command_delegation_cascade';
-    END IF;
-    RETURN NULL;
-END;
-$$;
-
-
---
 -- Name: require_applied_turn_command_delegation_cascade(); Type: FUNCTION; Schema: public
 --
 
@@ -872,6 +806,7 @@ BEGIN
            AND cascade.root_source_kind = 'turn_command'
            AND cascade.root_turn_id = NEW.expected_active_turn_id
            AND cascade.root_goal_generation IS NULL
+           AND cascade.termination_kind = 'cancelled'
            AND cascade.descendant_scope = NEW.descendant_scope
     ) THEN
         RAISE EXCEPTION 'applied descendant-scoped turn command lacks its cascade proof'
@@ -1176,8 +1111,7 @@ CREATE FUNCTION require_delegation_lifecycle_update() RETURNS trigger
 BEGIN
     IF NEW.event_kind <> 'outcome_recorded'
         OR NEW.provenance_kind NOT IN (
-            'parent_turn_command', 'parent_goal_command',
-            'parent_lifecycle_command'
+            'parent_turn_command', 'parent_goal_command'
         ) THEN
         RETURN NULL;
     END IF;
@@ -1496,41 +1430,15 @@ BEGIN
                AND command.result_kind = 'applied'
                AND command.descendant_scope = NEW.descendant_scope
                AND event.event_kind = 'user_stopped'
-               AND event.generation = NEW.root_goal_generation
-               AND NEW.termination_kind = 'stopped'))
+               AND event.generation = NEW.root_goal_generation))
         OR (NEW.root_source_kind = 'turn_command' AND NOT EXISTS (
-            SELECT 1
-              FROM submit_input_command AS command
-             WHERE command.command_id = NEW.root_command_id
-               AND command.session_id = NEW.root_session_id
-               AND command.delivery_kind = 'interrupt'
-               AND command.expected_active_turn_id = NEW.root_turn_id
-               AND command.result_kind = 'applied'
-               AND command.rejection_kind IS NULL
-               AND command.descendant_scope = NEW.descendant_scope
-               AND (NEW.termination_kind = 'cancelled' OR (
-                    NEW.termination_kind = 'stopped'
-                    AND EXISTS (
-                        SELECT 1
-                          FROM session_lifecycle_command AS lifecycle
-                         WHERE lifecycle.session_id = command.session_id
-                           AND lifecycle.operation_kind = 'stop'
-                           AND lifecycle.result_kind = 'applied'
-                           AND lifecycle.applied_effect_kind = 'closure_pending'
-                           AND lifecycle.live_turn_id = command.expected_active_turn_id
-                           AND lifecycle.descendant_scope = command.descendant_scope
-                    )
-               ))))
-        OR (NEW.root_source_kind = 'lifecycle_command' AND NOT EXISTS (
-            SELECT 1
-              FROM session_lifecycle_command AS command
-             WHERE command.command_id = NEW.root_command_id
-               AND command.session_id = NEW.root_session_id
-               AND command.operation_kind = 'stop'
-               AND command.result_kind = 'applied'
-               AND command.applied_effect_kind = 'closed'
-               AND command.descendant_scope = NEW.descendant_scope
-               AND NEW.termination_kind = 'stopped')) THEN
+            SELECT 1 FROM submit_input_command
+             WHERE command_id = NEW.root_command_id
+               AND session_id = NEW.root_session_id
+               AND delivery_kind = 'interrupt'
+               AND expected_active_turn_id = NEW.root_turn_id
+               AND result_kind = 'applied' AND rejection_kind IS NULL
+               AND descendant_scope = NEW.descendant_scope)) THEN
         RAISE EXCEPTION 'delegation cascade lacks its exact applied root command'
             USING ERRCODE = '23514',
                 CONSTRAINT = 'session_delegation_termination_cascade_command';
@@ -1590,8 +1498,7 @@ BEGIN
                             'parent_cancelled_parent_and_descendants'
                        )
                        AND event.provenance_kind IN (
-                            'parent_turn_command', 'parent_goal_command',
-                            'parent_lifecycle_command'
+                            'parent_turn_command', 'parent_goal_command'
                        )
                        AND relation.child_session_id = NEW.child_session_id
                        AND (
@@ -2383,8 +2290,7 @@ BEGIN
             'parent_cancelled_parent_and_descendants'
         ) THEN
             IF NEW.provenance_kind NOT IN (
-                    'parent_turn_command', 'parent_goal_command',
-                    'parent_lifecycle_command'
+                    'parent_turn_command', 'parent_goal_command'
                 )
                 OR NEW.provenance_session_id <> relation_parent
                 OR NOT EXISTS (
@@ -2396,7 +2302,6 @@ BEGIN
                        AND authority.command_source_kind = CASE NEW.provenance_kind
                             WHEN 'parent_turn_command' THEN 'turn_command'
                             WHEN 'parent_goal_command' THEN 'goal_command'
-                            WHEN 'parent_lifecycle_command' THEN 'lifecycle_command'
                        END
                        AND authority.parent_turn_id IS NOT DISTINCT FROM
                             NEW.provenance_turn_id
@@ -2693,9 +2598,9 @@ CREATE TABLE session_delegation_parent_termination (
     termination_kind text NOT NULL,
     source_kind text NOT NULL,
     source_spawning_tool_request_id uuid,
-    CONSTRAINT session_delegation_parent_command_source_shape CHECK ((((command_source_kind = 'turn_command'::text) AND (parent_turn_id IS NOT NULL) AND (parent_goal_generation IS NULL)) OR ((command_source_kind = 'goal_command'::text) AND (parent_turn_id IS NULL) AND (parent_goal_generation IS NOT NULL)) OR ((command_source_kind = 'lifecycle_command'::text) AND (parent_turn_id IS NULL) AND (parent_goal_generation IS NULL)))),
+    CONSTRAINT session_delegation_parent_command_source_shape CHECK ((((command_source_kind = 'turn_command'::text) AND (parent_turn_id IS NOT NULL) AND (parent_goal_generation IS NULL)) OR ((command_source_kind = 'goal_command'::text) AND (parent_turn_id IS NULL) AND (parent_goal_generation IS NOT NULL)))),
     CONSTRAINT session_delegation_parent_goal_generation_positive CHECK (((parent_goal_generation IS NULL) OR ((parent_goal_generation >= (1)::numeric) AND (parent_goal_generation <= '18446744073709551615'::numeric)))),
-    CONSTRAINT session_delegation_parent_termination_command_source_kind_check CHECK ((command_source_kind = ANY (ARRAY['turn_command'::text, 'goal_command'::text, 'lifecycle_command'::text]))),
+    CONSTRAINT session_delegation_parent_termination_command_source_kind_check CHECK ((command_source_kind = ANY (ARRAY['turn_command'::text, 'goal_command'::text]))),
     CONSTRAINT session_delegation_parent_termination_source_kind_check CHECK ((source_kind = ANY (ARRAY['root'::text, 'parent_disposition'::text]))),
     CONSTRAINT session_delegation_parent_termination_source_shape CHECK ((((source_kind = 'root'::text) AND (source_spawning_tool_request_id IS NULL)) OR ((source_kind = 'parent_disposition'::text) AND (source_spawning_tool_request_id IS NOT NULL)))),
     CONSTRAINT session_delegation_parent_termination_termination_kind_check CHECK ((termination_kind = ANY (ARRAY['stopped'::text, 'cancelled'::text])))
@@ -2715,11 +2620,11 @@ CREATE TABLE session_delegation_termination_cascade (
     termination_kind text CONSTRAINT session_delegation_termination_cascad_termination_kind_not_null NOT NULL,
     descendant_scope text CONSTRAINT session_delegation_termination_cascad_descendant_scope_not_null NOT NULL,
     disposition_count numeric(20,0) CONSTRAINT session_delegation_termination_casca_disposition_count_not_null NOT NULL,
-    CONSTRAINT session_delegation_cascade_command_source_shape CHECK ((((root_source_kind = 'turn_command'::text) AND (root_turn_id IS NOT NULL) AND (root_goal_generation IS NULL)) OR ((root_source_kind = 'goal_command'::text) AND (root_turn_id IS NULL) AND (root_goal_generation IS NOT NULL) AND (termination_kind = 'stopped'::text)) OR ((root_source_kind = 'lifecycle_command'::text) AND (root_turn_id IS NULL) AND (root_goal_generation IS NULL) AND (termination_kind = 'stopped'::text)))),
+    CONSTRAINT session_delegation_cascade_command_source_shape CHECK ((((root_source_kind = 'turn_command'::text) AND (root_turn_id IS NOT NULL) AND (root_goal_generation IS NULL) AND (termination_kind = 'cancelled'::text)) OR ((root_source_kind = 'goal_command'::text) AND (root_turn_id IS NULL) AND (root_goal_generation IS NOT NULL) AND (termination_kind = 'stopped'::text)))),
     CONSTRAINT session_delegation_cascade_goal_generation_positive CHECK (((root_goal_generation IS NULL) OR ((root_goal_generation >= (1)::numeric) AND (root_goal_generation <= '18446744073709551615'::numeric)))),
     CONSTRAINT session_delegation_termination_cascade_descendant_scope_check CHECK ((descendant_scope = 'parent_and_descendants'::text)),
     CONSTRAINT session_delegation_termination_cascade_disposition_count_check CHECK (((disposition_count >= (0)::numeric) AND (disposition_count <= '18446744073709551615'::numeric))),
-    CONSTRAINT session_delegation_termination_cascade_root_source_kind_check CHECK ((root_source_kind = ANY (ARRAY['turn_command'::text, 'goal_command'::text, 'lifecycle_command'::text]))),
+    CONSTRAINT session_delegation_termination_cascade_root_source_kind_check CHECK ((root_source_kind = ANY (ARRAY['turn_command'::text, 'goal_command'::text]))),
     CONSTRAINT session_delegation_termination_cascade_termination_kind_check CHECK ((termination_kind = ANY (ARRAY['stopped'::text, 'cancelled'::text])))
 );
 
@@ -2774,7 +2679,6 @@ BEGIN
            AND source_event.provenance_kind = CASE cascade.root_source_kind
                 WHEN 'turn_command' THEN 'parent_turn_command'
                 WHEN 'goal_command' THEN 'parent_goal_command'
-                WHEN 'lifecycle_command' THEN 'parent_lifecycle_command'
            END
            AND source_event.provenance_command_id = checked.root_command_id
            AND source_event.provenance_turn_id IS NOT DISTINCT FROM
@@ -2782,7 +2686,7 @@ BEGIN
            AND source_event.provenance_goal_generation IS NOT DISTINCT FROM
                 source_authority.parent_goal_generation
            AND source_relation.child_session_id = checked.parent_session_id
-           AND (checked.command_source_kind IN ('goal_command', 'lifecycle_command')
+           AND (checked.command_source_kind = 'goal_command'
                 OR source_task.turn_id = checked.parent_turn_id)
            -- `delegation_cascade_expected_frontier` derives a nested edge's
            -- effective parent kind from the recorded prior result on its source
@@ -2872,13 +2776,13 @@ CREATE TABLE delegation_update_outbox_event (
     CONSTRAINT delegation_update_outbox_event_outcome_kind_check CHECK (((outcome_kind IS NULL) OR (outcome_kind = ANY (ARRAY['result_returned'::text, 'child_failed'::text, 'child_stopped'::text, 'child_cancelled'::text, 'continue_running'::text, 'already_terminal'::text])))),
     CONSTRAINT delegation_update_outbox_event_policy_kind_check CHECK (((policy_kind IS NULL) OR (policy_kind = ANY (ARRAY['background'::text, 'bound'::text])))),
     CONSTRAINT delegation_update_outbox_event_provenance_goal_generation_check CHECK (((provenance_goal_generation IS NULL) OR ((provenance_goal_generation >= (1)::numeric) AND (provenance_goal_generation <= '18446744073709551615'::numeric)))),
-    CONSTRAINT delegation_update_outbox_event_provenance_kind_check CHECK (((provenance_kind IS NULL) OR (provenance_kind = ANY (ARRAY['child_turn'::text, 'parent_turn_command'::text, 'parent_goal_command'::text, 'parent_lifecycle_command'::text])))),
+    CONSTRAINT delegation_update_outbox_event_provenance_kind_check CHECK (((provenance_kind IS NULL) OR (provenance_kind = ANY (ARRAY['child_turn'::text, 'parent_turn_command'::text, 'parent_goal_command'::text])))),
     CONSTRAINT delegation_update_outbox_event_reason_kind_check CHECK (((reason_kind IS NULL) OR (reason_kind = ANY (ARRAY['child_completed'::text, 'child_execution_failed'::text, 'child_result_unavailable'::text, 'child_cancelled'::text, 'parent_stopped_parent_and_descendants'::text, 'parent_cancelled_parent_and_descendants'::text])))),
     CONSTRAINT delegation_update_outbox_event_storage_version_check CHECK ((storage_version = 1)),
     CONSTRAINT delegation_update_outbox_event_update_kind_check CHECK ((update_kind = ANY (ARRAY['child_spawned'::text, 'child_waiting'::text, 'child_lifecycle_disposition'::text, 'child_result'::text, 'session_message'::text]))),
     CONSTRAINT delegation_update_outbox_event_wait_mode_check CHECK (((wait_mode IS NULL) OR (wait_mode = ANY (ARRAY['foreground'::text, 'background'::text])))),
-    CONSTRAINT delegation_update_provenance_shape CHECK ((((provenance_kind IS NULL) AND (provenance_session_id IS NULL) AND (provenance_turn_id IS NULL) AND (provenance_goal_generation IS NULL) AND (provenance_command_id IS NULL)) OR ((provenance_kind = 'child_turn'::text) AND (provenance_session_id IS NOT NULL) AND (provenance_turn_id IS NOT NULL) AND (provenance_goal_generation IS NULL) AND (provenance_command_id IS NULL)) OR ((provenance_kind = 'parent_turn_command'::text) AND (provenance_session_id IS NOT NULL) AND (provenance_turn_id IS NOT NULL) AND (provenance_goal_generation IS NULL) AND (provenance_command_id IS NOT NULL)) OR ((provenance_kind = 'parent_goal_command'::text) AND (provenance_session_id IS NOT NULL) AND (provenance_turn_id IS NULL) AND (provenance_goal_generation IS NOT NULL) AND (provenance_command_id IS NOT NULL)) OR ((provenance_kind = 'parent_lifecycle_command'::text) AND (provenance_session_id IS NOT NULL) AND (provenance_turn_id IS NULL) AND (provenance_goal_generation IS NULL) AND (provenance_command_id IS NOT NULL)))),
-    CONSTRAINT delegation_update_subject_shape CHECK ((((update_kind = 'child_spawned'::text) AND (child_session_id IS NOT NULL) AND (policy_kind IS NOT NULL) AND (((policy_kind = 'background'::text) AND (on_parent_stopped IS NULL) AND (on_parent_cancelled IS NULL)) OR ((policy_kind = 'bound'::text) AND (on_parent_stopped IS NOT NULL) AND (on_parent_cancelled IS NOT NULL))) AND (awaiting_tool_request_id IS NULL) AND (wait_mode IS NULL) AND (delegation_event_ordinal IS NOT NULL) AND (delegation_event_ordinal = (1)::numeric) AND (delegation_event_kind IS NOT NULL) AND (delegation_event_kind = 'spawned'::text) AND (outcome_kind IS NULL) AND (reason_kind IS NULL) AND (provenance_kind IS NULL) AND (result_spawning_request_id IS NULL) AND (message_id IS NULL) AND (sender_session_id IS NULL) AND (recipient_session_id IS NULL) AND (message_ordinal IS NULL) AND (content_text IS NULL)) OR ((update_kind = 'child_waiting'::text) AND (child_session_id IS NOT NULL) AND (policy_kind IS NULL) AND (on_parent_stopped IS NULL) AND (on_parent_cancelled IS NULL) AND (awaiting_tool_request_id IS NOT NULL) AND (wait_mode IS NOT NULL) AND (delegation_event_ordinal IS NULL) AND (delegation_event_kind IS NULL) AND (outcome_kind IS NULL) AND (reason_kind IS NULL) AND (provenance_kind IS NULL) AND (result_spawning_request_id IS NULL) AND (message_id IS NULL) AND (sender_session_id IS NULL) AND (recipient_session_id IS NULL) AND (message_ordinal IS NULL) AND (content_text IS NULL)) OR ((update_kind = 'child_lifecycle_disposition'::text) AND (child_session_id IS NOT NULL) AND (policy_kind IS NULL) AND (on_parent_stopped IS NULL) AND (on_parent_cancelled IS NULL) AND (awaiting_tool_request_id IS NULL) AND (wait_mode IS NULL) AND (delegation_event_ordinal IS NOT NULL) AND (delegation_event_kind IS NOT NULL) AND (delegation_event_kind = 'outcome_recorded'::text) AND (outcome_kind = ANY (ARRAY['child_stopped'::text, 'child_cancelled'::text, 'already_terminal'::text, 'continue_running'::text])) AND (reason_kind = ANY (ARRAY['parent_stopped_parent_and_descendants'::text, 'parent_cancelled_parent_and_descendants'::text])) AND (provenance_kind = ANY (ARRAY['parent_turn_command'::text, 'parent_goal_command'::text, 'parent_lifecycle_command'::text])) AND (result_spawning_request_id IS NULL) AND (message_id IS NULL) AND (sender_session_id IS NULL) AND (recipient_session_id IS NULL) AND (message_ordinal IS NULL) AND (content_text IS NULL)) OR ((update_kind = 'child_result'::text) AND (child_session_id IS NOT NULL) AND (policy_kind IS NULL) AND (on_parent_stopped IS NULL) AND (on_parent_cancelled IS NULL) AND (awaiting_tool_request_id IS NULL) AND (wait_mode IS NULL) AND (delegation_event_ordinal IS NULL) AND (delegation_event_kind IS NULL) AND (outcome_kind IS NOT NULL) AND (outcome_kind = ANY (ARRAY['result_returned'::text, 'child_failed'::text, 'child_stopped'::text, 'child_cancelled'::text])) AND (reason_kind IS NOT NULL) AND (provenance_kind IS NOT NULL) AND (result_spawning_request_id IS NOT NULL) AND (result_spawning_request_id = spawning_tool_request_id) AND (message_id IS NULL) AND (sender_session_id IS NULL) AND (recipient_session_id IS NULL) AND (message_ordinal IS NULL) AND (((outcome_kind = 'result_returned'::text) AND (content_text IS NOT NULL)) OR ((outcome_kind <> 'result_returned'::text) AND (content_text IS NULL)))) OR ((update_kind = 'session_message'::text) AND (child_session_id IS NULL) AND (policy_kind IS NULL) AND (on_parent_stopped IS NULL) AND (on_parent_cancelled IS NULL) AND (awaiting_tool_request_id IS NULL) AND (wait_mode IS NULL) AND (delegation_event_ordinal IS NULL) AND (delegation_event_kind IS NULL) AND (outcome_kind IS NULL) AND (reason_kind IS NULL) AND (provenance_kind IS NULL) AND (result_spawning_request_id IS NULL) AND (message_id IS NOT NULL) AND (sender_session_id IS NOT NULL) AND (recipient_session_id IS NOT NULL) AND (sender_session_id <> recipient_session_id) AND (message_ordinal IS NOT NULL) AND (content_text IS NOT NULL))))
+    CONSTRAINT delegation_update_provenance_shape CHECK ((((provenance_kind IS NULL) AND (provenance_session_id IS NULL) AND (provenance_turn_id IS NULL) AND (provenance_goal_generation IS NULL) AND (provenance_command_id IS NULL)) OR ((provenance_kind = 'child_turn'::text) AND (provenance_session_id IS NOT NULL) AND (provenance_turn_id IS NOT NULL) AND (provenance_goal_generation IS NULL) AND (provenance_command_id IS NULL)) OR ((provenance_kind = 'parent_turn_command'::text) AND (provenance_session_id IS NOT NULL) AND (provenance_turn_id IS NOT NULL) AND (provenance_goal_generation IS NULL) AND (provenance_command_id IS NOT NULL)) OR ((provenance_kind = 'parent_goal_command'::text) AND (provenance_session_id IS NOT NULL) AND (provenance_turn_id IS NULL) AND (provenance_goal_generation IS NOT NULL) AND (provenance_command_id IS NOT NULL)))),
+    CONSTRAINT delegation_update_subject_shape CHECK ((((update_kind = 'child_spawned'::text) AND (child_session_id IS NOT NULL) AND (policy_kind IS NOT NULL) AND (((policy_kind = 'background'::text) AND (on_parent_stopped IS NULL) AND (on_parent_cancelled IS NULL)) OR ((policy_kind = 'bound'::text) AND (on_parent_stopped IS NOT NULL) AND (on_parent_cancelled IS NOT NULL))) AND (awaiting_tool_request_id IS NULL) AND (wait_mode IS NULL) AND (delegation_event_ordinal IS NOT NULL) AND (delegation_event_ordinal = (1)::numeric) AND (delegation_event_kind IS NOT NULL) AND (delegation_event_kind = 'spawned'::text) AND (outcome_kind IS NULL) AND (reason_kind IS NULL) AND (provenance_kind IS NULL) AND (result_spawning_request_id IS NULL) AND (message_id IS NULL) AND (sender_session_id IS NULL) AND (recipient_session_id IS NULL) AND (message_ordinal IS NULL) AND (content_text IS NULL)) OR ((update_kind = 'child_waiting'::text) AND (child_session_id IS NOT NULL) AND (policy_kind IS NULL) AND (on_parent_stopped IS NULL) AND (on_parent_cancelled IS NULL) AND (awaiting_tool_request_id IS NOT NULL) AND (wait_mode IS NOT NULL) AND (delegation_event_ordinal IS NULL) AND (delegation_event_kind IS NULL) AND (outcome_kind IS NULL) AND (reason_kind IS NULL) AND (provenance_kind IS NULL) AND (result_spawning_request_id IS NULL) AND (message_id IS NULL) AND (sender_session_id IS NULL) AND (recipient_session_id IS NULL) AND (message_ordinal IS NULL) AND (content_text IS NULL)) OR ((update_kind = 'child_lifecycle_disposition'::text) AND (child_session_id IS NOT NULL) AND (policy_kind IS NULL) AND (on_parent_stopped IS NULL) AND (on_parent_cancelled IS NULL) AND (awaiting_tool_request_id IS NULL) AND (wait_mode IS NULL) AND (delegation_event_ordinal IS NOT NULL) AND (delegation_event_kind IS NOT NULL) AND (delegation_event_kind = 'outcome_recorded'::text) AND (outcome_kind = ANY (ARRAY['child_stopped'::text, 'child_cancelled'::text, 'already_terminal'::text, 'continue_running'::text])) AND (reason_kind = ANY (ARRAY['parent_stopped_parent_and_descendants'::text, 'parent_cancelled_parent_and_descendants'::text])) AND (provenance_kind = ANY (ARRAY['parent_turn_command'::text, 'parent_goal_command'::text])) AND (result_spawning_request_id IS NULL) AND (message_id IS NULL) AND (sender_session_id IS NULL) AND (recipient_session_id IS NULL) AND (message_ordinal IS NULL) AND (content_text IS NULL)) OR ((update_kind = 'child_result'::text) AND (child_session_id IS NOT NULL) AND (policy_kind IS NULL) AND (on_parent_stopped IS NULL) AND (on_parent_cancelled IS NULL) AND (awaiting_tool_request_id IS NULL) AND (wait_mode IS NULL) AND (delegation_event_ordinal IS NULL) AND (delegation_event_kind IS NULL) AND (outcome_kind IS NOT NULL) AND (outcome_kind = ANY (ARRAY['result_returned'::text, 'child_failed'::text, 'child_stopped'::text, 'child_cancelled'::text])) AND (reason_kind IS NOT NULL) AND (provenance_kind IS NOT NULL) AND (result_spawning_request_id IS NOT NULL) AND (result_spawning_request_id = spawning_tool_request_id) AND (message_id IS NULL) AND (sender_session_id IS NULL) AND (recipient_session_id IS NULL) AND (message_ordinal IS NULL) AND (((outcome_kind = 'result_returned'::text) AND (content_text IS NOT NULL)) OR ((outcome_kind <> 'result_returned'::text) AND (content_text IS NULL)))) OR ((update_kind = 'session_message'::text) AND (child_session_id IS NULL) AND (policy_kind IS NULL) AND (on_parent_stopped IS NULL) AND (on_parent_cancelled IS NULL) AND (awaiting_tool_request_id IS NULL) AND (wait_mode IS NULL) AND (delegation_event_ordinal IS NULL) AND (delegation_event_kind IS NULL) AND (outcome_kind IS NULL) AND (reason_kind IS NULL) AND (provenance_kind IS NULL) AND (result_spawning_request_id IS NULL) AND (message_id IS NOT NULL) AND (sender_session_id IS NOT NULL) AND (recipient_session_id IS NOT NULL) AND (sender_session_id <> recipient_session_id) AND (message_ordinal IS NOT NULL) AND (content_text IS NOT NULL))))
 );
 
 
@@ -2975,8 +2879,8 @@ CREATE TABLE session_delegation_event (
     CONSTRAINT session_delegation_event_event_ordinal_check CHECK (((event_ordinal >= (1)::numeric) AND (event_ordinal <= '18446744073709551615'::numeric))),
     CONSTRAINT session_delegation_event_goal_generation_positive CHECK (((provenance_goal_generation IS NULL) OR ((provenance_goal_generation >= (1)::numeric) AND (provenance_goal_generation <= '18446744073709551615'::numeric)))),
     CONSTRAINT session_delegation_event_outcome_kind_check CHECK (((outcome_kind IS NULL) OR (outcome_kind = ANY (ARRAY['result_returned'::text, 'child_failed'::text, 'child_stopped'::text, 'child_cancelled'::text, 'continue_running'::text, 'already_terminal'::text])))),
-    CONSTRAINT session_delegation_event_provenance_kind_check CHECK ((provenance_kind = ANY (ARRAY['tool_request'::text, 'child_turn'::text, 'parent_turn_command'::text, 'parent_goal_command'::text, 'parent_lifecycle_command'::text]))),
-    CONSTRAINT session_delegation_event_provenance_shape CHECK ((((provenance_kind = 'tool_request'::text) AND (provenance_turn_id IS NOT NULL) AND (provenance_goal_generation IS NULL) AND (provenance_tool_request_id IS NOT NULL) AND (provenance_command_id IS NULL)) OR ((provenance_kind = 'child_turn'::text) AND (provenance_turn_id IS NOT NULL) AND (provenance_goal_generation IS NULL) AND (provenance_tool_request_id IS NULL) AND (provenance_command_id IS NULL)) OR ((provenance_kind = 'parent_turn_command'::text) AND (provenance_turn_id IS NOT NULL) AND (provenance_goal_generation IS NULL) AND (provenance_tool_request_id IS NULL) AND (provenance_command_id IS NOT NULL)) OR ((provenance_kind = 'parent_goal_command'::text) AND (provenance_turn_id IS NULL) AND (provenance_goal_generation IS NOT NULL) AND (provenance_tool_request_id IS NULL) AND (provenance_command_id IS NOT NULL)) OR ((provenance_kind = 'parent_lifecycle_command'::text) AND (provenance_turn_id IS NULL) AND (provenance_goal_generation IS NULL) AND (provenance_tool_request_id IS NULL) AND (provenance_command_id IS NOT NULL)))),
+    CONSTRAINT session_delegation_event_provenance_kind_check CHECK ((provenance_kind = ANY (ARRAY['tool_request'::text, 'child_turn'::text, 'parent_turn_command'::text, 'parent_goal_command'::text]))),
+    CONSTRAINT session_delegation_event_provenance_shape CHECK ((((provenance_kind = 'tool_request'::text) AND (provenance_turn_id IS NOT NULL) AND (provenance_goal_generation IS NULL) AND (provenance_tool_request_id IS NOT NULL) AND (provenance_command_id IS NULL)) OR ((provenance_kind = 'child_turn'::text) AND (provenance_turn_id IS NOT NULL) AND (provenance_goal_generation IS NULL) AND (provenance_tool_request_id IS NULL) AND (provenance_command_id IS NULL)) OR ((provenance_kind = 'parent_turn_command'::text) AND (provenance_turn_id IS NOT NULL) AND (provenance_goal_generation IS NULL) AND (provenance_tool_request_id IS NULL) AND (provenance_command_id IS NOT NULL)) OR ((provenance_kind = 'parent_goal_command'::text) AND (provenance_turn_id IS NULL) AND (provenance_goal_generation IS NOT NULL) AND (provenance_tool_request_id IS NULL) AND (provenance_command_id IS NOT NULL)))),
     CONSTRAINT session_delegation_event_reason_kind_check CHECK (((reason_kind IS NULL) OR (reason_kind = ANY (ARRAY['child_completed'::text, 'child_execution_failed'::text, 'child_result_unavailable'::text, 'child_cancelled'::text, 'parent_stopped_parent_and_descendants'::text, 'parent_cancelled_parent_and_descendants'::text])))),
     CONSTRAINT session_delegation_event_shape CHECK ((((event_kind = ANY (ARRAY['spawned'::text, 'message_delivered'::text])) AND (outcome_kind IS NULL) AND (reason_kind IS NULL)) OR ((event_kind = 'outcome_recorded'::text) AND (outcome_kind IS NOT NULL) AND (reason_kind IS NOT NULL)))),
     CONSTRAINT session_delegation_spawn_ordinal CHECK (((event_kind = 'spawned'::text) = (event_ordinal = (1)::numeric))),
@@ -3617,7 +3521,7 @@ CREATE UNIQUE INDEX session_delegation_message_request_once ON session_delegatio
 -- Name: session_delegation_parent_outcome_authority_once; Type: INDEX; Schema: public
 --
 
-CREATE UNIQUE INDEX session_delegation_parent_outcome_authority_once ON session_delegation_event USING btree (spawning_tool_request_id, provenance_command_id) WHERE ((event_kind = 'outcome_recorded'::text) AND (provenance_kind = ANY (ARRAY['parent_turn_command'::text, 'parent_goal_command'::text, 'parent_lifecycle_command'::text])));
+CREATE UNIQUE INDEX session_delegation_parent_outcome_authority_once ON session_delegation_event USING btree (spawning_tool_request_id, provenance_command_id) WHERE ((event_kind = 'outcome_recorded'::text) AND (provenance_kind = ANY (ARRAY['parent_turn_command'::text, 'parent_goal_command'::text])));
 
 
 --

@@ -344,7 +344,7 @@ async fn apply(
         }
         SessionLifecycleOperation::CloseFailed { cause } => {
             let standing = require_parked(&held.state())?;
-            if cause.is_some() && standing.is_none() {
+            if cause.is_some() && *cause != standing {
                 return Err(ApplyError::Rejected(
                     SessionLifecycleCommandRejection::StandingCauseMismatch,
                 ));

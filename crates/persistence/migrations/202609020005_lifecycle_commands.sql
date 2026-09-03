@@ -642,6 +642,672 @@ CREATE TRIGGER session_lifecycle_command_is_append_only
     BEFORE DELETE OR UPDATE ON session_lifecycle_command
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
 
+-- Lifecycle commands extend the delegation cascade through this forward
+-- migration; the applied delegation migration remains byte-for-byte stable.
+DROP FUNCTION materialize_session_delegation_termination_cascade(uuid);
+
+CREATE FUNCTION materialize_session_delegation_termination_cascade(checked_root_command uuid, checked_root_kind text) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    root_session uuid;
+    root_source_kind text;
+    root_turn uuid;
+    root_goal_generation numeric(20, 0);
+    root_termination_kind text;
+    provenance_kind text;
+    disposition_count numeric(20, 0);
+    frontier record;
+    parent_turn uuid;
+    event_ordinal numeric(20, 0);
+    outcome_kind text;
+    reason_kind text;
+    logical_disposition text;
+    child_turn uuid;
+    child_starting_frontier uuid;
+    child_terminal_frontier uuid;
+    child_frontier_member_count numeric(20, 0);
+    child_task_entry uuid;
+    wait_record record;
+    delivery_sequence numeric(20, 0);
+BEGIN
+    SELECT
+        root.root_session_id,
+        root.root_source_kind,
+        root.root_turn_id,
+        root.root_goal_generation,
+        root.termination_kind
+      INTO
+        root_session,
+        root_source_kind,
+        root_turn,
+        root_goal_generation,
+        root_termination_kind
+      FROM (
+        SELECT
+            command.session_id AS root_session_id,
+            'goal_command'::text AS root_source_kind,
+            NULL::uuid AS root_turn_id,
+            event.generation AS root_goal_generation,
+            checked_root_kind AS termination_kind
+          FROM goal_command AS command
+          JOIN goal_event AS event
+            ON event.session_id = command.session_id
+           AND event.event_ordinal = command.result_event_ordinal
+         WHERE command.command_id = checked_root_command
+           AND command.operation_kind = 'stop'
+           AND command.result_kind = 'applied'
+           AND command.descendant_scope = 'parent_and_descendants'
+           AND event.event_kind = 'user_stopped'
+           AND checked_root_kind = 'stopped'
+        UNION ALL
+        SELECT
+            command.session_id,
+            'turn_command'::text,
+            command.expected_active_turn_id,
+            NULL::numeric(20, 0),
+            checked_root_kind
+          FROM submit_input_command AS command
+         WHERE command.command_id = checked_root_command
+           AND command.delivery_kind = 'interrupt'
+           AND command.result_kind = 'applied'
+           AND command.descendant_scope = 'parent_and_descendants'
+           AND checked_root_kind = ANY (ARRAY['stopped'::text, 'cancelled'::text])
+           AND (checked_root_kind = 'cancelled' OR EXISTS (
+                SELECT 1
+                  FROM session_lifecycle_command AS lifecycle
+                 WHERE lifecycle.session_id = command.session_id
+                   AND lifecycle.operation_kind = 'stop'
+                   AND lifecycle.result_kind = 'applied'
+                   AND lifecycle.applied_effect_kind = 'closure_pending'
+                   AND lifecycle.live_turn_id = command.expected_active_turn_id
+                   AND lifecycle.descendant_scope = command.descendant_scope
+           ))
+        UNION ALL
+        SELECT
+            command.session_id,
+            'lifecycle_command'::text,
+            NULL::uuid,
+            NULL::numeric(20, 0),
+            checked_root_kind
+          FROM session_lifecycle_command AS command
+         WHERE command.command_id = checked_root_command
+           AND command.operation_kind = 'stop'
+           AND command.result_kind = 'applied'
+           AND command.applied_effect_kind = 'closed'
+           AND command.descendant_scope = 'parent_and_descendants'
+           AND checked_root_kind = 'stopped'
+      ) AS root;
+    IF root_session IS NULL THEN
+        RETURN;
+    END IF;
+
+    SELECT count(*) INTO disposition_count
+      FROM delegation_cascade_expected_frontier(
+            root_session, root_termination_kind
+      );
+    IF disposition_count = 0 THEN
+        RETURN;
+    END IF;
+    provenance_kind := CASE root_source_kind
+        WHEN 'goal_command' THEN 'parent_goal_command'
+        WHEN 'turn_command' THEN 'parent_turn_command'
+        WHEN 'lifecycle_command' THEN 'parent_lifecycle_command'
+    END;
+
+    INSERT INTO session_delegation_termination_cascade
+        (root_command_id, root_session_id, root_source_kind,
+         root_turn_id, root_goal_generation, termination_kind,
+         descendant_scope, disposition_count)
+    VALUES
+        (checked_root_command, root_session, root_source_kind,
+         root_turn, root_goal_generation, root_termination_kind,
+         'parent_and_descendants', disposition_count);
+
+    FOR frontier IN
+        SELECT expected.*
+          FROM delegation_cascade_expected_frontier(
+                root_session, root_termination_kind
+          ) AS expected
+         ORDER BY expected.parent_session_id,
+                  expected.spawning_tool_request_id
+    LOOP
+        parent_turn := NULL;
+        IF root_source_kind = 'turn_command' THEN
+            IF frontier.source_kind = 'root' THEN
+                parent_turn := root_turn;
+            ELSE
+                SELECT task.turn_id INTO parent_turn
+                  FROM session_delegation_initial_task AS task
+                 WHERE task.spawning_tool_request_id =
+                        frontier.source_spawning_tool_request_id;
+            END IF;
+        END IF;
+
+        INSERT INTO session_delegation_parent_termination
+            (spawning_tool_request_id, root_command_id, parent_session_id,
+             command_source_kind, parent_turn_id, parent_goal_generation,
+             termination_kind, source_kind,
+             source_spawning_tool_request_id)
+        VALUES
+            (frontier.spawning_tool_request_id, checked_root_command,
+             frontier.parent_session_id, root_source_kind, parent_turn,
+             root_goal_generation, frontier.effective_parent_kind,
+             frontier.source_kind, frontier.source_spawning_tool_request_id);
+
+        IF EXISTS (
+            SELECT 1 FROM session_child_result AS result
+             WHERE result.spawning_tool_request_id =
+                    frontier.spawning_tool_request_id
+        ) THEN
+            outcome_kind := 'already_terminal';
+            logical_disposition := NULL;
+        ELSE
+            outcome_kind := CASE frontier.expected_action
+                WHEN 'keep_running' THEN 'continue_running'
+                WHEN 'stop' THEN 'child_stopped'
+                WHEN 'cancel' THEN 'child_cancelled'
+            END;
+            logical_disposition := CASE frontier.expected_action
+                WHEN 'stop' THEN 'stopped'
+                WHEN 'cancel' THEN 'cancelled'
+            END;
+        END IF;
+        reason_kind := CASE frontier.effective_parent_kind
+            WHEN 'stopped' THEN 'parent_stopped_parent_and_descendants'
+            WHEN 'cancelled' THEN 'parent_cancelled_parent_and_descendants'
+        END;
+
+        IF logical_disposition IS NOT NULL THEN
+            SELECT task.turn_id, task.semantic_entry_id,
+                   lifecycle.starting_frontier_id
+              INTO child_turn, child_task_entry, child_starting_frontier
+              FROM session_delegation_initial_task AS task
+              JOIN turn_lifecycle AS lifecycle
+                ON lifecycle.turn_id = task.turn_id
+               AND lifecycle.session_id = task.child_session_id
+             WHERE task.spawning_tool_request_id =
+                    frontier.spawning_tool_request_id
+               AND task.child_session_id = frontier.child_session_id;
+            child_terminal_frontier := (
+                md5(
+                    'signalbox:delegation-terminal-frontier:'
+                    || frontier.spawning_tool_request_id::text
+                )
+            )::uuid;
+            IF child_starting_frontier IS NULL THEN
+                INSERT INTO context_frontier
+                    (owning_session_id, context_frontier_id, member_count,
+                     prefix_context_frontier_id)
+                VALUES
+                    (frontier.child_session_id, child_terminal_frontier,
+                     1, NULL);
+                INSERT INTO context_frontier_delta
+                    (owning_session_id, context_frontier_id, member_position,
+                     source_session_id, semantic_entry_id)
+                VALUES
+                    (frontier.child_session_id, child_terminal_frontier, 1,
+                     frontier.child_session_id, child_task_entry);
+            ELSE
+                SELECT stored.member_count INTO child_frontier_member_count
+                  FROM context_frontier AS stored
+                 WHERE stored.owning_session_id = frontier.child_session_id
+                   AND stored.context_frontier_id = child_starting_frontier;
+                INSERT INTO context_frontier
+                    (owning_session_id, context_frontier_id, member_count,
+                     prefix_context_frontier_id)
+                VALUES
+                    (frontier.child_session_id, child_terminal_frontier,
+                     child_frontier_member_count, child_starting_frontier);
+            END IF;
+            INSERT INTO session_delegation_logical_terminal
+                (spawning_tool_request_id, child_session_id, child_turn_id,
+                 root_command_id, terminal_frontier_id, disposition_kind)
+            VALUES
+                (frontier.spawning_tool_request_id, frontier.child_session_id,
+                 child_turn, checked_root_command, child_terminal_frontier,
+                 logical_disposition);
+            UPDATE turn_lifecycle
+               SET delegation_runtime_terminal = true
+             WHERE session_id = frontier.child_session_id
+               AND turn_id = child_turn;
+        END IF;
+
+        SELECT COALESCE(max(stored.event_ordinal), 0) + 1
+          INTO event_ordinal
+          FROM session_delegation_event AS stored
+         WHERE stored.spawning_tool_request_id =
+                frontier.spawning_tool_request_id;
+        INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             outcome_kind, reason_kind, provenance_kind,
+             provenance_session_id, provenance_turn_id,
+             provenance_goal_generation, provenance_command_id)
+        VALUES
+            (frontier.spawning_tool_request_id, event_ordinal,
+             'outcome_recorded', outcome_kind, reason_kind, provenance_kind,
+             frontier.parent_session_id, parent_turn, root_goal_generation,
+             checked_root_command);
+
+        WITH header AS (
+            INSERT INTO delegation_outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES ('delegation_update', 1, frontier.parent_session_id)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+        )
+        INSERT INTO delegation_update_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             update_kind, spawning_tool_request_id, child_session_id,
+             delegation_event_ordinal, delegation_event_kind,
+             outcome_kind, reason_kind, provenance_kind,
+             provenance_session_id, provenance_turn_id,
+             provenance_goal_generation, provenance_command_id)
+        SELECT
+            event_sequence, event_kind, storage_version, session_id,
+            'child_lifecycle_disposition',
+            frontier.spawning_tool_request_id, frontier.child_session_id,
+            event_ordinal, 'outcome_recorded', outcome_kind, reason_kind,
+            provenance_kind, frontier.parent_session_id, parent_turn,
+            root_goal_generation, checked_root_command
+          FROM header;
+
+        IF logical_disposition IS NOT NULL THEN
+            WITH header AS (
+                INSERT INTO delegation_outbox_event
+                    (event_kind, storage_version, session_id)
+                VALUES ('delegation_update', 1, frontier.child_session_id)
+                RETURNING event_sequence, event_kind, storage_version, session_id
+            )
+            INSERT INTO delegation_update_outbox_event
+                (event_sequence, event_kind, storage_version, session_id,
+                 update_kind, spawning_tool_request_id, child_session_id,
+                 delegation_event_ordinal, delegation_event_kind,
+                 outcome_kind, reason_kind, provenance_kind,
+                 provenance_session_id, provenance_turn_id,
+                 provenance_goal_generation, provenance_command_id)
+            SELECT
+                event_sequence, event_kind, storage_version, session_id,
+                'child_lifecycle_disposition',
+                frontier.spawning_tool_request_id, frontier.child_session_id,
+                event_ordinal, 'outcome_recorded', outcome_kind, reason_kind,
+                provenance_kind, frontier.parent_session_id, parent_turn,
+                root_goal_generation, checked_root_command
+              FROM header;
+
+            INSERT INTO session_child_result
+                (spawning_tool_request_id, event_ordinal, event_kind,
+                 outcome_kind)
+            VALUES
+                (frontier.spawning_tool_request_id, event_ordinal,
+                 'outcome_recorded', outcome_kind);
+
+            FOR wait_record IN
+                SELECT waiting.awaiting_tool_request_id, waiting.wait_mode
+                  FROM session_delegation_wait AS waiting
+                 WHERE waiting.spawning_tool_request_id =
+                        frontier.spawning_tool_request_id
+                 ORDER BY waiting.awaiting_tool_request_id
+            LOOP
+                delivery_sequence := NULL;
+                IF wait_record.wait_mode = 'background' THEN
+                    SELECT COALESCE(max(pending.delivery_sequence), 0) + 1
+                      INTO delivery_sequence
+                      FROM session_pending_delivery AS pending
+                     WHERE pending.recipient_session_id =
+                            frontier.parent_session_id;
+                    INSERT INTO session_pending_delivery
+                        (recipient_session_id, delivery_sequence, delivery_kind)
+                    VALUES
+                        (frontier.parent_session_id, delivery_sequence,
+                         'background_result');
+                END IF;
+                INSERT INTO session_child_result_delivery
+                    (awaiting_tool_request_id, spawning_tool_request_id,
+                     parent_session_id, delivery_sequence, delivery_kind)
+                VALUES
+                    (wait_record.awaiting_tool_request_id,
+                     frontier.spawning_tool_request_id,
+                     frontier.parent_session_id, delivery_sequence,
+                     CASE WHEN delivery_sequence IS NULL THEN NULL
+                          ELSE 'background_result' END);
+            END LOOP;
+
+            WITH header AS (
+                INSERT INTO delegation_outbox_event
+                    (event_kind, storage_version, session_id)
+                VALUES ('delegation_update', 1, frontier.parent_session_id)
+                RETURNING event_sequence, event_kind, storage_version, session_id
+            )
+            INSERT INTO delegation_update_outbox_event
+                (event_sequence, event_kind, storage_version, session_id,
+                 update_kind, spawning_tool_request_id, child_session_id,
+                 outcome_kind, reason_kind, provenance_kind,
+                 provenance_session_id, provenance_turn_id,
+                 provenance_goal_generation, provenance_command_id,
+                 result_spawning_request_id)
+            SELECT
+                event_sequence, event_kind, storage_version, session_id,
+                'child_result', frontier.spawning_tool_request_id,
+                frontier.child_session_id, outcome_kind, reason_kind,
+                provenance_kind, frontier.parent_session_id, parent_turn,
+                root_goal_generation, checked_root_command,
+                frontier.spawning_tool_request_id
+              FROM header;
+
+            WITH header AS (
+                INSERT INTO delegation_outbox_event
+                    (event_kind, storage_version, session_id)
+                VALUES ('delegation_wake', 1, frontier.parent_session_id)
+                RETURNING event_sequence, event_kind, storage_version, session_id
+            )
+            INSERT INTO delegation_wake_outbox_event
+                (event_sequence, event_kind, storage_version, session_id,
+                 spawning_tool_request_id, subject_kind,
+                 result_spawning_request_id, awaiting_tool_request_id)
+            SELECT
+                event_sequence, event_kind, storage_version, session_id,
+                frontier.spawning_tool_request_id, 'result',
+                frontier.spawning_tool_request_id, NULL
+              FROM header;
+        END IF;
+    END LOOP;
+END;
+$$;
+
+
+CREATE FUNCTION require_applied_lifecycle_command_delegation_cascade() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.operation_kind <> 'stop'
+       OR NEW.result_kind <> 'applied'
+       OR NEW.applied_effect_kind <> 'closed'
+       OR NEW.descendant_scope <> 'parent_and_descendants' THEN
+        RETURN NULL;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM session_delegation AS relation
+         WHERE relation.parent_session_id = NEW.session_id
+    ) THEN
+        RETURN NULL;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM session_delegation_termination_cascade AS cascade
+         WHERE cascade.root_command_id = NEW.command_id
+           AND cascade.root_session_id = NEW.session_id
+           AND cascade.root_source_kind = 'lifecycle_command'
+           AND cascade.root_turn_id IS NULL
+           AND cascade.root_goal_generation IS NULL
+           AND cascade.termination_kind = 'stopped'
+           AND cascade.descendant_scope = NEW.descendant_scope
+    ) THEN
+        RAISE EXCEPTION 'applied descendant-scoped lifecycle command lacks its cascade proof'
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'session_lifecycle_command_delegation_cascade';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+ CREATE OR REPLACE FUNCTION require_applied_turn_command_delegation_cascade() RETURNS trigger
+     LANGUAGE plpgsql
+     AS $$
+ BEGIN
+     IF NEW.delivery_kind <> 'interrupt'
+        OR NEW.result_kind <> 'applied'
+        OR NEW.descendant_scope <> 'parent_and_descendants' THEN
+         RETURN NULL;
+     END IF;
+     IF NOT EXISTS (
+         SELECT 1 FROM session_delegation AS relation
+          WHERE relation.parent_session_id = NEW.session_id
+     ) THEN
+         RETURN NULL;
+     END IF;
+     IF NOT EXISTS (
+         SELECT 1 FROM session_delegation_termination_cascade AS cascade
+          WHERE cascade.root_command_id = NEW.command_id
+            AND cascade.root_session_id = NEW.session_id
+            AND cascade.root_source_kind = 'turn_command'
+            AND cascade.root_turn_id = NEW.expected_active_turn_id
+            AND cascade.root_goal_generation IS NULL
+            AND cascade.descendant_scope = NEW.descendant_scope
+     ) THEN
+         RAISE EXCEPTION 'applied descendant-scoped turn command lacks its cascade proof'
+             USING ERRCODE = '23514',
+                 CONSTRAINT = 'submit_input_command_delegation_cascade';
+     END IF;
+     RETURN NULL;
+ END;
+ $$;
+
+
+DO $migration$
+DECLARE
+    changed record;
+    prior_definition text;
+    next_definition text;
+BEGIN
+    FOR changed IN
+        SELECT * FROM (VALUES
+            (
+                'require_delegation_lifecycle_update()'::regprocedure,
+                $old$'parent_turn_command', 'parent_goal_command'$old$,
+                $new$'parent_turn_command', 'parent_goal_command',
+            'parent_lifecycle_command'$new$
+            ),
+            (
+                'require_delegation_termination_cascade_command()'::regprocedure,
+                $old$AND event.generation = NEW.root_goal_generation))
+        OR (NEW.root_source_kind = 'turn_command' AND NOT EXISTS (
+            SELECT 1 FROM submit_input_command
+             WHERE command_id = NEW.root_command_id
+               AND session_id = NEW.root_session_id
+               AND delivery_kind = 'interrupt'
+               AND expected_active_turn_id = NEW.root_turn_id
+               AND result_kind = 'applied' AND rejection_kind IS NULL
+               AND descendant_scope = NEW.descendant_scope)) THEN$old$,
+                $new$AND event.generation = NEW.root_goal_generation
+               AND NEW.termination_kind = 'stopped'))
+        OR (NEW.root_source_kind = 'turn_command' AND NOT EXISTS (
+            SELECT 1
+              FROM submit_input_command AS command
+             WHERE command.command_id = NEW.root_command_id
+               AND command.session_id = NEW.root_session_id
+               AND command.delivery_kind = 'interrupt'
+               AND command.expected_active_turn_id = NEW.root_turn_id
+               AND command.result_kind = 'applied'
+               AND command.rejection_kind IS NULL
+               AND command.descendant_scope = NEW.descendant_scope
+               AND (NEW.termination_kind = 'cancelled' OR (
+                    NEW.termination_kind = 'stopped'
+                    AND EXISTS (
+                        SELECT 1
+                          FROM session_lifecycle_command AS lifecycle
+                         WHERE lifecycle.session_id = command.session_id
+                           AND lifecycle.operation_kind = 'stop'
+                           AND lifecycle.result_kind = 'applied'
+                           AND lifecycle.applied_effect_kind = 'closure_pending'
+                           AND lifecycle.live_turn_id = command.expected_active_turn_id
+                           AND lifecycle.descendant_scope = command.descendant_scope
+                    )
+               ))))
+        OR (NEW.root_source_kind = 'lifecycle_command' AND NOT EXISTS (
+            SELECT 1
+              FROM session_lifecycle_command AS command
+             WHERE command.command_id = NEW.root_command_id
+               AND command.session_id = NEW.root_session_id
+               AND command.operation_kind = 'stop'
+               AND command.result_kind = 'applied'
+               AND command.applied_effect_kind = 'closed'
+               AND command.descendant_scope = NEW.descendant_scope
+               AND NEW.termination_kind = 'stopped')) THEN$new$
+            ),
+            (
+                'require_delegation_update_subject()'::regprocedure,
+                $old$'parent_turn_command', 'parent_goal_command'$old$,
+                $new$'parent_turn_command', 'parent_goal_command',
+                            'parent_lifecycle_command'$new$
+            ),
+            (
+                'require_session_delegation_event_payload()'::regprocedure,
+                $old$'parent_turn_command', 'parent_goal_command'$old$,
+                $new$'parent_turn_command', 'parent_goal_command',
+                    'parent_lifecycle_command'$new$
+            ),
+            (
+                'require_session_delegation_event_payload()'::regprocedure,
+                $old$WHEN 'parent_goal_command' THEN 'goal_command'$old$,
+                $new$WHEN 'parent_goal_command' THEN 'goal_command'
+                            WHEN 'parent_lifecycle_command' THEN 'lifecycle_command'$new$
+            ),
+            (
+                'assert_delegation_parent_termination_chain(session_delegation_parent_termination, session_delegation_termination_cascade)'::regprocedure,
+                $old$WHEN 'goal_command' THEN 'parent_goal_command'$old$,
+                $new$WHEN 'goal_command' THEN 'parent_goal_command'
+                WHEN 'lifecycle_command' THEN 'parent_lifecycle_command'$new$
+            ),
+            (
+                'assert_delegation_parent_termination_chain(session_delegation_parent_termination, session_delegation_termination_cascade)'::regprocedure,
+                $old$checked.command_source_kind = 'goal_command'$old$,
+                $new$checked.command_source_kind IN ('goal_command', 'lifecycle_command')$new$
+            )
+        ) AS replacements(function_oid, prior_fragment, next_fragment)
+    LOOP
+        SELECT pg_get_functiondef(changed.function_oid)
+          INTO prior_definition;
+        next_definition := replace(
+            prior_definition,
+            changed.prior_fragment,
+            changed.next_fragment
+        );
+        IF next_definition = prior_definition THEN
+            RAISE EXCEPTION 'delegation function definition did not match: %',
+                changed.function_oid;
+        END IF;
+        EXECUTE next_definition;
+    END LOOP;
+END;
+$migration$;
+
+DO $migration$
+DECLARE
+    changed record;
+    constraint_oid oid;
+    migration_schema text := current_schema();
+    prior_definition text;
+    next_definition text;
+BEGIN
+    FOR changed IN
+        SELECT * FROM (VALUES
+            (
+                'session_delegation_parent_termination',
+                'session_delegation_parent_command_source_shape',
+                $old$((command_source_kind = 'goal_command'::text) AND (parent_turn_id IS NULL) AND (parent_goal_generation IS NOT NULL)))$old$,
+                $new$((command_source_kind = 'goal_command'::text) AND (parent_turn_id IS NULL) AND (parent_goal_generation IS NOT NULL)) OR ((command_source_kind = 'lifecycle_command'::text) AND (parent_turn_id IS NULL) AND (parent_goal_generation IS NULL)))$new$
+            ),
+            (
+                'session_delegation_parent_termination',
+                'session_delegation_parent_termination_command_source_kind_check',
+                $old$ARRAY['turn_command'::text, 'goal_command'::text]$old$,
+                $new$ARRAY['turn_command'::text, 'goal_command'::text, 'lifecycle_command'::text]$new$
+            ),
+            (
+                'session_delegation_termination_cascade',
+                'session_delegation_cascade_command_source_shape',
+                $old$((root_source_kind = 'turn_command'::text) AND (root_turn_id IS NOT NULL) AND (root_goal_generation IS NULL) AND (termination_kind = 'cancelled'::text)) OR ((root_source_kind = 'goal_command'::text) AND (root_turn_id IS NULL) AND (root_goal_generation IS NOT NULL) AND (termination_kind = 'stopped'::text))$old$,
+                $new$((root_source_kind = 'turn_command'::text) AND (root_turn_id IS NOT NULL) AND (root_goal_generation IS NULL)) OR ((root_source_kind = 'goal_command'::text) AND (root_turn_id IS NULL) AND (root_goal_generation IS NOT NULL) AND (termination_kind = 'stopped'::text)) OR ((root_source_kind = 'lifecycle_command'::text) AND (root_turn_id IS NULL) AND (root_goal_generation IS NULL) AND (termination_kind = 'stopped'::text))$new$
+            ),
+            (
+                'session_delegation_termination_cascade',
+                'session_delegation_termination_cascade_root_source_kind_check',
+                $old$ARRAY['turn_command'::text, 'goal_command'::text]$old$,
+                $new$ARRAY['turn_command'::text, 'goal_command'::text, 'lifecycle_command'::text]$new$
+            ),
+            (
+                'delegation_update_outbox_event',
+                'delegation_update_outbox_event_provenance_kind_check',
+                $old$'parent_goal_command'::text]$old$,
+                $new$'parent_goal_command'::text, 'parent_lifecycle_command'::text]$new$
+            ),
+            (
+                'delegation_update_outbox_event',
+                'delegation_update_provenance_shape',
+                $old$((provenance_kind = 'parent_goal_command'::text) AND (provenance_session_id IS NOT NULL) AND (provenance_turn_id IS NULL) AND (provenance_goal_generation IS NOT NULL) AND (provenance_command_id IS NOT NULL)))$old$,
+                $new$((provenance_kind = 'parent_goal_command'::text) AND (provenance_session_id IS NOT NULL) AND (provenance_turn_id IS NULL) AND (provenance_goal_generation IS NOT NULL) AND (provenance_command_id IS NOT NULL)) OR ((provenance_kind = 'parent_lifecycle_command'::text) AND (provenance_session_id IS NOT NULL) AND (provenance_turn_id IS NULL) AND (provenance_goal_generation IS NULL) AND (provenance_command_id IS NOT NULL)))$new$
+            ),
+            (
+                'delegation_update_outbox_event',
+                'delegation_update_subject_shape',
+                $old$ARRAY['parent_turn_command'::text, 'parent_goal_command'::text]$old$,
+                $new$ARRAY['parent_turn_command'::text, 'parent_goal_command'::text, 'parent_lifecycle_command'::text]$new$
+            ),
+            (
+                'session_delegation_event',
+                'session_delegation_event_provenance_kind_check',
+                $old$'parent_goal_command'::text]$old$,
+                $new$'parent_goal_command'::text, 'parent_lifecycle_command'::text]$new$
+            ),
+            (
+                'session_delegation_event',
+                'session_delegation_event_provenance_shape',
+                $old$((provenance_kind = 'parent_goal_command'::text) AND (provenance_turn_id IS NULL) AND (provenance_goal_generation IS NOT NULL) AND (provenance_tool_request_id IS NULL) AND (provenance_command_id IS NOT NULL)))$old$,
+                $new$((provenance_kind = 'parent_goal_command'::text) AND (provenance_turn_id IS NULL) AND (provenance_goal_generation IS NOT NULL) AND (provenance_tool_request_id IS NULL) AND (provenance_command_id IS NOT NULL)) OR ((provenance_kind = 'parent_lifecycle_command'::text) AND (provenance_turn_id IS NULL) AND (provenance_goal_generation IS NULL) AND (provenance_tool_request_id IS NULL) AND (provenance_command_id IS NOT NULL)))$new$
+            )
+        ) AS replacements(
+            table_name,
+            constraint_name,
+            prior_fragment,
+            next_fragment
+        )
+    LOOP
+        SELECT constraint_record.oid,
+               pg_get_constraintdef(constraint_record.oid)
+          INTO constraint_oid, prior_definition
+          FROM pg_constraint AS constraint_record
+          JOIN pg_class AS relation
+            ON relation.oid = constraint_record.conrelid
+          JOIN pg_namespace AS namespace
+            ON namespace.oid = relation.relnamespace
+         WHERE namespace.nspname = migration_schema
+           AND relation.relname = changed.table_name
+           AND constraint_record.conname = changed.constraint_name;
+        next_definition := replace(
+            prior_definition,
+            changed.prior_fragment,
+            changed.next_fragment
+        );
+        IF constraint_oid IS NULL OR next_definition = prior_definition THEN
+            RAISE EXCEPTION 'delegation constraint definition did not match: %.%',
+                changed.table_name, changed.constraint_name;
+        END IF;
+        EXECUTE format(
+            'ALTER TABLE %I.%I DROP CONSTRAINT %I, ADD CONSTRAINT %I %s',
+            migration_schema,
+            changed.table_name,
+            changed.constraint_name,
+            changed.constraint_name,
+            next_definition
+        );
+    END LOOP;
+END;
+$migration$;
+
+DROP INDEX session_delegation_parent_outcome_authority_once;
+
+CREATE UNIQUE INDEX session_delegation_parent_outcome_authority_once
+    ON session_delegation_event USING btree (
+        spawning_tool_request_id, provenance_command_id
+    )
+    WHERE (
+        event_kind = 'outcome_recorded'::text
+        AND provenance_kind = ANY (ARRAY[
+            'parent_turn_command'::text,
+            'parent_goal_command'::text,
+            'parent_lifecycle_command'::text
+        ])
+    );
+
 CREATE CONSTRAINT TRIGGER applied_lifecycle_command_requires_delegation_cascade
     AFTER INSERT OR UPDATE ON session_lifecycle_command
     DEFERRABLE INITIALLY DEFERRED FOR EACH ROW

@@ -1649,6 +1649,67 @@ async fn a_supplied_cause_over_a_causeless_park_is_rejected() -> Result<(), Box<
     Ok(())
 }
 
+/// A failed closure cannot replace the park's standing cause with another
+/// member of the same typed cause family.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_failed_closure_rejects_a_cause_different_from_the_parks_standing_cause()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(26);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(26))
+        .await?;
+    park_by_statement(&pool, session).await?;
+    sqlx::query(
+        "UPDATE session_lifecycle
+            SET parked_cause = 'retry_budget_exhausted',
+                parked_standing_cause_kind = 'provider_transient'
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await?;
+    let mismatched = lifecycle_command(
+        26,
+        1,
+        session,
+        SessionLifecycleOperation::CloseFailed {
+            cause: Some(SessionFailureCause::Retryable(
+                SessionRetryableCause::ProviderOverloaded,
+            )),
+        },
+    );
+
+    let refused = recorded(&pool, mismatched.clone()).await?;
+
+    assert_eq!(
+        refused,
+        SessionLifecycleCommandResult::Rejected(
+            SessionLifecycleCommandRejection::StandingCauseMismatch
+        )
+    );
+    assert_eq!(
+        settlement(&pool, mismatched.command_id()).await?,
+        (
+            String::from("rejected"),
+            Some(String::from("standing_cause_mismatch"))
+        )
+    );
+    assert!(
+        SessionLifecycleRepository::new(pool.clone())
+            .load(session)
+            .await?
+            .expect("the session keeps its lifecycle row")
+            .state()
+            .is_parked()
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// A pending closure whose only live turn the delegation cascade terminates
 /// logically settles: a runtime-terminal turn is not live.
 #[tokio::test(flavor = "multi_thread")]
