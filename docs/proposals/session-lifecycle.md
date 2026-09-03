@@ -548,9 +548,9 @@ proxies.
   stopped/superseded trim, recording cause `context_headroom_exhausted` on any
   turn.
 - `P(finish | overflow)` — of the sessions counted by `overflow_incidence`, the
-  fraction whose terminal outcome is `achieved_verified`. The owner's
-  observation this measures: a session that starts small and grows into the wall
-  through real work almost always succeeds.
+  fraction whose terminal outcome is `achieved_verified` or `achieved_declared`.
+  The owner's observation this measures: a session that starts small and grows
+  into the wall through real work almost always succeeds.
 - `wall_rate` — fraction of sessions dispatched in the calendar week recording
   cause `context_compaction_wall`. The rate counts walls of every kind, organic
   growth included; the recorded initial payloads (§15) sit beside it.
