@@ -2370,6 +2370,62 @@ async fn a_park_carries_the_standing_evidence_its_cause_names() -> Result<(), Bo
     Ok(())
 }
 
+/// §1/§2: a cause-bearing park cannot omit the standing evidence its cause
+/// names, including when a writer bypasses the repository.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_cause_bearing_park_requires_standing_evidence() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(62);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(62))
+        .await?;
+
+    let retry_error = sqlx::query(
+        "UPDATE session_lifecycle
+            SET state_kind = 'parked', state_entered_at = statement_timestamp(),
+                parked_cause = 'retry_budget_exhausted',
+                parked_responder = 'operator', parked_since = statement_timestamp(),
+                parked_standing_cause_kind = NULL
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a retry-exhaustion park carries retryable standing evidence");
+    assert_eq!(
+        retry_error
+            .as_database_error()
+            .and_then(DatabaseError::code)
+            .as_deref(),
+        Some("23514")
+    );
+
+    let structural_error = sqlx::query(
+        "UPDATE session_lifecycle
+            SET state_kind = 'parked', state_entered_at = statement_timestamp(),
+                parked_cause = 'structural_failure',
+                parked_responder = 'operator', parked_since = statement_timestamp(),
+                parked_standing_cause_kind = NULL
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a structural-failure park carries structural standing evidence");
+    assert_eq!(
+        structural_error
+            .as_database_error()
+            .and_then(DatabaseError::code)
+            .as_deref(),
+        Some("23514")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// §10: the active-stall deadline measures a stall, not a session's whole
 /// working life. A turn terminalizing with a queued successor projects
 /// `active` again, and re-arming there is what keeps a continuously
