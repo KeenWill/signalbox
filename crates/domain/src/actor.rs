@@ -11,6 +11,8 @@ use crate::{ToolRequestId, TurnId};
 pub enum Actor {
     /// The single user's authority, however connected.
     User,
+    /// Daemon core acting without model, tool, or recovery agency.
+    Core,
     /// Agency exercised by model output from one exact turn.
     Model {
         /// The turn whose model output acted.
@@ -35,6 +37,7 @@ mod tests {
     #[test]
     fn inv001_actor_equality_is_structural() {
         assert_eq!(Actor::User, Actor::User);
+        assert_ne!(Actor::User, Actor::Core);
         assert_ne!(Actor::User, Actor::Recovery);
         assert_ne!(
             Actor::Model { turn: turn_id(1) },

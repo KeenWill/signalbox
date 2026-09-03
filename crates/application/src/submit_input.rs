@@ -1,8 +1,9 @@
 //! Durable input-submission orchestration.
 //!
 //! docs/spec/identity-and-commands.md owns hub-minted identity supply and
-//! user-global command replay, and admits only the user actor at the
-//! baseline command boundary. Authoritative session loading, position
+//! user-global command replay. The baseline boundary fixes the user actor,
+//! while lifecycle closure has one core-only interrupt constructor.
+//! Authoritative session loading, position
 //! allocation, preparation, and recording remain inside one atomic
 //! transaction port.
 
@@ -10,7 +11,8 @@ use std::{error::Error, fmt, future::Future};
 
 use signalbox_domain::{
     AcceptedInputId, CancelledModelCallTurnIdentities, ContextFrontierId, DeliveryRequest,
-    DurableCommandId, SemanticTranscriptEntryId, SessionId, SubmitInput as DomainSubmitInput,
+    DescendantTerminationScope, DurableCommandId, PerInputConfigurationChoices,
+    SemanticTranscriptEntryId, SessionId, SubmitInput as DomainSubmitInput,
     SubmitInputAppliedResult, SubmitInputResult, TurnId, UserContent, UserContentPart,
 };
 
@@ -58,14 +60,41 @@ impl Error for SubmitInputRequestError {}
 /// Content is already a checked domain value. Private fields ensure the nil
 /// and max command-identity sentinels reserved by
 /// docs/spec/identity-and-commands.md cannot enter canonical command
-/// construction through this boundary. The user actor is fixed by the
-/// service rather than accepted as caller input.
+/// construction through this boundary. Purpose-specific constructors fix
+/// either the baseline user or lifecycle-closure core actor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubmitInputRequest {
     command_id: DurableCommandId,
     session: SessionId,
     content: UserContent,
-    delivery: DeliveryRequest,
+    kind: SubmitInputRequestKind,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SubmitInputRequestKind {
+    User(DeliveryRequest),
+    CoreInterrupt {
+        expected_active_turn: TurnId,
+        descendant_scope: DescendantTerminationScope,
+        configuration: PerInputConfigurationChoices,
+    },
+}
+
+impl SubmitInputRequestKind {
+    const fn delivery(&self) -> DeliveryRequest {
+        match self {
+            Self::User(delivery) => *delivery,
+            Self::CoreInterrupt {
+                expected_active_turn,
+                descendant_scope,
+                configuration,
+            } => DeliveryRequest::Interrupt {
+                expected_active_turn: *expected_active_turn,
+                descendant_scope: *descendant_scope,
+                configuration: *configuration,
+            },
+        }
+    }
 }
 
 impl SubmitInputRequest {
@@ -76,7 +105,13 @@ impl SubmitInputRequest {
         content: UserContent,
         delivery: DeliveryRequest,
     ) -> Result<Self, SubmitInputRequestError> {
-        Self::try_new_with_content_limit(command_id, session, content, delivery, None)
+        Self::admit(
+            command_id,
+            session,
+            content,
+            SubmitInputRequestKind::User(delivery),
+            None,
+        )
     }
 
     /// Validates structural admission and the deployment's optional content policy.
@@ -85,6 +120,44 @@ impl SubmitInputRequest {
         session: SessionId,
         content: UserContent,
         delivery: DeliveryRequest,
+        max_content_utf8_bytes: Option<usize>,
+    ) -> Result<Self, SubmitInputRequestError> {
+        Self::admit(
+            command_id,
+            session,
+            content,
+            SubmitInputRequestKind::User(delivery),
+            max_content_utf8_bytes,
+        )
+    }
+
+    /// Validates a daemon-core interrupt before canonical command construction.
+    pub fn try_new_core_interrupt(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        expected_active_turn: TurnId,
+        descendant_scope: DescendantTerminationScope,
+        configuration: PerInputConfigurationChoices,
+    ) -> Result<Self, SubmitInputRequestError> {
+        Self::admit(
+            command_id,
+            session,
+            content,
+            SubmitInputRequestKind::CoreInterrupt {
+                expected_active_turn,
+                descendant_scope,
+                configuration,
+            },
+            None,
+        )
+    }
+
+    fn admit(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        kind: SubmitInputRequestKind,
         max_content_utf8_bytes: Option<usize>,
     ) -> Result<Self, SubmitInputRequestError> {
         if command_id.as_uuid().is_nil() {
@@ -111,7 +184,7 @@ impl SubmitInputRequest {
             command_id,
             session,
             content,
-            delivery,
+            kind,
         })
     }
 
@@ -132,7 +205,7 @@ impl SubmitInputRequest {
 
     /// Returns the caller's explicit delivery treatment.
     pub const fn delivery(&self) -> DeliveryRequest {
-        self.delivery
+        self.kind.delivery()
     }
 }
 
@@ -305,7 +378,7 @@ where
     Transaction: SubmitInputTransaction,
     Nudge: EligibilityNudge,
 {
-    /// Constructs and handles one user-attributed input command.
+    /// Constructs and handles one admitted input command.
     ///
     /// Each invocation creates fresh candidates, including retransmission
     /// after a lost acknowledgement. The atomic port remains authoritative:
@@ -315,8 +388,14 @@ where
         &mut self,
         request: SubmitInputRequest,
     ) -> Result<SubmitInputOutcome, Transaction::Error> {
-        let session = request.session;
-        let interrupt_turn = match request.delivery {
+        let SubmitInputRequest {
+            command_id,
+            session,
+            content,
+            kind,
+        } = request;
+        let delivery = kind.delivery();
+        let interrupt_turn = match delivery {
             DeliveryRequest::Interrupt {
                 expected_active_turn,
                 ..
@@ -329,18 +408,29 @@ where
             Some(turn) => Some(self.tool_dispatch_gate.acquire(turn).await),
             None => None,
         };
-        let turn = match request.delivery {
+        let turn = match delivery {
             DeliveryRequest::NextSafePoint { .. } => None,
             DeliveryRequest::StartWhenNoActiveTurn { .. }
             | DeliveryRequest::Interrupt { .. }
             | DeliveryRequest::AfterCurrentTurn { .. } => Some(self.ids.next_turn_id()),
         };
-        let command = DomainSubmitInput::new(
-            request.command_id,
-            request.session,
-            request.content,
-            request.delivery,
-        );
+        let command = match kind {
+            SubmitInputRequestKind::User(delivery) => {
+                DomainSubmitInput::new(command_id, session, content, delivery)
+            }
+            SubmitInputRequestKind::CoreInterrupt {
+                expected_active_turn,
+                descendant_scope,
+                configuration,
+            } => DomainSubmitInput::new_core_interrupt(
+                command_id,
+                session,
+                content,
+                expected_active_turn,
+                descendant_scope,
+                configuration,
+            ),
+        };
         let accepted_input = self.ids.next_accepted_input_id();
         let cancellation_identities = CancelledModelCallTurnIdentities::new(
             self.ids.next_semantic_entry_id(),

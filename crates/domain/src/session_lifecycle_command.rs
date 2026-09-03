@@ -33,6 +33,7 @@ impl CommandPrincipal {
     pub const fn for_actor(actor: Actor) -> Self {
         match actor {
             Actor::User => Self::Operator,
+            Actor::Core => Self::Core,
             Actor::Recovery => Self::Watchdog,
             Actor::Model { .. } | Actor::Tool { .. } => Self::Core,
         }

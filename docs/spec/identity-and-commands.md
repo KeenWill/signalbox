@@ -415,7 +415,7 @@ rejection must use a new identifier.
 ## Actor attribution
 
 `Actor` (`crates/domain/src/actor.rs`) is the closed typed provenance of a
-durable command's initiating agency: `User`, `Model { turn: TurnId }`,
+durable command's initiating agency: `User`, `Core`, `Model { turn: TurnId }`,
 `Recovery`, or `Tool { request: ToolRequestId }`. Equality is structural; a
 carried identity is a validated reference, not minting authority, and
 attribution confers no lifecycle, authorization, or approval authority (INV-001,
@@ -423,7 +423,8 @@ INV-020).
 
 `SubmitInput` and `ReplaceSessionMetadata` are the command kinds whose durable
 payloads carry an `actor` field. The `SubmitInput` application constructor fixes
-`Actor::User`. Metadata replacement has two purpose-specific constructors: the
+`Actor::User`; its internal lifecycle-closure interrupt constructor fixes
+`Actor::Core`. Metadata replacement has two purpose-specific constructors: the
 process-facing form fixes `Actor::User`, while the tool-facing form requires one
 exact `ToolRequestId` and fixes `Actor::Tool { request }`. Neither accepts an
 arbitrary actor, and model/recovery issuers remain unconstructible.
@@ -436,7 +437,7 @@ claimed identifier under a different claimed agency. For metadata replacement,
 the recorded actor is also the applied last-writer provenance.
 
 Storage follows the closed-discriminator convention: `actor_kind`
-(`user`/`model`/`recovery`/`tool`) plus `actor_turn_id` and
+(`user`/`core`/`model`/`recovery`/`tool`) plus `actor_turn_id` and
 `actor_tool_request_id` reference columns with a `CHECK`-enforced variant shape
 in `submit_input_command` and `replace_session_metadata_command`. Metadata
 receipts additionally carry constructor-selected `issuer_kind` (`user`/`tool`)
@@ -520,5 +521,5 @@ edges.
 - UUIDv7 timestamp disclosure and namespace scope must be reassessed before
   identities are exposed outside the single-user boundary or treated as
   capabilities.
-- Which command kinds may admit non-user actors, and under what verification,
-  remains with reserved delegation and authorization decisions.
+- Any further command kinds that admit non-user actors remain with reserved
+  delegation and authorization decisions.

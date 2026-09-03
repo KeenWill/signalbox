@@ -849,6 +849,44 @@ fn assert_applied_command(outcome: GoalCommandHandlingOutcome) {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn attaching_a_goal_dispatches_the_first_turn_under_the_command_issuer()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let attached = GoalRepository::new(pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                command(ATTACH_COMMAND),
+                session(SESSION),
+                GoalUserAction::Attach(statement("finish the commissioned task")),
+            ),
+            Some(turn_candidates(0xb68)),
+            |_| None,
+        )
+        .await?;
+    let lifecycle: (String, String, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, actor_kind, actor_module
+           FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session(SESSION).into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_applied_command(attached);
+    assert_eq!(
+        lifecycle,
+        (String::from("dispatched"), String::from("operator"), None)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn owned_pending_failure_selection_requires_the_exact_need_under_the_session_lock()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;

@@ -101,6 +101,7 @@ listed there: `DirectModelSelection`, `ModelAlias` (configuration),
 ```rust
 pub enum Actor {
     User,
+    Core,
     Model { turn: TurnId },
     Recovery,
     Tool { request: ToolRequestId },
@@ -2549,6 +2550,14 @@ impl SubmitInput {
         session: SessionId,
         content: UserContent,
         delivery: DeliveryRequest,
+    ) -> Self;
+    pub const fn new_core_interrupt(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        expected_active_turn: TurnId,
+        descendant_scope: DescendantTerminationScope,
+        configuration: PerInputConfigurationChoices,
     ) -> Self;
     pub fn prepare_session_not_found(self) -> PreparedSubmitInput;
     pub fn prepare_attachment_blob_not_found(
@@ -11043,6 +11052,14 @@ impl SubmitInputRequest {
         session: SessionId,
         content: UserContent,
         delivery: DeliveryRequest,
+    ) -> Result<Self, SubmitInputRequestError>;
+    pub fn try_new_core_interrupt(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        expected_active_turn: TurnId,
+        descendant_scope: DescendantTerminationScope,
+        configuration: PerInputConfigurationChoices,
     ) -> Result<Self, SubmitInputRequestError>;
     pub fn try_new_with_content_limit(
         command_id: DurableCommandId,

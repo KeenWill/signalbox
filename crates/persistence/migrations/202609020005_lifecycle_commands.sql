@@ -25,6 +25,91 @@ ALTER TABLE durable_command
         ])))
     );
 
+ALTER TABLE submit_input_command
+    DROP CONSTRAINT submit_input_command_actor_kind_closed,
+    DROP CONSTRAINT submit_input_command_actor_shape,
+    ADD CONSTRAINT submit_input_command_actor_kind_closed CHECK (
+        actor_kind = ANY (ARRAY[
+            'user'::text, 'core'::text, 'model'::text,
+            'recovery'::text, 'tool'::text
+        ])
+    ),
+    ADD CONSTRAINT submit_input_command_actor_shape CHECK (
+        ((actor_kind = ANY (ARRAY['user'::text, 'core'::text, 'recovery'::text]))
+            AND actor_turn_id IS NULL
+            AND actor_tool_request_id IS NULL)
+        OR (actor_kind = 'model'::text
+            AND actor_turn_id IS NOT NULL
+            AND actor_tool_request_id IS NULL)
+        OR (actor_kind = 'tool'::text
+            AND actor_turn_id IS NULL
+            AND actor_tool_request_id IS NOT NULL)
+    );
+
+ALTER TABLE replace_session_metadata_command
+    DROP CONSTRAINT replace_session_metadata_command_actor_kind_closed,
+    DROP CONSTRAINT replace_session_metadata_command_actor_shape,
+    DROP CONSTRAINT replace_session_metadata_command_result_actor_kind_closed,
+    DROP CONSTRAINT replace_session_metadata_command_result_actor_shape,
+    ADD CONSTRAINT replace_session_metadata_command_actor_kind_closed CHECK (
+        actor_kind = ANY (ARRAY[
+            'user'::text, 'core'::text, 'model'::text,
+            'recovery'::text, 'tool'::text
+        ])
+    ),
+    ADD CONSTRAINT replace_session_metadata_command_actor_shape CHECK (
+        ((actor_kind = ANY (ARRAY['user'::text, 'core'::text, 'recovery'::text]))
+            AND actor_turn_id IS NULL
+            AND actor_tool_request_id IS NULL)
+        OR (actor_kind = 'model'::text
+            AND actor_turn_id IS NOT NULL
+            AND actor_tool_request_id IS NULL)
+        OR (actor_kind = 'tool'::text
+            AND actor_turn_id IS NULL
+            AND actor_tool_request_id IS NOT NULL)
+    ),
+    ADD CONSTRAINT replace_session_metadata_command_result_actor_kind_closed CHECK (
+        result_actor_kind IS NULL OR result_actor_kind = ANY (ARRAY[
+            'user'::text, 'core'::text, 'model'::text,
+            'recovery'::text, 'tool'::text
+        ])
+    ),
+    ADD CONSTRAINT replace_session_metadata_command_result_actor_shape CHECK (
+        (result_actor_kind IS NULL
+            AND result_actor_turn_id IS NULL
+            AND result_actor_tool_request_id IS NULL)
+        OR ((result_actor_kind = ANY (ARRAY['user'::text, 'core'::text, 'recovery'::text]))
+            AND result_actor_turn_id IS NULL
+            AND result_actor_tool_request_id IS NULL)
+        OR (result_actor_kind = 'model'::text
+            AND result_actor_turn_id IS NOT NULL
+            AND result_actor_tool_request_id IS NULL)
+        OR (result_actor_kind = 'tool'::text
+            AND result_actor_turn_id IS NULL
+            AND result_actor_tool_request_id IS NOT NULL)
+    );
+
+ALTER TABLE session_metadata
+    DROP CONSTRAINT session_metadata_actor_kind_closed,
+    DROP CONSTRAINT session_metadata_actor_shape,
+    ADD CONSTRAINT session_metadata_actor_kind_closed CHECK (
+        actor_kind = ANY (ARRAY[
+            'user'::text, 'core'::text, 'model'::text,
+            'recovery'::text, 'tool'::text
+        ])
+    ),
+    ADD CONSTRAINT session_metadata_actor_shape CHECK (
+        ((actor_kind = ANY (ARRAY['user'::text, 'core'::text, 'recovery'::text]))
+            AND actor_turn_id IS NULL
+            AND actor_tool_request_id IS NULL)
+        OR (actor_kind = 'model'::text
+            AND actor_turn_id IS NOT NULL
+            AND actor_tool_request_id IS NULL)
+        OR (actor_kind = 'tool'::text
+            AND actor_turn_id IS NULL
+            AND actor_tool_request_id IS NOT NULL)
+    );
+
 --
 -- The projector takes the issuer of a command-authored write (§6), and the
 -- goal-event trigger below reads it from the envelope.
@@ -41,7 +126,8 @@ CREATE FUNCTION project_session_lifecycle(
     lifts_park boolean,
     issuer_kind text DEFAULT NULL,
     issuer_module text DEFAULT NULL,
-    turn_progressed boolean DEFAULT false
+    turn_progressed boolean DEFAULT false,
+    queues_turn boolean DEFAULT false
 ) RETURNS void
     LANGUAGE plpgsql
     AS $$
@@ -156,6 +242,7 @@ BEGIN
              WHERE pending.session_id = subject
                AND pending.state_kind = 'queued'
         ) INTO queued;
+        queued := queued OR queues_turn;
 
         -- A creation stays `created` until its first turn is queued, and a
         -- dispatched session stays `dispatched` until one activates: the
@@ -278,7 +365,9 @@ BEGIN
         NEW.session_id,
         NEW.event_kind = 'resumed',
         authored_kind,
-        authored_module
+        authored_module,
+        false,
+        NEW.event_kind IN ('commissioned', 'resumed', 'superseded')
     );
     RETURN NULL;
 END;

@@ -110,9 +110,10 @@ use signalbox_process_protocol::{
     ReviewOrchestrationCounts, ReviewOrchestrationSnapshot, ReviewOrchestrationState,
     ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
     ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject,
-    ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, SessionMetadata, SessionPlacement,
-    SettingOverlay, SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry,
-    TranscriptTextEntry, TurnState, UserInputContent, decode_server_line, encode_client_line,
+    ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, SessionLifecycleEffect,
+    SessionMetadata, SessionPlacement, SettingOverlay, SystemPromptMember, SystemPromptText,
+    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, UserInputContent,
+    decode_server_line, encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, BlobStorageClass, BlobStoreRegistry, ContextGuardedTurnPass,
@@ -6656,6 +6657,69 @@ async fn s07_inv029_stop_turn_requests_cancellation_of_an_issued_call_exactly_on
             existing_command_id: CanonicalUuid::from_uuid(first_stop_command.into_uuid()),
         }
     );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn lifecycle_closure_retransmission_reports_its_receipt_after_interrupt_progress()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, live_turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    let _issued = Box::pin(authorize_issued_model_call(&runtime.pool, session_id)).await?;
+    let lifecycle_command = command()?;
+
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            3,
+            ClientRequest::StopSession {
+                command_id: lifecycle_command,
+                session_id,
+                sticky: true,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            },
+        )
+        .await?;
+    let first = response_within(&mut connection).await?;
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            4,
+            ClientRequest::StopSession {
+                command_id: lifecycle_command,
+                session_id,
+                sticky: true,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            },
+        )
+        .await?;
+    let replay = response_within(&mut connection).await?;
+    let expected = ServerMessage::SessionLifecycleCommandApplied {
+        session_id,
+        effect: SessionLifecycleEffect::ClosurePending { live_turn_id },
+    };
+    let applied_core_interrupts: (i64, i64) = sqlx::query_as(
+        "SELECT count(*), count(DISTINCT command.command_id)
+           FROM submit_input_command AS command
+           JOIN durable_command AS envelope USING (command_id)
+          WHERE command.session_id = $1
+            AND command.delivery_kind = 'interrupt'
+            AND command.actor_kind = 'core'
+            AND envelope.issuer_kind = 'core'",
+    )
+    .bind(session_id.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+
+    assert_eq!(first.message(), &expected);
+    assert_eq!(applied_core_interrupts, (1, 1));
+    assert_eq!(replay.message(), &expected);
 
     drop(connection);
     runtime.stop().await

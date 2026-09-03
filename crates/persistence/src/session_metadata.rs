@@ -950,7 +950,7 @@ fn decode_command(
     )?;
     match command_actor {
         Actor::User | Actor::Tool { .. } => {}
-        Actor::Model { .. } | Actor::Recovery => {
+        Actor::Core | Actor::Model { .. } | Actor::Recovery => {
             return Err(SessionMetadataCorruption::Unsupported {
                 field: "command actor",
                 value: actor_kind,
@@ -1203,6 +1203,11 @@ fn encode_actor(actor: Actor) -> EncodedActor {
             turn: None,
             tool_request: None,
         },
+        Actor::Core => EncodedActor {
+            kind: "core",
+            turn: None,
+            tool_request: None,
+        },
         Actor::Model { turn } => EncodedActor {
             kind: "model",
             turn: Some(turn.into_uuid()),
@@ -1229,6 +1234,7 @@ fn decode_actor(
 ) -> Result<Actor, SessionMetadataRepositoryError> {
     match (kind.as_str(), turn, tool_request) {
         ("user", None, None) => Ok(Actor::User),
+        ("core", None, None) => Ok(Actor::Core),
         ("model", Some(turn), None) => Ok(Actor::Model {
             turn: TurnId::from_uuid(turn),
         }),
@@ -1356,6 +1362,7 @@ mod tests {
     #[test]
     fn actor_storage_round_trips_every_variant() {
         assert_actor_storage_round_trip(Actor::User);
+        assert_actor_storage_round_trip(Actor::Core);
         assert_actor_storage_round_trip(Actor::Model {
             turn: TurnId::from_uuid(Uuid::from_u128(1)),
         });

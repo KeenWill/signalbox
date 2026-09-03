@@ -14719,6 +14719,7 @@ fn wire_metadata_snapshot(
 fn wire_metadata_last_writer(writer: SessionMetadataLastWriter) -> MetadataLastWriter {
     let actor = match writer.actor() {
         Actor::User => MetadataActor::User {},
+        Actor::Core => MetadataActor::Core {},
         Actor::Model { turn } => MetadataActor::Model {
             turn_id: wire_uuid(turn.into_uuid()),
         },
@@ -15778,18 +15779,16 @@ async fn interrupt_for_closure(
     let Ok(content) = UserContent::try_text(String::from("The session was closed.")) else {
         return Err(());
     };
-    let request = SubmitInputRequest::try_new(
+    let request = SubmitInputRequest::try_new_core_interrupt(
         DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
         session,
         content,
-        DeliveryRequest::Interrupt {
-            expected_active_turn: live_turn,
-            descendant_scope,
-            configuration: PerInputConfigurationChoices::new(
-                expected_version,
-                ModelSelectionOverride::UseSessionDefault,
-            ),
-        },
+        live_turn,
+        descendant_scope,
+        PerInputConfigurationChoices::new(
+            expected_version,
+            ModelSelectionOverride::UseSessionDefault,
+        ),
     );
     let Ok(request) = request else {
         return Err(());
@@ -15810,6 +15809,13 @@ async fn interrupt_for_closure(
     );
     match service.execute(request).await {
         Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Applied(_))) => Ok(()),
+        Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::InterruptAlreadyApplied {
+                session: rejected_session,
+                active_turn,
+                ..
+            },
+        ))) if rejected_session == session && active_turn == live_turn => Ok(()),
         Ok(other) => {
             if closure_settled(services, session).await {
                 return Ok(());
@@ -17895,6 +17901,7 @@ mod tests {
         let request = ToolRequestId::from_uuid(Uuid::from_u128(3));
 
         assert_metadata_last_writer_projects(Actor::User, MetadataActor::User {});
+        assert_metadata_last_writer_projects(Actor::Core, MetadataActor::Core {});
         assert_metadata_last_writer_projects(
             Actor::Model { turn },
             MetadataActor::Model {

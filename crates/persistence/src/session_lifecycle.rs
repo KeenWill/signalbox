@@ -894,35 +894,6 @@ fn closed_goal_agrees(state: &GoalState, outcome: SessionTerminalOutcome) -> boo
     }
 }
 
-#[cfg(test)]
-mod closed_goal_agreement_tests {
-    use super::*;
-
-    #[test]
-    fn achieved_goal_agrees_only_with_achievement_outcomes() {
-        let achieved = GoalState::Achieved {
-            report: signalbox_domain::GoalModelProvenance::new(
-                signalbox_domain::TurnId::from_uuid(Uuid::from_u128(1)),
-                signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(2)),
-            )
-            .report_ref(),
-        };
-
-        assert!(closed_goal_agrees(
-            &achieved,
-            SessionTerminalOutcome::AchievedVerified
-        ));
-        assert!(closed_goal_agrees(
-            &achieved,
-            SessionTerminalOutcome::AchievedDeclared
-        ));
-        assert!(!closed_goal_agrees(
-            &achieved,
-            SessionTerminalOutcome::FailedUnknown
-        ));
-    }
-}
-
 /// Whether the closure is an abandonment its state and actor permit.
 ///
 /// §2 makes `abandoned` the operator's write-off of a parked session, so a
@@ -1790,4 +1761,33 @@ where
 {
     row.try_get::<Option<T>, _>(field)?
         .ok_or_else(|| SessionLifecycleCorruption::Missing(field).into())
+}
+
+#[cfg(test)]
+mod closed_goal_agreement_tests {
+    use super::*;
+
+    #[test]
+    fn achieved_goal_agrees_only_with_achievement_outcomes() {
+        let achieved = GoalState::Achieved {
+            report: signalbox_domain::GoalModelProvenance::new(
+                signalbox_domain::TurnId::from_uuid(Uuid::from_u128(1)),
+                signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(2)),
+            )
+            .report_ref(),
+        };
+
+        assert!(closed_goal_agrees(
+            &achieved,
+            SessionTerminalOutcome::AchievedVerified
+        ));
+        assert!(closed_goal_agrees(
+            &achieved,
+            SessionTerminalOutcome::AchievedDeclared
+        ));
+        assert!(!closed_goal_agrees(
+            &achieved,
+            SessionTerminalOutcome::FailedUnknown
+        ));
+    }
 }

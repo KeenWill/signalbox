@@ -3748,6 +3748,7 @@ const fn last_writer_actor_label(last_writer: Option<MetadataLastWriter>) -> &'s
     match last_writer {
         Some(last_writer) => match last_writer.actor() {
             MetadataActor::User {} => "user",
+            MetadataActor::Core {} => "core",
             MetadataActor::Model { .. } => "model",
             MetadataActor::Recovery {} => "recovery",
             MetadataActor::Tool { .. } => "tool",

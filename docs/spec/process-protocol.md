@@ -1524,7 +1524,7 @@ and the value-bearing forms retain the unsupported value.
 unwritten snapshot has the empty non-archived metadata object and a null
 `last_writer`; an applied replacement always has a non-null last writer. A
 last-writer object has `updated_at_unix_micros` (canonical nonnegative decimal
-microseconds since the Unix epoch) and one closed actor object: `user`,
+microseconds since the Unix epoch) and one closed actor object: `user`, `core`,
 `model { turn_id }`, `recovery`, or `tool { tool_request_id }`. That inventory
 is exactly the durable actor inventory, because the projection is total over
 what storage admits: `replace_session_metadata` on this boundary always writes
@@ -2749,20 +2749,21 @@ reaches the user as a named diagnostic rather than a generic local encode
 failure. Each result is one line carrying the summary's session identity,
 archive state, defaults version, model selection, dangerous-tool posture,
 last-writer actor and timestamp, sorted comma-joined tags, and title. The actor
-prints as its wire kind — `user`, `model`, `recovery`, or `tool` — without the
-reference the kind carries, which the line has no field for. An unwritten
-metadata snapshot prints `last_writer=none`, `updated_at_unix_micros=none`, and
-empty tag and title values, which a present tag or title never is. A tag may
-itself contain the space that ends its field, the comma that separates it from a
-sibling, or the backslash that introduces an escape, so all three are escaped
-inside a tag exactly as a control code point is; every backslash in the tag
-field therefore opens an escape the client wrote, and the field decodes back to
-the exact tag set. The title is the line's last field, keeps its spaces, and is
-rendered to be read rather than decoded. When the page end names a continuation
-cursor, the client prints `next_after_session_id=<uuid>` to standard error after
-the results; a page is therefore never silently truncated, and that value is the
-next invocation's `--after`. The client also validates that a page never exceeds
-its requested limit.
+prints as its wire kind — `user`, `core`, `model`, `recovery`, or `tool` —
+without the reference the kind carries, which the line has no field for. An
+unwritten metadata snapshot prints `last_writer=none`,
+`updated_at_unix_micros=none`, and empty tag and title values, which a present
+tag or title never is. A tag may itself contain the space that ends its field,
+the comma that separates it from a sibling, or the backslash that introduces an
+escape, so all three are escaped inside a tag exactly as a control code point
+is; every backslash in the tag field therefore opens an escape the client wrote,
+and the field decodes back to the exact tag set. The title is the line's last
+field, keeps its spaces, and is rendered to be read rather than decoded. When
+the page end names a continuation cursor, the client prints
+`next_after_session_id=<uuid>` to standard error after the results; a page is
+therefore never silently truncated, and that value is the next invocation's
+`--after`. The client also validates that a page never exceeds its requested
+limit.
 
 `conversations` is the separate verb for `list_conversations` and follows the
 same one-request, one-page discipline as `search`. `--title` is the exact

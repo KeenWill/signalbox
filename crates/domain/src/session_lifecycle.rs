@@ -109,6 +109,9 @@ impl LifecycleActor {
     pub const fn classify(actor: Actor) -> Self {
         match actor {
             Actor::User => Self::Operator,
+            Actor::Core => Self::Core {
+                agency: CoreAgency::Daemon,
+            },
             Actor::Recovery => Self::Watchdog,
             Actor::Model { turn } => Self::Core {
                 agency: CoreAgency::Model { turn },

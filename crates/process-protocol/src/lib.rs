@@ -2650,6 +2650,8 @@ where
 pub enum MetadataActor {
     /// The user wrote the snapshot.
     User {},
+    /// Daemon core wrote the snapshot without delegated agency.
+    Core {},
     /// Model output from one exact turn wrote the snapshot.
     Model {
         /// The turn whose model output acted.
@@ -16919,6 +16921,7 @@ mod tests {
     fn inv033_metadata_writer_actor_round_trips_every_agency()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_metadata_actor_round_trips(MetadataActor::User {}, r#"{"type":"user"}"#)?;
+        assert_metadata_actor_round_trips(MetadataActor::Core {}, r#"{"type":"core"}"#)?;
         assert_metadata_actor_round_trips(
             MetadataActor::Model { turn_id: uuid(2) },
             r#"{"type":"model","turn_id":"00000000-0000-0000-0000-000000000002"}"#,

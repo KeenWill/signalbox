@@ -7277,6 +7277,11 @@ fn encode_actor(actor: Actor) -> EncodedActor {
             turn: None,
             tool_request: None,
         },
+        Actor::Core => EncodedActor {
+            kind: "core",
+            turn: None,
+            tool_request: None,
+        },
         Actor::Model { turn } => EncodedActor {
             kind: "model",
             turn: Some(turn.into_uuid()),
@@ -8969,23 +8974,38 @@ fn decode_complete(
         row.try_get("actor_tool_request_id")?,
     )?;
     let command_model_settings_override: Value = required(&row, "command_model_settings_override")?;
-    let command = SubmitInput::new(
-        command_id,
-        session_id_from_uuid(required(&row, "command_session_id")?),
-        decode_content(required(&row, "command_content_parts")?, "command content")?,
-        decode_delivery(
-            required(&row, "command_delivery_kind")?,
-            row.try_get("command_descendant_scope")?,
-            row.try_get("command_expected_active_turn_id")?,
-            row.try_get("command_expected_defaults_version")?,
-            row.try_get("command_model_override_kind")?,
-            row.try_get("command_replacement_model_kind")?,
-            row.try_get("command_replacement_direct_id")?,
-            row.try_get("command_replacement_alias_id")?,
-            command_model_settings_override,
-            "command delivery",
-        )?,
-    );
+    let session = session_id_from_uuid(required(&row, "command_session_id")?);
+    let content = decode_content(required(&row, "command_content_parts")?, "command content")?;
+    let delivery = decode_delivery(
+        required(&row, "command_delivery_kind")?,
+        row.try_get("command_descendant_scope")?,
+        row.try_get("command_expected_active_turn_id")?,
+        row.try_get("command_expected_defaults_version")?,
+        row.try_get("command_model_override_kind")?,
+        row.try_get("command_replacement_model_kind")?,
+        row.try_get("command_replacement_direct_id")?,
+        row.try_get("command_replacement_alias_id")?,
+        command_model_settings_override,
+        "command delivery",
+    )?;
+    let command = match (actor, delivery) {
+        (
+            Actor::Core,
+            DeliveryRequest::Interrupt {
+                expected_active_turn,
+                descendant_scope,
+                configuration,
+            },
+        ) => SubmitInput::new_core_interrupt(
+            command_id,
+            session,
+            content,
+            expected_active_turn,
+            descendant_scope,
+            configuration,
+        ),
+        (_, delivery) => SubmitInput::new(command_id, session, content, delivery),
+    };
 
     let result_kind: String = required(&row, "result_kind")?;
     let rejection_kind: Option<String> = row.try_get("rejection_kind")?;
@@ -9880,6 +9900,7 @@ fn decode_actor(
 ) -> Result<Actor, SubmitInputRepositoryError> {
     match (kind.as_str(), turn, tool_request) {
         ("user", None, None) => Ok(Actor::User),
+        ("core", None, None) => Ok(Actor::Core),
         ("model", Some(turn), None) => Ok(Actor::Model {
             turn: TurnId::from_uuid(turn),
         }),

@@ -164,8 +164,8 @@ async fn activate_turn(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn a_core_issued_interrupt_records_the_core_envelope_principal() -> Result<(), Box<dyn Error>>
-{
+async fn a_core_issued_interrupt_records_the_core_actor_and_envelope_principal()
+-> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = creation_session(30);
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
@@ -174,16 +174,14 @@ async fn a_core_issued_interrupt_records_the_core_envelope_principal() -> Result
     let live = queue_turn(&pool, session, 30, 1).await?;
     activate_turn(&pool, session, 30).await?;
     let command_id = DurableCommandId::from_uuid(Uuid::from_u128(SEED + 0xf30));
-    let interrupt = SubmitInput::new(
+    let interrupt = SubmitInput::new_core_interrupt(
         command_id,
         session,
         UserContent::try_text(String::from("core lifecycle closure interrupt"))
             .expect("fixture content is admitted"),
-        DeliveryRequest::Interrupt {
-            expected_active_turn: live,
-            descendant_scope: DescendantTerminationScope::ParentAlone,
-            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
-        },
+        live,
+        DescendantTerminationScope::ParentAlone,
+        input_choices(1, ModelSelectionOverride::UseSessionDefault),
     );
     let successor = TurnId::from_uuid(Uuid::from_u128(SEED + 0xf31));
     let _outcome = SubmitInputRepository::new(pool.clone())
@@ -214,6 +212,12 @@ async fn a_core_issued_interrupt_records_the_core_envelope_principal() -> Result
         issuer(&pool, command_id).await?,
         (String::from("core"), None)
     );
+    let actor: String =
+        sqlx::query_scalar("SELECT actor_kind FROM submit_input_command WHERE command_id = $1")
+            .bind(command_id.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(actor, "core");
 
     pool.close().await;
     drop(container);
