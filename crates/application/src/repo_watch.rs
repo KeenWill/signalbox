@@ -24,7 +24,7 @@ use signalbox_domain::{
     RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchWorkflowRunAttempt, RepositorySlug,
     ReviewState, ReviewThreadId, SemanticTranscriptEntryId, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationProvenance, SessionId, SessionTemplateName,
-    SessionTemplateProvenance, SubmitInput, TurnId, UserContent, WorkflowName,
+    SessionTemplateProvenance, SubmitInput, TurnAttemptId, TurnId, UserContent, WorkflowName,
 };
 
 /// Supplies identities in the exact order in which the differ emits facts.
@@ -3220,6 +3220,14 @@ impl SubmitInputIdGenerator for UuidV7RepoWatchDispatchIdGenerator {
 
     fn next_context_frontier_id(&mut self) -> ContextFrontierId {
         ContextFrontierId::from_uuid(uuid::Uuid::now_v7())
+    }
+
+    fn next_closure_decision_command_id(&mut self) -> DurableCommandId {
+        DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+    }
+
+    fn next_closure_turn_attempt_id(&mut self) -> TurnAttemptId {
+        TurnAttemptId::from_uuid(uuid::Uuid::now_v7())
     }
 }
 

@@ -11930,7 +11930,7 @@ struct ConfiguredSubmitInputTransaction<'configuration> {
 impl SubmitInputTransaction for ConfiguredSubmitInputTransaction<'_> {
     type Error = SubmitInputRepositoryError;
 
-    async fn handle<NextTurn, NextToolCancellation>(
+    async fn handle<NextTurn, NextToolCancellation, NextClosureDecision, NextClosureAttempt>(
         &mut self,
         command: SubmitInput,
         accepted_input: AcceptedInputId,
@@ -11938,6 +11938,8 @@ impl SubmitInputTransaction for ConfiguredSubmitInputTransaction<'_> {
         cancellation_identities: CancelledModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
         next_tool_cancellation: NextToolCancellation,
+        next_closure_decision: NextClosureDecision,
+        next_closure_attempt: NextClosureAttempt,
     ) -> Result<SubmitInputOutcome, Self::Error>
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
@@ -11947,6 +11949,8 @@ impl SubmitInputTransaction for ConfiguredSubmitInputTransaction<'_> {
                 Vec<signalbox_domain::SemanticTranscriptEntryId>,
                 signalbox_domain::ContextFrontierId,
             ) + Send,
+        NextClosureDecision: FnMut() -> DurableCommandId + Send,
+        NextClosureAttempt: FnMut() -> signalbox_domain::TurnAttemptId + Send,
     {
         let outcome = self
             .repository
@@ -11959,6 +11963,8 @@ impl SubmitInputTransaction for ConfiguredSubmitInputTransaction<'_> {
                 cancellation_identities,
                 next_reclassified_turn,
                 next_tool_cancellation,
+                next_closure_decision,
+                next_closure_attempt,
                 |alias| self.model_configuration.resolve_alias(alias),
             )
             .await?;

@@ -222,7 +222,7 @@ BEGIN
       FROM tool_approval_decision AS approval
      WHERE approval.user_command_id = checked_command_id
        AND approval.request_id = command_record.request_id
-       AND approval.decision_source = 'user_command'
+       AND approval.decision_source IN ('user_command', 'lifecycle_closure')
        AND approval.decision_kind = command_record.decision_kind
        AND approval.denial_reason
            IS NOT DISTINCT FROM command_record.denial_reason;
@@ -2301,6 +2301,27 @@ BEGIN
         END IF;
         RETURN NULL;
     END IF;
+    IF NEW.decision_source = 'lifecycle_closure' THEN
+        SELECT count(*) INTO matched
+          FROM decide_tool_request_command AS command
+          JOIN durable_command AS durable
+            ON durable.command_id = command.command_id
+           AND durable.command_kind = command.command_kind
+           AND durable.storage_version = command.storage_version
+         WHERE command.command_id = NEW.user_command_id
+           AND command.request_id = NEW.request_id
+           AND command.decision_kind = 'deny'
+           AND command.denial_reason IS NULL
+           AND command.result_kind = 'applied'
+           AND durable.issuer_kind = 'core';
+        IF matched <> 1 THEN
+            RAISE EXCEPTION 'lifecycle closure denial lacks core authority'
+                USING ERRCODE = '23514',
+                      CONSTRAINT =
+                          'tool_approval_lifecycle_closure_requires_core';
+        END IF;
+        RETURN NULL;
+    END IF;
     IF NEW.decision_source <> 'delegate' THEN
         RETURN NULL;
     END IF;
@@ -2752,8 +2773,8 @@ CREATE TABLE tool_approval_decision (
     override_denied_request_id uuid,
     CONSTRAINT tool_approval_decision_kind_closed CHECK ((decision_kind = ANY (ARRAY['approve'::text, 'deny'::text]))),
     CONSTRAINT tool_approval_decision_shape CHECK ((((decision_kind = 'approve'::text) AND (denial_reason IS NULL)) OR ((decision_kind = 'deny'::text) AND ((denial_reason IS NULL) OR ((octet_length(denial_reason) BETWEEN 1 AND 1024) AND (denial_reason !~ '[\x01-\x1f\x7f]'::text) AND (denial_reason !~ '[\u0080-\u009f]'::text) AND (denial_reason !~ '^[ \t\n\x0b\x0c\r]'::text) AND (denial_reason !~ '[ \t\n\x0b\x0c\r]$'::text)))))),
-    CONSTRAINT tool_approval_decision_source_closed CHECK ((decision_source = ANY (ARRAY['user_command'::text, 'policy_auto'::text, 'session_blanket'::text, 'delegate'::text, 'user_override'::text, 'runtime_safety'::text]))),
-    CONSTRAINT tool_approval_decision_source_shape CHECK ((((decision_source = 'user_command'::text) AND (user_command_id IS NOT NULL) AND (delegate_model_selection_id IS NULL) AND (delegate_model_call_id IS NULL) AND (rationale IS NULL) AND (override_denied_request_id IS NULL)) OR ((decision_source = ANY (ARRAY['policy_auto'::text, 'session_blanket'::text])) AND (decision_kind = 'approve'::text) AND (user_command_id IS NULL) AND (delegate_model_selection_id IS NULL) AND (delegate_model_call_id IS NULL) AND (rationale IS NULL) AND (override_denied_request_id IS NULL)) OR ((decision_source = 'delegate'::text) AND (user_command_id IS NULL) AND (delegate_model_selection_id IS NOT NULL) AND (delegate_model_call_id IS NOT NULL) AND (rationale IS NOT NULL) AND ((octet_length(rationale) >= 1) AND (octet_length(rationale) <= 4096)) AND (override_denied_request_id IS NULL)) OR ((decision_source = 'user_override'::text) AND (decision_kind = 'approve'::text) AND (user_command_id IS NULL) AND (delegate_model_selection_id IS NULL) AND (delegate_model_call_id IS NULL) AND (rationale IS NULL) AND (override_denied_request_id IS NOT NULL)) OR ((decision_source = 'runtime_safety'::text) AND (decision_kind = 'deny'::text) AND (denial_reason = 'Tool arguments were suppressed by the credential boundary'::text) AND (user_command_id IS NULL) AND (delegate_model_selection_id IS NULL) AND (delegate_model_call_id IS NULL) AND (rationale IS NULL) AND (override_denied_request_id IS NULL))))
+    CONSTRAINT tool_approval_decision_source_closed CHECK ((decision_source = ANY (ARRAY['user_command'::text, 'policy_auto'::text, 'session_blanket'::text, 'delegate'::text, 'user_override'::text, 'runtime_safety'::text, 'lifecycle_closure'::text]))),
+    CONSTRAINT tool_approval_decision_source_shape CHECK ((((decision_source = 'user_command'::text) AND (user_command_id IS NOT NULL) AND (delegate_model_selection_id IS NULL) AND (delegate_model_call_id IS NULL) AND (rationale IS NULL) AND (override_denied_request_id IS NULL)) OR ((decision_source = ANY (ARRAY['policy_auto'::text, 'session_blanket'::text])) AND (decision_kind = 'approve'::text) AND (user_command_id IS NULL) AND (delegate_model_selection_id IS NULL) AND (delegate_model_call_id IS NULL) AND (rationale IS NULL) AND (override_denied_request_id IS NULL)) OR ((decision_source = 'delegate'::text) AND (user_command_id IS NULL) AND (delegate_model_selection_id IS NOT NULL) AND (delegate_model_call_id IS NOT NULL) AND (rationale IS NOT NULL) AND ((octet_length(rationale) >= 1) AND (octet_length(rationale) <= 4096)) AND (override_denied_request_id IS NULL)) OR ((decision_source = 'user_override'::text) AND (decision_kind = 'approve'::text) AND (user_command_id IS NULL) AND (delegate_model_selection_id IS NULL) AND (delegate_model_call_id IS NULL) AND (rationale IS NULL) AND (override_denied_request_id IS NOT NULL)) OR ((decision_source = 'runtime_safety'::text) AND (decision_kind = 'deny'::text) AND (denial_reason = 'Tool arguments were suppressed by the credential boundary'::text) AND (user_command_id IS NULL) AND (delegate_model_selection_id IS NULL) AND (delegate_model_call_id IS NULL) AND (rationale IS NULL) AND (override_denied_request_id IS NULL)) OR ((decision_source = 'lifecycle_closure'::text) AND (decision_kind = 'deny'::text) AND (denial_reason IS NULL) AND (user_command_id IS NOT NULL) AND (delegate_model_selection_id IS NULL) AND (delegate_model_call_id IS NULL) AND (rationale IS NULL) AND (override_denied_request_id IS NULL))))
 );
 
 

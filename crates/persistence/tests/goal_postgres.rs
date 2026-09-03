@@ -4086,6 +4086,8 @@ async fn s18_inv010_inv012_lifecycle_stop_interrupt_uses_stopped_child_policy()
             ),
             |_| successor,
             |_| panic!("the fixture has no tool batch to cancel"),
+            || panic!("the fixture has no approval wait"),
+            || panic!("the fixture has no approval wait"),
             |_| None,
         )
         .await?;

@@ -344,6 +344,35 @@ impl ToolBatch {
         command: DecideToolRequest,
         continuation_attempt: Option<TurnAttemptId>,
     ) -> Result<PreparedToolBatchDecision, ToolBatchDecisionError> {
+        self.prepare_decision(command, continuation_attempt, |command, request| {
+            command.prepare_applied(request)
+        })
+    }
+
+    /// Applies a committed lifecycle closure's denial to the exact parked
+    /// request without attributing user agency.
+    pub fn prepare_lifecycle_closure_denial(
+        self,
+        command: DecideToolRequest,
+        continuation_attempt: Option<TurnAttemptId>,
+    ) -> Result<PreparedToolBatchDecision, ToolBatchDecisionError> {
+        self.prepare_decision(command, continuation_attempt, |command, request| {
+            command.prepare_lifecycle_closure_applied(request)
+        })
+    }
+
+    fn prepare_decision(
+        self,
+        command: DecideToolRequest,
+        continuation_attempt: Option<TurnAttemptId>,
+        prepare: impl FnOnce(
+            DecideToolRequest,
+            &crate::ToolRequest,
+        ) -> Result<
+            PreparedDecideToolRequest,
+            crate::DecideToolRequestPreparationError,
+        >,
+    ) -> Result<PreparedToolBatchDecision, ToolBatchDecisionError> {
         let ToolBatchPhase::AwaitingApproval {
             request: waiting_on,
         } = self.phase
@@ -391,13 +420,11 @@ impl ToolBatch {
             ));
         }
         let prepared =
-            command
-                .prepare_applied(request_record)
-                .map_err(|error| ToolBatchDecisionError {
-                    batch: Box::new(self.clone()),
-                    command: error.command().clone(),
-                    failure: ToolBatchDecisionFailure::CommandCorrelationMismatch,
-                })?;
+            prepare(command, request_record).map_err(|error| ToolBatchDecisionError {
+                batch: Box::new(self.clone()),
+                command: error.command().clone(),
+                failure: ToolBatchDecisionFailure::CommandCorrelationMismatch,
+            })?;
         let DecideToolRequestResult::Applied(applied) = prepared.result() else {
             return Err(ToolBatchDecisionError {
                 batch: Box::new(self),

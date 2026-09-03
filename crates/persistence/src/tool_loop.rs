@@ -53,9 +53,10 @@ use crate::{
         blob_read_rejection_to_str, dangerous_tool_auto_approval_from_str,
         durable_command_id_from_uuid, durable_command_id_to_uuid, positive_u64_from_numeric,
         session_id_from_uuid, session_id_to_uuid, tool_approval_decision_source_from_str,
-        tool_approval_posture_from_str, tool_attempt_disposition_from_str,
-        tool_attempt_disposition_to_str, tool_attempt_id_from_uuid, tool_attempt_id_to_uuid,
-        tool_request_id_from_uuid, tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
+        tool_approval_decision_source_to_str, tool_approval_posture_from_str,
+        tool_attempt_disposition_from_str, tool_attempt_disposition_to_str,
+        tool_attempt_id_from_uuid, tool_attempt_id_to_uuid, tool_request_id_from_uuid,
+        tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
     model_execution::{
         insert_prepared_call, insert_snapshot, lock_delegated_child_endpoint_sessions,
@@ -1867,11 +1868,17 @@ pub(crate) async fn load_active_batch_from_connection(
     .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
 }
 
-pub(crate) async fn deny_awaiting_approvals_for_interrupt(
+pub(crate) async fn deny_awaiting_approvals_for_interrupt<NextDecision, NextContinuation>(
     connection: &mut PgConnection,
     session: SessionId,
     turn: TurnId,
-) -> Result<(), ToolLoopRepositoryError> {
+    next_decision: &mut NextDecision,
+    next_continuation: &mut NextContinuation,
+) -> Result<(), ToolLoopRepositoryError>
+where
+    NextDecision: FnMut() -> DurableCommandId,
+    NextContinuation: FnMut() -> signalbox_domain::TurnAttemptId,
+{
     loop {
         let Some(batch) = load_active_batch_from_connection(connection, session, turn).await?
         else {
@@ -1887,10 +1894,9 @@ pub(crate) async fn deny_awaiting_approvals_for_interrupt(
             .filter(|request| batch.approval(request.id()).is_none())
             .count()
             == 1;
-        let continuation =
-            last_undecided.then(|| signalbox_domain::TurnAttemptId::from_uuid(Uuid::now_v7()));
+        let continuation = last_undecided.then(&mut *next_continuation);
         let command = DecideToolRequest::try_new(
-            DurableCommandId::from_uuid(Uuid::now_v7()),
+            next_decision(),
             request,
             ToolApprovalDecision::Deny { reason: None },
         )
@@ -1898,7 +1904,7 @@ pub(crate) async fn deny_awaiting_approvals_for_interrupt(
             ToolLoopRepositoryError::InvalidTransition("closure denial command identity is invalid")
         })?;
         let decision = batch
-            .prepare_user_decision(command, continuation)
+            .prepare_lifecycle_closure_denial(command, continuation)
             .map_err(|_| {
                 ToolLoopRepositoryError::InvalidTransition(
                     "closure denial does not match the approval wait",
@@ -2649,6 +2655,28 @@ async fn decode_approval(
             }
             ToolApprovalResolutionReconstitutionInput::runtime_safety(request)
         }
+        ToolApprovalDecisionSourceStorageKind::LifecycleClosure
+            if decision == (ToolApprovalDecision::Deny { reason: None }) =>
+        {
+            let command_id = durable_command_id_from_uuid(
+                user_command.ok_or(ToolLoopCorruption::Missing("closure decision command"))?,
+            )
+            .map_err(|_| ToolLoopCorruption::Inconsistent("closure decision command identity"))?;
+            let command = user_receipts
+                .get(&command_id)
+                .ok_or(ToolLoopCorruption::Missing(
+                    "closure decision command receipt",
+                ))?;
+            if command.command().request() != request
+                || command.command().decision() != &decision
+                || !matches!(command.result(), DecideToolRequestResult::Applied(_))
+            {
+                return Err(
+                    ToolLoopCorruption::Inconsistent("closure decision command receipt").into(),
+                );
+            }
+            ToolApprovalResolutionReconstitutionInput::lifecycle_closure(request)
+        }
         ToolApprovalDecisionSourceStorageKind::Delegate if user_command.is_none() => {
             let delegate_model: Option<Uuid> = row.try_get("delegate_model_selection_id")?;
             let delegate_call: Option<Uuid> = row.try_get("delegate_model_call_id")?;
@@ -2719,6 +2747,11 @@ async fn decode_approval(
                 ToolLoopCorruption::Inconsistent("runtime safety approval evidence").into(),
             );
         }
+        ToolApprovalDecisionSourceStorageKind::LifecycleClosure => {
+            return Err(
+                ToolLoopCorruption::Inconsistent("lifecycle closure approval evidence").into(),
+            );
+        }
         ToolApprovalDecisionSourceStorageKind::UserOverride => {
             return Err(ToolLoopCorruption::Inconsistent("user-override approval evidence").into());
         }
@@ -2744,6 +2777,7 @@ async fn load_user_decision_receipts(
                 command.decision_kind, command.denial_reason,
                 command.result_kind, command.rejection_kind,
                 command.result_earliest_undecided_request_id,
+                approval.decision_source,
                 request.request_ordinal, request.tool_name,
                 request.arguments_kind, request.arguments_text,
                 request.approval_posture,
@@ -2752,6 +2786,8 @@ async fn load_user_decision_receipts(
            FROM decide_tool_request_command AS command
            JOIN tool_request AS request
              ON request.request_id = command.request_id
+           LEFT JOIN tool_approval_decision AS approval
+             ON approval.user_command_id = command.command_id
           WHERE command.command_id = ANY($1)
             AND command.command_kind = 'decide_tool_request'
             AND command.storage_version = 1",
@@ -2777,10 +2813,14 @@ async fn load_user_decision_receipts(
             signalbox_domain::ModelCallId::from_uuid(required(&row, "producing_model_call_id")?);
         let session = session_id_from_uuid(required(&row, "session_id")?);
         let turn = turn_id_from_uuid(required(&row, "turn_id")?);
+        let source: Option<String> = row.try_get("decision_source")?;
         let request_record = decode_request(row, producing_call, session, turn)?;
-        let prepared = command
-            .prepare_applied(&request_record)
-            .map_err(|_| ToolLoopCorruption::Inconsistent("applied decision receipt"))?;
+        let prepared = if source.as_deref() == Some("lifecycle_closure") {
+            command.prepare_lifecycle_closure_applied(&request_record)
+        } else {
+            command.prepare_applied(&request_record)
+        }
+        .map_err(|_| ToolLoopCorruption::Inconsistent("applied decision receipt"))?;
         if receipts.insert(command_id, prepared).is_some() {
             return Err(ToolLoopCorruption::Inconsistent(
                 "duplicate approval user command receipt",
@@ -3410,12 +3450,33 @@ async fn persist_batch_decision(
     connection: &mut PgConnection,
     decision: &PreparedToolBatchDecision,
 ) -> Result<(), ToolLoopRepositoryError> {
-    persist_decision_command(
-        connection,
-        decision.prepared_command(),
-        signalbox_domain::CommandPrincipal::Core,
-    )
-    .await?;
+    let (source, principal) = match decision.prepared_command().result() {
+        DecideToolRequestResult::Applied(applied) => match applied.resolution().source() {
+            signalbox_domain::ToolDecisionSource::UserCommand => (
+                ToolApprovalDecisionSourceStorageKind::UserCommand,
+                signalbox_domain::CommandPrincipal::Operator,
+            ),
+            signalbox_domain::ToolDecisionSource::LifecycleClosure => (
+                ToolApprovalDecisionSourceStorageKind::LifecycleClosure,
+                signalbox_domain::CommandPrincipal::Core,
+            ),
+            _ => {
+                return Err(ToolLoopRepositoryError::InvalidTransition(
+                    "explicit decision used an unsupported source",
+                ));
+            }
+        },
+        DecideToolRequestResult::Rejected(_) => {
+            persist_decision_command(
+                connection,
+                decision.prepared_command(),
+                signalbox_domain::CommandPrincipal::Operator,
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    persist_decision_command(connection, decision.prepared_command(), principal).await?;
     let DecideToolRequestResult::Applied(applied) = decision.prepared_command().result() else {
         return Ok(());
     };
@@ -3424,10 +3485,11 @@ async fn persist_batch_decision(
         "INSERT INTO tool_approval_decision
             (request_id, decision_kind, decision_source, denial_reason,
              user_command_id)
-         VALUES ($1, $2, 'user_command', $3, $4)",
+         VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(tool_request_id_to_uuid(applied.resolution().request()))
     .bind(decision_kind)
+    .bind(tool_approval_decision_source_to_str(source))
     .bind(denial_reason)
     .bind(durable_command_id_to_uuid(
         decision.prepared_command().command().command_id(),
@@ -3597,13 +3659,16 @@ async fn load_decision_receipt(
     command_id: signalbox_domain::DurableCommandId,
 ) -> Result<Option<PreparedDecideToolRequest>, ToolLoopRepositoryError> {
     let row = sqlx::query(
-        "SELECT request_id, decision_kind, denial_reason,
+        "SELECT command.request_id, command.decision_kind, command.denial_reason,
                 result_kind, rejection_kind,
-                result_earliest_undecided_request_id
-           FROM decide_tool_request_command
-          WHERE command_id = $1
-            AND command_kind = 'decide_tool_request'
-            AND storage_version = 1",
+                result_earliest_undecided_request_id,
+                approval.decision_source
+           FROM decide_tool_request_command AS command
+           LEFT JOIN tool_approval_decision AS approval
+             ON approval.user_command_id = command.command_id
+          WHERE command.command_id = $1
+            AND command.command_kind = 'decide_tool_request'
+            AND command.storage_version = 1",
     )
     .bind(durable_command_id_to_uuid(command_id))
     .fetch_optional(&mut *connection)
@@ -3622,9 +3687,13 @@ async fn load_decision_receipt(
             let request_record = load_request_by_id(connection, request)
                 .await?
                 .ok_or(ToolLoopCorruption::Missing("applied decision request"))?;
-            command
-                .prepare_applied(&request_record)
-                .map_err(|_| ToolLoopCorruption::Inconsistent("applied decision receipt"))?
+            let source: Option<String> = row.try_get("decision_source")?;
+            if source.as_deref() == Some("lifecycle_closure") {
+                command.prepare_lifecycle_closure_applied(&request_record)
+            } else {
+                command.prepare_applied(&request_record)
+            }
+            .map_err(|_| ToolLoopCorruption::Inconsistent("applied decision receipt"))?
         }
         ("rejected", Some("request_not_found")) => command.prepare_request_not_found(),
         ("rejected", Some("already_resolved")) => command.prepare_already_resolved(),

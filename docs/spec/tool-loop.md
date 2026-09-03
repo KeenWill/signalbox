@@ -82,13 +82,15 @@ repository-read extension is verified through PR #348
 `2a55dbb65440dfae31b339b6726fe5ace6dab24c`. The runner executable stack rooted
 at this foundation proposal extends the same laws to the runner locus. The
 explicit-approval `AlwaysConfirm` declaration is verified through PR #366
-(`agent/exec-tools`). The daemon family inventory and the implemented Git and
-execution names were re-verified through this PR (`agent/daemon-wiring`) against
-implementation ref `c8f881f585b49fb11ae5718cd923029ed0218b5d`; its child stack
-implements their daemon composition. This page owns logical tool requests,
-approval policy and decisions, physical tool attempts, result admission,
-intra-turn continuation, crash classification, the compiled registry, and the
-daemon-local catalog. Turn and attempt lifecycle law lives in
+(`agent/exec-tools`). Lifecycle-closure denial provenance is verified through PR
+#1484 (`agent/lifecycle-t5-commands`). The daemon family inventory and the
+implemented Git and execution names were re-verified through this PR
+(`agent/daemon-wiring`) against implementation ref
+`c8f881f585b49fb11ae5718cd923029ed0218b5d`; its child stack implements their
+daemon composition. This page owns logical tool requests, approval policy and
+decisions, physical tool attempts, result admission, intra-turn continuation,
+crash classification, the compiled registry, and the daemon-local catalog. Turn
+and attempt lifecycle law lives in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
 entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
 model-call staging and provider translation in
@@ -195,18 +197,22 @@ implemented decision sources are:
   approval;
 - `Delegate` — an authority-checked approval-judge call decided the request;
 - `UserOverride` — a user-recorded one-shot override of a delegate denial
-  supplied approval when the session re-proposed the denied command; and
+  supplied approval when the session re-proposed the denied command;
 - `RuntimeSafety` — the provider credential boundary suppressed the complete
   argument object, so the producing-call transaction recorded a fixed denial
-  before any executor could observe the request.
+  before any executor could observe the request; and
+- `LifecycleClosure` — a committed session closure supplied a reasonless core
+  denial before its interrupt terminalized the live turn.
 
 A delegated decision names the exact direct model selection and dedicated model
 call that made it, and retains the judge rationale as nonempty text of at most
 4,096 bytes. A user decision instead names its exact durable command. A consumed
 user override names its override durable command and the exact delegate-denied
 request it overrides — user agency exercised in advance through that command.
-Automatic policy and runtime-safety denial have no decider or rationale. None of
-the automated paths can claim user agency (INV-020).
+Automatic policy, runtime-safety denial, and lifecycle-closure denial have no
+decider or rationale. The closure denial retains its core-issued durable command
+as authority evidence. None of the automated paths can claim user agency
+(INV-020).
 
 Each daemon tool mapping may declare one approval posture: `Auto`, `Delegated`,
 or `Human`. The selected posture is frozen into every resulting request. For

@@ -204,6 +204,8 @@ async fn a_core_issued_interrupt_records_the_core_envelope_principal() -> Result
                     ContextFrontierId::from_uuid(Uuid::from_u128(SEED + 0xf35)),
                 )
             },
+            || panic!("the fixture has no committed closure"),
+            || panic!("the fixture has no committed closure"),
             |_| None,
         )
         .await?;
@@ -252,7 +254,58 @@ async fn lifecycle_stop_settles_an_awaiting_approval_turn() -> Result<(), Box<dy
         })
     );
 
+    let rejected = SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates_alias_resolver_as(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x50)),
+                fixture.session,
+                UserContent::try_text(String::from("reject before closing the approval wait"))
+                    .expect("fixture content is admitted"),
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: fixture.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                    configuration: input_choices(2, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            CommandPrincipal::Core,
+            ParentTerminationKind::Stopped,
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x51)),
+            Some(TurnId::from_uuid(Uuid::from_u128(seed + 0x52))),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x53)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x54)),
+            ),
+            |_| TurnId::from_uuid(Uuid::from_u128(seed + 0x55)),
+            |_| panic!("a rejected interrupt does not cancel the tool batch"),
+            || DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x56)),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x57)),
+            |_| None,
+        )
+        .await?;
+    assert_eq!(
+        rejected,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::SessionDefaultsVersionMismatch {
+                session: fixture.session,
+                expected: SessionConfigurationDefaultsVersion::try_from_u64(2)
+                    .expect("fixture version is positive"),
+                current: SessionConfigurationDefaultsVersion::first(),
+            }
+        ))
+    );
+    let premature_decisions: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM tool_approval_decision
+          WHERE request_id = $1",
+    )
+    .bind(request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(premature_decisions, 0);
+
     let successor = TurnId::from_uuid(Uuid::from_u128(seed + 0x42));
+    let closure_decision = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x48));
+    let closure_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x49));
     let settled = SubmitInputRepository::new(pool.clone())
         .handle_with_candidates_alias_resolver_as(
             SubmitInput::new(
@@ -284,6 +337,8 @@ async fn lifecycle_stop_settles_an_awaiting_approval_turn() -> Result<(), Box<dy
                     ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x47)),
                 )
             },
+            || closure_decision,
+            || closure_attempt,
             |_| None,
         )
         .await?;
@@ -291,15 +346,26 @@ async fn lifecycle_stop_settles_an_awaiting_approval_turn() -> Result<(), Box<dy
         panic!("the closure interrupt must settle the parked turn");
     };
 
-    let approval: (String, Option<String>) = sqlx::query_as(
-        "SELECT decision_kind, denial_reason
-           FROM tool_approval_decision
+    let approval: (String, String, Option<String>, String) = sqlx::query_as(
+        "SELECT approval.decision_kind, approval.decision_source,
+                approval.denial_reason, command.issuer_kind
+           FROM tool_approval_decision AS approval
+           JOIN durable_command AS command
+             ON command.command_id = approval.user_command_id
           WHERE request_id = $1",
     )
     .bind(request.into_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(approval, (String::from("deny"), None));
+    assert_eq!(
+        approval,
+        (
+            String::from("deny"),
+            String::from("lifecycle_closure"),
+            None,
+            String::from("core")
+        )
+    );
     let lifecycle = SessionLifecycleRepository::new(pool.clone())
         .load(fixture.session)
         .await?
@@ -910,6 +976,8 @@ async fn a_park_closure_settles_the_suspended_turn_through_the_interrupt_machine
                     ContextFrontierId::from_uuid(Uuid::from_u128(0x11fe_c225)),
                 )
             },
+            || panic!("the fixture has no approval wait"),
+            || panic!("the fixture has no approval wait"),
             |_| None,
         )
         .await?;

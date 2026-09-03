@@ -172,6 +172,13 @@ pub trait SubmitInputIdGenerator {
 
     /// Generates one candidate terminal-frontier identity.
     fn next_context_frontier_id(&mut self) -> ContextFrontierId;
+
+    /// Generates one candidate command identity for a closure denial.
+    fn next_closure_decision_command_id(&mut self) -> DurableCommandId;
+
+    /// Generates one candidate continuation attempt after the final closure
+    /// denial.
+    fn next_closure_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
 }
 
 /// Production UUIDv7 generator for input-handling candidate identities.
@@ -193,6 +200,14 @@ impl SubmitInputIdGenerator for UuidV7SubmitInputIdGenerator {
 
     fn next_context_frontier_id(&mut self) -> ContextFrontierId {
         ContextFrontierId::from_uuid(uuid::Uuid::now_v7())
+    }
+
+    fn next_closure_decision_command_id(&mut self) -> DurableCommandId {
+        DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+    }
+
+    fn next_closure_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId {
+        signalbox_domain::TurnAttemptId::from_uuid(uuid::Uuid::now_v7())
     }
 }
 
@@ -223,7 +238,11 @@ pub trait SubmitInputTransaction {
     type Error;
 
     /// Handles one canonical command and its hub-minted identity candidates.
-    fn handle<NextTurn, NextToolCancellation>(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the atomic port keeps each identity candidate family explicit"
+    )]
+    fn handle<NextTurn, NextToolCancellation, NextClosureDecision, NextClosureAttempt>(
         &mut self,
         command: DomainSubmitInput,
         accepted_input: AcceptedInputId,
@@ -231,13 +250,17 @@ pub trait SubmitInputTransaction {
         cancellation_identities: CancelledModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
         next_tool_cancellation: NextToolCancellation,
+        next_closure_decision: NextClosureDecision,
+        next_closure_attempt: NextClosureAttempt,
     ) -> impl Future<Output = Result<SubmitInputOutcome, Self::Error>> + Send
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
         NextToolCancellation: FnMut(
                 &[signalbox_domain::ToolRequestId],
             ) -> (Vec<SemanticTranscriptEntryId>, ContextFrontierId)
-            + Send;
+            + Send,
+        NextClosureDecision: FnMut() -> DurableCommandId + Send,
+        NextClosureAttempt: FnMut() -> signalbox_domain::TurnAttemptId + Send;
 }
 
 /// Coordinates the durable input-submission use case.
@@ -348,6 +371,16 @@ where
                             .collect(),
                         ids.next_context_frontier_id(),
                     )
+                },
+                || {
+                    ids.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .next_closure_decision_command_id()
+                },
+                || {
+                    ids.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .next_closure_turn_attempt_id()
                 },
             )
             .await;
@@ -580,6 +613,16 @@ mod tests {
                 0x2000 + self.accepted_input_calls as u128,
             ))
         }
+
+        fn next_closure_decision_command_id(&mut self) -> DurableCommandId {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x3000 + self.accepted_input_calls as u128))
+        }
+
+        fn next_closure_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId {
+            signalbox_domain::TurnAttemptId::from_uuid(Uuid::from_u128(
+                0x4000 + self.accepted_input_calls as u128,
+            ))
+        }
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -612,7 +655,7 @@ mod tests {
     impl SubmitInputTransaction for FakeTransaction {
         type Error = FakeTransactionError;
 
-        fn handle<NextTurn, NextToolCancellation>(
+        fn handle<NextTurn, NextToolCancellation, NextClosureDecision, NextClosureAttempt>(
             &mut self,
             command: DomainSubmitInput,
             accepted_input: AcceptedInputId,
@@ -620,6 +663,8 @@ mod tests {
             _cancellation_identities: CancelledModelCallTurnIdentities,
             _next_reclassified_turn: NextTurn,
             _next_tool_cancellation: NextToolCancellation,
+            _next_closure_decision: NextClosureDecision,
+            _next_closure_attempt: NextClosureAttempt,
         ) -> impl Future<Output = Result<SubmitInputOutcome, Self::Error>> + Send
         where
             NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
@@ -629,6 +674,8 @@ mod tests {
                     Vec<signalbox_domain::SemanticTranscriptEntryId>,
                     signalbox_domain::ContextFrontierId,
                 ) + Send,
+            NextClosureDecision: FnMut() -> DurableCommandId + Send,
+            NextClosureAttempt: FnMut() -> signalbox_domain::TurnAttemptId + Send,
         {
             self.observed.push((command, accepted_input, turn));
             ready(

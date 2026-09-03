@@ -583,6 +583,7 @@ enum TransactionDecision {
 struct PreparedAgainstLockedState {
     prepared: PreparedSubmitInput,
     scheduling: Option<AcceptedInputSchedulingProjection>,
+    settles_closure: bool,
 }
 
 /// PostgreSQL implementation of atomic durable input acceptance.
@@ -682,6 +683,9 @@ impl SubmitInputRepository {
             ) + Send,
     {
         let principal = CommandPrincipal::for_actor(command.actor());
+        let unreachable_closure_decision = command.command_id();
+        let unreachable_closure_attempt =
+            TurnAttemptId::from_uuid(command.command_id().into_uuid());
         self.handle_with_candidates_alias_resolver_as(
             command,
             principal,
@@ -691,6 +695,8 @@ impl SubmitInputRepository {
             cancellation_identities,
             next_reclassified_turn,
             next_tool_cancellation,
+            || unreachable_closure_decision,
+            || unreachable_closure_attempt,
             select_definition,
         )
         .await
@@ -699,7 +705,12 @@ impl SubmitInputRepository {
     /// Handles one command with an authenticated envelope principal and
     /// deployment model-alias resolution.
     #[allow(clippy::too_many_arguments)]
-    pub async fn handle_with_candidates_alias_resolver_as<NextTurn, NextToolCancellation>(
+    pub async fn handle_with_candidates_alias_resolver_as<
+        NextTurn,
+        NextToolCancellation,
+        NextClosureDecision,
+        NextClosureAttempt,
+    >(
         &self,
         command: SubmitInput,
         principal: CommandPrincipal,
@@ -709,6 +720,8 @@ impl SubmitInputRepository {
         cancellation_identities: CancelledModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
         next_tool_cancellation: NextToolCancellation,
+        next_closure_decision: NextClosureDecision,
+        next_closure_attempt: NextClosureAttempt,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     ) -> Result<SubmitInputHandlingOutcome, SubmitInputRepositoryError>
     where
@@ -719,6 +732,8 @@ impl SubmitInputRepository {
                 Vec<signalbox_domain::SemanticTranscriptEntryId>,
                 signalbox_domain::ContextFrontierId,
             ) + Send,
+        NextClosureDecision: FnMut() -> DurableCommandId + Send,
+        NextClosureAttempt: FnMut() -> TurnAttemptId + Send,
     {
         let mut transaction = self.pool.begin().await?;
         let decision = Box::pin(handle_in_transaction(
@@ -731,6 +746,8 @@ impl SubmitInputRepository {
             cancellation_identities,
             next_reclassified_turn,
             next_tool_cancellation,
+            next_closure_decision,
+            next_closure_attempt,
             select_definition,
             self.model_capabilities.as_ref(),
             self.attachment_maximum_bytes,
@@ -797,7 +814,7 @@ impl SubmitInputRepository {
 impl SubmitInputTransaction for SubmitInputRepository {
     type Error = SubmitInputRepositoryError;
 
-    async fn handle<NextTurn, NextToolCancellation>(
+    async fn handle<NextTurn, NextToolCancellation, NextClosureDecision, NextClosureAttempt>(
         &mut self,
         command: SubmitInput,
         accepted_input: AcceptedInputId,
@@ -805,6 +822,8 @@ impl SubmitInputTransaction for SubmitInputRepository {
         cancellation_identities: CancelledModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
         next_tool_cancellation: NextToolCancellation,
+        _next_closure_decision: NextClosureDecision,
+        _next_closure_attempt: NextClosureAttempt,
     ) -> Result<SubmitInputOutcome, Self::Error>
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
@@ -814,6 +833,8 @@ impl SubmitInputTransaction for SubmitInputRepository {
                 Vec<signalbox_domain::SemanticTranscriptEntryId>,
                 signalbox_domain::ContextFrontierId,
             ) + Send,
+        NextClosureDecision: FnMut() -> DurableCommandId + Send,
+        NextClosureAttempt: FnMut() -> TurnAttemptId + Send,
     {
         let outcome = SubmitInputRepository::handle_with_candidates(
             self,
@@ -836,7 +857,12 @@ impl SubmitInputTransaction for SubmitInputRepository {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_in_transaction<NextTurn, NextToolCancellation>(
+async fn handle_in_transaction<
+    NextTurn,
+    NextToolCancellation,
+    NextClosureDecision,
+    NextClosureAttempt,
+>(
     connection: &mut PgConnection,
     command: SubmitInput,
     principal: CommandPrincipal,
@@ -846,6 +872,8 @@ async fn handle_in_transaction<NextTurn, NextToolCancellation>(
     cancellation_identities: CancelledModelCallTurnIdentities,
     mut next_reclassified_turn: NextTurn,
     mut next_tool_cancellation: NextToolCancellation,
+    mut next_closure_decision: NextClosureDecision,
+    mut next_closure_attempt: NextClosureAttempt,
     select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     model_capabilities: Option<&ModelCapabilityCatalog>,
     attachment_maximum_bytes: Option<u64>,
@@ -858,6 +886,8 @@ where
             Vec<signalbox_domain::SemanticTranscriptEntryId>,
             signalbox_domain::ContextFrontierId,
         ) + Send,
+    NextClosureDecision: FnMut() -> DurableCommandId + Send,
+    NextClosureAttempt: FnMut() -> TurnAttemptId + Send,
 {
     let command_id = command.command_id();
     match inspect_registry(connection, command_id).await? {
@@ -974,16 +1004,24 @@ where
     let PreparedAgainstLockedState {
         prepared,
         scheduling,
+        settles_closure,
     } = prepare_against_locked_state(
         connection,
         command,
         principal,
         accepted_input,
         turn,
+        &mut next_closure_decision,
+        &mut next_closure_attempt,
         select_definition,
         model_capabilities,
     )
     .await?;
+    if settles_closure && matches!(prepared.result(), SubmitInputResult::Rejected(_)) {
+        return Ok(TransactionDecision::Rollback(
+            SubmitInputHandlingOutcome::Recorded(prepared.result().clone()),
+        ));
+    }
     let prior_queued_inputs = scheduling
         .as_ref()
         .map(|scheduling| {
@@ -2749,6 +2787,8 @@ pub(crate) async fn insert_fresh_initial_input(
         cancellation_entry,
         cancellation_frontier,
     } = minted;
+    let unreachable_closure_decision = command.command_id();
+    let unreachable_closure_attempt = TurnAttemptId::from_uuid(command.command_id().into_uuid());
     let outcome = handle_in_transaction(
         connection,
         command,
@@ -2759,6 +2799,8 @@ pub(crate) async fn insert_fresh_initial_input(
         CancelledModelCallTurnIdentities::new(cancellation_entry, cancellation_frontier),
         |_| turn,
         |_| (Vec::new(), cancellation_frontier),
+        || unreachable_closure_decision,
+        || unreachable_closure_attempt,
         select_definition,
         None,
         None,
@@ -2872,15 +2914,25 @@ fn existing_outcome(
     }
 }
 
-async fn prepare_against_locked_state(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the locked preparation keeps command inputs and deferred identity effects explicit"
+)]
+async fn prepare_against_locked_state<NextClosureDecision, NextClosureAttempt>(
     connection: &mut PgConnection,
     command: SubmitInput,
     principal: CommandPrincipal,
     accepted_input: AcceptedInputId,
     turn: Option<TurnId>,
+    next_closure_decision: &mut NextClosureDecision,
+    next_closure_attempt: &mut NextClosureAttempt,
     select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     model_capabilities: Option<&ModelCapabilityCatalog>,
-) -> Result<PreparedAgainstLockedState, SubmitInputRepositoryError> {
+) -> Result<PreparedAgainstLockedState, SubmitInputRepositoryError>
+where
+    NextClosureDecision: FnMut() -> DurableCommandId + Send,
+    NextClosureAttempt: FnMut() -> TurnAttemptId + Send,
+{
     // Lock-mode constraint: these session-row locks must use the no-key-update
     // mode, not PostgreSQL's strongest row-lock mode. Submit orders the session row before the
     // scheduler row and current-defaults pointer row, while a concurrent
@@ -2929,6 +2981,7 @@ async fn prepare_against_locked_state(
         return Ok(PreparedAgainstLockedState {
             prepared: command.prepare_session_not_found(),
             scheduling: None,
+            settles_closure: false,
         });
     }
 
@@ -2965,9 +3018,15 @@ async fn prepare_against_locked_state(
             ..
         } = command.delivery()
     {
-        deny_awaiting_approvals_for_interrupt(connection, command.session(), expected_active_turn)
-            .await
-            .map_err(map_tool_loop_error)?;
+        deny_awaiting_approvals_for_interrupt(
+            connection,
+            command.session(),
+            expected_active_turn,
+            next_closure_decision,
+            next_closure_attempt,
+        )
+        .await
+        .map_err(map_tool_loop_error)?;
     }
 
     let pointer_exists =
@@ -3120,6 +3179,7 @@ async fn prepare_against_locked_state(
         .map(|prepared| PreparedAgainstLockedState {
             prepared,
             scheduling: Some(scheduling),
+            settles_closure,
         })
         .map_err(|error| match error.failure() {
             SubmitInputPreparationFailure::SessionMismatch { .. } => {

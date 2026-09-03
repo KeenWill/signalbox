@@ -3069,6 +3069,14 @@ impl SubmitInputIdGenerator for FixedSubmitInputIds {
     fn next_context_frontier_id(&mut self) -> ContextFrontierId {
         ContextFrontierId::from_uuid(next_test_submit_uuid())
     }
+
+    fn next_closure_decision_command_id(&mut self) -> DurableCommandId {
+        DurableCommandId::from_uuid(next_test_submit_uuid())
+    }
+
+    fn next_closure_turn_attempt_id(&mut self) -> TurnAttemptId {
+        TurnAttemptId::from_uuid(next_test_submit_uuid())
+    }
 }
 
 #[derive(Debug)]

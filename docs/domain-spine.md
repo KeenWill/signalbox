@@ -5138,6 +5138,7 @@ pub enum ToolDecisionSource {
     SessionOverride,
     Delegate,
     RuntimeSafety,
+    LifecycleClosure,
     UserOverride,
 }
 
@@ -5199,8 +5200,8 @@ pub enum ToolApprovalDecision {
 }
 pub struct ToolApprovalResolution { /* private */ }
 // sealed live producers: user command, registry auto, frozen session blanket,
-// checked delegate, consumed user override, or provider credential-boundary
-// safety denial
+// checked delegate, consumed user override, provider credential-boundary
+// safety denial, or committed lifecycle closure
 impl ToolApprovalResolution {
     // accessors: request(), decision(), source(), decider(), rationale(), is_approved()
 }
@@ -5217,6 +5218,7 @@ impl ToolApprovalResolutionReconstitutionInput {
         frozen_posture: DangerousToolAutoApproval,
     ) -> Self;
     pub const fn runtime_safety(request: ToolRequestId) -> Self;
+    pub const fn lifecycle_closure(request: ToolRequestId) -> Self;
     pub const fn user_override(
         request: ToolRequestId,
         command: DurableCommandId,
@@ -5252,6 +5254,10 @@ impl DecideToolRequest {
         decision: ToolApprovalDecision,
     ) -> Result<Self, DecideToolRequestConstructionError>;
     pub fn prepare_applied(
+        self,
+        request: &ToolRequest,
+    ) -> Result<PreparedDecideToolRequest, DecideToolRequestPreparationError>;
+    pub fn prepare_lifecycle_closure_applied(
         self,
         request: &ToolRequest,
     ) -> Result<PreparedDecideToolRequest, DecideToolRequestPreparationError>;
@@ -5624,6 +5630,11 @@ impl ToolBatch {
         continuation_attempt: Option<TurnAttemptId>,
     ) -> Result<PreparedDelegateToolApproval, DelegateToolApprovalTransitionError>;
     pub fn prepare_user_decision(
+        self,
+        command: DecideToolRequest,
+        continuation_attempt: Option<TurnAttemptId>,
+    ) -> Result<PreparedToolBatchDecision, ToolBatchDecisionError>;
+    pub fn prepare_lifecycle_closure_denial(
         self,
         command: DecideToolRequest,
         continuation_attempt: Option<TurnAttemptId>,
@@ -7555,6 +7566,8 @@ pub trait CreateSessionFromImportedFrontierIdGenerator {
     fn next_session_id(&mut self) -> SessionId;
     fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
     fn next_context_frontier_id(&mut self) -> ContextFrontierId;
+    fn next_closure_decision_command_id(&mut self) -> DurableCommandId;
+    fn next_closure_turn_attempt_id(&mut self) -> TurnAttemptId;
 }
 
 pub struct UuidV7CreateSessionFromImportedFrontierIdGenerator;
@@ -11053,7 +11066,7 @@ pub enum SubmitInputOutcome {
 pub trait SubmitInputTransaction {
     type Error;
 
-    fn handle<NextTurn, NextToolCancellation>(
+    fn handle<NextTurn, NextToolCancellation, NextClosureDecision, NextClosureAttempt>(
         &mut self,
         command: SubmitInput,
         accepted_input: AcceptedInputId,
@@ -11061,13 +11074,17 @@ pub trait SubmitInputTransaction {
         cancellation_identities: CancelledModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
         next_tool_cancellation: NextToolCancellation,
+        next_closure_decision: NextClosureDecision,
+        next_closure_attempt: NextClosureAttempt,
     ) -> impl Future<Output = Result<SubmitInputOutcome, Self::Error>> + Send
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
         NextToolCancellation:
             FnMut(&[ToolRequestId])
                 -> (Vec<SemanticTranscriptEntryId>, ContextFrontierId)
-                + Send;
+                + Send,
+        NextClosureDecision: FnMut() -> DurableCommandId + Send,
+        NextClosureAttempt: FnMut() -> TurnAttemptId + Send;
 }
 
 pub struct SubmitInputService<Generator, Transaction, Nudge> { /* private */ }

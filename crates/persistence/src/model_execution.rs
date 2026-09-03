@@ -8897,6 +8897,9 @@ fn encode_tool_decision_source(
         ToolDecisionSource::PolicyAuto => ToolApprovalDecisionSourceStorageKind::PolicyAuto,
         ToolDecisionSource::SessionBlanket => ToolApprovalDecisionSourceStorageKind::SessionBlanket,
         ToolDecisionSource::RuntimeSafety => ToolApprovalDecisionSourceStorageKind::RuntimeSafety,
+        ToolDecisionSource::LifecycleClosure => {
+            ToolApprovalDecisionSourceStorageKind::LifecycleClosure
+        }
         ToolDecisionSource::UserOverride => ToolApprovalDecisionSourceStorageKind::UserOverride,
         ToolDecisionSource::SessionOverride | ToolDecisionSource::Delegate => {
             return Err(ModelCallRepositoryError::InvalidTransition(

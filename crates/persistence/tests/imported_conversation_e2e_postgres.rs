@@ -169,6 +169,14 @@ impl SubmitInputIdGenerator for FixedSubmitIds {
             .pop_front()
             .expect("one cancellation frontier candidate is supplied")
     }
+
+    fn next_closure_decision_command_id(&mut self) -> DurableCommandId {
+        panic!("the import fixture never submits a closure interrupt")
+    }
+
+    fn next_closure_turn_attempt_id(&mut self) -> TurnAttemptId {
+        panic!("the import fixture never submits a closure interrupt")
+    }
 }
 
 #[derive(Debug)]
