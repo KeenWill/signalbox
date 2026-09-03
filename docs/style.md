@@ -1,26 +1,25 @@
 # House style: names over positions, provenance over literals
 
-**Status: normative for new and modified code.** Apply these principles to
-existing code only when already changing it for another reason. Rules from the
-testing style guide are cited below as TS-*n*; this guide restates none of them.
+These rules apply to new and modified code; apply them to existing code only
+when already changing it for another reason. Testing-style rules are cited as
+TS-*n* and not restated.
 
 ## Scope
 
-[`docs/agents/testing-style.md`](agents/testing-style.md) owns how a test body
-reads — fixtures, assertions, snapshots, helpers. This guide owns two narrower
-disciplines that apply to production and test code alike:
+[`docs/agents/testing-style.md`](agents/testing-style.md) covers how a test body
+reads: fixtures, assertions, snapshots, helpers. This guide covers two rules
+that apply to production and test code alike:
 
 1. **Literal provenance.** Every value visible at a use site either matters
    exactly (load-bearing) or merely needs to exist (arbitrary). The reader must
-   be able to tell which, without archaeology.
+   be able to tell which without reading elsewhere.
 2. **Label discipline.** Position may carry meaning only where types already do.
-   A run of same-typed positions — booleans worst of all — must become labeled
+   A run of same-typed positions, booleans especially, becomes labeled
    structure.
 
-Every worked example in the appendix starts from a real excerpt of this
-repository, abridged where the text says so, and quoted (with its line
-citations) as of the adoption commit; the rewrite that follows each excerpt is
-proposed, not existing code, except where the text says it has since landed.
+Each worked example in the appendix quotes a real excerpt of this repository,
+with line citations as of the commit that adopted this guide; the rewrite after
+each excerpt is proposed code unless the text says it has since landed.
 
 ## Core principles
 
@@ -73,14 +72,14 @@ Why: labels move the cross-referencing from every read site to one definition
 site, and turn silent transposition bugs into compile errors or visibly wrong
 field names.
 
-### 3. A boolean is an answer with its question erased
+### 3. A boolean axis becomes a two-variant enum
 
 `true` at a call site, in a tuple, or in a match arm tells the reader nothing
 about what was asked. Replace each boolean axis with a two-variant enum named
 for the axis; when the yes-case has data, carry it in the variant. This is the
 "boolean blindness" fix: keep the evidence, not just the bit. A boolean that
 must remain (a struct field mirroring an external schema, say) gets a positive,
-assertive name — `overflowed`, never `no_overflow`.
+assertive name: `overflowed`, not `no_overflow`.
 
 ```text
 decode(input, true);                       // true... what?
@@ -93,11 +92,9 @@ and failure output — self-describing.
 
 ### 4. Tests are documentation, and read as such
 
-The test suite is where a maintainer learns what the system promises. TS-1,
-TS-3, and TS-20 set that standard and remain its only statement; read them
-there. This guide adds the label discipline to it: defining a five-line local
-struct or enum inside a test module is cheap, and it is exactly as legitimate a
-documentation move as a well-named test function.
+TS-1, TS-3, and TS-20 state how tests document the system. This guide adds: a
+five-line local struct or enum defined inside a test module is cheap and
+documents the test as well as a well-named test function does.
 
 ### 5. Make illegal states unrepresentable before documenting legal ones
 
@@ -150,13 +147,11 @@ allowance into a fact.
 
 ## Conventions at component seams
 
-The core principles imply the following narrower rules where representations,
-errors, or durable data cross a boundary. These rules are normative for new and
-modified code in their stated scope.
+Narrower rules where representations, errors, or durable data cross a boundary.
 
 ### Distinguish the user from the wire role
 
-The human principal is the **user**. Prose never says bare “user message,”
+The human principal is the **user**. Prose does not say bare “user message,”
 because a wire-role `user` message may come from a parent agent, an imported
 transcript, or another non-human source. Say **user-role message** for the wire
 role, or **a message from the user** for the human principal.
@@ -217,9 +212,7 @@ the persistence crate's own tests, not the daemon at runtime.
 Migration filenames sort identically under lexical and numeric ordering, and the
 ordering prefix is chosen at merge time, not at authoring time — the prefix is
 load-bearing policy, because a file that sorts earlier than the definition it
-replaces silently re-issues the older text. The supersession-naming ceremony
-that once accompanied a re-added constraint is retired with the migration reset:
-a new migration is just a new migration.
+replaces silently re-issues the older text.
 
 Every `command_kind` spelling a durable `CHECK` constraint admits gains its
 registry variant, its join, and its presence entry in the same commit as the
@@ -284,10 +277,7 @@ idiomatically are untouched.
 
 No function body exceeds 400 lines. When a body accumulates shared mutable state
 across several match arms or loop bodies, that state becomes a named struct and
-each arm or phase becomes a function taking `&mut` that struct. The ceiling
-constrains only genuine outliers; the named-scope clause is what the author does
-instead, because the reason a long body resists reading is an unnamed working
-set that every arm reads and mutates, not the line count itself.
+each arm or phase becomes a function taking `&mut` that struct.
 
 ### Shared machinery has one home
 
@@ -295,9 +285,7 @@ Where two or more crates implement the same named role — provider adapters,
 source-format importers, transport clients — a helper that is byte-identical, or
 differs only in provider names and diagnostic strings, lives in the shared crate
 they both depend on. A change that would add such a helper to a second sibling
-moves it to the shared crate instead, in the same change. No per-crate reviewer
-can see the second copy, which is why the sibling relationship has to be named
-rather than left to notice.
+moves it to the shared crate instead, in the same change.
 
 Code in a provider-adapter crate names at least one of that provider's own wire
 types. Machinery that operates only on the shared runtime's types — evidence
@@ -336,10 +324,10 @@ for environment input, the variable name.
 
 A fallible domain operation returns a failure type scoped to that operation, and
 the failure value retains the rejected input: the offending string for a scalar
-admission, the boxed input for a reconstitution. Never write `map_err(|_| ...)`
-over a structured error — add or extend a variant that carries it. One flat enum
-serving dozens of operations, whose variants carry no context, is the shape this
-rule exists to prevent.
+admission, the boxed input for a reconstitution. Do not write `map_err(|_| ...)`
+over a structured error; add or extend a variant that carries it. One flat enum
+serving dozens of operations, with context-free variants, is what this rule
+prevents.
 
 A tracing event for session work carries `session_id`; turn-scoped work also
 carries `turn_id`. A subordinate identity such as a request or model-call ID
@@ -383,12 +371,10 @@ type or decoder mirroring a wire shape additionally names the wire discriminant
 it decodes, which makes a missing decoder visible by inspection.
 
 Every public item in the domain and application crates — including enum variants
-and public struct fields — carries a doc comment. Most already do, but not all:
-`DelegationTransitionFailure` and `DelegationTransitionError` in
-`crates/domain/src/session_delegation.rs` are exported undocumented today. The
-outstanding items are a baseline to burn down, not a permitted exception, and
-`missing_docs` stays deferred until they are cleared — see the clean-gate rule
-under mechanical enforcement.
+and public struct fields — carries a doc comment. `DelegationTransitionFailure`
+and `DelegationTransitionError` in `crates/domain/src/session_delegation.rs` are
+still undocumented; document them when next changing that file. `missing_docs`
+is enabled once they are cleared (see mechanical enforcement).
 
 Every arm of a tagged wire decoder in the native client names its complete
 admitted field set, through the shared rejection helper or a hand-written
@@ -415,44 +401,15 @@ the whole workspace passes it at `deny`.
 `missing_docs` is not configured yet. A follow-up enables it at `deny` only
 after the outstanding undocumented items across the workspace are cleared.
 
-`clippy::wildcard_enum_match_arm` is also not configured. A whole-workspace
-probe reports 211 remaining violations:
-
-- `signalbox-client`: 47; `signalbox-persistence`: 41; `signalbox-domain`: 34;
-  `signalboxd`: 23; `signalbox-model-runtime-anthropic`: 15;
-  `signalbox-model-runtime-openai`: 11; `signalbox-model-runtime-claude-cli`: 7;
-  `signalbox-model-runtime-codex-cli`: 6; `signalbox-application`,
-  `signalbox-expect-table`, and `signalbox-tools-code-host`: 5 each;
-  `signalbox-conversation-import-codex`: 3; `signalbox-model-runtime`,
-  `signalbox-model-provider-runtime`, and `signalbox-process-protocol`: 2 each;
-  `signalbox-conversation-import-claude-code`, `signalbox-tool-contract`, and
-  `signalbox-tool-schema-derive`: 1 each.
-
-The audit-fixes effort owns active violations in `apps/client/src/`,
-`apps/signalboxd/`, `crates/domain/src/model_execution.rs`, the model-runtime
-crates, `crates/process-protocol/`, and `crates/tools-code-host/`; the remaining
-domain and persistence matches require a separate exhaustive-match follow-up.
-Review enforces explicit matching until that complete inventory reaches zero and
-the lint can be enabled at `deny`.
+`clippy::wildcard_enum_match_arm` is also not configured. Review enforces
+explicit matching until the workspace's remaining wildcard arms are gone and the
+lint can be enabled at `deny`.
 
 ### The style-rule checker
 
-`scripts/check_style_rules.py` decides the three conventions below that a text
-scan decides without type resolution and that the tree already satisfies. It
-runs in CI as a blocking step: any finding fails the workflow, so the step can
-only fail on a regression. A rule joins it only once the tree it scans is at
-zero — never as a side effect of a change that merely reduces a count.
-
-The checker once carried thirteen rules report-only, with about a thousand
-findings it could never act on; ten of them are gone, because a step that always
-reports gates nothing and its findings go unread. Nine of those conventions are
-unchanged — only their mechanical scan is gone, and review enforces them like
-the rest of this guide. SR-9 is the exception, and the two halves of it part
-ways: the filename-ordering policy stands, stated above, while the
-supersession-naming ceremony is retired outright with the migration reset rather
-than merely unscanned.
-
-Each rule below names the convention it decides:
+`scripts/check_style_rules.py` checks the three conventions below, which a text
+scan can decide without type resolution. It runs in CI as a blocking step. A
+rule joins it only once the tree is at zero for that rule.
 
 | Rule  | Convention it decides                                             |
 | ----- | ----------------------------------------------------------------- |
@@ -460,19 +417,10 @@ Each rule below names the convention it decides:
 | SR-12 | every clap argument and `ValueEnum` variant carries a doc comment |
 | SR-13 | no proc-macro diagnostic is spanned on the macro call site        |
 
-The remaining conventions stay judgment-only, and the reason is the same in
-every case: the fact they turn on is not in the text. Whether a bound or durable
-spelling is owned by the crate restating it, whether a row record's labels
-describe the columns, whether a scrutinee's enum is project-owned, whether an
-error value is safe to render, whether a helper in a second sibling crate is the
-same helper, whether an alternative in the standard library was actually
-considered, whether a comment names the failure its defense prevents, whether a
-label describes the state it is derived from, and whether a tracing event's
-identities are the ones a reader would join on — each needs a reader who knows
-what the code means. Exhaustive matching and undocumented public items are
-Clippy's and rustc's to decide, once the counts above allow those lints to be
-configured at `deny`. A lint warning is never treated as permission to add a
-blanket crate-level allowance.
+The other conventions in this guide are checked in review, because the fact they
+turn on (who owns a bound, whether two helpers are the same helper, whether an
+error value is safe to render) is not in the text. Do not add a blanket
+crate-level `allow` to silence a lint warning.
 
 ## Rust mechanics (appendix)
 
@@ -483,7 +431,7 @@ and `PartialEq`, name the fields, and both assertions and failure output become
 labeled. Match with field names and `..` for the fields a given arm does not
 care about — the pattern then states exactly which facts the arm depends on.
 
-**Worked example** —
+Worked example:
 `crates/persistence/tests/postgres_integration/model_call_execution_and_recovery.rs:2441-2460`
 asserts a migration backfill through a six-way tuple:
 
@@ -528,14 +476,13 @@ assert_eq!(
 );
 ```
 
-`FromRow` requires named columns (`AS scheduler_rows`, …), which repairs the
-SQL's readability in the same stroke. On failure, `Debug` output prints field
-names instead of a positional tuple — the assertion message improves for free
-(TS-20).
+`FromRow` requires named columns (`AS scheduler_rows`, …), which also makes the
+SQL readable. On failure, `Debug` output prints field names instead of a
+positional tuple, so the assertion message improves (TS-20).
 
 ### B. A two-variant enum per boolean axis
 
-**Worked example** — the streaming budget helper in both provider runtimes
+Worked example: the streaming budget helper in both provider runtimes
 (`crates/model-runtime-openai/src/runtime.rs:506`, mirrored in
 `crates/model-runtime-anthropic/src/runtime.rs`) returned `(usize, bool)`, and
 its tests asserted bare pairs
@@ -602,12 +549,11 @@ guide introduces:
   const MISMATCHING_IDENTITY: u128 = 8;
   ```
 
-  The comments state each value's *role*; the reader never wonders whether `8`
-  is meaningful (it is: it must differ from `7`, and nothing more). The excerpt
-  is faithful, gap included: `TARGET_IDENTITY` carries no comment, so whether
-  `7` is itself load-bearing is left to the reader — under principle 1 it would
-  say *the pinned identity under test; any value `MISMATCHING_IDENTITY` differs
-  from serves*. This guide reaches that file the next time it is modified.
+  The comments state each value's role: `8` must differ from `7`, and nothing
+  more. `TARGET_IDENTITY` carries no comment, so whether `7` is load-bearing is
+  left to the reader; under principle 1 it would say "the pinned identity under
+  test; any value `MISMATCHING_IDENTITY` differs from serves". Add that comment
+  when next changing the file.
 
 - **Namespaced generators** for values whose only obligation is distinctness —
   `next_test_submit_uuid()` in `postgres_integration/main.rs:1722-1725` brands
@@ -616,12 +562,11 @@ guide introduces:
 
 - **One-knob fixtures** (TS-4) so arbitrary plumbing never reaches the test body
   at all, and — where a value must appear literally but any value would do — an
-  `ARBITRARY_`-prefixed constant such as `ARBITRARY_SESSION_ID`. The prefix is a
-  convention this guide introduces; no constant in the tree carries it yet, so
-  the first use establishes it.
+  `ARBITRARY_`-prefixed constant such as `ARBITRARY_SESSION_ID`
+  (`crates/runner-wire/src/tests.rs` uses the prefix).
 
-**Worked example** — `checkpoint_restart_model_call` combines both problems in
-one signature (`postgres_integration/main.rs:3084-3088`, twelve call sites):
+Worked example: `checkpoint_restart_model_call` combines both problems in one
+signature (`postgres_integration/main.rs:3084-3088`, twelve call sites):
 
 ```rust
 async fn checkpoint_restart_model_call(pool: &PgPool, seed: u128, authorize: bool) -> ...
@@ -653,7 +598,7 @@ let issued =
 
 ### D. Labeled matches for flag inventories
 
-**Worked example** — the registry corruption check matched a kind against six
+Worked example: the registry corruption check matched a kind against six
 presence booleans (`crates/persistence/src/command_registry.rs:130-170`,
 production code), abridged here to three flags:
 
