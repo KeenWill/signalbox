@@ -5,6 +5,6 @@
   "license": "MIT",
   "description": "Renovate-tracked exact pin for the Codex CLI wrapped by crates/model-runtime-codex-cli. Not a Node project: the sole dependency is the CLI executable itself, and the pin discipline is specified in docs/spec/runtime-substrate.md.",
   "dependencies": {
-    "@openai/codex": "0.150.0"
+    "@openai/codex": "0.153.1"
   }
 }
