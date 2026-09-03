@@ -1931,3 +1931,150 @@ BEGIN
     RETURN NEW;
 END;
 $$;
+
+-- A committed closure leaves no successor that could receive pending
+-- steering, so the handoff closes it without delivery.
+ALTER TABLE accepted_input
+    DROP CONSTRAINT accepted_input_disposition_closed,
+    ADD CONSTRAINT accepted_input_disposition_closed CHECK (
+        disposition_kind = ANY (ARRAY[
+            'origin_of'::text,
+            'pending_steering'::text,
+            'consumed_as_steering'::text,
+            'reclassified_as_turn_origin'::text,
+            'closed_not_delivered'::text
+        ])
+    );
+
+ALTER TABLE accepted_input
+    DROP CONSTRAINT accepted_input_delivery_shape,
+    ADD CONSTRAINT accepted_input_delivery_shape CHECK (
+        (
+            disposition_kind = 'origin_of'::text
+            AND delivery_kind = ANY (ARRAY[
+                'start_when_no_active_turn'::text,
+                'after_current_turn'::text,
+                'interrupt'::text
+            ])
+            AND (
+                (delivery_kind = 'start_when_no_active_turn'::text
+                    AND expected_active_turn_id IS NULL)
+                OR (delivery_kind = ANY (ARRAY[
+                        'after_current_turn'::text,
+                        'interrupt'::text
+                    ])
+                    AND expected_active_turn_id IS NOT NULL)
+            )
+            AND expected_defaults_version IS NOT NULL
+            AND model_override_kind IS NOT NULL
+            AND origin_turn_id IS NOT NULL
+            AND consuming_model_call_id IS NULL
+        )
+        OR (
+            disposition_kind = ANY (ARRAY[
+                'pending_steering'::text,
+                'consumed_as_steering'::text,
+                'closed_not_delivered'::text
+            ])
+            AND delivery_kind = 'next_safe_point'::text
+            AND expected_active_turn_id IS NOT NULL
+            AND expected_defaults_version IS NULL
+            AND model_override_kind IS NULL
+            AND replacement_model_kind IS NULL
+            AND replacement_direct_model_selection_id IS NULL
+            AND replacement_model_alias_id IS NULL
+            AND origin_turn_id IS NULL
+            AND (
+                (disposition_kind = ANY (ARRAY[
+                        'pending_steering'::text,
+                        'closed_not_delivered'::text
+                    ])
+                    AND consuming_model_call_id IS NULL)
+                OR (disposition_kind = 'consumed_as_steering'::text
+                    AND consuming_model_call_id IS NOT NULL)
+            )
+        )
+        OR (
+            disposition_kind = 'reclassified_as_turn_origin'::text
+            AND delivery_kind = 'next_safe_point'::text
+            AND expected_active_turn_id IS NOT NULL
+            AND expected_defaults_version IS NULL
+            AND model_override_kind IS NULL
+            AND replacement_model_kind IS NULL
+            AND replacement_direct_model_selection_id IS NULL
+            AND replacement_model_alias_id IS NULL
+            AND origin_turn_id IS NOT NULL
+            AND consuming_model_call_id IS NULL
+        )
+    );
+
+CREATE OR REPLACE FUNCTION reject_invalid_accepted_input_change() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'accepted_input is not deletable'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF OLD.disposition_kind = 'pending_steering'
+       AND NEW.disposition_kind IN (
+            'consumed_as_steering',
+            'reclassified_as_turn_origin',
+            'closed_not_delivered'
+       )
+       AND OLD.origin_turn_id IS NULL
+       AND OLD.consuming_model_call_id IS NULL
+       AND (
+            (
+                NEW.disposition_kind = 'consumed_as_steering'
+                AND NEW.origin_turn_id IS NULL
+                AND NEW.consuming_model_call_id IS NOT NULL
+            )
+            OR
+            (
+                NEW.disposition_kind = 'reclassified_as_turn_origin'
+                AND NEW.origin_turn_id IS NOT NULL
+                AND NEW.consuming_model_call_id IS NULL
+            )
+            OR
+            (
+                NEW.disposition_kind = 'closed_not_delivered'
+                AND NEW.origin_turn_id IS NULL
+                AND NEW.consuming_model_call_id IS NULL
+            )
+       )
+       AND ROW(
+            OLD.accepted_input_id,
+            OLD.accepting_command_id,
+            OLD.session_id,
+            OLD.delivery_kind,
+            OLD.expected_active_turn_id,
+            OLD.expected_defaults_version,
+            OLD.model_override_kind,
+            OLD.replacement_model_kind,
+            OLD.replacement_direct_model_selection_id,
+            OLD.replacement_model_alias_id,
+            OLD.acceptance_position
+       ) IS NOT DISTINCT FROM ROW(
+            NEW.accepted_input_id,
+            NEW.accepting_command_id,
+            NEW.session_id,
+            NEW.delivery_kind,
+            NEW.expected_active_turn_id,
+            NEW.expected_defaults_version,
+            NEW.model_override_kind,
+            NEW.replacement_model_kind,
+            NEW.replacement_direct_model_selection_id,
+            NEW.replacement_model_alias_id,
+            NEW.acceptance_position
+       )
+    THEN
+        RETURN NEW;
+    END IF;
+
+    RAISE EXCEPTION
+        'accepted_input is immutable outside pending-steering disposition'
+        USING ERRCODE = '23514';
+END;
+$$;

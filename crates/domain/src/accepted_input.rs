@@ -3,8 +3,9 @@
 //! The normative specification is
 //! `docs/spec/turn-lifecycle-and-scheduling.md`. An accepted input either
 //! originates a turn, waits as pending steering bound to its source turn, is
-//! consumed by an exact model call, or is reclassified as new turn-origin
-//! work when its source turn terminates before a safe point.
+//! consumed by an exact model call, is reclassified as new turn-origin work
+//! when its source turn terminates before a safe point, or is closed
+//! undelivered when its session commits to terminate.
 
 use crate::{AcceptedInputId, ModelCallId, TurnId};
 
@@ -194,6 +195,8 @@ pub enum AcceptedInputDisposition {
         /// Why the accepted steering could not be consumed by its source turn.
         reason: SteeringReclassificationReason,
     },
+    /// The session committed to terminate before a boundary could carry the input.
+    ClosedNotDelivered,
 }
 
 impl AcceptedInputDisposition {
@@ -206,7 +209,8 @@ impl AcceptedInputDisposition {
             Self::PendingSteering { .. } => Ok(Self::ConsumedAsSteering { call }),
             current @ (Self::OriginOf(_)
             | Self::ConsumedAsSteering { .. }
-            | Self::ReclassifiedAsTurnOrigin { .. }) => {
+            | Self::ReclassifiedAsTurnOrigin { .. }
+            | Self::ClosedNotDelivered) => {
                 Err(AcceptedInputDispositionTransitionError::CannotConsumeAsSteering { current })
             }
         }
@@ -222,7 +226,8 @@ impl AcceptedInputDisposition {
             Self::PendingSteering { .. } => Ok(Self::ReclassifiedAsTurnOrigin { turn, reason }),
             current @ (Self::OriginOf(_)
             | Self::ConsumedAsSteering { .. }
-            | Self::ReclassifiedAsTurnOrigin { .. }) => Err(
+            | Self::ReclassifiedAsTurnOrigin { .. }
+            | Self::ClosedNotDelivered) => Err(
                 AcceptedInputDispositionTransitionError::CannotReclassifyAsTurnOrigin { current },
             ),
         }

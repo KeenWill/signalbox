@@ -314,6 +314,8 @@ impl SessionLifecycleRepository {
     ///
     /// The lift records `operator`: §7 makes leaving a park an operator or
     /// coordinator action, so the classification is fixed rather than supplied.
+    /// A blocked goal must instead resume through its goal command so the goal
+    /// event and any guidance commit before the park is lifted.
     pub async fn resume(
         &self,
         session: SessionId,
@@ -334,6 +336,16 @@ impl SessionLifecycleRepository {
             return Err(reject(
                 transaction,
                 SessionLifecycleRejection::PendingTerminalConflict,
+            )
+            .await);
+        }
+        if goal::load_goal_from_connection(&mut transaction, session)
+            .await?
+            .is_some_and(|goal| matches!(goal.current().state(), GoalState::Blocked { .. }))
+        {
+            return Err(reject(
+                transaction,
+                SessionLifecycleRejection::TransitionNotAdmitted,
             )
             .await);
         }
@@ -448,6 +460,7 @@ impl SessionLifecycleRepository {
         .bind(actor_request)
         .execute(&mut *transaction)
         .await?;
+        dispose_pending_steering(&mut transaction, session).await?;
         commit(transaction).await
     }
 
@@ -525,6 +538,26 @@ impl SessionLifecycleRepository {
         journal_ownership(&mut transaction, session, transition, actor).await?;
         commit(transaction).await
     }
+}
+
+/// Closes accepted steering once its session has committed to terminate.
+async fn dispose_pending_steering(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<(), SessionLifecycleRepositoryError> {
+    sqlx::query(
+        "UPDATE accepted_input AS input
+            SET disposition_kind = 'closed_not_delivered'
+           FROM session_lifecycle AS lifecycle
+          WHERE input.session_id = $1
+            AND input.disposition_kind = 'pending_steering'
+            AND lifecycle.session_id = input.session_id
+            AND lifecycle.pending_terminal_outcome_kind IS NOT NULL",
+    )
+    .bind(session_id_to_uuid(session))
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
 }
 
 /// Writes the lifecycle satellite for one newly created session.
