@@ -2679,7 +2679,8 @@ async fn a_resume_cannot_lift_a_park_under_a_committed_closure() -> Result<(), B
 
 /// §2: a goal command cannot contradict a committed closure. Its own terminal
 /// event would make the settlement refuse, and with the handoff standing and
-/// activation frozen behind it the session could not move at all.
+/// activation frozen behind it the session could not move at all, so a client
+/// command takes the durable `session_closing` rejection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_goal_command_cannot_contradict_a_committed_closure() -> Result<(), Box<dyn Error>> {
@@ -2711,7 +2712,12 @@ async fn a_goal_command_cannot_contradict_a_committed_closure() -> Result<(), Bo
             |_| None,
         )
         .await?;
-    assert!(matches!(outcome, GoalCommandHandlingOutcome::LineageMoved));
+    assert_eq!(
+        outcome,
+        GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Rejected(
+            GoalCommandRejection::SessionClosing
+        ))
+    );
 
     let settled = repository.settle_pending_terminal(session).await?;
     assert_eq!(
