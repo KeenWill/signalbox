@@ -1942,9 +1942,13 @@ BEGIN
         ON lifecycle.turn_id = request.turn_id
        AND lifecycle.session_id = request.session_id
      WHERE dispatched.request_id = NEW.request_id
-       AND lifecycle.active_tool_round_call_id =
-           request.producing_model_call_id
+       AND dispatched.recording_transaction_id = pg_current_xact_id()
        AND (
+            lifecycle.active_tool_round_call_id =
+                request.producing_model_call_id
+            OR lifecycle.state_kind = 'terminal'
+       )
+       AND ((
             SELECT count(*)
               FROM tool_approval_decided_outbox_event AS transaction_event
               JOIN tool_approval_decision AS transaction_decision
@@ -1960,7 +1964,7 @@ BEGIN
                )
                AND transaction_event.recording_transaction_id =
                    dispatched.recording_transaction_id
-       ) = 1
+       ) = 1 OR lifecycle.state_kind = 'terminal')
        AND NOT EXISTS (
             SELECT 1
               FROM tool_request AS earlier
@@ -2017,6 +2021,36 @@ BEGIN
                        AND successor.continued_from_attempt_id =
                            producing_call.turn_attempt_id
                        AND successor.state_kind = 'prepared'
+                )
+            )
+            OR
+            (
+                lifecycle.state_kind = 'terminal'
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM tool_request AS undecided
+                      LEFT JOIN tool_approval_decision AS undecided_decision
+                        ON undecided_decision.request_id =
+                           undecided.request_id
+                     WHERE undecided.producing_model_call_id =
+                           request.producing_model_call_id
+                       AND undecided_decision.request_id IS NULL
+                )
+                AND EXISTS (
+                    SELECT 1
+                      FROM turn_attempt AS stopped_attempt
+                      JOIN submit_input_command AS interrupt
+                        ON interrupt.command_id =
+                           stopped_attempt.interrupt_command_id
+                      JOIN durable_command AS interrupt_claim
+                        ON interrupt_claim.command_id = interrupt.command_id
+                     WHERE stopped_attempt.turn_attempt_id =
+                           lifecycle.terminal_attempt_id
+                       AND interrupt.delivery_kind = 'interrupt'
+                       AND interrupt.result_kind = 'applied'
+                       AND interrupt_claim.issuer_kind = 'core'
+                       AND interrupt_claim.claimed_at =
+                           transaction_timestamp()
                 )
             )
        );

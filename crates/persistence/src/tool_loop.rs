@@ -1867,6 +1867,47 @@ pub(crate) async fn load_active_batch_from_connection(
     .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
 }
 
+pub(crate) async fn deny_awaiting_approvals_for_interrupt(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<(), ToolLoopRepositoryError> {
+    loop {
+        let Some(batch) = load_active_batch_from_connection(connection, session, turn).await?
+        else {
+            return Ok(());
+        };
+        let Some(waiting) = batch.awaiting_approval() else {
+            return Ok(());
+        };
+        let request = waiting.request();
+        let last_undecided = batch
+            .requests()
+            .iter()
+            .filter(|request| batch.approval(request.id()).is_none())
+            .count()
+            == 1;
+        let continuation =
+            last_undecided.then(|| signalbox_domain::TurnAttemptId::from_uuid(Uuid::now_v7()));
+        let command = DecideToolRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            request,
+            ToolApprovalDecision::Deny { reason: None },
+        )
+        .map_err(|_| {
+            ToolLoopRepositoryError::InvalidTransition("closure denial command identity is invalid")
+        })?;
+        let decision = batch
+            .prepare_user_decision(command, continuation)
+            .map_err(|_| {
+                ToolLoopRepositoryError::InvalidTransition(
+                    "closure denial does not match the approval wait",
+                )
+            })?;
+        persist_batch_decision(connection, &decision).await?;
+    }
+}
+
 /// Loads the exact frontier from which a runner-recovery interrupt must
 /// continue. A recovery wait retaining a tool round uses that round's yielded
 /// boundary; a wait without one uses the turn's starting frontier.

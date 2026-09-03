@@ -218,6 +218,104 @@ async fn a_core_issued_interrupt_records_the_core_envelope_principal() -> Result
     Ok(())
 }
 
+/// A lifecycle stop atomically denies a parked tool approval before its core
+/// interrupt settles the live turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn lifecycle_stop_settles_an_awaiting_approval_turn() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x11ff_9000;
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, "current_time", "{}").await?;
+    let terminal_outcome = SessionTerminalOutcome::Stopped {
+        sticky: StopStickiness::Sticky,
+    };
+    let lifecycle_command = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x40));
+    let committed = recorded(
+        &pool,
+        SessionLifecycleCommand::new(
+            lifecycle_command,
+            fixture.session,
+            SessionLifecycleOperation::Stop {
+                sticky: StopStickiness::Sticky,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            },
+        ),
+    )
+    .await?;
+    assert_eq!(
+        committed,
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::ClosurePending {
+            outcome: terminal_outcome,
+            live_turn: fixture.turn,
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
+        })
+    );
+
+    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 0x42));
+    let settled = SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates_alias_resolver_as(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x41)),
+                fixture.session,
+                UserContent::try_text(String::from("close the approval wait"))
+                    .expect("fixture content is admitted"),
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: fixture.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            CommandPrincipal::Core,
+            ParentTerminationKind::Stopped,
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x43)),
+            Some(successor),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x44)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x45)),
+            ),
+            |_| successor,
+            |requests| {
+                assert_eq!(requests, [request]);
+                (
+                    vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                        seed + 0x46,
+                    ))],
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x47)),
+                )
+            },
+            |_| None,
+        )
+        .await?;
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_)) = settled else {
+        panic!("the closure interrupt must settle the parked turn");
+    };
+
+    let approval: (String, Option<String>) = sqlx::query_as(
+        "SELECT decision_kind, denial_reason
+           FROM tool_approval_decision
+          WHERE request_id = $1",
+    )
+    .bind(request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(approval, (String::from("deny"), None));
+    let lifecycle = SessionLifecycleRepository::new(pool.clone())
+        .load(fixture.session)
+        .await?
+        .expect("the session keeps its lifecycle row");
+    assert_eq!(
+        lifecycle.state(),
+        SessionLifecycleState::Terminal {
+            outcome: terminal_outcome,
+        }
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// Fails the live turn through the startup recovery scan: an authorized
 /// failure transition that runs with every trigger armed.
 async fn fail_live_turn(

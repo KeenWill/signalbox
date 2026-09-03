@@ -102,11 +102,12 @@ use crate::{
     outbox::{self, OutboxEvent},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     tool_loop::{
-        load_active_batch_from_connection, load_continuation_round_evidence,
-        load_optional_foreground_delegation_outcome, load_recovery_batch_by_attempt,
-        load_runner_recovery_batch_without_attempt, load_runner_recovery_cancellation_batch,
-        load_runner_recovery_source_snapshot, load_steering_continuation_round_evidence,
-        load_terminal_result_attempts, load_terminal_result_denials, persist_ended_attempt,
+        deny_awaiting_approvals_for_interrupt, load_active_batch_from_connection,
+        load_continuation_round_evidence, load_optional_foreground_delegation_outcome,
+        load_recovery_batch_by_attempt, load_runner_recovery_batch_without_attempt,
+        load_runner_recovery_cancellation_batch, load_runner_recovery_source_snapshot,
+        load_steering_continuation_round_evidence, load_terminal_result_attempts,
+        load_terminal_result_denials, persist_ended_attempt,
     },
 };
 
@@ -2951,10 +2952,22 @@ async fn prepare_against_locked_state(
     .bind(session_id_to_uuid(command.session()))
     .fetch_one(&mut *connection)
     .await?;
-    if pending_terminal && !settles_committed_closure(connection, &command, principal).await? {
+    let settles_closure =
+        pending_terminal && settles_committed_closure(connection, &command, principal).await?;
+    if pending_terminal && !settles_closure {
         return Err(
             SubmitInputCorruption::Inconsistent("session has a pending terminal handoff").into(),
         );
+    }
+    if settles_closure
+        && let DeliveryRequest::Interrupt {
+            expected_active_turn,
+            ..
+        } = command.delivery()
+    {
+        deny_awaiting_approvals_for_interrupt(connection, command.session(), expected_active_turn)
+            .await
+            .map_err(map_tool_loop_error)?;
     }
 
     let pointer_exists =
