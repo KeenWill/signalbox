@@ -737,36 +737,38 @@ fn closure_carries_standing_cause(
     held: &SessionLifecycleState,
     outcome: SessionTerminalOutcome,
 ) -> bool {
-    let SessionLifecycleState::Parked {
-        standing: Some(standing),
-        ..
-    } = held
-    else {
-        return true;
-    };
-    match (standing, outcome) {
+    match (held, outcome) {
         (
-            SessionFailureCause::Retryable(standing),
+            SessionLifecycleState::Parked {
+                cause: SessionParkCause::UnknownFailure,
+                ..
+            },
+            SessionTerminalOutcome::FailedRetryable { .. }
+            | SessionTerminalOutcome::FailedStructural { .. },
+        ) => false,
+        (
+            SessionLifecycleState::Parked {
+                standing: Some(SessionFailureCause::Retryable(standing)),
+                ..
+            },
             SessionTerminalOutcome::FailedRetryable { cause },
         ) => *standing == cause,
         (
-            SessionFailureCause::Structural(standing),
+            SessionLifecycleState::Parked {
+                standing: Some(SessionFailureCause::Structural(standing)),
+                ..
+            },
             SessionTerminalOutcome::FailedStructural { cause },
         ) => *standing == cause,
         (
-            _,
+            SessionLifecycleState::Parked {
+                standing: Some(_), ..
+            },
             SessionTerminalOutcome::FailedRetryable { .. }
             | SessionTerminalOutcome::FailedStructural { .. }
             | SessionTerminalOutcome::FailedUnknown,
         ) => false,
-        (
-            _,
-            SessionTerminalOutcome::AchievedVerified
-            | SessionTerminalOutcome::Stopped { .. }
-            | SessionTerminalOutcome::Superseded { .. }
-            | SessionTerminalOutcome::Abandoned
-            | SessionTerminalOutcome::Retired { .. },
-        ) => true,
+        _ => true,
     }
 }
 
