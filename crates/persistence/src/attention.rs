@@ -829,12 +829,19 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
     )?;
     let waiting = row.try_get::<Option<String>, _>("session_waiting_kind")?;
     let recovering = row.try_get::<Option<String>, _>("session_recovering_op")?;
+    let active_turn_count = required_string(row, "active_turn_count")?
+        .parse()
+        .map_err(|_| AttentionCorruption::Invalid("active turn count"))?;
+    let queued_turn_count = required_string(row, "queued_turn_count")?
+        .parse()
+        .map_err(|_| AttentionCorruption::Invalid("queued turn count"))?;
     let state = classify_state(
         runner.as_deref(),
         SessionLifecycleProjection {
             state: session_state,
             waiting: waiting.as_deref(),
             recovering: recovering.as_deref(),
+            queued_turns: queued_turn_count,
         },
         turn_state.as_deref(),
         phase.as_deref(),
@@ -851,12 +858,6 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
         approval_human_authority,
         automatic_resumption_pending,
     );
-    let active_turn_count = required_string(row, "active_turn_count")?
-        .parse()
-        .map_err(|_| AttentionCorruption::Invalid("active turn count"))?;
-    let queued_turn_count = required_string(row, "queued_turn_count")?
-        .parse()
-        .map_err(|_| AttentionCorruption::Invalid("queued turn count"))?;
     validate_state_counts(state, active_turn_count, queued_turn_count)?;
     let fact_kind = required_string(row, "fact_kind")?;
     let recorded_at = row
@@ -946,6 +947,7 @@ struct SessionLifecycleProjection<'row> {
     state: SessionLifecycleStateKind,
     waiting: Option<&'row str>,
     recovering: Option<&'row str>,
+    queued_turns: u64,
 }
 
 /// Projects one attention state from the durable session state and turn phase.
@@ -985,7 +987,14 @@ fn classify_state(
         SessionLifecycleStateKind::Terminal | SessionLifecycleStateKind::Created => {
             Ok(AttentionState::Idle)
         }
-        SessionLifecycleStateKind::Dispatched => Ok(AttentionState::Queued),
+        // A dispatch whose queue emptied -- a stop retiring the turn it was
+        // dispatched for -- is dispatched with nothing to run. `queued` names
+        // work waiting, and there is none.
+        SessionLifecycleStateKind::Dispatched => Ok(if session.queued_turns > 0 {
+            AttentionState::Queued
+        } else {
+            AttentionState::Idle
+        }),
         SessionLifecycleStateKind::Active => classify_turn_phase(turn, phase, terminal),
     }
 }
@@ -1174,6 +1183,7 @@ mod tests {
             state,
             waiting: None,
             recovering: None,
+            queued_turns: 1,
         }
     }
 
@@ -1182,6 +1192,7 @@ mod tests {
             state: SessionLifecycleStateKind::Waiting,
             waiting: Some(kind),
             recovering: None,
+            queued_turns: 0,
         }
     }
 
@@ -1190,6 +1201,7 @@ mod tests {
             state: SessionLifecycleStateKind::Recovering,
             waiting: None,
             recovering: Some(operation),
+            queued_turns: 0,
         }
     }
 
@@ -1435,6 +1447,24 @@ mod tests {
             .unwrap(),
             AttentionState::Queued
         );
+    }
+
+    /// A stop can retire the turn a session was dispatched for, leaving the
+    /// session dispatched with an empty queue. `queued` would then contradict
+    /// the queued count and the whole snapshot would fail its own validation.
+    #[test]
+    fn a_dispatch_with_nothing_queued_projects_idle() {
+        let emptied = SessionLifecycleProjection {
+            state: SessionLifecycleStateKind::Dispatched,
+            waiting: None,
+            recovering: None,
+            queued_turns: 0,
+        };
+        assert_eq!(
+            classify_state(None, emptied, None, None, None).unwrap(),
+            AttentionState::Idle
+        );
+        assert!(validate_state_counts(AttentionState::Idle, 0, 0).is_ok());
     }
 
     #[test]

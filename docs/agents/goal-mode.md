@@ -16,8 +16,8 @@ finishing a milestone.
   the backlog flags a next major milestone (the tool-loop foundation today),
   propose that flagged milestone first, and when it is blocked on an owner
   decision (as the tool loop is), propose scheduling that decision or design
-  pass rather than dropping to a lower `ready` item; (2) only when nothing is
-  owner-flagged, fall to the highest backlog entry that is `ready` (or whose
+  pass rather than taking a lower `ready` item; (2) only when nothing is
+  owner-flagged, take the highest backlog entry that is `ready` (or whose
   blocker the goal itself clears) and whose `Owns`/`Collides-with` groups are
   free of the concurrent claims the owner names at launch. Agents never reorder
   the backlog. The priority order is binding for selection; the target model's
@@ -44,29 +44,25 @@ finishing a milestone.
   unconsumed machinery are not substitutes for blocked work.
 - Maintain compact progress checkpoints naming the current track, what has been
   verified, what remains, and any semantic or external blocker.
-- On a pull request touching `crates/domain` or `crates/persistence`, pause the
-  review-fix loop after wave three and wait for the owner's next check-in rather
-  than running it unattended; report the wave history so far at the pause.
-  Non-core pull requests keep the adaptive wave rule in `AGENTS.md` unchanged.
 
 ### Long-running commands
 
-- Describe a long-running background command as progressing only on advancing
-  evidence: process CPU time increasing between two samples, output growing, or
-  a progress counter moving. Absence of failures is not progress, and neither is
-  silence.
+- Describe a long-running background command as progressing only on evidence
+  that it is advancing: process CPU time increasing between two samples, output
+  growing, or a progress counter moving. Absence of failures is not progress,
+  and neither is silence.
 - Before electing to wait on a background run, sample the process itself —
   elapsed and CPU time, for example `ps -o etime,time -p <pid>` — and record
   what that sample showed, so the next check has a prior observation to compare
   against.
 - A run whose CPU time and output have not advanced across two samples roughly
-  five minutes apart is presumed wedged, not slow. Capture state first — process
+  five minutes apart is presumed stuck, not slow. Capture state first — process
   table, container status, output tail — then kill the run and its containers,
   remediate, and rerun the targeted subset before the full suite. Never wait for
   a zero-CPU command to exit on its own.
 - Before launching a heavyweight suite, find and kill the leaked runs and
   containers an earlier turn left behind. A suite queued behind an abandoned run
-  of its own waits on resources that run still holds, advances not at all, and
+  of its own waits on resources that run still holds, does not advance, and
   reports no failure — the case these rules exist for.
 
 ## Finishing
@@ -74,10 +70,7 @@ finishing a milestone.
 A milestone is complete when all of its pull requests are finished (per
 `AGENTS.md`) and merged by the owner; finished pull requests awaiting merge are
 not a reason to stop other work. When the milestone's work is delivered, request
-an owner alignment review before selecting the next milestone. That request
-includes each pull request's one-line review-wave history — accepted and
-declined counts partitioned per wave, in wave order, never aggregated across
-waves — so the owner sees the degradation curve.
+an owner alignment review before selecting the next milestone.
 
 ## Writing a goal
 

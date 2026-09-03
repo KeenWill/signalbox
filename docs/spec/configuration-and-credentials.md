@@ -1,7 +1,10 @@
 # Configuration and credentials
 
 The model-call recovery telemetry vocabulary is re-verified against this PR
-(`agent/turn-lifecycle-hardening`).
+(`agent/turn-lifecycle-hardening`). The migration-failure rejection text on the
+startup log is verified against this PR (`agent/t1-migration-backfill`). The
+lifecycle Prometheus gauge inventory is verified against PR #1478
+(`agent/lifecycle-t3-metrics`).
 
 The browser HTTP listener, same-origin static assets, and generated contract
 bootstrap are verified against this PR (`agent/web-http-transport`). The
@@ -380,15 +383,19 @@ operator failure class, and small typed fields where present (session and turn
 ids, recovered-turn count, grace-window seconds) — never configuration values,
 paths, or URLs. The typed configuration error does not survive to the log:
 `run_hub` collapses every catalog-parse and adapter-construction variant (and
-likewise connection and migration errors) into a generic `Infrastructure` class
-carrying only its phase, so an operator cannot distinguish an unreadable catalog
-from an unknown field, bad version, or invalid limit (see Open edges). The six
-unconditional deployment paths are accepted without I/O at environment parsing
-time; both catalogs and every template prompt file are read during startup.
-Provider and integration credential files remain lazy. A currently routed S3
-blob store is the sole static-file exception: after database connection and the
-configuration-independent recovery scan, startup reads that explicit credential
-to perform the marker and lifecycle checks owned by
+likewise connection errors) into a generic `Infrastructure` class carrying only
+its phase, so an operator cannot distinguish an unreadable catalog from an
+unknown field, bad version, or invalid limit (see Open edges). A failed
+migration is the one exception. It carries the same generic class and phase and
+additionally records the database's own rejection text in a structured field,
+because the phase alone cannot separate a rejected constraint from an
+unreachable database, and that text names schema objects rather than
+configuration. The six unconditional deployment paths are accepted without I/O
+at environment parsing time; both catalogs and every template prompt file are
+read during startup. Provider and integration credential files remain lazy. A
+currently routed S3 blob store is the sole static-file exception: after database
+connection and the configuration-independent recovery scan, startup reads that
+explicit credential to perform the marker and lifecycle checks owned by
 [blob storage](blob-storage.md#stores-routing-and-configuration), before socket
 admission or scheduling.
 
@@ -503,7 +510,7 @@ rate-limited and a transient failure does not stop later scrapes.
 SIGNALBOX_PROMETHEUS_BIND=127.0.0.1:9464
 ```
 
-The registry contains exactly six metric names:
+The registry contains exactly nine metric names:
 
 - `signalbox_turns_started_total`, with no labels, counts durable turn
   activations. An operator graphs it as the workload-rate denominator and
@@ -516,6 +523,15 @@ The registry contains exactly six metric names:
   values are `completed`, `known_failed`, `refused`, `cancelled`, and
   `ambiguous`, counts durable terminal model calls. It separates provider-call
   health and refusal from ambiguity that requires recovery handling.
+- `signalbox_session_lifecycle_rate_parts_per_million{metric}` publishes each
+  latest complete weekly rate under the closed labels
+  `session_completion_failure_rate`, `failed_unknown_share`,
+  `overflow_incidence`, `finish_given_overflow`, `wall_rate`,
+  `turn_cause_completeness`, and `model_call_cause_completeness`.
+- `signalbox_sessions_nonterminal_past_deadline` is the current count of owned
+  non-terminal sessions past their armed deadline obligation.
+- `signalbox_session_lifecycle_export_fresh` is one after a successful
+  configured refresh and zero after a failed refresh.
 - `signalbox_scheduler_passes_in_flight`, with no labels, is the current count
   of authoritative scheduler passes holding admission slots.
 - `signalbox_scheduler_oldest_in_flight_pass_age_seconds`, with no labels, is
@@ -3258,10 +3274,10 @@ are outside this cluster-delivery policy:
 - `DATABASE_URL` via process environment is explicitly provisional; the
   database-credential delivery channel remains an open decision.
 - signalboxd erases typed configuration diagnostics before logging:
-  catalog-parse and Anthropic-construction variants (and connection and
-  migration errors) collapse to a generic `Infrastructure` class plus phase, so
-  startup logs cannot distinguish failure causes within the `Configuration`
-  phase.
+  catalog-parse and Anthropic-construction variants (and connection errors)
+  collapse to a generic `Infrastructure` class plus phase, so startup logs
+  cannot distinguish failure causes within the `Configuration` phase. A failed
+  migration is the exception and keeps its rejection text.
 - [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance)
   owns the unresolved in-memory credential-hygiene question.
 - No adapter in this build reports remaining provider capacity, so

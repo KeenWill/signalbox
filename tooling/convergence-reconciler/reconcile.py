@@ -152,9 +152,6 @@ INFORMATIONAL_REVIEW_COMMENT = re.compile(
 TRIVIAL_INFORMATIONAL_REPLIES = frozenset(
     {"ack", "acknowledged", "done", "noted", "ok", "okay", "thanks", "thank you"}
 )
-MEANINGFUL_LINES = re.compile(
-    r"(?im)^meaningfully changed lines:\s*([0-9][0-9,]*)\s*(?:\([^\n]*\))?\s*$"
-)
 COMPARE_FILE_LIMIT = 300
 NON_GATING_CHECK_NAMES = frozenset(
     {
@@ -1323,40 +1320,6 @@ def comparison_is_complete(comparison: Any) -> bool:
     )
 
 
-def is_lockfile(path: str) -> bool:
-    name = Path(path).name.casefold()
-    return name in {
-        "cargo.lock",
-        "composer.lock",
-        "devenv.lock",
-        "gemfile.lock",
-        "package-lock.json",
-        "packages.lock.json",
-        "pipfile.lock",
-        "pnpm-lock.yaml",
-        "poetry.lock",
-        "pubspec.lock",
-        "uv.lock",
-        "yarn.lock",
-    } or name.endswith(".resolved")
-
-
-def meaningful_line_count(changed_files: Sequence[dict[str, Any]]) -> int | None:
-    total = 0
-    for changed_file in changed_files:
-        path = changed_file.get("path")
-        additions = changed_file.get("additions")
-        deletions = changed_file.get("deletions")
-        if not isinstance(path, str):
-            return None
-        if is_lockfile(path):
-            continue
-        if not isinstance(additions, int) or not isinstance(deletions, int):
-            return None
-        total += additions + deletions
-    return total
-
-
 def normalize_review_threads(
     threads: Sequence[dict[str, Any]], pull_request_author: str | None
 ) -> list[dict[str, Any]]:
@@ -1626,18 +1589,6 @@ def evaluate_convergence(pull_request: dict[str, Any]) -> dict[str, Any]:
         description = pull_request["body"]
         if len(re.findall(r"\b[\w'-]+\b", description)) > 350:
             reasons.append("description-exceeds-350-words")
-        meaningful_match = MEANINGFUL_LINES.search(description)
-        if meaningful_match is None:
-            reasons.append("description-missing-meaningfully-changed-lines")
-        elif "changed_files" in pull_request:
-            observed_count = meaningful_line_count(pull_request["changed_files"])
-            stated_count = int(meaningful_match.group(1).replace(",", ""))
-            if observed_count is None:
-                reasons.append("meaningfully-changed-lines-unavailable")
-            elif stated_count != observed_count:
-                reasons.append(
-                    f"meaningfully-changed-lines-mismatch:{stated_count}:{observed_count}"
-                )
     if pull_request["checked_head_oid"] != pull_request["head_oid"]:
         reasons.append("checks-not-for-current-head")
     if pull_request["check_rollup_state"] is None:

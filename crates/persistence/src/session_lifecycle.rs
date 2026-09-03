@@ -327,6 +327,8 @@ impl SessionLifecycleRepository {
     ///
     /// The lift records `operator`: §7 makes leaving a park an operator or
     /// coordinator action, so the classification is fixed rather than supplied.
+    /// A blocked goal must instead resume through its goal command so the goal
+    /// event and any guidance commit before the park is lifted.
     pub async fn resume(
         &self,
         session: SessionId,
@@ -463,11 +465,26 @@ impl SessionLifecycleRepository {
     }
 }
 
-/// Writes the lifecycle satellite for one newly created session.
-///
-/// Every creation path calls this: `session` carries a deferred foreign key to
-/// the satellite, so a creation that skips it fails at commit rather than
-/// leaving a session with no state.
+/// Closes accepted steering once its session has committed to terminate.
+async fn dispose_pending_steering(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<(), SessionLifecycleRepositoryError> {
+    sqlx::query(
+        "UPDATE accepted_input AS input
+            SET disposition_kind = 'closed_not_delivered'
+           FROM session_lifecycle AS lifecycle
+          WHERE input.session_id = $1
+            AND input.disposition_kind = 'pending_steering'
+            AND lifecycle.session_id = input.session_id
+            AND lifecycle.pending_terminal_outcome_kind IS NOT NULL",
+    )
+    .bind(session_id_to_uuid(session))
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
 /// Lifts one park inside the caller's transaction.
 pub(crate) async fn resume_in_transaction(
     connection: &mut PgConnection,
@@ -483,6 +500,14 @@ pub(crate) async fn resume_in_transaction(
     if held.pending_terminal.is_some() {
         return Err(SessionLifecycleRepositoryError::Rejected(
             SessionLifecycleRejection::PendingTerminalConflict,
+        ));
+    }
+    if goal::load_goal_from_connection(connection, session)
+        .await?
+        .is_some_and(|goal| matches!(goal.current().state(), GoalState::Blocked { .. }))
+    {
+        return Err(SessionLifecycleRepositoryError::Rejected(
+            SessionLifecycleRejection::TransitionNotAdmitted,
         ));
     }
     write_state(connection, &held, SessionLifecycleState::Active, actor).await?;
@@ -559,6 +584,7 @@ pub(crate) async fn commit_pending_terminal_in_transaction(
     .bind(actor_request)
     .execute(&mut *connection)
     .await?;
+    dispose_pending_steering(connection, session).await?;
     Ok(())
 }
 
@@ -677,6 +703,11 @@ async fn flip_ownership_in_transaction(
     Ok(())
 }
 
+/// Writes the lifecycle satellite for one newly created session.
+///
+/// Every creation path calls this: `session` carries a deferred foreign key to
+/// the satellite, so a creation that skips it fails at commit rather than
+/// leaving a session with no state.
 pub(crate) async fn insert_created(
     connection: &mut PgConnection,
     session: SessionId,

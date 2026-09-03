@@ -6845,11 +6845,15 @@ async fn load_active_acceptance_tail(
                     call: ModelCallId::from_uuid(call),
                 }
             }
+            ("closed_not_delivered", None, None, DeliveryRequest::NextSafePoint { .. }) => {
+                AcceptedInputDisposition::ClosedNotDelivered
+            }
             (
                 "origin_of"
                 | "pending_steering"
                 | "reclassified_as_turn_origin"
-                | "consumed_as_steering",
+                | "consumed_as_steering"
+                | "closed_not_delivered",
                 _,
                 _,
                 _,

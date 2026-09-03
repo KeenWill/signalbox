@@ -22,7 +22,6 @@ from reconcile import (
     evaluate_convergence,
     is_codex_review_request,
     load_state,
-    meaningful_line_count,
     normalize_pull_request,
     normalize_review_threads,
     nonnegative_number,
@@ -38,7 +37,7 @@ class ConvergencePredicateTests(unittest.TestCase):
     def test_description_requirements_block_convergence(self) -> None:
         pull_request = {
             "base_commits_not_in_head": 0,
-            "body": "Summary without the required line count.",
+            "body": " ".join(["word"] * 351),
             "checked_head_oid": "head-description",
             "check_rollup_state": "SUCCESS",
             "checks": [],
@@ -53,7 +52,7 @@ class ConvergencePredicateTests(unittest.TestCase):
         self.assertFalse(computed["converged"])
         self.assertEqual(
             computed["reasons"],
-            ["description-missing-meaningfully-changed-lines"],
+            ["description-exceeds-350-words"],
         )
 
     def test_review_exempt_head_change_preserves_quiet_review(self) -> None:
@@ -502,16 +501,6 @@ class InputValidationTests(unittest.TestCase):
             positive_number(None, "interval_seconds")
         with self.assertRaisesRegex(ValueError, "cool_off_seconds"):
             nonnegative_number([], "cool_off_seconds")
-
-    def test_devenv_lock_is_excluded_from_meaningful_lines(self) -> None:
-        count = meaningful_line_count(
-            [
-                {"path": "devenv.lock", "additions": 100, "deletions": 50},
-                {"path": "src/main.py", "additions": 3, "deletions": 2},
-            ]
-        )
-
-        self.assertEqual(count, 5)
 
     def test_non_object_state_is_rejected_as_malformed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

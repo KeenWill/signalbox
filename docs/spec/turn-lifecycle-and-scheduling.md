@@ -1100,8 +1100,10 @@ The occupied-slot delivery outcomes implemented here are:
   position, and source turn. A reclassification path now exists: terminalization
   of the source turn reclassifies pending steering into a queued successor
   origin turn that inherits the source turn's configuration
-  (`queued_input_origin.source_configuration_turn_id`). At the next model-call
-  preparation, every pending input is consumed under the atomic boundary in
+  (`queued_input_origin.source_configuration_turn_id`), except under a committed
+  closure handoff, which closes it as `closed_not_delivered` rather than
+  reclassifying it. At the next model-call preparation, every pending input is
+  consumed under the atomic boundary in
   [model-call-execution](model-call-execution.md) (INV-036).
 - `AfterCurrentTurn` creates an ordinary queued origin turn with frozen
   configuration and an immutable acceptance position; it fixes no predecessor
