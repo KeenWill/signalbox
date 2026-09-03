@@ -1559,7 +1559,8 @@ BEGIN
     END IF;
 
     IF NOT (
-        last_kind = 'achieved'
+        (last_kind = 'achieved'
+            AND NEW.terminal_outcome_kind IN ('achieved_verified', 'achieved_declared'))
         OR (last_kind = 'user_stopped' AND NEW.terminal_outcome_kind = 'stopped')
         OR (last_kind = 'session_closed'
             AND last_outcome = NEW.terminal_outcome_kind)

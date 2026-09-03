@@ -802,6 +802,74 @@ async fn completed_goal_with_successor(
     Ok(())
 }
 
+/// A release serialized after the current goal turn completes retires the
+/// daemon's liveness obligation before it can queue another goal turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_released_session_does_not_continue_its_completed_goal_turn() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let attached = turn_candidates(0xb58);
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(0x958),
+                    session(SESSION),
+                    GoalUserAction::Attach(statement("release after this goal turn")),
+                ),
+                Some(attached),
+                |_| None,
+            )
+            .await?,
+    );
+    assert_eq!(activate_goal_turn(&pool, 0xd59).await?, attached.turn());
+    mark_goal_turn_completed(&pool, attached.turn()).await?;
+    assert_eq!(
+        SessionLifecycleCommandRepository::new(pool.clone())
+            .handle(
+                SessionLifecycleCommand::new(
+                    command(0x959),
+                    session(SESSION),
+                    SessionLifecycleOperation::Release,
+                ),
+                CommandPrincipal::Operator,
+            )
+            .await?,
+        SessionLifecycleCommandHandlingOutcome::Recorded(SessionLifecycleCommandResult::Applied(
+            SessionLifecycleApplication::OwnershipChanged
+        ))
+    );
+
+    assert_eq!(
+        repository
+            .reconcile_current_after_execution(
+                session(SESSION),
+                turn_candidates(0xb59),
+                GoalNeed::try_new(String::from("repair execution"))
+                    .expect("fixture need is admitted"),
+                |_| None,
+            )
+            .await?,
+        GoalTurnContinuationOutcome::NotPursuing
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM goal_turn WHERE session_id = $1")
+            .bind(Uuid::from_u128(SESSION))
+            .fetch_one(&pool)
+            .await?,
+        1
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 async fn mark_completed_goal_turn_failed(
     pool: &PgPool,
     turn: TurnId,

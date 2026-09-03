@@ -520,8 +520,8 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
     Ok(())
 }
 
-/// Runs one goal to a completed turn and an unsuccessful successor under the
-/// named ownership, returning the blocked goal.
+/// Runs an owned goal through a completed turn and unsuccessful successor, or
+/// a released goal through its already-queued unsuccessful first turn.
 async fn goal_failure_block_after_success(
     ownership: signalbox_domain::SessionOwnership,
 ) -> Result<(ContainerAsync<Postgres>, PgPool, Goal), Box<dyn Error>> {
@@ -580,7 +580,14 @@ async fn goal_failure_block_after_success(
     let (nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
     let _ = nudge.nudge(session);
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
-    let runtime = ScriptedModel::following([goal_completion_script(), goal_refusal_script()]);
+    let runtime = match ownership {
+        signalbox_domain::SessionOwnership::Owned => {
+            ScriptedModel::following([goal_completion_script(), goal_refusal_script()])
+        }
+        signalbox_domain::SessionOwnership::Unmonitored => {
+            ScriptedModel::following([goal_refusal_script()])
+        }
+    };
     let provider =
         RuntimeModelCallProvider::new(runtime.clone(), configuration.runtime_model_catalog(), None);
     let credential_reference = ModelCallCredentialReference::new("scripted-goal-test");
@@ -647,9 +654,18 @@ async fn goal_failure_block_after_success(
             .fetch_one(&pool)
             .await?;
 
-    assert_eq!(goal_turn_count, 2);
-    assert_eq!(runtime.received_operations().len(), 2);
-    assert_ne!(first_turn.turn(), execution_failure_turn(&goal));
+    match ownership {
+        signalbox_domain::SessionOwnership::Owned => {
+            assert_eq!(goal_turn_count, 2);
+            assert_eq!(runtime.received_operations().len(), 2);
+            assert_ne!(first_turn.turn(), execution_failure_turn(&goal));
+        }
+        signalbox_domain::SessionOwnership::Unmonitored => {
+            assert_eq!(goal_turn_count, 1);
+            assert_eq!(runtime.received_operations().len(), 1);
+            assert_eq!(first_turn.turn(), execution_failure_turn(&goal));
+        }
+    }
 
     Ok((container, pool, goal))
 }

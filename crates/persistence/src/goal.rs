@@ -630,12 +630,8 @@ impl GoalRepository {
     /// Whether the daemon holds the session's liveness obligation (§6): an
     /// automatic resume is owed to an owned session only.
     pub async fn session_owned(&self, session: SessionId) -> Result<bool, GoalRepositoryError> {
-        let owned: Option<bool> =
-            sqlx::query_scalar("SELECT owned FROM session_lifecycle WHERE session_id = $1")
-                .bind(session_id_to_uuid(session))
-                .fetch_optional(&self.pool)
-                .await?;
-        Ok(owned.unwrap_or(false))
+        let mut connection = self.pool.acquire().await?;
+        session_owned(&mut connection, session).await
     }
 
     /// Loads the current turn in one goal generation.
@@ -850,6 +846,10 @@ impl GoalRepository {
                 return Ok(GoalTurnContinuationOutcome::NotPursuing);
             }
             GoalTurnTerminalState::Completed => {}
+        }
+        if !session_owned(&mut transaction, session).await? {
+            transaction.rollback().await?;
+            return Ok(GoalTurnContinuationOutcome::NotPursuing);
         }
         if continuation_exists(&mut transaction, session, predecessor).await? {
             transaction.rollback().await?;
@@ -1260,12 +1260,20 @@ async fn failure_need_for_current_ownership(
     let Some(unmonitored_need) = unmonitored_need else {
         return Ok(owned_need);
     };
-    let owned: bool =
+    let owned = session_owned(connection, session).await?;
+    Ok(if owned { owned_need } else { unmonitored_need })
+}
+
+async fn session_owned(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<bool, GoalRepositoryError> {
+    let owned: Option<bool> =
         sqlx::query_scalar("SELECT owned FROM session_lifecycle WHERE session_id = $1")
             .bind(session_id_to_uuid(session))
-            .fetch_one(&mut *connection)
+            .fetch_optional(&mut *connection)
             .await?;
-    Ok(if owned { owned_need } else { unmonitored_need })
+    Ok(owned.unwrap_or(false))
 }
 
 fn recorded_scheduler_failure(goal: &Goal, turn: TurnId) -> Option<&GoalEvent> {
