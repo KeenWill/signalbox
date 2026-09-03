@@ -363,7 +363,7 @@ CREATE TABLE session_terminal_outbox_event (
         CHECK (storage_version = 1),
     CONSTRAINT session_terminal_outbox_outcome_closed CHECK (
         terminal_outcome_kind = ANY (ARRAY[
-            'achieved_verified'::text, 'achieved_declared'::text, 'failed_retryable'::text,
+            'achieved_verified'::text, 'failed_retryable'::text,
             'failed_structural'::text, 'failed_unknown'::text, 'stopped'::text,
             'superseded'::text, 'abandoned'::text, 'retired'::text
         ])

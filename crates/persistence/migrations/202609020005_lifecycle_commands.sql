@@ -26,6 +26,203 @@ ALTER TABLE durable_command
     );
 
 --
+-- The projector takes the issuer of a command-authored write (§6), and the
+-- goal-event trigger below reads it from the envelope.
+-- Supersedes 202609020002_session_lifecycle_satellite.
+--
+
+DROP FUNCTION IF EXISTS project_session_lifecycle(uuid, boolean);
+DROP FUNCTION IF EXISTS project_session_lifecycle(uuid, boolean, boolean);
+
+CREATE FUNCTION project_session_lifecycle(
+    subject uuid,
+    lifts_park boolean,
+    issuer_kind text DEFAULT NULL,
+    issuer_module text DEFAULT NULL
+) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    held session_lifecycle%ROWTYPE;
+    live_phase text;
+    live_turn uuid;
+    goal_turn uuid;
+    goal_request uuid;
+    actor text;
+    live_child_request uuid;
+    child uuid;
+    queued boolean;
+    goal_kind text;
+    goal_reason text;
+    goal_generation numeric(20,0);
+    cycles bigint;
+    next_state text;
+    next_waiting_kind text;
+    next_waiting_waker text;
+    next_recovering_op text;
+    next_blocked_reason text;
+    next_blocked_cycle bigint;
+BEGIN
+    SELECT * INTO held FROM session_lifecycle WHERE session_id = subject;
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+
+    -- Terminal is final in both directions. As a projection no-op, a later
+    -- turn or goal write would land beneath a closed session and then
+    -- activate: the deferred terminal-turn constraint fires on lifecycle
+    -- writes, and nothing re-fires it for the turn.
+    IF held.state_kind = 'terminal' THEN
+        RAISE EXCEPTION
+            'session % is terminal and admits no further turn or goal work',
+            subject
+            USING ERRCODE = '23514';
+    END IF;
+
+    -- `parked` overrides the mapping. One write lifts it, the operator's goal
+    -- resume, and the caller says so: inferring it from the lineage would let
+    -- a park taken after an earlier resume be lifted by the next unrelated
+    -- turn write.
+    IF held.state_kind = 'parked' AND NOT lifts_park THEN
+        RETURN;
+    END IF;
+
+    SELECT live.active_phase_kind, live.turn_id, live.child_wait_request_id
+      INTO live_phase, live_turn, live_child_request
+      FROM turn_lifecycle AS live
+     WHERE live.session_id = subject
+       AND live.state_kind = 'active'
+       AND NOT live.delegation_runtime_terminal
+     ORDER BY live.acceptance_position DESC
+     LIMIT 1;
+
+    -- The goal lineage is read only when it can decide the state: a live turn
+    -- outranks it, and this runs on every turn write.
+    IF live_phase IS NULL THEN
+        SELECT event.event_kind, event.blocked_reason, event.generation,
+               COALESCE(event.model_turn_id, event.scheduler_turn_id),
+               event.model_tool_request_id
+          INTO goal_kind, goal_reason, goal_generation,
+               goal_turn, goal_request
+          FROM goal_event AS event
+         WHERE event.session_id = subject
+         ORDER BY event.event_ordinal DESC
+         LIMIT 1;
+    END IF;
+
+    IF live_phase IS NOT NULL THEN
+        CASE live_phase
+            WHEN 'running' THEN
+                next_state := 'active';
+            WHEN 'awaiting_tool_approval' THEN
+                next_state := 'waiting';
+                next_waiting_kind := 'approval';
+                next_waiting_waker := 'approval_decision';
+            WHEN 'awaiting_child' THEN
+                next_state := 'waiting';
+                next_waiting_kind := 'child';
+                next_waiting_waker := 'child_settlement';
+                SELECT waiting.child_session_id INTO child
+                  FROM session_delegation_wait AS waiting
+                 WHERE waiting.awaiting_tool_request_id = live_child_request
+                   AND waiting.parent_session_id = subject;
+            WHEN 'awaiting_model_call_recovery' THEN
+                next_state := 'recovering';
+                next_recovering_op := 'model_call';
+            WHEN 'awaiting_tool_recovery' THEN
+                next_state := 'recovering';
+                next_recovering_op := 'tool';
+            WHEN 'awaiting_runner_recovery' THEN
+                next_state := 'recovering';
+                next_recovering_op := 'runner';
+            ELSE
+                RAISE EXCEPTION 'unmapped active turn phase %', live_phase
+                    USING ERRCODE = '23514';
+        END CASE;
+    ELSIF goal_kind = 'blocked' THEN
+        SELECT count(*) INTO cycles
+          FROM goal_event AS resumed
+         WHERE resumed.session_id = subject
+           AND resumed.generation = goal_generation
+           AND resumed.event_kind = 'resumed';
+        next_state := 'blocked';
+        next_blocked_reason := goal_reason;
+        next_blocked_cycle := cycles;
+    ELSE
+        SELECT EXISTS (
+            SELECT 1
+              FROM turn_lifecycle AS pending
+             WHERE pending.session_id = subject
+               AND pending.state_kind = 'queued'
+        ) INTO queued;
+
+        -- A creation stays `created` until its first turn is queued, and a
+        -- dispatched session stays `dispatched` until one activates: the
+        -- dispatch deadline is what covers a queued turn that never runs. A
+        -- queued successor inside a live session never re-enters `dispatched`
+        -- (§1) — the active stall deadline covers it, so the session reads
+        -- `active` while the scheduler owes it a pass.
+        IF held.state_kind = 'created' THEN
+            next_state := CASE WHEN queued THEN 'dispatched' ELSE 'created' END;
+        ELSIF held.state_kind = 'dispatched' THEN
+            next_state := 'dispatched';
+        ELSE
+            next_state := 'active';
+        END IF;
+    END IF;
+
+    IF held.state_kind = next_state
+       AND held.waiting_kind IS NOT DISTINCT FROM next_waiting_kind
+       AND held.waiting_subject_session_id IS NOT DISTINCT FROM child
+       AND held.recovering_op IS NOT DISTINCT FROM next_recovering_op
+       AND held.blocked_reason IS NOT DISTINCT FROM next_blocked_reason
+       AND held.blocked_cycle IS NOT DISTINCT FROM next_blocked_cycle
+    THEN
+        RETURN;
+    END IF;
+
+    -- A projected transition is core machinery, and the live turn is the
+    -- agency behind it; the creating actor is not. A write a command authored
+    -- names its issuer, and the transition is that issuer's: the operator's
+    -- lift, a module's stop. Daemon core's own commands stay core machinery.
+    IF issuer_kind IS NOT NULL AND issuer_kind <> 'core' THEN
+        actor := issuer_kind;
+        goal_turn := NULL;
+        goal_request := NULL;
+        live_turn := NULL;
+    ELSE
+        actor := 'core';
+        IF live_turn IS NOT NULL THEN
+            goal_turn := NULL;
+            goal_request := NULL;
+        END IF;
+    END IF;
+
+    UPDATE session_lifecycle
+       SET state_kind = next_state,
+           state_entered_at = statement_timestamp(),
+           actor_kind = actor,
+           actor_module = CASE WHEN actor = 'module' THEN issuer_module END,
+           actor_turn_id = COALESCE(live_turn, goal_turn),
+           actor_tool_request_id = CASE
+               WHEN COALESCE(live_turn, goal_turn) IS NULL THEN goal_request
+               ELSE NULL
+           END,
+           waiting_kind = next_waiting_kind,
+           waiting_waker = next_waiting_waker,
+           waiting_subject_session_id = child,
+           recovering_op = next_recovering_op,
+           blocked_reason = next_blocked_reason,
+           blocked_cycle = next_blocked_cycle,
+           parked_cause = NULL,
+           parked_responder = NULL,
+           parked_since = NULL,
+           parked_standing_cause_kind = NULL
+     WHERE session_id = subject;
+END;
+$$;
+
+--
 -- A goal event a command authored projects with that command's issuer (§6):
 -- daemon core's automatic resume is core's, a module's composed stop is the
 -- module's, and only the operator's own commands read as the operator's.
@@ -651,6 +848,279 @@ BEGIN
     RETURN NEW;
 END;
 $$;
+
+--
+-- `achieved_declared` (§2, ruled 2026-09-02): an achievement no finish check
+-- verifies closes the session with it; `finish_check_failed` is the block a
+-- failing check appends. Supersedes 202609020002_session_lifecycle_satellite.
+--
+
+ALTER TABLE session_lifecycle
+    DROP CONSTRAINT session_lifecycle_terminal_outcome_closed,
+    DROP CONSTRAINT session_lifecycle_terminal_shape,
+    DROP CONSTRAINT session_lifecycle_pending_terminal_shape,
+    DROP CONSTRAINT session_lifecycle_blocked_reason_closed;
+
+ALTER TABLE session_lifecycle
+    ADD CONSTRAINT session_lifecycle_terminal_outcome_closed CHECK (
+        (terminal_outcome_kind IS NULL)
+        OR (terminal_outcome_kind = ANY (ARRAY[
+            'achieved_verified'::text,
+            'achieved_declared'::text,
+            'failed_retryable'::text,
+            'failed_structural'::text,
+            'failed_unknown'::text,
+            'stopped'::text,
+            'superseded'::text,
+            'abandoned'::text,
+            'retired'::text
+        ]))
+    ),
+    ADD CONSTRAINT session_lifecycle_terminal_shape CHECK (
+        ((state_kind = 'terminal'::text)
+            = ((ended_at IS NOT NULL) AND (terminal_outcome_kind IS NOT NULL)))
+        -- Guarded against a null outcome: `NULL = 'stopped'` is NULL, and a
+        -- CHECK accepts NULL.
+        AND ((terminal_outcome_kind IS NULL)
+             OR ((terminal_outcome_kind = 'stopped'::text)
+                 = (terminal_stop_sticky IS NOT NULL)))
+        AND ((state_kind = 'terminal'::text) = (ended_at IS NOT NULL))
+        AND ((state_kind = 'terminal'::text) = (terminal_outcome_kind IS NOT NULL))
+        AND ((terminal_outcome_kind IS NOT NULL)
+             OR ((terminal_stop_sticky IS NULL)
+                 AND (terminal_superseded_by IS NULL)
+                 AND (terminal_cause_kind IS NULL)
+                 AND (ended_at IS NULL)))
+        AND ((terminal_superseded_by IS NULL)
+             OR (terminal_outcome_kind = 'superseded'::text))
+        AND ((terminal_superseded_by IS NULL)
+             OR (terminal_superseded_by <> session_id))
+        AND (
+            (terminal_outcome_kind IS NULL AND terminal_cause_kind IS NULL)
+            OR (terminal_outcome_kind = ANY (ARRAY[
+                    'achieved_verified'::text,
+                    'achieved_declared'::text,
+                    'failed_unknown'::text,
+                    'stopped'::text,
+                    'superseded'::text,
+                    'abandoned'::text
+                ]) AND terminal_cause_kind IS NULL)
+            OR (terminal_outcome_kind = 'failed_retryable'::text
+                AND terminal_cause_kind = ANY (ARRAY[
+                    'provider_transient'::text,
+                    'provider_quota_exhausted'::text,
+                    'provider_overloaded'::text,
+                    'infrastructure_failure'::text,
+                    'retry_budget_exhausted'::text
+                ]))
+            OR (terminal_outcome_kind = 'failed_structural'::text
+                AND terminal_cause_kind = ANY (ARRAY[
+                    'context_compaction_wall'::text,
+                    'context_headroom_exhausted'::text,
+                    'broken_toolchain'::text,
+                    'moderation_block'::text
+                ]))
+            OR (terminal_outcome_kind = 'retired'::text
+                AND terminal_cause_kind = ANY (ARRAY[
+                    'dispatch_deadline_expired'::text,
+                    'start_gate_deadline_expired'::text,
+                    'first_input_deadline_expired'::text,
+                    'stranded_queued_turn'::text
+                ]))
+        )
+    ),
+    ADD CONSTRAINT session_lifecycle_pending_terminal_shape CHECK (
+        ((pending_terminal_outcome_kind IS NULL)
+            OR (state_kind <> 'terminal'::text))
+        AND ((pending_terminal_outcome_kind IS NOT NULL)
+             OR ((pending_terminal_cause_kind IS NULL)
+                 AND (pending_terminal_stop_sticky IS NULL)
+                 AND (pending_terminal_superseded_by IS NULL)))
+        AND ((pending_terminal_outcome_kind IS NULL)
+             OR (pending_terminal_outcome_kind = ANY (ARRAY[
+                    'achieved_verified'::text,
+                    'achieved_declared'::text,
+                    'failed_retryable'::text,
+                    'failed_structural'::text,
+                    'failed_unknown'::text,
+                    'stopped'::text,
+                    'superseded'::text,
+                    'abandoned'::text,
+                    'retired'::text
+                ])))
+        AND ((pending_terminal_outcome_kind IS NULL)
+             OR ((pending_terminal_outcome_kind = 'stopped'::text)
+                 = (pending_terminal_stop_sticky IS NOT NULL)))
+        AND ((pending_terminal_superseded_by IS NULL)
+             OR (pending_terminal_outcome_kind = 'superseded'::text))
+        -- The pending shape carries the terminal shape's rules; a handoff
+        -- settlement would reject can never be recorded.
+        AND ((pending_terminal_superseded_by IS NULL)
+             OR (pending_terminal_superseded_by <> session_id))
+        -- The cause is scoped to its outcome here too: a handoff whose cause
+        -- the terminal shape rejects can be committed and never settled.
+        AND (
+            (pending_terminal_outcome_kind IS NULL
+                AND pending_terminal_cause_kind IS NULL)
+            OR (pending_terminal_outcome_kind = ANY (ARRAY[
+                    'achieved_verified'::text,
+                    'achieved_declared'::text,
+                    'failed_unknown'::text,
+                    'stopped'::text,
+                    'superseded'::text,
+                    'abandoned'::text
+                ]) AND pending_terminal_cause_kind IS NULL)
+            OR (pending_terminal_outcome_kind = 'failed_retryable'::text
+                AND pending_terminal_cause_kind = ANY (ARRAY[
+                    'provider_transient'::text,
+                    'provider_quota_exhausted'::text,
+                    'provider_overloaded'::text,
+                    'infrastructure_failure'::text,
+                    'retry_budget_exhausted'::text
+                ]))
+            OR (pending_terminal_outcome_kind = 'failed_structural'::text
+                AND pending_terminal_cause_kind = ANY (ARRAY[
+                    'context_compaction_wall'::text,
+                    'context_headroom_exhausted'::text,
+                    'broken_toolchain'::text,
+                    'moderation_block'::text
+                ]))
+            OR (pending_terminal_outcome_kind = 'retired'::text
+                AND pending_terminal_cause_kind = ANY (ARRAY[
+                    'dispatch_deadline_expired'::text,
+                    'start_gate_deadline_expired'::text,
+                    'first_input_deadline_expired'::text,
+                    'stranded_queued_turn'::text
+                ]))
+        )
+    ),
+    ADD CONSTRAINT session_lifecycle_blocked_reason_closed CHECK (
+        (blocked_reason IS NULL)
+        OR (blocked_reason = ANY (ARRAY[
+            'user_input_required'::text,
+            'external_change_required'::text,
+            'authorization_required'::text,
+            'execution_failure'::text,
+            'finish_check_failed'::text
+        ]))
+    );
+
+-- Supersedes 202609020004_event_vocabulary.
+ALTER TABLE session_terminal_outbox_event
+    DROP CONSTRAINT session_terminal_outbox_outcome_closed;
+
+ALTER TABLE session_terminal_outbox_event
+    ADD CONSTRAINT session_terminal_outbox_outcome_closed CHECK (
+        terminal_outcome_kind = ANY (ARRAY[
+            'achieved_verified'::text, 'achieved_declared'::text, 'failed_retryable'::text,
+            'failed_structural'::text, 'failed_unknown'::text, 'stopped'::text,
+            'superseded'::text, 'abandoned'::text, 'retired'::text
+        ])
+    );
+
+-- Supersedes 202609020003_lifecycle_metrics: `achieved_declared` finishes an overflow.
+CREATE OR REPLACE VIEW session_lifecycle_weekly_metric AS
+WITH wall_occurrence AS (
+    -- F9's immediate half: a wall belongs to the week it happened in. §2 parks
+    -- a session on a wall and suspends its turn, so the park is the evidence
+    -- and `parked_since` the instant; terminalization carries both forward. A
+    -- turn cause is the evidence for a wall that ended a turn, at that row's
+    -- write week. One session's wall is one occurrence, at the earlier of the
+    -- two.
+    SELECT session_row.session_id,
+           LEAST(
+               (SELECT lifecycle.parked_since
+                  FROM session_lifecycle AS lifecycle
+                 WHERE lifecycle.session_id = session_row.session_id
+                   AND lifecycle.parked_standing_cause_kind
+                       = 'context_compaction_wall'::text
+                   AND lifecycle.parked_since IS NOT NULL),
+               (SELECT min(turn.recorded_at)
+                  FROM turn_lifecycle AS turn
+                 WHERE turn.session_id = session_row.session_id
+                   AND turn.terminal_cause_kind = 'context_compaction_wall'::text)
+           ) AS occurred_at
+      FROM session AS session_row
+), weeks AS (
+    SELECT cohort_week AS week FROM session_lifecycle_terminal_cohort
+     UNION
+    SELECT dispatch_week AS week FROM session_lifecycle_dispatch_cohort
+     UNION
+    SELECT recorded_week AS week FROM session_lifecycle_terminal_turn_cause
+     UNION
+    SELECT recorded_week AS week FROM session_lifecycle_known_failed_call_cause
+     UNION
+    SELECT session_lifecycle_metric_week(occurred_at) AS week
+      FROM wall_occurrence
+     WHERE occurred_at IS NOT NULL
+), terminal AS (
+    SELECT cohort.cohort_week AS week,
+           count(*) AS cohort_size,
+           count(*) FILTER (WHERE cohort.counts_in_denominator)
+               AS completion_failure_denominator,
+           count(*) FILTER (WHERE cohort.counts_in_numerator)
+               AS completion_failure_numerator,
+           count(*) FILTER (WHERE cohort.terminal_outcome_kind = 'failed_unknown'::text)
+               AS failed_unknown,
+           count(*) FILTER (WHERE incidence.recorded_context_headroom_exhausted)
+               AS overflow,
+           count(*) FILTER (WHERE incidence.recorded_context_headroom_exhausted
+                              AND cohort.terminal_outcome_kind = ANY (ARRAY[
+                                  'achieved_verified'::text, 'achieved_declared'::text]))
+               AS overflow_finished
+      FROM session_lifecycle_terminal_cohort AS cohort
+      JOIN session_lifecycle_cause_incidence AS incidence
+        ON incidence.session_id = cohort.session_id
+     GROUP BY cohort.cohort_week
+), dispatched AS (
+    SELECT cohort.dispatch_week AS week,
+           count(*) AS cohort_size,
+           count(*) FILTER (WHERE cohort.wall) AS wall,
+           bool_and(cohort.matured) AS matured
+      FROM session_lifecycle_dispatch_cohort AS cohort
+     GROUP BY cohort.dispatch_week
+), walls_recorded AS (
+    SELECT session_lifecycle_metric_week(occurrence.occurred_at) AS week,
+           count(*) AS occurrences
+      FROM wall_occurrence AS occurrence
+     WHERE occurrence.occurred_at IS NOT NULL
+     GROUP BY session_lifecycle_metric_week(occurrence.occurred_at)
+), turn_causes AS (
+    SELECT cause.recorded_week AS week,
+           count(*) AS terminal_turns,
+           count(*) FILTER (WHERE cause.classified) AS classified_turns
+      FROM session_lifecycle_terminal_turn_cause AS cause
+     GROUP BY cause.recorded_week
+), call_causes AS (
+    SELECT cause.recorded_week AS week,
+           count(*) AS known_failed_calls,
+           count(*) FILTER (WHERE cause.classified) AS classified_calls
+      FROM session_lifecycle_known_failed_call_cause AS cause
+     GROUP BY cause.recorded_week
+)
+SELECT weeks.week,
+       COALESCE(terminal.cohort_size, 0) AS terminal_cohort_size,
+       COALESCE(terminal.completion_failure_denominator, 0)
+           AS completion_failure_denominator,
+       COALESCE(terminal.completion_failure_numerator, 0)
+           AS completion_failure_numerator,
+       COALESCE(terminal.failed_unknown, 0) AS failed_unknown_count,
+       COALESCE(terminal.overflow, 0) AS overflow_count,
+       COALESCE(terminal.overflow_finished, 0) AS overflow_finished_count,
+       COALESCE(dispatched.cohort_size, 0) AS dispatch_cohort_size,
+       COALESCE(dispatched.wall, 0) AS wall_count,
+       COALESCE(dispatched.matured, true) AS wall_cohort_matured,
+       COALESCE(walls_recorded.occurrences, 0) AS wall_occurrence_count,
+       COALESCE(turn_causes.terminal_turns, 0) AS terminal_turn_count,
+       COALESCE(turn_causes.classified_turns, 0) AS classified_terminal_turn_count,
+       COALESCE(call_causes.known_failed_calls, 0) AS known_failed_call_count,
+       COALESCE(call_causes.classified_calls, 0) AS classified_known_failed_call_count
+  FROM weeks
+  LEFT JOIN terminal ON terminal.week = weeks.week
+  LEFT JOIN dispatched ON dispatched.week = weeks.week
+  LEFT JOIN walls_recorded ON walls_recorded.week = weeks.week
+  LEFT JOIN turn_causes ON turn_causes.week = weeks.week
+  LEFT JOIN call_causes ON call_causes.week = weeks.week;
 
 --
 -- §10: a closure retires the queued turns it strands.

@@ -251,8 +251,7 @@ CREATE TABLE session_lifecycle (
             'user_input_required'::text,
             'external_change_required'::text,
             'authorization_required'::text,
-            'execution_failure'::text,
-            'finish_check_failed'::text
+            'execution_failure'::text
         ]))
     ),
 
@@ -305,7 +304,6 @@ CREATE TABLE session_lifecycle (
         (terminal_outcome_kind IS NULL)
         OR (terminal_outcome_kind = ANY (ARRAY[
             'achieved_verified'::text,
-            'achieved_declared'::text,
             'failed_retryable'::text,
             'failed_structural'::text,
             'failed_unknown'::text,
@@ -376,7 +374,6 @@ CREATE TABLE session_lifecycle (
             (terminal_outcome_kind IS NULL AND terminal_cause_kind IS NULL)
             OR (terminal_outcome_kind = ANY (ARRAY[
                     'achieved_verified'::text,
-                    'achieved_declared'::text,
                     'failed_unknown'::text,
                     'stopped'::text,
                     'superseded'::text,
@@ -419,7 +416,6 @@ CREATE TABLE session_lifecycle (
         AND ((pending_terminal_outcome_kind IS NULL)
              OR (pending_terminal_outcome_kind = ANY (ARRAY[
                     'achieved_verified'::text,
-                    'achieved_declared'::text,
                     'failed_retryable'::text,
                     'failed_structural'::text,
                     'failed_unknown'::text,
@@ -444,7 +440,6 @@ CREATE TABLE session_lifecycle (
                 AND pending_terminal_cause_kind IS NULL)
             OR (pending_terminal_outcome_kind = ANY (ARRAY[
                     'achieved_verified'::text,
-                    'achieved_declared'::text,
                     'failed_unknown'::text,
                     'stopped'::text,
                     'superseded'::text,
@@ -1304,12 +1299,7 @@ CREATE TRIGGER session_lifecycle_arms_its_deadline
 -- scheduler prefix.
 --
 
-CREATE FUNCTION project_session_lifecycle(
-    subject uuid,
-    lifts_park boolean,
-    issuer_kind text DEFAULT NULL,
-    issuer_module text DEFAULT NULL
-) RETURNS void
+CREATE FUNCTION project_session_lifecycle(subject uuid, lifts_park boolean) RETURNS void
     LANGUAGE plpgsql
     AS $$
 DECLARE
@@ -1452,11 +1442,12 @@ BEGIN
     END IF;
 
     -- A projected transition is core machinery, and the live turn is the
-    -- agency behind it; the creating actor is not. A write a command authored
-    -- names its issuer, and the transition is that issuer's: the operator's
-    -- lift, a module's stop. Daemon core's own commands stay core machinery.
-    IF issuer_kind IS NOT NULL AND issuer_kind <> 'core' THEN
-        actor := issuer_kind;
+    -- agency behind it; the creating actor is not.
+    -- The agency is the live turn, or the goal event that decided the state
+    -- when no turn is live. A lift is the operator's own resume, so it keeps
+    -- that classification rather than reading as daemon machinery.
+    IF lifts_park THEN
+        actor := 'operator';
         goal_turn := NULL;
         goal_request := NULL;
         live_turn := NULL;
@@ -1472,7 +1463,7 @@ BEGIN
        SET state_kind = next_state,
            state_entered_at = statement_timestamp(),
            actor_kind = actor,
-           actor_module = CASE WHEN actor = 'module' THEN issuer_module END,
+           actor_module = NULL,
            actor_turn_id = COALESCE(live_turn, goal_turn),
            actor_tool_request_id = CASE
                WHEN COALESCE(live_turn, goal_turn) IS NULL THEN goal_request
@@ -1507,8 +1498,7 @@ CREATE FUNCTION project_session_lifecycle_from_goal() RETURNS trigger
 BEGIN
     PERFORM project_session_lifecycle(
         NEW.session_id,
-        NEW.event_kind = 'resumed',
-        CASE WHEN NEW.event_kind = 'resumed' THEN 'operator' END
+        NEW.event_kind = 'resumed'
     );
     RETURN NULL;
 END;

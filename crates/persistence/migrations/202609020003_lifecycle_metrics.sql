@@ -313,8 +313,7 @@ WITH wall_occurrence AS (
            count(*) FILTER (WHERE incidence.recorded_context_headroom_exhausted)
                AS overflow,
            count(*) FILTER (WHERE incidence.recorded_context_headroom_exhausted
-                              AND cohort.terminal_outcome_kind = ANY (ARRAY[
-                                  'achieved_verified'::text, 'achieved_declared'::text]))
+                              AND cohort.terminal_outcome_kind = 'achieved_verified'::text)
                AS overflow_finished
       FROM session_lifecycle_terminal_cohort AS cohort
       JOIN session_lifecycle_cause_incidence AS incidence
