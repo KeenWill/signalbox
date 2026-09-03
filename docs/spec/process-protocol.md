@@ -1321,8 +1321,8 @@ message and count validate. This avoids an aggregate frame-size limit.
 
 A successful `read_operator_status` response consists of `operator_status`
 messages: `kind=start`, zero or more rows from each section in this fixed order,
-then `kind=end` with one count per section and the substrate-v0 gate verdict.
-The row kinds are `held_slot`, `queued_obligation`, `pull_request_convergence`,
+then `kind=end` with one count per section. The row kinds are `held_slot`,
+`queued_obligation`, `pull_request_convergence`,
 `pending_stale_review_clearance`, `lifecycle_week`, and
 `lifecycle_deadline_violation`. The daemon reads the four repository-watch views
 bearing those respective concepts and the two session-lifecycle metric views in
@@ -1339,22 +1339,18 @@ carries no rate at all instead of a zero. The pairs are the completion failure
 rate over the trimmed weekly terminal cohort, the `failed_unknown` count inside
 that numerator, overflow incidence over the untrimmed cohort, the finished share
 of exactly those overflow sessions, and the wall rate over the week's dispatch
-cohort, beside that cohort's maturity, the walls recorded in the week whatever
-cohort they belong to, and the two cause-completeness axes. Every numerator is
-at most its own denominator, the trimmed cohort is at most the untrimmed one,
-and `failed_unknown` is at most the completion-failure numerator, because each
-is a subset relation the definitions establish rather than a coincidence of one
-read.
+cohort, the walls recorded in the week whatever cohort they belong to, and the
+two cause-completeness axes. Every numerator is at most its own denominator, the
+trimmed cohort is at most the untrimmed one, and `failed_unknown` is at most the
+completion-failure numerator, because each is a subset relation the definitions
+establish rather than a coincidence of one read.
 
 A `lifecycle_deadline_violation` row names one owned non-terminal session whose
 armed deadline obligation is unmet: its identity, the non-terminal state it
 holds, whether the deadline record is missing outright, and how long the armed
 expiry has been past. Exactly one of those last two is present — a session with
 no armed record has no expiry to be past — and the section's count is the
-`nonterminal_past_deadline` alarm value, whose target is zero. The end message's
-gate verdict is `met`, `not_met`, or `indeterminate`; it is `indeterminate` when
-no gate window is configured or fewer weekly cohorts with a population exist
-than the window requires.
+`nonterminal_past_deadline` alarm value, whose target is zero.
 
 A held-slot row carries dispatch, repository, dispatch origin, rule, singleton,
 ordered session, whole-second held duration, and the independently failing
@@ -2699,25 +2695,24 @@ line.
 `status` sends exactly one `read_operator_status` request through the configured
 owner-only daemon socket; it never opens the database itself. It validates the
 fixed section order and all six terminal counts before printing anything. The
-first output line names those counts and the gate verdict, followed by one
-human-scannable line per row with `held`, `queued`, `convergence`,
-`stale_review_clearance`, `lifecycle_week`, or `nonterminal_past_deadline` as
-its kind. A `lifecycle_week` line prints each metric as `numerator/denominator`
-and, where the denominator is not zero, the derived rate in parts per million,
-so an absent rate is visibly absent rather than printed as zero. A held line
-prints its dispatch origin as `origin=pull_request#<number>` or
-`origin=branch:<branch>`, naming the fact the slot was taken from under one
-field whichever shape it has. A queued line prints an occupant blocked by an
-independently commissioned live session as `occupying=external:<sessions>`,
-distinguishing it from a watch dispatch, which prints its identity ahead of its
-sessions. A convergence line prints `non_green_count` beside the comma-joined
-`non_green` field, so an empty inventory cannot collide with a check literally
-named `none`. Durations use compact day, hour, minute, and second units.
-Process-derived text uses terminal-safe field escaping unless `--raw-output` is
-selected. The final `model_usage=omitted` line states that no cheap status
-aggregate is available: model usage crosses this protocol only inside each
-complete session transcript, and `status` does not issue one transcript read per
-session.
+first output line names those counts, followed by one human-scannable line per
+row with `held`, `queued`, `convergence`, `stale_review_clearance`,
+`lifecycle_week`, or `nonterminal_past_deadline` as its kind. A `lifecycle_week`
+line prints each metric as `numerator/denominator` and, where the denominator is
+not zero, the derived rate in parts per million, so an absent rate is visibly
+absent rather than printed as zero. A held line prints its dispatch origin as
+`origin=pull_request#<number>` or `origin=branch:<branch>`, naming the fact the
+slot was taken from under one field whichever shape it has. A queued line prints
+an occupant blocked by an independently commissioned live session as
+`occupying=external:<sessions>`, distinguishing it from a watch dispatch, which
+prints its identity ahead of its sessions. A convergence line prints
+`non_green_count` beside the comma-joined `non_green` field, so an empty
+inventory cannot collide with a check literally named `none`. Durations use
+compact day, hour, minute, and second units. Process-derived text uses
+terminal-safe field escaping unless `--raw-output` is selected. The final
+`model_usage=omitted` line states that no cheap status aggregate is available:
+model usage crosses this protocol only inside each complete session transcript,
+and `status` does not issue one transcript read per session.
 
 `list` remains the complete unfiltered summary sequence. `search` is the
 separate verb for `list_session_metadata`, whose filters, bounded page, and

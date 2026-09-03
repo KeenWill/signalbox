@@ -11,8 +11,8 @@ to bound or size a fixture.
 The live-line merge adds one model-exchange policy to the original audit and the
 automatic-resume lifetime ceiling one goal policy; the liveness watchdog's
 single recovery-attempt constant now answers to two configured policies because
-its two consumers need different ceilings. The 141 rows partition as 35 guards,
-8 derived bounds, 85 configuration policies, 9 representation facts, and 4 test
+its two consumers need different ceilings. The 127 rows partition as 36 guards,
+8 derived bounds, 69 configuration policies, 10 representation facts, and 4 test
 fixtures. Source locations are maintained with the implementation slices that
 move or delete declarations.
 
@@ -69,6 +69,7 @@ bound in either root fails closed.
 | `crates/tools-code-host/src/code_host/arguments.rs:15`         | `MAX_OPAQUE_ID_BYTES`                       | guard   | The tool grammar advertises accepting opaque identifiers only to this length.                   |
 | `crates/tools-code-host/src/code_host/arguments.rs:17`         | `MAX_CURSOR_BYTES`                          | guard   | The tool grammar advertises accepting pagination cursors only to this length.                   |
 | `crates/tools-code-host/src/code_host/repository_result.rs:15` | `MAX_REPOSITORY_FILE_SCAN_BYTES`            | guard   | One ranged repository-file read exhausting process memory.                                      |
+| `crates/persistence/src/lifecycle_metrics.rs:22`               | `MAX_REPORTED_WEEKS`                        | guard   | Weeks accrue forever, so one metric report exhausting wire-frame memory.                        |
 
 ## Required configuration policies
 
@@ -139,26 +140,10 @@ bound in either root fails closed.
 | `config/signalboxd.example.toml:142` | `MAX_RESULT_TEXT_BYTES`                           | config | `numeric_bounds.max_code_host_result_text_bytes`                                     |
 | `config/signalboxd.example.toml:144` | `MAX_RESULT_ITEMS`                                | config | `numeric_bounds.max_code_host_result_items`                                          |
 | `config/signalboxd.example.toml:146` | `MAX_REPOSITORY_FILE_CONTENT_BYTES`               | config | `numeric_bounds.max_repository_file_content_bytes`                                   |
-| `config/signalboxd.example.toml`     | `SESSION_DISPATCH_DEADLINE`                       | config | `numeric_bounds.session_dispatch_deadline`                                           |
-| `config/signalboxd.example.toml`     | `SESSION_START_GATE_DEADLINE`                     | config | `numeric_bounds.session_start_gate_deadline`                                         |
-| `config/signalboxd.example.toml`     | `SESSION_FIRST_INPUT_DEADLINE`                    | config | `numeric_bounds.session_first_input_deadline`                                        |
+| `config/signalboxd.example.toml`     | `SESSION_ADMISSION_DEADLINE`                      | config | `numeric_bounds.session_admission_deadline`                                          |
 | `config/signalboxd.example.toml`     | `SESSION_ACTIVE_STALL_DEADLINE`                   | config | `numeric_bounds.session_active_stall_deadline`                                       |
-| `config/signalboxd.example.toml`     | `SESSION_WAITING_APPROVAL_DEADLINE`               | config | `numeric_bounds.session_waiting_approval_deadline`                                   |
-| `config/signalboxd.example.toml`     | `SESSION_WAITING_EXTERNAL_DEADLINE`               | config | `numeric_bounds.session_waiting_external_deadline`                                   |
-| `config/signalboxd.example.toml`     | `SESSION_WAITING_CHILD_DEADLINE`                  | config | `numeric_bounds.session_waiting_child_deadline`                                      |
-| `config/signalboxd.example.toml`     | `SESSION_WAITING_PROVIDER_RETRY_DEADLINE`         | config | `numeric_bounds.session_waiting_provider_retry_deadline`                             |
-| `config/signalboxd.example.toml`     | `SESSION_WAITING_PIPELINE_DEADLINE`               | config | `numeric_bounds.session_waiting_pipeline_deadline`                                   |
-| `config/signalboxd.example.toml`     | `SESSION_WAITING_SCHEDULER_DEADLINE`              | config | `numeric_bounds.session_waiting_scheduler_deadline`                                  |
-| `config/signalboxd.example.toml`     | `SESSION_RECOVERING_DEADLINE`                     | config | `numeric_bounds.session_recovering_deadline`                                         |
-| `config/signalboxd.example.toml`     | `SESSION_BLOCKED_DEADLINE`                        | config | `numeric_bounds.session_blocked_deadline`                                            |
-| `config/signalboxd.example.toml`     | `SESSION_PARKED_RENOTIFY_INTERVAL`                | config | `numeric_bounds.session_parked_renotify_interval`                                    |
-| `config/signalboxd.example.toml`     | `SESSION_DEADLINE_PROCESSING_GRACE`               | config | `numeric_bounds.session_deadline_processing_grace`                                   |
-| `config/signalboxd.example.toml`     | `SESSION_WALL_COHORT_MATURATION`                  | config | `numeric_bounds.session_wall_cohort_maturation`                                      |
+| `config/signalboxd.example.toml`     | `SESSION_WAITING_DEADLINE`                        | config | `numeric_bounds.session_waiting_deadline`                                            |
 | `config/signalboxd.example.toml`     | `SESSION_LIFECYCLE_METRIC_SCAN_INTERVAL`          | config | `numeric_bounds.session_lifecycle_metric_scan_interval`                              |
-| `config/signalboxd.example.toml`     | `SESSION_GATE_WEEKS`                              | config | `numeric_bounds.session_gate_weeks`                                                  |
-| `config/signalboxd.example.toml`     | `SESSION_COMPLETION_FAILURE_RATE_THRESHOLD_PPM`   | config | `numeric_bounds.session_completion_failure_rate_threshold_ppm`                       |
-| `config/signalboxd.example.toml`     | `SESSION_WALL_RATE_THRESHOLD_PPM`                 | config | `numeric_bounds.session_wall_rate_threshold_ppm`                                     |
-| `config/signalboxd.example.toml`     | `SESSION_FAILED_UNKNOWN_SHARE_THRESHOLD_PPM`      | config | `numeric_bounds.session_failed_unknown_share_threshold_ppm`                          |
 
 ## Representation facts
 
@@ -173,6 +158,7 @@ bound in either root fails closed.
 | `crates/tools-code-host/src/code_host/github.rs:84`            | `MAX_CHANGED_FILE_PAGES`                        | not-a-bound | Fixed provider exposure divided by its fixed page size. |
 | `crates/tools-code-host/src/code_host/repository_result.rs:21` | `MAX_OBSERVED_DIRECTORY_ENTRIES`                | not-a-bound | Fixed provider contents-endpoint exposure.              |
 | `crates/tools-code-host/src/code_host/repository_result.rs:23` | `MAX_UTF8_BOUNDARY_DISCARD_BYTES`               | not-a-bound | Fixed maximum UTF-8 continuation width.                 |
+| `crates/persistence/src/lifecycle_metrics.rs:26`               | `PARTS_PER_MILLION`                             | not-a-bound | Fixed-point scale the rates are reported in.            |
 
 ## Test fixtures
 

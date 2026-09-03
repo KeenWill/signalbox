@@ -46,12 +46,10 @@ use signalbox_persistence::{
     blob::BlobCatalogRepository,
     convergence_sweep::PostgresConvergenceSweepStore,
     hub_fence::FENCED_POOL_MAX_CONNECTIONS,
-    lifecycle_metrics::{LifecycleMetricBounds, LifecycleMetricsRepository},
     migrate,
     model_execution::PostgresModelCallRepository,
     repo_watch_dispatch::{PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError},
     scheduler::PostgresEligibilitySweep,
-    session_lifecycle::{SessionLifecycleNumericBounds, SessionLifecycleRepository},
     start_eligible_turn::StartEligibleTurnRepository,
     startup::PostgresStartupScanRepository,
     turn_liveness::TurnLivenessPersistenceBounds,
@@ -1358,7 +1356,6 @@ async fn run_hub(
                 )
             })
     };
-    let configured_u64 = |field| numeric_bounds.integer(field).flatten();
     let model_exchange_timeout = configured_duration("model_exchange_timeout");
     let codex_cli_version_probe_bound = configured_duration("codex_cli_version_probe_bound")
         .filter(|bound| !bound.is_zero())
@@ -1529,51 +1526,6 @@ async fn run_hub(
         configured_u32("automatic_resume_attempt_ceiling")?,
         configured_duration("automatic_resume_startup_retry_delay"),
     );
-    let session_lifecycle_numeric_bounds = SessionLifecycleNumericBounds {
-        dispatch: configured_duration("session_dispatch_deadline"),
-        start_gate: configured_duration("session_start_gate_deadline"),
-        first_input: configured_duration("session_first_input_deadline"),
-        active_stall: configured_duration("session_active_stall_deadline"),
-        waiting_approval: configured_duration("session_waiting_approval_deadline"),
-        waiting_external: configured_duration("session_waiting_external_deadline"),
-        waiting_child: configured_duration("session_waiting_child_deadline"),
-        waiting_provider_retry: configured_duration("session_waiting_provider_retry_deadline"),
-        waiting_pipeline: configured_duration("session_waiting_pipeline_deadline"),
-        waiting_scheduler: configured_duration("session_waiting_scheduler_deadline"),
-        recovering: configured_duration("session_recovering_deadline"),
-        blocked: configured_duration("session_blocked_deadline"),
-        parked_renotify: configured_duration("session_parked_renotify_interval"),
-    };
-    // A rate cannot exceed a million parts per million, so a threshold above
-    // the scale is a typo that silently disables the check it configures.
-    let configured_ppm = |field| match configured_u64(field) {
-        Some(value) if value > 1_000_000 => Err(erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Static("configured_rate_threshold_exceeds_scale"),
-        )),
-        configured => Ok(configured),
-    };
-    // `"none"` is the spelling for no gate, so a zero window is a typo that
-    // would leave the gate `indeterminate` forever without saying so.
-    let configured_gate_weeks = match configured_u64("session_gate_weeks") {
-        Some(0) => Err(erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Static("configured_gate_weeks_is_zero"),
-        )),
-        configured => Ok(configured),
-    };
-    let lifecycle_metric_bounds = LifecycleMetricBounds {
-        deadline_processing_grace: configured_duration("session_deadline_processing_grace"),
-        wall_cohort_maturation: configured_duration("session_wall_cohort_maturation"),
-        gate_weeks: configured_gate_weeks?,
-        completion_failure_rate_threshold_ppm: configured_ppm(
-            "session_completion_failure_rate_threshold_ppm",
-        )?,
-        wall_rate_threshold_ppm: configured_ppm("session_wall_rate_threshold_ppm")?,
-        failed_unknown_share_threshold_ppm: configured_ppm(
-            "session_failed_unknown_share_threshold_ppm",
-        )?,
-    };
     // A zero interval reaches `tokio::time::interval`, which refuses a zero
     // period by panicking; a spawned task's panic is a runtime defect that
     // stops the daemon. A configuration that means "never export" spells that
@@ -1874,33 +1826,6 @@ async fn run_hub(
                     SanitizedStartupCause::Static("database_migration_failed"),
                 )
             })?;
-            // The deadline policy lands with the schema it governs. §1 lets a
-            // bound live in config or the database, and it lives in both: this
-            // installs the deployment's `[numeric_bounds]` policy where the
-            // arming trigger reads it, so a session that moves state re-arms
-            // its deadline in the same statement rather than in a caller.
-            SessionLifecycleRepository::new(migration_pool.clone())
-                .apply_configured_bounds(&session_lifecycle_numeric_bounds)
-                .await
-                .map_err(|_| {
-                    erase_startup_cause(
-                        RuntimePhase::Migration,
-                        SanitizedStartupCause::Static("session_deadline_policy_failed"),
-                    )
-                })?;
-            // §12's thresholds and windows land beside the definitions that
-            // read them, for the same reason the deadline bounds do: a metric
-            // whose policy lives in the query is a metric two readers can
-            // disagree about.
-            LifecycleMetricsRepository::new(migration_pool.clone())
-                .apply_configured_bounds(&lifecycle_metric_bounds)
-                .await
-                .map_err(|_| {
-                    erase_startup_cause(
-                        RuntimePhase::Migration,
-                        SanitizedStartupCause::Static("lifecycle_metric_policy_failed"),
-                    )
-                })?;
             tracing::info!(
                 phase = ?RuntimePhase::Migration,
                 "daemon startup phase completed"

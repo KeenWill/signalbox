@@ -121,7 +121,7 @@ use signalbox_persistence::{
     },
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalRepositoryError},
     goal_turn::GoalTurnCandidates,
-    lifecycle_metrics::{LifecycleGateVerdict, LifecycleNonTerminalState},
+    lifecycle_metrics::LifecycleNonTerminalState,
     model_execution::{ModelCallRepositoryError, PostgresModelCallRepository},
     operator_status::{
         ProcessOperatorStatusConvergenceSeal, ProcessOperatorStatusConvergenceVerdict,
@@ -195,8 +195,8 @@ use signalbox_process_protocol::{
     OperatorStatusConvergenceVerdict as WireOperatorStatusConvergenceVerdict,
     OperatorStatusEndMessage, OperatorStatusHeldSlotBlocker as WireOperatorStatusHeldSlotBlocker,
     OperatorStatusHeldSlotMessage, OperatorStatusHeldSlotOrigin,
-    OperatorStatusLifecycleDeadlineViolationMessage, OperatorStatusLifecycleGate,
-    OperatorStatusLifecycleState, OperatorStatusLifecycleWeekMessage,
+    OperatorStatusLifecycleDeadlineViolationMessage, OperatorStatusLifecycleState,
+    OperatorStatusLifecycleWeekMessage,
     OperatorStatusMergeableState as WireOperatorStatusMergeableState, OperatorStatusMessage,
     OperatorStatusPendingStaleReviewClearanceMessage, OperatorStatusPullRequestConvergenceMessage,
     OperatorStatusQueuedObligationMessage,
@@ -10132,10 +10132,6 @@ async fn spool_operator_status(
         .counts()
         .ok_or(SnapshotSpoolError::EncodeInvariant)
         .map_err(OperatorStatusSpoolError::Spool)?;
-    let gate = reader
-        .gate_verdict()
-        .ok_or(SnapshotSpoolError::EncodeInvariant)
-        .map_err(OperatorStatusSpoolError::Spool)?;
     write_spool_message(
         &mut file,
         version,
@@ -10154,7 +10150,6 @@ async fn spool_operator_status(
                 lifecycle_deadline_violation_count: CanonicalU64::new(
                     counts.lifecycle_deadline_violations(),
                 ),
-                substrate_v0_gate: wire_lifecycle_gate(gate),
             },
         )))),
     )
@@ -10169,14 +10164,6 @@ async fn spool_operator_status(
         .map_err(SnapshotSpoolError::Io)
         .map_err(OperatorStatusSpoolError::Spool)?;
     Ok(SessionListSpool { file })
-}
-
-const fn wire_lifecycle_gate(verdict: LifecycleGateVerdict) -> OperatorStatusLifecycleGate {
-    match verdict {
-        LifecycleGateVerdict::Met => OperatorStatusLifecycleGate::Met,
-        LifecycleGateVerdict::NotMet => OperatorStatusLifecycleGate::NotMet,
-        LifecycleGateVerdict::Indeterminate => OperatorStatusLifecycleGate::Indeterminate,
-    }
 }
 
 const fn wire_lifecycle_state(state: LifecycleNonTerminalState) -> OperatorStatusLifecycleState {
@@ -10307,7 +10294,6 @@ fn wire_operator_status_item(item: ProcessOperatorStatusItem) -> ServerMessage {
                 ),
                 wall_numerator: CanonicalU64::new(item.wall_rate().numerator()),
                 wall_denominator: CanonicalU64::new(item.wall_rate().denominator()),
-                wall_cohort_matured: item.wall_cohort_matured(),
                 wall_occurrence_count: CanonicalU64::new(item.wall_occurrences()),
                 classified_terminal_turn_count: CanonicalU64::new(
                     item.turn_cause_completeness().numerator(),
