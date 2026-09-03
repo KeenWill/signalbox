@@ -987,11 +987,13 @@ pub(crate) async fn insert_prepared_failure(
 
     outbox::append(
         connection,
-        outbox::OutboxEvent::TurnFailed {
+        outbox::OutboxEvent::TurnTerminal {
             session,
             turn,
-            failure_entry: failure_entry.identity(),
-            terminal_frontier: terminal_snapshot.frontier().snapshot(),
+            disposition: outbox::TurnTerminalOutboxDisposition::Failed {
+                failure_entry: failure_entry.identity(),
+                terminal_frontier: terminal_snapshot.frontier().snapshot(),
+            },
         },
     )
     .await?;

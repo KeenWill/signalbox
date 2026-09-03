@@ -566,7 +566,7 @@ export type WebSessionTimelineDetailBody = {
   readonly type: "event_fact";
 };
 
-export type WebSessionTimelineEventKind = "session_created" | "session_model_settings_changed" | "turn_model_settings_resolved" | "input_accepted" | "goal_turn_retired" | "turn_activated" | "turn_failed" | "model_call_transition" | "tool_batch_transition" | "tool_approval_decided" | "context_compacted" | "turn_completed" | "turn_refused" | "turn_cancelled" | "turn_reconciliation_required" | "runner_state_transition" | "delegation_update" | "delegation_wake";
+export type WebSessionTimelineEventKind = "session_created" | "session_state_changed" | "session_terminal" | "goal_changed" | "command_settled" | "injection_settled" | "session_ownership_changed" | "session_model_settings_changed" | "turn_model_settings_resolved" | "input_accepted" | "goal_turn_retired" | "turn_activated" | "turn_failed" | "model_call_transition" | "tool_batch_transition" | "tool_approval_decided" | "context_compacted" | "turn_completed" | "turn_refused" | "turn_cancelled" | "turn_reconciliation_required" | "runner_state_transition" | "delegation_update" | "delegation_wake";
 
 export type WebSessionTimelineItem = {
   readonly address: WebTimelineAddress;

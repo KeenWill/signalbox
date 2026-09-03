@@ -542,7 +542,7 @@ async fn s24_inv032_dispatcher_redelivers_after_cursor_commit_failure_in_order()
                 retry_offer
                     .lock()
                     .expect("offer log lock")
-                    .push((event.sequence(), event.session().into_uuid()));
+                    .push((event.sequence(), event.session().map(SessionId::into_uuid)));
                 OutboxDeliveryDecision::Retry
             })
             .await?,
@@ -555,7 +555,7 @@ async fn s24_inv032_dispatcher_redelivers_after_cursor_commit_failure_in_order()
                 first_offer
                     .lock()
                     .expect("offer log lock")
-                    .push((event.sequence(), event.session().into_uuid()));
+                    .push((event.sequence(), event.session().map(SessionId::into_uuid)));
                 OutboxDeliveryDecision::Delivered
             })
             .await,
@@ -589,7 +589,7 @@ async fn s24_inv032_dispatcher_redelivers_after_cursor_commit_failure_in_order()
                 first_redelivery
                     .lock()
                     .expect("offer log lock")
-                    .push((event.sequence(), event.session().into_uuid()));
+                    .push((event.sequence(), event.session().map(SessionId::into_uuid)));
                 OutboxDeliveryDecision::Delivered
             })
             .await?,
@@ -602,7 +602,7 @@ async fn s24_inv032_dispatcher_redelivers_after_cursor_commit_failure_in_order()
                 second_delivery
                     .lock()
                     .expect("offer log lock")
-                    .push((event.sequence(), event.session().into_uuid()));
+                    .push((event.sequence(), event.session().map(SessionId::into_uuid)));
                 OutboxDeliveryDecision::Delivered
             })
             .await?,
@@ -617,10 +617,10 @@ async fn s24_inv032_dispatcher_redelivers_after_cursor_commit_failure_in_order()
     assert_eq!(
         offered.lock().expect("offer log lock").as_slice(),
         [
-            (1, first_session),
-            (1, first_session),
-            (1, first_session),
-            (2, second_session)
+            (1, Some(first_session)),
+            (1, Some(first_session)),
+            (1, Some(first_session)),
+            (2, Some(second_session))
         ]
     );
     assert_eq!(
@@ -981,8 +981,9 @@ async fn s24_inv032_dispatcher_rejects_crosswired_terminal_correlations()
 
     let failures: Vec<(Decimal, Uuid, Uuid, Uuid)> = sqlx::query_as(
         "SELECT event_sequence, turn_id, failure_entry_id, terminal_frontier_id
-           FROM turn_failed_outbox_event
-          WHERE session_id = $1
+           FROM turn_terminal_outbox_event
+          WHERE disposition_kind = 'failed'
+          AND session_id = $1
           ORDER BY event_sequence",
     )
     .bind(session)
@@ -995,17 +996,17 @@ async fn s24_inv032_dispatcher_rejects_crosswired_terminal_correlations()
     assert_eq!(second.1, second_turn);
 
     sqlx::query(
-        "ALTER TABLE turn_failed_outbox_event
-         DISABLE TRIGGER turn_failed_outbox_event_is_append_only",
+        "ALTER TABLE turn_terminal_outbox_event
+         DISABLE TRIGGER turn_terminal_outbox_event_is_append_only",
     )
     .execute(&pool)
     .await?;
-    sqlx::query("DELETE FROM turn_failed_outbox_event WHERE event_sequence = $1")
+    sqlx::query("DELETE FROM turn_terminal_outbox_event WHERE disposition_kind = 'failed' AND event_sequence = $1")
         .bind(second.0)
         .execute(&pool)
         .await?;
     sqlx::query(
-        "UPDATE turn_failed_outbox_event
+        "UPDATE turn_terminal_outbox_event
             SET failure_entry_id = $1,
                 terminal_frontier_id = $2
           WHERE event_sequence = $3",
@@ -1016,8 +1017,8 @@ async fn s24_inv032_dispatcher_rejects_crosswired_terminal_correlations()
     .execute(&pool)
     .await?;
     sqlx::query(
-        "ALTER TABLE turn_failed_outbox_event
-         ENABLE TRIGGER turn_failed_outbox_event_is_append_only",
+        "ALTER TABLE turn_terminal_outbox_event
+         ENABLE TRIGGER turn_terminal_outbox_event_is_append_only",
     )
     .execute(&pool)
     .await?;
@@ -1211,29 +1212,37 @@ async fn inv032_outbox_storage_rejects_truncate() -> Result<(), Box<dyn Error>> 
         .await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE input_accepted_outbox_event CASCADE")
         .await?;
-    assert_outbox_truncate_rejected(
-        &pool,
-        "TRUNCATE TABLE goal_turn_retired_outbox_event CASCADE",
-    )
-    .await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE turn_activated_outbox_event CASCADE")
         .await?;
-    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE turn_failed_outbox_event CASCADE")
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE turn_terminal_outbox_event CASCADE")
         .await?;
     assert_outbox_truncate_rejected(
         &pool,
         "TRUNCATE TABLE model_call_transition_outbox_event CASCADE",
     )
     .await?;
-    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE turn_completed_outbox_event CASCADE")
+    assert_outbox_truncate_rejected(
+        &pool,
+        "TRUNCATE TABLE session_state_changed_outbox_event CASCADE",
+    )
+    .await?;
+    assert_outbox_truncate_rejected(
+        &pool,
+        "TRUNCATE TABLE session_terminal_outbox_event CASCADE",
+    )
+    .await?;
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE goal_changed_outbox_event CASCADE")
         .await?;
-    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE turn_refused_outbox_event CASCADE")
-        .await?;
-    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE turn_cancelled_outbox_event CASCADE")
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE command_settled_outbox_event CASCADE")
         .await?;
     assert_outbox_truncate_rejected(
         &pool,
-        "TRUNCATE TABLE turn_reconciliation_required_outbox_event CASCADE",
+        "TRUNCATE TABLE injection_settled_outbox_event CASCADE",
+    )
+    .await?;
+    assert_outbox_truncate_rejected(
+        &pool,
+        "TRUNCATE TABLE session_ownership_changed_outbox_event CASCADE",
     )
     .await?;
 
@@ -1388,7 +1397,7 @@ async fn s01_inv012_inv032_create_session_first_handling_appends_exactly_once()
         vec![(
             Decimal::ONE,
             "session_created".to_owned(),
-            1,
+            2,
             creation.applied_result().session().into_uuid(),
         )]
     );
@@ -1464,10 +1473,10 @@ async fn s01_inv012_inv032_scheduling_transitions_dispatch_in_commit_order()
         OutboxDispatchOutcome::Delivered { sequence: 1 }
     );
     let created = created.expect("the session creation event was offered");
-    assert_eq!(created.session(), session);
+    assert_eq!(created.session(), Some(session));
     assert!(matches!(
         created.kind(),
-        DispatchedOutboxEventKind::SessionCreated
+        DispatchedOutboxEventKind::SessionCreated(_)
     ));
 
     assert_eq!(
@@ -1487,7 +1496,7 @@ async fn s01_inv012_inv032_scheduling_transitions_dispatch_in_commit_order()
         OutboxDispatchOutcome::Delivered { sequence: 3 }
     );
     let accepted = accepted.expect("the input acceptance event was offered");
-    assert_eq!(accepted.session(), session);
+    assert_eq!(accepted.session(), Some(session));
     assert_eq!(
         accepted.kind(),
         &DispatchedOutboxEventKind::InputAccepted {
@@ -1509,7 +1518,7 @@ async fn s01_inv012_inv032_scheduling_transitions_dispatch_in_commit_order()
         OutboxDispatchOutcome::Delivered { sequence: 4 }
     );
     let activation = activation.expect("the turn activation event was offered");
-    assert_eq!(activation.session(), session);
+    assert_eq!(activation.session(), Some(session));
     assert_eq!(
         activation.kind(),
         &DispatchedOutboxEventKind::TurnActivated {
@@ -1909,8 +1918,9 @@ async fn s01_inv032_completed_dispatch_requires_exact_terminal_attempt()
 
     let sequence = sqlx::query_scalar(
         "SELECT event_sequence
-           FROM turn_completed_outbox_event
-          WHERE turn_id = $1",
+           FROM turn_terminal_outbox_event
+          WHERE disposition_kind = 'completed'
+          AND turn_id = $1",
     )
     .bind(fixture.turn.into_uuid())
     .fetch_one(&pool)
@@ -1957,8 +1967,9 @@ async fn s01_inv032_refused_dispatch_requires_exact_terminal_attempt() -> Result
 
     let sequence = sqlx::query_scalar(
         "SELECT event_sequence
-           FROM turn_refused_outbox_event
-          WHERE turn_id = $1",
+           FROM turn_terminal_outbox_event
+          WHERE disposition_kind = 'refused'
+          AND turn_id = $1",
     )
     .bind(fixture.turn.into_uuid())
     .fetch_one(&pool)
@@ -2022,8 +2033,9 @@ async fn s04_inv032_reconciliation_dispatch_requires_exact_terminal_attempt()
 
     let sequence = sqlx::query_scalar(
         "SELECT event_sequence
-           FROM turn_reconciliation_required_outbox_event
-          WHERE turn_id = $1",
+           FROM turn_terminal_outbox_event
+          WHERE disposition_kind = 'reconciliation_required'
+          AND turn_id = $1",
     )
     .bind(fixture.turn.into_uuid())
     .fetch_one(&pool)

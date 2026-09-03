@@ -126,14 +126,18 @@ scope; defaults-epoch binding is
 scope. The implemented slice stores three lifecycle states per turn
 (`turn_lifecycle.state_kind`): `queued`, `active`, and `terminal`, with the
 terminal disposition kind closed to `failed`, `completed`, `refused`,
-`cancelled`, and `reconciliation_required` (migrations `202607220001` and
-`202607220005`). A terminal turn records a non-null typed `terminal_cause_kind`
-from a closed vocabulary its disposition admits, and a non-terminal turn records
-none (migration `202609020001`). `unclassified_failure` is the only catch-all
-spelling. The domain `TurnDisposition` algebra carries all five accepted
-variants — `Completed`, `Refused`, `Failed`, `Cancelled { cause }`,
-`ReconciliationRequired { marker }` — but `Cancelled` is constructible only from
-an `AppliedInterruptProof`. `ReconciliationRequired` remains constructible only
+`cancelled`, `reconciliation_required`, and `retired` (migrations
+`202607220001`, `202607220005`, and `202609020004`). `retired` is the terminal
+disposition of a queued turn that never activated: it carries no lineage, no
+frontier, and no attempt, contributes no terminal frontier, and stays out of
+queue order and predecessor selection. A terminal turn records a non-null typed
+`terminal_cause_kind` from a closed vocabulary its disposition admits, and a
+non-terminal turn records none (migration `202609020001`).
+`unclassified_failure` is the only catch-all spelling. The domain
+`TurnDisposition` algebra carries all six accepted variants — `Completed`,
+`Refused`, `Failed`, `Cancelled { cause }`, `ReconciliationRequired { marker }`,
+`Retired` — but `Cancelled` is constructible only from an
+`AppliedInterruptProof`. `ReconciliationRequired` remains constructible only
 from a sealed `ReconciliationMarker`. Committed transitions produce every
 variant: interrupted physical ambiguity produces proof-bearing
 `ReconciliationRequired`, and confirmed interrupted cancellation produces
@@ -701,25 +705,26 @@ ended on the strength of its earlier silence.
 The frontier is the outbox's rather than the transcript's because the outbox
 assigns its sequence in commit order, and every session-scoped transition kind
 lands in that one table. It is scoped to turn progress rather than to the
-session because six of those kinds are things that happen *to* a session while
+session because some of those kinds are things that happen *to* a session while
 its active turn sits still: one ordinary submission writes both the input
-acceptance and the turn's model-settings resolution, and replacing session
-defaults, retiring a goal turn, creating a session, and a runner state
-transition are the rest. Reading any of them as progress would let a user hold a
-wedged turn open indefinitely by submitting input. What remains is emitted only
-by a transition of a turn, its model calls, its tool rounds, or its approvals,
-none of which can occur while the turn does nothing. The scope is written as
-those six exclusions rather than as a list of what counts, so a kind added later
-is read as progress until someone decides otherwise: counting an unrelated event
-delays terminalizing a wedge, where missing a real one would end a turn that was
-working. An identity ordering would have been unsound here: a backward clock
-adjustment, or an earlier mint skewed into the future, lets a freshly appended
-identity sort below the recorded one, and a frontier that does not move reads as
-silence on a session that progressed — which is the one error this pass may
-never make. A commit-ordered sequence cannot move backwards whatever a clock
-does. Both observations are also chosen so that reading them costs the same
-whatever a session's history weighs: the attempt is a column of the lifecycle
-row already read, and the frontier is one backward index lookup on
+acceptance and the turn's model-settings resolution; replacing session defaults,
+creating a session, a runner state transition, the session's own lifecycle,
+goal, ownership, and settlement records, and `turn_terminal{retired}` — retiring
+queued work — are the rest. Reading any of them as progress would let a user
+hold a wedged turn open indefinitely by submitting input. What remains is
+emitted only by a transition of a turn, its model calls, its tool rounds, or its
+approvals, none of which can occur while the turn does nothing. The scope is
+written as those exclusions rather than as a list of what counts, so a kind
+added later is read as progress until someone decides otherwise: counting an
+unrelated event delays terminalizing a wedge, where missing a real one would end
+a turn that was working. An identity ordering would have been unsound here: a
+backward clock adjustment, or an earlier mint skewed into the future, lets a
+freshly appended identity sort below the recorded one, and a frontier that does
+not move reads as silence on a session that progressed — which is the one error
+this pass may never make. A commit-ordered sequence cannot move backwards
+whatever a clock does. Both observations are also chosen so that reading them
+costs the same whatever a session's history weighs: the attempt is a column of
+the lifecycle row already read, and the frontier is one backward index lookup on
 `outbox_event_turn_progress_by_session`, whose partial predicate is that same
 exclusion. Aggregates over a session's history would have made a once-a-minute
 pass cost more the longer a session lived. The same requirement binds the

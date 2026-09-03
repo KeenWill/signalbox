@@ -28,9 +28,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::{
-    Decimal, TestSubmitInputHandle, commission_fixture_session_goal, insert_frontier,
-    migrated_postgres, prepared_complete_delegation_outbox, start_input_with_attachment,
-    stop_fixture_session_goal, test_session_credential_pin,
+    Decimal, TestSubmitInputHandle, commission_fixture_session_goal, migrated_postgres,
+    prepared_complete_delegation_outbox, start_input_with_attachment, stop_fixture_session_goal,
+    test_session_credential_pin,
 };
 
 fn credential_pin() -> signalbox_persistence::SessionCredentialPin {
@@ -921,9 +921,15 @@ async fn relevance_predicates_disagree(
           WHERE turn.session_id = $1
             AND goal_turn_is_queue_order_relevant(turn.session_id, turn.turn_id)
                 IS DISTINCT FROM (
-                    turn.state_kind <> 'queued'
-                    OR goal_turn_generation_is_pursued(
-                        turn.session_id, turn.turn_id
+                    NOT (
+                        turn.state_kind = 'terminal'
+                        AND turn.terminal_disposition_kind = 'retired'
+                    )
+                    AND (
+                        turn.state_kind <> 'queued'
+                        OR goal_turn_generation_is_pursued(
+                            turn.session_id, turn.turn_id
+                        )
                     )
                 )",
     )
@@ -935,19 +941,10 @@ async fn relevance_predicates_disagree(
 
 /// A queued goal turn whose generation a goal event retired is no longer
 /// credited to `queued_turn_count`, so the lifecycle trigger must not subtract
-/// it again when that turn later leaves the queue.
-///
-/// No repository path reaches this state today, which is exactly why it is
-/// asserted here rather than through one. Activation refuses a retired turn
-/// (`start_eligible_turn` filters on `goal_turn_is_runtime_relevant`) and every
-/// terminalization requires `state_kind = 'active'`, so a retired queued turn
-/// merely lingers. The delegation cascade cannot reach it either: a goal turn is
-/// `origin_kind = 'accepted_input'` by `goal_turn_lifecycle_fk`, and
-/// `turn_lifecycle_delegation_runtime_terminal_shape` admits that flag only on
-/// `origin_kind = 'delegation'`. The fact triggers still have to agree with the
-/// backfill on their own terms instead of borrowing those gates, because an
-/// unguarded subtraction removes credit that was never granted and drives the
-/// count to -1, aborting the writing transaction on the nonnegative check.
+/// it again when the same transaction moves that turn to `terminal{retired}`.
+/// An unguarded subtraction would remove credit that was never granted and
+/// drive the count to -1, aborting the writing transaction on the nonnegative
+/// check.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_retired_queued_goal_turn_is_never_subtracted_twice() -> Result<(), Box<dyn Error>> {
@@ -976,56 +973,20 @@ async fn a_retired_queued_goal_turn_is_never_subtracted_twice() -> Result<(), Bo
         0
     );
 
-    // The retired turn leaves the queue. Only the final-state assertion is
-    // suspended -- it demands the attempts and boundary entries a turn that
-    // never ran does not have. The transition guard and the fact trigger both
-    // stay enabled, so this exercises exactly the subtraction under test. The
-    // suspension spans its own statements rather than the cancelling
-    // transaction because a deferred trigger the update leaves pending blocks
-    // any `ALTER TABLE` that would re-enable it in that same transaction.
+    // The stop retired the turn: it left the queue as `terminal{retired}`.
     let goal_turn = Uuid::from_u128(seed + 2);
-    let frontier = Uuid::from_u128(seed + 0x200);
-    let mut connection = pool.acquire().await?;
-    insert_frontier(
-        &mut connection,
-        identity.into_uuid(),
-        frontier,
-        Decimal::ZERO,
-        &[],
+    let retired: (String, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
     )
-    .await?;
-    drop(connection);
-    sqlx::raw_sql(
-        "ALTER TABLE turn_lifecycle
-             DISABLE TRIGGER turn_lifecycle_requires_complete_final_state",
-    )
-    .execute(&pool)
-    .await?;
-    let cancelling = sqlx::query(
-        "UPDATE turn_lifecycle
-            SET state_kind = 'terminal',
-                start_lineage_kind = 'first_in_session',
-                starting_frontier_id = $1,
-                terminal_frontier_id = $1,
-                terminal_disposition_kind = 'cancelled',
-                terminal_cause_kind = 'interrupt_applied'
-          WHERE session_id = $2 AND turn_id = $3",
-    )
-    .bind(frontier)
     .bind(identity.into_uuid())
     .bind(goal_turn)
-    .execute(&pool)
-    .await;
-    sqlx::raw_sql(
-        "ALTER TABLE turn_lifecycle
-             ENABLE TRIGGER turn_lifecycle_requires_complete_final_state",
-    )
-    .execute(&pool)
+    .fetch_one(&pool)
     .await?;
     assert_eq!(
-        cancelling?.rows_affected(),
-        1,
-        "the retired queued goal turn leaves the queue"
+        retired,
+        (String::from("terminal"), Some(String::from("retired")))
     );
 
     let cancelled = repository

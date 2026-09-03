@@ -3957,7 +3957,7 @@ async fn s32_inv032_inv044_runner_loss_transaction_projects_exact_unpinned_sessi
     assert_eq!(loaded.interrupted_tool_attempt(), None);
     assert_eq!(completed.propagated_through(), Some(session));
     assert!(completed.is_complete());
-    assert_eq!(event.session(), session);
+    assert_eq!(event.session(), Some(session));
     assert_eq!(
         event.kind(),
         &DispatchedOutboxEventKind::RunnerStateTransition {
@@ -17147,7 +17147,7 @@ async fn s32_inv032_inv044_runner_pinned_outbox_round_trips() -> Result<(), Box<
     let event = dispatch_next_outbox_event(&pool).await?;
 
     assert_eq!(event.sequence(), 1);
-    assert_eq!(event.session(), session);
+    assert_eq!(event.session(), Some(session));
     assert_eq!(
         event.kind(),
         &DispatchedOutboxEventKind::RunnerStateTransition {
@@ -17200,7 +17200,7 @@ async fn s32_inv032_inv044_runner_suspect_outbox_round_trips() -> Result<(), Box
     assert_eq!(outbox_event_count, 1);
     assert_eq!(runner_event_count, 1);
     assert_eq!(event.sequence(), 1);
-    assert_eq!(event.session(), session);
+    assert_eq!(event.session(), Some(session));
     assert_eq!(
         event.kind(),
         &DispatchedOutboxEventKind::RunnerStateTransition {
@@ -17574,7 +17574,7 @@ async fn s32_inv032_inv044_runner_connected_outbox_round_trips() -> Result<(), B
 
     assert_eq!(suspect.sequence(), 1);
     assert_eq!(event.sequence(), 2);
-    assert_eq!(event.session(), session);
+    assert_eq!(event.session(), Some(session));
     assert_eq!(
         event.kind(),
         &DispatchedOutboxEventKind::RunnerStateTransition {
@@ -17617,7 +17617,7 @@ async fn s32_inv032_inv044_runner_reconnect_after_suspicion_publishes_connected(
 
     assert_eq!(suspect.sequence(), 1);
     assert_eq!(connected.sequence(), 2);
-    assert_eq!(connected.session(), session);
+    assert_eq!(connected.session(), Some(session));
     assert_eq!(replacement_connection.event_ordinal(), 1);
     assert_eq!(
         connected.kind(),
@@ -17936,7 +17936,7 @@ async fn s32_inv032_inv044_runner_lost_before_pin_outbox_round_trips() -> Result
     let event = dispatch_next_outbox_event(&pool).await?;
 
     assert_eq!(event.sequence(), 1);
-    assert_eq!(event.session(), placement.session());
+    assert_eq!(event.session(), Some(placement.session()));
     assert_eq!(
         event.kind(),
         &DispatchedOutboxEventKind::RunnerStateTransition {
@@ -17979,7 +17979,7 @@ async fn s32_inv032_inv044_runner_lost_outbox_round_trips() -> Result<(), Box<dy
     let event = dispatch_next_outbox_event(&pool).await?;
 
     assert_eq!(event.sequence(), 1);
-    assert_eq!(event.session(), session);
+    assert_eq!(event.session(), Some(session));
     assert_eq!(
         event.kind(),
         &DispatchedOutboxEventKind::RunnerStateTransition {
@@ -18032,7 +18032,7 @@ async fn s32_inv032_inv044_runner_pre_pin_replaced_outbox_round_trips() -> Resul
     let event = dispatch_next_outbox_event(&pool).await?;
 
     assert_eq!(event.sequence(), 1);
-    assert_eq!(event.session(), placement.session());
+    assert_eq!(event.session(), Some(placement.session()));
     assert_eq!(
         event.kind(),
         &DispatchedOutboxEventKind::RunnerStateTransition {
@@ -18078,7 +18078,7 @@ async fn s32_inv032_inv044_runner_pinned_replaced_outbox_round_trips() -> Result
     let event = dispatch_next_outbox_event(&pool).await?;
 
     assert_eq!(event.sequence(), 1);
-    assert_eq!(event.session(), session);
+    assert_eq!(event.session(), Some(session));
     assert_eq!(
         event.kind(),
         &DispatchedOutboxEventKind::RunnerStateTransition {
@@ -18130,7 +18130,7 @@ async fn s32_inv032_inv044_runner_working_directory_changed_outbox_round_trips()
     let event = dispatch_next_outbox_event(&pool).await?;
 
     assert_eq!(event.sequence(), 1);
-    assert_eq!(event.session(), session);
+    assert_eq!(event.session(), Some(session));
     assert_eq!(
         event.kind(),
         &DispatchedOutboxEventKind::RunnerStateTransition {
@@ -18274,7 +18274,7 @@ async fn s32_inv032_inv044_runner_abandoned_outbox_round_trips() -> Result<(), B
     let event = dispatch_next_outbox_event(&pool).await?;
 
     assert_eq!(event.sequence(), 1);
-    assert_eq!(event.session(), session);
+    assert_eq!(event.session(), Some(session));
     assert_eq!(
         event.kind(),
         &DispatchedOutboxEventKind::RunnerStateTransition {

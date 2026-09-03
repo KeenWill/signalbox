@@ -135,8 +135,8 @@ use signalbox_persistence::{
         DispatchedDelegationProvenance, DispatchedDelegationReason, DispatchedDelegationUpdate,
         DispatchedDelegationWaitMode, DispatchedModelCallDisposition, DispatchedModelCallState,
         DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedReconciliationOperation,
-        DispatchedRunnerState, DispatchedToolBatchState, OutboxDeliveryDecision,
-        OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
+        DispatchedRunnerState, DispatchedToolBatchState, DispatchedTurnTerminalDisposition,
+        OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
     },
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition,
@@ -561,15 +561,18 @@ async fn dispatch_updates(
                     event.sequence(),
                     event.kind(),
                 );
-                nudge_delegation_wake(&eligibility_nudge, event.session(), event.kind());
-                let _ = fanouts.monitor.send(ProcessMonitorUpdate::Durable {
-                    cursor: event.sequence(),
-                    session: event.session(),
-                    kind: monitor_event_kind(event.kind()),
-                });
-                if let Some(update) = ProcessUpdate::from_outbox(event) {
-                    let _ = fanouts.durable.send(update.clone());
-                    let _ = fanouts.streaming.send(update);
+                // A sessionless receipt has no follower to reach.
+                if let Some(session) = event.session() {
+                    nudge_delegation_wake(&eligibility_nudge, session, event.kind());
+                    let _ = fanouts.monitor.send(ProcessMonitorUpdate::Durable {
+                        cursor: event.sequence(),
+                        session,
+                        kind: monitor_event_kind(event.kind()),
+                    });
+                    if let Some(update) = ProcessUpdate::from_outbox(event) {
+                        let _ = fanouts.durable.send(update.clone());
+                        let _ = fanouts.streaming.send(update);
+                    }
                 }
                 OutboxDeliveryDecision::Delivered
             })
@@ -674,7 +677,21 @@ pub enum ProcessMonitorReceiveError {
 
 fn monitor_event_kind(event: &DispatchedOutboxEventKind) -> SessionTimelineEventKind {
     match event {
-        DispatchedOutboxEventKind::SessionCreated => SessionTimelineEventKind::SessionCreated,
+        DispatchedOutboxEventKind::SessionCreated(_) => SessionTimelineEventKind::SessionCreated,
+        DispatchedOutboxEventKind::SessionStateChanged(_) => {
+            SessionTimelineEventKind::SessionStateChanged
+        }
+        DispatchedOutboxEventKind::SessionTerminal(_) => SessionTimelineEventKind::SessionTerminal,
+        DispatchedOutboxEventKind::GoalChanged(_) => SessionTimelineEventKind::GoalChanged,
+        DispatchedOutboxEventKind::CommandSettled { .. } => {
+            SessionTimelineEventKind::CommandSettled
+        }
+        DispatchedOutboxEventKind::InjectionSettled { .. } => {
+            SessionTimelineEventKind::InjectionSettled
+        }
+        DispatchedOutboxEventKind::SessionOwnershipChanged(_) => {
+            SessionTimelineEventKind::SessionOwnershipChanged
+        }
         DispatchedOutboxEventKind::SessionModelSettingsChanged(_) => {
             SessionTimelineEventKind::SessionModelSettingsChanged
         }
@@ -682,11 +699,25 @@ fn monitor_event_kind(event: &DispatchedOutboxEventKind) -> SessionTimelineEvent
             SessionTimelineEventKind::TurnModelSettingsResolved
         }
         DispatchedOutboxEventKind::InputAccepted { .. } => SessionTimelineEventKind::InputAccepted,
-        DispatchedOutboxEventKind::GoalTurnRetired { .. } => {
-            SessionTimelineEventKind::GoalTurnRetired
-        }
         DispatchedOutboxEventKind::TurnActivated { .. } => SessionTimelineEventKind::TurnActivated,
-        DispatchedOutboxEventKind::TurnFailed { .. } => SessionTimelineEventKind::TurnFailed,
+        DispatchedOutboxEventKind::TurnTerminal { disposition, .. } => match disposition {
+            DispatchedTurnTerminalDisposition::Completed { .. } => {
+                SessionTimelineEventKind::TurnCompleted
+            }
+            DispatchedTurnTerminalDisposition::Refused { .. } => {
+                SessionTimelineEventKind::TurnRefused
+            }
+            DispatchedTurnTerminalDisposition::Failed { .. } => {
+                SessionTimelineEventKind::TurnFailed
+            }
+            DispatchedTurnTerminalDisposition::Cancelled { .. } => {
+                SessionTimelineEventKind::TurnCancelled
+            }
+            DispatchedTurnTerminalDisposition::ReconciliationRequired { .. } => {
+                SessionTimelineEventKind::TurnReconciliationRequired
+            }
+            DispatchedTurnTerminalDisposition::Retired => SessionTimelineEventKind::GoalTurnRetired,
+        },
         DispatchedOutboxEventKind::ModelCallTransition { .. } => {
             SessionTimelineEventKind::ModelCallTransition
         }
@@ -698,12 +729,6 @@ fn monitor_event_kind(event: &DispatchedOutboxEventKind) -> SessionTimelineEvent
         }
         DispatchedOutboxEventKind::ContextCompacted { .. } => {
             SessionTimelineEventKind::ContextCompacted
-        }
-        DispatchedOutboxEventKind::TurnCompleted { .. } => SessionTimelineEventKind::TurnCompleted,
-        DispatchedOutboxEventKind::TurnRefused { .. } => SessionTimelineEventKind::TurnRefused,
-        DispatchedOutboxEventKind::TurnCancelled { .. } => SessionTimelineEventKind::TurnCancelled,
-        DispatchedOutboxEventKind::TurnReconciliationRequired { .. } => {
-            SessionTimelineEventKind::TurnReconciliationRequired
         }
         DispatchedOutboxEventKind::RunnerStateTransition { .. } => {
             SessionTimelineEventKind::RunnerStateTransition
@@ -748,29 +773,38 @@ fn observe_outbox_metrics(metrics: Option<&TelemetryMetrics>, event: &Dispatched
     };
     match event {
         DispatchedOutboxEventKind::TurnActivated { .. } => metrics.observe_turn_started(),
-        DispatchedOutboxEventKind::TurnCompleted { .. } => {
-            metrics.observe_turn_terminal(TurnMetricOutcome::Completed);
-        }
-        DispatchedOutboxEventKind::TurnFailed { .. } => {
-            metrics.observe_turn_terminal(TurnMetricOutcome::Failed);
-        }
-        DispatchedOutboxEventKind::TurnRefused { .. } => {
-            metrics.observe_turn_terminal(TurnMetricOutcome::Refused);
-        }
-        DispatchedOutboxEventKind::TurnCancelled { .. } => {
-            metrics.observe_turn_terminal(TurnMetricOutcome::Cancelled);
-        }
-        DispatchedOutboxEventKind::TurnReconciliationRequired { .. } => {
-            metrics.observe_turn_terminal(TurnMetricOutcome::ReconciliationRequired);
-        }
+        DispatchedOutboxEventKind::TurnTerminal { disposition, .. } => match disposition {
+            DispatchedTurnTerminalDisposition::Completed { .. } => {
+                metrics.observe_turn_terminal(TurnMetricOutcome::Completed);
+            }
+            DispatchedTurnTerminalDisposition::Failed { .. } => {
+                metrics.observe_turn_terminal(TurnMetricOutcome::Failed);
+            }
+            DispatchedTurnTerminalDisposition::Refused { .. } => {
+                metrics.observe_turn_terminal(TurnMetricOutcome::Refused);
+            }
+            DispatchedTurnTerminalDisposition::Cancelled { .. } => {
+                metrics.observe_turn_terminal(TurnMetricOutcome::Cancelled);
+            }
+            DispatchedTurnTerminalDisposition::ReconciliationRequired { .. } => {
+                metrics.observe_turn_terminal(TurnMetricOutcome::ReconciliationRequired);
+            }
+            // A retired turn never ran, so it is not a turn outcome.
+            DispatchedTurnTerminalDisposition::Retired => {}
+        },
         DispatchedOutboxEventKind::ModelCallTransition { state, .. } => {
             observe_model_call_metrics(metrics, *state);
         }
-        DispatchedOutboxEventKind::SessionCreated
+        DispatchedOutboxEventKind::SessionCreated(_)
+        | DispatchedOutboxEventKind::SessionStateChanged(_)
+        | DispatchedOutboxEventKind::SessionTerminal(_)
+        | DispatchedOutboxEventKind::GoalChanged(_)
+        | DispatchedOutboxEventKind::CommandSettled { .. }
+        | DispatchedOutboxEventKind::InjectionSettled { .. }
+        | DispatchedOutboxEventKind::SessionOwnershipChanged(_)
         | DispatchedOutboxEventKind::SessionModelSettingsChanged(_)
         | DispatchedOutboxEventKind::TurnModelSettingsResolved(_)
         | DispatchedOutboxEventKind::InputAccepted { .. }
-        | DispatchedOutboxEventKind::GoalTurnRetired { .. }
         | DispatchedOutboxEventKind::ToolBatchTransition { .. }
         | DispatchedOutboxEventKind::RunnerStateTransition { .. }
         | DispatchedOutboxEventKind::ContextCompacted { .. }
@@ -15754,7 +15788,7 @@ impl ProcessUpdate {
     fn from_outbox(event: &DispatchedOutboxEvent) -> Option<Self> {
         Some(Self::Durable {
             cursor: event.sequence(),
-            session: event.session(),
+            session: event.session()?,
             event: ProcessUpdateEvent::from_outbox(event.kind())?,
         })
     }
@@ -15839,7 +15873,14 @@ enum ProcessUpdateEvent {
 impl ProcessUpdateEvent {
     fn from_outbox(event: &DispatchedOutboxEventKind) -> Option<Self> {
         Some(match event {
-            DispatchedOutboxEventKind::SessionCreated => Self::SessionCreated,
+            DispatchedOutboxEventKind::SessionCreated(_) => Self::SessionCreated,
+            // The module-facing lifecycle kinds have no wire projection yet.
+            DispatchedOutboxEventKind::SessionStateChanged(_)
+            | DispatchedOutboxEventKind::SessionTerminal(_)
+            | DispatchedOutboxEventKind::GoalChanged(_)
+            | DispatchedOutboxEventKind::CommandSettled { .. }
+            | DispatchedOutboxEventKind::InjectionSettled { .. }
+            | DispatchedOutboxEventKind::SessionOwnershipChanged(_) => return None,
             DispatchedOutboxEventKind::SessionModelSettingsChanged(event) => {
                 Self::SessionModelSettingsChanged(event.clone())
             }
@@ -15857,24 +15898,57 @@ impl ProcessUpdateEvent {
                 acceptance_position: acceptance_position.as_u64(),
                 content: content.clone(),
             },
-            DispatchedOutboxEventKind::GoalTurnRetired { turn } => {
-                Self::GoalTurnRetired { turn: *turn }
-            }
+            DispatchedOutboxEventKind::TurnTerminal { turn, disposition } => match disposition {
+                DispatchedTurnTerminalDisposition::Completed {
+                    call,
+                    completion_entry,
+                    terminal_frontier,
+                } => Self::TurnCompleted {
+                    turn: *turn,
+                    call: *call,
+                    completion_entry: *completion_entry,
+                    terminal_frontier: *terminal_frontier,
+                },
+                DispatchedTurnTerminalDisposition::Refused {
+                    call,
+                    terminal_frontier,
+                } => Self::TurnRefused {
+                    turn: *turn,
+                    call: *call,
+                    terminal_frontier: *terminal_frontier,
+                },
+                DispatchedTurnTerminalDisposition::Failed {
+                    failure_entry,
+                    terminal_frontier,
+                } => Self::TurnFailed {
+                    turn: *turn,
+                    failure_entry: *failure_entry,
+                    terminal_frontier: *terminal_frontier,
+                },
+                DispatchedTurnTerminalDisposition::Cancelled {
+                    cancellation_entry,
+                    terminal_frontier,
+                } => Self::TurnCancelled {
+                    turn: *turn,
+                    cancellation_entry: *cancellation_entry,
+                    terminal_frontier: *terminal_frontier,
+                },
+                DispatchedTurnTerminalDisposition::ReconciliationRequired {
+                    operation,
+                    terminal_frontier,
+                } => Self::TurnReconciliationRequired {
+                    turn: *turn,
+                    operation: *operation,
+                    terminal_frontier: *terminal_frontier,
+                },
+                DispatchedTurnTerminalDisposition::Retired => Self::GoalTurnRetired { turn: *turn },
+            },
             DispatchedOutboxEventKind::TurnActivated {
                 turn,
                 current_attempt,
             } => Self::TurnActivated {
                 turn: *turn,
                 current_attempt: *current_attempt,
-            },
-            DispatchedOutboxEventKind::TurnFailed {
-                turn,
-                failure_entry,
-                terminal_frontier,
-            } => Self::TurnFailed {
-                turn: *turn,
-                failure_entry: *failure_entry,
-                terminal_frontier: *terminal_frontier,
             },
             DispatchedOutboxEventKind::ModelCallTransition { turn, call, state } => {
                 Self::ModelCallTransition {
@@ -15926,44 +16000,6 @@ impl ProcessUpdateEvent {
                 through_position: *through_position,
                 summary_entry: *summary_entry,
                 result_frontier: *result_frontier,
-            },
-            DispatchedOutboxEventKind::TurnCompleted {
-                turn,
-                call,
-                completion_entry,
-                terminal_frontier,
-            } => Self::TurnCompleted {
-                turn: *turn,
-                call: *call,
-                completion_entry: *completion_entry,
-                terminal_frontier: *terminal_frontier,
-            },
-            DispatchedOutboxEventKind::TurnRefused {
-                turn,
-                call,
-                terminal_frontier,
-            } => Self::TurnRefused {
-                turn: *turn,
-                call: *call,
-                terminal_frontier: *terminal_frontier,
-            },
-            DispatchedOutboxEventKind::TurnCancelled {
-                turn,
-                cancellation_entry,
-                terminal_frontier,
-            } => Self::TurnCancelled {
-                turn: *turn,
-                cancellation_entry: *cancellation_entry,
-                terminal_frontier: *terminal_frontier,
-            },
-            DispatchedOutboxEventKind::TurnReconciliationRequired {
-                turn,
-                operation,
-                terminal_frontier,
-            } => Self::TurnReconciliationRequired {
-                turn: *turn,
-                operation: *operation,
-                terminal_frontier: *terminal_frontier,
             },
             DispatchedOutboxEventKind::DelegationUpdate(update) => {
                 Self::DelegationUpdate(update.clone())
@@ -16600,25 +16636,25 @@ mod tests {
 
     use super::{
         CommittedForegroundDelivery, ContextCompactionRangeLoadError, ConversationImportState,
-        ConversionFailureDisposition, GENERAL_BUFFERED_INBOUND_FRAMES, INBOUND_READ_AHEAD_BYTES,
-        ImportedConversationRepository, ImportedConversationRepositoryError,
-        ImportedRawBlobStorageError, InboundFrameBudgets, IncomingLine, InternalDiagnostic,
-        MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_BLOB_READS,
-        MAX_CONCURRENT_IMPORTS, MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES,
-        MAX_IMPORT_ADMISSION_WAITERS, OperationalImportError, PendingConversationImport,
-        ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
-        RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS,
-        RequestId, ReviewCommandAdmission, SnapshotReaderAdmission, SnapshotSpoolError,
-        SubmitInputModelExecutionDiagnostic, acquire_import_permit, acquire_import_waiter_permit,
-        acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
-        acquire_review_command_permit, acquire_review_command_permit_while_buffered,
-        acquire_snapshot_reader_permit, admit_snapshot_reader, admitted_user_content,
-        blob_upload_begin_preflight, bounded_rendered_compaction_boundary,
-        canonical_review_request_digest, claude_conversion_failure_disposition,
-        codex_conversion_failure_disposition, consume_snapshot_queued_update,
-        context_compaction_failure_disposition, execute_import, foreground_peer_activity,
-        handle_append_conversation_import, handle_begin_conversation_import,
-        handle_commit_conversation_import, import_evidence,
+        ConversionFailureDisposition, DispatchedTurnTerminalDisposition,
+        GENERAL_BUFFERED_INBOUND_FRAMES, INBOUND_READ_AHEAD_BYTES, ImportedConversationRepository,
+        ImportedConversationRepositoryError, ImportedRawBlobStorageError, InboundFrameBudgets,
+        IncomingLine, InternalDiagnostic, MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES,
+        MAX_CONCURRENT_BLOB_READS, MAX_CONCURRENT_IMPORTS, MAX_CONCURRENT_REVIEW_COMMANDS,
+        MAX_FRAME_BYTES, MAX_IMPORT_ADMISSION_WAITERS, OperationalImportError,
+        PendingConversationImport, ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent,
+        ProtocolError, RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES,
+        RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, ReviewCommandAdmission,
+        SnapshotReaderAdmission, SnapshotSpoolError, SubmitInputModelExecutionDiagnostic,
+        acquire_import_permit, acquire_import_waiter_permit, acquire_inbound_frame_permit,
+        acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
+        acquire_review_command_permit_while_buffered, acquire_snapshot_reader_permit,
+        admit_snapshot_reader, admitted_user_content, blob_upload_begin_preflight,
+        bounded_rendered_compaction_boundary, canonical_review_request_digest,
+        claude_conversion_failure_disposition, codex_conversion_failure_disposition,
+        consume_snapshot_queued_update, context_compaction_failure_disposition, execute_import,
+        foreground_peer_activity, handle_append_conversation_import,
+        handle_begin_conversation_import, handle_commit_conversation_import, import_evidence,
         imported_conversation_internal_diagnostic, inspect_connection_completion,
         internal_protocol_error, map_rejection, nudge_after_process_await_rejection,
         nudge_after_process_message_rejection, nudge_delegation_issuer, nudge_delegation_wake,
@@ -19524,9 +19560,11 @@ mod tests {
     #[test]
     fn goal_turn_retirement_projects_to_the_exact_wire_identity() {
         let turn = TurnId::from_uuid(Uuid::from_u128(7));
-        let update =
-            ProcessUpdateEvent::from_outbox(&DispatchedOutboxEventKind::GoalTurnRetired { turn })
-                .expect("a client-visible event projects to one update");
+        let update = ProcessUpdateEvent::from_outbox(&DispatchedOutboxEventKind::TurnTerminal {
+            turn,
+            disposition: DispatchedTurnTerminalDisposition::Retired,
+        })
+        .expect("a client-visible event projects to one update");
 
         assert_eq!(
             update.wire().expect("the fixture event is representable"),
@@ -20215,13 +20253,14 @@ mod tests {
             }
         );
 
-        let cancelled =
-            ProcessUpdateEvent::from_outbox(&DispatchedOutboxEventKind::TurnCancelled {
-                turn,
+        let cancelled = ProcessUpdateEvent::from_outbox(&DispatchedOutboxEventKind::TurnTerminal {
+            turn,
+            disposition: DispatchedTurnTerminalDisposition::Cancelled {
                 cancellation_entry: entry,
                 terminal_frontier: frontier,
-            })
-            .expect("a client-visible event projects to one update");
+            },
+        })
+        .expect("a client-visible event projects to one update");
         assert_eq!(
             cancelled
                 .wire()
@@ -20232,14 +20271,15 @@ mod tests {
                 terminal_frontier_id: CanonicalUuid::from_uuid(frontier.into_uuid()),
             }
         );
-        let reconciliation = ProcessUpdateEvent::from_outbox(
-            &DispatchedOutboxEventKind::TurnReconciliationRequired {
+        let reconciliation =
+            ProcessUpdateEvent::from_outbox(&DispatchedOutboxEventKind::TurnTerminal {
                 turn,
-                operation: DispatchedReconciliationOperation::ModelCall(call),
-                terminal_frontier: frontier,
-            },
-        )
-        .expect("a client-visible event projects to one update");
+                disposition: DispatchedTurnTerminalDisposition::ReconciliationRequired {
+                    operation: DispatchedReconciliationOperation::ModelCall(call),
+                    terminal_frontier: frontier,
+                },
+            })
+            .expect("a client-visible event projects to one update");
         assert_eq!(
             reconciliation
                 .wire()

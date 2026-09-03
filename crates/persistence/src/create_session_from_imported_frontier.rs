@@ -709,6 +709,10 @@ async fn insert_prepared(
         connection,
         outbox::OutboxEvent::SessionCreated {
             session: session.id(),
+            cause: signalbox_domain::SessionCreationCause::Interactive,
+            ownership: crate::session_lifecycle::creation_ownership(
+                &signalbox_domain::SessionCreationCause::Interactive,
+            ),
         },
     )
     .await?;

@@ -611,6 +611,8 @@ pub(crate) async fn insert_prepared(
         connection,
         outbox::OutboxEvent::SessionCreated {
             session: session.id(),
+            cause,
+            ownership: crate::session_lifecycle::creation_ownership(&cause),
         },
     )
     .await?;

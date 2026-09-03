@@ -70,7 +70,10 @@ use crate::{
         tool_approval_decision_source_to_str, tool_approval_posture_to_str,
         tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid, turn_terminal_cause_to_str,
     },
-    outbox::{self, ModelCallOutboxState, OutboxEvent, ToolBatchOutboxState},
+    outbox::{
+        self, ModelCallOutboxState, OutboxEvent, ToolBatchOutboxState,
+        TurnTerminalOutboxDisposition,
+    },
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     submit_input::{
         SubmitInputCorruption, SubmitInputRepositoryError, decode_goal_origin_configuration,
@@ -4032,8 +4035,9 @@ async fn completed_terminal_closure_matches(
     Ok(sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
             SELECT 1
-              FROM turn_completed_outbox_event
-             WHERE session_id = $1
+              FROM turn_terminal_outbox_event
+             WHERE disposition_kind = 'completed'
+             AND session_id = $1
                AND turn_id = $2
                AND model_call_id = $3
                AND completion_entry_id = $4
@@ -4137,8 +4141,9 @@ async fn cancelled_terminal_closure_matches(
             )
             AND EXISTS (
                 SELECT 1
-                  FROM turn_cancelled_outbox_event
-                 WHERE session_id = $1
+                  FROM turn_terminal_outbox_event
+                 WHERE disposition_kind = 'cancelled'
+                 AND session_id = $1
                    AND turn_id = $2
                    AND cancellation_entry_id = $4
                    AND terminal_frontier_id = $5
@@ -4241,8 +4246,9 @@ async fn prepared_cancellation_closure_matches(
     Ok(sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
             SELECT 1
-              FROM turn_cancelled_outbox_event
-             WHERE session_id = $1
+              FROM turn_terminal_outbox_event
+             WHERE disposition_kind = 'cancelled'
+             AND session_id = $1
                AND turn_id = $2
                AND cancellation_entry_id = $3
                AND terminal_frontier_id = $4
@@ -4319,8 +4325,9 @@ async fn failed_turn_closure_matches(
     Ok(sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
             SELECT 1
-              FROM turn_failed_outbox_event
-             WHERE session_id = $1
+              FROM turn_terminal_outbox_event
+             WHERE disposition_kind = 'failed'
+             AND session_id = $1
                AND turn_id = $2
                AND failure_entry_id = $3
                AND terminal_frontier_id = $4
@@ -4393,8 +4400,9 @@ async fn refused_terminal_closure_matches(
     Ok(sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
             SELECT 1
-              FROM turn_refused_outbox_event
-             WHERE session_id = $1
+              FROM turn_terminal_outbox_event
+             WHERE disposition_kind = 'refused'
+             AND session_id = $1
                AND turn_id = $2
                AND model_call_id = $3
                AND terminal_frontier_id = $4
@@ -4513,8 +4521,9 @@ async fn ambiguous_terminal_closure_matches(
                    )
                    AND EXISTS (
                         SELECT 1
-                          FROM turn_reconciliation_required_outbox_event
-                         WHERE session_id = $1
+                          FROM turn_terminal_outbox_event
+                         WHERE disposition_kind = 'reconciliation_required'
+                         AND session_id = $1
                            AND turn_id = $2
                            AND model_call_id = $4
                            AND terminal_frontier_id =
@@ -8172,11 +8181,13 @@ pub(crate) async fn persist_reconciliation_required(
     }
     outbox::append(
         connection,
-        OutboxEvent::TurnReconciliationRequired {
+        OutboxEvent::TurnTerminal {
             session: reconciliation.session(),
             turn: reconciliation.turn(),
-            call: reconciliation.call().id(),
-            terminal_frontier: reconciliation.terminal_snapshot().frontier().snapshot(),
+            disposition: TurnTerminalOutboxDisposition::ModelCallReconciliationRequired {
+                call: reconciliation.call().id(),
+                terminal_frontier: reconciliation.terminal_snapshot().frontier().snapshot(),
+            },
         },
     )
     .await?;
@@ -8269,11 +8280,13 @@ pub(crate) async fn persist_tool_reconciliation_required(
     require_single(rows, "terminal tool-reconciliation lifecycle")?;
     outbox::append(
         connection,
-        OutboxEvent::TurnToolReconciliationRequired {
+        OutboxEvent::TurnTerminal {
             session: reconciliation.session(),
             turn: reconciliation.turn(),
-            attempt: reconciliation.tool_attempt().attempt(),
-            terminal_frontier: reconciliation.terminal_snapshot().frontier().snapshot(),
+            disposition: TurnTerminalOutboxDisposition::ToolAttemptReconciliationRequired {
+                attempt: reconciliation.tool_attempt().attempt(),
+                terminal_frontier: reconciliation.terminal_snapshot().frontier().snapshot(),
+            },
         },
     )
     .await?;
@@ -8735,11 +8748,13 @@ async fn persist_cancelled_tool_round(
     .await?;
     outbox::append(
         connection,
-        OutboxEvent::TurnCancelled {
+        OutboxEvent::TurnTerminal {
             session: cancelled.session(),
             turn: cancelled.turn(),
-            cancellation_entry: cancellation.identity(),
-            terminal_frontier: cancelled.terminal_snapshot().frontier().snapshot(),
+            disposition: TurnTerminalOutboxDisposition::Cancelled {
+                cancellation_entry: cancellation.identity(),
+                terminal_frontier: cancelled.terminal_snapshot().frontier().snapshot(),
+            },
         },
     )
     .await?;
@@ -8958,11 +8973,13 @@ async fn persist_cancelled(
     }
     outbox::append(
         connection,
-        OutboxEvent::TurnCancelled {
+        OutboxEvent::TurnTerminal {
             session: cancelled.session(),
             turn: cancelled.turn(),
-            cancellation_entry: entry.identity(),
-            terminal_frontier: cancelled.terminal_snapshot().frontier().snapshot(),
+            disposition: TurnTerminalOutboxDisposition::Cancelled {
+                cancellation_entry: entry.identity(),
+                terminal_frontier: cancelled.terminal_snapshot().frontier().snapshot(),
+            },
         },
     )
     .await?;
@@ -9071,12 +9088,14 @@ async fn persist_completed(
     .await?;
     outbox::append(
         connection,
-        OutboxEvent::TurnCompleted {
+        OutboxEvent::TurnTerminal {
             session: completed.session(),
             turn: completed.turn(),
-            call: completed.call().id(),
-            completion_entry: completion.identity(),
-            terminal_frontier: completed.terminal_snapshot().frontier().snapshot(),
+            disposition: TurnTerminalOutboxDisposition::Completed {
+                call: completed.call().id(),
+                completion_entry: completion.identity(),
+                terminal_frontier: completed.terminal_snapshot().frontier().snapshot(),
+            },
         },
     )
     .await?;
@@ -9156,11 +9175,13 @@ async fn persist_failed(
     }
     outbox::append(
         connection,
-        OutboxEvent::TurnFailed {
+        OutboxEvent::TurnTerminal {
             session: failed.session(),
             turn: failed.turn(),
-            failure_entry: entry.identity(),
-            terminal_frontier: failed.terminal_snapshot().frontier().snapshot(),
+            disposition: TurnTerminalOutboxDisposition::Failed {
+                failure_entry: entry.identity(),
+                terminal_frontier: failed.terminal_snapshot().frontier().snapshot(),
+            },
         },
     )
     .await?;
@@ -9215,11 +9236,13 @@ async fn persist_refused(
     .await?;
     outbox::append(
         connection,
-        OutboxEvent::TurnRefused {
+        OutboxEvent::TurnTerminal {
             session: refused.session(),
             turn: refused.turn(),
-            call: refused.call().id(),
-            terminal_frontier: refused.terminal_snapshot().frontier().snapshot(),
+            disposition: TurnTerminalOutboxDisposition::Refused {
+                call: refused.call().id(),
+                terminal_frontier: refused.terminal_snapshot().frontier().snapshot(),
+            },
         },
     )
     .await?;

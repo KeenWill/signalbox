@@ -35,8 +35,8 @@ use std::{collections::BTreeSet, error::Error, fmt};
 use signalbox_domain::{
     ContextFrontierId, CreateSession, DelegationMessageId, DirectModelSelection, DurableCommandId,
     ModelCallId, ModelSelectionRequest, PreparedCreateSession, SessionConfigurationDefaults,
-    SessionCreationCause, SessionCreationProvenance, SessionId, ToolAttemptId, ToolRequestId,
-    TranscriptAncestry, TurnId,
+    SessionCreationCause, SessionCreationProvenance, SessionId, SessionOwnership, ToolAttemptId,
+    ToolRequestId, TranscriptAncestry, TurnId,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -52,10 +52,10 @@ use signalbox_persistence::{
         DispatchedDelegationProvenance, DispatchedDelegationReason, DispatchedDelegationUpdate,
         DispatchedDelegationWaitMode, DispatchedDelegationWake, DispatchedModelCallDisposition,
         DispatchedModelCallState, DispatchedOutboxEventKind, DispatchedReconciliationOperation,
-        DispatchedToolBatchState, OutboxCorruption, OutboxDeliveryDecision, OutboxDispatchError,
-        OutboxDispatcher, decode_bound_action, decode_delegation_outcome,
-        decode_delegation_policy_kind, decode_delegation_reason, decode_delegation_update_kind,
-        decode_delegation_wake_subject, decode_wait_mode,
+        DispatchedSessionCreation, DispatchedToolBatchState, OutboxCorruption,
+        OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatcher, decode_bound_action,
+        decode_delegation_outcome, decode_delegation_policy_kind, decode_delegation_reason,
+        decode_delegation_update_kind, decode_delegation_wake_subject, decode_wait_mode,
     },
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
@@ -1360,7 +1360,10 @@ async fn every_admitted_update_kind_dispatches_to_its_variant() -> Result<(), Bo
     let dispatcher = OutboxDispatcher::new(pool.clone());
     assert_eq!(
         dispatch_next_kind(&dispatcher).await?,
-        DispatchedOutboxEventKind::SessionCreated,
+        DispatchedOutboxEventKind::SessionCreated(DispatchedSessionCreation {
+            cause: SessionCreationCause::Interactive,
+            ownership: SessionOwnership::Unmonitored,
+        }),
         "the session's own creation event is committed ahead of the planted updates"
     );
     assert_eq!(

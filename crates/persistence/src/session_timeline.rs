@@ -20,12 +20,13 @@ use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 
 use crate::{
     mapping::{
-        OUTBOX_EVENT_KIND_UTF8_BYTE_BOUNDS, OutboxEventDiscriminator, input_position_from_numeric,
-        outbox_event_discriminator_from_str,
+        OUTBOX_EVENT_KIND_UTF8_BYTE_BOUNDS, OutboxEventDiscriminator, TurnDispositionStorageKind,
+        input_position_from_numeric, outbox_event_discriminator_from_str, timeline_event_kind_str,
+        turn_disposition_kind_from_str,
     },
     outbox::{
         DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEvent,
-        DispatchedOutboxEventKind, OutboxDispatchError,
+        DispatchedOutboxEventKind, DispatchedTurnTerminalDisposition, OutboxDispatchError,
     },
 };
 
@@ -36,7 +37,9 @@ const PROJECTED_ITEM_ENVELOPE_BYTES: u32 = 64;
 pub enum SessionTimelineCorruption {
     Missing(&'static str),
     InvalidOrdinal(&'static str),
+    Inconsistent(&'static str),
     UnsupportedEventKind(String),
+    UnsupportedTurnDisposition(String),
     ItemProjectionOverflow,
     DetailProjectionOverflow,
     MissingDetailRecord,
@@ -47,8 +50,17 @@ impl fmt::Display for SessionTimelineCorruption {
         match self {
             Self::Missing(field) => write!(formatter, "missing session timeline {field}"),
             Self::InvalidOrdinal(field) => write!(formatter, "invalid session timeline {field}"),
+            Self::Inconsistent(field) => {
+                write!(formatter, "inconsistent session timeline {field}")
+            }
             Self::UnsupportedEventKind(kind) => {
                 write!(formatter, "unsupported session timeline event kind: {kind}")
+            }
+            Self::UnsupportedTurnDisposition(disposition) => {
+                write!(
+                    formatter,
+                    "unsupported session timeline turn disposition: {disposition}"
+                )
             }
             Self::ItemProjectionOverflow => {
                 formatter.write_str("session timeline item projection overflowed")
@@ -500,13 +512,10 @@ WITH turn_events AS (
        AND settings.session_id = event.session_id
      WHERE settings.session_id = $1 AND settings.turn_id = $2
     UNION ALL
-    SELECT event_sequence FROM goal_turn_retired_outbox_event
-     WHERE session_id = $1 AND turn_id = $2
-    UNION ALL
     SELECT event_sequence FROM turn_activated_outbox_event
      WHERE session_id = $1 AND turn_id = $2
     UNION ALL
-    SELECT event_sequence FROM turn_failed_outbox_event
+    SELECT event_sequence FROM turn_terminal_outbox_event
      WHERE session_id = $1 AND turn_id = $2
     UNION ALL
     SELECT event.event_sequence
@@ -524,18 +533,6 @@ WITH turn_events AS (
       FROM tool_approval_decided_outbox_event AS event
       JOIN tool_request AS request ON request.request_id = event.request_id
      WHERE request.session_id = $1 AND request.turn_id = $2
-    UNION ALL
-    SELECT event_sequence FROM turn_completed_outbox_event
-     WHERE session_id = $1 AND turn_id = $2
-    UNION ALL
-    SELECT event_sequence FROM turn_refused_outbox_event
-     WHERE session_id = $1 AND turn_id = $2
-    UNION ALL
-    SELECT event_sequence FROM turn_cancelled_outbox_event
-     WHERE session_id = $1 AND turn_id = $2
-    UNION ALL
-    SELECT event_sequence FROM turn_reconciliation_required_outbox_event
-     WHERE session_id = $1 AND turn_id = $2
     UNION ALL
     SELECT event.event_sequence
       FROM compact_session_command AS command
@@ -728,7 +725,7 @@ async fn load_detail_event(
     let Some(header) = header else {
         return Err(SessionTimelineCorruption::MissingDetailRecord.into());
     };
-    if header.session != session {
+    if header.session != Some(session) {
         return Ok(None);
     }
     if header.discriminator == OutboxEventDiscriminator::InputAccepted {
@@ -876,7 +873,7 @@ SELECT event.turn_id,
         return Err(SessionTimelineCorruption::MissingDetailRecord.into());
     }
     Ok(event
-        .filter(|event| event.session() == session)
+        .filter(|event| event.session() == Some(session))
         .map(DetailEvent::Decoded))
 }
 
@@ -1000,25 +997,39 @@ async fn project_detail_event(
                         None,
                     )
                 }
-                DispatchedOutboxEventKind::TurnFailed { turn, .. } => {
-                    terminal_turn_body(*turn, "failed", cursor)?
-                }
-                DispatchedOutboxEventKind::TurnCompleted { turn, .. } => {
-                    terminal_turn_body(*turn, "completed", cursor)?
-                }
-                DispatchedOutboxEventKind::TurnRefused { turn, .. } => {
-                    terminal_turn_body(*turn, "refused", cursor)?
-                }
-                DispatchedOutboxEventKind::TurnCancelled { turn, .. } => {
-                    terminal_turn_body(*turn, "cancelled", cursor)?
-                }
-                DispatchedOutboxEventKind::TurnReconciliationRequired { turn, .. } => {
-                    terminal_turn_body(*turn, "reconciliation_required", cursor)?
-                }
-                DispatchedOutboxEventKind::SessionCreated
+                DispatchedOutboxEventKind::TurnTerminal {
+                    turn,
+                    disposition: DispatchedTurnTerminalDisposition::Failed { .. },
+                } => terminal_turn_body(*turn, "failed", cursor)?,
+                DispatchedOutboxEventKind::TurnTerminal {
+                    turn,
+                    disposition: DispatchedTurnTerminalDisposition::Completed { .. },
+                } => terminal_turn_body(*turn, "completed", cursor)?,
+                DispatchedOutboxEventKind::TurnTerminal {
+                    turn,
+                    disposition: DispatchedTurnTerminalDisposition::Refused { .. },
+                } => terminal_turn_body(*turn, "refused", cursor)?,
+                DispatchedOutboxEventKind::TurnTerminal {
+                    turn,
+                    disposition: DispatchedTurnTerminalDisposition::Cancelled { .. },
+                } => terminal_turn_body(*turn, "cancelled", cursor)?,
+                DispatchedOutboxEventKind::TurnTerminal {
+                    turn,
+                    disposition: DispatchedTurnTerminalDisposition::ReconciliationRequired { .. },
+                } => terminal_turn_body(*turn, "reconciliation_required", cursor)?,
+                DispatchedOutboxEventKind::SessionCreated(_)
+                | DispatchedOutboxEventKind::SessionStateChanged(_)
+                | DispatchedOutboxEventKind::SessionTerminal(_)
+                | DispatchedOutboxEventKind::GoalChanged(_)
+                | DispatchedOutboxEventKind::CommandSettled { .. }
+                | DispatchedOutboxEventKind::InjectionSettled { .. }
+                | DispatchedOutboxEventKind::SessionOwnershipChanged(_)
                 | DispatchedOutboxEventKind::SessionModelSettingsChanged(_)
                 | DispatchedOutboxEventKind::TurnModelSettingsResolved(_)
-                | DispatchedOutboxEventKind::GoalTurnRetired { .. }
+                | DispatchedOutboxEventKind::TurnTerminal {
+                    disposition: DispatchedTurnTerminalDisposition::Retired,
+                    ..
+                }
                 | DispatchedOutboxEventKind::ToolBatchTransition { .. }
                 | DispatchedOutboxEventKind::ToolApprovalDecided { .. }
                 | DispatchedOutboxEventKind::ContextCompacted { .. }
@@ -1400,7 +1411,21 @@ fn response_excerpt(
 
 fn dispatched_event_kind(kind: &DispatchedOutboxEventKind) -> SessionTimelineEventKind {
     match kind {
-        DispatchedOutboxEventKind::SessionCreated => SessionTimelineEventKind::SessionCreated,
+        DispatchedOutboxEventKind::SessionCreated(_) => SessionTimelineEventKind::SessionCreated,
+        DispatchedOutboxEventKind::SessionStateChanged(_) => {
+            SessionTimelineEventKind::SessionStateChanged
+        }
+        DispatchedOutboxEventKind::SessionTerminal(_) => SessionTimelineEventKind::SessionTerminal,
+        DispatchedOutboxEventKind::GoalChanged(_) => SessionTimelineEventKind::GoalChanged,
+        DispatchedOutboxEventKind::CommandSettled { .. } => {
+            SessionTimelineEventKind::CommandSettled
+        }
+        DispatchedOutboxEventKind::InjectionSettled { .. } => {
+            SessionTimelineEventKind::InjectionSettled
+        }
+        DispatchedOutboxEventKind::SessionOwnershipChanged(_) => {
+            SessionTimelineEventKind::SessionOwnershipChanged
+        }
         DispatchedOutboxEventKind::SessionModelSettingsChanged(_) => {
             SessionTimelineEventKind::SessionModelSettingsChanged
         }
@@ -1408,11 +1433,10 @@ fn dispatched_event_kind(kind: &DispatchedOutboxEventKind) -> SessionTimelineEve
             SessionTimelineEventKind::TurnModelSettingsResolved
         }
         DispatchedOutboxEventKind::InputAccepted { .. } => SessionTimelineEventKind::InputAccepted,
-        DispatchedOutboxEventKind::GoalTurnRetired { .. } => {
-            SessionTimelineEventKind::GoalTurnRetired
-        }
         DispatchedOutboxEventKind::TurnActivated { .. } => SessionTimelineEventKind::TurnActivated,
-        DispatchedOutboxEventKind::TurnFailed { .. } => SessionTimelineEventKind::TurnFailed,
+        DispatchedOutboxEventKind::TurnTerminal { disposition, .. } => {
+            terminal_turn_kind(disposition_storage_kind(disposition))
+        }
         DispatchedOutboxEventKind::ModelCallTransition { .. } => {
             SessionTimelineEventKind::ModelCallTransition
         }
@@ -1424,12 +1448,6 @@ fn dispatched_event_kind(kind: &DispatchedOutboxEventKind) -> SessionTimelineEve
         }
         DispatchedOutboxEventKind::ContextCompacted { .. } => {
             SessionTimelineEventKind::ContextCompacted
-        }
-        DispatchedOutboxEventKind::TurnCompleted { .. } => SessionTimelineEventKind::TurnCompleted,
-        DispatchedOutboxEventKind::TurnRefused { .. } => SessionTimelineEventKind::TurnRefused,
-        DispatchedOutboxEventKind::TurnCancelled { .. } => SessionTimelineEventKind::TurnCancelled,
-        DispatchedOutboxEventKind::TurnReconciliationRequired { .. } => {
-            SessionTimelineEventKind::TurnReconciliationRequired
         }
         DispatchedOutboxEventKind::RunnerStateTransition { .. } => {
             SessionTimelineEventKind::RunnerStateTransition
@@ -1492,9 +1510,9 @@ macro_rules! window_sql {
     ($tail:literal) => {
         concat!(
             "WITH session_events AS (",
-            "SELECT event_sequence, event_kind FROM outbox_event WHERE session_id = $1 ",
+            "SELECT event_sequence, event_kind, turn_disposition FROM outbox_event WHERE session_id = $1 ",
             "UNION ALL ",
-            "SELECT event_sequence, event_kind FROM delegation_outbox_event WHERE session_id = $1",
+            "SELECT event_sequence, event_kind, NULL::text AS turn_disposition FROM delegation_outbox_event WHERE session_id = $1",
             ") ",
             $tail
         )
@@ -1502,46 +1520,46 @@ macro_rules! window_sql {
 }
 
 const FIRST_WINDOW_SQL: &str = window_sql!(
-    "SELECT event_sequence, event_kind FROM session_events ORDER BY event_sequence ASC LIMIT $2"
+    "SELECT event_sequence, event_kind, turn_disposition FROM session_events ORDER BY event_sequence ASC LIMIT $2"
 );
 const LATEST_WINDOW_SQL: &str = window_sql!(
-    "SELECT event_sequence, event_kind FROM session_events ORDER BY event_sequence DESC LIMIT $2"
+    "SELECT event_sequence, event_kind, turn_disposition FROM session_events ORDER BY event_sequence DESC LIMIT $2"
 );
 const BEFORE_WINDOW_SQL: &str = window_sql!(
-    "SELECT event_sequence, event_kind FROM session_events WHERE event_sequence < $2 ORDER BY event_sequence DESC LIMIT $3"
+    "SELECT event_sequence, event_kind, turn_disposition FROM session_events WHERE event_sequence < $2 ORDER BY event_sequence DESC LIMIT $3"
 );
 const AFTER_WINDOW_SQL: &str = window_sql!(
-    "SELECT event_sequence, event_kind FROM session_events WHERE event_sequence > $2 ORDER BY event_sequence ASC LIMIT $3"
+    "SELECT event_sequence, event_kind, turn_disposition FROM session_events WHERE event_sequence > $2 ORDER BY event_sequence ASC LIMIT $3"
 );
 const AROUND_WINDOW_SQL: &str = r#"
 WITH before_candidates AS (
-    (SELECT event_sequence, event_kind FROM outbox_event
+    (SELECT event_sequence, event_kind, turn_disposition FROM outbox_event
       WHERE session_id = $1 AND event_sequence <= $2
       ORDER BY event_sequence DESC LIMIT $3)
     UNION ALL
-    (SELECT event_sequence, event_kind FROM delegation_outbox_event
+    (SELECT event_sequence, event_kind, NULL::text AS turn_disposition FROM delegation_outbox_event
       WHERE session_id = $1 AND event_sequence <= $2
       ORDER BY event_sequence DESC LIMIT $3)
 ), before_events AS (
-    SELECT event_sequence, event_kind FROM before_candidates
+    SELECT event_sequence, event_kind, turn_disposition FROM before_candidates
      ORDER BY event_sequence DESC LIMIT $3
 ), after_candidates AS (
-    (SELECT event_sequence, event_kind FROM outbox_event
+    (SELECT event_sequence, event_kind, turn_disposition FROM outbox_event
       WHERE session_id = $1 AND event_sequence > $2
       ORDER BY event_sequence ASC LIMIT $3)
     UNION ALL
-    (SELECT event_sequence, event_kind FROM delegation_outbox_event
+    (SELECT event_sequence, event_kind, NULL::text AS turn_disposition FROM delegation_outbox_event
       WHERE session_id = $1 AND event_sequence > $2
       ORDER BY event_sequence ASC LIMIT $3)
 ), after_events AS (
-    SELECT event_sequence, event_kind FROM after_candidates
+    SELECT event_sequence, event_kind, turn_disposition FROM after_candidates
      ORDER BY event_sequence ASC LIMIT $3
 ), candidates AS (
-    SELECT event_sequence, event_kind FROM before_events
+    SELECT event_sequence, event_kind, turn_disposition FROM before_events
     UNION ALL
-    SELECT event_sequence, event_kind FROM after_events
+    SELECT event_sequence, event_kind, turn_disposition FROM after_events
 )
-SELECT event_sequence, event_kind FROM candidates
+SELECT event_sequence, event_kind, turn_disposition FROM candidates
  ORDER BY abs(event_sequence - $2), event_sequence ASC LIMIT $3
 "#;
 
@@ -1649,7 +1667,8 @@ fn decode_item(
     row: sqlx::postgres::PgRow,
 ) -> Result<SessionTimelineItem, SessionTimelineRepositoryError> {
     let kind_text: String = row.try_get("event_kind")?;
-    let kind = decode_kind(&kind_text)?;
+    let disposition: Option<String> = row.try_get("turn_disposition")?;
+    let (kind, kind_text) = decode_kind(&kind_text, disposition.as_deref())?;
     let address = required_address(row.try_get("event_sequence")?, "item address")?;
     let projected_structured_bytes = PROJECTED_ITEM_ENVELOPE_BYTES
         .checked_add(u32::try_from(kind_text.len()).map_err(|_| {
@@ -1665,43 +1684,109 @@ fn decode_item(
     })
 }
 
-fn decode_kind(value: &str) -> Result<SessionTimelineEventKind, SessionTimelineCorruption> {
+/// Decodes one header into its timeline kind and the spelling that kind is
+/// projected under, which is what the item's byte accounting charges.
+fn decode_kind(
+    value: &str,
+    turn_disposition: Option<&str>,
+) -> Result<(SessionTimelineEventKind, &'static str), SessionTimelineCorruption> {
     let discriminator = outbox_event_discriminator_from_str(value)
         .ok_or_else(|| SessionTimelineCorruption::UnsupportedEventKind(value.to_owned()))?;
-    Ok(match discriminator {
-        OutboxEventDiscriminator::SessionCreated => SessionTimelineEventKind::SessionCreated,
-        OutboxEventDiscriminator::SessionModelSettingsChanged => {
+    let disposition = match (discriminator, turn_disposition) {
+        (OutboxEventDiscriminator::TurnTerminal, Some(disposition)) => {
+            Some(turn_disposition_kind_from_str(disposition).ok_or_else(|| {
+                SessionTimelineCorruption::UnsupportedTurnDisposition(disposition.to_owned())
+            })?)
+        }
+        (OutboxEventDiscriminator::TurnTerminal, None) | (_, Some(_)) => {
+            return Err(SessionTimelineCorruption::Inconsistent("turn disposition"));
+        }
+        (_, None) => None,
+    };
+    let kind = match (discriminator, disposition) {
+        (OutboxEventDiscriminator::SessionCreated, _) => SessionTimelineEventKind::SessionCreated,
+        (OutboxEventDiscriminator::SessionStateChanged, _) => {
+            SessionTimelineEventKind::SessionStateChanged
+        }
+        (OutboxEventDiscriminator::SessionTerminal, _) => SessionTimelineEventKind::SessionTerminal,
+        (OutboxEventDiscriminator::GoalChanged, _) => SessionTimelineEventKind::GoalChanged,
+        (OutboxEventDiscriminator::CommandSettled, _) => SessionTimelineEventKind::CommandSettled,
+        (OutboxEventDiscriminator::InjectionSettled, _) => {
+            SessionTimelineEventKind::InjectionSettled
+        }
+        (OutboxEventDiscriminator::SessionOwnershipChanged, _) => {
+            SessionTimelineEventKind::SessionOwnershipChanged
+        }
+        (OutboxEventDiscriminator::SessionModelSettingsChanged, _) => {
             SessionTimelineEventKind::SessionModelSettingsChanged
         }
-        OutboxEventDiscriminator::TurnModelSettingsResolved => {
+        (OutboxEventDiscriminator::TurnModelSettingsResolved, _) => {
             SessionTimelineEventKind::TurnModelSettingsResolved
         }
-        OutboxEventDiscriminator::InputAccepted => SessionTimelineEventKind::InputAccepted,
-        OutboxEventDiscriminator::GoalTurnRetired => SessionTimelineEventKind::GoalTurnRetired,
-        OutboxEventDiscriminator::TurnActivated => SessionTimelineEventKind::TurnActivated,
-        OutboxEventDiscriminator::TurnFailed => SessionTimelineEventKind::TurnFailed,
-        OutboxEventDiscriminator::ModelCallTransition => {
+        (OutboxEventDiscriminator::InputAccepted, _) => SessionTimelineEventKind::InputAccepted,
+        (OutboxEventDiscriminator::TurnActivated, _) => SessionTimelineEventKind::TurnActivated,
+        (OutboxEventDiscriminator::TurnTerminal, Some(disposition)) => {
+            terminal_turn_kind(disposition)
+        }
+        (OutboxEventDiscriminator::TurnTerminal, None) => {
+            return Err(SessionTimelineCorruption::Inconsistent("turn disposition"));
+        }
+        (OutboxEventDiscriminator::ModelCallTransition, _) => {
             SessionTimelineEventKind::ModelCallTransition
         }
-        OutboxEventDiscriminator::ToolBatchTransition => {
+        (OutboxEventDiscriminator::ToolBatchTransition, _) => {
             SessionTimelineEventKind::ToolBatchTransition
         }
-        OutboxEventDiscriminator::ToolApprovalDecided => {
+        (OutboxEventDiscriminator::ToolApprovalDecided, _) => {
             SessionTimelineEventKind::ToolApprovalDecided
         }
-        OutboxEventDiscriminator::ContextCompacted => SessionTimelineEventKind::ContextCompacted,
-        OutboxEventDiscriminator::TurnCompleted => SessionTimelineEventKind::TurnCompleted,
-        OutboxEventDiscriminator::TurnRefused => SessionTimelineEventKind::TurnRefused,
-        OutboxEventDiscriminator::TurnCancelled => SessionTimelineEventKind::TurnCancelled,
-        OutboxEventDiscriminator::TurnReconciliationRequired => {
-            SessionTimelineEventKind::TurnReconciliationRequired
+        (OutboxEventDiscriminator::ContextCompacted, _) => {
+            SessionTimelineEventKind::ContextCompacted
         }
-        OutboxEventDiscriminator::RunnerStateTransition => {
+        (OutboxEventDiscriminator::RunnerStateTransition, _) => {
             SessionTimelineEventKind::RunnerStateTransition
         }
-        OutboxEventDiscriminator::DelegationUpdate => SessionTimelineEventKind::DelegationUpdate,
-        OutboxEventDiscriminator::DelegationWake => SessionTimelineEventKind::DelegationWake,
-    })
+        (OutboxEventDiscriminator::DelegationUpdate, _) => {
+            SessionTimelineEventKind::DelegationUpdate
+        }
+        (OutboxEventDiscriminator::DelegationWake, _) => SessionTimelineEventKind::DelegationWake,
+    };
+    let spelling = timeline_event_kind_str(discriminator, disposition)
+        .ok_or(SessionTimelineCorruption::Inconsistent("turn disposition"))?;
+    Ok((kind, spelling))
+}
+
+/// The timeline kind a `turn_terminal` header projects under.
+const fn terminal_turn_kind(disposition: TurnDispositionStorageKind) -> SessionTimelineEventKind {
+    match disposition {
+        TurnDispositionStorageKind::Completed => SessionTimelineEventKind::TurnCompleted,
+        TurnDispositionStorageKind::Refused => SessionTimelineEventKind::TurnRefused,
+        TurnDispositionStorageKind::Failed => SessionTimelineEventKind::TurnFailed,
+        TurnDispositionStorageKind::Cancelled => SessionTimelineEventKind::TurnCancelled,
+        TurnDispositionStorageKind::ReconciliationRequired => {
+            SessionTimelineEventKind::TurnReconciliationRequired
+        }
+        TurnDispositionStorageKind::Retired => SessionTimelineEventKind::GoalTurnRetired,
+    }
+}
+
+const fn disposition_storage_kind(
+    disposition: &DispatchedTurnTerminalDisposition,
+) -> TurnDispositionStorageKind {
+    match disposition {
+        DispatchedTurnTerminalDisposition::Completed { .. } => {
+            TurnDispositionStorageKind::Completed
+        }
+        DispatchedTurnTerminalDisposition::Refused { .. } => TurnDispositionStorageKind::Refused,
+        DispatchedTurnTerminalDisposition::Failed { .. } => TurnDispositionStorageKind::Failed,
+        DispatchedTurnTerminalDisposition::Cancelled { .. } => {
+            TurnDispositionStorageKind::Cancelled
+        }
+        DispatchedTurnTerminalDisposition::ReconciliationRequired { .. } => {
+            TurnDispositionStorageKind::ReconciliationRequired
+        }
+        DispatchedTurnTerminalDisposition::Retired => TurnDispositionStorageKind::Retired,
+    }
 }
 
 fn nonnegative(value: Decimal, field: &'static str) -> Result<u64, SessionTimelineCorruption> {
@@ -1737,12 +1822,27 @@ mod tests {
     #[test]
     fn durable_event_categories_decode_without_generic_fallback() {
         assert_eq!(
-            decode_kind("delegation_wake"),
-            Ok(SessionTimelineEventKind::DelegationWake)
+            decode_kind("delegation_wake", None),
+            Ok((SessionTimelineEventKind::DelegationWake, "delegation_wake"))
+        );
+        assert_eq!(
+            decode_kind("turn_terminal", Some("retired")),
+            Ok((
+                SessionTimelineEventKind::GoalTurnRetired,
+                "goal_turn_retired"
+            ))
         );
         assert!(matches!(
-            decode_kind("future_event"),
+            decode_kind("future_event", None),
             Err(SessionTimelineCorruption::UnsupportedEventKind(_))
+        ));
+        assert!(matches!(
+            decode_kind("turn_terminal", None),
+            Err(SessionTimelineCorruption::Inconsistent(_))
+        ));
+        assert!(matches!(
+            decode_kind("turn_activated", Some("completed")),
+            Err(SessionTimelineCorruption::Inconsistent(_))
         ));
     }
 

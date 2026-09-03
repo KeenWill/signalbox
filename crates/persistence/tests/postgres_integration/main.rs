@@ -100,8 +100,8 @@ use signalbox_domain::{
     ReplaceSessionDefaultsResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
     SemanticTranscriptEntryRef, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
     SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition,
-    SessionPlacement, SessionPlacementPath, SessionSystemPrompt, SessionTemplateContentDigest,
-    SessionTemplateName, SessionTemplateProvenance, SettingOverlay,
+    SessionOwnership, SessionPlacement, SessionPlacementPath, SessionSystemPrompt,
+    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance, SettingOverlay,
     StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, SubmitInput,
     SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
     SubmitInputResult, ToolApprovalDecider, ToolApprovalDecision, ToolApprovalResolution,
@@ -149,9 +149,9 @@ use signalbox_persistence::{
         DispatchedDelegationOutcome, DispatchedDelegationPolicy, DispatchedDelegationProvenance,
         DispatchedDelegationReason, DispatchedDelegationUpdate, DispatchedDelegationWaitMode,
         DispatchedDelegationWake, DispatchedModelCallState, DispatchedOutboxEvent,
-        DispatchedOutboxEventKind, DispatchedReconciliationOperation, DispatchedToolBatchState,
-        OutboxCorruption, OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome,
-        OutboxDispatcher,
+        DispatchedOutboxEventKind, DispatchedReconciliationOperation, DispatchedSessionCreation,
+        DispatchedToolBatchState, DispatchedTurnTerminalDisposition, OutboxCorruption,
+        OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
     },
     plan::{SessionPlanCorruption, SessionPlanRepository, SessionPlanRepositoryError},
     process_read::{
@@ -1736,10 +1736,12 @@ async fn dispatched_tool_reconciliation(
     drain_outbox(pool, |event| {
         if matches!(
             event.kind(),
-            DispatchedOutboxEventKind::TurnReconciliationRequired {
+            DispatchedOutboxEventKind::TurnTerminal {
                 turn,
-                operation: DispatchedReconciliationOperation::ToolAttempt(attempt),
-                ..
+                disposition: DispatchedTurnTerminalDisposition::ReconciliationRequired {
+                    operation: DispatchedReconciliationOperation::ToolAttempt(attempt),
+                    ..
+                },
             } if *turn == expected_turn && *attempt == expected_attempt
         ) {
             dispatched = true;
@@ -2329,7 +2331,7 @@ async fn append_session_created_test_event(
     let sequence = sqlx::query_scalar(
         "INSERT INTO outbox_event
             (event_kind, storage_version, session_id)
-         VALUES ('session_created', 1, $1)
+         VALUES ('session_created', 2, $1)
          RETURNING event_sequence",
     )
     .bind(session)
@@ -2338,8 +2340,9 @@ async fn append_session_created_test_event(
 
     sqlx::query(
         "INSERT INTO session_created_outbox_event
-            (event_sequence, event_kind, storage_version, session_id)
-         VALUES ($1, 'session_created', 1, $2)",
+            (event_sequence, event_kind, storage_version, session_id,
+             creation_cause, owned)
+         VALUES ($1, 'session_created', 2, $2, 'interactive', false)",
     )
     .bind(sequence)
     .bind(session)
@@ -2409,20 +2412,21 @@ async fn drain_cancellation_dispatches(
 ) -> Result<Vec<CancellationDispatch>, OutboxDispatchError> {
     let mut cancellations = Vec::new();
     drain_outbox(pool, |event| {
-        let DispatchedOutboxEventKind::TurnCancelled {
-            turn,
-            cancellation_entry,
-            terminal_frontier,
-        } = event.kind()
+        let (
+            Some(session),
+            DispatchedOutboxEventKind::TurnTerminal {
+                turn,
+                disposition:
+                    DispatchedTurnTerminalDisposition::Cancelled {
+                        cancellation_entry,
+                        terminal_frontier,
+                    },
+            },
+        ) = (event.session(), event.kind())
         else {
             return;
         };
-        cancellations.push((
-            event.session(),
-            *turn,
-            *cancellation_entry,
-            *terminal_frontier,
-        ));
+        cancellations.push((session, *turn, *cancellation_entry, *terminal_frontier));
     })
     .await?;
     Ok(cancellations)
@@ -2440,15 +2444,21 @@ async fn drain_reconciliation_dispatches(
 ) -> Result<Vec<ReconciliationDispatch>, OutboxDispatchError> {
     let mut reconciliations = Vec::new();
     drain_outbox(pool, |event| {
-        let DispatchedOutboxEventKind::TurnReconciliationRequired {
-            turn,
-            operation,
-            terminal_frontier,
-        } = event.kind()
+        let (
+            Some(session),
+            DispatchedOutboxEventKind::TurnTerminal {
+                turn,
+                disposition:
+                    DispatchedTurnTerminalDisposition::ReconciliationRequired {
+                        operation,
+                        terminal_frontier,
+                    },
+            },
+        ) = (event.session(), event.kind())
         else {
             return;
         };
-        reconciliations.push((event.session(), *turn, *operation, *terminal_frontier));
+        reconciliations.push((session, *turn, *operation, *terminal_frontier));
     })
     .await?;
     Ok(reconciliations)
@@ -4272,29 +4282,30 @@ fn announcement_for(
         // reported resolved one way or another; an effect that may or may not
         // have happened admits none of those. `TurnReconciliationRequired` is
         // the honest terminal announcement for ambiguity and is not definitive.
-        DispatchedOutboxEventKind::TurnCompleted { turn, .. }
-        | DispatchedOutboxEventKind::TurnFailed { turn, .. }
-        | DispatchedOutboxEventKind::TurnRefused { turn, .. }
-        | DispatchedOutboxEventKind::TurnCancelled { turn, .. }
-            if *turn == fixture_turn =>
-        {
-            AmbiguityAnnouncement::DefinitiveTurnOutcome
-        }
+        DispatchedOutboxEventKind::TurnTerminal {
+            turn,
+            disposition:
+                DispatchedTurnTerminalDisposition::Completed { .. }
+                | DispatchedTurnTerminalDisposition::Failed { .. }
+                | DispatchedTurnTerminalDisposition::Refused { .. }
+                | DispatchedTurnTerminalDisposition::Cancelled { .. },
+        } if *turn == fixture_turn => AmbiguityAnnouncement::DefinitiveTurnOutcome,
         DispatchedOutboxEventKind::ToolBatchTransition { .. }
-        | DispatchedOutboxEventKind::TurnCompleted { .. }
-        | DispatchedOutboxEventKind::TurnFailed { .. }
-        | DispatchedOutboxEventKind::TurnRefused { .. }
-        | DispatchedOutboxEventKind::TurnCancelled { .. }
-        | DispatchedOutboxEventKind::SessionCreated
+        | DispatchedOutboxEventKind::TurnTerminal { .. }
+        | DispatchedOutboxEventKind::SessionCreated(_)
+        | DispatchedOutboxEventKind::SessionStateChanged(_)
+        | DispatchedOutboxEventKind::SessionTerminal(_)
+        | DispatchedOutboxEventKind::GoalChanged(_)
+        | DispatchedOutboxEventKind::CommandSettled { .. }
+        | DispatchedOutboxEventKind::InjectionSettled { .. }
+        | DispatchedOutboxEventKind::SessionOwnershipChanged(_)
         | DispatchedOutboxEventKind::SessionModelSettingsChanged(_)
         | DispatchedOutboxEventKind::TurnModelSettingsResolved(_)
         | DispatchedOutboxEventKind::InputAccepted { .. }
-        | DispatchedOutboxEventKind::GoalTurnRetired { .. }
         | DispatchedOutboxEventKind::TurnActivated { .. }
         | DispatchedOutboxEventKind::ModelCallTransition { .. }
         | DispatchedOutboxEventKind::ToolApprovalDecided { .. }
         | DispatchedOutboxEventKind::ContextCompacted { .. }
-        | DispatchedOutboxEventKind::TurnReconciliationRequired { .. }
         | DispatchedOutboxEventKind::DelegationUpdate(_)
         | DispatchedOutboxEventKind::DelegationWake(_)
         | DispatchedOutboxEventKind::RunnerStateTransition { .. } => {
@@ -4365,7 +4376,10 @@ fn announced_failed_turns(dispatched: &[DispatchedOutboxEventKind]) -> Vec<TurnI
     dispatched
         .iter()
         .filter_map(|kind| match kind {
-            DispatchedOutboxEventKind::TurnFailed { turn, .. } => Some(*turn),
+            DispatchedOutboxEventKind::TurnTerminal {
+                turn,
+                disposition: DispatchedTurnTerminalDisposition::Failed { .. },
+            } => Some(*turn),
             _ => None,
         })
         .collect()

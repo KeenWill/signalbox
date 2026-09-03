@@ -7261,9 +7261,18 @@ async fn release_timestamp_is_sampled_after_dispatch_lock_wait() -> Result<(), B
     .bind(fixture.dispatch_id.as_uuid())
     .fetch_one(&fixture.pool)
     .await?;
+    // The withdrawal retires the queued turn to `terminal{retired}`, so the
+    // release fires on the turn as well as on the goal event; both stay off
+    // until the release under test runs.
     sqlx::query(
         "ALTER TABLE goal_event
          DISABLE TRIGGER repo_watch_dispatch_release_on_terminal_goal",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE turn_lifecycle
+         DISABLE TRIGGER repo_watch_dispatch_release_on_terminal_turn",
     )
     .execute(&fixture.pool)
     .await?;
@@ -7271,6 +7280,12 @@ async fn release_timestamp_is_sampled_after_dispatch_lock_wait() -> Result<(), B
     sqlx::query(
         "ALTER TABLE goal_event
          ENABLE TRIGGER repo_watch_dispatch_release_on_terminal_goal",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE turn_lifecycle
+         ENABLE TRIGGER repo_watch_dispatch_release_on_terminal_turn",
     )
     .execute(&fixture.pool)
     .await?;

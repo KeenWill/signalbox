@@ -3205,6 +3205,16 @@ fn body_continuation_dto(continuation: TimelineBodyContinuation) -> WebTimelineB
 fn event_kind_dto(kind: SessionTimelineEventKind) -> WebSessionTimelineEventKind {
     match kind {
         SessionTimelineEventKind::SessionCreated => WebSessionTimelineEventKind::SessionCreated,
+        SessionTimelineEventKind::SessionStateChanged => {
+            WebSessionTimelineEventKind::SessionStateChanged
+        }
+        SessionTimelineEventKind::SessionTerminal => WebSessionTimelineEventKind::SessionTerminal,
+        SessionTimelineEventKind::GoalChanged => WebSessionTimelineEventKind::GoalChanged,
+        SessionTimelineEventKind::CommandSettled => WebSessionTimelineEventKind::CommandSettled,
+        SessionTimelineEventKind::InjectionSettled => WebSessionTimelineEventKind::InjectionSettled,
+        SessionTimelineEventKind::SessionOwnershipChanged => {
+            WebSessionTimelineEventKind::SessionOwnershipChanged
+        }
         SessionTimelineEventKind::SessionModelSettingsChanged => {
             WebSessionTimelineEventKind::SessionModelSettingsChanged
         }

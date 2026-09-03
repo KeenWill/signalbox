@@ -586,8 +586,17 @@ const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
                     'session_model_settings_changed',
                     'turn_model_settings_resolved',
                     'input_accepted',
-                    'goal_turn_retired',
-                    'runner_state_transition'
+                    'runner_state_transition',
+                    'session_state_changed',
+                    'session_terminal',
+                    'goal_changed',
+                    'command_settled',
+                    'injection_settled',
+                    'session_ownership_changed'
+                )
+                AND NOT (
+                    newest.event_kind = 'turn_terminal'
+                    AND newest.turn_disposition = 'retired'
                 )
               ORDER BY newest.event_sequence DESC
               LIMIT 1) AS outbox_frontier
@@ -662,8 +671,17 @@ const SLOT_HELD_ACTIVE_TURNS: &str = "SELECT active.session_id,
                     'session_model_settings_changed',
                     'turn_model_settings_resolved',
                     'input_accepted',
-                    'goal_turn_retired',
-                    'runner_state_transition'
+                    'runner_state_transition',
+                    'session_state_changed',
+                    'session_terminal',
+                    'goal_changed',
+                    'command_settled',
+                    'injection_settled',
+                    'session_ownership_changed'
+                )
+                AND NOT (
+                    newest.event_kind = 'turn_terminal'
+                    AND newest.turn_disposition = 'retired'
                 )
               ORDER BY newest.event_sequence DESC
               LIMIT 1) AS outbox_frontier

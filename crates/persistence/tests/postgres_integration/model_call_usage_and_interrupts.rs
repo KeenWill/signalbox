@@ -1102,14 +1102,16 @@ async fn inv006_model_call_prepared_failure_reread_distinguishes_pending_and_com
         ))
     ));
 
-    sqlx::query("ALTER TABLE turn_failed_outbox_event DISABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
-    sqlx::query("DELETE FROM turn_failed_outbox_event WHERE turn_id = $1")
-        .bind(fixture.turn.into_uuid())
-        .execute(&pool)
-        .await?;
-    sqlx::query("ALTER TABLE turn_failed_outbox_event ENABLE TRIGGER USER")
+    sqlx::query(
+        "DELETE FROM turn_terminal_outbox_event WHERE disposition_kind = 'failed' AND turn_id = $1",
+    )
+    .bind(fixture.turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;
     assert!(matches!(
@@ -1153,14 +1155,16 @@ async fn inv006_model_call_prepared_failure_reread_distinguishes_pending_and_com
         RetainedModelCallObservationStatus::AlreadyCommitted
     );
 
-    sqlx::query("ALTER TABLE turn_failed_outbox_event DISABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
-    sqlx::query("DELETE FROM turn_failed_outbox_event WHERE turn_id = $1")
-        .bind(issued.turn.into_uuid())
-        .execute(&pool)
-        .await?;
-    sqlx::query("ALTER TABLE turn_failed_outbox_event ENABLE TRIGGER USER")
+    sqlx::query(
+        "DELETE FROM turn_terminal_outbox_event WHERE disposition_kind = 'failed' AND turn_id = $1",
+    )
+    .bind(issued.turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;
     assert!(matches!(
@@ -1246,14 +1250,14 @@ async fn inv006_inv014_inv037_failure_rereads_accept_prepared_cancellation()
         ModelCallAuthorizationReread::Cancelled
     );
 
-    sqlx::query("ALTER TABLE turn_cancelled_outbox_event DISABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
-    sqlx::query("DELETE FROM turn_cancelled_outbox_event WHERE turn_id = $1")
+    sqlx::query("DELETE FROM turn_terminal_outbox_event WHERE disposition_kind = 'cancelled' AND turn_id = $1")
         .bind(fixture.turn.into_uuid())
         .execute(&pool)
         .await?;
-    sqlx::query("ALTER TABLE turn_cancelled_outbox_event ENABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;
     assert!(matches!(
@@ -1330,14 +1334,16 @@ async fn model_call_noncompleted_rereads_validate_each_durable_closure()
         terminal_call.disposition(),
         ProcessFailedModelCallDisposition::Cancelled
     );
-    sqlx::query("ALTER TABLE turn_failed_outbox_event DISABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
-    sqlx::query("DELETE FROM turn_failed_outbox_event WHERE turn_id = $1")
-        .bind(cancelled.turn.into_uuid())
-        .execute(&pool)
-        .await?;
-    sqlx::query("ALTER TABLE turn_failed_outbox_event ENABLE TRIGGER USER")
+    sqlx::query(
+        "DELETE FROM turn_terminal_outbox_event WHERE disposition_kind = 'failed' AND turn_id = $1",
+    )
+    .bind(cancelled.turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;
     assert!(matches!(
@@ -1373,8 +1379,9 @@ async fn model_call_noncompleted_rereads_validate_each_durable_closure()
     );
     let refused_sequence: Decimal = sqlx::query_scalar(
         "SELECT event_sequence
-           FROM turn_refused_outbox_event
-          WHERE turn_id = $1",
+           FROM turn_terminal_outbox_event
+          WHERE disposition_kind = 'refused'
+          AND turn_id = $1",
     )
     .bind(refused.turn.into_uuid())
     .fetch_one(&pool)
@@ -1449,14 +1456,14 @@ async fn model_call_noncompleted_rereads_validate_each_durable_closure()
     sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;
-    sqlx::query("ALTER TABLE turn_refused_outbox_event DISABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
-    sqlx::query("DELETE FROM turn_refused_outbox_event WHERE turn_id = $1")
+    sqlx::query("DELETE FROM turn_terminal_outbox_event WHERE disposition_kind = 'refused' AND turn_id = $1")
         .bind(refused.turn.into_uuid())
         .execute(&pool)
         .await?;
-    sqlx::query("ALTER TABLE turn_refused_outbox_event ENABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE turn_terminal_outbox_event ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;
     assert!(matches!(
@@ -1667,8 +1674,9 @@ async fn issued_interrupt_requests_and_confirms_durable_cancellation() -> Result
               WHERE cancelled_turn_id = $1
                 AND payload_kind = 'turn_cancelled'),
             (SELECT count(*)
-               FROM turn_cancelled_outbox_event
-              WHERE turn_id = $1)",
+               FROM turn_terminal_outbox_event
+              WHERE disposition_kind = 'cancelled'
+              AND turn_id = $1)",
     )
     .bind(fixture.turn.into_uuid())
     .bind(fixture.attempt.into_uuid())
@@ -1841,8 +1849,9 @@ async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Resul
                 AND state_kind = 'terminal'
                 AND terminal_disposition_kind = 'reconciliation_required'),
             (SELECT count(*)
-               FROM turn_reconciliation_required_outbox_event
-              WHERE turn_id = $2
+               FROM turn_terminal_outbox_event
+              WHERE disposition_kind = 'reconciliation_required'
+              AND turn_id = $2
                 AND model_call_id = $3)",
     )
     .bind(fixture.attempt.into_uuid())
@@ -1974,8 +1983,9 @@ async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Resul
                 AND state_kind = 'terminal'
                 AND terminal_disposition_kind = 'reconciliation_required'),
             (SELECT count(*)
-               FROM turn_reconciliation_required_outbox_event
-              WHERE turn_id = $2
+               FROM turn_terminal_outbox_event
+              WHERE disposition_kind = 'reconciliation_required'
+              AND turn_id = $2
                 AND model_call_id = $3)",
     )
     .bind(waiting.attempt.into_uuid())
@@ -2529,8 +2539,9 @@ async fn interrupt_completion_and_restart_races_retain_stop_history() -> Result<
                 AND state_kind = 'terminal'
                 AND terminal_disposition_kind = 'ambiguous'),
             (SELECT count(*)
-               FROM turn_reconciliation_required_outbox_event
-              WHERE turn_id = $1
+               FROM turn_terminal_outbox_event
+              WHERE disposition_kind = 'reconciliation_required'
+              AND turn_id = $1
                 AND model_call_id = $2)",
     )
     .bind(restarted.turn.into_uuid())

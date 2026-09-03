@@ -26,7 +26,7 @@ use crate::{
         GoalTurnInsertion, GoalTurnTerminalState, bind_goal_turn, continuation_exists,
         current_goal_turn, goal_turn_frozen_alias_definition, goal_turn_generation,
         goal_turn_terminal_state, insert_goal_turn, next_goal_turn_acceptance_position,
-        retired_queued_goal_turn_without_outbox,
+        retire_ineligible_queued_goal_turn,
     },
     mapping::{
         DurableCommandIdMappingError, GoalEventDiscriminator, GoalOperationKind,
@@ -470,19 +470,8 @@ impl GoalRepository {
         match &result {
             GoalCommandResult::Applied(event) => {
                 insert_event(&mut transaction, command.session(), event).await?;
-                if event_may_retire_queued_turn(event)
-                    && let Some(retired) =
-                        retired_queued_goal_turn_without_outbox(&mut transaction, command.session())
-                            .await?
-                {
-                    outbox::append(
-                        &mut transaction,
-                        OutboxEvent::GoalTurnRetired {
-                            session: command.session(),
-                            turn: retired,
-                        },
-                    )
-                    .await?;
+                if event_may_retire_queued_turn(event) {
+                    retire_ineligible_queued_goal_turn(&mut transaction, command.session()).await?;
                 }
                 if event_starts_pursuit(event) {
                     let candidates = candidates.ok_or(GoalCorruption::Missing(
@@ -761,6 +750,10 @@ impl GoalRepository {
                 )
                 .await;
             }
+            GoalTurnTerminalState::Retired => {
+                transaction.rollback().await?;
+                return Ok(GoalTurnContinuationOutcome::NotPursuing);
+            }
             GoalTurnTerminalState::Completed => {}
         }
         if continuation_exists(&mut transaction, session, predecessor).await? {
@@ -926,18 +919,7 @@ impl GoalRepository {
         // so the change must reach the process monitor as a durable outbox
         // event: an open follow stream otherwise retains the old queue state
         // with no cursor advance to force a resynchronization.
-        if let Some(retired) =
-            retired_queued_goal_turn_without_outbox(&mut transaction, session).await?
-        {
-            outbox::append(
-                &mut transaction,
-                OutboxEvent::GoalTurnRetired {
-                    session,
-                    turn: retired,
-                },
-            )
-            .await?;
-        }
+        retire_ineligible_queued_goal_turn(&mut transaction, session).await?;
         commit(transaction).await?;
         Ok(GoalTransitionOutcome::Applied(event))
     }
@@ -985,16 +967,7 @@ pub(crate) async fn block_execution_failure_locked(
     // Same monitor-visibility requirement as `handle_system_transition`: a
     // blocked transition that retires a queued turn from the live projection
     // must surface as a durable outbox event.
-    if let Some(retired) = retired_queued_goal_turn_without_outbox(connection, session).await? {
-        outbox::append(
-            connection,
-            OutboxEvent::GoalTurnRetired {
-                session,
-                turn: retired,
-            },
-        )
-        .await?;
-    }
+    retire_ineligible_queued_goal_turn(connection, session).await?;
     Ok(GoalTransitionOutcome::Applied(event))
 }
 
@@ -1233,18 +1206,7 @@ pub(crate) async fn insert_repo_watch_composed_stop(
     lock_scheduler(connection, command.session()).await?;
     insert_command(connection, &command, &result).await?;
     insert_event(connection, command.session(), event).await?;
-    if let Some(retired) =
-        retired_queued_goal_turn_without_outbox(connection, command.session()).await?
-    {
-        outbox::append(
-            connection,
-            OutboxEvent::GoalTurnRetired {
-                session: command.session(),
-                turn: retired,
-            },
-        )
-        .await?;
-    }
+    retire_ineligible_queued_goal_turn(connection, command.session()).await?;
     sqlx::query("SELECT materialize_session_delegation_termination_cascade($1)")
         .bind(durable_command_id_to_uuid(command.command_id()))
         .execute(&mut *connection)
@@ -1704,16 +1666,7 @@ pub(crate) async fn insert_event_for_session_closure(
     // A closure retires its queued turn through the same committed path a stop
     // or a supersession uses; otherwise the turn stays live beneath a terminal
     // session.
-    if let Some(retired) = retired_queued_goal_turn_without_outbox(connection, session).await? {
-        outbox::append(
-            connection,
-            OutboxEvent::GoalTurnRetired {
-                session,
-                turn: retired,
-            },
-        )
-        .await?;
-    }
+    retire_ineligible_queued_goal_turn(connection, session).await?;
     Ok(())
 }
 
@@ -1752,6 +1705,14 @@ async fn insert_event(
     .bind(encoded.closure_actor_turn)
     .bind(encoded.closure_actor_request)
     .execute(&mut *connection)
+    .await?;
+    outbox::append(
+        connection,
+        OutboxEvent::GoalChanged {
+            session,
+            event_ordinal: event.ordinal().get(),
+        },
+    )
     .await?;
     Ok(())
 }
