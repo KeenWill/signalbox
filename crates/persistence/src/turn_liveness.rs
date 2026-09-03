@@ -223,6 +223,15 @@ impl From<StartupScanRepositoryError> for TurnLivenessRepositoryError {
     }
 }
 
+/// How a complete guard observation treats matching durable evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TurnLivenessObservationMode {
+    /// Establishes a restart baseline without advancing a retained ordinal.
+    RestartBaseline,
+    /// Advances a retained ordinal by one completed scan interval.
+    Advance,
+}
+
 /// PostgreSQL inventory and terminalization adapter for turn liveness.
 #[derive(Clone, Debug)]
 pub struct PostgresTurnLivenessRepository {
@@ -275,7 +284,7 @@ impl PostgresTurnLivenessRepository {
         Ok(QuiescentActiveTurnPage::new(fetched))
     }
 
-    /// Advances one guard's durable repeated-observation ledger atomically.
+    /// Records one guard's durable repeated-observation ledger atomically.
     ///
     /// `candidates` is the complete population for the guard. Rows absent from
     /// it are removed in the same transaction, so a turn that leaves and later
@@ -285,37 +294,7 @@ impl PostgresTurnLivenessRepository {
         guard: TurnLivenessGuardKind,
         scan_interval: TurnLivenessScanInterval,
         candidates: &[StaleTurnCandidate],
-    ) -> Result<Box<[DurableTurnLivenessObservation]>, TurnLivenessRepositoryError> {
-        self.record_complete_observation_with_progress(guard, scan_interval, candidates, true)
-            .await
-    }
-
-    /// Records a restart's complete population without advancing existing rows.
-    pub async fn record_restart_complete_observation(
-        &self,
-        guard: TurnLivenessGuardKind,
-        scan_interval: TurnLivenessScanInterval,
-        candidates: &[StaleTurnCandidate],
-    ) -> Result<Box<[DurableTurnLivenessObservation]>, TurnLivenessRepositoryError> {
-        self.record_complete_observation_with_progress(guard, scan_interval, candidates, false)
-            .await
-    }
-
-    /// Clears observation continuity while stale-turn supervision is disabled.
-    pub async fn clear_guard_observations(&self) -> Result<(), TurnLivenessRepositoryError> {
-        sqlx::query("DELETE FROM turn_liveness_observation")
-            .execute(&self.pool)
-            .await
-            .map_err(TurnLivenessRepositoryError::observation)?;
-        Ok(())
-    }
-
-    async fn record_complete_observation_with_progress(
-        &self,
-        guard: TurnLivenessGuardKind,
-        scan_interval: TurnLivenessScanInterval,
-        candidates: &[StaleTurnCandidate],
-        advance_existing: bool,
+        mode: TurnLivenessObservationMode,
     ) -> Result<Box<[DurableTurnLivenessObservation]>, TurnLivenessRepositoryError> {
         let mut transaction = self
             .pool
@@ -398,7 +377,7 @@ impl PostgresTurnLivenessRepository {
                 TurnLivenessRepositoryError::observation(sqlx::Error::Decode(Box::new(source)))
             })?,
         )
-        .bind(advance_existing)
+        .bind(mode == TurnLivenessObservationMode::Advance)
         .fetch_all(&mut *transaction)
         .await
         .map_err(TurnLivenessRepositoryError::observation)?;
@@ -422,6 +401,15 @@ impl PostgresTurnLivenessRepository {
             .collect::<Result<Vec<_>, _>>()?;
         observations.sort_unstable_by_key(|observation| observation.candidate().session());
         Ok(observations.into_boxed_slice())
+    }
+
+    /// Clears observation continuity while stale-turn supervision is disabled.
+    pub async fn clear_guard_observations(&self) -> Result<(), TurnLivenessRepositoryError> {
+        sqlx::query("DELETE FROM turn_liveness_observation")
+            .execute(&self.pool)
+            .await
+            .map_err(TurnLivenessRepositoryError::observation)?;
+        Ok(())
     }
 
     /// Reads the current slot-held observation for one exact session.

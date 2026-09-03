@@ -23,7 +23,8 @@ use signalbox_persistence::{
         reconciliation_deadline,
     },
     turn_liveness::{
-        PostgresTurnLivenessRepository, TurnLivenessPersistenceBounds, TurnLivenessRepositoryError,
+        PostgresTurnLivenessRepository, TurnLivenessObservationMode, TurnLivenessPersistenceBounds,
+        TurnLivenessRepositoryError,
     },
 };
 use sqlx::PgPool;
@@ -289,7 +290,7 @@ trait DurableObservationRecorder {
         guard: TurnLivenessGuardKind,
         scan_interval: TurnLivenessScanInterval,
         candidates: &[StaleTurnCandidate],
-        advance_existing: bool,
+        mode: TurnLivenessObservationMode,
     ) -> impl Future<
         Output = Result<Box<[DurableTurnLivenessObservation]>, TurnLivenessRepositoryError>,
     > + Send;
@@ -301,15 +302,10 @@ impl DurableObservationRecorder for PostgresTurnLivenessRepository {
         guard: TurnLivenessGuardKind,
         scan_interval: TurnLivenessScanInterval,
         candidates: &[StaleTurnCandidate],
-        advance_existing: bool,
+        mode: TurnLivenessObservationMode,
     ) -> Result<Box<[DurableTurnLivenessObservation]>, TurnLivenessRepositoryError> {
-        if advance_existing {
-            self.record_complete_observation(guard, scan_interval, candidates)
-                .await
-        } else {
-            self.record_restart_complete_observation(guard, scan_interval, candidates)
-                .await
-        }
+        self.record_complete_observation(guard, scan_interval, candidates, mode)
+            .await
     }
 }
 
@@ -468,12 +464,17 @@ async fn run_quiescent_watchdog(
         match next_turn_liveness_wake(&mut shutdown, &mut ticker).await {
             TurnLivenessWake::Shutdown => return,
             TurnLivenessWake::Scan => {
+                let observation_mode = if first_scan_after_restart {
+                    TurnLivenessObservationMode::RestartBaseline
+                } else {
+                    TurnLivenessObservationMode::Advance
+                };
                 let tally = reconcile_turn_liveness(
                     &repository,
                     ledger,
                     TurnLivenessGuardKind::Quiescent,
                     &mut window,
-                    !first_scan_after_restart,
+                    observation_mode,
                     &mut shutdown,
                 )
                 .await;
@@ -502,13 +503,18 @@ async fn run_slot_held_watchdog(
         match next_turn_liveness_wake(&mut shutdown, &mut ticker).await {
             TurnLivenessWake::Shutdown => return,
             TurnLivenessWake::Scan => {
+                let observation_mode = if first_scan_after_restart {
+                    TurnLivenessObservationMode::RestartBaseline
+                } else {
+                    TurnLivenessObservationMode::Advance
+                };
                 let observation_recorded = reconcile_slot_held_turns(
                     &repository,
                     ledger,
                     &mut window,
                     numeric_bounds.recovery_attempt_bound,
                     &mut shutdown,
-                    !first_scan_after_restart,
+                    observation_mode,
                 )
                 .await;
                 ticker.reset();
@@ -561,7 +567,7 @@ async fn reconcile_slot_held_turns(
     window: &mut TerminalizationWindow,
     recovery_attempt_bound: Option<Duration>,
     shutdown: &mut watch::Receiver<bool>,
-    advance_existing: bool,
+    observation_mode: TurnLivenessObservationMode,
 ) -> bool {
     let Some(active) = drain_slot_held_rotation(inventory, recovery_attempt_bound).await else {
         return false;
@@ -571,7 +577,7 @@ async fn reconcile_slot_held_turns(
             TurnLivenessGuardKind::SlotHeld,
             ledger.scan_interval(),
             &active,
-            advance_existing,
+            observation_mode,
         )
         .await
     {
@@ -1010,7 +1016,7 @@ async fn reconcile_turn_liveness<Repository>(
     ledger: TurnLivenessLedger,
     guard: TurnLivenessGuardKind,
     window: &mut TerminalizationWindow,
-    advance_existing: bool,
+    observation_mode: TurnLivenessObservationMode,
     shutdown: &mut watch::Receiver<bool>,
 ) -> TerminalizationTally
 where
@@ -1025,7 +1031,7 @@ where
         return TerminalizationTally::default();
     };
     let observations = match repository
-        .record_observation(guard, ledger.scan_interval(), &quiescent, advance_existing)
+        .record_observation(guard, ledger.scan_interval(), &quiescent, observation_mode)
         .await
     {
         Ok(observations) => observations,
@@ -1261,8 +1267,11 @@ mod tests {
         TurnLivenessEvidence, TurnLivenessGuardKind, TurnLivenessLedger, TurnLivenessScanInterval,
     };
     use signalbox_domain::{AcceptedInputTurnFailureIdentities, SessionId, TurnAttemptId, TurnId};
+    use signalbox_persistence::turn_liveness::TurnLivenessObservationMode::{
+        Advance, RestartBaseline,
+    };
     use signalbox_persistence::turn_liveness::{
-        TurnLivenessPersistenceBounds, TurnLivenessRepositoryError,
+        TurnLivenessObservationMode, TurnLivenessPersistenceBounds, TurnLivenessRepositoryError,
     };
     use std::{
         num::NonZeroU64,
@@ -1441,16 +1450,17 @@ mod tests {
             _guard: TurnLivenessGuardKind,
             _scan_interval: TurnLivenessScanInterval,
             candidates: &[StaleTurnCandidate],
-            advance_existing: bool,
+            mode: TurnLivenessObservationMode,
         ) -> Result<Box<[DurableTurnLivenessObservation]>, TurnLivenessRepositoryError> {
-            let ordinal = if advance_existing {
-                self.observation_ordinal
-                    .fetch_add(1, Ordering::Relaxed)
-                    .saturating_add(1)
-            } else {
-                self.observation_ordinal
+            let ordinal = match mode {
+                RestartBaseline => self
+                    .observation_ordinal
                     .fetch_max(1, Ordering::Relaxed)
-                    .max(1)
+                    .max(1),
+                Advance => self
+                    .observation_ordinal
+                    .fetch_add(1, Ordering::Relaxed)
+                    .saturating_add(1),
             };
             let ordinal = NonZeroU64::new(ordinal).expect("fixture ordinal stays positive");
             Ok(candidates
@@ -1485,6 +1495,7 @@ mod tests {
     async fn reconcile_once(
         repository: &CountingRepository,
         ledger: TurnLivenessLedger,
+        mode: TurnLivenessObservationMode,
         window: &mut TerminalizationWindow,
     ) -> super::TerminalizationTally {
         let (_shutdown, mut receiver) = watch::channel(false);
@@ -1493,7 +1504,7 @@ mod tests {
             ledger,
             TurnLivenessGuardKind::Quiescent,
             window,
-            true,
+            mode,
             &mut receiver,
         )
         .await
@@ -1572,9 +1583,9 @@ mod tests {
         let repository = CountingRepository::new(cohort.clone());
         let ledger = fixture_ledger(bound);
         let mut window = TerminalizationWindow::new(Some(capacity));
-        let _ = reconcile_once(&repository, ledger, &mut window).await;
+        let _ = reconcile_once(&repository, ledger, RestartBaseline, &mut window).await;
 
-        let _ = reconcile_once(&repository, ledger, &mut window).await;
+        let _ = reconcile_once(&repository, ledger, Advance, &mut window).await;
 
         assert_eq!(repository.terminalized(), capacity);
         assert_eq!(repository.still_active(), cohort.len() - capacity);
@@ -1590,10 +1601,10 @@ mod tests {
         let repository = CountingRepository::new(cohort.clone());
         let ledger = fixture_ledger(bound);
         let mut window = TerminalizationWindow::new(Some(capacity));
-        let _ = reconcile_once(&repository, ledger, &mut window).await;
-        let _ = reconcile_once(&repository, ledger, &mut window).await;
+        let _ = reconcile_once(&repository, ledger, RestartBaseline, &mut window).await;
+        let _ = reconcile_once(&repository, ledger, Advance, &mut window).await;
 
-        let _ = reconcile_once(&repository, ledger, &mut window).await;
+        let _ = reconcile_once(&repository, ledger, Advance, &mut window).await;
 
         assert_eq!(repository.terminalized(), cohort.len());
         assert_eq!(repository.still_active(), 0);
@@ -1672,9 +1683,9 @@ mod tests {
         let repository = CountingRepository::with_busy(vec![busy, ends], vec![busy.turn()]);
         let ledger = fixture_ledger(bound);
         let mut window = TerminalizationWindow::new(Some(2));
-        let _ = reconcile_once(&repository, ledger, &mut window).await;
+        let _ = reconcile_once(&repository, ledger, RestartBaseline, &mut window).await;
 
-        let tally = reconcile_once(&repository, ledger, &mut window).await;
+        let tally = reconcile_once(&repository, ledger, Advance, &mut window).await;
 
         assert_eq!(tally.lock_unavailable, 1);
         assert_eq!(tally.failed, 0);

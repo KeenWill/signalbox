@@ -9,7 +9,9 @@ use signalbox_application::{
 };
 use signalbox_persistence::{
     mapping::turn_terminal_cause_to_str,
-    turn_liveness::{PostgresTurnLivenessRepository, TurnLivenessPersistenceBounds},
+    turn_liveness::{
+        PostgresTurnLivenessRepository, TurnLivenessObservationMode, TurnLivenessPersistenceBounds,
+    },
 };
 
 /// Starvation allowance for an uncontended pool checkout: generous, not a
@@ -95,10 +97,11 @@ async fn restart_mid_observation_retains_staleness_evidence() -> Result<(), Box<
         .await?
         .into_candidates();
     let first = first_repository
-        .record_restart_complete_observation(
+        .record_complete_observation(
             TurnLivenessGuardKind::Quiescent,
             interval,
             &candidates,
+            TurnLivenessObservationMode::RestartBaseline,
         )
         .await?;
     drop(first_repository);
@@ -106,14 +109,20 @@ async fn restart_mid_observation_retains_staleness_evidence() -> Result<(), Box<
         PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
 
     let second = restarted_repository
-        .record_restart_complete_observation(
+        .record_complete_observation(
             TurnLivenessGuardKind::Quiescent,
             interval,
             &candidates,
+            TurnLivenessObservationMode::RestartBaseline,
         )
         .await?;
     let third = restarted_repository
-        .record_complete_observation(TurnLivenessGuardKind::Quiescent, interval, &candidates)
+        .record_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::Advance,
+        )
         .await?;
     let changed_interval = TurnLivenessScanInterval::try_new(std::time::Duration::from_secs(61))?;
     let changed_cadence = restarted_repository
@@ -121,6 +130,7 @@ async fn restart_mid_observation_retains_staleness_evidence() -> Result<(), Box<
             TurnLivenessGuardKind::Quiescent,
             changed_interval,
             &candidates,
+            TurnLivenessObservationMode::Advance,
         )
         .await?;
     let bound = StaleActiveTurnBound::try_new(std::time::Duration::from_secs(60))?;
@@ -153,33 +163,55 @@ async fn disabled_supervision_clears_guard_observation_history() -> Result<(), B
         .await?
         .into_candidates();
     let first_quiescent = repository
-        .record_restart_complete_observation(
+        .record_complete_observation(
             TurnLivenessGuardKind::Quiescent,
             interval,
             &candidates,
+            TurnLivenessObservationMode::RestartBaseline,
         )
         .await?;
     let first_slot_held = repository
-        .record_restart_complete_observation(TurnLivenessGuardKind::SlotHeld, interval, &candidates)
+        .record_complete_observation(
+            TurnLivenessGuardKind::SlotHeld,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::RestartBaseline,
+        )
         .await?;
     let advanced_quiescent = repository
-        .record_complete_observation(TurnLivenessGuardKind::Quiescent, interval, &candidates)
+        .record_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::Advance,
+        )
         .await?;
     let advanced_slot_held = repository
-        .record_complete_observation(TurnLivenessGuardKind::SlotHeld, interval, &candidates)
+        .record_complete_observation(
+            TurnLivenessGuardKind::SlotHeld,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::Advance,
+        )
         .await?;
 
     repository.clear_guard_observations().await?;
 
     let reset_quiescent = repository
-        .record_restart_complete_observation(
+        .record_complete_observation(
             TurnLivenessGuardKind::Quiescent,
             interval,
             &candidates,
+            TurnLivenessObservationMode::RestartBaseline,
         )
         .await?;
     let reset_slot_held = repository
-        .record_restart_complete_observation(TurnLivenessGuardKind::SlotHeld, interval, &candidates)
+        .record_complete_observation(
+            TurnLivenessGuardKind::SlotHeld,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::RestartBaseline,
+        )
         .await?;
     assert_ne!(
         advanced_quiescent[0].ordinal(),
