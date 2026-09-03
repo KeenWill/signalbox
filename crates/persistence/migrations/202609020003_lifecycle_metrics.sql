@@ -47,6 +47,7 @@ ALTER TABLE session_lifecycle
         -- under a classification the park never supported.
         AND ((parked_cause IS NULL)
              OR ((parked_cause = 'retry_budget_exhausted'::text)
+                 AND (parked_standing_cause_kind IS NOT NULL)
                  AND (parked_standing_cause_kind = ANY (ARRAY[
                     'provider_transient'::text,
                     'provider_quota_exhausted'::text,
@@ -55,6 +56,7 @@ ALTER TABLE session_lifecycle
                     'retry_budget_exhausted'::text
                  ])))
              OR ((parked_cause = 'structural_failure'::text)
+                 AND (parked_standing_cause_kind IS NOT NULL)
                  AND (parked_standing_cause_kind = ANY (ARRAY[
                     'context_compaction_wall'::text,
                     'context_headroom_exhausted'::text,
