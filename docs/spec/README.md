@@ -3,9 +3,10 @@
 These pages, together with INV-tagged tests indexed in
 [invariants.md](../invariants.md) and public API shapes in
 [domain-spine.md](../domain-spine.md), are the normative specification of
-Signalbox's implemented cross-component and wire behavior; `AGENTS.md` defines
-the authority model. Each page names the code ref it was last verified against
-and is updated in the same pull request as any behavior change it describes. A
+Signalbox's implemented cross-component and wire behavior. `AGENTS.md` is the
+guidance for agents working on the repository; this README owns the conventions
+the pages follow. Each page names the code ref it was last verified against and
+is updated in the same pull request as any behavior change it describes. A
 verification reference names that pull request as `` PR #N (`branch-ref`) `` and
 may narrow the claim to the surface the pull request settled, either as a
 semicolon tail inside the parentheses — `` PR #N (`branch-ref`; <scope>) `` — or
