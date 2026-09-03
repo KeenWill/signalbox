@@ -17,9 +17,9 @@ that apply to production and test code alike:
    A run of same-typed positions, booleans especially, becomes labeled
    structure.
 
-Each worked example in the appendix quotes a real excerpt of this repository,
-with line citations as of the commit that adopted this guide; the rewrite after
-each excerpt is proposed code unless the text says it has since landed.
+Each worked example in the appendix quotes an excerpt from this repository's
+history, with the line citation of its source; the rewrite after each excerpt is
+the form this guide asks for.
 
 ## Core principles
 
@@ -115,7 +115,7 @@ Why: a constraint held by the type system is enforced at every construction site
 forever; a constraint held by documentation is enforced only where someone
 remembered to read it. This repository's domain crate already works this way —
 see the exemplars below; the rule extends that standard to test fixtures and
-helper signatures, where it is applied least consistently today.
+helper signatures, where it is applied least consistently.
 
 ## Numeric bounds
 
@@ -370,8 +370,8 @@ it decodes, which makes a missing decoder visible by inspection.
 Every public item in the domain and application crates — including enum variants
 and public struct fields — carries a doc comment. `DelegationTransitionFailure`
 and `DelegationTransitionError` in `crates/domain/src/session_delegation.rs` are
-still undocumented; document them when next changing that file. `missing_docs`
-is enabled once they are cleared (see mechanical enforcement).
+undocumented; document them when next changing that file. `missing_docs` is
+enabled once they are cleared (see mechanical enforcement).
 
 Every arm of a tagged wire decoder in the native client names its complete
 admitted field set, through the shared rejection helper or a hand-written
@@ -395,8 +395,8 @@ Clippy denies panicking convenience paths (`expect`, `panic`, `unwrap`, `todo`,
 gates: CI promotes every warning to an error, so a lint is configured only when
 the whole workspace passes it at `deny`.
 
-`missing_docs` is not configured yet. A follow-up enables it at `deny` only
-after the outstanding undocumented items across the workspace are cleared.
+`missing_docs` is not configured. A follow-up enables it at `deny` only after
+the outstanding undocumented items across the workspace are cleared.
 
 `clippy::wildcard_enum_match_arm` is also not configured. Review enforces
 explicit matching until the workspace's remaining wildcard arms are gone and the
@@ -483,8 +483,7 @@ Worked example: the streaming budget helper in both provider runtimes
 (`crates/model-runtime-openai/src/runtime.rs:506`, mirrored in
 `crates/model-runtime-anthropic/src/runtime.rs`) returned `(usize, bool)`, and
 its tests asserted bare pairs
-(`crates/model-runtime-openai/src/runtime.rs:2036-2050`); the enum rewrite below
-has since landed in both runtimes:
+(`crates/model-runtime-openai/src/runtime.rs:2036-2050`):
 
 ```rust
 fn streamed_response_prefix_len(current: usize, chunk: usize) -> (usize, bool) { ... }
@@ -523,10 +522,9 @@ test drivers `drive_with_stop_sequences(&[...], true)` /
 (`crates/model-runtime-openai/src/stream.rs:594-599`,
 `crates/model-runtime-openai/src/response.rs:384-390`). The parameter was
 `stop_sequences_declared: bool` — a name every call site hides. As
-`enum StopSequences { Declared, NotDeclared }` — since landed as the decoder's
-actual signature — every site says what it means, and the variant is where
-declared sequences themselves would live if the decoder ever needs them
-(principle 5).
+`enum StopSequences { Declared, NotDeclared }`, every site says what it means,
+and the variant is where declared sequences themselves would live if the decoder
+ever needs them (principle 5).
 
 ### C. Arbitrary versus load-bearing, spelled out
 
@@ -613,9 +611,8 @@ match (kind, has_create, has_defaults, has_input) {
 
 Every arm demands positional cross-referencing, and the actual rule — *exactly
 one typed record exists, and it is the registered kind* — is nowhere stated.
-Pairing each flag with its kind makes the rule the code, the form that has since
-landed there (with the decision match extracted as `sole_typed_record` so unit
-tests pin its arms without a database):
+Pairing each flag with its kind makes the rule the code (with the decision match
+extracted as `sole_typed_record` so unit tests pin its arms without a database):
 
 ```rust
 let present: Vec<CommandKind> = [

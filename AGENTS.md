@@ -17,6 +17,11 @@ owner-approved plans. Do not add speculative product behavior.
 - CI runner routing: `.github/workflows/README.md`. Change a job's `runs-on` and
   that file in the same pull request.
 
+Documentation and code comments describe the current state only. Do not explain
+what something used to be, when it changed, or what it was renamed from; git
+history holds that. The one exception is an old state that must remain
+restorable.
+
 ## Minimum mechanism
 
 Build the smallest thing that satisfies the behavior the task names: no config
