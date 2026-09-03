@@ -31,7 +31,7 @@ use sqlx::PgPool;
 use tokio::{
     select,
     sync::watch,
-    time::{Duration, Interval, MissedTickBehavior, interval, timeout},
+    time::{Duration, Interval, MissedTickBehavior, interval, sleep, timeout},
 };
 use uuid::Uuid;
 
@@ -343,7 +343,7 @@ pub struct TurnLivenessRuntime {
     staleness_bound: Option<StaleActiveTurnBound>,
     scan_interval: Option<TurnLivenessScanInterval>,
     automatic_reconciliation_attempt_budget: Option<u32>,
-    automatic_reconciliation_base_backoff: Option<Duration>,
+    disabled_clear_retry_delay: Option<Duration>,
     numeric_bounds: TurnLivenessNumericBounds,
 }
 
@@ -363,6 +363,8 @@ impl TurnLivenessRuntime {
         automatic_reconciliation_backoff_cap: Option<Duration>,
         numeric_bounds: TurnLivenessNumericBounds,
     ) -> Self {
+        let disabled_clear_retry_delay =
+            automatic_reconciliation_base_backoff.or(automatic_reconciliation_backoff_cap);
         Self {
             repository: PostgresTurnLivenessRepository::new(
                 pool.clone(),
@@ -377,7 +379,7 @@ impl TurnLivenessRuntime {
             staleness_bound,
             scan_interval,
             automatic_reconciliation_attempt_budget,
-            automatic_reconciliation_base_backoff,
+            disabled_clear_retry_delay,
             numeric_bounds,
         }
     }
@@ -406,11 +408,11 @@ impl TurnLivenessRuntime {
                     Ok(()) => break,
                     Err(error) => {
                         report_turn_liveness_failure(&error);
-                        let Some(()) = complete_before_shutdown(
-                            &mut shutdown,
-                            crate::sleep_for_policy(self.automatic_reconciliation_base_backoff),
-                        )
-                        .await
+                        let Some(retry_delay) = self.disabled_clear_retry_delay else {
+                            break;
+                        };
+                        let Some(()) =
+                            complete_before_shutdown(&mut shutdown, sleep(retry_delay)).await
                         else {
                             return;
                         };
@@ -1060,15 +1062,10 @@ where
         ..TerminalizationTally::default()
     };
     for candidate in &selected {
-        let Some(outcome) = complete_before_shutdown(
-            shutdown,
-            terminalize_stale_turn(repository, *candidate, ledger.bound()),
-        )
-        .await
-        else {
+        if *shutdown.borrow() || shutdown.has_changed().is_err() {
             break;
-        };
-        tally.record(outcome);
+        }
+        tally.record(terminalize_stale_turn(repository, *candidate, ledger.bound()).await);
     }
     // A capped window or shutdown can leave due turns unprocessed. Either kind
     // of deferral costs laps, not one interval, and the replacement daemon must
@@ -1428,8 +1425,8 @@ mod tests {
             }
         }
 
-        /// Lets exactly `processed` terminalizations finish, then holds the
-        /// next one while requesting shutdown.
+        /// Lets exactly `processed` terminalizations finish, then requests
+        /// shutdown while the next one is still in flight.
         fn with_shutdown_after(
             candidates: Vec<StaleTurnCandidate>,
             processed: usize,
@@ -1509,7 +1506,7 @@ mod tests {
                 && self.terminalized.load(Ordering::Relaxed) == *processed
             {
                 shutdown.send(true).expect("the fixture receiver is held");
-                return std::future::pending().await;
+                tokio::task::yield_now().await;
             }
             if self.busy.contains(&candidate.turn()) {
                 return Err(TurnLivenessRepositoryError::TerminalizationLockUnavailable(
@@ -1624,17 +1621,20 @@ mod tests {
         assert_eq!(repository.still_active(), cohort.len() - capacity);
     }
 
-    /// Shutdown can preempt a selected cohort after partial progress. Every
-    /// unprocessed candidate is reported as deferred for the replacement
-    /// daemon rather than disappearing into the selected-window count.
+    /// Shutdown waits for an in-flight terminalization to resolve, then defers
+    /// the rest of the selected cohort for the replacement daemon.
     #[tokio::test(start_paused = true)]
-    async fn shutdown_preemption_counts_unprocessed_candidates_as_deferred() {
+    async fn shutdown_waits_for_in_flight_terminalization_and_defers_the_remainder() {
         let bound = fixture_staleness_bound();
         let cohort = vec![candidate(1), candidate(2)];
         let (shutdown, mut receiver) = watch::channel(false);
-        let processed = cohort.len() - 1;
-        let repository =
-            CountingRepository::with_shutdown_after(cohort.clone(), processed, shutdown);
+        let processed_before_shutdown = 0;
+        let expected_processed = cohort.len() - 1;
+        let repository = CountingRepository::with_shutdown_after(
+            cohort.clone(),
+            processed_before_shutdown,
+            shutdown,
+        );
         let ledger = fixture_ledger(bound);
         let mut window = TerminalizationWindow::new(None);
         let _ = reconcile_once(&repository, ledger, RestartBaseline, &mut window).await;
@@ -1649,8 +1649,9 @@ mod tests {
         )
         .await;
 
-        assert_eq!(tally.attempted(), processed);
-        assert_eq!(tally.deferred, cohort.len() - processed);
+        assert_eq!(tally.attempted(), expected_processed);
+        assert_eq!(repository.terminalized(), tally.attempted());
+        assert_eq!(tally.deferred, cohort.len() - tally.attempted());
     }
 
     /// What one scan defers the next one ends: nothing about a deferred turn

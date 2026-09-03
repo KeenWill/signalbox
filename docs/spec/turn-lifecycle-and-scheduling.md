@@ -818,8 +818,10 @@ ambiguity reconciliation active without stale-turn terminalization. At startup,
 either disabled value clears both guards' observation rows. When the scan
 interval remains enabled, a failed clear makes no decision and retries at the
 next scan before ambiguity reconciliation. Without a scan interval, the clear
-retries until it succeeds or shutdown arrives, then the runtime idles. Finite
-values pass checked constructors that reject zero, subsecond precision, and an
+waits for the first finite automatic-reconciliation backoff (base, then cap)
+before retrying until it succeeds or shutdown arrives; when neither is finite,
+it reports the failure once and idles without retrying. Finite values pass
+checked constructors that reject zero, subsecond precision, and an
 unrepresentable timer range; no compiled policy value remains.
 
 **Terminalization.** A due turn ends through the same committed failed-turn
