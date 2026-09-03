@@ -11,8 +11,8 @@ to bound or size a fixture.
 The live-line merge adds one model-exchange policy to the original audit and the
 automatic-resume lifetime ceiling one goal policy; the liveness watchdog's
 single recovery-attempt constant now answers to two configured policies because
-its two consumers need different ceilings. The 137 rows partition as 36 guards,
-8 derived bounds, 79 configuration policies, 10 representation facts, and 4 test
+its two consumers need different ceilings. The 127 rows partition as 36 guards,
+8 derived bounds, 69 configuration policies, 10 representation facts, and 4 test
 fixtures. Source locations are maintained with the implementation slices that
 move or delete declarations.
 
