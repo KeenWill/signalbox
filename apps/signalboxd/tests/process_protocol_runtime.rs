@@ -2832,18 +2832,20 @@ fn start_fleet_scheduler(
                 .flatten(),
         ),
         SlowSubstrateNumericBounds::new(
-            bounds.integer("slow_substrate_backup_enabled").flatten() == Some(1),
-            bounds.integer("slow_substrate_restart_enabled").flatten() == Some(1),
-            bounds
-                .integer("slow_substrate_lock_convoy_enabled")
-                .flatten()
-                == Some(1),
             bounds
                 .integer("slow_substrate_staleness_factor")
                 .flatten()
                 .and_then(|value| u32::try_from(value).ok())
                 .and_then(std::num::NonZeroU32::new)
                 .expect("fixture slow-substrate factor is positive"),
+        )
+        .with_backup_enabled(bounds.integer("slow_substrate_backup_enabled").flatten() == Some(1))
+        .with_restart_enabled(bounds.integer("slow_substrate_restart_enabled").flatten() == Some(1))
+        .with_lock_convoy_enabled(
+            bounds
+                .integer("slow_substrate_lock_convoy_enabled")
+                .flatten()
+                == Some(1),
         ),
         turn_liveness_persistence_bounds,
     );

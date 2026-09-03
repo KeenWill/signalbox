@@ -2565,12 +2565,13 @@ async fn automatic_tool_reconciliation_honors_its_class_budget() -> Result<(), B
             )
             .await?,
     );
+    let tool_attempt_budget = 1;
     let repository = PostgresAutomaticReconciliationRepository::new(pool.clone())
         .with_class_policies(
             5,
             Some(Duration::ZERO),
             Some(Duration::ZERO),
-            1,
+            tool_attempt_budget,
             Some(Duration::ZERO),
             Some(Duration::ZERO),
         );
@@ -2588,6 +2589,10 @@ async fn automatic_tool_reconciliation_honors_its_class_budget() -> Result<(), B
     assert_eq!(first.claimed()[0].attempt().get(), 1);
     assert_eq!(exhausted.claimed(), &[]);
     assert_eq!(exhausted.exhausted().len(), 1);
+    assert_eq!(
+        exhausted.exhausted()[0].attempt_ceiling().get(),
+        tool_attempt_budget
+    );
     assert_eq!(
         exhausted.exhausted()[0].operation(),
         AutomaticReconciliationOperation::ToolAttempt(tool_attempt)

@@ -87,6 +87,7 @@ async fn activated_watchdog_session(
 async fn restart_mid_observation_retains_staleness_evidence() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = activated_watchdog_session(&pool, 0x10_000).await?;
+    let interval = TurnLivenessScanInterval::try_new(std::time::Duration::from_secs(60))?;
     let first_repository =
         PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
     let candidates = first_repository
@@ -94,25 +95,41 @@ async fn restart_mid_observation_retains_staleness_evidence() -> Result<(), Box<
         .await?
         .into_candidates();
     let first = first_repository
-        .record_restart_complete_observation(TurnLivenessGuardKind::Quiescent, &candidates)
+        .record_restart_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            interval,
+            &candidates,
+        )
         .await?;
     drop(first_repository);
     let restarted_repository =
         PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
 
     let second = restarted_repository
-        .record_restart_complete_observation(TurnLivenessGuardKind::Quiescent, &candidates)
+        .record_restart_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            interval,
+            &candidates,
+        )
         .await?;
     let third = restarted_repository
-        .record_complete_observation(TurnLivenessGuardKind::Quiescent, &candidates)
+        .record_complete_observation(TurnLivenessGuardKind::Quiescent, interval, &candidates)
         .await?;
-    let interval = TurnLivenessScanInterval::try_new(std::time::Duration::from_secs(60))?;
+    let changed_interval = TurnLivenessScanInterval::try_new(std::time::Duration::from_secs(61))?;
+    let changed_cadence = restarted_repository
+        .record_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            changed_interval,
+            &candidates,
+        )
+        .await?;
     let bound = StaleActiveTurnBound::try_new(std::time::Duration::from_secs(60))?;
     let due = TurnLivenessLedger::new(bound, interval).reconcile(&third, std::num::NonZeroU32::MIN);
 
     assert_eq!(first[0].ordinal().get(), 1);
     assert_eq!(second[0].ordinal().get(), 1);
     assert_eq!(third[0].ordinal().get(), 2);
+    assert_eq!(changed_cadence[0].ordinal().get(), 1);
     assert_eq!(due.as_ref(), &[third[0].candidate()]);
     assert_eq!(third[0].candidate().turn(), fixture.turn);
 

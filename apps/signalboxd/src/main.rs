@@ -1565,12 +1565,12 @@ async fn run_hub(
             configured_usize("automatic_tool_reconciliations_per_liveness_scan")?,
             configured_duration("automatic_tool_reconciliation_attempt_bound"),
         ),
-        SlowSubstrateNumericBounds::new(
-            slow_substrate_enabled("slow_substrate_backup_enabled")?,
-            slow_substrate_enabled("slow_substrate_restart_enabled")?,
-            slow_substrate_enabled("slow_substrate_lock_convoy_enabled")?,
-            slow_substrate_factor,
-        ),
+        SlowSubstrateNumericBounds::new(slow_substrate_factor)
+            .with_backup_enabled(slow_substrate_enabled("slow_substrate_backup_enabled")?)
+            .with_restart_enabled(slow_substrate_enabled("slow_substrate_restart_enabled")?)
+            .with_lock_convoy_enabled(slow_substrate_enabled(
+                "slow_substrate_lock_convoy_enabled",
+            )?),
         turn_liveness_persistence_bounds,
     );
     let goal_mode_numeric_bounds = GoalModeNumericBounds::new(

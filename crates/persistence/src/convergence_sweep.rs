@@ -166,14 +166,17 @@ pub struct ConvergenceSweepRetryPolicy {
 }
 
 impl ConvergenceSweepRetryPolicy {
-    fn stored_backoff_base_seconds(self) -> Option<i64> {
-        self.backoff_base
-            .map(|base| i64::try_from(base.as_secs()).unwrap_or(i64::MAX))
-    }
-
-    fn stored_backoff_cap_seconds(self) -> Option<i64> {
-        self.backoff_cap
-            .map(|cap| i64::try_from(cap.as_secs()).unwrap_or(i64::MAX))
+    fn stored_retry_delay_seconds(self, consecutive_failures: i16) -> Option<i64> {
+        let mut delay = self.backoff_base?;
+        let limit = self.backoff_cap.unwrap_or(Duration::MAX);
+        let doublings = u32::try_from(consecutive_failures.saturating_sub(1)).ok()?;
+        for _ in 0..doublings {
+            delay = delay.saturating_mul(2).min(limit);
+            if delay == limit {
+                break;
+            }
+        }
+        i64::try_from(delay.as_secs()).ok()
     }
 }
 
@@ -181,6 +184,12 @@ impl ConvergenceSweepRetryPolicy {
 struct FailureTransitionRow {
     consecutive_failures: i16,
     parking_kind: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct ActiveFailureLineageRow {
+    failure_kind: Option<String>,
+    consecutive_failures: i16,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -1036,6 +1045,34 @@ impl PostgresConvergenceSweepStore {
                     .await?;
             }
         }
+        let failure_storage = convergence_sweep_failure_to_str(failure);
+        let lineage: ActiveFailureLineageRow = sqlx::query_as(
+            "SELECT failure_kind, consecutive_failures
+               FROM convergence_sweep_target
+              WHERE repository = $1 AND pull_request_number = $2",
+        )
+        .bind(repository.as_str())
+        .bind(Decimal::from(pull_request.get()))
+        .fetch_one(&mut *transaction)
+        .await?;
+        let continues_lineage = lineage.failure_kind.as_deref() == Some(failure_storage);
+        let configured_budget = i16::try_from(self.retry_budget.get())
+            .map_err(|_| ConvergenceSweepStoreError::Corruption("retry budget"))?;
+        let budget = if continues_lineage {
+            budget
+        } else {
+            configured_budget
+        };
+        let consecutive_failures = if failure == ConvergenceSweepFailureKind::NoModelActivity {
+            budget
+        } else if continues_lineage {
+            lineage.consecutive_failures.saturating_add(1).min(budget)
+        } else {
+            1
+        };
+        let retry_delay_seconds = (consecutive_failures < budget)
+            .then(|| retry_policy.stored_retry_delay_seconds(consecutive_failures))
+            .flatten();
         let (head, threads) = observation
             .map(|value| {
                 (
@@ -1086,83 +1123,42 @@ impl PostgresConvergenceSweepStore {
                   JOIN latest_dispatch AS latest
                     ON latest.dispatch_id = candidate.dispatch_id
                    AND latest.recorded_at = candidate.recorded_at
-                 WHERE candidate.session_id = $11
+                 WHERE candidate.session_id = $10
                    AND NOT candidate.has_model_activity
                  ORDER BY candidate.session_id DESC
                  LIMIT 1
              )
              UPDATE convergence_sweep_target
-                SET state_kind = CASE WHEN
-                        (CASE WHEN $4 THEN $5
-                            WHEN failure_kind = $3
-                                THEN least(consecutive_failures + 1, $5)
-                            ELSE 1::smallint END) >= $5
-                        THEN $12 ELSE $13 END,
+                SET state_kind = CASE WHEN $13 >= $5 THEN $11 ELSE $12 END,
                     failure_kind = $3,
-                    consecutive_failures = CASE WHEN $4 THEN $5
-                        WHEN failure_kind = $3
-                            THEN least(consecutive_failures + 1, $5)
-                        ELSE 1::smallint END,
-                    retry_not_before = CASE WHEN
-                        (CASE WHEN $4 THEN $5
-                            WHEN failure_kind = $3
-                                THEN least(consecutive_failures + 1, $5)
-                            ELSE 1::smallint END) >= $5
-                        THEN NULL
+                    consecutive_failures = $13,
+                    retry_budget = $5,
+                    retry_not_before = CASE WHEN $13 >= $5 THEN NULL
                         WHEN $6::bigint IS NULL THEN 'infinity'::timestamptz
-                        ELSE clock_timestamp() + least(
-                            $6::bigint * (1::bigint << greatest(
-                                (CASE WHEN failure_kind = $3
-                                    THEN least(consecutive_failures + 1, $5)
-                                    ELSE 1::smallint END) - 1,
-                                0
-                            )),
-                            $7::bigint
-                        ) * interval '1 second' END,
-                    parked_at = CASE WHEN
-                        (CASE WHEN $4 THEN $5
-                            WHEN failure_kind = $3
-                                THEN least(consecutive_failures + 1, $5)
-                            ELSE 1::smallint END) >= $5
+                        ELSE clock_timestamp() + $6::bigint * interval '1 second' END,
+                    parked_at = CASE WHEN $13 >= $5
                         THEN clock_timestamp() ELSE NULL END,
-                    operator_need = CASE WHEN
-                        (CASE WHEN $4 THEN $5
-                            WHEN failure_kind = $3
-                                THEN least(consecutive_failures + 1, $5)
-                            ELSE 1::smallint END) >= $5
-                        THEN $8 ELSE NULL END,
-                    parked_dispatch_id = CASE WHEN $4 AND
-                        (CASE WHEN $4 THEN $5
-                            WHEN failure_kind = $3
-                                THEN least(consecutive_failures + 1, $5)
-                            ELSE 1::smallint END) >= $5
+                    operator_need = CASE WHEN $13 >= $5 THEN $7 ELSE NULL END,
+                    parked_dispatch_id = CASE WHEN $4 AND $13 >= $5
                         THEN (SELECT dispatch_id FROM expected_dispatch)
                         ELSE NULL END,
-                    parked_session_id = CASE WHEN $4 AND
-                        (CASE WHEN $4 THEN $5
-                            WHEN failure_kind = $3
-                                THEN least(consecutive_failures + 1, $5)
-                            ELSE 1::smallint END) >= $5
+                    parked_session_id = CASE WHEN $4 AND $13 >= $5
                         THEN (SELECT session_id FROM expected_dispatch)
                         ELSE NULL END,
-                    parked_dispatched_at = CASE WHEN $4 AND
-                        (CASE WHEN $4 THEN $5
-                            WHEN failure_kind = $3
-                                THEN least(consecutive_failures + 1, $5)
-                            ELSE 1::smallint END) >= $5
+                    parked_dispatched_at = CASE WHEN $4 AND $13 >= $5
                         THEN (SELECT recorded_at FROM expected_dispatch)
                         ELSE NULL END,
-                    last_head_sha = coalesce($9, last_head_sha),
-                    last_unresolved_threads = coalesce($10, last_unresolved_threads),
-                    last_observed_at = CASE WHEN $9 IS NULL THEN last_observed_at
+                    last_head_sha = coalesce($8, last_head_sha),
+                    last_unresolved_threads = coalesce($9, last_unresolved_threads),
+                    last_observed_at = CASE WHEN $8 IS NULL THEN last_observed_at
                         ELSE clock_timestamp() END
               WHERE repository = $1 AND pull_request_number = $2
-                AND ($11::uuid IS NULL OR (
+                AND ($10::uuid IS NULL OR (
                     EXISTS (SELECT 1 FROM expected_dispatch)
                     AND NOT EXISTS (
                         SELECT 1
                           FROM target_dispatch AS competitor
-                         WHERE competitor.session_id <> $11
+                         WHERE competitor.session_id <> $10
                            AND (
                                competitor.live
                                OR (
@@ -1176,17 +1172,16 @@ impl PostgresConvergenceSweepStore {
                 ))
           RETURNING consecutive_failures AS consecutive_failures,
                     CASE state_kind
-                        WHEN $12 THEN 'parked'
+                        WHEN $11 THEN 'parked'
                         ELSE 'retry_scheduled'
                     END AS parking_kind",
         )
         .bind(repository.as_str())
         .bind(Decimal::from(pull_request.get()))
-        .bind(convergence_sweep_failure_to_str(failure))
+        .bind(failure_storage)
         .bind(failure == ConvergenceSweepFailureKind::NoModelActivity)
         .bind(budget)
-        .bind(retry_policy.stored_backoff_base_seconds())
-        .bind(retry_policy.stored_backoff_cap_seconds())
+        .bind(retry_delay_seconds)
         .bind(convergence_sweep_operator_need_to_str(failure))
         .bind(head)
         .bind(threads)
@@ -1197,6 +1192,7 @@ impl PostgresConvergenceSweepStore {
         .bind(convergence_sweep_state_to_str(
             ConvergenceSweepStateStorageKind::RetryWait,
         ))
+        .bind(consecutive_failures)
         .fetch_optional(&mut *transaction)
         .await?;
         let Some(updated) = updated else {
@@ -1466,8 +1462,30 @@ fn resolve_ambiguous_fence_commit(
 #[cfg(test)]
 mod tests {
     use super::{
-        ConvergenceSweepStoreError, resolve_ambiguous_event_commit, resolve_ambiguous_fence_commit,
+        ConvergenceSweepRetryPolicy, ConvergenceSweepStoreError, resolve_ambiguous_event_commit,
+        resolve_ambiguous_fence_commit,
     };
+    use std::time::Duration;
+
+    #[test]
+    fn retry_delay_saturates_before_a_large_ordinal_can_overflow() {
+        let policy = ConvergenceSweepRetryPolicy {
+            backoff_base: Some(Duration::from_secs(120)),
+            backoff_cap: Some(Duration::from_secs(1_800)),
+        };
+
+        assert_eq!(policy.stored_retry_delay_seconds(59), Some(1_800));
+    }
+
+    #[test]
+    fn an_unrepresentable_unbounded_retry_delay_becomes_never_due() {
+        let policy = ConvergenceSweepRetryPolicy {
+            backoff_base: Some(Duration::from_secs(120)),
+            backoff_cap: None,
+        };
+
+        assert_eq!(policy.stored_retry_delay_seconds(i16::MAX), None);
+    }
 
     #[test]
     fn ambiguous_decision_commit_is_resolved_by_event_identity() {

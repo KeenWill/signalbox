@@ -11299,8 +11299,9 @@ impl ExhaustedAutomaticReconciliation {
         session: SessionId,
         turn: TurnId,
         operation: AutomaticReconciliationOperation,
+        attempt_ceiling: NonZeroU32,
     ) -> Self;
-    // accessors: session(), turn(), operation()
+    // accessors: session(), turn(), operation(), attempt_ceiling()
 }
 
 pub struct AutomaticReconciliationBatch { /* private */ }

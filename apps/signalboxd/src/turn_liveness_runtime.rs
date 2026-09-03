@@ -120,20 +120,40 @@ pub struct SlowSubstrateNumericBounds {
 }
 
 impl SlowSubstrateNumericBounds {
-    /// Binds every declared condition and the multiplier to configuration.
-    pub const fn new(
-        backup_enabled: bool,
-        restart_enabled: bool,
-        lock_convoy_enabled: bool,
-        factor: NonZeroU32,
-    ) -> Self {
+    /// Starts a policy with no declared condition enabled.
+    pub const fn new(factor: NonZeroU32) -> Self {
         Self {
-            backup_enabled,
-            restart_enabled,
-            lock_convoy_enabled,
+            backup_enabled: false,
+            restart_enabled: false,
+            lock_convoy_enabled: false,
             factor,
         }
     }
+
+    /// Applies the configured backup condition switch.
+    pub const fn with_backup_enabled(mut self, enabled: bool) -> Self {
+        self.backup_enabled = enabled;
+        self
+    }
+
+    /// Applies the configured restart condition switch.
+    pub const fn with_restart_enabled(mut self, enabled: bool) -> Self {
+        self.restart_enabled = enabled;
+        self
+    }
+
+    /// Applies the configured lock-convoy condition switch.
+    pub const fn with_lock_convoy_enabled(mut self, enabled: bool) -> Self {
+        self.lock_convoy_enabled = enabled;
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SlowSubstrateConditions {
+    backup_running: bool,
+    restart_in_progress: bool,
+    lock_convoy_detected: bool,
 }
 
 /// Deployment policy for one turn-liveness scan.
@@ -200,15 +220,10 @@ impl TurnLivenessNumericBounds {
         }
     }
 
-    const fn slow_substrate_factor_for(
-        self,
-        backup_running: bool,
-        restart_in_progress: bool,
-        lock_convoy_detected: bool,
-    ) -> NonZeroU32 {
-        if (backup_running && self.slow_substrate_backup_enabled)
-            || (restart_in_progress && self.slow_substrate_restart_enabled)
-            || (lock_convoy_detected && self.slow_substrate_lock_convoy_enabled)
+    const fn slow_substrate_factor_for(self, conditions: SlowSubstrateConditions) -> NonZeroU32 {
+        if (conditions.backup_running && self.slow_substrate_backup_enabled)
+            || (conditions.restart_in_progress && self.slow_substrate_restart_enabled)
+            || (conditions.lock_convoy_detected && self.slow_substrate_lock_convoy_enabled)
         {
             self.slow_substrate_factor
         } else {
@@ -372,6 +387,7 @@ trait DurableObservationRecorder {
     fn record_observation(
         &self,
         guard: TurnLivenessGuardKind,
+        scan_interval: TurnLivenessScanInterval,
         candidates: &[StaleTurnCandidate],
         advance_existing: bool,
     ) -> impl Future<
@@ -383,13 +399,15 @@ impl DurableObservationRecorder for PostgresTurnLivenessRepository {
     async fn record_observation(
         &self,
         guard: TurnLivenessGuardKind,
+        scan_interval: TurnLivenessScanInterval,
         candidates: &[StaleTurnCandidate],
         advance_existing: bool,
     ) -> Result<Box<[DurableTurnLivenessObservation]>, TurnLivenessRepositoryError> {
         if advance_existing {
-            self.record_complete_observation(guard, candidates).await
+            self.record_complete_observation(guard, scan_interval, candidates)
+                .await
         } else {
-            self.record_restart_complete_observation(guard, candidates)
+            self.record_restart_complete_observation(guard, scan_interval, candidates)
                 .await
         }
     }
@@ -451,8 +469,6 @@ pub struct TurnLivenessRuntime {
     quiescent_staleness_bound: Option<StaleActiveTurnBound>,
     slot_held_staleness_bound: Option<StaleActiveTurnBound>,
     scan_interval: Option<TurnLivenessScanInterval>,
-    automatic_model_call_reconciliation_attempt_budget: u32,
-    automatic_tool_reconciliation_attempt_budget: u32,
     numeric_bounds: TurnLivenessNumericBounds,
 }
 
@@ -489,8 +505,6 @@ impl TurnLivenessRuntime {
             quiescent_staleness_bound,
             slot_held_staleness_bound,
             scan_interval,
-            automatic_model_call_reconciliation_attempt_budget: model_call.attempt_budget,
-            automatic_tool_reconciliation_attempt_budget: tool.attempt_budget,
             numeric_bounds,
         }
     }
@@ -542,8 +556,6 @@ impl TurnLivenessRuntime {
         let ambiguous_operations = run_ambiguous_operation_watchdog(
             self.automatic_reconciliation,
             scan_interval,
-            self.automatic_model_call_reconciliation_attempt_budget,
-            self.automatic_tool_reconciliation_attempt_budget,
             numeric_bounds,
             shutdown,
         );
@@ -579,11 +591,11 @@ async fn run_quiescent_watchdog(
                     &repository,
                     ledger,
                     TurnLivenessGuardKind::Quiescent,
-                    numeric_bounds.slow_substrate_factor_for(
+                    numeric_bounds.slow_substrate_factor_for(SlowSubstrateConditions {
                         backup_running,
-                        first_scan_after_restart,
+                        restart_in_progress: first_scan_after_restart,
                         lock_convoy_detected,
-                    ),
+                    }),
                     &mut window,
                     !first_scan_after_restart,
                     &mut shutdown,
@@ -622,11 +634,11 @@ async fn run_slot_held_watchdog(
                 reconcile_slot_held_turns(
                     &repository,
                     ledger,
-                    numeric_bounds.slow_substrate_factor_for(
+                    numeric_bounds.slow_substrate_factor_for(SlowSubstrateConditions {
                         backup_running,
-                        first_scan_after_restart,
+                        restart_in_progress: first_scan_after_restart,
                         lock_convoy_detected,
-                    ),
+                    }),
                     &mut window,
                     numeric_bounds.slot_held_recovery_attempt_bound,
                     &mut shutdown,
@@ -642,8 +654,6 @@ async fn run_slot_held_watchdog(
 async fn run_ambiguous_operation_watchdog(
     repository: PostgresAutomaticReconciliationRepository,
     scan_interval: TurnLivenessScanInterval,
-    automatic_model_call_reconciliation_attempt_budget: u32,
-    automatic_tool_reconciliation_attempt_budget: u32,
     numeric_bounds: TurnLivenessNumericBounds,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -653,14 +663,7 @@ async fn run_ambiguous_operation_watchdog(
         match next_turn_liveness_wake(&mut shutdown, &mut ticker).await {
             TurnLivenessWake::Shutdown => return,
             TurnLivenessWake::Scan => {
-                reconcile_ambiguous_operations(
-                    &repository,
-                    automatic_model_call_reconciliation_attempt_budget,
-                    automatic_tool_reconciliation_attempt_budget,
-                    numeric_bounds,
-                    &mut shutdown,
-                )
-                .await;
+                reconcile_ambiguous_operations(&repository, numeric_bounds, &mut shutdown).await;
             }
         }
     }
@@ -679,7 +682,12 @@ async fn reconcile_slot_held_turns(
         return;
     };
     let observations = match inventory
-        .record_observation(TurnLivenessGuardKind::SlotHeld, &active, advance_existing)
+        .record_observation(
+            TurnLivenessGuardKind::SlotHeld,
+            ledger.scan_interval(),
+            &active,
+            advance_existing,
+        )
         .await
     {
         Ok(observations) => observations,
@@ -817,6 +825,21 @@ fn batch_admits_another_reconciliation(
     !*shutdown.borrow() && ceiling.is_none_or(|limit| reconciliations < limit)
 }
 
+fn automatic_reconciliation_scan_ceiling_reached(
+    model_call_empty: bool,
+    model_call_reconciliations: usize,
+    model_call_ceiling: Option<usize>,
+    tool_empty: bool,
+    tool_reconciliations: usize,
+    tool_ceiling: Option<usize>,
+) -> bool {
+    let model_ceiling_reached = !model_call_empty
+        && model_call_ceiling.is_some_and(|ceiling| model_call_reconciliations >= ceiling);
+    let tool_ceiling_reached =
+        !tool_empty && tool_ceiling.is_some_and(|ceiling| tool_reconciliations >= ceiling);
+    model_ceiling_reached || tool_ceiling_reached
+}
+
 /// Claims and applies one bounded window of durable ambiguous-call work.
 ///
 /// Every stage observes shutdown ahead of its own deadline, exactly as the
@@ -826,8 +849,6 @@ fn batch_admits_another_reconciliation(
 /// attempt's own recorded deadline stays the recovery authority.
 async fn reconcile_ambiguous_operations(
     repository: &PostgresAutomaticReconciliationRepository,
-    automatic_model_call_reconciliation_attempt_budget: u32,
-    automatic_tool_reconciliation_attempt_budget: u32,
     numeric_bounds: TurnLivenessNumericBounds,
     shutdown: &mut watch::Receiver<bool>,
 ) {
@@ -885,21 +906,13 @@ async fn reconcile_ambiguous_operations(
         };
         for exhausted in batch.exhausted() {
             let (operation_kind, operation_id) = operation_log_fields(exhausted.operation());
-            let attempt_budget = match exhausted.operation() {
-                AutomaticReconciliationOperation::ModelCall(_) => {
-                    automatic_model_call_reconciliation_attempt_budget
-                }
-                AutomaticReconciliationOperation::ToolAttempt(_) => {
-                    automatic_tool_reconciliation_attempt_budget
-                }
-            };
             tracing::warn!(
                 cause_code = "automatic_reconciliation_exhausted",
                 session_id = %exhausted.session().as_uuid(),
                 turn_id = %exhausted.turn().as_uuid(),
                 operation_kind,
                 operation_id = %operation_id,
-                attempt_budget,
+                attempt_budget = exhausted.attempt_ceiling().get(),
                 "automatic operation reconciliation exhausted; the turn remains visibly parked for an operator"
             );
         }
@@ -996,6 +1009,16 @@ async fn reconcile_ambiguous_operations(
             tool_attempt_ceiling = ?numeric_bounds.automatic_tool_reconciliations_per_scan,
             "shutdown ended the automatic reconciliation batch; due work remains discoverable"
         );
+        return;
+    }
+    if !automatic_reconciliation_scan_ceiling_reached(
+        model_call_empty,
+        model_call_reconciliations,
+        numeric_bounds.automatic_model_call_reconciliations_per_scan,
+        tool_empty,
+        tool_reconciliations,
+        numeric_bounds.automatic_tool_reconciliations_per_scan,
+    ) {
         return;
     }
     tracing::info!(
@@ -1181,7 +1204,7 @@ where
         return TerminalizationTally::default();
     };
     let observations = match repository
-        .record_observation(guard, &quiescent, advance_existing)
+        .record_observation(guard, ledger.scan_interval(), &quiescent, advance_existing)
         .await
     {
         Ok(observations) => observations,
@@ -1407,8 +1430,9 @@ mod tests {
         STALE_TURN_LOCK_UNAVAILABLE_CAUSE, STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE,
         SlowSubstrateNumericBounds, StaleTurnTerminalizer, TERMINALIZATION_DEFERRED_CAUSE,
         TerminalizationWindow, TurnLivenessNumericBounds, TurnLivenessWake,
-        batch_admits_another_reconciliation, complete_before_shutdown, drain_quiescent_rotation,
-        next_turn_liveness_wake, reconcile_turn_liveness, reconciliation_deadline,
+        automatic_reconciliation_scan_ceiling_reached, batch_admits_another_reconciliation,
+        complete_before_shutdown, drain_quiescent_rotation, next_turn_liveness_wake,
+        reconcile_turn_liveness, reconciliation_deadline,
     };
     use signalbox_application::{
         DurableTurnLivenessObservation, StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome,
@@ -1469,18 +1493,24 @@ mod tests {
                     .flatten(),
             ),
             SlowSubstrateNumericBounds::new(
-                bounds.integer("slow_substrate_backup_enabled").flatten() == Some(1),
-                bounds.integer("slow_substrate_restart_enabled").flatten() == Some(1),
-                bounds
-                    .integer("slow_substrate_lock_convoy_enabled")
-                    .flatten()
-                    == Some(1),
                 bounds
                     .integer("slow_substrate_staleness_factor")
                     .flatten()
                     .and_then(|value| u32::try_from(value).ok())
                     .and_then(NonZeroU32::new)
                     .expect("the example slow-substrate factor is positive"),
+            )
+            .with_backup_enabled(
+                bounds.integer("slow_substrate_backup_enabled").flatten() == Some(1),
+            )
+            .with_restart_enabled(
+                bounds.integer("slow_substrate_restart_enabled").flatten() == Some(1),
+            )
+            .with_lock_convoy_enabled(
+                bounds
+                    .integer("slow_substrate_lock_convoy_enabled")
+                    .flatten()
+                    == Some(1),
             ),
             TurnLivenessPersistenceBounds::new(
                 bounds.duration("terminalization_lock_wait").flatten(),
@@ -1618,6 +1648,7 @@ mod tests {
         async fn record_observation(
             &self,
             _guard: TurnLivenessGuardKind,
+            _scan_interval: TurnLivenessScanInterval,
             candidates: &[StaleTurnCandidate],
             advance_existing: bool,
         ) -> Result<Box<[DurableTurnLivenessObservation]>, TurnLivenessRepositoryError> {
@@ -1949,6 +1980,34 @@ mod tests {
     #[test]
     fn one_scan_uses_the_configured_terminalization_limit() {
         assert!(example_numeric_bounds().terminalizations_per_scan.is_some());
+    }
+
+    /// Empty classes mean the scan completed its inventory rather than reached
+    /// a processing ceiling, even when both processed counts happen to be zero.
+    #[test]
+    fn an_idle_automatic_reconciliation_scan_does_not_report_a_ceiling() {
+        assert!(!automatic_reconciliation_scan_ceiling_reached(
+            true,
+            0,
+            Some(32),
+            true,
+            0,
+            Some(32),
+        ));
+    }
+
+    /// A non-empty class left at its processing limit reports that due work was
+    /// deliberately deferred to a later scan.
+    #[test]
+    fn a_nonempty_automatic_reconciliation_class_at_its_limit_reports_a_ceiling() {
+        assert!(automatic_reconciliation_scan_ceiling_reached(
+            false,
+            32,
+            Some(32),
+            true,
+            0,
+            Some(32),
+        ));
     }
 
     /// The compiled ceiling is the capacity the page states.

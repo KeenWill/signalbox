@@ -80,6 +80,7 @@ pub struct ExhaustedAutomaticReconciliation {
     session: SessionId,
     turn: TurnId,
     operation: AutomaticReconciliationOperation,
+    attempt_ceiling: NonZeroU32,
 }
 
 impl ExhaustedAutomaticReconciliation {
@@ -88,11 +89,13 @@ impl ExhaustedAutomaticReconciliation {
         session: SessionId,
         turn: TurnId,
         operation: AutomaticReconciliationOperation,
+        attempt_ceiling: NonZeroU32,
     ) -> Self {
         Self {
             session,
             turn,
             operation,
+            attempt_ceiling,
         }
     }
 
@@ -109,6 +112,11 @@ impl ExhaustedAutomaticReconciliation {
     /// Returns the exact ambiguous operation.
     pub const fn operation(self) -> AutomaticReconciliationOperation {
         self.operation
+    }
+
+    /// Returns the durable ceiling exhausted by this recovery.
+    pub const fn attempt_ceiling(self) -> NonZeroU32 {
+        self.attempt_ceiling
     }
 }
 

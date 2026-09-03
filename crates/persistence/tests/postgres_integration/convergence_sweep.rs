@@ -572,11 +572,13 @@ async fn retry_backoff_saturates_at_the_configured_cap() -> Result<(), Box<dyn E
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_different_failure_kind_starts_an_independent_lineage() -> Result<(), Box<dyn Error>> {
     let (_container, pool, _database_url) = migrated_postgres().await?;
-    let store = PostgresConvergenceSweepStore::new(pool);
+    let initial = PostgresConvergenceSweepStore::new(pool.clone());
+    let lowered =
+        PostgresConvergenceSweepStore::new(pool.clone()).with_retry_budget(NonZeroU16::MIN);
     let repository = repository()?;
     let observation = observation()?;
 
-    store
+    initial
         .record_failure(
             Uuid::from_u128(8),
             &repository,
@@ -589,7 +591,7 @@ async fn a_different_failure_kind_starts_an_independent_lineage() -> Result<(), 
             },
         )
         .await?;
-    store
+    initial
         .record_failure(
             Uuid::from_u128(9),
             &repository,
@@ -602,7 +604,7 @@ async fn a_different_failure_kind_starts_an_independent_lineage() -> Result<(), 
             },
         )
         .await?;
-    store
+    lowered
         .record_failure(
             Uuid::from_u128(10),
             &repository,
@@ -615,16 +617,27 @@ async fn a_different_failure_kind_starts_an_independent_lineage() -> Result<(), 
             },
         )
         .await?;
-    let state = store
+    let state = lowered
         .load_target(&repository, pull_request())
         .await?
         .expect("the failed target is durable");
+    let durable_lineage: (i16, i16) = sqlx::query_as(
+        "SELECT consecutive_failures, retry_budget
+           FROM convergence_sweep_target
+          WHERE repository = $1 AND pull_request_number = $2",
+    )
+    .bind(repository.as_str())
+    .bind(rust_decimal::Decimal::from(pull_request().get()))
+    .fetch_one(&pool)
+    .await?;
 
     assert_eq!(
         state.failure_kind(),
         Some(ConvergenceSweepFailureKind::CommissionRefused)
     );
     assert_eq!(state.consecutive_failures(), 1);
+    assert!(state.is_parked());
+    assert_eq!(durable_lineage, (1, 1));
     Ok(())
 }
 

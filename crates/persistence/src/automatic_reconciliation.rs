@@ -1,6 +1,6 @@
 //! Durable daemon-owned reconciliation of ambiguous physical operations.
 
-use std::{error::Error, fmt, future::Future, time::Duration};
+use std::{error::Error, fmt, future::Future, num::NonZeroU32, time::Duration};
 
 use signalbox_application::{
     AutomaticReconciliationAttempt, AutomaticReconciliationBatch,
@@ -573,6 +573,12 @@ impl PostgresAutomaticReconciliationRepository {
                 session_id_from_uuid(row.try_get("session_id")?),
                 turn_id_from_uuid(row.try_get("turn_id")?),
                 operation,
+                u32::try_from(row.try_get::<i32, _>("attempt_ceiling")?)
+                    .ok()
+                    .and_then(NonZeroU32::new)
+                    .ok_or(AutomaticReconciliationRepositoryError::Corruption(
+                        "attempt ceiling",
+                    ))?,
             ));
         }
         Ok(AutomaticReconciliationBatch::new(
@@ -985,7 +991,8 @@ async fn mark_exhausted_recoveries(
             AND recovery.state_kind IN ('scheduled', 'attempting')
             AND recovery.attempt_count >= recovery.attempt_ceiling
       RETURNING recovery.session_id, recovery.turn_id,
-                recovery.model_call_id, recovery.tool_attempt_id",
+                recovery.model_call_id, recovery.tool_attempt_id,
+                recovery.attempt_ceiling",
     )
     .bind(window)
     .fetch_all(connection)
