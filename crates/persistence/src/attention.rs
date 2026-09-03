@@ -875,7 +875,7 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
         queued_turn_count,
         state,
         action,
-        goal_block: decode_goal_block(row, goal_state.as_deref())?,
+        goal_block: decode_goal_block(row, state, goal_state.as_deref())?,
         judge: AttentionJudgeFacts {
             actionable: nonnegative(row.try_get("judge_actionable")?, "judge actionable")?,
             completed: nonnegative(row.try_get("judge_completed")?, "judge completed")?,
@@ -1072,9 +1072,14 @@ fn classify_turn_phase(
 
 fn decode_goal_block(
     row: &PgRow,
+    state: AttentionState,
     goal_state: Option<&str>,
 ) -> Result<Option<AttentionGoalBlock>, AttentionRepositoryError> {
-    if goal_state != Some("blocked") {
+    // The block is the evidence for `blocked`, and the session state is what
+    // the summary reports: a live turn under a blocked goal projects `active`,
+    // and evidence for a state the summary does not name is a pair the wire
+    // refuses.
+    if state != AttentionState::Blocked || goal_state != Some("blocked") {
         return Ok(None);
     }
     let stored_reason = required_string(row, "blocked_reason")?;
