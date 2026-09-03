@@ -124,8 +124,8 @@ sources.
 ## Validation
 
 A documentation-only change runs the documentation bar; a change to code, tests,
-dependency manifests, or generated contracts runs the complete bar. CI is the
-backstop.
+dependency manifests, or generated contracts runs the complete bar. CI runs
+both.
 
 Documentation bar:
 
