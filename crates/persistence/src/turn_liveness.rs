@@ -67,11 +67,12 @@ impl TurnLivenessPersistenceBounds {
 
 /// Infrastructure or integrity failure while supervising turn liveness.
 ///
-/// The two database arms are separate because they mean different things to an
-/// operator: a failed inventory read is a pass that made no decision at all,
-/// while a failed terminalization is a decision that could not be carried out
-/// on a turn already judged stale. No blanket `From<sqlx::Error>` exists, so
-/// neither path can silently borrow the other's cause code.
+/// The database arms are separate because they mean different things to an
+/// operator: a failed inventory read is a pass that made no decision at all, a
+/// malformed observation is durable corruption, and a failed terminalization
+/// is a decision that could not be carried out on a turn already judged stale.
+/// No blanket `From<sqlx::Error>` exists, so no path can silently borrow
+/// another's cause code.
 #[derive(Debug)]
 pub enum TurnLivenessRepositoryError {
     /// Reading the quiescent active-turn inventory failed.
@@ -83,6 +84,8 @@ pub enum TurnLivenessRepositoryError {
         /// The originating driver failure.
         source: sqlx::Error,
     },
+    /// A stored durable observation could not be decoded into its domain shape.
+    ObservationCorruption(sqlx::Error),
     /// A required terminalization row stayed locked past the attempt's wait.
     TerminalizationLockUnavailable(sqlx::Error),
     /// A database operation on the terminalization path failed.
@@ -111,6 +114,11 @@ impl TurnLivenessRepositoryError {
             commit_ambiguous: crate::commit_failure_is_ambiguous(&error),
             source: error,
         }
+    }
+
+    /// Classifies malformed durable observation state.
+    fn observation_corruption(error: sqlx::Error) -> Self {
+        Self::ObservationCorruption(error)
     }
 
     /// Classifies an unambiguous driver failure on the terminalization path.
@@ -149,6 +157,12 @@ impl fmt::Display for TurnLivenessRepositoryError {
                     "durable turn-liveness observation failed: {source}"
                 )
             }
+            Self::ObservationCorruption(source) => {
+                write!(
+                    formatter,
+                    "durable turn-liveness observation is corrupt: {source}"
+                )
+            }
             Self::TerminalizationLockUnavailable(source) => {
                 write!(
                     formatter,
@@ -168,6 +182,7 @@ impl Error for TurnLivenessRepositoryError {
         match self {
             Self::Inventory(source)
             | Self::Observation { source, .. }
+            | Self::ObservationCorruption(source)
             | Self::TerminalizationLockUnavailable(source)
             | Self::TerminalizationDatabase { source, .. } => Some(source),
             Self::Terminalization(source) => Some(source),
@@ -186,6 +201,7 @@ impl ClassifyOperatorFailure for TurnLivenessRepositoryError {
             } => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: *commit_ambiguous,
             },
+            Self::ObservationCorruption(_) => OperatorFailureClass::FailClosedCorruption,
             Self::TerminalizationLockUnavailable(_) => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
             },
@@ -202,6 +218,7 @@ impl ClassifyOperatorFailure for TurnLivenessRepositoryError {
         match self {
             Self::Inventory(_) => "turn_liveness_inventory_failed",
             Self::Observation { .. } => "turn_liveness_observation_failed",
+            Self::ObservationCorruption(_) => "turn_liveness_observation_corrupt",
             Self::TerminalizationLockUnavailable(_) => {
                 "turn_liveness_terminalization_lock_unavailable"
             }
@@ -347,7 +364,10 @@ impl PostgresTurnLivenessRepository {
                         THEN 1
                         WHEN NOT $7::boolean
                         THEN observation.observation_ordinal
-                        ELSE observation.observation_ordinal + 1
+                        ELSE LEAST(
+                            observation.observation_ordinal + 1,
+                            18446744073709551615
+                        )
                     END
              RETURNING turn_id, session_id, current_attempt_id,
                        outbox_frontier, observation_ordinal",
@@ -596,20 +616,22 @@ fn decode_durable_observation(
 ) -> Result<DurableTurnLivenessObservation, TurnLivenessRepositoryError> {
     let frontier = row
         .try_get::<Option<Decimal>, _>("outbox_frontier")
-        .map_err(TurnLivenessRepositoryError::observation)?
+        .map_err(TurnLivenessRepositoryError::observation_corruption)?
         .map(u64::try_from)
         .transpose()
         .map_err(|source| {
-            TurnLivenessRepositoryError::observation(sqlx::Error::Decode(Box::new(source)))
+            TurnLivenessRepositoryError::observation_corruption(sqlx::Error::Decode(Box::new(
+                source,
+            )))
         })?;
     let ordinal: Decimal = row
         .try_get("observation_ordinal")
-        .map_err(TurnLivenessRepositoryError::observation)?;
+        .map_err(TurnLivenessRepositoryError::observation_corruption)?;
     let ordinal = u64::try_from(ordinal)
         .ok()
         .and_then(NonZeroU64::new)
         .ok_or_else(|| {
-            TurnLivenessRepositoryError::observation(sqlx::Error::Decode(Box::new(
+            TurnLivenessRepositoryError::observation_corruption(sqlx::Error::Decode(Box::new(
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "invalid durable turn-liveness ordinal",
@@ -620,16 +642,16 @@ fn decode_durable_observation(
         StaleTurnCandidate::new(
             session_id_from_uuid(
                 row.try_get("session_id")
-                    .map_err(TurnLivenessRepositoryError::observation)?,
+                    .map_err(TurnLivenessRepositoryError::observation_corruption)?,
             ),
             turn_id_from_uuid(
                 row.try_get("turn_id")
-                    .map_err(TurnLivenessRepositoryError::observation)?,
+                    .map_err(TurnLivenessRepositoryError::observation_corruption)?,
             ),
             TurnLivenessEvidence::new(
                 TurnAttemptId::from_uuid(
                     row.try_get("current_attempt_id")
-                        .map_err(TurnLivenessRepositoryError::observation)?,
+                        .map_err(TurnLivenessRepositoryError::observation_corruption)?,
                 ),
                 frontier,
             ),

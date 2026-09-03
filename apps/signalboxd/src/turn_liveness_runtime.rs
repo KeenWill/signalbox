@@ -600,18 +600,28 @@ async fn reconcile_slot_held_turns(
     let Some(active) = drain_slot_held_rotation(inventory, recovery_attempt_bound).await else {
         return false;
     };
-    let observations = match inventory
-        .record_observation(
+    let observation = optional_timeout(
+        recovery_attempt_bound,
+        inventory.record_observation(
             TurnLivenessGuardKind::SlotHeld,
             ledger.scan_interval(),
             &active,
             observation_mode,
-        )
-        .await
-    {
-        Ok(observations) => observations,
-        Err(error) => {
+        ),
+    );
+    let observations = match observation.await {
+        Ok(Ok(observations)) => observations,
+        Ok(Err(error)) => {
             report_turn_liveness_failure(&error);
+            return false;
+        }
+        Err(_) => {
+            tracing::error!(
+                failure_class = ?signalbox_application::OperatorFailureClass::Infrastructure { commit_ambiguous: true },
+                cause_code = "turn_liveness_slot_held_observation_timed_out",
+                attempt_bound_seconds = ?recovery_attempt_bound.map(|bound| bound.as_secs()),
+                "slot-held durable observation exceeded its bound; unchanged evidence remains due"
+            );
             return false;
         }
     };
@@ -1642,7 +1652,8 @@ mod tests {
         let cohort = vec![candidate(1), candidate(2)];
         let (shutdown, mut receiver) = watch::channel(false);
         let processed_before_shutdown = 0;
-        let expected_processed = cohort.len() - 1;
+        let expected_processed = processed_before_shutdown + 1;
+        let expected_deferred = cohort.len() - expected_processed;
         let repository = CountingRepository::with_shutdown_after(
             cohort.clone(),
             processed_before_shutdown,
@@ -1663,8 +1674,8 @@ mod tests {
         .await;
 
         assert_eq!(tally.attempted(), expected_processed);
-        assert_eq!(repository.terminalized(), tally.attempted());
-        assert_eq!(tally.deferred, cohort.len() - tally.attempted());
+        assert_eq!(repository.terminalized(), expected_processed);
+        assert_eq!(tally.deferred, expected_deferred);
     }
 
     /// What one scan defers the next one ends: nothing about a deferred turn

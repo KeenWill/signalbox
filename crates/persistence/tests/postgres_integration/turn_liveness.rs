@@ -187,8 +187,74 @@ async fn observation_ordinal_advances_through_the_u64_range() -> Result<(), Box<
             TurnLivenessObservationMode::Advance,
         )
         .await?;
+    let saturated = repository
+        .record_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::Advance,
+        )
+        .await?;
 
     assert_eq!(advanced[0].ordinal().get(), u64::MAX);
+    assert_eq!(saturated[0].ordinal().get(), u64::MAX);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// An observation that cannot be decoded into its durable domain shape is
+/// fail-closed corruption rather than a transient infrastructure failure.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn malformed_observation_is_classified_as_corruption() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let _fixture = activated_watchdog_session(&pool, 0x10_200).await?;
+    let interval = TurnLivenessScanInterval::try_new(std::time::Duration::from_secs(60))?;
+    let repository = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
+    let candidates = repository
+        .quiescent_active_turns(None)
+        .await?
+        .into_candidates();
+    repository
+        .record_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::RestartBaseline,
+        )
+        .await?;
+    sqlx::query(
+        "ALTER TABLE turn_liveness_observation
+         DROP CONSTRAINT turn_liveness_observation_ordinal",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_liveness_observation
+            SET observation_ordinal = $1
+          WHERE guard_kind = $2",
+    )
+    .bind(Decimal::from(u64::MAX) + Decimal::ONE)
+    .bind(TurnLivenessGuardKind::Quiescent.as_str())
+    .execute(&pool)
+    .await?;
+
+    let error = repository
+        .record_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::RestartBaseline,
+        )
+        .await
+        .expect_err("the malformed stored ordinal fails closed");
+
+    assert_eq!(
+        error.operator_failure_class(),
+        OperatorFailureClass::FailClosedCorruption
+    );
 
     pool.close().await;
     drop(container);
