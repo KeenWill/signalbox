@@ -7,7 +7,7 @@ CREATE TABLE turn_liveness_observation (
     current_attempt_id uuid NOT NULL,
     outbox_frontier numeric(20, 0),
     scan_interval_seconds numeric(20, 0) NOT NULL,
-    observation_ordinal bigint NOT NULL,
+    observation_ordinal numeric(20, 0) NOT NULL,
     CONSTRAINT turn_liveness_observation_pkey PRIMARY KEY (guard_kind, turn_id),
     CONSTRAINT turn_liveness_observation_guard_kind CHECK (
         guard_kind = ANY (ARRAY['quiescent'::text, 'slot_held'::text])
@@ -19,7 +19,10 @@ CREATE TABLE turn_liveness_observation (
             AND outbox_frontier <= 18446744073709551615
         )
     ),
-    CONSTRAINT turn_liveness_observation_ordinal CHECK (observation_ordinal > 0),
+    CONSTRAINT turn_liveness_observation_ordinal CHECK (
+        observation_ordinal >= 1
+        AND observation_ordinal <= 18446744073709551615
+    ),
     CONSTRAINT turn_liveness_observation_scan_interval CHECK (
         scan_interval_seconds > 0
         AND scan_interval_seconds <= 18446744073709551615

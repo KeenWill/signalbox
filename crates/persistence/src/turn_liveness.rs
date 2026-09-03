@@ -347,11 +347,7 @@ impl PostgresTurnLivenessRepository {
                         THEN 1
                         WHEN NOT $7::boolean
                         THEN observation.observation_ordinal
-                        ELSE CASE
-                            WHEN observation.observation_ordinal < 9223372036854775807
-                            THEN observation.observation_ordinal + 1
-                            ELSE observation.observation_ordinal
-                        END
+                        ELSE observation.observation_ordinal + 1
                     END
              RETURNING turn_id, session_id, current_attempt_id,
                        outbox_frontier, observation_ordinal",
@@ -606,7 +602,7 @@ fn decode_durable_observation(
         .map_err(|source| {
             TurnLivenessRepositoryError::observation(sqlx::Error::Decode(Box::new(source)))
         })?;
-    let ordinal: i64 = row
+    let ordinal: Decimal = row
         .try_get("observation_ordinal")
         .map_err(TurnLivenessRepositoryError::observation)?;
     let ordinal = u64::try_from(ordinal)

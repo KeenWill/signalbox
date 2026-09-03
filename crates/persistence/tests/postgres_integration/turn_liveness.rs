@@ -148,6 +148,53 @@ async fn restart_mid_observation_retains_staleness_evidence() -> Result<(), Box<
     Ok(())
 }
 
+/// A durable observation ordinal uses the persistence contract's whole `u64`
+/// range instead of stopping at PostgreSQL's signed-bigint ceiling.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn observation_ordinal_advances_through_the_u64_range() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let _fixture = activated_watchdog_session(&pool, 0x10_100).await?;
+    let interval = TurnLivenessScanInterval::try_new(std::time::Duration::from_secs(60))?;
+    let repository = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
+    let candidates = repository
+        .quiescent_active_turns(None)
+        .await?
+        .into_candidates();
+    repository
+        .record_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::RestartBaseline,
+        )
+        .await?;
+    sqlx::query(
+        "UPDATE turn_liveness_observation
+            SET observation_ordinal = $1
+          WHERE guard_kind = $2",
+    )
+    .bind(Decimal::from(u64::MAX - 1))
+    .bind(TurnLivenessGuardKind::Quiescent.as_str())
+    .execute(&pool)
+    .await?;
+
+    let advanced = repository
+        .record_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::Advance,
+        )
+        .await?;
+
+    assert_eq!(advanced[0].ordinal().get(), u64::MAX);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// Disabling either stale-turn supervision input breaks observation continuity
 /// for both guards, so a later deployment starts both ledgers from their first
 /// observation rather than inheriting credit earned before the disabled run.
