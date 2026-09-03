@@ -96,9 +96,6 @@ owner's private repositories may be named as provenance, not cited as rules.
   not reword, restructure, or reformat unrelated text.
 - Do not add `Co-Authored-By`, session, or URL trailers to commits or
   pull-request text.
-- Do not adopt the review-slog toolkit as a merge gate until its
-  [blocking condition](docs/open-questions.md#review-slog-toolkit-adoption) is
-  cleared.
 
 ## Pull requests
 
