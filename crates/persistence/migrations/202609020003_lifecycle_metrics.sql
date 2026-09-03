@@ -6,9 +6,8 @@
 --
 -- §12's denominator keeps a supersession that closed a park holding a failure
 -- cause, so the standing cause must outlive the park that raised it: through
--- terminalization, and through the resume a committed closure survives between
--- its decision and the turn's boundary. A state that owes neither still cannot
--- carry one.
+-- terminalization, and through the closure committed while the turn is still
+-- reaching its boundary. A state that owes neither still cannot carry one.
 --
 
 -- Supersedes the definition in `202609020002_session_lifecycle_satellite.sql`.

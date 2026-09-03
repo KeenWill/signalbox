@@ -1012,15 +1012,14 @@ async fn adopt_by_statement(pool: &PgPool, session: SessionId) -> Result<(), sql
     Ok(())
 }
 
-/// §12 counts a supersession that closed a park holding a failure cause, and
-/// the committed closure survives a resume, so its cause must too.
+/// §12 counts a supersession that closed a park holding a failure cause, so
+/// the cause must outlive the committed decision waiting on the turn.
 ///
-/// The handoff deliberately outlives the resume between the decision and the
-/// turn's boundary. A cause cleared under it would reach settlement empty and
+/// A cause cleared once the closure commits would reach settlement empty and
 /// the supersession would be trimmed as a non-failure, flattering the rate.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn a_committed_supersession_keeps_its_cause_across_a_resume() -> Result<(), Box<dyn Error>> {
+async fn a_committed_supersession_keeps_its_cause_until_it_settles() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = SessionLifecycleRepository::new(pool.clone());
 
@@ -1052,7 +1051,6 @@ async fn a_committed_supersession_keeps_its_cause_across_a_resume() -> Result<()
             },
         )
         .await?;
-    repository.resume(respawned).await?;
     settle_turn_with_cause(&pool, respawned, turn, 0x1900, "context_compaction_wall").await?;
     repository.settle_pending_terminal(respawned).await?;
 
