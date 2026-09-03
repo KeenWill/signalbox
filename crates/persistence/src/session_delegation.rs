@@ -1825,7 +1825,19 @@ fn decode_outcome(row: &PgRow) -> Result<DelegationOutcome, SessionDelegationRep
                 )?)?,
             }
         }
-        "child_turn" | "parent_turn_command" => {
+        "parent_lifecycle_command"
+            if provenance_turn.is_none()
+                && provenance_goal.is_none()
+                && provenance_request.is_none() =>
+        {
+            DelegationProvenanceReconstitutionInput::ParentLifecycleCommand {
+                session: source,
+                command: decode_command(provenance_command.ok_or(
+                    SessionDelegationCorruption::Inconsistent("outcome provenance shape"),
+                )?)?,
+            }
+        }
+        "child_turn" | "parent_turn_command" | "parent_lifecycle_command" => {
             return Err(
                 SessionDelegationCorruption::Inconsistent("outcome provenance shape").into(),
             );

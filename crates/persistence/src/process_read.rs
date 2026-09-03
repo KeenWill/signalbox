@@ -4379,6 +4379,7 @@ fn decode_logical_delegation_terminal(
                 provenance,
                 DispatchedDelegationProvenance::ParentTurnCommand { .. }
                     | DispatchedDelegationProvenance::ParentGoalCommand { .. }
+                    | DispatchedDelegationProvenance::ParentLifecycleCommand { .. }
             ) {
                 return Err(ProcessReadCorruption::Inconsistent(
                     "logical delegation terminal shape",

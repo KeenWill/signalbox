@@ -1867,6 +1867,14 @@ pub fn render_delegation_outcome(outcome: &DelegationOutcome) -> String {
             generation.get(),
             command.into_uuid()
         ),
+        signalbox_domain::DelegationProvenanceReconstitutionInput::ParentLifecycleCommand {
+            session,
+            command,
+        } => format!(
+            r#"{{"type":"parent_lifecycle_command","parent_session_id":"{}","command_id":"{}","descendant_scope":"parent_and_descendants"}}"#,
+            session.into_uuid(),
+            command.into_uuid()
+        ),
     };
     format!(r#"{{"outcome":"{outcome_kind}","reason":"{reason}","provenance":{provenance}}}"#)
 }

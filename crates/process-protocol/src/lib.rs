@@ -6750,6 +6750,15 @@ pub enum DelegationProvenance {
         /// Explicit kill-time descendant choice.
         descendant_scope: DescendantTerminationScope,
     },
+    /// Exact parent lifecycle command.
+    ParentLifecycleCommand {
+        /// Parent session.
+        parent_session_id: CanonicalUuid,
+        /// Durable lifecycle stop command.
+        command_id: CanonicalUuid,
+        /// Explicit kill-time descendant choice.
+        descendant_scope: DescendantTerminationScope,
+    },
 }
 
 /// Exact decision recorded for one explicit tool approval.
@@ -7190,6 +7199,9 @@ fn direct_child_result_shape_is_valid(
         }
         | DelegationProvenance::ParentGoalCommand {
             parent_session_id, ..
+        }
+        | DelegationProvenance::ParentLifecycleCommand {
+            parent_session_id, ..
         } => {
             *parent_session_id != child_session_id
                 && child_result_shape_is_valid(
@@ -7227,6 +7239,14 @@ fn parent_delegation_provenance_is_cascade(
                 && goal_generation.value() > 0
                 && parent_delegation_provenance_has_cascade(provenance)
         }
+        DelegationProvenance::ParentLifecycleCommand {
+            parent_session_id: provenance_parent,
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            ..
+        } => {
+            *provenance_parent == parent_session_id
+                && parent_delegation_provenance_has_cascade(provenance)
+        }
         _ => false,
     }
 }
@@ -7238,6 +7258,9 @@ fn delegation_provenance_parent(provenance: &DelegationProvenance) -> Option<Can
             parent_session_id, ..
         }
         | DelegationProvenance::ParentGoalCommand {
+            parent_session_id, ..
+        }
+        | DelegationProvenance::ParentLifecycleCommand {
             parent_session_id, ..
         } => Some(*parent_session_id),
         _ => None,
@@ -7255,6 +7278,10 @@ fn parent_delegation_provenance_has_cascade(provenance: &DelegationProvenance) -
             goal_generation,
             ..
         } => goal_generation.value() > 0,
+        DelegationProvenance::ParentLifecycleCommand {
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            ..
+        } => true,
         _ => false,
     }
 }

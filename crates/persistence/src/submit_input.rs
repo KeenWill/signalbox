@@ -6458,6 +6458,14 @@ fn decode_delegation_provenance(
                 })?,
             })
         }
+        ("parent_lifecycle_command", None, None, Some(command)) => Ok(
+            DelegationProvenanceReconstitutionInput::ParentLifecycleCommand {
+                session: session_id_from_uuid(session),
+                command: durable_command_id_from_uuid(command).map_err(|_| {
+                    SubmitInputCorruption::Inconsistent("delegation provenance command")
+                })?,
+            },
+        ),
         _ => Err(SubmitInputCorruption::Inconsistent(
             "delegation result provenance",
         )),

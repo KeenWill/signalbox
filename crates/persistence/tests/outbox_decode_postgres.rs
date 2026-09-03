@@ -357,7 +357,13 @@ fn every_delegation_provenance() -> Vec<DispatchedDelegationProvenance> {
                     command: command(ARBITRARY_COMMAND_SEED),
                 })
             }
-            DispatchedDelegationProvenance::ParentGoalCommand { .. } => None,
+            DispatchedDelegationProvenance::ParentGoalCommand { .. } => {
+                Some(DispatchedDelegationProvenance::ParentLifecycleCommand {
+                    session: session(UNDECODABLE_SESSION),
+                    command: command(ARBITRARY_COMMAND_SEED),
+                })
+            }
+            DispatchedDelegationProvenance::ParentLifecycleCommand { .. } => None,
         };
         provenances.push(current);
     }

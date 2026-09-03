@@ -3580,6 +3580,14 @@ fn delegation_provenance(provenance: &DelegationProvenance) -> String {
             goal_generation.value(),
             descendant_scope_label(*descendant_scope)
         ),
+        DelegationProvenance::ParentLifecycleCommand {
+            parent_session_id,
+            command_id,
+            descendant_scope,
+        } => format!(
+            "parent_lifecycle_command:{parent_session_id}:{command_id}:{}",
+            descendant_scope_label(*descendant_scope)
+        ),
     }
 }
 

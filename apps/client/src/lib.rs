@@ -2311,6 +2311,9 @@ fn delegation_provenance_matches(
         }
         | DelegationProvenance::ParentGoalCommand {
             parent_session_id, ..
+        }
+        | DelegationProvenance::ParentLifecycleCommand {
+            parent_session_id, ..
         } => parent_session_id == expectation.parent_session_id,
     }
 }

@@ -4196,6 +4196,14 @@ pub(crate) async fn load_optional_foreground_delegation_outcome(
                 })?,
             }
         }
+        ("parent_lifecycle_command", None, None, Some(command)) => {
+            DelegationProvenanceReconstitutionInput::ParentLifecycleCommand {
+                session: provenance_session,
+                command: durable_command_id_from_uuid(command).map_err(|_| {
+                    ToolLoopCorruption::Inconsistent("delegation provenance command")
+                })?,
+            }
+        }
         _ => {
             return Err(ToolLoopCorruption::Inconsistent("delegation result provenance").into());
         }

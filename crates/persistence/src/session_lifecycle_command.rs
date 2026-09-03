@@ -176,6 +176,21 @@ impl SessionLifecycleCommandRepository {
             .execute(&mut *transaction)
             .await?;
         insert_command_record(&mut transaction, &command, result).await?;
+        if matches!(
+            (command.operation(), result),
+            (
+                SessionLifecycleOperation::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                    ..
+                },
+                SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::Closed { .. })
+            )
+        ) {
+            sqlx::query("SELECT materialize_session_delegation_termination_cascade($1, 'stopped')")
+                .bind(durable_command_id_to_uuid(command.command_id()))
+                .execute(&mut *transaction)
+                .await?;
+        }
         transaction.commit().await.map_err(|error| {
             if crate::commit_failure_is_ambiguous(&error) {
                 SessionLifecycleCommandRepositoryError::CommitAmbiguous(error)

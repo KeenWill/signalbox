@@ -3674,6 +3674,13 @@ fn wire_domain_delegation_provenance(
                 descendant_scope,
             })
         }
+        ParentTerminationCommandSource::Lifecycle => {
+            Ok(WireDelegationProvenance::ParentLifecycleCommand {
+                parent_session_id: wire_uuid(authority.parent().into_uuid()),
+                command_id: wire_uuid(authority.command().into_uuid()),
+                descendant_scope,
+            })
+        }
     }
 }
 
@@ -16961,6 +16968,13 @@ fn wire_delegation_provenance(
             command_id: wire_uuid(command.into_uuid()),
             descendant_scope: WireDescendantTerminationScope::ParentAndDescendants,
         },
+        DispatchedDelegationProvenance::ParentLifecycleCommand { session, command } => {
+            WireDelegationProvenance::ParentLifecycleCommand {
+                parent_session_id: wire_uuid(session.into_uuid()),
+                command_id: wire_uuid(command.into_uuid()),
+                descendant_scope: WireDescendantTerminationScope::ParentAndDescendants,
+            }
+        }
     }
 }
 

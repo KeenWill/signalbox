@@ -527,6 +527,158 @@ async fn a_stop_claims_records_its_receipt_and_replays() -> Result<(), Box<dyn E
     Ok(())
 }
 
+/// A descendant-scoped lifecycle stop with no live turn materializes the same
+/// complete cascade as the deferred interrupt path.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_immediate_lifecycle_stop_materializes_its_descendant_cascade()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x12fe_0000;
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 1));
+    let child = SessionId::from_uuid(Uuid::from_u128(seed + 2));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(
+            seed + 3,
+            seed + 2,
+            ModelSelectionRequest::Direct(selection),
+        ))
+        .await?;
+    let (parent, spawning_request) = attach_delegation_relationship_fixture(
+        &pool,
+        child,
+        TurnId::from_uuid(Uuid::from_u128(seed + 4)),
+        selection,
+        seed + 0x100,
+    )
+    .await?;
+    let stop = SessionLifecycleCommand::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(seed + 5)),
+        parent,
+        SessionLifecycleOperation::Stop {
+            sticky: StopStickiness::Sticky,
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+        },
+    );
+    let command = stop.command_id();
+
+    let applied = recorded(&pool, stop).await?;
+    let cascade: (String, String, i64) = sqlx::query_as(
+        "SELECT root_source_kind, termination_kind, disposition_count::bigint
+           FROM session_delegation_termination_cascade
+          WHERE root_command_id = $1",
+    )
+    .bind(command.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let disposition: (String, String, String, Uuid, i64) = sqlx::query_as(
+        "SELECT outcome_kind, reason_kind, provenance_kind, provenance_command_id,
+                event_ordinal::bigint
+           FROM session_delegation_event
+          WHERE spawning_tool_request_id = $1 AND provenance_command_id = $2",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(command.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let dispatched_ordinal = u64::try_from(disposition.4)?;
+    let mut dispatched = Vec::new();
+    drain_outbox(&pool, |event| dispatched.push(event.clone())).await?;
+
+    assert_eq!(
+        applied,
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::Closed {
+            outcome: SessionTerminalOutcome::Stopped {
+                sticky: StopStickiness::Sticky,
+            },
+        })
+    );
+    assert_eq!(
+        cascade,
+        (
+            String::from("lifecycle_command"),
+            String::from("stopped"),
+            1
+        )
+    );
+    assert_eq!(
+        (
+            disposition.0.as_str(),
+            disposition.1.as_str(),
+            disposition.2.as_str(),
+            disposition.3,
+        ),
+        (
+            "continue_running",
+            "parent_stopped_parent_and_descendants",
+            "parent_lifecycle_command",
+            command.into_uuid(),
+        )
+    );
+    assert!(dispatched.iter().any(|event| event.kind()
+        == &DispatchedOutboxEventKind::DelegationUpdate(
+            DispatchedDelegationUpdate::ChildLifecycleDisposition {
+                spawning_request,
+                child,
+                event_ordinal: dispatched_ordinal,
+                outcome: DispatchedDelegationOutcome::ContinueRunning,
+                reason: DispatchedDelegationReason::ParentStoppedWithDescendants,
+                provenance: DispatchedDelegationProvenance::ParentLifecycleCommand {
+                    session: parent,
+                    command,
+                },
+            }
+        )));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The typed command record admits only the effect its operation can produce.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_lifecycle_command_effect_must_match_its_operation() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(32);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(32))
+        .await?;
+    let command = lifecycle_command(32, 1, session, SessionLifecycleOperation::Release);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'session_lifecycle', 1, transaction_timestamp(), 'operator')",
+    )
+    .bind(command.command_id().into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+
+    let error = sqlx::query(
+        "INSERT INTO session_lifecycle_command
+            (command_id, command_kind, storage_version, session_id,
+             operation_kind, result_kind, applied_effect_kind)
+         VALUES ($1, 'session_lifecycle', 1, $2, 'release', 'applied', 'closed')",
+    )
+    .bind(command.command_id().into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *transaction)
+    .await
+    .expect_err("release cannot carry a closed effect");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("session_lifecycle_command_result_shape")
+    );
+
+    transaction.rollback().await?;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// §7: a refused command still claims its identity and records the closed
 /// rejection with its receipt; a retry replays the rejection.
 #[tokio::test(flavor = "multi_thread")]

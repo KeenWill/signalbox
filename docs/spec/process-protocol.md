@@ -2216,6 +2216,8 @@ The two outcome events use one closed nested union. `outcome` is `returned`,
 `parent_turn_command { parent_session_id, parent_turn_id, command_id, descendant_scope }`,
 or
 `parent_goal_command { parent_session_id, goal_generation, command_id, descendant_scope }`,
+or
+`parent_lifecycle_command { parent_session_id, command_id, descendant_scope }`,
 where `goal_generation` is a positive canonical decimal string and
 `descendant_scope` uses the request spelling above. Goal-stop provenance never
 carries or fabricates a parent turn. The admitted correlations are exhaustive:
@@ -2233,8 +2235,8 @@ carries or fabricates a parent turn. The admitted correlations are exhaustive:
 `child_result` admits every row except `already_terminal` and
 `continue_running`; `child_lifecycle_disposition` admits only parent-command
 `stopped`, `cancelled`, `already_terminal`, and `continue_running` rows. A
-parent-command outcome admits either `parent_turn_command` or
-`parent_goal_command` provenance and requires `parent_and_descendants` for
+parent-command outcome admits `parent_turn_command`, `parent_goal_command`, or
+`parent_lifecycle_command` provenance and requires `parent_and_descendants` for
 `stopped`, parent-caused `cancelled`, and `continue_running`. An
 `already_terminal` row additionally requires the relationship's pre-existing
 immutable child result and never creates or replaces it; traversal continues

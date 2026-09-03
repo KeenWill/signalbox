@@ -74,6 +74,8 @@ pub enum ParentTerminationCommandSource {
     Turn { turn: TurnId },
     /// A goal-stop command applied to one exact goal generation.
     Goal { generation: GoalGeneration },
+    /// A lifecycle stop applied directly to a session with no live turn.
+    Lifecycle,
 }
 
 /// Exact applied parent termination authority.
@@ -102,14 +104,16 @@ impl ParentTerminationAuthority {
     pub const fn turn(self) -> Option<TurnId> {
         match self.source {
             ParentTerminationCommandSource::Turn { turn } => Some(turn),
-            ParentTerminationCommandSource::Goal { .. } => None,
+            ParentTerminationCommandSource::Goal { .. }
+            | ParentTerminationCommandSource::Lifecycle => None,
         }
     }
 
     pub const fn goal_generation(self) -> Option<GoalGeneration> {
         match self.source {
             ParentTerminationCommandSource::Goal { generation } => Some(generation),
-            ParentTerminationCommandSource::Turn { .. } => None,
+            ParentTerminationCommandSource::Turn { .. }
+            | ParentTerminationCommandSource::Lifecycle => None,
         }
     }
 
@@ -902,6 +906,10 @@ pub enum DelegationProvenanceReconstitutionInput {
         generation: GoalGeneration,
         command: DurableCommandId,
     },
+    ParentLifecycleCommand {
+        session: SessionId,
+        command: DurableCommandId,
+    },
 }
 
 impl DelegationOutcome {
@@ -1088,6 +1096,17 @@ impl DelegationOutcome {
                 ParentTerminationCommandSource::Goal { generation },
                 command,
             ),
+            DelegationProvenanceReconstitutionInput::ParentLifecycleCommand {
+                session,
+                command,
+            } => Self::reconstitute_parent_outcome(
+                kind,
+                content,
+                reason,
+                session,
+                ParentTerminationCommandSource::Lifecycle,
+                command,
+            ),
         }
     }
 
@@ -1249,6 +1268,12 @@ impl DelegationOutcome {
                     DelegationProvenanceReconstitutionInput::ParentGoalCommand {
                         session: authority.parent(),
                         generation,
+                        command: authority.command(),
+                    }
+                }
+                ParentTerminationCommandSource::Lifecycle => {
+                    DelegationProvenanceReconstitutionInput::ParentLifecycleCommand {
+                        session: authority.parent(),
                         command: authority.command(),
                     }
                 }

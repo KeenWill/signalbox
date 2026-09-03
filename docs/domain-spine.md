@@ -1312,6 +1312,7 @@ pub enum ParentTerminationKind { Stopped, Cancelled }
 pub enum ParentTerminationCommandSource {
     Turn { turn: TurnId },
     Goal { generation: GoalGeneration },
+    Lifecycle,
 }
 pub struct ParentTerminationAuthority { /* private applied command authority */ }
 // sealed: exact applied parent-termination producer deferred to scheduling
@@ -1406,6 +1407,10 @@ pub enum DelegationProvenanceReconstitutionInput {
     ParentGoalCommand {
         session: SessionId,
         generation: GoalGeneration,
+        command: DurableCommandId,
+    },
+    ParentLifecycleCommand {
+        session: SessionId,
         command: DurableCommandId,
     },
 }

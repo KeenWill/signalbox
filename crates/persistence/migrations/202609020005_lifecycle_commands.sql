@@ -420,6 +420,17 @@ CREATE TABLE session_lifecycle_command (
         AND ((applied_effect_kind IS NULL) OR (applied_effect_kind = ANY (ARRAY[
             'closed'::text, 'closure_pending'::text, 'resumed'::text, 'ownership_changed'::text
         ])))
+        AND ((applied_effect_kind IS NULL)
+             OR ((operation_kind = ANY (ARRAY[
+                    'stop'::text, 'supersede'::text,
+                    'abandon'::text, 'close_failed'::text
+                 ])) AND (applied_effect_kind = ANY (ARRAY[
+                    'closed'::text, 'closure_pending'::text
+                 ])))
+             OR ((operation_kind = 'resume'::text)
+                 AND (applied_effect_kind = 'resumed'::text))
+             OR ((operation_kind = ANY (ARRAY['adopt'::text, 'release'::text]))
+                 AND (applied_effect_kind = 'ownership_changed'::text)))
         AND ((applied_effect_kind IS NOT DISTINCT FROM 'closure_pending'::text)
              = (live_turn_id IS NOT NULL))
     ),
@@ -487,6 +498,11 @@ CREATE INDEX session_lifecycle_command_by_session
 CREATE TRIGGER session_lifecycle_command_is_append_only
     BEFORE DELETE OR UPDATE ON session_lifecycle_command
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE CONSTRAINT TRIGGER applied_lifecycle_command_requires_delegation_cascade
+    AFTER INSERT OR UPDATE ON session_lifecycle_command
+    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+    EXECUTE FUNCTION require_applied_lifecycle_command_delegation_cascade();
 
 -- A rejected command may name a session that does not exist, so the session
 -- reference is checked by the applying transaction rather than a key.
