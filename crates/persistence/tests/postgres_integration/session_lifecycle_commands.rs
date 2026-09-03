@@ -943,17 +943,20 @@ async fn ownership_commands_on_a_closed_session_are_recorded_rejections()
     let not_admitted = SessionLifecycleCommandResult::Rejected(
         SessionLifecycleCommandRejection::TransitionNotAdmitted,
     );
+    let recorded_rejection = (
+        String::from("rejected"),
+        Some(String::from("transition_not_admitted")),
+    );
     assert_eq!(recorded(&pool, release.clone()).await?, not_admitted);
     assert_eq!(recorded(&pool, adopt.clone()).await?, not_admitted);
-    for command in [release, adopt] {
-        assert_eq!(
-            settlement(&pool, command.command_id()).await?,
-            (
-                String::from("rejected"),
-                Some(String::from("transition_not_admitted"))
-            )
-        );
-    }
+    assert_eq!(
+        settlement(&pool, release.command_id()).await?,
+        recorded_rejection
+    );
+    assert_eq!(
+        settlement(&pool, adopt.command_id()).await?,
+        recorded_rejection
+    );
 
     pool.close().await;
     drop(container);

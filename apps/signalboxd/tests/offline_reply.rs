@@ -858,6 +858,26 @@ async fn debug_driver_rejects_invalid_reply_before_durable_writes() -> Result<()
     Ok(())
 }
 
+/// Waits for the armed resumption to append its `resumed` event.
+async fn resumed_goal(pool: &PgPool, session: SessionId) -> Result<Goal, Box<dyn Error>> {
+    let repository = GoalRepository::new(pool.clone());
+    let goal = timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(goal) = repository.load_goal(session).await.ok().flatten()
+                && matches!(
+                    goal.events().last().map(GoalEvent::kind),
+                    Some(GoalEventKind::Resumed { .. })
+                )
+            {
+                return goal;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    Ok(goal)
+}
+
 /// §6: adopting a session whose goal is blocked arms the resumption the
 /// unmonitored block was not owed.
 #[tokio::test(flavor = "multi_thread")]
@@ -898,21 +918,8 @@ async fn adopting_a_blocked_goal_arms_its_resumption() -> Result<(), Box<dyn Err
     )
     .arm_blocked_goal_resumption(session);
 
-    let goal_repository = GoalRepository::new(pool.clone());
-    let resumed = timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some(goal) = goal_repository.load_goal(session).await.ok().flatten()
-                && matches!(
-                    goal.events().last().map(GoalEvent::kind),
-                    Some(GoalEventKind::Resumed { .. })
-                )
-            {
-                return goal;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await?;
+    let resumed = resumed_goal(&pool, session).await?;
+
     assert_eq!(*resumed.current().state(), GoalState::Pursuing);
 
     pool.close().await;

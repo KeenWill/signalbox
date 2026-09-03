@@ -381,8 +381,8 @@ CREATE TABLE session_lifecycle_command (
     ),
     -- Each operation carries exactly its own members.
     CONSTRAINT session_lifecycle_command_operation_shape CHECK (
-        ((operation_kind = 'stop'::text)
-            = ((stop_sticky IS NOT NULL) AND (descendant_scope IS NOT NULL)))
+        ((operation_kind = 'stop'::text) = (stop_sticky IS NOT NULL))
+        AND ((operation_kind = 'stop'::text) = (descendant_scope IS NOT NULL))
         AND ((operation_kind = 'supersede'::text) = (successor_session_id IS NOT NULL))
         AND ((failure_cause_kind IS NULL) OR (operation_kind = 'close_failed'::text))
         AND ((finish_condition_kind IS NULL) OR (operation_kind = 'adopt'::text))
@@ -407,7 +407,8 @@ CREATE TABLE session_lifecycle_command (
     CONSTRAINT session_lifecycle_command_finish_condition_shape CHECK (
         ((finish_condition_kind IS NULL)
             OR (finish_condition_kind = ANY (ARRAY['external_gate'::text, 'declared'::text])))
-        AND ((finish_condition_kind = 'declared'::text) = (finish_condition IS NOT NULL))
+        AND ((finish_condition_kind IS NOT DISTINCT FROM 'declared'::text)
+             = (finish_condition IS NOT NULL))
         AND ((finish_condition IS NULL)
              OR ((octet_length(finish_condition) >= 1)
                  AND (octet_length(finish_condition) <= 1048576)))
@@ -419,7 +420,8 @@ CREATE TABLE session_lifecycle_command (
         AND ((applied_effect_kind IS NULL) OR (applied_effect_kind = ANY (ARRAY[
             'closed'::text, 'closure_pending'::text, 'resumed'::text, 'ownership_changed'::text
         ])))
-        AND ((applied_effect_kind = 'closure_pending'::text) = (live_turn_id IS NOT NULL))
+        AND ((applied_effect_kind IS NOT DISTINCT FROM 'closure_pending'::text)
+             = (live_turn_id IS NOT NULL))
     ),
     CONSTRAINT session_lifecycle_command_rejection_closed CHECK (
         (rejection_kind IS NULL)
@@ -459,7 +461,9 @@ CREATE TABLE session_lifecycle_command (
                 'successor_not_found'::text, 'successor_is_self'::text
             ])))
         OR ((operation_kind = 'resume'::text)
-            AND (rejection_kind = 'goal_resume_required'::text))
+            AND (rejection_kind = ANY (ARRAY[
+                'goal_resume_required'::text, 'pending_terminal_conflict'::text
+            ])))
         OR ((operation_kind = 'adopt'::text) AND (rejection_kind = ANY (ARRAY[
                 'ownership_unchanged'::text,
                 'finish_condition_already_declared'::text
@@ -543,7 +547,8 @@ ALTER TABLE create_session_command
     ADD CONSTRAINT create_session_command_finish_condition_shape CHECK (
         ((finish_condition_kind IS NULL)
             OR (finish_condition_kind = ANY (ARRAY['external_gate'::text, 'declared'::text])))
-        AND ((finish_condition_kind = 'declared'::text) = (finish_condition IS NOT NULL))
+        AND ((finish_condition_kind IS NOT DISTINCT FROM 'declared'::text)
+             = (finish_condition IS NOT NULL))
         AND ((finish_condition IS NULL)
              OR ((octet_length(finish_condition) >= 1)
                  AND (octet_length(finish_condition) <= 1048576)))
@@ -564,7 +569,8 @@ ALTER TABLE session_lifecycle
     ADD CONSTRAINT session_lifecycle_finish_condition_shape CHECK (
         ((finish_condition_kind IS NULL)
             OR (finish_condition_kind = ANY (ARRAY['external_gate'::text, 'declared'::text])))
-        AND ((finish_condition_kind = 'declared'::text) = (finish_condition IS NOT NULL))
+        AND ((finish_condition_kind IS NOT DISTINCT FROM 'declared'::text)
+             = (finish_condition IS NOT NULL))
         AND ((finish_condition IS NULL)
              OR ((octet_length(finish_condition) >= 1)
                  AND (octet_length(finish_condition) <= 1048576)))

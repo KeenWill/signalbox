@@ -611,25 +611,32 @@ impl PostgresGoalPassDisposition {
             let Ok(need) = AutomaticResumption::Unmonitored.need() else {
                 return;
             };
-            match adapter
-                .repository
-                .pending_owned_execution_failure_with_need(session, &need)
-                .await
-            {
-                Ok(Some(blocked)) => {
-                    adapter
-                        .resume_after_execution_failure(session, blocked)
-                        .await;
-                }
-                Ok(None) => {}
-                Err(error) => tracing::error!(
-                    session = %session.into_uuid(),
-                    cause_code = "goal_adopt_resume_reread_failed",
-                    cause = %error,
-                    "an adopt could not read the goal it should resume"
-                ),
-            }
+            adapter.resume_owned_execution_failure(session, &need).await;
         }));
+    }
+
+    /// Resumes the execution-failure block the session still holds under
+    /// exactly this need.
+    ///
+    /// The re-read takes the session lock the block append and every ownership
+    /// flip also take, so a release that commits after the need was chosen
+    /// leaves the block to its operator instead of to a resume the session no
+    /// longer owes.
+    async fn resume_owned_execution_failure(&self, session: SessionId, need: &GoalNeed) {
+        match self
+            .repository
+            .pending_owned_execution_failure_with_need(session, need)
+            .await
+        {
+            Ok(Some(blocked)) => self.resume_after_execution_failure(session, blocked).await,
+            Ok(None) => {}
+            Err(error) => tracing::error!(
+                session = %session.into_uuid(),
+                cause_code = "goal_blocked_resume_reread_failed",
+                cause = %error,
+                "a blocked goal could not be read under the session lock"
+            ),
+        }
     }
 
     /// Reads the lineage a pending execution-failure block would extend.
@@ -744,12 +751,13 @@ impl PostgresGoalPassDisposition {
                 return;
             }
         };
+        let Ok(need) = resumption.need() else {
+            return;
+        };
         let adapter = self.clone();
         drop(tokio::spawn(async move {
             sleep_for_policy(delay).await;
-            adapter
-                .resume_after_execution_failure(session, blocked)
-                .await;
+            adapter.resume_owned_execution_failure(session, &need).await;
         }));
     }
 
