@@ -3684,10 +3684,9 @@ fn terminal_disposition_command(disposition: &TurnDisposition) -> Option<Durable
 
 fn terminal_disposition_matches_turn(disposition: &TurnDisposition, turn: TurnId) -> bool {
     match disposition {
-        TurnDisposition::Completed
-        | TurnDisposition::Refused
-        | TurnDisposition::Failed
-        | TurnDisposition::Retired => true,
+        TurnDisposition::Completed | TurnDisposition::Refused | TurnDisposition::Failed => true,
+        // A retired turn never activated, so it was never a steering source.
+        TurnDisposition::Retired => false,
         TurnDisposition::Cancelled { cause } => cause.predecessor() == turn,
         TurnDisposition::ReconciliationRequired { marker } => match marker.reason() {
             ReconciliationReason::UserChoseReconciliation { decision } => decision.turn() == turn,

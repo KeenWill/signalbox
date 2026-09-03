@@ -6041,16 +6041,18 @@ pub enum SessionRecoveryOperation {
 }
 
 pub enum SessionParkCause {
-    ProgressBudgetExhausted,
     RetryBudgetExhausted,
     StructuralFailure,
     UnknownFailure,
     ActiveStallDeadlineExpired,
     WaitingDeadlineExpired,
     RecoveringDeadlineExpired,
-    BlockedDeadlineExpired,
     OperatorHold,
     ModulePark,
+}
+
+impl SessionParkCause {
+    pub const fn admits_standing(self, standing: Option<SessionFailureCause>) -> bool;
 }
 
 pub enum SessionParkResponder {
@@ -6076,7 +6078,6 @@ pub enum SessionStructuralCause {
 pub enum SessionRetirementCause {
     DispatchDeadlineExpired,
     StartGateDeadlineExpired,
-    FirstInputDeadlineExpired,
     StrandedQueuedTurn,
 }
 
@@ -6114,7 +6115,6 @@ impl SessionTerminalOutcome {
     pub const fn closure_outcome(&self) -> Option<SessionClosureOutcome>;
     pub const fn forbids_further_escalation(&self) -> bool;
     pub const fn releases_resources(&self) -> bool;
-    pub const fn records_cleanup_obligations(&self) -> bool;
 }
 
 pub enum SessionLifecycleState {
@@ -6141,28 +6141,18 @@ impl SessionLifecycleState {
 pub struct SessionLifecycleTransitionError { /* private */ }
 impl SessionLifecycleTransitionError {
     // accessors: from(), to()
+    // + Display + Error
 }
 
 pub enum SessionDeadlineExpiry {
     Retire,
     Park,
-    Renotify,
 }
 
 pub enum SessionDeadlineKind {
-    Dispatch,
-    StartGate,
-    FirstInput,
+    Admission,
     ActiveStall,
-    WaitingApproval,
-    WaitingExternal,
-    WaitingChild,
-    WaitingProviderRetry,
-    WaitingPipeline,
-    WaitingScheduler,
-    Recovering,
-    Blocked,
-    ParkedRenotify,
+    Waiting,
 }
 impl SessionDeadlineKind {
     pub const fn on_expiry(&self) -> SessionDeadlineExpiry;
@@ -6517,6 +6507,17 @@ impl AttentionCursor {
     pub const fn value(self) -> u64;
 }
 
+pub enum AttentionLifecycleState {
+    Created,
+    Dispatched,
+    Active,
+    Waiting,
+    Recovering,
+    Blocked,
+    Parked,
+    Terminal,
+}
+
 pub enum AttentionState {
     Active,
     Queued,
@@ -6526,6 +6527,7 @@ pub enum AttentionState {
     AwaitingToolRecovery,
     AwaitingReconciliation,
     RunnerLost,
+    Parked,
     Idle,
 }
 
@@ -6615,6 +6617,7 @@ pub struct AttentionSummary {
     pub active_turn_count: u64,
     pub queued_turn_count: u64,
     pub state: AttentionState,
+    pub lifecycle_state: AttentionLifecycleState,
     pub action: Option<AttentionAction>,
     pub goal_block: Option<AttentionGoalBlock>,
     pub judge: AttentionJudgeFacts,
@@ -10803,6 +10806,7 @@ pub trait EligibilityWorkSource {
 
     fn next(&mut self) -> impl Future<Output = Result<SessionId, Self::Error>> + Send;
     fn take_returned_dispatch_start(&mut self, _session: SessionId) -> bool;
+    fn take_returned_unmonitored(&mut self, _session: SessionId) -> bool;
     fn take_pending_dispatch_start(&mut self) -> Option<SessionId>;
     fn next_pending_dispatch_start(
         &mut self,
@@ -13590,7 +13594,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | **signalbox-domain total**                         | **893 (+12 free fn)**            |
 | application: repo_watch_operations                 | 33 (+2 free fn) (incl. 1 trait)  |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
-| application: attention                             | 16 (+6 free fn) (incl. 1 trait)  |
+| application: attention                             | 17 (+6 free fn) (incl. 1 trait)  |
 | application: blob_derivation                       | 9 (incl. 3 traits)               |
 | application: commissioned_dispatch                 | 6 (incl. 1 trait)                |
 | application: conversation_import                   | 12 (incl. 4 traits)              |
@@ -13623,4 +13627,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop_ports                       | 10 (incl. 3 traits)              |
 | application: turn_liveness                         | 14                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **494 (+34 free fn)**            |
+| **signalbox-application total**                    | **495 (+34 free fn)**            |

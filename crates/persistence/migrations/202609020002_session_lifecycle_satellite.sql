@@ -84,9 +84,8 @@ ALTER TABLE session
 -- shape constraint forbids the detail of every other state, so a stale
 -- `waiting_kind` cannot survive a move to `active`.
 --
--- `waiting`'s deadline and `recovering`'s bound are not repeated here: both are
--- the armed `session_deadline` row, which is where §1 puts the invariant. A
--- second copy could only disagree with it.
+-- The armed deadline is not repeated here: it is the `session_deadline` row,
+-- and a second copy could only disagree with it.
 --
 
 CREATE TABLE session_lifecycle (
@@ -135,6 +134,15 @@ CREATE TABLE session_lifecycle (
     pending_terminal_cause_kind text,
     pending_terminal_stop_sticky boolean,
     pending_terminal_superseded_by uuid,
+
+    -- The actor that made the decision, kept with it. A settlement runs later,
+    -- possibly in another worker or after a restart, and the §6 provenance the
+    -- terminal row records is the deciding actor's -- not whichever caller
+    -- happened to observe the turn reach its boundary.
+    pending_terminal_actor_kind text,
+    pending_terminal_actor_module text,
+    pending_terminal_actor_turn_id uuid,
+    pending_terminal_actor_tool_request_id uuid,
 
     -- §15 dispatch payload measurements. T11 records them on every dispatch
     -- path; the columns land here because they are per-session mutable values.
@@ -269,14 +277,12 @@ CREATE TABLE session_lifecycle (
     CONSTRAINT session_lifecycle_parked_cause_closed CHECK (
         (parked_cause IS NULL)
         OR (parked_cause = ANY (ARRAY[
-            'progress_budget_exhausted'::text,
             'retry_budget_exhausted'::text,
             'structural_failure'::text,
             'unknown_failure'::text,
             'active_stall_deadline_expired'::text,
             'waiting_deadline_expired'::text,
             'recovering_deadline_expired'::text,
-            'blocked_deadline_expired'::text,
             'operator_hold'::text,
             'module_park'::text
         ]))
@@ -298,6 +304,33 @@ CREATE TABLE session_lifecycle (
                  AND (parked_since IS NULL)
                  AND (parked_standing_cause_kind IS NULL)))
         AND ((parked_standing_cause_kind IS NULL) OR (parked_cause IS NOT NULL))
+        -- The standing evidence is the evidence the cause names. A closure
+        -- reads it to classify the outcome, so a park holding evidence its own
+        -- cause contradicts -- or an exhaustion holding none at all -- closes
+        -- under a classification the park never supported.
+        AND ((parked_cause IS NULL)
+             OR ((parked_cause = 'retry_budget_exhausted'::text)
+                 AND (parked_standing_cause_kind IS NOT NULL)
+                 AND (parked_standing_cause_kind = ANY (ARRAY[
+                    'provider_transient'::text,
+                    'provider_quota_exhausted'::text,
+                    'provider_overloaded'::text,
+                    'infrastructure_failure'::text,
+                    'retry_budget_exhausted'::text
+                 ])))
+             OR ((parked_cause = 'structural_failure'::text)
+                 AND (parked_standing_cause_kind IS NOT NULL)
+                 AND (parked_standing_cause_kind = ANY (ARRAY[
+                    'context_compaction_wall'::text,
+                    'context_headroom_exhausted'::text,
+                    'broken_toolchain'::text,
+                    'moderation_block'::text
+                 ])))
+             OR ((parked_cause <> ALL (ARRAY[
+                    'retry_budget_exhausted'::text,
+                    'structural_failure'::text
+                 ]))
+                 AND (parked_standing_cause_kind IS NULL)))
     ),
 
     CONSTRAINT session_lifecycle_terminal_outcome_closed CHECK (
@@ -329,7 +362,6 @@ CREATE TABLE session_lifecycle (
             'moderation_block'::text,
             'dispatch_deadline_expired'::text,
             'start_gate_deadline_expired'::text,
-            'first_input_deadline_expired'::text,
             'stranded_queued_turn'::text
         ]))
     ),
@@ -380,6 +412,7 @@ CREATE TABLE session_lifecycle (
                     'abandoned'::text
                 ]) AND terminal_cause_kind IS NULL)
             OR (terminal_outcome_kind = 'failed_retryable'::text
+                AND terminal_cause_kind IS NOT NULL
                 AND terminal_cause_kind = ANY (ARRAY[
                     'provider_transient'::text,
                     'provider_quota_exhausted'::text,
@@ -388,6 +421,7 @@ CREATE TABLE session_lifecycle (
                     'retry_budget_exhausted'::text
                 ]))
             OR (terminal_outcome_kind = 'failed_structural'::text
+                AND terminal_cause_kind IS NOT NULL
                 AND terminal_cause_kind = ANY (ARRAY[
                     'context_compaction_wall'::text,
                     'context_headroom_exhausted'::text,
@@ -395,10 +429,10 @@ CREATE TABLE session_lifecycle (
                     'moderation_block'::text
                 ]))
             OR (terminal_outcome_kind = 'retired'::text
+                AND terminal_cause_kind IS NOT NULL
                 AND terminal_cause_kind = ANY (ARRAY[
                     'dispatch_deadline_expired'::text,
                     'start_gate_deadline_expired'::text,
-                    'first_input_deadline_expired'::text,
                     'stranded_queued_turn'::text
                 ]))
         )
@@ -412,7 +446,32 @@ CREATE TABLE session_lifecycle (
         AND ((pending_terminal_outcome_kind IS NOT NULL)
              OR ((pending_terminal_cause_kind IS NULL)
                  AND (pending_terminal_stop_sticky IS NULL)
-                 AND (pending_terminal_superseded_by IS NULL)))
+                 AND (pending_terminal_superseded_by IS NULL)
+                 AND (pending_terminal_actor_kind IS NULL)))
+        -- A committed handoff always names its actor, and the actor's shape is
+        -- the state actor's: one module name, or one acting identity, never
+        -- both and never a bare classification that owes one.
+        AND ((pending_terminal_outcome_kind IS NULL)
+             = (pending_terminal_actor_kind IS NULL))
+        AND ((pending_terminal_actor_kind IS NULL)
+             OR (pending_terminal_actor_kind = ANY (ARRAY[
+                    'core'::text,
+                    'operator'::text,
+                    'module'::text,
+                    'watchdog'::text
+                ])))
+        AND ((pending_terminal_actor_kind IS NOT DISTINCT FROM 'module'::text)
+             = (pending_terminal_actor_module IS NOT NULL))
+        AND ((pending_terminal_actor_module IS NULL)
+             OR (pending_terminal_actor_module = ANY (ARRAY[
+                    'repo_watch'::text,
+                    'commissioned_dispatch'::text
+                ])))
+        AND ((pending_terminal_actor_turn_id IS NULL)
+             OR (pending_terminal_actor_tool_request_id IS NULL))
+        AND ((pending_terminal_actor_kind IS NOT DISTINCT FROM 'core'::text)
+             OR ((pending_terminal_actor_turn_id IS NULL)
+                 AND (pending_terminal_actor_tool_request_id IS NULL)))
         AND ((pending_terminal_outcome_kind IS NULL)
              OR (pending_terminal_outcome_kind = ANY (ARRAY[
                     'achieved_verified'::text,
@@ -446,6 +505,7 @@ CREATE TABLE session_lifecycle (
                     'abandoned'::text
                 ]) AND pending_terminal_cause_kind IS NULL)
             OR (pending_terminal_outcome_kind = 'failed_retryable'::text
+                AND pending_terminal_cause_kind IS NOT NULL
                 AND pending_terminal_cause_kind = ANY (ARRAY[
                     'provider_transient'::text,
                     'provider_quota_exhausted'::text,
@@ -454,6 +514,7 @@ CREATE TABLE session_lifecycle (
                     'retry_budget_exhausted'::text
                 ]))
             OR (pending_terminal_outcome_kind = 'failed_structural'::text
+                AND pending_terminal_cause_kind IS NOT NULL
                 AND pending_terminal_cause_kind = ANY (ARRAY[
                     'context_compaction_wall'::text,
                     'context_headroom_exhausted'::text,
@@ -461,10 +522,10 @@ CREATE TABLE session_lifecycle (
                     'moderation_block'::text
                 ]))
             OR (pending_terminal_outcome_kind = 'retired'::text
+                AND pending_terminal_cause_kind IS NOT NULL
                 AND pending_terminal_cause_kind = ANY (ARRAY[
                     'dispatch_deadline_expired'::text,
                     'start_gate_deadline_expired'::text,
-                    'first_input_deadline_expired'::text,
                     'stranded_queued_turn'::text
                 ]))
         )
@@ -542,6 +603,24 @@ ALTER TABLE ONLY session_lifecycle
         ON UPDATE RESTRICT ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED;
 
+-- The handoff's acting identity is scoped the same way: an identity belonging
+-- to another session loads back intact and then cannot settle, because the
+-- terminal write and the goal-closure trigger both reject it -- which strands
+-- the committed decision with no way to replace it.
+ALTER TABLE ONLY session_lifecycle
+    ADD CONSTRAINT session_lifecycle_pending_terminal_actor_turn_fk
+        FOREIGN KEY (pending_terminal_actor_turn_id, session_id)
+        REFERENCES turn_lifecycle(turn_id, session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE ONLY session_lifecycle
+    ADD CONSTRAINT session_lifecycle_pending_terminal_actor_request_fk
+        FOREIGN KEY (pending_terminal_actor_tool_request_id, session_id)
+        REFERENCES tool_request(request_id, session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
+
 --
 -- The operator queue is `SELECT * FROM session_lifecycle WHERE state = 'parked'`
 -- (§1), and the eligibility sweep and liveness watchdog now read the state to
@@ -552,12 +631,9 @@ CREATE INDEX session_lifecycle_by_state
     ON session_lifecycle (state_kind, session_id);
 
 --
--- §1's armed-deadline record. At most one row per session by primary key;
--- the invariant trigger below supplies the "exactly one, while non-terminal
--- and owned" half.
---
--- `expires_at IS NULL` is the explicit unbounded marker a `none` bound
--- journals. §12's alarm never counts it; only a missing record is a violation.
+-- The armed-deadline record: which deadline an owned session is running and
+-- since when. At most one row per session by primary key. A session with no
+-- row, or a row with no `expires_at`, is simply unbounded.
 --
 
 CREATE TABLE session_deadline (
@@ -571,42 +647,15 @@ CREATE TABLE session_deadline (
 
     CONSTRAINT session_deadline_kind_closed CHECK (
         deadline_kind = ANY (ARRAY[
-            'dispatch'::text,
-            'start_gate'::text,
-            'first_input'::text,
+            'admission'::text,
             'active_stall'::text,
-            'waiting_approval'::text,
-            'waiting_external'::text,
-            'waiting_child'::text,
-            'waiting_provider_retry'::text,
-            'waiting_pipeline'::text,
-            'waiting_scheduler'::text,
-            'recovering'::text,
-            'blocked'::text,
-            'parked_renotify'::text
+            'waiting'::text
         ])
     ),
 
-    -- Every deadline's expiry is a defined transition (§1). Admission expiries
-    -- retire; post-admission expiries park; a parked deadline re-notifies and
-    -- re-arms without moving the session (§13).
-    CONSTRAINT session_deadline_expiry_transition_defined CHECK (
-        ((deadline_kind = ANY (ARRAY[
-            'dispatch'::text, 'start_gate'::text, 'first_input'::text
-        ])) AND (on_expiry_kind = 'retire'::text))
-        OR ((deadline_kind = 'parked_renotify'::text)
-            AND (on_expiry_kind = 'renotify'::text))
-        OR ((deadline_kind = ANY (ARRAY[
-            'active_stall'::text,
-            'waiting_approval'::text,
-            'waiting_external'::text,
-            'waiting_child'::text,
-            'waiting_provider_retry'::text,
-            'waiting_pipeline'::text,
-            'waiting_scheduler'::text,
-            'recovering'::text,
-            'blocked'::text
-        ])) AND (on_expiry_kind = 'park'::text))
+    -- An admission expiry retires; a post-admission expiry parks.
+    CONSTRAINT session_deadline_expiry_closed CHECK (
+        on_expiry_kind = ANY (ARRAY['retire'::text, 'park'::text])
     )
 );
 
@@ -776,8 +825,7 @@ CREATE TRIGGER session_ownership_event_truncate_is_rejected
     BEFORE TRUNCATE ON session_ownership_event
     FOR EACH STATEMENT EXECUTE FUNCTION reject_session_lifecycle_table_truncate();
 
--- The invariant triggers are row-level, so a truncation would disarm every
--- deadline at once and fire none of them.
+-- Truncating would silently unbound every owned session at once.
 CREATE TRIGGER session_deadline_truncate_is_rejected
     BEFORE TRUNCATE ON session_deadline
     FOR EACH STATEMENT EXECUTE FUNCTION reject_session_lifecycle_table_truncate();
@@ -821,107 +869,6 @@ CREATE TRIGGER session_lifecycle_terminal_is_final
     FOR EACH ROW EXECUTE FUNCTION guard_session_lifecycle_change();
 
 --
--- §1's invariant, enforced rather than asserted: every non-terminal state of an
--- owned session carries exactly one armed deadline whose kind is the one that
--- state defines. An unmonitored session and a terminal session carry none.
--- A bound configured `none` still writes its record, with `expires_at` null as
--- the explicit unbounded marker.
---
--- Deferred, so one transaction may move the state and re-arm the deadline in
--- either order.
---
-
-CREATE FUNCTION require_session_deadline_invariant_for(subject uuid) RETURNS void
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-    lifecycle session_lifecycle%ROWTYPE;
-    armed session_deadline%ROWTYPE;
-    expected text;
-BEGIN
-    SELECT * INTO lifecycle FROM session_lifecycle WHERE session_id = subject;
-    IF NOT FOUND THEN
-        -- The session-level back-reference owns the missing-satellite case.
-        RETURN;
-    END IF;
-
-    SELECT * INTO armed FROM session_deadline WHERE session_id = subject;
-
-    IF lifecycle.state_kind = 'terminal' OR NOT lifecycle.owned THEN
-        IF FOUND THEN
-            RAISE EXCEPTION
-                'session % holds an armed deadline while % and %',
-                subject,
-                lifecycle.state_kind,
-                CASE WHEN lifecycle.owned THEN 'owned' ELSE 'unmonitored' END
-                USING ERRCODE = '23514';
-        END IF;
-        RETURN;
-    END IF;
-
-    IF NOT FOUND THEN
-        RAISE EXCEPTION
-            'owned session % is % with no armed deadline', subject,
-            lifecycle.state_kind
-            USING ERRCODE = '23514';
-    END IF;
-
-    expected := CASE lifecycle.state_kind
-        WHEN 'dispatched' THEN 'dispatch'
-        WHEN 'active' THEN 'active_stall'
-        WHEN 'recovering' THEN 'recovering'
-        WHEN 'blocked' THEN 'blocked'
-        WHEN 'parked' THEN 'parked_renotify'
-        WHEN 'waiting' THEN 'waiting_' || lifecycle.waiting_kind
-        ELSE NULL
-    END;
-
-    IF lifecycle.state_kind = 'created' THEN
-        IF armed.deadline_kind NOT IN ('first_input', 'start_gate') THEN
-            RAISE EXCEPTION
-                'owned session % is created holding a % deadline', subject,
-                armed.deadline_kind
-                USING ERRCODE = '23514';
-        END IF;
-        RETURN;
-    END IF;
-
-    IF armed.deadline_kind IS DISTINCT FROM expected THEN
-        RAISE EXCEPTION
-            'owned session % is % holding a % deadline, not %', subject,
-            lifecycle.state_kind, armed.deadline_kind, expected
-            USING ERRCODE = '23514';
-    END IF;
-END;
-$$;
-
-CREATE FUNCTION require_session_deadline_invariant() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    -- A move between sessions leaves two sessions to check: validating only
-    -- the destination would let the source lose its required deadline.
-    IF TG_OP <> 'INSERT' THEN
-        PERFORM require_session_deadline_invariant_for(OLD.session_id);
-    END IF;
-    IF TG_OP <> 'DELETE' THEN
-        PERFORM require_session_deadline_invariant_for(NEW.session_id);
-    END IF;
-    RETURN NULL;
-END;
-$$;
-
-CREATE CONSTRAINT TRIGGER session_lifecycle_holds_its_deadline
-    AFTER INSERT OR UPDATE ON session_lifecycle
-    DEFERRABLE INITIALLY DEFERRED
-    FOR EACH ROW EXECUTE FUNCTION require_session_deadline_invariant();
-
-CREATE CONSTRAINT TRIGGER session_deadline_matches_its_state
-    AFTER INSERT OR DELETE OR UPDATE ON session_deadline
-    DEFERRABLE INITIALLY DEFERRED
-    FOR EACH ROW EXECUTE FUNCTION require_session_deadline_invariant();
-
---
 -- §1/§2: no terminal session leaves a non-terminal turn behind. Session
 -- closures settle the live turn through the committed machinery first, and
 -- this is what makes "first" true rather than intended.
@@ -941,10 +888,15 @@ BEGIN
     -- disposition that would let it reach `terminal` lands with the event
     -- vocabulary; requiring it here would make every closure of a dispatched
     -- goal session impossible.
+    -- Nor is a turn the delegation cascade already terminated logically: the
+    -- parent's stop released its runtime slot and wrote the terminal proof,
+    -- and its `state_kind` stays put by design. Reading it as live would leave
+    -- the child session unclosable forever.
     SELECT lifecycle.turn_id INTO live
       FROM turn_lifecycle AS lifecycle
      WHERE lifecycle.session_id = NEW.session_id
        AND lifecycle.state_kind <> 'terminal'
+       AND NOT lifecycle.delegation_runtime_terminal
        AND NOT EXISTS (
             SELECT 1
               FROM goal_turn_retired_outbox_event AS retired
@@ -1036,10 +988,17 @@ CREATE CONSTRAINT TRIGGER session_terminal_settles_its_goal
 -- the session outcome and the §6 classification of the actor that closed it.
 --
 
+-- The closure's agency gets its own columns rather than reusing the model
+-- declaration's. `enforce_goal_model_declaration_request` validates every
+-- non-null `model_tool_request_id` as an achieved-or-blocked `goal_declare`
+-- request, and that column is globally unique, so a closure borrowing it would
+-- be rejected at commit or collide with the declaration that already used it.
 ALTER TABLE goal_event
     ADD COLUMN session_outcome_kind text,
     ADD COLUMN closure_actor_kind text,
-    ADD COLUMN closure_actor_module text;
+    ADD COLUMN closure_actor_module text,
+    ADD COLUMN closure_actor_turn_id uuid,
+    ADD COLUMN closure_actor_tool_request_id uuid;
 
 ALTER TABLE goal_event
     DROP CONSTRAINT goal_event_event_kind_check;
@@ -1081,11 +1040,20 @@ ALTER TABLE goal_event
         AND ((event_kind = 'session_closed'::text)
              OR ((session_outcome_kind IS NULL)
                  AND (closure_actor_kind IS NULL)
-                 AND (closure_actor_module IS NULL)))
+                 AND (closure_actor_module IS NULL)
+                 AND (closure_actor_turn_id IS NULL)
+                 AND (closure_actor_tool_request_id IS NULL)))
         AND ((closure_actor_module IS NULL) OR (closure_actor_module = ANY (ARRAY[
             'repo_watch'::text,
             'commissioned_dispatch'::text
         ])))
+        -- A core closure keeps at most one acting identity, and no other
+        -- classification keeps any: the reader rejects the combinations this
+        -- would otherwise let commit, leaving the goal unreadable.
+        AND ((closure_actor_turn_id IS NULL) OR (closure_actor_tool_request_id IS NULL))
+        AND ((closure_actor_kind = 'core'::text)
+             OR ((closure_actor_turn_id IS NULL)
+                 AND (closure_actor_tool_request_id IS NULL)))
     );
 
 --
@@ -1106,7 +1074,7 @@ ALTER TABLE goal_event
         OR ((event_kind = 'achieved'::text) AND (statement IS NULL) AND (blocked_reason IS NULL) AND (need IS NULL) AND (guidance IS NULL) AND (report IS NOT NULL) AND (user_command_id IS NULL) AND (model_turn_id IS NOT NULL) AND (model_tool_request_id IS NOT NULL) AND (scheduler_turn_id IS NULL))
         OR ((event_kind = 'user_stopped'::text) AND (statement IS NULL) AND (blocked_reason IS NULL) AND (need IS NULL) AND (guidance IS NULL) AND (report IS NULL) AND (user_command_id IS NOT NULL) AND (model_turn_id IS NULL) AND (model_tool_request_id IS NULL) AND (scheduler_turn_id IS NULL))
         OR ((event_kind = 'superseded'::text) AND (statement IS NOT NULL) AND (blocked_reason IS NULL) AND (need IS NULL) AND (guidance IS NULL) AND (report IS NULL) AND (user_command_id IS NOT NULL) AND (model_turn_id IS NULL) AND (model_tool_request_id IS NULL) AND (scheduler_turn_id IS NULL))
-        OR ((event_kind = 'session_closed'::text) AND (statement IS NULL) AND (blocked_reason IS NULL) AND (need IS NULL) AND (guidance IS NULL) AND (report IS NULL) AND (user_command_id IS NULL) AND (scheduler_turn_id IS NULL) AND ((model_turn_id IS NULL) OR (model_tool_request_id IS NULL)) AND ((closure_actor_kind = 'core'::text) OR ((model_turn_id IS NULL) AND (model_tool_request_id IS NULL)))))
+        OR ((event_kind = 'session_closed'::text) AND (statement IS NULL) AND (blocked_reason IS NULL) AND (need IS NULL) AND (guidance IS NULL) AND (report IS NULL) AND (user_command_id IS NULL) AND (scheduler_turn_id IS NULL) AND (model_turn_id IS NULL) AND (model_tool_request_id IS NULL)))
     );
 
 --
@@ -1115,102 +1083,70 @@ ALTER TABLE goal_event
 -- tool-only actor leaves null by construction.
 --
 
-ALTER TABLE ONLY goal_event
-    ADD CONSTRAINT goal_event_closure_tool_request_fk
-        FOREIGN KEY (model_tool_request_id, session_id)
-        REFERENCES tool_request(request_id, session_id)
-        ON UPDATE RESTRICT ON DELETE RESTRICT;
+CREATE FUNCTION require_goal_closure_actor_identity() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.event_kind <> 'session_closed' THEN
+        RETURN NULL;
+    END IF;
+
+    IF NEW.closure_actor_tool_request_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1
+          FROM tool_request AS request
+         WHERE request.request_id = NEW.closure_actor_tool_request_id
+           AND request.session_id = NEW.session_id
+    ) THEN
+        RAISE EXCEPTION
+            'session closure for % names tool request %, which is not its own',
+            NEW.session_id, NEW.closure_actor_tool_request_id
+            USING ERRCODE = '23503';
+    END IF;
+
+    IF NEW.closure_actor_turn_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1
+          FROM turn_lifecycle AS turn
+         WHERE turn.turn_id = NEW.closure_actor_turn_id
+           AND turn.session_id = NEW.session_id
+    ) THEN
+        RAISE EXCEPTION
+            'session closure for % names turn %, which is not its own',
+            NEW.session_id, NEW.closure_actor_turn_id
+            USING ERRCODE = '23503';
+    END IF;
+
+    RETURN NULL;
+END;
+$$;
+
+-- A trigger rather than a foreign key: the key would validate every historical
+-- `achieved` and `blocked` row, and this rule is about the closure kind alone.
+CREATE CONSTRAINT TRIGGER goal_event_closure_names_its_own_identity
+    AFTER INSERT ON goal_event
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION require_goal_closure_actor_identity();
 
 --
--- Deployment policy for the armed deadlines.
---
--- §1 lets a bound live in config or the database. It lives in both here: the
--- daemon writes its `[numeric_bounds]` policy into this table at startup, and
--- the arming below reads it. That is what lets the invariant be maintained by
--- the same statement that moves the state — no write path can move a session
--- and forget to re-arm, because it is not the write path that arms.
---
--- A null `bound` is the explicit unbounded marker a `none` policy journals.
--- The seeded rows are all unbounded, so a daemon that has not written its
--- policy yet still satisfies the invariant with a journaled record rather than
--- an absent one.
---
-
-CREATE TABLE session_lifecycle_bound (
-    deadline_kind text NOT NULL,
-    bound interval,
-    updated_at timestamp with time zone DEFAULT statement_timestamp() NOT NULL,
-
-    CONSTRAINT session_lifecycle_bound_pkey PRIMARY KEY (deadline_kind),
-
-    CONSTRAINT session_lifecycle_bound_kind_closed CHECK (
-        deadline_kind = ANY (ARRAY[
-            'dispatch'::text,
-            'start_gate'::text,
-            'first_input'::text,
-            'active_stall'::text,
-            'waiting_approval'::text,
-            'waiting_external'::text,
-            'waiting_child'::text,
-            'waiting_provider_retry'::text,
-            'waiting_pipeline'::text,
-            'waiting_scheduler'::text,
-            'recovering'::text,
-            'blocked'::text,
-            'parked_renotify'::text
-        ])
-    ),
-
-    CONSTRAINT session_lifecycle_bound_positive CHECK (
-        (bound IS NULL) OR (bound > '0'::interval)
-    )
-);
-
-INSERT INTO session_lifecycle_bound (deadline_kind, bound)
-SELECT kind, NULL
-  FROM unnest(ARRAY[
-        'dispatch',
-        'start_gate',
-        'first_input',
-        'active_stall',
-        'waiting_approval',
-        'waiting_external',
-        'waiting_child',
-        'waiting_provider_retry',
-        'waiting_pipeline',
-        'waiting_scheduler',
-        'recovering',
-        'blocked',
-        'parked_renotify'
-       ]) AS kind;
-
---
--- Arming. The satellite's state decides which deadline is armed, and the
--- policy table decides when it expires; the trigger below is the only writer
--- of `session_deadline`'s armed record, so the §1 invariant holds by
--- construction rather than by every caller remembering.
+-- Arming. The satellite's state decides which deadline is armed and when it
+-- was armed; the bound that turns that into an expiry is deployment policy the
+-- daemon holds in `[numeric_bounds]`. An unset `expires_at` is unbounded.
 --
 -- Re-arming happens exactly when the state was entered, the ownership bit
 -- moved, or the armed record disagrees with the state. An unrelated column
--- write — a payload measurement, a pending-terminal handoff — leaves a running
--- deadline running.
+-- write -- a payload measurement, a pending-terminal handoff -- leaves a
+-- running deadline running.
 --
 
-CREATE FUNCTION session_deadline_kind_for_state(
-    state_kind text,
-    waiting_kind text
-) RETURNS text
+CREATE FUNCTION session_deadline_kind_for_state(state_kind text) RETURNS text
     LANGUAGE sql
     IMMUTABLE
     AS $$
     SELECT CASE state_kind
-        WHEN 'created' THEN 'first_input'
-        WHEN 'dispatched' THEN 'dispatch'
+        WHEN 'created' THEN 'admission'
+        WHEN 'dispatched' THEN 'admission'
         WHEN 'active' THEN 'active_stall'
-        WHEN 'recovering' THEN 'recovering'
-        WHEN 'blocked' THEN 'blocked'
-        WHEN 'parked' THEN 'parked_renotify'
-        WHEN 'waiting' THEN 'waiting_' || waiting_kind
+        WHEN 'recovering' THEN 'active_stall'
+        WHEN 'waiting' THEN 'waiting'
         ELSE NULL
     END;
 $$;
@@ -1219,11 +1155,7 @@ CREATE FUNCTION session_deadline_expiry_for_kind(deadline_kind text) RETURNS tex
     LANGUAGE sql
     IMMUTABLE
     AS $$
-    SELECT CASE
-        WHEN deadline_kind IN ('dispatch', 'start_gate', 'first_input') THEN 'retire'
-        WHEN deadline_kind = 'parked_renotify' THEN 'renotify'
-        ELSE 'park'
-    END;
+    SELECT CASE WHEN deadline_kind = 'admission' THEN 'retire' ELSE 'park' END;
 $$;
 
 CREATE FUNCTION arm_session_deadline() RETURNS trigger
@@ -1231,10 +1163,9 @@ CREATE FUNCTION arm_session_deadline() RETURNS trigger
     AS $$
 DECLARE
     required text;
-    policy interval;
     armed text;
 BEGIN
-    required := session_deadline_kind_for_state(NEW.state_kind, NEW.waiting_kind);
+    required := session_deadline_kind_for_state(NEW.state_kind);
 
     IF NOT NEW.owned OR required IS NULL THEN
         DELETE FROM session_deadline WHERE session_id = NEW.session_id;
@@ -1253,23 +1184,18 @@ BEGIN
         RETURN NULL;
     END IF;
 
-    SELECT bound INTO policy
-      FROM session_lifecycle_bound
-     WHERE deadline_kind = required;
-
     INSERT INTO session_deadline
-            (session_id, deadline_kind, on_expiry_kind, expires_at, armed_at)
+            (session_id, deadline_kind, on_expiry_kind, armed_at)
          VALUES (
             NEW.session_id,
             required,
             session_deadline_expiry_for_kind(required),
-            CASE WHEN policy IS NULL THEN NULL ELSE statement_timestamp() + policy END,
             statement_timestamp()
          )
     ON CONFLICT (session_id) DO UPDATE
        SET deadline_kind = EXCLUDED.deadline_kind,
            on_expiry_kind = EXCLUDED.on_expiry_kind,
-           expires_at = EXCLUDED.expires_at,
+           expires_at = NULL,
            armed_at = EXCLUDED.armed_at;
 
     RETURN NULL;
@@ -1299,13 +1225,17 @@ CREATE TRIGGER session_lifecycle_arms_its_deadline
 -- scheduler prefix.
 --
 
-CREATE FUNCTION project_session_lifecycle(subject uuid, lifts_park boolean) RETURNS void
+CREATE FUNCTION project_session_lifecycle(
+    subject uuid,
+    lifts_park boolean,
+    operator_authored boolean DEFAULT false,
+    turn_progressed boolean DEFAULT false
+) RETURNS void
     LANGUAGE plpgsql
     AS $$
 DECLARE
     held session_lifecycle%ROWTYPE;
     live_phase text;
-    live_turn uuid;
     goal_turn uuid;
     goal_request uuid;
     actor text;
@@ -1347,8 +1277,8 @@ BEGIN
         RETURN;
     END IF;
 
-    SELECT live.active_phase_kind, live.turn_id, live.child_wait_request_id
-      INTO live_phase, live_turn, live_child_request
+    SELECT live.active_phase_kind, live.child_wait_request_id
+      INTO live_phase, live_child_request
       FROM turn_lifecycle AS live
      WHERE live.session_id = subject
        AND live.state_kind = 'active'
@@ -1360,8 +1290,7 @@ BEGIN
     -- outranks it, and this runs on every turn write.
     IF live_phase IS NULL THEN
         SELECT event.event_kind, event.blocked_reason, event.generation,
-               COALESCE(event.model_turn_id, event.scheduler_turn_id),
-               event.model_tool_request_id
+               event.model_turn_id, event.model_tool_request_id
           INTO goal_kind, goal_reason, goal_generation,
                goal_turn, goal_request
           FROM goal_event AS event
@@ -1438,22 +1367,37 @@ BEGIN
        AND held.blocked_reason IS NOT DISTINCT FROM next_blocked_reason
        AND held.blocked_cycle IS NOT DISTINCT FROM next_blocked_cycle
     THEN
+        -- The state did not move, but a turn transitioned under it -- one
+        -- terminalized, or a successor activated -- and that is the progress
+        -- the stall deadline measures. Queueing another turn is admission, not
+        -- progress, and re-arming on it would let a stalled session postpone
+        -- its own deadline. Only the deadline re-arms: the session entered
+        -- `active` when its first turn started, and `state_entered_at` says so.
+        IF turn_progressed AND held.state_kind = 'active' AND held.owned THEN
+            UPDATE session_deadline
+               SET armed_at = statement_timestamp(),
+                   expires_at = NULL
+             WHERE session_id = subject
+               AND deadline_kind = 'active_stall';
+        END IF;
         RETURN;
     END IF;
 
     -- A projected transition is core machinery, and the live turn is the
     -- agency behind it; the creating actor is not.
-    -- The agency is the live turn, or the goal event that decided the state
-    -- when no turn is live. A lift is the operator's own resume, so it keeps
-    -- that classification rather than reading as daemon machinery.
-    IF lifts_park THEN
+    -- The identity recorded here is model or tool agency and nothing else. A
+    -- turn activating, a phase moving, a scheduler-authored block: those are
+    -- daemon machinery that happens to concern a turn, and the reader takes a
+    -- stored turn to mean the model acted. Only a model-declared goal event
+    -- carries one. A goal event the user authored -- a lift, a stop, a
+    -- supersede, a commission -- is the operator's, not daemon core's.
+    IF lifts_park OR operator_authored THEN
         actor := 'operator';
         goal_turn := NULL;
         goal_request := NULL;
-        live_turn := NULL;
     ELSE
         actor := 'core';
-        IF live_turn IS NOT NULL THEN
+        IF live_phase IS NOT NULL THEN
             goal_turn := NULL;
             goal_request := NULL;
         END IF;
@@ -1464,9 +1408,9 @@ BEGIN
            state_entered_at = statement_timestamp(),
            actor_kind = actor,
            actor_module = NULL,
-           actor_turn_id = COALESCE(live_turn, goal_turn),
+           actor_turn_id = goal_turn,
            actor_tool_request_id = CASE
-               WHEN COALESCE(live_turn, goal_turn) IS NULL THEN goal_request
+               WHEN goal_turn IS NULL THEN goal_request
                ELSE NULL
            END,
            waiting_kind = next_waiting_kind,
@@ -1487,7 +1431,12 @@ CREATE FUNCTION project_session_lifecycle_from_turn() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    PERFORM project_session_lifecycle(NEW.session_id, false);
+    PERFORM project_session_lifecycle(
+        NEW.session_id,
+        false,
+        false,
+        TG_OP = 'UPDATE'
+    );
     RETURN NULL;
 END;
 $$;
@@ -1498,15 +1447,29 @@ CREATE FUNCTION project_session_lifecycle_from_goal() RETURNS trigger
 BEGIN
     PERFORM project_session_lifecycle(
         NEW.session_id,
-        NEW.event_kind = 'resumed'
+        NEW.event_kind = 'resumed',
+        NEW.user_command_id IS NOT NULL
     );
     RETURN NULL;
 END;
 $$;
 
-CREATE TRIGGER turn_lifecycle_projects_session_state
-    AFTER INSERT OR UPDATE ON turn_lifecycle
+-- Split, and the update arm fires only when a column the mapping reads moves.
+-- A turn write that advances attempt pointers, frontier identities, or tool
+-- round bookkeeping cannot change the session's state, and this trigger runs on
+-- every one of them.
+CREATE TRIGGER turn_lifecycle_projects_session_state_on_insert
+    AFTER INSERT ON turn_lifecycle
     FOR EACH ROW EXECUTE FUNCTION project_session_lifecycle_from_turn();
+
+CREATE TRIGGER turn_lifecycle_projects_session_state_on_update
+    AFTER UPDATE ON turn_lifecycle
+    FOR EACH ROW
+    WHEN (OLD.state_kind IS DISTINCT FROM NEW.state_kind
+          OR OLD.active_phase_kind IS DISTINCT FROM NEW.active_phase_kind
+          OR OLD.child_wait_request_id IS DISTINCT FROM NEW.child_wait_request_id
+          OR OLD.delegation_runtime_terminal IS DISTINCT FROM NEW.delegation_runtime_terminal)
+    EXECUTE FUNCTION project_session_lifecycle_from_turn();
 
 CREATE TRIGGER goal_event_projects_session_state
     AFTER INSERT ON goal_event
@@ -1531,6 +1494,15 @@ BEGIN
     THEN
         RETURN NULL;
     END IF;
+    -- A failed closure is not a finished dispatch. The obligation insert
+    -- downstream admits only the three goal kinds, so releasing the batch here
+    -- would retire the dispatch with nothing recorded to retry it.
+    IF NEW.event_kind = 'session_closed'
+       AND NEW.session_outcome_kind IN
+            ('failed_retryable', 'failed_structural', 'failed_unknown')
+    THEN
+        RETURN NULL;
+    END IF;
     PERFORM repo_watch_release_completed_dispatch_batches_for_turn(
         NULL::uuid,
         NEW.session_id
@@ -1538,37 +1510,6 @@ BEGIN
     RETURN NULL;
 END;
 $$;
-
---
--- What a closure cannot release by itself. §2 gives `abandoned` cleanup
--- obligations for worktrees and containers: an operator write-off leaves live
--- resources behind, unlike an achievement or a supersession, whose successor
--- takes them. The obligation is recorded rather than performed here — the
--- cleanup runs outside the closing transaction, and a record is what lets it
--- be found.
---
-
-CREATE TABLE session_cleanup_obligation (
-    session_id uuid NOT NULL,
-    outcome_kind text NOT NULL,
-    recorded_at timestamp with time zone DEFAULT statement_timestamp() NOT NULL,
-    discharged_at timestamp with time zone,
-
-    CONSTRAINT session_cleanup_obligation_pkey PRIMARY KEY (session_id),
-
-    CONSTRAINT session_cleanup_obligation_outcome_closed CHECK (
-        outcome_kind = 'abandoned'::text
-    )
-);
-
-ALTER TABLE ONLY session_cleanup_obligation
-    ADD CONSTRAINT session_cleanup_obligation_session_id_fkey
-        FOREIGN KEY (session_id) REFERENCES session(session_id)
-        ON UPDATE RESTRICT ON DELETE RESTRICT;
-
-CREATE INDEX session_cleanup_obligation_outstanding
-    ON session_cleanup_obligation (recorded_at, session_id)
-    WHERE discharged_at IS NULL;
 
 --
 -- The create-session command records the cause it created the session with,

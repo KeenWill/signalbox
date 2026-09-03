@@ -5,15 +5,17 @@ use std::{collections::BTreeSet, error::Error, fmt, time::SystemTime};
 use signalbox_application::{
     AttentionAction, AttentionActivity, AttentionActivityKind, AttentionBlockedReason,
     AttentionChanges, AttentionContinuation, AttentionCursor, AttentionGoalBlock,
-    AttentionJudgeFacts, AttentionQuery, AttentionReader, AttentionSnapshot, AttentionSort,
-    AttentionState, AttentionSummary, max_attention_change_items,
+    AttentionJudgeFacts, AttentionLifecycleState, AttentionQuery, AttentionReader,
+    AttentionSnapshot, AttentionSort, AttentionState, AttentionSummary, max_attention_change_items,
     max_attention_goal_summary_characters, max_attention_snapshot_items,
     max_attention_title_characters,
 };
 use signalbox_domain::{GoalBlockedReasonKind, SessionId, TurnId};
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
-use crate::mapping::goal_blocked_reason_from_str;
+use crate::mapping::{
+    SessionLifecycleStateKind, goal_blocked_reason_from_str, session_lifecycle_state_kind_from_str,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AttentionCorruption {
@@ -819,12 +821,18 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
     let session_state = row
         .try_get::<Option<String>, _>("session_state")?
         .ok_or(AttentionCorruption::Missing("session lifecycle state"))?;
+    let session_state = session_lifecycle_state_kind_from_str(&session_state).ok_or(
+        AttentionCorruption::Unsupported {
+            field: "session lifecycle state",
+            value: session_state.clone(),
+        },
+    )?;
     let waiting = row.try_get::<Option<String>, _>("session_waiting_kind")?;
     let recovering = row.try_get::<Option<String>, _>("session_recovering_op")?;
     let state = classify_state(
         runner.as_deref(),
         SessionLifecycleProjection {
-            state: &session_state,
+            state: session_state,
             waiting: waiting.as_deref(),
             recovering: recovering.as_deref(),
         },
@@ -862,11 +870,12 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
         current_turn: row
             .try_get::<Option<Uuid>, _>("turn_id")?
             .map(TurnId::from_uuid),
+        lifecycle_state: lifecycle_state(session_state),
         active_turn_count,
         queued_turn_count,
         state,
         action,
-        goal_block: decode_goal_block(row, goal_state.as_deref())?,
+        goal_block: decode_goal_block(row, state, goal_state.as_deref())?,
         judge: AttentionJudgeFacts {
             actionable: nonnegative(row.try_get("judge_actionable")?, "judge actionable")?,
             completed: nonnegative(row.try_get("judge_completed")?, "judge completed")?,
@@ -921,6 +930,9 @@ fn attention_action(
         | AttentionState::RunnerLost
         | AttentionState::Active
         | AttentionState::Queued
+        // A park already reads as the state that waits on a human; naming the
+        // command that lifts it is the web slice's, not this projection's.
+        | AttentionState::Parked
         | AttentionState::Idle => None,
     }
 }
@@ -931,7 +943,7 @@ fn attention_action(
 /// are the same kind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SessionLifecycleProjection<'row> {
-    state: &'row str,
+    state: SessionLifecycleStateKind,
     waiting: Option<&'row str>,
     recovering: Option<&'row str>,
 }
@@ -939,10 +951,9 @@ struct SessionLifecycleProjection<'row> {
 /// Projects one attention state from the durable session state and turn phase.
 ///
 /// A projection, never a second state machine: the goal machine is not
-/// consulted. Where the durable state defers to the turn — `created`,
-/// `dispatched`, `active`, and the `parked` suspension that keeps its phase —
-/// the phase decides, which is the rule the database projection applies when
-/// the session leaves `parked`.
+/// consulted, and every durable state answers for itself. Only `active` is
+/// refined by the turn phase — it is the one state that names the session
+/// rather than what the session is doing.
 ///
 /// A lost runner is read first because it is a placement fact rather than a
 /// state; `recovering{runner}` reaches the same answer through the state.
@@ -967,18 +978,29 @@ fn classify_state(
         }
     }
     match session.state {
-        "waiting" => classify_wait(session.waiting),
-        "recovering" => classify_recovery(session.recovering),
-        "blocked" => Ok(AttentionState::Blocked),
-        "terminal" => Ok(AttentionState::Idle),
-        "created" | "dispatched" | "active" | "parked" => {
-            classify_turn_phase(turn, phase, terminal)
+        SessionLifecycleStateKind::Waiting => classify_wait(session.waiting),
+        SessionLifecycleStateKind::Recovering => classify_recovery(session.recovering),
+        SessionLifecycleStateKind::Blocked => Ok(AttentionState::Blocked),
+        SessionLifecycleStateKind::Parked => Ok(AttentionState::Parked),
+        SessionLifecycleStateKind::Terminal | SessionLifecycleStateKind::Created => {
+            Ok(AttentionState::Idle)
         }
-        value => Err(AttentionCorruption::Unsupported {
-            field: "session lifecycle state",
-            value: value.to_owned(),
-        }
-        .into()),
+        SessionLifecycleStateKind::Dispatched => Ok(AttentionState::Queued),
+        SessionLifecycleStateKind::Active => classify_turn_phase(turn, phase, terminal),
+    }
+}
+
+/// Projects the durable state a summary carries beside its attention reading.
+const fn lifecycle_state(kind: SessionLifecycleStateKind) -> AttentionLifecycleState {
+    match kind {
+        SessionLifecycleStateKind::Created => AttentionLifecycleState::Created,
+        SessionLifecycleStateKind::Dispatched => AttentionLifecycleState::Dispatched,
+        SessionLifecycleStateKind::Active => AttentionLifecycleState::Active,
+        SessionLifecycleStateKind::Waiting => AttentionLifecycleState::Waiting,
+        SessionLifecycleStateKind::Recovering => AttentionLifecycleState::Recovering,
+        SessionLifecycleStateKind::Blocked => AttentionLifecycleState::Blocked,
+        SessionLifecycleStateKind::Parked => AttentionLifecycleState::Parked,
+        SessionLifecycleStateKind::Terminal => AttentionLifecycleState::Terminal,
     }
 }
 
@@ -1017,7 +1039,7 @@ fn classify_recovery(operation: Option<&str>) -> Result<AttentionState, Attentio
     }
 }
 
-/// Projects the attention state the session's own turn phase decides.
+/// Refines `active` by the phase of the turn the session is running.
 fn classify_turn_phase(
     turn: Option<&str>,
     phase: Option<&str>,
@@ -1050,9 +1072,14 @@ fn classify_turn_phase(
 
 fn decode_goal_block(
     row: &PgRow,
+    state: AttentionState,
     goal_state: Option<&str>,
 ) -> Result<Option<AttentionGoalBlock>, AttentionRepositoryError> {
-    if goal_state != Some("blocked") {
+    // The block is the evidence for `blocked`, and the session state is what
+    // the summary reports: a live turn under a blocked goal projects `active`,
+    // and evidence for a state the summary does not name is a pair the wire
+    // refuses.
+    if state != AttentionState::Blocked || goal_state != Some("blocked") {
         return Ok(None);
     }
     let stored_reason = required_string(row, "blocked_reason")?;
@@ -1142,7 +1169,7 @@ mod tests {
         }
     }
 
-    const fn session(state: &str) -> SessionLifecycleProjection<'_> {
+    const fn session(state: SessionLifecycleStateKind) -> SessionLifecycleProjection<'static> {
         SessionLifecycleProjection {
             state,
             waiting: None,
@@ -1152,7 +1179,7 @@ mod tests {
 
     const fn waiting(kind: &str) -> SessionLifecycleProjection<'_> {
         SessionLifecycleProjection {
-            state: "waiting",
+            state: SessionLifecycleStateKind::Waiting,
             waiting: Some(kind),
             recovering: None,
         }
@@ -1160,7 +1187,7 @@ mod tests {
 
     const fn recovering(operation: &str) -> SessionLifecycleProjection<'_> {
         SessionLifecycleProjection {
-            state: "recovering",
+            state: SessionLifecycleStateKind::Recovering,
             waiting: None,
             recovering: Some(operation),
         }
@@ -1171,7 +1198,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 None,
-                session("active"),
+                session(SessionLifecycleStateKind::Active),
                 Some("active"),
                 Some("running"),
                 None
@@ -1182,7 +1209,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 None,
-                session("active"),
+                session(SessionLifecycleStateKind::Active),
                 Some("active"),
                 Some("running"),
                 None
@@ -1356,7 +1383,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 None,
-                session("blocked"),
+                session(SessionLifecycleStateKind::Blocked),
                 Some("terminal"),
                 None,
                 Some("failed")
@@ -1374,7 +1401,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 None,
-                session("blocked"),
+                session(SessionLifecycleStateKind::Blocked),
                 Some("terminal"),
                 None,
                 Some("failed")
@@ -1387,11 +1414,25 @@ mod tests {
     #[test]
     fn queued_turn_projects_the_same_state_the_classifier_gave() {
         assert_eq!(
-            classify_state(None, session("dispatched"), Some("queued"), None, None).unwrap(),
+            classify_state(
+                None,
+                session(SessionLifecycleStateKind::Dispatched),
+                Some("queued"),
+                None,
+                None
+            )
+            .unwrap(),
             legacy_classify_state(None, None, Some("queued"), None, None).unwrap()
         );
         assert_eq!(
-            classify_state(None, session("dispatched"), Some("queued"), None, None).unwrap(),
+            classify_state(
+                None,
+                session(SessionLifecycleStateKind::Dispatched),
+                Some("queued"),
+                None,
+                None
+            )
+            .unwrap(),
             AttentionState::Queued
         );
     }
@@ -1401,7 +1442,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 None,
-                session("active"),
+                session(SessionLifecycleStateKind::Active),
                 Some("terminal"),
                 None,
                 Some("reconciliation_required")
@@ -1419,7 +1460,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 None,
-                session("active"),
+                session(SessionLifecycleStateKind::Active),
                 Some("terminal"),
                 None,
                 Some("reconciliation_required")
@@ -1434,7 +1475,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 None,
-                session("active"),
+                session(SessionLifecycleStateKind::Active),
                 Some("terminal"),
                 None,
                 Some("completed")
@@ -1443,11 +1484,25 @@ mod tests {
             legacy_classify_state(None, None, Some("terminal"), None, Some("completed")).unwrap()
         );
         assert_eq!(
-            classify_state(None, session("created"), None, None, None).unwrap(),
+            classify_state(
+                None,
+                session(SessionLifecycleStateKind::Created),
+                None,
+                None,
+                None
+            )
+            .unwrap(),
             legacy_classify_state(None, None, None, None, None).unwrap()
         );
         assert_eq!(
-            classify_state(None, session("terminal"), None, None, None).unwrap(),
+            classify_state(
+                None,
+                session(SessionLifecycleStateKind::Terminal),
+                None,
+                None,
+                None
+            )
+            .unwrap(),
             AttentionState::Idle
         );
     }
@@ -1466,7 +1521,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 None,
-                session("active"),
+                session(SessionLifecycleStateKind::Active),
                 Some("active"),
                 Some("running"),
                 None
@@ -1481,7 +1536,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 Some("runner_lost"),
-                session("active"),
+                session(SessionLifecycleStateKind::Active),
                 Some("active"),
                 Some("running"),
                 None
@@ -1492,7 +1547,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 Some("runner_lost_before_pin"),
-                session("dispatched"),
+                session(SessionLifecycleStateKind::Dispatched),
                 Some("queued"),
                 None,
                 None
@@ -1503,7 +1558,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 Some("unpinned"),
-                session("active"),
+                session(SessionLifecycleStateKind::Active),
                 Some("active"),
                 Some("running"),
                 None
@@ -1514,7 +1569,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 Some("runner_abandoned"),
-                session("created"),
+                session(SessionLifecycleStateKind::Created),
                 None,
                 None,
                 None
@@ -1525,7 +1580,7 @@ mod tests {
 
         let error = classify_state(
             Some("future_runner_state"),
-            session("created"),
+            session(SessionLifecycleStateKind::Created),
             None,
             None,
             None,
@@ -1540,50 +1595,121 @@ mod tests {
         ));
     }
 
+    /// `parked` is the one state that waits on a human, so it reads as itself
+    /// whatever the suspended turn was doing.
     #[test]
-    fn parked_session_projects_the_state_its_suspended_phase_gives() {
+    fn a_parked_session_projects_parked() {
         assert_eq!(
             classify_state(
                 None,
-                session("parked"),
+                session(SessionLifecycleStateKind::Parked),
                 Some("active"),
                 Some("awaiting_tool_approval"),
                 None
             )
             .unwrap(),
-            AttentionState::AwaitingApproval
+            AttentionState::Parked
         );
         assert_eq!(
             classify_state(
                 None,
-                session("parked"),
+                session(SessionLifecycleStateKind::Parked),
                 Some("active"),
                 Some("running"),
                 None
             )
             .unwrap(),
-            AttentionState::Active
+            AttentionState::Parked
+        );
+        assert_eq!(
+            classify_state(
+                None,
+                session(SessionLifecycleStateKind::Parked),
+                None,
+                None,
+                None
+            )
+            .unwrap(),
+            AttentionState::Parked
+        );
+    }
+
+    /// Every durable state answers for itself; only `active` asks the turn.
+    #[test]
+    fn only_the_active_state_is_refined_by_its_turn() {
+        assert_eq!(
+            classify_state(
+                None,
+                session(SessionLifecycleStateKind::Dispatched),
+                Some("terminal"),
+                None,
+                Some("completed")
+            )
+            .unwrap(),
+            AttentionState::Queued
+        );
+        assert_eq!(
+            classify_state(
+                None,
+                session(SessionLifecycleStateKind::Created),
+                Some("queued"),
+                None,
+                None
+            )
+            .unwrap(),
+            AttentionState::Idle
+        );
+        assert_eq!(
+            classify_state(
+                None,
+                session(SessionLifecycleStateKind::Active),
+                Some("terminal"),
+                None,
+                Some("reconciliation_required")
+            )
+            .unwrap(),
+            AttentionState::AwaitingReconciliation
+        );
+    }
+
+    /// The summary carries the durable state beside the reading of it.
+    #[test]
+    fn the_summary_carries_the_durable_state_kind() {
+        assert_eq!(
+            lifecycle_state(SessionLifecycleStateKind::Parked),
+            AttentionLifecycleState::Parked
+        );
+        assert_eq!(
+            lifecycle_state(SessionLifecycleStateKind::Waiting),
+            AttentionLifecycleState::Waiting
+        );
+        assert_eq!(
+            lifecycle_state(SessionLifecycleStateKind::Terminal),
+            AttentionLifecycleState::Terminal
+        );
+    }
+
+    /// The state vocabulary is closed at the decoder, so a spelling the
+    /// database does not define never reaches the projection at all.
+    #[test]
+    fn unsupported_session_state_fails_closed() {
+        assert_eq!(session_lifecycle_state_kind_from_str("future_state"), None);
+        assert_eq!(
+            session_lifecycle_state_kind_from_str("parked"),
+            Some(SessionLifecycleStateKind::Parked)
         );
     }
 
     #[test]
-    fn unsupported_session_state_fails_closed() {
-        let error = classify_state(None, session("future_state"), None, None, None)
-            .expect_err("unknown session lifecycle states must fail closed");
-
-        assert!(matches!(
-            error,
-            AttentionRepositoryError::Corruption(AttentionCorruption::Unsupported {
-                field: "session lifecycle state",
-                ..
-            })
-        ));
-    }
-
-    #[test]
     fn wait_without_its_kind_fails_closed() {
-        let error = classify_state(None, session("waiting"), None, None, None)
-            .expect_err("a wait with no kind cannot be projected");
+        let error = classify_state(
+            None,
+            session(SessionLifecycleStateKind::Waiting),
+            None,
+            None,
+            None,
+        )
+        .expect_err("a wait with no kind cannot be projected");
 
         assert!(matches!(
             error,
@@ -1593,8 +1719,14 @@ mod tests {
 
     #[test]
     fn recovery_without_its_operation_fails_closed() {
-        let error = classify_state(None, session("recovering"), None, None, None)
-            .expect_err("a recovery with no operation cannot be projected");
+        let error = classify_state(
+            None,
+            session(SessionLifecycleStateKind::Recovering),
+            None,
+            None,
+            None,
+        )
+        .expect_err("a recovery with no operation cannot be projected");
 
         assert!(matches!(
             error,
@@ -1606,8 +1738,14 @@ mod tests {
 
     #[test]
     fn supported_turn_with_invalid_shape_reports_shape_corruption() {
-        let error = classify_state(None, session("active"), Some("active"), None, None)
-            .expect_err("a supported state with a missing phase is corrupt");
+        let error = classify_state(
+            None,
+            session(SessionLifecycleStateKind::Active),
+            Some("active"),
+            None,
+            None,
+        )
+        .expect_err("a supported state with a missing phase is corrupt");
 
         assert!(matches!(
             error,

@@ -227,7 +227,8 @@ const fn command_rejection(
         SessionLifecycleRejection::TransitionNotAdmitted
         | SessionLifecycleRejection::GoalGenerationStillOpen
         | SessionLifecycleRejection::NoPendingTerminal
-        | SessionLifecycleRejection::ParkWhileUnmonitored => {
+        | SessionLifecycleRejection::ParkWhileUnmonitored
+        | SessionLifecycleRejection::AbandonRequiresParkedOperator => {
             SessionLifecycleCommandRejection::TransitionNotAdmitted
         }
         SessionLifecycleRejection::ReleaseWhileParked => {
@@ -242,7 +243,8 @@ const fn command_rejection(
         SessionLifecycleRejection::GoalOutcomeMismatch => {
             SessionLifecycleCommandRejection::GoalOutcomeMismatch
         }
-        SessionLifecycleRejection::StandingCauseMismatch => {
+        SessionLifecycleRejection::StandingCauseMismatch
+        | SessionLifecycleRejection::ParkStandingMismatch => {
             SessionLifecycleCommandRejection::StandingCauseMismatch
         }
         SessionLifecycleRejection::FinishConditionAlreadyDeclared => {

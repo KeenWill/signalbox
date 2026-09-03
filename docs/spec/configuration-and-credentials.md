@@ -262,18 +262,18 @@ the same-origin surface owned by
 `GET /api/attention` returns at most 32 session summaries from one read-only
 repeatable-read snapshot, ordered by session identity. A continuation names the
 last session identity and opens the next keyset page; it is not a count-based or
-fixed-tail feed. Each summary carries the current turn classification, exact
-operator action when one is owed, a typed blocked-goal reason and a need summary
-of at most 128 Unicode scalar values, approval-judge outcome counts, and the
-last publication-timestamped durable activity fact. Exact blocked-goal need text
-remains available from the session detail read rather than entering the hot
-fleet page.
+fixed-tail feed. Each summary carries the current turn classification, the
+session's lifecycle state, exact operator action when one is owed, a typed
+blocked-goal reason and a need summary of at most 128 Unicode scalar values,
+approval-judge outcome counts, and the last publication-timestamped durable
+activity fact. Exact blocked-goal need text remains available from the session
+detail read rather than entering the hot fleet page.
 
 Runner loss, model-call recovery ambiguity, tool recovery, reconciliation,
-approval wait, blocked goal, active, queued, and idle remain distinct states.
-Tool recovery carries no reconciliation action because no current command writes
-that wait. The projection uses one set query over the selected identities and
-never constructs the fleet by following individual sessions.
+approval wait, blocked goal, parked, active, queued, and idle remain distinct
+states. Tool recovery carries no reconciliation action because no current
+command writes that wait. The projection uses one set query over the selected
+identities and never constructs the fleet by following individual sessions.
 
 `GET /api/attention/follow` begins with the first coherent attention page and
 its durable change-journal cursor, then emits summary replacements only for
@@ -407,6 +407,24 @@ The local `signalbox-debug` harness reads `SIGNALBOX_DEBUG_DATABASE_URL` and
 from the configured profile exactly as the daemon does. It does not compose the
 daemon tool catalog and does not read `GITHUB_TOKEN_FILE`; it is a development
 driver, not the client protocol.
+
+## Configuration reload
+
+**Committed unimplemented functionality.** No present surface re-reads a
+configuration file after startup. Reload is one admin verb,
+[`reload_configuration`](process-protocol.md#configuration-reload): it re-reads
+the configured paths, validates the complete replacement exactly as startup
+does, and swaps the in-memory catalogs atomically on success. Any failure, and
+any replacement whose startup-only sections differ, leaves the running
+configuration in place. File watching and polling are external tooling that
+calls that verb.
+
+The reloadable sections are the model and alias catalog with its rate windows,
+the session-template catalog, and the repository-watch configuration, whose
+reload transaction is owed to [repo-watch](repo-watch.md); every other section
+is startup-only. This widens
+[#660](https://github.com/KeenWill/signalbox/issues/660), which named the latter
+two.
 
 ## Telemetry export
 
@@ -1430,16 +1448,28 @@ Each `[[models]]` entry defines one direct selection:
 - `context_window_tokens` — required positive `u32` usable context ceiling after
   any provider or adapter reservation, not the provider's larger raw advertised
   window, and not smaller than `max_output_tokens`.
-- the optional all-or-none rate set — `rate_version`,
+- zero or more `[[models.rate_windows]]` entries, each one dated price window
+  over this entry's own `provider_model`: `provider` (the commercial provider
+  that published the rates, `anthropic` or `openai`), `channel` (`api` or
+  `batch_api`), `effective_from`, optional `effective_until`, the all-or-none
   `input_usd_per_million_tokens`, `output_usd_per_million_tokens`,
   `cache_creation_input_usd_per_million_tokens`, and
-  `cache_read_input_usd_per_million_tokens`. The four rates are nonnegative
-  decimal USD strings per million tokens. A derived figure is absent when
-  multiplying, dividing by one million, or summing those rates and the reported
-  counts would lose decimal precision. The version is nonempty, unpadded,
-  NUL-free, and at most 128 UTF-8 bytes. Declaring only part of the set is a
-  configuration error; omitting all five is valid and yields no dollar figure
-  for that model.
+  `cache_read_input_usd_per_million_tokens` as nonnegative decimal USD strings
+  per million tokens, and the provenance pair `source_url` and `retrieved_on`.
+  Both bounds are canonical `YYYY-MM-DD` strings: a window covers a call
+  timestamp from `effective_from` at 00:00:00 UTC inclusive to `effective_until`
+  at 00:00:00 UTC exclusive, and windows resolved for one target and channel may
+  not overlap. A window's identity is exactly its `provider`, `provider_model`,
+  `channel`, and `effective_from`, and that identity is what a derived cost
+  names; the opaque `rate_version` label is retired. A published window's rates
+  and bounds do not change; the one admitted edit is closing an open window,
+  setting its absent `effective_until` to the `effective_from` of the successor
+  installed with it. Declaring only part of a window's rate set is a
+  configuration error; declaring no window yields no dollar figure for that
+  model.
+
+The document root may carry an optional `[verified_through]` table mapping a
+provider name to one date. It is provenance metadata, never a resolution gate.
 
 This build provides exactly `anthropic`, `openai`, `claude_cli`, and
 `codex_cli`. No adapter pins a profile name, and a pool may hold several
@@ -1497,8 +1527,8 @@ Each optional `[[aliases]]` entry defines one alias: `alias_id` (UUID of the
 `ModelAlias`) and `selection_id`, which must name a configured model (dangling
 aliases are rejected). Duplicate selection keys, duplicate aliases, and
 conflicting runtime meanings for one target are all rejected. If more than one
-model entry names the same target, its complete rate set or complete rate
-absence must also agree; a rated and unrated entry cannot share a target.
+model entry names the same target, its complete set of rate windows or complete
+rate absence must also agree; a rated and unrated entry cannot share a target.
 
 One valid document yields correlated immutable in-memory catalogs:
 
@@ -1512,24 +1542,23 @@ One valid document yields correlated immutable in-memory catalogs:
   each operation; the latter selects a session-pinned credential entry. A
   provider model routed to different adapters or a target assigned conflicting
   families is rejected at startup.
-- the profile-to-billing-kind registry and target-to-versioned-rate catalog used
-  only when a read surface derives dollar cost. Rates are never written to a
-  model-call row.
+- the profile-to-billing-kind registry and target-to-dated-rate-window catalog
+  used only when a read surface derives dollar cost. Rates are never written to
+  a model-call row.
 
-The file is read once at startup and never reread; changing the catalog is a
-process restart. Why: pinned targets and frozen selections must not change
-meaning mid-flight, so the restart is the visible unit of configuration change.
-Keeping a selection key immutable is deployment discipline that code enforces
-only partially: removal makes new resolution fail, but nothing prevents an
-edited document from pointing an existing `selection_id` at a new `target_id`
-across a restart — new turns would silently resolve to the new target (see Open
-edges). Where a stored call exists, code does enforce consistency: ordinary-path
-reconstitution cross-checks every stored call's target against the configured
-`ModelTargetCatalog` and fails closed as corruption (`CallTargetMismatch`) when
-the catalog now resolves that selection to a different target. The startup-scan
-restart path instead rebuilds its target catalog from the stored calls
-themselves, deliberately not from configuration — part of why recovery of
-acknowledged work is configuration-independent (INV-034).
+The file is read at startup and re-read by the
+[configuration reload](#configuration-reload) verb. Keeping a selection key
+immutable is deployment discipline that code enforces only partially: removal
+makes new resolution fail, but nothing prevents an edited document from pointing
+an existing `selection_id` at a new `target_id` across a restart — new turns
+would silently resolve to the new target (see Open edges). Where a stored call
+exists, code does enforce consistency: ordinary-path reconstitution cross-checks
+every stored call's target against the configured `ModelTargetCatalog` and fails
+closed as corruption (`CallTargetMismatch`) when the catalog now resolves that
+selection to a different target. The startup-scan restart path instead rebuilds
+its target catalog from the stored calls themselves, deliberately not from
+configuration — part of why recovery of acknowledged work is
+configuration-independent (INV-034).
 
 ## Credential deliveries
 
@@ -2510,13 +2539,14 @@ behavior available from this build.
 
 The file named by `SIGNALBOX_TEMPLATE_CONFIG_FILE` is a separate versioned TOML
 document (`config/session-templates.example.toml` is the checked-in example). It
-is read once at startup, after the model catalog, and never reread within a
-process. Its root requires exactly `version = 1`, an optional array of
-`[[templates]]` tables, and one optional `[review_library]` table; a
-version-only document is a valid empty catalog. Unknown root and nested fields,
-a mistyped templates or review-library value, duplicate names, and every invalid
-field fail as precise sanitized `SessionTemplateConfigurationError` variants
-without including file paths, prompt content, or document text.
+is read at startup, after the model catalog, and re-read on
+[configuration reload](#configuration-reload). Its root requires exactly
+`version = 1`, an optional array of `[[templates]]` tables, and one optional
+`[review_library]` table; a version-only document is a valid empty catalog.
+Unknown root and nested fields, a mistyped templates or review-library value,
+duplicate names, and every invalid field fail as precise sanitized
+`SessionTemplateConfigurationError` variants without including file paths,
+prompt content, or document text.
 
 The version-one `[review_library]` table is closed and carries exactly:
 
@@ -2679,16 +2709,16 @@ registry by command identity. An existing create-session claim is reconstituted
 and compared using the caller-supplied creation mode and template name before
 the current catalog is consulted; an equal replay returns its stored session,
 including when that name is absent or changed in the current catalog. Only an
-unclaimed command identity resolves against this process-lifetime catalog and
+unclaimed command identity resolves against the currently loaded catalog and
 copies the complete bundle into the session's immutable defaults version one.
 The session separately records the template name and ordinary content digest; it
 retains no live catalog reference. Generated review templates follow this same
 copy-on-create path: the complete assembled prompt, model selection, approval
 blanket, reserved name, and content digest become immutable session evidence. An
-edit therefore requires a daemon restart and affects only creation commands
-first handled under the new catalog. Equal replay of an already handled command
-and template name returns the original copied session rather than comparing
-against the current bundle (INV-047).
+edit therefore takes effect at the next restart or reload and affects only
+creation commands first handled under the new catalog. Equal replay of an
+already handled command and template name returns the original copied session
+rather than comparing against the current bundle (INV-047).
 
 Why: a separate file lets operators change the reusable creation surface without
 mixing it into immutable model-identity definitions, while one load boundary
@@ -2760,10 +2790,11 @@ the latest session credential snapshot entry for that target's family. A
 prepared or in-flight predecessor retains its call pin (INV-046).
 
 Dollar cost is derived only while reading a terminal call: the call's pinned
-target selects the current configured rate version, and the exact credential
-profile stored on that call selects `api_metered` or `subscription`. An
-API-metered profile produces `real`; a subscription profile produces
-`metered_equivalent`, regardless of adapter kind. A missing rate set, missing
+target, the channel pinned on it, and its execution timestamp select the one
+configured rate window covering that instant, and the exact credential profile
+stored on that call selects `api_metered` or `subscription`. An API-metered
+profile produces `real`; a subscription profile produces `metered_equivalent`,
+regardless of adapter kind. A timestamp covered by no configured window, missing
 historical profile declaration, call with no present usage axis, or historical
 call whose input/cache semantics predate the durable pin produces no dollar
 figure rather than zero. Codex CLI's reported `input_tokens` includes its
@@ -2771,8 +2802,9 @@ reported cache-creation and cache-read breakdowns. Derivation therefore applies
 the ordinary input rate only when both cache breakdown axes are present and can
 be subtracted from total input; an omitted breakdown leaves ordinary input
 unreported while any independently reported output or cache axis remains
-priceable. Each cache rate is applied once. That inclusive-input meaning is
-pinned on the call when it is prepared, so a later configuration restart that
+priceable. Each cache rate is applied once. The channel and that inclusive-input
+meaning are pinned on the call when it is prepared, and every call this build
+prepares pins channel `api`, so a later configuration restart or reload that
 reuses the target with another adapter cannot reinterpret historical usage. A
 cache breakdown larger than total input yields no figure. A credential update
 that advances the session head cannot relabel an earlier call because that call

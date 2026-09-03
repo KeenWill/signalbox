@@ -172,10 +172,10 @@ target, and resolved expectation from the already digest-verified case. Thus no
 pre-scoring placeholder check-outcome row exists. A stage mixing measured and
 missing-reference checks is represented check by check, and its single stage
 status summarizes without substituting. Durable cost is recorded per model call
-with the model and rate version that priced that call — an evaluation may score
-with one model and judge with another, and the configured rate catalog versions
-each model's rates independently, so no single run-level rate version exists;
-run-level cost is an aggregation grouped by model and rate version, never a
+with the model and rate window that priced that call — an evaluation may score
+with one model and judge with another, and the configured rate catalog dates
+each model's rates independently, so no single run-level rate window exists;
+run-level cost is an aggregation grouped by model and rate window, never a
 stored scalar that forgets its pricing. Stages order cheap to expensive, and a
 stage failure is recorded on its row without discarding the trial's other
 stages. Aggregation — accuracy by slice, stability across repeats, thresholded

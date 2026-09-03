@@ -33,7 +33,9 @@ export type WebAttentionJudgeFacts = {
   readonly failed: string;
 };
 
-export type WebAttentionState = "active" | "queued" | "blocked" | "awaiting_approval" | "ambiguous" | "awaiting_tool_recovery" | "awaiting_reconciliation" | "runner_lost" | "idle";
+export type WebAttentionLifecycleState = "created" | "dispatched" | "active" | "waiting" | "recovering" | "blocked" | "parked" | "terminal";
+
+export type WebAttentionState = "active" | "queued" | "blocked" | "awaiting_approval" | "ambiguous" | "awaiting_tool_recovery" | "awaiting_reconciliation" | "runner_lost" | "parked" | "idle";
 
 export type WebAttentionSummary = {
   readonly action?: WebAttentionAction | null;
@@ -41,6 +43,7 @@ export type WebAttentionSummary = {
   readonly goal_block?: WebAttentionGoalBlock | null;
   readonly judge: WebAttentionJudgeFacts;
   readonly last_activity: WebAttentionActivity;
+  readonly lifecycle_state: WebAttentionLifecycleState;
   readonly session_id: string;
   readonly state: WebAttentionState;
 };

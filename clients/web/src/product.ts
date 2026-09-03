@@ -380,6 +380,7 @@ const validateAttentionSummary = (summary: AttentionSummary): void => {
         return null
       case 'active':
       case 'queued':
+      case 'parked':
       case 'idle':
         return null
     }

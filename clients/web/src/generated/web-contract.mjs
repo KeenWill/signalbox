@@ -157,6 +157,20 @@ const schemas = {
         ],
         "type": "object"
       },
+      "WebAttentionLifecycleState": {
+        "description": "The durable session state one attention summary projects.",
+        "enum": [
+          "created",
+          "dispatched",
+          "active",
+          "waiting",
+          "recovering",
+          "blocked",
+          "parked",
+          "terminal"
+        ],
+        "type": "string"
+      },
       "WebAttentionState": {
         "enum": [
           "active",
@@ -167,6 +181,7 @@ const schemas = {
           "awaiting_tool_recovery",
           "awaiting_reconciliation",
           "runner_lost",
+          "parked",
           "idle"
         ],
         "type": "string"
@@ -207,6 +222,9 @@ const schemas = {
           "last_activity": {
             "$ref": "#/$defs/WebAttentionActivity"
           },
+          "lifecycle_state": {
+            "$ref": "#/$defs/WebAttentionLifecycleState"
+          },
           "session_id": {
             "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
             "type": "string"
@@ -218,6 +236,7 @@ const schemas = {
         "required": [
           "session_id",
           "state",
+          "lifecycle_state",
           "judge",
           "last_activity"
         ],
@@ -351,6 +370,20 @@ const schemas = {
         ],
         "type": "object"
       },
+      "WebAttentionLifecycleState": {
+        "description": "The durable session state one attention summary projects.",
+        "enum": [
+          "created",
+          "dispatched",
+          "active",
+          "waiting",
+          "recovering",
+          "blocked",
+          "parked",
+          "terminal"
+        ],
+        "type": "string"
+      },
       "WebAttentionSnapshot": {
         "additionalProperties": false,
         "properties": {
@@ -389,6 +422,7 @@ const schemas = {
           "awaiting_tool_recovery",
           "awaiting_reconciliation",
           "runner_lost",
+          "parked",
           "idle"
         ],
         "type": "string"
@@ -429,6 +463,9 @@ const schemas = {
           "last_activity": {
             "$ref": "#/$defs/WebAttentionActivity"
           },
+          "lifecycle_state": {
+            "$ref": "#/$defs/WebAttentionLifecycleState"
+          },
           "session_id": {
             "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
             "type": "string"
@@ -440,6 +477,7 @@ const schemas = {
         "required": [
           "session_id",
           "state",
+          "lifecycle_state",
           "judge",
           "last_activity"
         ],
@@ -2598,6 +2636,20 @@ const schemas = {
         ],
         "type": "object"
       },
+      "WebAttentionLifecycleState": {
+        "description": "The durable session state one attention summary projects.",
+        "enum": [
+          "created",
+          "dispatched",
+          "active",
+          "waiting",
+          "recovering",
+          "blocked",
+          "parked",
+          "terminal"
+        ],
+        "type": "string"
+      },
       "WebAttentionState": {
         "enum": [
           "active",
@@ -2608,6 +2660,7 @@ const schemas = {
           "awaiting_tool_recovery",
           "awaiting_reconciliation",
           "runner_lost",
+          "parked",
           "idle"
         ],
         "type": "string"
@@ -2648,6 +2701,9 @@ const schemas = {
           "last_activity": {
             "$ref": "#/$defs/WebAttentionActivity"
           },
+          "lifecycle_state": {
+            "$ref": "#/$defs/WebAttentionLifecycleState"
+          },
           "session_id": {
             "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
             "type": "string"
@@ -2659,6 +2715,7 @@ const schemas = {
         "required": [
           "session_id",
           "state",
+          "lifecycle_state",
           "judge",
           "last_activity"
         ],
@@ -3864,6 +3921,7 @@ const schemas = {
           "awaiting_tool_recovery",
           "awaiting_reconciliation",
           "runner_lost",
+          "parked",
           "idle"
         ],
         "type": "string"
@@ -6789,6 +6847,7 @@ function assertAttentionSummary(summary, path) {
       "awaiting_tool_recovery",
       "awaiting_reconciliation",
       "runner_lost",
+      "parked",
       "idle",
     ].includes(summary.state) && action === null);
   if (!valid) {

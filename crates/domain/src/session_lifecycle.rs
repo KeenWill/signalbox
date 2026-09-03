@@ -252,8 +252,6 @@ pub enum SessionRecoveryOperation {
 /// Why an owned session waits on a human.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SessionParkCause {
-    /// The active-state progress budget ran out.
-    ProgressBudgetExhausted,
     /// Budgeted retries ran out with the retryable cause standing.
     RetryBudgetExhausted,
     /// The same input will fail again.
@@ -266,12 +264,28 @@ pub enum SessionParkCause {
     WaitingDeadlineExpired,
     /// A recovery bound expired.
     RecoveringDeadlineExpired,
-    /// A blocked generation outlived its bound.
-    BlockedDeadlineExpired,
     /// An operator parked the session directly.
     OperatorHold,
     /// A module park drove the session it wraps to core `parked`.
     ModulePark,
+}
+
+impl SessionParkCause {
+    /// Whether the standing evidence a park carries is what its cause names.
+    ///
+    /// A closure reads the standing evidence to classify the outcome (§2), so
+    /// a park holding evidence its own cause contradicts closes under a
+    /// classification the park never supported -- and an exhaustion holding no
+    /// evidence at all cannot say what it exhausted retries or structure on.
+    #[must_use]
+    pub const fn admits_standing(self, standing: Option<SessionFailureCause>) -> bool {
+        match (self, standing) {
+            (Self::RetryBudgetExhausted, Some(SessionFailureCause::Retryable(_)))
+            | (Self::StructuralFailure, Some(SessionFailureCause::Structural(_))) => true,
+            (Self::RetryBudgetExhausted | Self::StructuralFailure, _) => false,
+            (_, standing) => standing.is_none(),
+        }
+    }
 }
 
 /// Who must act on one park.
@@ -326,8 +340,6 @@ pub enum SessionRetirementCause {
     DispatchDeadlineExpired,
     /// A held start gate was never released.
     StartGateDeadlineExpired,
-    /// An owned creation never received its first input.
-    FirstInputDeadlineExpired,
     /// The one-time closure of a stranded queued-turn session.
     StrandedQueuedTurn,
 }
@@ -458,29 +470,13 @@ impl SessionTerminalOutcome {
         }
     }
 
-    /// Whether this outcome releases the session's held slot and worktree.
+    /// Whether this outcome releases the session's held slot, worktree, and
+    /// containers.
     ///
-    /// Every terminal outcome does: a session that will never run again holds
-    /// nothing. The distinction §2 draws is what else each owes —
-    /// `abandoned` additionally records container cleanup obligations, and
-    /// `superseded` forbids the escalations the others still permit.
+    /// Every terminal outcome does, inline at the closure: a session that will
+    /// never run again holds nothing.
     pub const fn releases_resources(&self) -> bool {
         true
-    }
-
-    /// Whether this outcome owes worktree and container cleanup obligations.
-    pub const fn records_cleanup_obligations(&self) -> bool {
-        match self {
-            Self::Abandoned => true,
-            Self::AchievedVerified
-            | Self::AchievedDeclared
-            | Self::FailedRetryable { .. }
-            | Self::FailedStructural { .. }
-            | Self::FailedUnknown
-            | Self::Stopped { .. }
-            | Self::Superseded { .. }
-            | Self::Retired { .. } => false,
-        }
     }
 }
 
@@ -605,11 +601,7 @@ impl SessionLifecycleState {
     const fn admits_outcome(&self, outcome: &SessionTerminalOutcome) -> bool {
         match outcome {
             SessionTerminalOutcome::Retired { cause } => match (self, cause) {
-                (
-                    Self::Created,
-                    SessionRetirementCause::FirstInputDeadlineExpired
-                    | SessionRetirementCause::StartGateDeadlineExpired,
-                )
+                (Self::Created, SessionRetirementCause::StartGateDeadlineExpired)
                 | (
                     Self::Dispatched,
                     SessionRetirementCause::DispatchDeadlineExpired
@@ -682,92 +674,49 @@ impl core::fmt::Display for SessionLifecycleTransitionError {
 impl core::error::Error for SessionLifecycleTransitionError {}
 
 /// The transition one expired deadline fires.
-///
-/// Every armed deadline has one: an expiry is a transition, never a silent
-/// hold. Admission expiries retire; post-admission expiries park; a parked
-/// deadline re-notifies and re-arms without moving the session.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SessionDeadlineExpiry {
     /// Close the session `terminal{retired}`.
     Retire,
     /// Move the session to `parked`.
     Park,
-    /// Re-raise the operator alert and re-arm, leaving the state alone.
-    Renotify,
 }
 
 /// The closed vocabulary of armed session deadlines.
+///
+/// A state with no deadline is unbounded, not broken.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SessionDeadlineKind {
-    /// `dispatched` to `active`.
-    Dispatch,
-    /// A held start gate.
-    StartGate,
-    /// An owned ungated creation's first input.
-    FirstInput,
-    /// An active session making no progress, queued successor turns included.
+    /// An owned session that never started working.
+    Admission,
+    /// An active or recovering session making no progress.
     ActiveStall,
-    /// An outstanding approval decision.
-    WaitingApproval,
-    /// An external gate.
-    WaitingExternal,
-    /// A delegated child.
-    WaitingChild,
-    /// A provider backoff.
-    WaitingProviderRetry,
-    /// Pipeline backlog.
-    WaitingPipeline,
-    /// A recorded scheduler fault.
-    WaitingScheduler,
-    /// A running recovery.
-    Recovering,
-    /// A blocked generation.
-    Blocked,
-    /// The parked re-notification interval.
-    ParkedRenotify,
+    /// A session waiting on something outside it.
+    Waiting,
 }
 
 impl SessionDeadlineKind {
     /// Returns the transition this deadline's expiry fires.
     pub const fn on_expiry(&self) -> SessionDeadlineExpiry {
         match self {
-            Self::Dispatch | Self::StartGate | Self::FirstInput => SessionDeadlineExpiry::Retire,
-            Self::ParkedRenotify => SessionDeadlineExpiry::Renotify,
-            Self::ActiveStall
-            | Self::WaitingApproval
-            | Self::WaitingExternal
-            | Self::WaitingChild
-            | Self::WaitingProviderRetry
-            | Self::WaitingPipeline
-            | Self::WaitingScheduler
-            | Self::Recovering
-            | Self::Blocked => SessionDeadlineExpiry::Park,
+            Self::Admission => SessionDeadlineExpiry::Retire,
+            Self::ActiveStall | Self::Waiting => SessionDeadlineExpiry::Park,
         }
     }
 
     /// Returns the deadline one non-terminal state arms.
-    ///
-    /// `created` arms the first-input deadline. The start gate is a core
-    /// concept the command surface does not yet expose, so no creation holds
-    /// one; the kind exists because the invariant admits it the day a gate can
-    /// be held.
     pub const fn for_state(state: &SessionLifecycleState) -> Option<Self> {
         match state {
-            SessionLifecycleState::Created => Some(Self::FirstInput),
-            SessionLifecycleState::Dispatched => Some(Self::Dispatch),
-            SessionLifecycleState::Active => Some(Self::ActiveStall),
-            SessionLifecycleState::Waiting { wait } => Some(match wait.kind() {
-                SessionWaitKind::Approval => Self::WaitingApproval,
-                SessionWaitKind::External => Self::WaitingExternal,
-                SessionWaitKind::Child => Self::WaitingChild,
-                SessionWaitKind::ProviderRetry => Self::WaitingProviderRetry,
-                SessionWaitKind::Pipeline => Self::WaitingPipeline,
-                SessionWaitKind::Scheduler => Self::WaitingScheduler,
-            }),
-            SessionLifecycleState::Recovering { .. } => Some(Self::Recovering),
-            SessionLifecycleState::Blocked { .. } => Some(Self::Blocked),
-            SessionLifecycleState::Parked { .. } => Some(Self::ParkedRenotify),
-            SessionLifecycleState::Terminal { .. } => None,
+            SessionLifecycleState::Created | SessionLifecycleState::Dispatched => {
+                Some(Self::Admission)
+            }
+            SessionLifecycleState::Active | SessionLifecycleState::Recovering { .. } => {
+                Some(Self::ActiveStall)
+            }
+            SessionLifecycleState::Waiting { .. } => Some(Self::Waiting),
+            SessionLifecycleState::Blocked { .. }
+            | SessionLifecycleState::Parked { .. }
+            | SessionLifecycleState::Terminal { .. } => None,
         }
     }
 }
@@ -829,10 +778,10 @@ mod tests {
         }
     }
 
-    fn first_input_retired() -> SessionLifecycleState {
+    fn start_gate_retired() -> SessionLifecycleState {
         SessionLifecycleState::Terminal {
             outcome: SessionTerminalOutcome::Retired {
-                cause: SessionRetirementCause::FirstInputDeadlineExpired,
+                cause: SessionRetirementCause::StartGateDeadlineExpired,
             },
         }
     }
@@ -944,7 +893,7 @@ mod tests {
 
     #[test]
     fn only_an_admission_state_retires() {
-        assert_admits(SessionLifecycleState::Created, first_input_retired());
+        assert_admits(SessionLifecycleState::Created, start_gate_retired());
         assert_admits(dispatched(), retired());
         assert_rejects(SessionLifecycleState::Active, retired());
         assert_rejects(parked(), retired());
@@ -953,7 +902,7 @@ mod tests {
     #[test]
     fn a_retirement_names_the_cause_its_own_state_could_fire() {
         assert_rejects(SessionLifecycleState::Created, retired());
-        assert_rejects(dispatched(), first_input_retired());
+        assert_rejects(dispatched(), start_gate_retired());
     }
 
     #[test]
@@ -983,37 +932,46 @@ mod tests {
     }
 
     #[test]
-    fn every_non_terminal_state_defines_its_deadline() {
+    fn the_admission_states_share_one_deadline() {
         assert_eq!(
             SessionDeadlineKind::for_state(&SessionLifecycleState::Created),
-            Some(SessionDeadlineKind::FirstInput)
+            Some(SessionDeadlineKind::Admission)
         );
         assert_eq!(
             SessionDeadlineKind::for_state(&dispatched()),
-            Some(SessionDeadlineKind::Dispatch)
+            Some(SessionDeadlineKind::Admission)
         );
+    }
+
+    #[test]
+    fn active_and_recovering_share_the_stall_deadline() {
         assert_eq!(
             SessionDeadlineKind::for_state(&SessionLifecycleState::Active),
             Some(SessionDeadlineKind::ActiveStall)
         );
         assert_eq!(
-            SessionDeadlineKind::for_state(&parked()),
-            Some(SessionDeadlineKind::ParkedRenotify)
+            SessionDeadlineKind::for_state(&SessionLifecycleState::Recovering {
+                operation: SessionRecoveryOperation::ModelCall,
+            }),
+            Some(SessionDeadlineKind::ActiveStall)
         );
     }
 
+    /// A state with no deadline is unbounded, not broken: parked, blocked and
+    /// terminal sessions arm none.
     #[test]
-    fn a_terminal_state_defines_no_deadline() {
+    fn the_states_without_a_deadline_arm_none() {
+        assert_eq!(SessionDeadlineKind::for_state(&parked()), None);
         assert_eq!(SessionDeadlineKind::for_state(&stopped()), None);
     }
 
     #[test]
-    fn each_waiting_kind_arms_its_own_deadline() {
+    fn every_waiting_kind_arms_the_one_waiting_deadline() {
         assert_eq!(
             SessionDeadlineKind::for_state(&SessionLifecycleState::Waiting {
                 wait: SessionWait::Approval,
             }),
-            Some(SessionDeadlineKind::WaitingApproval)
+            Some(SessionDeadlineKind::Waiting)
         );
         assert_eq!(
             SessionDeadlineKind::for_state(&SessionLifecycleState::Waiting {
@@ -1021,18 +979,14 @@ mod tests {
                     session: session_id(7),
                 },
             }),
-            Some(SessionDeadlineKind::WaitingChild)
+            Some(SessionDeadlineKind::Waiting)
         );
     }
 
     #[test]
     fn admission_deadlines_retire_and_post_admission_deadlines_park() {
         assert_eq!(
-            SessionDeadlineKind::Dispatch.on_expiry(),
-            SessionDeadlineExpiry::Retire
-        );
-        assert_eq!(
-            SessionDeadlineKind::FirstInput.on_expiry(),
+            SessionDeadlineKind::Admission.on_expiry(),
             SessionDeadlineExpiry::Retire
         );
         assert_eq!(
@@ -1040,12 +994,8 @@ mod tests {
             SessionDeadlineExpiry::Park
         );
         assert_eq!(
-            SessionDeadlineKind::Recovering.on_expiry(),
+            SessionDeadlineKind::Waiting.on_expiry(),
             SessionDeadlineExpiry::Park
-        );
-        assert_eq!(
-            SessionDeadlineKind::ParkedRenotify.on_expiry(),
-            SessionDeadlineExpiry::Renotify
         );
     }
 
@@ -1177,7 +1127,7 @@ mod tests {
     }
 
     #[test]
-    fn supersession_forbids_further_escalation_and_abandonment_owes_cleanup() {
+    fn supersession_forbids_further_escalation_and_every_outcome_releases() {
         assert!(
             SessionTerminalOutcome::Superseded {
                 by: Some(SessionId::from_uuid(uuid::Uuid::from_u128(9))),
@@ -1185,8 +1135,7 @@ mod tests {
             .forbids_further_escalation()
         );
         assert!(!SessionTerminalOutcome::Abandoned.forbids_further_escalation());
-        assert!(SessionTerminalOutcome::Abandoned.records_cleanup_obligations());
-        assert!(!SessionTerminalOutcome::AchievedVerified.records_cleanup_obligations());
         assert!(SessionTerminalOutcome::AchievedVerified.releases_resources());
+        assert!(SessionTerminalOutcome::Abandoned.releases_resources());
     }
 }

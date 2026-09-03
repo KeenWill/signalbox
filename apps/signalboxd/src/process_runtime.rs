@@ -125,7 +125,7 @@ use signalbox_persistence::{
     },
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalRepositoryError},
     goal_turn::GoalTurnCandidates,
-    lifecycle_metrics::{LifecycleGateVerdict, LifecycleNonTerminalState},
+    lifecycle_metrics::LifecycleNonTerminalState,
     model_execution::{ModelCallRepositoryError, PostgresModelCallRepository},
     operator_status::{
         ProcessOperatorStatusConvergenceSeal, ProcessOperatorStatusConvergenceVerdict,
@@ -156,7 +156,7 @@ use signalbox_persistence::{
         ReplaceSessionDefaultsHandlingOutcome, ReplaceSessionDefaultsRejectionOnlyOutcome,
         ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
     },
-    review_workflow::{ReviewWorkflowStore, ReviewWorkflowStoreError},
+    review_workflow::{ReviewTurnLifecycleState, ReviewWorkflowStore, ReviewWorkflowStoreError},
     session_delegation::{
         DelegationOperationRejection, DelegationRequestExecutionState, ProcessDelegationOutcome,
         ProcessDelegationRequestRejection,
@@ -204,8 +204,8 @@ use signalbox_process_protocol::{
     OperatorStatusConvergenceVerdict as WireOperatorStatusConvergenceVerdict,
     OperatorStatusEndMessage, OperatorStatusHeldSlotBlocker as WireOperatorStatusHeldSlotBlocker,
     OperatorStatusHeldSlotMessage, OperatorStatusHeldSlotOrigin,
-    OperatorStatusLifecycleDeadlineViolationMessage, OperatorStatusLifecycleGate,
-    OperatorStatusLifecycleState, OperatorStatusLifecycleWeekMessage,
+    OperatorStatusLifecycleDeadlineViolationMessage, OperatorStatusLifecycleState,
+    OperatorStatusLifecycleWeekMessage,
     OperatorStatusMergeableState as WireOperatorStatusMergeableState, OperatorStatusMessage,
     OperatorStatusPendingStaleReviewClearanceMessage, OperatorStatusPullRequestConvergenceMessage,
     OperatorStatusQueuedObligationMessage,
@@ -243,7 +243,7 @@ use signalbox_process_protocol::{
     recover_bounded_client_protocol_version, recover_bounded_client_request_id,
 };
 use signalbox_tools_sessions::{AwaitSessionPortOutcome, DeliveredChildResult};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use tokio::{
     io::{
         AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt,
@@ -3951,26 +3951,17 @@ where
         Ok(None) => return write_review_invalid(writer, version, request_id).await,
         Err(error) => return write_review_store_error(writer, version, request_id, error).await,
     }
-    let row = match sqlx::query(
-        "SELECT session_id, origin_turn_id FROM accepted_input WHERE accepted_input_id = $1",
-    )
-    .bind(accepted_input_id.into_uuid())
-    .fetch_optional(pool)
-    .await
+    let origin = match store
+        .load_accepted_input_origin(AcceptedInputId::from_uuid(accepted_input_id.into_uuid()))
+        .await
     {
-        Ok(Some(row)) => row,
+        Ok(Some(origin)) => origin,
         Ok(None) => return write_review_invalid(writer, version, request_id).await,
-        Err(_) => return write_review_unavailable(writer, version, request_id, false).await,
+        Err(error) => return write_review_store_error(writer, version, request_id, error).await,
     };
-    let canonical_session: uuid::Uuid = match row.try_get("session_id") {
-        Ok(value) => value,
-        Err(_) => return write_review_internal(writer, version, request_id).await,
-    };
-    let origin_turn: Option<uuid::Uuid> = match row.try_get("origin_turn_id") {
-        Ok(value) => value,
-        Err(_) => return write_review_internal(writer, version, request_id).await,
-    };
-    if canonical_session != session_id.into_uuid() || origin_turn.is_none() {
+    if origin.session() != SessionId::from_uuid(session_id.into_uuid())
+        || origin.origin_turn().is_none()
+    {
         return write_review_invalid(writer, version, request_id).await;
     }
     let reference = ReviewRunRef::new(
@@ -3986,8 +3977,8 @@ where
         SessionId::from_uuid(session_id.into_uuid()),
         ReviewPassAcceptedInputEvidence::new(
             AcceptedInputId::from_uuid(accepted_input_id.into_uuid()),
-            SessionId::from_uuid(canonical_session),
-            origin_turn.map(TurnId::from_uuid),
+            origin.session(),
+            origin.origin_turn(),
         ),
     );
     let Ok(pass) = pass else {
@@ -4300,34 +4291,17 @@ where
     if current_pass.reference().run().run() != run_id {
         return write_review_invalid(writer, version, request_id).await;
     }
-    let row = match sqlx::query(
-        "SELECT session_id, origin_accepted_input_id, state_kind
-           FROM turn_lifecycle
-          WHERE turn_id = $1",
-    )
-    .bind(turn_id.into_uuid())
-    .fetch_optional(pool)
-    .await
-    {
-        Ok(Some(row)) => row,
+    let lifecycle = match store.load_turn_lifecycle(turn_id).await {
+        Ok(Some(lifecycle)) => lifecycle,
         Ok(None) => return write_review_invalid(writer, version, request_id).await,
-        Err(_) => return write_review_unavailable(writer, version, request_id, false).await,
+        Err(error) => return write_review_store_error(writer, version, request_id, error).await,
     };
-    let canonical_session: uuid::Uuid = match row.try_get("session_id") {
-        Ok(value) => value,
-        Err(_) => return write_review_internal(writer, version, request_id).await,
+    let Some(canonical_input) = lifecycle.accepted_input() else {
+        return write_review_internal(writer, version, request_id).await;
     };
-    let canonical_input: uuid::Uuid = match row.try_get("origin_accepted_input_id") {
-        Ok(value) => value,
-        Err(_) => return write_review_internal(writer, version, request_id).await,
-    };
-    let state: String = match row.try_get("state_kind") {
-        Ok(value) => value,
-        Err(_) => return write_review_internal(writer, version, request_id).await,
-    };
-    if canonical_session != current_pass.session().into_uuid()
-        || canonical_input != current_pass.accepted_input().into_uuid()
-        || (state != "active" && state != "terminal")
+    if lifecycle.session() != current_pass.session()
+        || canonical_input != current_pass.accepted_input()
+        || matches!(lifecycle.state(), ReviewTurnLifecycleState::Queued)
     {
         return write_review_invalid(writer, version, request_id).await;
     }
@@ -4343,7 +4317,7 @@ where
     let active_run_state = ReviewRunState::Running {
         active_pass: current_pass.reference(),
     };
-    let (run, pass) = if state == "active"
+    let (run, pass) = if lifecycle.state() == ReviewTurnLifecycleState::Active
         && current_run.state() == ReviewRunState::Queued
         && current_pass.state() == &ReviewPassState::Queued
     {
@@ -5455,101 +5429,51 @@ where
             return Err(ProcessConnectionError::EncodeInvariant);
         }
     };
-    let row = match sqlx::query(
-        "SELECT session_id, origin_accepted_input_id, state_kind,
-                terminal_disposition_kind, terminal_frontier_id
-           FROM turn_lifecycle
-          WHERE turn_id = $1",
-    )
-    .bind(turn.into_uuid())
-    .fetch_optional(pool)
-    .await
-    {
-        Ok(Some(row)) => row,
+    let store = ReviewWorkflowStore::new(pool.clone());
+    let lifecycle = match store.load_turn_lifecycle(turn).await {
+        Ok(Some(lifecycle)) => lifecycle,
         Ok(None) => {
             return write_review_invalid(writer, version, request_id)
                 .await
                 .map(|()| None);
         }
-        Err(_) => {
-            return write_review_unavailable(writer, version, request_id, false)
+        Err(error) => {
+            return write_review_store_error(writer, version, request_id, error)
                 .await
                 .map(|()| None);
         }
     };
-    let canonical_session: uuid::Uuid = match row.try_get("session_id") {
-        Ok(value) => value,
-        Err(_) => {
-            return write_review_internal(writer, version, request_id)
-                .await
-                .map(|()| None);
-        }
+    let Some(canonical_input) = lifecycle.accepted_input() else {
+        return write_review_internal(writer, version, request_id)
+            .await
+            .map(|()| None);
     };
-    let canonical_input: uuid::Uuid = match row.try_get("origin_accepted_input_id") {
-        Ok(value) => value,
-        Err(_) => {
-            return write_review_internal(writer, version, request_id)
-                .await
-                .map(|()| None);
-        }
-    };
-    let state: String = match row.try_get("state_kind") {
-        Ok(value) => value,
-        Err(_) => {
-            return write_review_internal(writer, version, request_id)
-                .await
-                .map(|()| None);
-        }
-    };
-    let disposition: Option<String> = match row.try_get("terminal_disposition_kind") {
-        Ok(value) => value,
-        Err(_) => {
-            return write_review_internal(writer, version, request_id)
-                .await
-                .map(|()| None);
-        }
-    };
-    let frontier: Option<uuid::Uuid> = match row.try_get("terminal_frontier_id") {
-        Ok(value) => value,
-        Err(_) => {
-            return write_review_internal(writer, version, request_id)
-                .await
-                .map(|()| None);
-        }
-    };
+    let frontier = lifecycle.terminal_frontier();
     let expected_frontier = match &next {
         ReviewPassState::Succeeded {
             output_frontier, ..
-        } => Some(output_frontier.into_uuid()),
+        } => Some(*output_frontier),
         _ => frontier,
     };
-    if canonical_session != current_pass.session().into_uuid()
-        || canonical_input != current_pass.accepted_input().into_uuid()
-        || state != "terminal"
+    let ReviewTurnLifecycleState::Terminal(turn_outcome) = lifecycle.state() else {
+        return write_review_invalid(writer, version, request_id)
+            .await
+            .map(|()| None);
+    };
+    if lifecycle.session() != current_pass.session()
+        || canonical_input != current_pass.accepted_input()
         || frontier != expected_frontier
     {
         return write_review_invalid(writer, version, request_id)
             .await
             .map(|()| None);
     }
-    let turn_outcome = match disposition.as_deref() {
-        Some("completed") => ReviewPassTurnOutcome::Completed,
-        Some("failed") => ReviewPassTurnOutcome::Failed,
-        Some("refused") => ReviewPassTurnOutcome::Refused,
-        Some("cancelled") => ReviewPassTurnOutcome::Cancelled,
-        Some("reconciliation_required") => ReviewPassTurnOutcome::ReconciliationRequired,
-        _ => {
-            return write_review_internal(writer, version, request_id)
-                .await
-                .map(|()| None);
-        }
-    };
     let evidence = ReviewPassTurnEvidence::new(
         turn,
         current_pass.session(),
         current_pass.accepted_input(),
         turn_outcome,
-        frontier.map(ContextFrontierId::from_uuid),
+        frontier,
     );
     let policy = current_run.policy();
     let pass_reference = current_pass.reference();
@@ -10466,10 +10390,6 @@ async fn spool_operator_status(
         .counts()
         .ok_or(SnapshotSpoolError::EncodeInvariant)
         .map_err(OperatorStatusSpoolError::Spool)?;
-    let gate = reader
-        .gate_verdict()
-        .ok_or(SnapshotSpoolError::EncodeInvariant)
-        .map_err(OperatorStatusSpoolError::Spool)?;
     write_spool_message(
         &mut file,
         version,
@@ -10488,7 +10408,6 @@ async fn spool_operator_status(
                 lifecycle_deadline_violation_count: CanonicalU64::new(
                     counts.lifecycle_deadline_violations(),
                 ),
-                substrate_v0_gate: wire_lifecycle_gate(gate),
             },
         )))),
     )
@@ -10503,14 +10422,6 @@ async fn spool_operator_status(
         .map_err(SnapshotSpoolError::Io)
         .map_err(OperatorStatusSpoolError::Spool)?;
     Ok(SessionListSpool { file })
-}
-
-const fn wire_lifecycle_gate(verdict: LifecycleGateVerdict) -> OperatorStatusLifecycleGate {
-    match verdict {
-        LifecycleGateVerdict::Met => OperatorStatusLifecycleGate::Met,
-        LifecycleGateVerdict::NotMet => OperatorStatusLifecycleGate::NotMet,
-        LifecycleGateVerdict::Indeterminate => OperatorStatusLifecycleGate::Indeterminate,
-    }
 }
 
 const fn wire_lifecycle_state(state: LifecycleNonTerminalState) -> OperatorStatusLifecycleState {
@@ -10641,7 +10552,6 @@ fn wire_operator_status_item(item: ProcessOperatorStatusItem) -> ServerMessage {
                 ),
                 wall_numerator: CanonicalU64::new(item.wall_rate().numerator()),
                 wall_denominator: CanonicalU64::new(item.wall_rate().denominator()),
-                wall_cohort_matured: item.wall_cohort_matured(),
                 wall_occurrence_count: CanonicalU64::new(item.wall_occurrences()),
                 classified_terminal_turn_count: CanonicalU64::new(
                     item.turn_cause_completeness().numerator(),

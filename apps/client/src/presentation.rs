@@ -17,16 +17,15 @@ use signalbox_process_protocol::{
     MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition, ModelCallState,
     OperatorStatusConvergenceSeal, OperatorStatusConvergenceVerdict, OperatorStatusHeldSlotBlocker,
     OperatorStatusHeldSlotMessage, OperatorStatusHeldSlotOrigin,
-    OperatorStatusLifecycleDeadlineViolationMessage, OperatorStatusLifecycleGate,
-    OperatorStatusLifecycleState, OperatorStatusLifecycleWeekMessage, OperatorStatusMergeableState,
-    OperatorStatusMessage, OperatorStatusPendingStaleReviewClearanceMessage,
-    OperatorStatusPullRequestConvergenceMessage, OperatorStatusQueuedObligationMessage,
-    OperatorStatusReviewDecision, OperatorStatusSingletonScope, ReviewDiffSide,
-    ReviewFindingSnapshot, ReviewFindingStatus, ReviewOrchestrationConcernStatus,
-    ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassKind, ReviewPassLifecycle,
-    ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot,
-    ReviewTargetSubject, ReviewWorkflow, RunnerConnectionHealth, RunnerProjection,
-    RunnerProjectionSelector, RunnerProjectionState, RunnerSandboxProfile,
+    OperatorStatusLifecycleDeadlineViolationMessage, OperatorStatusLifecycleState,
+    OperatorStatusLifecycleWeekMessage, OperatorStatusMergeableState, OperatorStatusMessage,
+    OperatorStatusPendingStaleReviewClearanceMessage, OperatorStatusPullRequestConvergenceMessage,
+    OperatorStatusQueuedObligationMessage, OperatorStatusReviewDecision,
+    OperatorStatusSingletonScope, ReviewDiffSide, ReviewFindingSnapshot, ReviewFindingStatus,
+    ReviewOrchestrationConcernStatus, ReviewOrchestrationSnapshot, ReviewOrchestrationState,
+    ReviewPassKind, ReviewPassLifecycle, ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity,
+    ReviewTargetSnapshot, ReviewTargetSubject, ReviewWorkflow, RunnerConnectionHealth,
+    RunnerProjection, RunnerProjectionSelector, RunnerProjectionState, RunnerSandboxProfile,
     RunnerStateTransitionState, ServerMessage, SessionClosureOutcome, SessionEvent,
     ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState, ToolDecision,
     TranscriptEntry, TranscriptTextEntry, TurnState, UsageProvenance, UserInputContent,
@@ -80,7 +79,6 @@ pub(crate) struct OperatorStatusPresentationCounts {
     pub(crate) pending_stale_review_clearances: u64,
     pub(crate) lifecycle_weeks: u64,
     pub(crate) lifecycle_deadline_violations: u64,
-    pub(crate) substrate_v0_gate: OperatorStatusLifecycleGate,
 }
 
 pub(crate) enum BlobUploadPresentation {
@@ -1144,7 +1142,6 @@ impl<'a> Output<'a> {
             pending_stale_review_clearances,
             lifecycle_weeks,
             lifecycle_deadline_violations,
-            substrate_v0_gate,
         } = counts;
         writeln!(
             self.stdout,
@@ -1152,9 +1149,7 @@ impl<'a> Output<'a> {
              pull_request_convergences={pull_request_convergences} \
              pending_stale_review_clearances={pending_stale_review_clearances} \
              lifecycle_weeks={lifecycle_weeks} \
-             nonterminal_past_deadline={lifecycle_deadline_violations} \
-             substrate_v0_gate={}",
-            operator_status_gate_label(substrate_v0_gate),
+             nonterminal_past_deadline={lifecycle_deadline_violations}"
         )
     }
 
@@ -1365,7 +1360,6 @@ impl<'a> Output<'a> {
                     finish_given_overflow_numerator,
                     wall_numerator,
                     wall_denominator,
-                    wall_cohort_matured,
                     wall_occurrence_count,
                     classified_terminal_turn_count,
                     terminal_turn_count,
@@ -1376,31 +1370,37 @@ impl<'a> Output<'a> {
                     self.stdout,
                     "lifecycle_week week={week_start_date} completion_failure={} \
                      failed_unknown={} overflow={} finish_given_overflow={} wall={} \
-                     wall_matured={wall_cohort_matured} wall_occurrences={} \
+                     wall_occurrences={} \
                      turn_cause_completeness={} model_call_cause_completeness={}",
-                    rate_label(
-                        completion_failure_numerator.value(),
-                        completion_failure_denominator.value()
-                    ),
-                    rate_label(
-                        failed_unknown_count.value(),
-                        completion_failure_denominator.value()
-                    ),
-                    rate_label(overflow_numerator.value(), overflow_denominator.value()),
-                    rate_label(
-                        finish_given_overflow_numerator.value(),
-                        overflow_numerator.value()
-                    ),
-                    rate_label(wall_numerator.value(), wall_denominator.value()),
+                    rate_label(RateCounts {
+                        numerator: completion_failure_numerator.value(),
+                        denominator: completion_failure_denominator.value(),
+                    }),
+                    rate_label(RateCounts {
+                        numerator: failed_unknown_count.value(),
+                        denominator: completion_failure_denominator.value(),
+                    }),
+                    rate_label(RateCounts {
+                        numerator: overflow_numerator.value(),
+                        denominator: overflow_denominator.value(),
+                    }),
+                    rate_label(RateCounts {
+                        numerator: finish_given_overflow_numerator.value(),
+                        denominator: overflow_numerator.value(),
+                    }),
+                    rate_label(RateCounts {
+                        numerator: wall_numerator.value(),
+                        denominator: wall_denominator.value(),
+                    }),
                     wall_occurrence_count.value(),
-                    rate_label(
-                        classified_terminal_turn_count.value(),
-                        terminal_turn_count.value()
-                    ),
-                    rate_label(
-                        classified_known_failed_call_count.value(),
-                        known_failed_call_count.value()
-                    ),
+                    rate_label(RateCounts {
+                        numerator: classified_terminal_turn_count.value(),
+                        denominator: terminal_turn_count.value(),
+                    }),
+                    rate_label(RateCounts {
+                        numerator: classified_known_failed_call_count.value(),
+                        denominator: known_failed_call_count.value(),
+                    }),
                 )?;
                 Ok(())
             }
@@ -3032,14 +3032,6 @@ const fn operator_status_seal_label(seal: OperatorStatusConvergenceSeal) -> &'st
     }
 }
 
-const fn operator_status_gate_label(gate: OperatorStatusLifecycleGate) -> &'static str {
-    match gate {
-        OperatorStatusLifecycleGate::Met => "met",
-        OperatorStatusLifecycleGate::NotMet => "not_met",
-        OperatorStatusLifecycleGate::Indeterminate => "indeterminate",
-    }
-}
-
 const fn operator_status_lifecycle_state_label(
     state: OperatorStatusLifecycleState,
 ) -> &'static str {
@@ -3054,10 +3046,21 @@ const fn operator_status_lifecycle_state_label(
     }
 }
 
+/// One metric's two counts: how much of a population the metric names.
+#[derive(Clone, Copy)]
+struct RateCounts {
+    numerator: u64,
+    denominator: u64,
+}
+
 /// Renders one metric as its exact counts beside its parts-per-million rate.
 ///
 /// An empty population prints no rate rather than a zero.
-fn rate_label(numerator: u64, denominator: u64) -> String {
+fn rate_label(counts: RateCounts) -> String {
+    let RateCounts {
+        numerator,
+        denominator,
+    } = counts;
     if denominator == 0 {
         return format!("{numerator}/0");
     }
@@ -3792,9 +3795,8 @@ mod tests {
         ModelCallDollarCost, ModelCallState, ModelCallTokenUsage, OperatorStatusConvergenceSeal,
         OperatorStatusConvergenceVerdict, OperatorStatusHeldSlotBlocker,
         OperatorStatusHeldSlotMessage, OperatorStatusHeldSlotOrigin,
-        OperatorStatusLifecycleDeadlineViolationMessage, OperatorStatusLifecycleGate,
-        OperatorStatusLifecycleState, OperatorStatusLifecycleWeekMessage,
-        OperatorStatusMergeableState, OperatorStatusMessage,
+        OperatorStatusLifecycleDeadlineViolationMessage, OperatorStatusLifecycleState,
+        OperatorStatusLifecycleWeekMessage, OperatorStatusMergeableState, OperatorStatusMessage,
         OperatorStatusPendingStaleReviewClearanceMessage,
         OperatorStatusPullRequestConvergenceMessage, OperatorStatusQueuedObligationMessage,
         OperatorStatusReviewDecision, OperatorStatusSingletonScope, ReviewDiffSide,
@@ -3948,7 +3950,6 @@ mod tests {
                     pending_stale_review_clearances: 1,
                     lifecycle_weeks: 1,
                     lifecycle_deadline_violations: 1,
-                    substrate_v0_gate: OperatorStatusLifecycleGate::NotMet,
                 })
                 .expect("in-memory output cannot fail");
             output
@@ -4049,7 +4050,6 @@ mod tests {
                             finish_given_overflow_numerator: CanonicalU64::new(4),
                             wall_numerator: CanonicalU64::new(0),
                             wall_denominator: CanonicalU64::new(38),
-                            wall_cohort_matured: true,
                             wall_occurrence_count: CanonicalU64::new(0),
                             classified_terminal_turn_count: CanonicalU64::new(980),
                             terminal_turn_count: CanonicalU64::new(985),
@@ -4078,12 +4078,12 @@ mod tests {
 
         let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
         expect![[r#"
-            status held_slots=1 queued_obligations=1 pull_request_convergences=1 pending_stale_review_clearances=1 lifecycle_weeks=1 nonterminal_past_deadline=1 substrate_v0_gate=not_met
+            status held_slots=1 queued_obligations=1 pull_request_convergences=1 pending_stale_review_clearances=1 lifecycle_weeks=1 nonterminal_past_deadline=1
             held repository=example/repo origin=pull_request#41 rule=review@1 singleton=pull_request:example/repo#41 held=1h1m1s blockers=pursuing_goal sessions=00000000-0000-0000-0000-000000000002 dispatch=00000000-0000-0000-0000-000000000001
             queued repository=example/repo rule=review@1 singleton=rule waiting=1m5s matches=3 ready=false occupying=none cooldown=5s first_event=00000000-0000-0000-0000-000000000004 latest_event=00000000-0000-0000-0000-000000000005 obligation=00000000-0000-0000-0000-000000000003
             convergence repository=example/repo pr=41 verdict=merge_ready seal=merge_ready unresolved_threads=0 gating_checks=2 non_green_count=0 non_green= mergeable=mergeable review=approved assessed_ago=9s head=1111111111111111111111111111111111111111 base=main@2222222222222222222222222222222222222222
             stale_review_clearance repository=example/repo pr=41 reviewer=reviewer pending=8s review=PRR_node reviewed_head=3333333333333333333333333333333333333333 current_head=1111111111111111111111111111111111111111
-            lifecycle_week week=2026-08-31 completion_failure=3/40@75000ppm failed_unknown=1/40@25000ppm overflow=5/44@113636ppm finish_given_overflow=4/5@800000ppm wall=0/38@0ppm wall_matured=true wall_occurrences=0 turn_cause_completeness=980/985@994923ppm model_call_cause_completeness=91/95@957894ppm
+            lifecycle_week week=2026-08-31 completion_failure=3/40@75000ppm failed_unknown=1/40@25000ppm overflow=5/44@113636ppm finish_given_overflow=4/5@800000ppm wall=0/38@0ppm wall_occurrences=0 turn_cause_completeness=980/985@994923ppm model_call_cause_completeness=91/95@957894ppm
             nonterminal_past_deadline session=00000000-0000-0000-0000-000000000006 state=parked deadline=armed expired=1m30s
             model_usage=omitted reason=no_cheap_status_aggregate
         "#]]

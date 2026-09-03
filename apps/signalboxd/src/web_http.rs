@@ -38,16 +38,16 @@ use futures_util::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use signalbox_application::{
     AttentionAction, AttentionActivityKind, AttentionBlockedReason, AttentionChanges,
-    AttentionContinuation, AttentionGoalBlock, AttentionQuery, AttentionSnapshot, AttentionSort,
-    AttentionState, AttentionSummary, SearchContentClass, SearchCursor, SearchPageLimit,
-    SearchQuery, SearchResultSource, SearchScope, SearchStrategy, SearchText,
-    SessionLiveActiveState, SessionLiveReconciliation, SessionLiveRunnerConnectionHealth,
-    SessionLiveRunnerState, SessionLiveSnapshot, SessionTimelineDescriptor,
-    SessionTimelineDetailBody, SessionTimelineDetailPage, SessionTimelineEventKind,
-    SessionTimelineWindow, TimelineAddress, TimelineBodyContinuation, TimelineBodyField,
-    TimelineContinuation, TimelineDetailContinuation, TimelineDetailCursor, TimelineDetailLimits,
-    TimelineModelCallDisposition, TimelineModelCallState, TimelineTextExcerpt,
-    TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
+    AttentionContinuation, AttentionGoalBlock, AttentionLifecycleState, AttentionQuery,
+    AttentionSnapshot, AttentionSort, AttentionState, AttentionSummary, SearchContentClass,
+    SearchCursor, SearchPageLimit, SearchQuery, SearchResultSource, SearchScope, SearchStrategy,
+    SearchText, SessionLiveActiveState, SessionLiveReconciliation,
+    SessionLiveRunnerConnectionHealth, SessionLiveRunnerState, SessionLiveSnapshot,
+    SessionTimelineDescriptor, SessionTimelineDetailBody, SessionTimelineDetailPage,
+    SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress, TimelineBodyContinuation,
+    TimelineBodyField, TimelineContinuation, TimelineDetailContinuation, TimelineDetailCursor,
+    TimelineDetailLimits, TimelineModelCallDisposition, TimelineModelCallState,
+    TimelineTextExcerpt, TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
     UsageAggregateCompleteness, UsageAggregateGroup, UsageAggregateTokenAxes,
     UsageCacheNormalization, UsageCallCursor, UsageCallEvidence, UsageCallKind, UsageCallOrder,
     UsageCallPageLimit, UsageCallQuery, UsageInputTokenSemantics, UsageProvenance, UsageQuery,
@@ -78,25 +78,25 @@ use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES, WebApiError,
     WebApiErrorKind, WebApiErrorResponse, WebAttentionAction, WebAttentionActivity,
     WebAttentionActivityKind, WebAttentionBlockedReason, WebAttentionGoalBlock,
-    WebAttentionJudgeFacts, WebAttentionSnapshot, WebAttentionState, WebAttentionStreamEvent,
-    WebAttentionSummary, WebBlobAvailableView, WebBlobDerivation, WebBlobDerivationProducer,
-    WebBlobDescriptor, WebBlobId, WebBlobViewKind, WebContractBootstrap, WebContractExample,
-    WebDollarAmount, WebLiveResourceId, WebNullableU64, WebNullableU128, WebPositiveU64,
-    WebProviderModelCallFailureCause, WebSearchContentClass, WebSearchCursor, WebSearchHighlight,
-    WebSearchPage, WebSearchProjectionId, WebSearchResult, WebSearchResultSource,
-    WebSessionCatalogActivity, WebSessionCatalogContinuation, WebSessionCatalogSnapshot,
-    WebSessionCatalogSort, WebSessionCatalogSummary, WebSessionId, WebSessionLiveActiveState,
-    WebSessionLiveActiveTurn, WebSessionLiveReconciliation, WebSessionLiveRunner,
-    WebSessionLiveRunnerConnectionHealth, WebSessionLiveSnapshot, WebSessionLiveStreamEvent,
-    WebSessionTimelineDescriptor, WebSessionTimelineDetail, WebSessionTimelineDetailBody,
-    WebSessionTimelineDetailPage, WebSessionTimelineEventKind, WebSessionTimelineItem,
-    WebSessionTimelineSizeFacts, WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
-    WebTimelineBlobReference, WebTimelineBodyContinuation, WebTimelineBodyField,
-    WebTimelineDetailContinuation, WebTimelineEventSequence, WebTimelineModelCallDisposition,
-    WebTimelineModelCallState, WebTimelineModelUsage, WebTimelineTextExcerpt,
-    WebTimelineTurnLifecycleKind, WebTurnId, WebU64, WebUsageAggregateGroup,
-    WebUsageAggregateTokenAxes, WebUsageCall, WebUsageCallCount, WebUsageCallCursor,
-    WebUsageCallKind, WebUsageCallPage, WebUsageCost, WebUsageCostLabel,
+    WebAttentionJudgeFacts, WebAttentionLifecycleState, WebAttentionSnapshot, WebAttentionState,
+    WebAttentionStreamEvent, WebAttentionSummary, WebBlobAvailableView, WebBlobDerivation,
+    WebBlobDerivationProducer, WebBlobDescriptor, WebBlobId, WebBlobViewKind, WebContractBootstrap,
+    WebContractExample, WebDollarAmount, WebLiveResourceId, WebNullableU64, WebNullableU128,
+    WebPositiveU64, WebProviderModelCallFailureCause, WebSearchContentClass, WebSearchCursor,
+    WebSearchHighlight, WebSearchPage, WebSearchProjectionId, WebSearchResult,
+    WebSearchResultSource, WebSessionCatalogActivity, WebSessionCatalogContinuation,
+    WebSessionCatalogSnapshot, WebSessionCatalogSort, WebSessionCatalogSummary, WebSessionId,
+    WebSessionLiveActiveState, WebSessionLiveActiveTurn, WebSessionLiveReconciliation,
+    WebSessionLiveRunner, WebSessionLiveRunnerConnectionHealth, WebSessionLiveSnapshot,
+    WebSessionLiveStreamEvent, WebSessionTimelineDescriptor, WebSessionTimelineDetail,
+    WebSessionTimelineDetailBody, WebSessionTimelineDetailPage, WebSessionTimelineEventKind,
+    WebSessionTimelineItem, WebSessionTimelineSizeFacts, WebSessionTimelineWindow,
+    WebSessionWorkFacts, WebTimelineAddress, WebTimelineBlobReference, WebTimelineBodyContinuation,
+    WebTimelineBodyField, WebTimelineDetailContinuation, WebTimelineEventSequence,
+    WebTimelineModelCallDisposition, WebTimelineModelCallState, WebTimelineModelUsage,
+    WebTimelineTextExcerpt, WebTimelineTurnLifecycleKind, WebTurnId, WebU64,
+    WebUsageAggregateGroup, WebUsageAggregateTokenAxes, WebUsageCall, WebUsageCallCount,
+    WebUsageCallCursor, WebUsageCallKind, WebUsageCallPage, WebUsageCost, WebUsageCostLabel,
     WebUsageCostUnavailableReason, WebUsageInputSemantics, WebUsageProvenance, WebUsageRateVersion,
     WebUsageSummary, WebUsageTimestampMicros, WebUsageTokenAxes, WebUsageTokenCoverage, WebUuid,
 };
@@ -1594,6 +1594,7 @@ pub(crate) fn attention_summary_dto(summary: AttentionSummary) -> Result<WebAtte
             .current_turn
             .map(|turn| turn.into_uuid().to_string()),
         state: web_attention_state(summary.state),
+        lifecycle_state: web_attention_lifecycle_state(summary.lifecycle_state),
         action: summary.action.map(web_attention_action),
         goal_block,
         judge: WebAttentionJudgeFacts {
@@ -1730,6 +1731,21 @@ fn attention_goal_block_dto(
     .transpose()
 }
 
+const fn web_attention_lifecycle_state(
+    state: AttentionLifecycleState,
+) -> WebAttentionLifecycleState {
+    match state {
+        AttentionLifecycleState::Created => WebAttentionLifecycleState::Created,
+        AttentionLifecycleState::Dispatched => WebAttentionLifecycleState::Dispatched,
+        AttentionLifecycleState::Active => WebAttentionLifecycleState::Active,
+        AttentionLifecycleState::Waiting => WebAttentionLifecycleState::Waiting,
+        AttentionLifecycleState::Recovering => WebAttentionLifecycleState::Recovering,
+        AttentionLifecycleState::Blocked => WebAttentionLifecycleState::Blocked,
+        AttentionLifecycleState::Parked => WebAttentionLifecycleState::Parked,
+        AttentionLifecycleState::Terminal => WebAttentionLifecycleState::Terminal,
+    }
+}
+
 const fn web_attention_state(state: AttentionState) -> WebAttentionState {
     match state {
         AttentionState::Active => WebAttentionState::Active,
@@ -1740,6 +1756,7 @@ const fn web_attention_state(state: AttentionState) -> WebAttentionState {
         AttentionState::AwaitingToolRecovery => WebAttentionState::AwaitingToolRecovery,
         AttentionState::AwaitingReconciliation => WebAttentionState::AwaitingReconciliation,
         AttentionState::RunnerLost => WebAttentionState::RunnerLost,
+        AttentionState::Parked => WebAttentionState::Parked,
         AttentionState::Idle => WebAttentionState::Idle,
     }
 }
@@ -4821,12 +4838,13 @@ mod tests {
     use signalbox_application::{
         AttentionAction, AttentionActivity, AttentionActivityKind, AttentionBlockedReason,
         AttentionContinuation, AttentionCursor, AttentionGoalBlock, AttentionJudgeFacts,
-        AttentionSort, AttentionState, AttentionSummary, TimelineAddress, TimelineBodyField,
-        TimelineDetailCursor, UsageAggregateGroup, UsageAggregateKey, UsageAggregateTokenAxes,
-        UsageCacheNormalization, UsageCallKind, UsageCredentialProfileLabel,
-        UsageInputTokenSemantics, UsageProvenance, UsageTokenAxes, UsageTokenCoverage,
-        UsageTokenPresence, max_attention_change_items, max_attention_goal_summary_characters,
-        max_attention_snapshot_items, max_attention_title_characters,
+        AttentionLifecycleState, AttentionSort, AttentionState, AttentionSummary, TimelineAddress,
+        TimelineBodyField, TimelineDetailCursor, UsageAggregateGroup, UsageAggregateKey,
+        UsageAggregateTokenAxes, UsageCacheNormalization, UsageCallKind,
+        UsageCredentialProfileLabel, UsageInputTokenSemantics, UsageProvenance, UsageTokenAxes,
+        UsageTokenCoverage, UsageTokenPresence, max_attention_change_items,
+        max_attention_goal_summary_characters, max_attention_snapshot_items,
+        max_attention_title_characters,
     };
     use signalbox_domain::{ProviderModelIdentity, ResolvedProviderTarget, SessionId, TurnId};
     use signalbox_persistence::attention::AttentionPage;
@@ -5852,6 +5870,7 @@ mod tests {
             active_turn_count: 0,
             queued_turn_count: 0,
             state: AttentionState::Idle,
+            lifecycle_state: AttentionLifecycleState::Created,
             action: None,
             goal_block: None,
             judge: AttentionJudgeFacts {
@@ -5889,6 +5908,7 @@ mod tests {
             active_turn_count: 0,
             queued_turn_count: 0,
             state: AttentionState::Idle,
+            lifecycle_state: AttentionLifecycleState::Created,
             action: None,
             goal_block: None,
             judge: AttentionJudgeFacts {
@@ -5931,6 +5951,7 @@ mod tests {
             active_turn_count: 0,
             queued_turn_count: 0,
             state: AttentionState::Idle,
+            lifecycle_state: AttentionLifecycleState::Created,
             action: None,
             goal_block: None,
             judge: AttentionJudgeFacts {
@@ -6007,6 +6028,7 @@ mod tests {
             active_turn_count: u64::MAX,
             queued_turn_count: u64::MAX,
             state: AttentionState::Blocked,
+            lifecycle_state: AttentionLifecycleState::Blocked,
             action: Some(AttentionAction::ProvideGoalNeed),
             goal_block: Some(AttentionGoalBlock {
                 generation: u64::MAX,

@@ -33,19 +33,21 @@ ALTER TABLE durable_command
 
 DROP FUNCTION IF EXISTS project_session_lifecycle(uuid, boolean);
 DROP FUNCTION IF EXISTS project_session_lifecycle(uuid, boolean, boolean);
+DROP FUNCTION IF EXISTS project_session_lifecycle(uuid, boolean, boolean, boolean);
+DROP FUNCTION IF EXISTS project_session_lifecycle(uuid, boolean, text, text);
 
 CREATE FUNCTION project_session_lifecycle(
     subject uuid,
     lifts_park boolean,
     issuer_kind text DEFAULT NULL,
-    issuer_module text DEFAULT NULL
+    issuer_module text DEFAULT NULL,
+    turn_progressed boolean DEFAULT false
 ) RETURNS void
     LANGUAGE plpgsql
     AS $$
 DECLARE
     held session_lifecycle%ROWTYPE;
     live_phase text;
-    live_turn uuid;
     goal_turn uuid;
     goal_request uuid;
     actor text;
@@ -87,8 +89,8 @@ BEGIN
         RETURN;
     END IF;
 
-    SELECT live.active_phase_kind, live.turn_id, live.child_wait_request_id
-      INTO live_phase, live_turn, live_child_request
+    SELECT live.active_phase_kind, live.child_wait_request_id
+      INTO live_phase, live_child_request
       FROM turn_lifecycle AS live
      WHERE live.session_id = subject
        AND live.state_kind = 'active'
@@ -100,8 +102,7 @@ BEGIN
     -- outranks it, and this runs on every turn write.
     IF live_phase IS NULL THEN
         SELECT event.event_kind, event.blocked_reason, event.generation,
-               COALESCE(event.model_turn_id, event.scheduler_turn_id),
-               event.model_tool_request_id
+               event.model_turn_id, event.model_tool_request_id
           INTO goal_kind, goal_reason, goal_generation,
                goal_turn, goal_request
           FROM goal_event AS event
@@ -178,21 +179,37 @@ BEGIN
        AND held.blocked_reason IS NOT DISTINCT FROM next_blocked_reason
        AND held.blocked_cycle IS NOT DISTINCT FROM next_blocked_cycle
     THEN
+        -- The state did not move, but a turn transitioned under it -- one
+        -- terminalized, or a successor activated -- and that is the progress
+        -- the stall deadline measures. Queueing another turn is admission, not
+        -- progress, and re-arming on it would let a stalled session postpone
+        -- its own deadline. Only the deadline re-arms: the session entered
+        -- `active` when its first turn started, and `state_entered_at` says so.
+        IF turn_progressed AND held.state_kind = 'active' AND held.owned THEN
+            UPDATE session_deadline
+               SET armed_at = statement_timestamp(),
+                   expires_at = NULL
+             WHERE session_id = subject
+               AND deadline_kind = 'active_stall';
+        END IF;
         RETURN;
     END IF;
 
     -- A projected transition is core machinery, and the live turn is the
-    -- agency behind it; the creating actor is not. A write a command authored
-    -- names its issuer, and the transition is that issuer's: the operator's
-    -- lift, a module's stop. Daemon core's own commands stay core machinery.
+    -- agency behind it; the creating actor is not.
+    -- The identity recorded here is model or tool agency and nothing else. A
+    -- turn activating, a phase moving, a scheduler-authored block: those are
+    -- daemon machinery that happens to concern a turn, and the reader takes a
+    -- stored turn to mean the model acted. Only a model-declared goal event
+    -- carries one. A goal event the user authored -- a lift, a stop, a
+    -- supersede, a commission -- is the operator's, not daemon core's.
     IF issuer_kind IS NOT NULL AND issuer_kind <> 'core' THEN
         actor := issuer_kind;
         goal_turn := NULL;
         goal_request := NULL;
-        live_turn := NULL;
     ELSE
         actor := 'core';
-        IF live_turn IS NOT NULL THEN
+        IF live_phase IS NOT NULL THEN
             goal_turn := NULL;
             goal_request := NULL;
         END IF;
@@ -203,9 +220,9 @@ BEGIN
            state_entered_at = statement_timestamp(),
            actor_kind = actor,
            actor_module = CASE WHEN actor = 'module' THEN issuer_module END,
-           actor_turn_id = COALESCE(live_turn, goal_turn),
+           actor_turn_id = goal_turn,
            actor_tool_request_id = CASE
-               WHEN COALESCE(live_turn, goal_turn) IS NULL THEN goal_request
+               WHEN goal_turn IS NULL THEN goal_request
                ELSE NULL
            END,
            waiting_kind = next_waiting_kind,
@@ -219,6 +236,21 @@ BEGIN
            parked_since = NULL,
            parked_standing_cause_kind = NULL
      WHERE session_id = subject;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION project_session_lifecycle_from_turn() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    PERFORM project_session_lifecycle(
+        NEW.session_id,
+        false,
+        NULL,
+        NULL,
+        TG_OP = 'UPDATE'
+    );
+    RETURN NULL;
 END;
 $$;
 
@@ -523,42 +555,6 @@ ALTER TABLE create_session_command
 -- transaction records terminal with that actor.
 --
 
-ALTER TABLE session_lifecycle
-    ADD COLUMN start_gate_held boolean NOT NULL,
-    ADD COLUMN finish_condition_kind text,
-    ADD COLUMN finish_condition text,
-    ADD COLUMN pending_terminal_actor_kind text,
-    ADD COLUMN pending_terminal_actor_module text,
-    ADD COLUMN pending_terminal_actor_turn_id uuid,
-    ADD COLUMN pending_terminal_actor_tool_request_id uuid;
-
-ALTER TABLE session_lifecycle
-    ADD CONSTRAINT session_lifecycle_finish_condition_shape CHECK (
-        ((finish_condition_kind IS NULL)
-            OR (finish_condition_kind = ANY (ARRAY['external_gate'::text, 'declared'::text])))
-        AND ((finish_condition_kind = 'declared'::text) = (finish_condition IS NOT NULL))
-        AND ((finish_condition IS NULL)
-             OR ((octet_length(finish_condition) >= 1)
-                 AND (octet_length(finish_condition) <= 1048576)))
-    ),
-    ADD CONSTRAINT session_lifecycle_pending_terminal_actor_shape CHECK (
-        ((pending_terminal_outcome_kind IS NULL) = (pending_terminal_actor_kind IS NULL))
-        AND ((pending_terminal_actor_kind IS NULL) OR (pending_terminal_actor_kind = ANY (ARRAY[
-            'core'::text, 'operator'::text, 'module'::text, 'watchdog'::text
-        ])))
-        AND ((pending_terminal_actor_kind = 'module'::text)
-             = (pending_terminal_actor_module IS NOT NULL))
-        AND ((pending_terminal_actor_module IS NULL)
-             OR (pending_terminal_actor_module = ANY (ARRAY[
-                 'repo_watch'::text, 'commissioned_dispatch'::text
-             ])))
-        AND ((pending_terminal_actor_turn_id IS NULL)
-             OR (pending_terminal_actor_tool_request_id IS NULL))
-        AND ((pending_terminal_actor_kind = 'core'::text)
-             OR ((pending_terminal_actor_turn_id IS NULL)
-                 AND (pending_terminal_actor_tool_request_id IS NULL)))
-    );
-
 ALTER TABLE ONLY session_lifecycle
     ADD CONSTRAINT session_lifecycle_pending_actor_turn_fk
         FOREIGN KEY (pending_terminal_actor_turn_id, session_id)
@@ -730,14 +726,25 @@ ALTER TABLE goal_event
         AND ((closure_actor_kind IS NULL)
              OR ((closure_actor_kind = 'module'::text)
                  = (closure_actor_module IS NOT NULL)))
+        -- Column by column: requiring only that the pair is absent together
+        -- lets an ordinary event carry one of them, which replay ignores.
         AND ((event_kind = 'session_closed'::text)
              OR ((session_outcome_kind IS NULL)
                  AND (closure_actor_kind IS NULL)
-                 AND (closure_actor_module IS NULL)))
+                 AND (closure_actor_module IS NULL)
+                 AND (closure_actor_turn_id IS NULL)
+                 AND (closure_actor_tool_request_id IS NULL)))
         AND ((closure_actor_module IS NULL) OR (closure_actor_module = ANY (ARRAY[
             'repo_watch'::text,
             'commissioned_dispatch'::text
         ])))
+        -- A core closure keeps at most one acting identity, and no other
+        -- classification keeps any: the reader rejects the combinations this
+        -- would otherwise let commit, leaving the goal unreadable.
+        AND ((closure_actor_turn_id IS NULL) OR (closure_actor_tool_request_id IS NULL))
+        AND ((closure_actor_kind = 'core'::text)
+             OR ((closure_actor_turn_id IS NULL)
+                 AND (closure_actor_tool_request_id IS NULL)))
     );
 
 --
@@ -901,6 +908,7 @@ ALTER TABLE session_lifecycle
                     'abandoned'::text
                 ]) AND terminal_cause_kind IS NULL)
             OR (terminal_outcome_kind = 'failed_retryable'::text
+                AND terminal_cause_kind IS NOT NULL
                 AND terminal_cause_kind = ANY (ARRAY[
                     'provider_transient'::text,
                     'provider_quota_exhausted'::text,
@@ -909,6 +917,7 @@ ALTER TABLE session_lifecycle
                     'retry_budget_exhausted'::text
                 ]))
             OR (terminal_outcome_kind = 'failed_structural'::text
+                AND terminal_cause_kind IS NOT NULL
                 AND terminal_cause_kind = ANY (ARRAY[
                     'context_compaction_wall'::text,
                     'context_headroom_exhausted'::text,
@@ -916,10 +925,10 @@ ALTER TABLE session_lifecycle
                     'moderation_block'::text
                 ]))
             OR (terminal_outcome_kind = 'retired'::text
+                AND terminal_cause_kind IS NOT NULL
                 AND terminal_cause_kind = ANY (ARRAY[
                     'dispatch_deadline_expired'::text,
                     'start_gate_deadline_expired'::text,
-                    'first_input_deadline_expired'::text,
                     'stranded_queued_turn'::text
                 ]))
         )
@@ -930,7 +939,32 @@ ALTER TABLE session_lifecycle
         AND ((pending_terminal_outcome_kind IS NOT NULL)
              OR ((pending_terminal_cause_kind IS NULL)
                  AND (pending_terminal_stop_sticky IS NULL)
-                 AND (pending_terminal_superseded_by IS NULL)))
+                 AND (pending_terminal_superseded_by IS NULL)
+                 AND (pending_terminal_actor_kind IS NULL)))
+        -- A committed handoff always names its actor, and the actor's shape is
+        -- the state actor's: one module name, or one acting identity, never
+        -- both and never a bare classification that owes one.
+        AND ((pending_terminal_outcome_kind IS NULL)
+             = (pending_terminal_actor_kind IS NULL))
+        AND ((pending_terminal_actor_kind IS NULL)
+             OR (pending_terminal_actor_kind = ANY (ARRAY[
+                    'core'::text,
+                    'operator'::text,
+                    'module'::text,
+                    'watchdog'::text
+                ])))
+        AND ((pending_terminal_actor_kind IS NOT DISTINCT FROM 'module'::text)
+             = (pending_terminal_actor_module IS NOT NULL))
+        AND ((pending_terminal_actor_module IS NULL)
+             OR (pending_terminal_actor_module = ANY (ARRAY[
+                    'repo_watch'::text,
+                    'commissioned_dispatch'::text
+                ])))
+        AND ((pending_terminal_actor_turn_id IS NULL)
+             OR (pending_terminal_actor_tool_request_id IS NULL))
+        AND ((pending_terminal_actor_kind IS NOT DISTINCT FROM 'core'::text)
+             OR ((pending_terminal_actor_turn_id IS NULL)
+                 AND (pending_terminal_actor_tool_request_id IS NULL)))
         AND ((pending_terminal_outcome_kind IS NULL)
              OR (pending_terminal_outcome_kind = ANY (ARRAY[
                     'achieved_verified'::text,
@@ -966,6 +1000,7 @@ ALTER TABLE session_lifecycle
                     'abandoned'::text
                 ]) AND pending_terminal_cause_kind IS NULL)
             OR (pending_terminal_outcome_kind = 'failed_retryable'::text
+                AND pending_terminal_cause_kind IS NOT NULL
                 AND pending_terminal_cause_kind = ANY (ARRAY[
                     'provider_transient'::text,
                     'provider_quota_exhausted'::text,
@@ -974,6 +1009,7 @@ ALTER TABLE session_lifecycle
                     'retry_budget_exhausted'::text
                 ]))
             OR (pending_terminal_outcome_kind = 'failed_structural'::text
+                AND pending_terminal_cause_kind IS NOT NULL
                 AND pending_terminal_cause_kind = ANY (ARRAY[
                     'context_compaction_wall'::text,
                     'context_headroom_exhausted'::text,
@@ -981,10 +1017,10 @@ ALTER TABLE session_lifecycle
                     'moderation_block'::text
                 ]))
             OR (pending_terminal_outcome_kind = 'retired'::text
+                AND pending_terminal_cause_kind IS NOT NULL
                 AND pending_terminal_cause_kind = ANY (ARRAY[
                     'dispatch_deadline_expired'::text,
                     'start_gate_deadline_expired'::text,
-                    'first_input_deadline_expired'::text,
                     'stranded_queued_turn'::text
                 ]))
         )
@@ -1018,12 +1054,16 @@ CREATE OR REPLACE VIEW session_lifecycle_weekly_metric AS
 WITH wall_occurrence AS (
     -- F9's immediate half: a wall belongs to the week it happened in. §2 parks
     -- a session on a wall and suspends its turn, so the park is the evidence
-    -- and `parked_since` the instant; terminalization carries both forward. A
-    -- turn cause is the evidence for a wall that ended a turn, at that row's
-    -- write week. One session's wall is one occurrence, at the earlier of the
-    -- two.
+    -- and `parked_since` the instant; terminalization carries both forward.
+    -- The park therefore dates the occurrence wherever it exists, and a later
+    -- terminal turn naming the same wall never moves it. A turn cause is the
+    -- next evidence, for a wall that ended a turn without parking the session,
+    -- at that row's write week; a session closed on a wall its turn never
+    -- named is the last, at its closure. The sources are the ones the
+    -- numerator counts, so a walled session always has an occurrence to show.
+    -- One session's wall is one occurrence.
     SELECT session_row.session_id,
-           LEAST(
+           COALESCE(
                (SELECT lifecycle.parked_since
                   FROM session_lifecycle AS lifecycle
                  WHERE lifecycle.session_id = session_row.session_id
@@ -1033,7 +1073,12 @@ WITH wall_occurrence AS (
                (SELECT min(turn.recorded_at)
                   FROM turn_lifecycle AS turn
                  WHERE turn.session_id = session_row.session_id
-                   AND turn.terminal_cause_kind = 'context_compaction_wall'::text)
+                   AND turn.terminal_cause_kind = 'context_compaction_wall'::text),
+               (SELECT lifecycle.ended_at
+                  FROM session_lifecycle AS lifecycle
+                 WHERE lifecycle.session_id = session_row.session_id
+                   AND lifecycle.terminal_cause_kind
+                       = 'context_compaction_wall'::text)
            ) AS occurred_at
       FROM session AS session_row
 ), weeks AS (
@@ -1070,8 +1115,7 @@ WITH wall_occurrence AS (
 ), dispatched AS (
     SELECT cohort.dispatch_week AS week,
            count(*) AS cohort_size,
-           count(*) FILTER (WHERE cohort.wall) AS wall,
-           bool_and(cohort.matured) AS matured
+           count(*) FILTER (WHERE cohort.wall) AS wall
       FROM session_lifecycle_dispatch_cohort AS cohort
      GROUP BY cohort.dispatch_week
 ), walls_recorded AS (
@@ -1104,7 +1148,6 @@ SELECT weeks.week,
        COALESCE(terminal.overflow_finished, 0) AS overflow_finished_count,
        COALESCE(dispatched.cohort_size, 0) AS dispatch_cohort_size,
        COALESCE(dispatched.wall, 0) AS wall_count,
-       COALESCE(dispatched.matured, true) AS wall_cohort_matured,
        COALESCE(walls_recorded.occurrences, 0) AS wall_occurrence_count,
        COALESCE(turn_causes.terminal_turns, 0) AS terminal_turn_count,
        COALESCE(turn_causes.classified_turns, 0) AS classified_terminal_turn_count,
@@ -1116,36 +1159,6 @@ SELECT weeks.week,
   LEFT JOIN walls_recorded ON walls_recorded.week = weeks.week
   LEFT JOIN turn_causes ON turn_causes.week = weeks.week
   LEFT JOIN call_causes ON call_causes.week = weeks.week;
-
--- Supersedes 202609020004_event_vocabulary: a runtime-terminal turn is not live
--- (T2's final head carries the same exemption; drop at the merge-forward).
-CREATE OR REPLACE FUNCTION require_terminal_session_has_no_live_turn() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-    live uuid;
-BEGIN
-    IF NEW.state_kind <> 'terminal' THEN
-        RETURN NULL;
-    END IF;
-
-    SELECT lifecycle.turn_id INTO live
-      FROM turn_lifecycle AS lifecycle
-     WHERE lifecycle.session_id = NEW.session_id
-       AND lifecycle.state_kind <> 'terminal'
-       AND NOT lifecycle.delegation_runtime_terminal
-     LIMIT 1;
-
-    IF FOUND THEN
-        RAISE EXCEPTION
-            'terminal session % still holds non-terminal turn %',
-            NEW.session_id, live
-            USING ERRCODE = '23514';
-    END IF;
-
-    RETURN NULL;
-END;
-$$;
 
 --
 -- §10: a closure retires the queued turns it strands.
@@ -1192,6 +1205,7 @@ ALTER TABLE turn_lifecycle
 ALTER TABLE turn_lifecycle
     ADD CONSTRAINT turn_lifecycle_terminal_cause_matches_disposition CHECK (
         (terminal_cause_kind IS NULL)
+        OR ((terminal_disposition_kind IS NOT NULL) AND (FALSE
         OR ((terminal_disposition_kind = 'completed'::text)
             AND (terminal_cause_kind = 'completed'::text))
         OR ((terminal_disposition_kind = 'refused'::text)
@@ -1204,7 +1218,8 @@ ALTER TABLE turn_lifecycle
             ])))
         OR ((terminal_disposition_kind = 'reconciliation_required'::text)
             AND (terminal_cause_kind = ANY (ARRAY[
-                'model_call_ambiguous'::text, 'tool_attempt_ambiguous'::text
+                'model_call_ambiguous'::text,
+                'tool_attempt_ambiguous'::text
             ])))
         OR ((terminal_disposition_kind = 'failed'::text)
             AND (terminal_cause_kind = ANY (ARRAY[
@@ -1224,7 +1239,7 @@ ALTER TABLE turn_lifecycle
                 'reported_usage_context_compaction_exhausted'::text,
                 'reported_usage_context_still_exceeded'::text,
                 'unclassified_failure'::text
-            ])))
+            ])))))
     );
 
 --
@@ -1364,11 +1379,6 @@ BEGIN
            pending_terminal_actor_tool_request_id = NULL
      WHERE session_id = subject;
 
-    IF held.pending_terminal_outcome_kind = 'abandoned' THEN
-        INSERT INTO session_cleanup_obligation (session_id, outcome_kind)
-        VALUES (subject, 'abandoned')
-        ON CONFLICT (session_id) DO NOTHING;
-    END IF;
 END;
 $$;
 

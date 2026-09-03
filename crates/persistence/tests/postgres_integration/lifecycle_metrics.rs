@@ -1,15 +1,11 @@
-//! PostgreSQL proof for the §12 metrics, their two companion alarms, and the
-//! substrate-v0 gate.
+//! PostgreSQL proof for the §12 metric views.
 //!
 //! Every fixture here is built to be one of the cases the specification's
 //! denominator and cohort rules single out: a session released mid-life, a
 //! supersession that closed a failure and one that closed none, a stop, an
 //! unmonitored conversation, a wall on a session that outlives its dispatch
-//! week, an unbounded deadline, and an expiry inside the processing grace. The
-//! assertions are on the numbers, because the numbers are what the gate turns
-//! on.
-
-use std::time::Duration;
+//! week, an unbounded deadline, and a deadline that has expired. The
+//! assertions are on the numbers.
 
 use sqlx::types::time::PrimitiveDateTime;
 
@@ -21,19 +17,16 @@ use signalbox_domain::{
 };
 use signalbox_persistence::{
     lifecycle_metrics::{
-        LifecycleDeadlineViolation, LifecycleGateVerdict, LifecycleMetricBounds,
-        LifecycleMetricsRepository, LifecycleNonTerminalState, LifecycleWeeklyMetrics,
+        LifecycleDeadlineViolation, LifecycleMetricsRepository, LifecycleNonTerminalState,
+        LifecycleWeeklyMetrics,
     },
     operator_status::{
         ProcessOperatorStatusCounts, ProcessOperatorStatusItem, ProcessOperatorStatusRepository,
     },
-    session_lifecycle::{SessionLifecycleNumericBounds, SessionLifecycleRepository},
+    session_lifecycle::SessionLifecycleRepository,
 };
 
 const METRIC_SEED: u128 = 0x12fe_0000;
-
-/// One week, the width of every §12 cohort.
-const WEEK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Builds one repository-watch dispatch, which §6 records as owned work.
 fn dispatched_creation(seed: u128) -> PreparedCreateSession {
@@ -93,6 +86,9 @@ async fn backdate_closure(
     sqlx::query("ALTER TABLE session_lifecycle DISABLE TRIGGER ALL")
         .execute(pool)
         .await?;
+    sqlx::query("ALTER TABLE session_ownership_event DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
     sqlx::query(
         "UPDATE session_lifecycle
             SET ended_at = ended_at - make_interval(weeks => $2)
@@ -102,6 +98,21 @@ async fn backdate_closure(
     .bind(weeks_ago)
     .execute(pool)
     .await?;
+    // The ownership the cohort reads has to move with the closure. A session
+    // whose journal still stands at today would have ended before it was ever
+    // owned, which is not a session — the cohort excludes it, correctly.
+    sqlx::query(
+        "UPDATE session_ownership_event
+            SET recorded_at = recorded_at - make_interval(weeks => $2)
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .bind(weeks_ago)
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_ownership_event ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
     sqlx::query("ALTER TABLE session_lifecycle ENABLE TRIGGER ALL")
         .execute(pool)
         .await?;
@@ -253,17 +264,6 @@ async fn activate_first_turn(
     Ok(turn)
 }
 
-/// Installs one deployment policy for the metric bounds.
-async fn apply_metric_bounds(
-    pool: &PgPool,
-    bounds: LifecycleMetricBounds,
-) -> Result<(), Box<dyn Error>> {
-    LifecycleMetricsRepository::new(pool.clone())
-        .apply_configured_bounds(&bounds)
-        .await?;
-    Ok(())
-}
-
 /// Reads the one deadline violation the snapshot streams.
 ///
 /// The report carries the alarm as a count; the rows themselves reach an
@@ -272,7 +272,7 @@ async fn apply_metric_bounds(
 async fn one_deadline_violation(
     pool: &PgPool,
 ) -> Result<LifecycleDeadlineViolation, Box<dyn Error>> {
-    let (items, counts, _) = drain_operator_status(pool).await?;
+    let (items, counts) = drain_operator_status(pool).await?;
     assert_eq!(counts.lifecycle_deadline_violations(), 1);
     let violation = items
         .into_iter()
@@ -297,7 +297,7 @@ fn latest_populated_week(weeks: &[LifecycleWeeklyMetrics]) -> LifecycleWeeklyMet
 /// denominator drops exactly the stops and the failure-free supersessions.
 ///
 /// Six closures, one per rule the specification singles out: a release does
-/// not remove a session from the gate, a stop leaves the denominator, a
+/// not remove a session from the cohort, a stop leaves the denominator, a
 /// supersession that closed a park holding a failure cause stays in both, a
 /// supersession that closed no failure leaves both, an achievement stays in
 /// the denominator alone, and a conversation that was never owned never
@@ -307,7 +307,6 @@ fn latest_populated_week(weeks: &[LifecycleWeeklyMetrics]) -> LifecycleWeeklyMet
 async fn the_headline_counts_released_and_failure_driven_closures() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = SessionLifecycleRepository::new(pool.clone());
-    apply_metric_bounds(&pool, LifecycleMetricBounds::default()).await?;
 
     let released = owned_session(&pool, 0x10).await?;
     repository
@@ -391,7 +390,12 @@ async fn the_headline_counts_released_and_failure_driven_closures() -> Result<()
     repository
         .close(
             conversation,
-            SessionTerminalOutcome::Abandoned,
+            // §2 reserves `abandoned` for an operator writing off a parked
+            // session, and §6 refuses to park an unmonitored one; a stop is
+            // how a conversation ends.
+            SessionTerminalOutcome::Stopped {
+                sticky: StopStickiness::Redispatchable,
+            },
             LifecycleActor::Operator,
         )
         .await?;
@@ -422,7 +426,6 @@ async fn the_headline_counts_released_and_failure_driven_closures() -> Result<()
 async fn an_unbounded_deadline_is_exempt_and_a_missing_record_is_not() -> Result<(), Box<dyn Error>>
 {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    apply_metric_bounds(&pool, LifecycleMetricBounds::default()).await?;
     let session = owned_session(&pool, 0x70).await?;
 
     let exempt = LifecycleMetricsRepository::new(pool.clone()).read().await?;
@@ -442,39 +445,24 @@ async fn an_unbounded_deadline_is_exempt_and_a_missing_record_is_not() -> Result
     Ok(())
 }
 
-/// §12 finding F8: an expiry counts only once the configured processing grace
-/// has also passed, so ordinary timer and commit latency never trips the
-/// zero-target alarm.
+/// §12's first companion alarm counts an expiry, and only an expiry: a
+/// deadline still ahead of the clock is the ordinary case and never counts.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn an_expired_deadline_counts_only_past_the_processing_grace() -> Result<(), Box<dyn Error>> {
+async fn a_deadline_counts_once_it_expires_and_not_before() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    apply_metric_bounds(
-        &pool,
-        LifecycleMetricBounds {
-            deadline_processing_grace: Some(Duration::from_secs(120)),
-            ..LifecycleMetricBounds::default()
-        },
-    )
-    .await?;
-    SessionLifecycleRepository::new(pool.clone())
-        .apply_configured_bounds(&SessionLifecycleNumericBounds {
-            first_input: Some(Duration::from_secs(60)),
-            ..SessionLifecycleNumericBounds::default()
-        })
-        .await?;
     let session = owned_session(&pool, 0x80).await?;
 
     sqlx::query(
         "UPDATE session_deadline
-            SET expires_at = clock_timestamp() - make_interval(secs => 30)
+            SET expires_at = clock_timestamp() + make_interval(secs => 300)
           WHERE session_id = $1",
     )
     .bind(session.into_uuid())
     .execute(&pool)
     .await?;
-    let inside_grace = LifecycleMetricsRepository::new(pool.clone()).read().await?;
-    assert_eq!(inside_grace.nonterminal_past_deadline(), 0);
+    let live = LifecycleMetricsRepository::new(pool.clone()).read().await?;
+    assert_eq!(live.nonterminal_past_deadline(), 0);
 
     sqlx::query(
         "UPDATE session_deadline
@@ -484,10 +472,10 @@ async fn an_expired_deadline_counts_only_past_the_processing_grace() -> Result<(
     .bind(session.into_uuid())
     .execute(&pool)
     .await?;
-    let past_grace = LifecycleMetricsRepository::new(pool.clone()).read().await?;
-    assert_eq!(past_grace.nonterminal_past_deadline(), 1);
+    let expired = LifecycleMetricsRepository::new(pool.clone()).read().await?;
+    assert_eq!(expired.nonterminal_past_deadline(), 1);
     let violation = one_deadline_violation(&pool).await?;
-    assert_eq!(violation.deadline_kind(), Some("first_input"));
+    assert_eq!(violation.deadline_kind(), Some("admission"));
     assert!(
         violation
             .expired_for_seconds()
@@ -508,14 +496,6 @@ async fn an_expired_deadline_counts_only_past_the_processing_grace() -> Result<(
 async fn a_wall_attributes_to_its_dispatch_week_and_the_closure_to_its_own()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    apply_metric_bounds(
-        &pool,
-        LifecycleMetricBounds {
-            wall_cohort_maturation: Some(WEEK),
-            ..LifecycleMetricBounds::default()
-        },
-    )
-    .await?;
     let walled = owned_session(&pool, 0x90).await?;
     settled_turn_with_cause(&pool, walled, 0x90, "context_compaction_wall").await?;
     backdate_dispatch(&pool, walled, 3).await?;
@@ -547,56 +527,10 @@ async fn a_wall_attributes_to_its_dispatch_week_and_the_closure_to_its_own()
     assert_eq!(dispatch_week.completion_failure().parts_per_million(), None);
     assert_eq!(closure_week.completion_failure().numerator(), 1);
     assert_eq!(closure_week.wall_rate().denominator(), 0);
-    // Its only member is terminal, so the dispatch cohort matured whatever the
-    // window says.
-    assert!(dispatch_week.wall_cohort_matured());
     // The wall itself was recorded in the dispatch week, and the alarm reports
     // it there immediately rather than waiting for maturation.
     assert_eq!(dispatch_week.wall_occurrences(), 1);
     assert_eq!(closure_week.wall_occurrences(), 0);
-
-    pool.close().await;
-    drop(container);
-    Ok(())
-}
-
-/// §12 finding F9: a weekly dispatch cohort is gate-evaluable only once no
-/// member is both non-terminal and still inside the configured maturation
-/// window.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn a_dispatch_cohort_matures_only_past_its_configured_window() -> Result<(), Box<dyn Error>> {
-    let (container, pool, _database_url) = migrated_postgres().await?;
-    apply_metric_bounds(
-        &pool,
-        LifecycleMetricBounds {
-            wall_cohort_maturation: Some(WEEK),
-            ..LifecycleMetricBounds::default()
-        },
-    )
-    .await?;
-    let live = owned_session(&pool, 0xa0).await?;
-    settled_turn_with_cause(&pool, live, 0xa0, "unclassified_failure").await?;
-
-    let immature = LifecycleMetricsRepository::new(pool.clone()).read().await?;
-    let immature_week = immature
-        .weeks()
-        .iter()
-        .find(|week| week.wall_rate().denominator() > 0)
-        .copied()
-        .expect("the dispatch cohort has one member");
-    assert!(!immature_week.wall_cohort_matured());
-
-    backdate_dispatch(&pool, live, 3).await?;
-
-    let matured = LifecycleMetricsRepository::new(pool.clone()).read().await?;
-    let matured_week = matured
-        .weeks()
-        .iter()
-        .find(|week| week.wall_rate().denominator() > 0)
-        .copied()
-        .expect("the dispatch cohort has one member");
-    assert!(matured_week.wall_cohort_matured());
 
     pool.close().await;
     drop(container);
@@ -611,7 +545,6 @@ async fn overflow_reads_the_untrimmed_cohort_and_its_finished_share() -> Result<
 {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = SessionLifecycleRepository::new(pool.clone());
-    apply_metric_bounds(&pool, LifecycleMetricBounds::default()).await?;
 
     let finished = owned_session(&pool, 0xb0).await?;
     settled_turn_with_cause(&pool, finished, 0xb0, "context_headroom_exhausted").await?;
@@ -672,7 +605,6 @@ async fn overflow_reads_the_untrimmed_cohort_and_its_finished_share() -> Result<
 async fn cause_completeness_measures_both_axes_outside_their_catch_alls()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    apply_metric_bounds(&pool, LifecycleMetricBounds::default()).await?;
 
     let classified = owned_session(&pool, 0xe0).await?;
     settled_turn_with_cause(&pool, classified, 0xe0, "model_call_failed").await?;
@@ -769,123 +701,10 @@ fn latest_populated_turn_week(weeks: &[LifecycleWeeklyMetrics]) -> LifecycleWeek
         .expect("the fixture settled at least one turn")
 }
 
-/// §12: the substrate-v0 gate reads the configured number of consecutive
-/// weekly cohorts and the integrity alarm together — a cohort thinned by
-/// sessions stuck outside `terminal` passes nothing.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn the_gate_requires_consecutive_weeks_and_a_silent_integrity_alarm()
--> Result<(), Box<dyn Error>> {
-    let (container, pool, _database_url) = migrated_postgres().await?;
-    let repository = SessionLifecycleRepository::new(pool.clone());
-    apply_metric_bounds(
-        &pool,
-        LifecycleMetricBounds {
-            gate_weeks: Some(2),
-            completion_failure_rate_threshold_ppm: Some(100_000),
-            ..LifecycleMetricBounds::default()
-        },
-    )
-    .await?;
-
-    // Both cohorts are complete weeks: the week in progress is still growing,
-    // so §12 never grades it.
-    let recent_week = owned_session(&pool, 0x1100).await?;
-    repository
-        .close(
-            recent_week,
-            SessionTerminalOutcome::AchievedVerified,
-            LifecycleActor::Operator,
-        )
-        .await?;
-    backdate_closure(&pool, recent_week, 1).await?;
-
-    let one_week = LifecycleMetricsRepository::new(pool.clone()).read().await?;
-    assert_eq!(one_week.gate_verdict(), LifecycleGateVerdict::Indeterminate);
-
-    let earlier_week = owned_session(&pool, 0x1200).await?;
-    repository
-        .close(
-            earlier_week,
-            SessionTerminalOutcome::AchievedVerified,
-            LifecycleActor::Operator,
-        )
-        .await?;
-    backdate_closure(&pool, earlier_week, 2).await?;
-
-    let two_weeks = LifecycleMetricsRepository::new(pool.clone()).read().await?;
-    assert_eq!(two_weeks.weeks().len(), 2);
-    assert_eq!(two_weeks.gate_verdict(), LifecycleGateVerdict::Met);
-
-    let stuck = owned_session(&pool, 0x1300).await?;
-    strand_deadline(&pool, stuck).await?;
-
-    let alarmed = LifecycleMetricsRepository::new(pool.clone()).read().await?;
-    assert_eq!(alarmed.nonterminal_past_deadline(), 1);
-    assert_eq!(alarmed.gate_verdict(), LifecycleGateVerdict::NotMet);
-
-    pool.close().await;
-    drop(container);
-    Ok(())
-}
-
-/// §12: a breached headline fails the gate even with the integrity alarm
-/// silent, and the configured threshold is what decides the breach.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn a_breached_headline_fails_the_gate_on_its_configured_threshold()
--> Result<(), Box<dyn Error>> {
-    let (container, pool, _database_url) = migrated_postgres().await?;
-    let repository = SessionLifecycleRepository::new(pool.clone());
-    apply_metric_bounds(
-        &pool,
-        LifecycleMetricBounds {
-            gate_weeks: Some(1),
-            completion_failure_rate_threshold_ppm: Some(100_000),
-            ..LifecycleMetricBounds::default()
-        },
-    )
-    .await?;
-
-    let failed = owned_session(&pool, 0x1400).await?;
-    repository
-        .close(
-            failed,
-            SessionTerminalOutcome::FailedUnknown,
-            LifecycleActor::Core {
-                agency: CoreAgency::Daemon,
-            },
-        )
-        .await?;
-    backdate_closure(&pool, failed, 1).await?;
-
-    let report = LifecycleMetricsRepository::new(pool.clone()).read().await?;
-    let week = latest_populated_week(report.weeks());
-
-    assert_eq!(report.nonterminal_past_deadline(), 0);
-    assert_eq!(
-        week.completion_failure().parts_per_million(),
-        Some(1_000_000)
-    );
-    assert_eq!(week.failed_unknown_share().numerator(), 1);
-    assert_eq!(report.gate_verdict(), LifecycleGateVerdict::NotMet);
-
-    pool.close().await;
-    drop(container);
-    Ok(())
-}
-
 /// Drains one operator-status snapshot into its rows, counts, and verdict.
 async fn drain_operator_status(
     pool: &PgPool,
-) -> Result<
-    (
-        Vec<ProcessOperatorStatusItem>,
-        ProcessOperatorStatusCounts,
-        LifecycleGateVerdict,
-    ),
-    Box<dyn Error>,
-> {
+) -> Result<(Vec<ProcessOperatorStatusItem>, ProcessOperatorStatusCounts), Box<dyn Error>> {
     let mut reader = ProcessOperatorStatusRepository::new(pool.clone())
         .open()
         .await?;
@@ -896,39 +715,25 @@ async fn drain_operator_status(
     let counts = reader
         .counts()
         .expect("an exhausted snapshot commits its counts");
-    let verdict = reader
-        .gate_verdict()
-        .expect("an exhausted snapshot commits its gate verdict");
-    Ok((items, counts, verdict))
+    Ok((items, counts))
 }
 
 /// §12: the operator-status snapshot carries the metrics and the alarm as two
-/// further sections of the same coherent read, and closes with the gate.
+/// further sections of the same coherent read.
 ///
 /// The snapshot and the telemetry pass run the same statements, which is what
 /// keeps the operator's number and the exported series from disagreeing about
-/// the gate; this reads them through the snapshot's own cursors to prove that
-/// path carries them.
+/// the numbers; this reads them through the snapshot's own cursors.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn the_operator_status_snapshot_carries_the_metrics_and_the_alarm()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    apply_metric_bounds(
-        &pool,
-        LifecycleMetricBounds {
-            gate_weeks: Some(1),
-            completion_failure_rate_threshold_ppm: Some(100_000),
-            ..LifecycleMetricBounds::default()
-        },
-    )
-    .await?;
 
-    let (empty_items, empty_counts, empty_verdict) = drain_operator_status(&pool).await?;
+    let (empty_items, empty_counts) = drain_operator_status(&pool).await?;
     assert!(empty_items.is_empty());
     assert_eq!(empty_counts.lifecycle_weeks(), 0);
     assert_eq!(empty_counts.lifecycle_deadline_violations(), 0);
-    assert_eq!(empty_verdict, LifecycleGateVerdict::Indeterminate);
 
     let closed = owned_session(&pool, 0x1500).await?;
     SessionLifecycleRepository::new(pool.clone())
@@ -942,11 +747,10 @@ async fn the_operator_status_snapshot_carries_the_metrics_and_the_alarm()
     let stuck = owned_session(&pool, 0x1600).await?;
     strand_deadline(&pool, stuck).await?;
 
-    let (items, counts, verdict) = drain_operator_status(&pool).await?;
+    let (items, counts) = drain_operator_status(&pool).await?;
 
     assert_eq!(counts.lifecycle_weeks(), 1);
     assert_eq!(counts.lifecycle_deadline_violations(), 1);
-    assert_eq!(verdict, LifecycleGateVerdict::NotMet);
     assert!(matches!(
         items.first(),
         Some(ProcessOperatorStatusItem::LifecycleWeek(_))
@@ -990,10 +794,14 @@ async fn backdate_park(
 async fn a_parked_wall_is_counted_in_the_week_it_happened() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = SessionLifecycleRepository::new(pool.clone());
-    apply_metric_bounds(&pool, LifecycleMetricBounds::default()).await?;
 
     let walled = owned_session(&pool, 0x1700).await?;
     let turn = activate_first_turn(&pool, walled, 0x1700).await?;
+    // The turn began two weeks before the park, which is the ordinary
+    // ordering: a turn runs, then the wall parks the session. The park instant
+    // is what dates the occurrence, so the two weeks must stay distinct for
+    // this test to say anything.
+    backdate_dispatch(&pool, walled, 2).await?;
     repository
         .park(
             walled,
@@ -1009,10 +817,17 @@ async fn a_parked_wall_is_counted_in_the_week_it_happened() -> Result<(), Box<dy
             },
         )
         .await?;
-    backdate_park(&pool, walled, 2).await?;
+    backdate_park(&pool, walled, 1).await?;
 
     let parked = LifecycleMetricsRepository::new(pool.clone()).read().await?;
     let parked_week = one_wall_occurrence_week(parked.weeks());
+    let dispatch_week = parked
+        .weeks()
+        .iter()
+        .find(|week| week.wall_rate().denominator() > 0)
+        .map(LifecycleWeeklyMetrics::week_start)
+        .expect("the dispatch cohort has one member");
+    assert_ne!(parked_week, dispatch_week);
 
     // The suspended turn has terminalized nothing, so the park is the only
     // evidence the wall happened at all.
@@ -1037,6 +852,10 @@ async fn a_parked_wall_is_counted_in_the_week_it_happened() -> Result<(), Box<dy
     let closed = LifecycleMetricsRepository::new(pool.clone()).read().await?;
     let closed_week = one_wall_occurrence_week(closed.weeks());
 
+    // The settled turn now also names the wall, and its row is two weeks old
+    // against the park's one. The park still dates the occurrence: reading the
+    // earlier of the two evidences instead would move the wall backwards into
+    // the week the turn started in.
     assert_eq!(closed_week, parked_week);
     assert_eq!(
         closed
@@ -1053,10 +872,197 @@ async fn a_parked_wall_is_counted_in_the_week_it_happened() -> Result<(), Box<dy
 }
 
 /// Returns the week the one recorded wall occurrence belongs to.
+/// The wall numerator and the occurrence count read the same three evidences,
+/// so a session closed on a wall its turn never named still shows one.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_wall_named_only_by_the_closure_is_still_one_occurrence() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+
+    let walled = owned_session(&pool, 0x1800).await?;
+    settled_turn_with_cause(&pool, walled, 0x1800, "unclassified_failure").await?;
+    SessionLifecycleRepository::new(pool.clone())
+        .close(
+            walled,
+            SessionTerminalOutcome::FailedStructural {
+                cause: SessionStructuralCause::ContextCompactionWall,
+            },
+            LifecycleActor::Core {
+                agency: CoreAgency::Daemon,
+            },
+        )
+        .await?;
+
+    let report = LifecycleMetricsRepository::new(pool.clone()).read().await?;
+    let walled_sessions: u64 = report
+        .weeks()
+        .iter()
+        .map(|week| week.wall_rate().numerator())
+        .sum();
+    let occurrences: u64 = report
+        .weeks()
+        .iter()
+        .map(LifecycleWeeklyMetrics::wall_occurrences)
+        .sum();
+    assert_eq!(walled_sessions, 1);
+    assert_eq!(occurrences, walled_sessions);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 fn one_wall_occurrence_week(weeks: &[LifecycleWeeklyMetrics]) -> PrimitiveDateTime {
     weeks
         .iter()
         .find(|week| week.wall_occurrences() > 0)
         .expect("the fixture recorded one wall")
         .week_start()
+}
+
+/// §12's cohort is sessions "owned at any point in their life", so ownership
+/// taken after the closure is not ownership during it.
+///
+/// An adoption recorded after `ended_at` would otherwise write an already-ended
+/// session into a week that had already been reported without it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn ownership_taken_after_the_closure_joins_no_cohort() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+
+    let conversation = unmonitored_session(&pool, 0x1800).await?;
+    repository
+        .close(
+            conversation,
+            // §2 reserves `abandoned` for an operator writing off a parked
+            // session, and §6 refuses to park an unmonitored one; a stop is
+            // how a conversation ends.
+            SessionTerminalOutcome::Stopped {
+                sticky: StopStickiness::Redispatchable,
+            },
+            LifecycleActor::Operator,
+        )
+        .await?;
+    let closed = LifecycleMetricsRepository::new(pool.clone()).read().await?;
+    assert_eq!(
+        closed
+            .weeks()
+            .iter()
+            .map(|week| week.overflow_incidence().denominator())
+            .sum::<u64>(),
+        0
+    );
+
+    adopt_by_statement(&pool, conversation).await?;
+
+    let adopted = LifecycleMetricsRepository::new(pool.clone()).read().await?;
+    assert_eq!(
+        adopted
+            .weeks()
+            .iter()
+            .map(|week| week.overflow_incidence().denominator())
+            .sum::<u64>(),
+        0
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Journals an adoption for a session that has already ended.
+///
+/// The satellite refuses this shape — terminal is final and the journal head
+/// must match the ownership bit — so the fixture writes it around those guards.
+/// What is under test is the cohort: it holds even where a path around them
+/// exists.
+async fn adopt_by_statement(pool: &PgPool, session: SessionId) -> Result<(), sqlx::Error> {
+    sqlx::query("ALTER TABLE session_ownership_event DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE session_lifecycle DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO session_ownership_event (
+             session_id, event_ordinal, transition_kind, owned_after, actor_kind
+         )
+         SELECT $1,
+                COALESCE(max(event_ordinal), 0) + 1,
+                'adopted',
+                true,
+                'operator'
+           FROM session_ownership_event
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query("UPDATE session_lifecycle SET owned = true WHERE session_id = $1")
+        .bind(session.into_uuid())
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE session_lifecycle ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE session_ownership_event ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// §12 counts a supersession that closed a park holding a failure cause, so
+/// the cause must outlive the committed decision waiting on the turn.
+///
+/// A cause cleared once the closure commits would reach settlement empty and
+/// the supersession would be trimmed as a non-failure, flattering the rate.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_committed_supersession_keeps_its_cause_until_it_settles() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+
+    let respawned = owned_session(&pool, 0x1900).await?;
+    let turn = activate_first_turn(&pool, respawned, 0x1900).await?;
+    repository
+        .park(
+            respawned,
+            SessionParkCause::StructuralFailure,
+            SessionParkResponder::Module {
+                module: DispatchingModule::RepositoryWatch,
+            },
+            Some(SessionFailureCause::Structural(
+                SessionStructuralCause::ContextCompactionWall,
+            )),
+            LifecycleActor::Core {
+                agency: CoreAgency::Daemon,
+            },
+        )
+        .await?;
+    // The closure keeps the actor that decided it, so the settlement names
+    // neither an actor nor an outcome of its own.
+    repository
+        .commit_pending_terminal(
+            respawned,
+            SessionTerminalOutcome::Superseded { by: None },
+            LifecycleActor::Core {
+                agency: CoreAgency::Daemon,
+            },
+        )
+        .await?;
+    settle_turn_with_cause(&pool, respawned, turn, 0x1900, "context_compaction_wall").await?;
+    repository.settle_pending_terminal(respawned).await?;
+
+    let report = LifecycleMetricsRepository::new(pool.clone()).read().await?;
+    let week = latest_populated_week(report.weeks());
+
+    // The supersession closed a failure, so it stays in both halves rather
+    // than being trimmed as withdrawn work.
+    assert_eq!(week.completion_failure().denominator(), 1);
+    assert_eq!(week.completion_failure().numerator(), 1);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
 }

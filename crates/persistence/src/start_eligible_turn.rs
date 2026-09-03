@@ -314,7 +314,10 @@ impl StartEligibleTurnRepository {
                 .bind(session_uuid)
                 .fetch_one(&mut *transaction)
                 .await?;
-        if !session_exists || scheduler_session.is_none() {
+        if !session_exists
+            || scheduler_session.is_none()
+            || session_refuses_new_work(&mut transaction, session).await?
+        {
             transaction.rollback().await?;
             return Ok(CommitActivationPreviewOutcome::Stale);
         }
@@ -365,7 +368,12 @@ impl StartEligibleTurnRepository {
                 .await
                 .map_err(StartEligibleTurnRepositoryError::from)
                 .map_err(CommitActivationPreviewError::Activation)?;
-        if !session_exists || scheduler_session.is_none() {
+        if !session_exists
+            || scheduler_session.is_none()
+            || session_refuses_new_work(&mut transaction, session)
+                .await
+                .map_err(CommitActivationPreviewError::Activation)?
+        {
             transaction
                 .rollback()
                 .await
@@ -469,7 +477,12 @@ impl StartEligibleTurnRepository {
                 .await
                 .map_err(StartEligibleTurnRepositoryError::from)
                 .map_err(CommitActivationPreviewError::Activation)?;
-        if !session_exists || scheduler_session.is_none() {
+        if !session_exists
+            || scheduler_session.is_none()
+            || session_refuses_new_work(&mut transaction, session)
+                .await
+                .map_err(CommitActivationPreviewError::Activation)?
+        {
             transaction
                 .rollback()
                 .await
@@ -970,17 +983,24 @@ async fn session_start_gate_is_held(
     Ok(held.unwrap_or(false))
 }
 
-async fn session_is_parked(
+/// Whether the session takes no new work: it is parked, or a closure already
+/// committed to an outcome and is waiting only for the live turn to settle.
+///
+/// Activating a successor under a committed handoff is what makes the
+/// settlement impossible: the terminal write would then find a live turn, and
+/// the next queued turn would do it again.
+async fn session_refuses_new_work(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<bool, StartEligibleTurnRepositoryError> {
-    let parked: Option<bool> = sqlx::query_scalar(
-        "SELECT state_kind = 'parked' FROM session_lifecycle WHERE session_id = $1",
+    let refuses: Option<bool> = sqlx::query_scalar(
+        "SELECT state_kind = 'parked' OR pending_terminal_outcome_kind IS NOT NULL
+           FROM session_lifecycle WHERE session_id = $1",
     )
     .bind(session_id_to_uuid(session))
     .fetch_optional(&mut *connection)
     .await?;
-    Ok(parked.unwrap_or(false))
+    Ok(refuses.unwrap_or(false))
 }
 
 async fn handle_in_transaction(
@@ -1018,7 +1038,7 @@ async fn handle_in_transaction(
     // queued before the park still reaches this transaction. The satellite row
     // is already locked by the scheduler statement above, so this reads under
     // that lock rather than racing it.
-    if session_is_parked(connection, requested_session).await?
+    if session_refuses_new_work(connection, requested_session).await?
         || session_start_gate_is_held(connection, requested_session).await?
     {
         return Ok(TransactionDecision::Rollback(

@@ -38,3 +38,13 @@ fn custom_decoder_without_shape_names_its_field() {
 fn wire_shape_without_custom_decoder_names_its_field() {
     trybuild::TestCases::new().compile_fail("tests/ui/wire_shape_without_custom_decoder.rs");
 }
+
+#[test]
+fn duplicate_attribute_spans_the_repeated_key() {
+    trybuild::TestCases::new().compile_fail("tests/ui/duplicate_attribute.rs");
+}
+
+#[test]
+fn unsupported_rename_rule_spans_the_offending_literal() {
+    trybuild::TestCases::new().compile_fail("tests/ui/unsupported_rename_rule.rs");
+}

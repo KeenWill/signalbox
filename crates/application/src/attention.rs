@@ -86,7 +86,25 @@ pub enum AttentionState {
     AwaitingToolRecovery,
     AwaitingReconciliation,
     RunnerLost,
+    Parked,
     Idle,
+}
+
+/// The durable session state this attention state projects.
+///
+/// The eight members of the lifecycle's own closed vocabulary, without their
+/// typed detail. A reader that wants the authoritative state rather than the
+/// attention reading of it takes this.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttentionLifecycleState {
+    Created,
+    Dispatched,
+    Active,
+    Waiting,
+    Recovering,
+    Blocked,
+    Parked,
+    Terminal,
 }
 
 /// Stable server-owned catalog order.
@@ -301,6 +319,7 @@ pub struct AttentionSummary {
     pub active_turn_count: u64,
     pub queued_turn_count: u64,
     pub state: AttentionState,
+    pub lifecycle_state: AttentionLifecycleState,
     pub action: Option<AttentionAction>,
     pub goal_block: Option<AttentionGoalBlock>,
     pub judge: AttentionJudgeFacts,

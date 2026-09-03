@@ -5126,7 +5126,7 @@ async fn status(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(
     let mut spool = tempfile::tempfile()?;
     let mut phase = OperatorStatusPhase::HeldSlots;
     let mut counts = OperatorStatusCounts::default();
-    let gate = loop {
+    loop {
         let frame = connection.frame().await?;
         let item_phase = match frame.message() {
             ServerMessage::OperatorStatus(message) => match message.as_ref() {
@@ -5172,7 +5172,7 @@ async fn status(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(
                                 .value(),
                         }) =>
                 {
-                    break item.substrate_v0_gate;
+                    break;
                 }
                 OperatorStatusMessage::Start {} | OperatorStatusMessage::End(_) => {
                     return Err(ClientError::Protocol(
@@ -5203,7 +5203,7 @@ async fn status(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(
         }
         phase = item_phase;
         spool.write_all(&encode_server_line(&frame)?)?;
-    };
+    }
     output.operator_status_counts(OperatorStatusPresentationCounts {
         held_slots: counts.held_slots,
         queued_obligations: counts.queued_obligations,
@@ -5211,7 +5211,6 @@ async fn status(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(
         pending_stale_review_clearances: counts.pending_stale_review_clearances,
         lifecycle_weeks: counts.lifecycle_weeks,
         lifecycle_deadline_violations: counts.lifecycle_deadline_violations,
-        substrate_v0_gate: gate,
     })?;
     spool.seek(SeekFrom::Start(0))?;
     let mut reader = BufReader::new(spool);

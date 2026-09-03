@@ -3215,7 +3215,8 @@ pub enum LifecycleActorClass {
     Core,
     /// The single user's authority.
     Operator,
-    /// One exact module.
+    /// A module, without saying which: the classification is what the
+    /// boundary carries, and the durable goal event keeps the exact module.
     Module,
     /// The recovery scan or liveness watchdog.
     Watchdog,
@@ -7629,23 +7630,11 @@ pub enum OperatorStatusLifecycleState {
     Parked,
 }
 
-/// The substrate-v0 gate verdict carried by one operator-status snapshot.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OperatorStatusLifecycleGate {
-    /// Every required weekly cohort held the headline below its target.
-    Met,
-    /// A required cohort missed the target, or the integrity alarm is nonzero.
-    NotMet,
-    /// No gate window is configured, or too few weekly cohorts exist yet.
-    Indeterminate,
-}
-
 /// One calendar week's session-lifecycle metrics.
 ///
 /// Every rate travels as its exact numerator and denominator rather than as a
 /// ratio, so a week with an empty population reports no rate at all instead of
-/// a zero that would flatter the gate, and a reader compares exact counts.
+/// a zero the durable columns do not claim, and a reader compares exact counts.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OperatorStatusLifecycleWeekMessage {
@@ -7668,8 +7657,6 @@ pub struct OperatorStatusLifecycleWeekMessage {
     pub wall_numerator: CanonicalU64,
     /// The week's dispatch cohort.
     pub wall_denominator: CanonicalU64,
-    /// Whether that cohort has matured enough to gate on.
-    pub wall_cohort_matured: bool,
     /// Walls recorded in this week, whatever cohort they belong to.
     pub wall_occurrence_count: CanonicalU64,
     /// Terminal turns carrying a cause outside the catch-all set.
@@ -7706,7 +7693,6 @@ pub struct OperatorStatusEndMessage {
     pub lifecycle_week_count: CanonicalU64,
     /// The `nonterminal_past_deadline` alarm value, target zero.
     pub lifecycle_deadline_violation_count: CanonicalU64,
-    pub substrate_v0_gate: OperatorStatusLifecycleGate,
 }
 
 /// One member of a coherent repository-watch operator-status snapshot.
@@ -7727,7 +7713,7 @@ pub enum OperatorStatusMessage {
     LifecycleWeek(Box<OperatorStatusLifecycleWeekMessage>),
     /// One owned non-terminal session past its armed-deadline obligation.
     LifecycleDeadlineViolation(Box<OperatorStatusLifecycleDeadlineViolationMessage>),
-    /// Completes the snapshot with its section counts and the gate verdict.
+    /// Completes the snapshot with its section counts.
     End(Box<OperatorStatusEndMessage>),
 }
 
@@ -8832,13 +8818,7 @@ fn validate_operator_status_message(message: &ServerMessage) -> Result<(), Frame
             // past has a record.
             item.deadline_missing == item.expired_for_seconds.is_none()
         }
-        OperatorStatusMessage::End(item) => {
-            // The alarm is the gate's integrity condition, so `met` beside a
-            // violation is a pair the daemon cannot produce.
-            item.substrate_v0_gate != OperatorStatusLifecycleGate::Met
-                || item.lifecycle_deadline_violation_count.value() == 0
-        }
-        OperatorStatusMessage::Start {} => true,
+        OperatorStatusMessage::Start {} | OperatorStatusMessage::End(_) => true,
     };
     if valid {
         Ok(())
@@ -10177,9 +10157,8 @@ mod tests {
         ModelSettingsPrecedence, ModelSettingsSnapshot, OpenAiServiceTier,
         OperatorStatusConvergenceSeal, OperatorStatusConvergenceVerdict, OperatorStatusEndMessage,
         OperatorStatusHeldSlotBlocker, OperatorStatusHeldSlotMessage, OperatorStatusHeldSlotOrigin,
-        OperatorStatusLifecycleDeadlineViolationMessage, OperatorStatusLifecycleGate,
-        OperatorStatusLifecycleState, OperatorStatusLifecycleWeekMessage,
-        OperatorStatusMergeableState, OperatorStatusMessage,
+        OperatorStatusLifecycleDeadlineViolationMessage, OperatorStatusLifecycleState,
+        OperatorStatusLifecycleWeekMessage, OperatorStatusMergeableState, OperatorStatusMessage,
         OperatorStatusPendingStaleReviewClearanceMessage,
         OperatorStatusPullRequestConvergenceMessage, OperatorStatusQueuedObligationMessage,
         OperatorStatusReviewDecision, OperatorStatusSingletonScope, PROTOCOL_VERSION,
@@ -10685,7 +10664,6 @@ mod tests {
                     finish_given_overflow_numerator: CanonicalU64::new(4),
                     wall_numerator: CanonicalU64::new(0),
                     wall_denominator: CanonicalU64::new(38),
-                    wall_cohort_matured: true,
                     wall_occurrence_count: CanonicalU64::new(0),
                     classified_terminal_turn_count: CanonicalU64::new(980),
                     terminal_turn_count: CanonicalU64::new(985),
@@ -10693,7 +10671,7 @@ mod tests {
                     known_failed_call_count: CanonicalU64::new(95),
                 }),
             ))),
-            r#"{"type":"operator_status","kind":"lifecycle_week","week_start_date":"2026-08-31","completion_failure_numerator":"3","completion_failure_denominator":"40","failed_unknown_count":"1","overflow_numerator":"5","overflow_denominator":"44","finish_given_overflow_numerator":"4","wall_numerator":"0","wall_denominator":"38","wall_cohort_matured":true,"wall_occurrence_count":"0","classified_terminal_turn_count":"980","terminal_turn_count":"985","classified_known_failed_call_count":"91","known_failed_call_count":"95"}"#,
+            r#"{"type":"operator_status","kind":"lifecycle_week","week_start_date":"2026-08-31","completion_failure_numerator":"3","completion_failure_denominator":"40","failed_unknown_count":"1","overflow_numerator":"5","overflow_denominator":"44","finish_given_overflow_numerator":"4","wall_numerator":"0","wall_denominator":"38","wall_occurrence_count":"0","classified_terminal_turn_count":"980","terminal_turn_count":"985","classified_known_failed_call_count":"91","known_failed_call_count":"95"}"#,
         )?;
         assert_server_message_round_trip(
             request(1)?,
@@ -10719,10 +10697,9 @@ mod tests {
                     pending_stale_review_clearance_count: CanonicalU64::new(1),
                     lifecycle_week_count: CanonicalU64::new(1),
                     lifecycle_deadline_violation_count: CanonicalU64::new(1),
-                    substrate_v0_gate: OperatorStatusLifecycleGate::Indeterminate,
                 },
             )))),
-            r#"{"type":"operator_status","kind":"end","held_slot_count":"1","queued_obligation_count":"1","pull_request_convergence_count":"1","pending_stale_review_clearance_count":"1","lifecycle_week_count":"1","lifecycle_deadline_violation_count":"1","substrate_v0_gate":"indeterminate"}"#,
+            r#"{"type":"operator_status","kind":"end","held_slot_count":"1","queued_obligation_count":"1","pull_request_convergence_count":"1","pending_stale_review_clearance_count":"1","lifecycle_week_count":"1","lifecycle_deadline_violation_count":"1"}"#,
         )?;
         Ok(())
     }
@@ -10744,7 +10721,6 @@ mod tests {
                     finish_given_overflow_numerator: CanonicalU64::new(0),
                     wall_numerator: CanonicalU64::new(0),
                     wall_denominator: CanonicalU64::new(38),
-                    wall_cohort_matured: true,
                     wall_occurrence_count: CanonicalU64::new(0),
                     classified_terminal_turn_count: CanonicalU64::new(0),
                     terminal_turn_count: CanonicalU64::new(0),
@@ -10758,6 +10734,14 @@ mod tests {
             Err(FrameValidationError::OperatorStatusShape)
         ));
 
+        Ok(())
+    }
+
+    /// A session with no armed record has no expiry to be past, so the two
+    /// fields cannot both speak.
+    #[test]
+    fn operator_status_rejects_a_deadline_violation_that_contradicts_itself()
+    -> Result<(), Box<dyn std::error::Error>> {
         let contradictory_deadline = ServerFrame::try_new(
             request(1)?,
             ServerMessage::OperatorStatus(Box::new(
@@ -10771,6 +10755,7 @@ mod tests {
                 )),
             )),
         );
+
         assert!(matches!(
             contradictory_deadline,
             Err(FrameValidationError::OperatorStatusShape)
