@@ -848,7 +848,7 @@ async fn inv002_inv009_start_eligible_turn_corrupt_projection_fails_closed()
     )
     .execute(&pool)
     .await?;
-    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
     sqlx::query("DELETE FROM turn_lifecycle WHERE turn_id = $1")

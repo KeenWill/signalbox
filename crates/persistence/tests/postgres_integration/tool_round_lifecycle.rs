@@ -1050,6 +1050,19 @@ async fn s02_s08_inv016_inv036_steering_consumed_at_continuation_reloads_and_sca
         ),
         "the continuation call durably consumed the steering input"
     );
+    let receipt: (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT outcome_kind, delivered_turn_id
+           FROM injection_settled_outbox_event
+          WHERE command_id = $1",
+    )
+    .bind(Uuid::from_u128(seed + 0x24))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        receipt,
+        (String::from("delivered"), Some(fixture.turn.into_uuid())),
+        "consumption settles the steering delivered to its source turn"
+    );
 
     let queued_follow_up = SubmitInputRepository::new(pool.clone())
         .handle(

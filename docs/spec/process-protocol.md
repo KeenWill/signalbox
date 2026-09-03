@@ -1,5 +1,8 @@
 # Process protocol
 
+Steering into a stopping turn is verified against PR #1483
+(`agent/lifecycle-t7-injection`).
+
 Deployment-owned process limits and the `read_deployment_limits` projection are
 verified against this PR (`agent/bounds-required-config-protocol`). The ordered
 user-content part-array vocabulary is verified against this PR
@@ -1596,12 +1599,12 @@ An application rejection is an `error` with `code = "rejected"` and a required
 `start_when_idle` retains that set. `steer` admits `session_not_found`,
 `acceptance_position_exhausted`,
 `no_active_turn { session_id, expected_active_turn_id }`, and
-`active_turn_mismatch { session_id, expected_active_turn_id, active_turn_id }`,
-plus
+`active_turn_mismatch { session_id, expected_active_turn_id, active_turn_id }`;
+a stopping turn accepts steering, and
 `safe_point_unavailable_while_stopping { session_id, active_turn_id, existing_command_id }`
-when the named turn already carries a stop proof. `queue` admits the first four
-steering details plus `defaults_version_mismatch` and `unknown_model_alias`. A
-`replace_session_metadata` rejection admits exactly
+is returned only on replay of a rejection recorded before it did. `queue` admits
+the first four steering details plus `defaults_version_mismatch` and
+`unknown_model_alias`. A `replace_session_metadata` rejection admits exactly
 `session_not_found { session_id }`. A `replace_session_defaults` rejection
 admits `session_not_found { session_id }`,
 `defaults_version_mismatch { session_id, expected, current }`, and

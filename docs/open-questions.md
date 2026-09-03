@@ -191,21 +191,6 @@ per-turn provenance. The following extensions remain undecided:
   remains undecided is whether one session may tune its own scan gate and how
   contending sessions share a deployment-wide pass budget. Later scope. (S01,
   S02)
-- **Terminalizing a turn that holds pending steering.** Every steering row bound
-  to a turn must be closed before that turn terminalizes, and the interrupt and
-  model-call terminal paths satisfy that by reclassifying the steering into a
-  queued successor origin
-  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)). The
-  failed-turn transition that startup recovery and the liveness watchdog share
-  performs no such reclassification and refuses outright, so a turn that wedges
-  and is then steered can be observed and reported but not ended — the one wedge
-  a user is actively trying to reach. Whether that transition should gain the
-  reclassification, and whether both its callers want it, is undecided: the
-  change is to a transition two components depend on, and startup recovery
-  reaching the same refusal has meant corrupt durable state rather than an
-  ordinary shape. Leaning: give the transition the reclassification the other
-  terminal paths already perform, since the constraint forcing it is a lifecycle
-  rule rather than a property of how the turn ended. Later scope. (S02, S07)
 - **Direct interrupt-only reconciliation from a running attempt.**
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) adds
   direct reconciliation only for fatal mismatch at a closed aggregate boundary;

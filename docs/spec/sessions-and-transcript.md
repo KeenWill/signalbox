@@ -1212,12 +1212,13 @@ source turn. The closed wire spelling and typed receipts are owned by
 [process-protocol](process-protocol.md#client-requests).
 
 The accepted input owns the one immutable authoritative content value; the
-`accepted_input` row admits exactly two guarded updates from pending steering:
+`accepted_input` row admits exactly three guarded updates from pending steering:
 consumption to `consumed_as_steering`, changing only disposition plus the exact
-consuming call, or reclassification to `reclassified_as_turn_origin`, changing
-only disposition plus the fresh origin turn. Neither changes content, and
-semantic history references that content rather than copying it (INV-005,
-INV-007, INV-036).
+consuming call; reclassification to `reclassified_as_turn_origin`, changing only
+disposition plus the fresh origin turn; or closure to `closed_not_delivered`
+under a committed session closure, changing only disposition. None changes
+content, and semantic history references that content rather than copying it
+(INV-005, INV-007, INV-036).
 
 ### Bounds
 

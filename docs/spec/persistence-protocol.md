@@ -1,7 +1,9 @@
 # Persistence protocol
 
 The session-lifecycle satellite's place in the lock order is verified against
-this PR (`agent/lifecycle-t2-state-machine`).
+this PR (`agent/lifecycle-t2-state-machine`). The `closed_not_delivered`
+disposition and `injection_settled` emission are verified against PR #1483
+(`agent/lifecycle-t7-injection`).
 
 The workspace-instruction discovery, registration, empty turn-start manifest,
 and model-call correlation were verified against PR #810
@@ -604,14 +606,17 @@ Representation rules, all enforced in the schema:
   `accepted_input` and admits only `pending_steering` →
   `reclassified_as_turn_origin`, setting a fresh `origin_turn_id`. Migration
   `202607220004` widens that exact guard for `pending_steering` →
-  `consumed_as_steering`, setting the exact `consuming_model_call_id`; both
-  admitted changes otherwise preserve the accepted fact. Consumed steering
-  additionally requires one correlated `steering_accepted_input` semantic entry
-  in that call's frontier, naming the same accepted input and source turn.
-  Reclassified steering instead requires its queued origin and terminal source
-  proof. Those lifecycle checks preserve the immutable next-safe-point command
-  receipt, so equal replay after either transition still returns the original
-  applied pending-steering result (INV-012, INV-016).
+  `consumed_as_steering`, setting the exact `consuming_model_call_id`; migration
+  `202609020007` widens it for `pending_steering` → `closed_not_delivered`,
+  which `accepted_input_closed_requires_terminal_session` admits only under a
+  terminal session or a committed pending terminal. All admitted changes
+  otherwise preserve the accepted fact. Consumed steering additionally requires
+  one correlated `steering_accepted_input` semantic entry in that call's
+  frontier, naming the same accepted input and source turn. Reclassified
+  steering instead requires its queued origin and terminal source proof. Those
+  lifecycle checks preserve the immutable next-safe-point command receipt, so
+  equal replay after any transition still returns the original applied
+  pending-steering result (INV-012, INV-016).
 - Migration `202608080101` adds the `awaiting_runner_recovery` active phase to
   `turn_lifecycle` with payload columns total only for that discriminator: the
   exact lost runner, the positive placement revision the loss was projected
@@ -1929,18 +1934,23 @@ before the replacement `input_accepted`. Dispatch rechecks that the named turn
 is terminal under that disposition. Every goal event appends `goal_changed`; an
 adopt or release appends `session_ownership_changed`; a transition into
 `terminal` appends `session_terminal` from the satellite's own trigger.
-`session_state_changed` and `injection_settled` are committed unimplemented
-functionality: each has its typed record and decoder and no present surface
-appends it — the deadline engine and the injection contract will. The
-`session_lifecycle` family appends `command_settled` for every claimed command.
-A closure that finds a live turn commits its outcome to the satellite's handoff
-with the acting principal; the transaction that terminalizes the session's last
-live turn settles it at commit (`turn_lifecycle_settles_pending_terminal`, a
-deferred constraint trigger, so the causal turn's own event precedes the
-settlement's): remaining queued turns retire as `retired{session_closed}`, an
-open goal generation closes as `session_closed`, a user-stopped generation
-admits only `stopped`, an achieved generation admits every closure, and the
-satellite records terminal. Model-call state transitions append
+`session_state_changed` is committed unimplemented functionality: it has its
+typed record and decoder and no present surface appends it — the deadline engine
+will. The `session_lifecycle` family appends `command_settled` for every claimed
+command. A closure that finds a live turn commits its outcome to the satellite's
+handoff with the acting principal; the transaction that terminalizes the
+session's last live turn settles it at commit
+(`turn_lifecycle_settles_pending_terminal`, a deferred constraint trigger, so
+the causal turn's own event precedes the settlement's): remaining queued turns
+retire as `retired{session_closed}`, an open goal generation closes as
+`session_closed`, a user-stopped generation admits only `stopped`, an achieved
+generation admits every closure, and the satellite records terminal. Every
+claimed `submit_input` or `decide_tool_request` command appends exactly one
+`injection_settled` (`injection_settled_outbox_event_command_id_key`): at
+acceptance for an origin or a rejection, at consumption, reclassification, or
+closure for pending steering, and at the decision for a tool request — a
+decision after its request was decided settles `not_delivered`. A command naming
+no session appends none. Model-call state transitions append
 `model_call_transition`, tool-round creation appends
 `tool_batch_transition { proposed }`, all-resolved result projection appends
 `tool_batch_transition { results_projected }`, and an external-effect ambiguity

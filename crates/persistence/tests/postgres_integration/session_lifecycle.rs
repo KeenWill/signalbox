@@ -999,6 +999,7 @@ async fn a_closure_handoff_disposes_pending_steering_before_settlement()
                     )),
                     ContextFrontierId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 65 + 0xd00)),
                 ),
+                &mut signalbox_application::UuidV7StartupScanIdGenerator,
             )
             .await?,
         signalbox_application::StaleTurnOutcome::Terminalized
@@ -2097,6 +2098,162 @@ async fn a_closure_cannot_override_a_committed_handoff() -> Result<(), Box<dyn E
     assert_eq!(
         lifecycle_rejection(error),
         SessionLifecycleRejection::PendingTerminalConflict
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// §8: a committed closure closes the steering still pending on its live turn
+/// `not_delivered`, with a receipt per injection; the turn then settles with
+/// no successor to reclassify into, and the session records terminal.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminalization_closes_pending_steering_not_delivered() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(40);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(interactive_creation(40))
+        .await?;
+    let turn = activate_first_turn(&pool, session, 40).await?;
+    let steering = DurableCommandId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 40 + 0xa00));
+    let accepted = SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                steering,
+                session,
+                UserContent::try_text(String::from("steer before closing"))
+                    .expect("fixture content is admitted"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: turn,
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 40 + 0xb00)),
+            None,
+        )
+        .await?;
+    assert!(matches!(
+        accepted,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
+
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    let outcome = SessionTerminalOutcome::Stopped {
+        sticky: StopStickiness::Sticky,
+    };
+    repository
+        .commit_pending_terminal(session, outcome, LifecycleActor::Operator)
+        .await?;
+    let settled: (String, String, Option<Uuid>) = sqlx::query_as(
+        "SELECT accepted.disposition_kind, receipt.outcome_kind, receipt.delivered_turn_id
+           FROM accepted_input AS accepted
+           JOIN injection_settled_outbox_event AS receipt
+             ON receipt.command_id = accepted.accepting_command_id
+          WHERE accepted.accepting_command_id = $1",
+    )
+    .bind(steering.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        settled,
+        (
+            String::from("closed_not_delivered"),
+            String::from("not_delivered"),
+            None
+        )
+    );
+
+    let liveness = PostgresTurnLivenessRepository::new(
+        pool.clone(),
+        TurnLivenessPersistenceBounds::new(None, None, None),
+    );
+    let candidate = *liveness
+        .quiescent_active_turns(None)
+        .await?
+        .candidates()
+        .first()
+        .expect("the live turn is quiescent");
+    assert_eq!(candidate.turn(), turn);
+    assert_eq!(
+        liveness
+            .terminalize_stale_turn(
+                candidate,
+                signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                        LIFECYCLE_SEED + 40 + 0xc00
+                    )),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 40 + 0xd00)),
+                ),
+                &mut signalbox_application::UuidV7StartupScanIdGenerator,
+            )
+            .await?,
+        signalbox_application::StaleTurnOutcome::Terminalized
+    );
+    let successors: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM turn_lifecycle WHERE session_id = $1 AND turn_id <> $2",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(successors, 0, "closed steering is not reclassified");
+    assert_eq!(
+        repository.settle_pending_terminal(session).await?,
+        SessionLifecycleState::Terminal { outcome }
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// §8: the third disposition exists only for a terminal or closing session;
+/// closing steering under a live one is refused at commit.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn closed_steering_requires_a_terminal_session() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(41);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(interactive_creation(41))
+        .await?;
+    let turn = activate_first_turn(&pool, session, 41).await?;
+    let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 41 + 0xb00));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 41 + 0xa00)),
+                session,
+                UserContent::try_text(String::from("steer a live turn"))
+                    .expect("fixture content is admitted"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: turn,
+                },
+            ),
+            accepted_input,
+            None,
+        )
+        .await?;
+
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "UPDATE accepted_input
+            SET disposition_kind = 'closed_not_delivered'
+          WHERE accepted_input_id = $1",
+    )
+    .bind(accepted_input.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("a live session cannot close its steering");
+    assert_eq!(
+        database_constraint(&error),
+        Some("accepted_input_closed_requires_terminal_session")
     );
 
     pool.close().await;

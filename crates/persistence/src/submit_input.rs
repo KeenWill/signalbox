@@ -974,6 +974,7 @@ where
     {
         let recorded = prepared.result().clone();
         insert_prepared_command(connection, &prepared).await?;
+        settle_injection_receipt(connection, &prepared).await?;
         return Ok(TransactionDecision::Commit(
             SubmitInputHandlingOutcome::Recorded(recorded),
         ));
@@ -7166,6 +7167,55 @@ async fn insert_prepared_effects(
         mirror_accepted_content_parts(connection, applied.accepted_input()).await?;
     }
 
+    settle_injection_receipt(connection, &prepared).await
+}
+
+/// Settles the command's injection receipt (§8). Pending steering settles at
+/// its boundary; a session that does not exist has no receipt to carry.
+async fn settle_injection_receipt(
+    connection: &mut PgConnection,
+    prepared: &PreparedSubmitInput,
+) -> Result<(), SubmitInputRepositoryError> {
+    let command = prepared.command();
+    let outcome = match prepared.result() {
+        SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(applied)) => {
+            outbox::InjectionOutcomeOutbox::Delivered {
+                turn: Some(applied.turn()),
+            }
+        }
+        SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(_))
+        | SubmitInputResult::Rejected(SubmitInputRejectedResult::SessionNotFound { .. }) => {
+            return Ok(());
+        }
+        SubmitInputResult::Rejected(rejected) => {
+            if matches!(
+                rejected,
+                SubmitInputRejectedResult::AttachmentBlobNotFound { .. }
+                    | SubmitInputRejectedResult::AttachmentByteBudgetExceeded { .. }
+            ) && !sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM session WHERE session_id = $1)",
+            )
+            .bind(session_id_to_uuid(command.session()))
+            .fetch_one(&mut *connection)
+            .await?
+            {
+                return Ok(());
+            }
+            let kind = encode_result(prepared.result(), command.delivery(), command.session())
+                .rejection_kind
+                .ok_or(SubmitInputCorruption::Inconsistent("rejection kind"))?;
+            outbox::InjectionOutcomeOutbox::Rejected { kind }
+        }
+    };
+    outbox::append(
+        connection,
+        OutboxEvent::InjectionSettled {
+            session: command.session(),
+            command: command.command_id(),
+            outcome,
+        },
+    )
+    .await?;
     Ok(())
 }
 

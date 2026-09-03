@@ -684,7 +684,9 @@ impl PostgresToolLoopRepository {
                     let session = session_id_from_uuid(stored_session);
                     let turn = turn_id_from_uuid(stored_turn);
                     lock_tool_session(&mut transaction, session).await?;
-                    if decision_exists(&mut transaction, command.request()).await? {
+                    if decision_exists(&mut transaction, command.request()).await?
+                        || request_closed_by_turn_end(&mut transaction, command.request()).await?
+                    {
                         let prepared = command.prepare_already_resolved();
                         persist_decision_command(
                             &mut transaction,
@@ -692,16 +694,8 @@ impl PostgresToolLoopRepository {
                             signalbox_domain::CommandPrincipal::Operator,
                         )
                         .await?;
-                        return Ok(prepared);
-                    }
-                    if request_closed_by_turn_end(&mut transaction, command.request()).await? {
-                        let prepared = command.prepare_already_resolved();
-                        persist_decision_command(
-                            &mut transaction,
-                            &prepared,
-                            signalbox_domain::CommandPrincipal::Operator,
-                        )
-                        .await?;
+                        settle_decision_injection(&mut transaction, session, turn, &prepared)
+                            .await?;
                         return Ok(prepared);
                     }
                     let batch = load_active_batch_from_connection(&mut transaction, session, turn)
@@ -727,6 +721,13 @@ impl PostgresToolLoopRepository {
                             )
                         })?;
                     persist_batch_decision(&mut transaction, &decision).await?;
+                    settle_decision_injection(
+                        &mut transaction,
+                        session,
+                        turn,
+                        decision.prepared_command(),
+                    )
+                    .await?;
                     return Ok(decision.prepared_command().clone());
                 }
             };
@@ -3594,6 +3595,44 @@ async fn persist_batch_decision(
         )
         .await?;
     }
+    Ok(())
+}
+
+/// Settles a decision's injection receipt (§8): applied decisions deliver to
+/// the request's turn; a decision that arrives after its request was decided
+/// or its turn ended is `not_delivered`. A decision naming no request has no
+/// session to carry a receipt.
+async fn settle_decision_injection(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    prepared: &PreparedDecideToolRequest,
+) -> Result<(), ToolLoopRepositoryError> {
+    let outcome = match prepared.result() {
+        DecideToolRequestResult::Applied(_) => {
+            outbox::InjectionOutcomeOutbox::Delivered { turn: Some(turn) }
+        }
+        DecideToolRequestResult::Rejected(DecideToolRequestRejectedResult::AlreadyResolved {
+            ..
+        }) => outbox::InjectionOutcomeOutbox::NotDelivered,
+        DecideToolRequestResult::Rejected(DecideToolRequestRejectedResult::RequestNotFound {
+            ..
+        }) => return Ok(()),
+        DecideToolRequestResult::Rejected(
+            DecideToolRequestRejectedResult::NotEarliestUndecided { .. },
+        ) => outbox::InjectionOutcomeOutbox::Rejected {
+            kind: "not_earliest_undecided",
+        },
+    };
+    outbox::append(
+        connection,
+        OutboxEvent::InjectionSettled {
+            session,
+            command: prepared.command().command_id(),
+            outcome,
+        },
+    )
+    .await?;
     Ok(())
 }
 

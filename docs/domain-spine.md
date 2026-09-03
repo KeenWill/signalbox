@@ -2358,12 +2358,14 @@ impl AcceptedInputLifecycle {
         -> Result<Self, AcceptedInputLifecycleTransitionError>;
     pub fn reclassify_as_turn_origin(self, turn: TurnId, reason: SteeringReclassificationReason)
         -> Result<Self, AcceptedInputLifecycleTransitionError>;
+    pub fn close_not_delivered(self) -> Result<Self, AcceptedInputLifecycleTransitionError>;
     // accessors: id(), disposition()
 }
 
 pub enum AcceptedInputLifecycleTransitionError {
     CannotConsumeAsSteering { lifecycle: AcceptedInputLifecycle },
     CannotReclassifyAsTurnOrigin { lifecycle: AcceptedInputLifecycle },
+    CannotCloseNotDelivered { lifecycle: AcceptedInputLifecycle },
 }
 impl AcceptedInputLifecycleTransitionError {
     pub fn into_lifecycle(self) -> AcceptedInputLifecycle;
@@ -3974,7 +3976,12 @@ impl AcceptedInputTurnFailureIdentities {
         failure_entry: SemanticTranscriptEntryId,
         terminal_frontier: ContextFrontierId,
     ) -> Self;
-    // accessors: failure_entry(), terminal_frontier()
+    pub fn with_pending_steering_reclassifications(
+        self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self;
+    // accessors: failure_entry(), terminal_frontier(),
+    // pending_steering_reclassifications()
 }
 
 pub struct FailedAcceptedInputTurn { /* private */ }
@@ -3993,13 +4000,15 @@ impl PreparedAcceptedInputTurnFailure {
         FailedAcceptedInputTurn,
         SemanticTranscriptEntry,
         ResolvedContextFrontierSnapshot,
+        Box<[ReclassifiedPendingSteeringTurn]>,
     );
-    // accessors: turn(), failure_entry(), terminal_snapshot()
+    // accessors: turn(), failure_entry(), terminal_snapshot(),
+    // reclassified_pending_steering()
 }
 
 pub enum AcceptedInputTurnFailureFailure {
     NoActiveTurn,
-    PendingSteering { accepted_input: AcceptedInputId },
+    PendingSteeringReclassificationMismatch,
     FailureEntryIdentityAlreadyExists,
     TerminalFrontierIdentityAlreadyExists,
     ActiveAttemptCannotEndLost,
@@ -11490,7 +11499,6 @@ impl StaleTurnCandidate {
 pub enum StaleTurnOutcome {
     Terminalized,
     Superseded,
-    BlockedByPendingSteering,
 }
 
 pub struct TurnLivenessLedger { /* private */ }

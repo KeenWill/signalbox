@@ -90,6 +90,23 @@ impl AcceptedInputLifecycle {
             ),
         }
     }
+
+    /// Closes pending steering undelivered at session terminalization.
+    pub fn close_not_delivered(self) -> Result<Self, AcceptedInputLifecycleTransitionError> {
+        let Self { id, disposition } = self;
+
+        match disposition.close_not_delivered() {
+            Ok(disposition) => Ok(Self { id, disposition }),
+            Err(error) => Err(
+                AcceptedInputLifecycleTransitionError::CannotCloseNotDelivered {
+                    lifecycle: Self {
+                        id,
+                        disposition: error.into_current(),
+                    },
+                },
+            ),
+        }
+    }
 }
 
 /// Reports a rejected identity-preserving accepted-input lifecycle transition.
@@ -105,6 +122,11 @@ pub enum AcceptedInputLifecycleTransitionError {
         /// The unchanged lifecycle on which reclassification was attempted.
         lifecycle: AcceptedInputLifecycle,
     },
+    /// The current disposition cannot be closed undelivered.
+    CannotCloseNotDelivered {
+        /// The unchanged lifecycle on which closure was attempted.
+        lifecycle: AcceptedInputLifecycle,
+    },
 }
 
 impl AcceptedInputLifecycleTransitionError {
@@ -112,7 +134,8 @@ impl AcceptedInputLifecycleTransitionError {
     pub const fn lifecycle(&self) -> &AcceptedInputLifecycle {
         match self {
             Self::CannotConsumeAsSteering { lifecycle }
-            | Self::CannotReclassifyAsTurnOrigin { lifecycle } => lifecycle,
+            | Self::CannotReclassifyAsTurnOrigin { lifecycle }
+            | Self::CannotCloseNotDelivered { lifecycle } => lifecycle,
         }
     }
 
@@ -120,7 +143,8 @@ impl AcceptedInputLifecycleTransitionError {
     pub fn into_lifecycle(self) -> AcceptedInputLifecycle {
         match self {
             Self::CannotConsumeAsSteering { lifecycle }
-            | Self::CannotReclassifyAsTurnOrigin { lifecycle } => lifecycle,
+            | Self::CannotReclassifyAsTurnOrigin { lifecycle }
+            | Self::CannotCloseNotDelivered { lifecycle } => lifecycle,
         }
     }
 }
@@ -232,10 +256,29 @@ impl AcceptedInputDisposition {
             ),
         }
     }
+
+    /// Closes pending steering undelivered at session terminalization.
+    pub(crate) fn close_not_delivered(
+        self,
+    ) -> Result<Self, AcceptedInputDispositionTransitionError> {
+        match self {
+            Self::PendingSteering { .. } => Ok(Self::ClosedNotDelivered),
+            current @ (Self::OriginOf(_)
+            | Self::ConsumedAsSteering { .. }
+            | Self::ReclassifiedAsTurnOrigin { .. }
+            | Self::ClosedNotDelivered) => {
+                Err(AcceptedInputDispositionTransitionError::CannotCloseNotDelivered { current })
+            }
+        }
+    }
 }
 
 /// Reports a rejected crate-private accepted-input disposition transition.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "each variant names the transition the current disposition refuses"
+)]
 pub(crate) enum AcceptedInputDispositionTransitionError {
     /// The current disposition cannot be consumed as steering.
     CannotConsumeAsSteering {
@@ -247,13 +290,19 @@ pub(crate) enum AcceptedInputDispositionTransitionError {
         /// The disposition on which reclassification was attempted.
         current: AcceptedInputDisposition,
     },
+    /// The current disposition cannot be closed undelivered.
+    CannotCloseNotDelivered {
+        /// The disposition on which closure was attempted.
+        current: AcceptedInputDisposition,
+    },
 }
 
 impl AcceptedInputDispositionTransitionError {
     fn into_current(self) -> AcceptedInputDisposition {
         match self {
             Self::CannotConsumeAsSteering { current }
-            | Self::CannotReclassifyAsTurnOrigin { current } => current,
+            | Self::CannotReclassifyAsTurnOrigin { current }
+            | Self::CannotCloseNotDelivered { current } => current,
         }
     }
 }
@@ -318,6 +367,14 @@ mod tests {
     }
 
     #[test]
+    fn internal_disposition_transition_can_close_pending_steering() {
+        assert_eq!(
+            pending_steering(1).close_not_delivered(),
+            Ok(AcceptedInputDisposition::ClosedNotDelivered)
+        );
+    }
+
+    #[test]
     fn lifecycle_couples_identity_to_disposition() {
         let id = accepted_input_id(1);
         let disposition = pending_steering(2);
@@ -369,6 +426,9 @@ mod tests {
         assert_lifecycle_consumption_rejects_unchanged(origin_disposition());
         assert_lifecycle_consumption_rejects_unchanged(consumed_disposition());
         assert_lifecycle_consumption_rejects_unchanged(reclassified_disposition());
+        assert_lifecycle_consumption_rejects_unchanged(
+            AcceptedInputDisposition::ClosedNotDelivered,
+        );
     }
 
     /// INV-006: a transition is valid only from explicitly permitted prior
@@ -378,6 +438,33 @@ mod tests {
         assert_lifecycle_reclassification_rejects_unchanged(origin_disposition());
         assert_lifecycle_reclassification_rejects_unchanged(consumed_disposition());
         assert_lifecycle_reclassification_rejects_unchanged(reclassified_disposition());
+        assert_lifecycle_reclassification_rejects_unchanged(
+            AcceptedInputDisposition::ClosedNotDelivered,
+        );
+    }
+
+    /// INV-004: closure preserves the accepted-input identity.
+    #[test]
+    fn lifecycle_closure_preserves_accepted_input_identity() {
+        let id = accepted_input_id(1);
+
+        assert_eq!(
+            AcceptedInputLifecycle::new(id, pending_steering(2)).close_not_delivered(),
+            Ok(AcceptedInputLifecycle::new(
+                id,
+                AcceptedInputDisposition::ClosedNotDelivered
+            ))
+        );
+    }
+
+    /// INV-006: closure is valid only from pending steering, and a rejection
+    /// leaves the current state unchanged.
+    #[test]
+    fn lifecycle_closure_rejections_return_the_unchanged_identity_and_disposition() {
+        assert_lifecycle_closure_rejects_unchanged(origin_disposition());
+        assert_lifecycle_closure_rejects_unchanged(consumed_disposition());
+        assert_lifecycle_closure_rejects_unchanged(reclassified_disposition());
+        assert_lifecycle_closure_rejects_unchanged(AcceptedInputDisposition::ClosedNotDelivered);
     }
 
     /// INV-006: a transition is valid only from explicitly permitted prior
@@ -387,6 +474,9 @@ mod tests {
         assert_internal_consumption_rejects_with_current(origin_disposition());
         assert_internal_consumption_rejects_with_current(consumed_disposition());
         assert_internal_consumption_rejects_with_current(reclassified_disposition());
+        assert_internal_consumption_rejects_with_current(
+            AcceptedInputDisposition::ClosedNotDelivered,
+        );
     }
 
     /// INV-006: a transition is valid only from explicitly permitted prior
@@ -396,6 +486,9 @@ mod tests {
         assert_internal_reclassification_rejects_with_current(origin_disposition());
         assert_internal_reclassification_rejects_with_current(consumed_disposition());
         assert_internal_reclassification_rejects_with_current(reclassified_disposition());
+        assert_internal_reclassification_rejects_with_current(
+            AcceptedInputDisposition::ClosedNotDelivered,
+        );
     }
 
     fn origin_disposition() -> AcceptedInputDisposition {
@@ -444,6 +537,18 @@ mod tests {
             ),
             Err(error.clone())
         );
+        assert_eq!(error.lifecycle(), &lifecycle);
+        assert_eq!(error.into_lifecycle(), lifecycle);
+    }
+
+    #[track_caller]
+    fn assert_lifecycle_closure_rejects_unchanged(disposition: AcceptedInputDisposition) {
+        let lifecycle = AcceptedInputLifecycle::new(accepted_input_id(1), disposition);
+        let error = AcceptedInputLifecycleTransitionError::CannotCloseNotDelivered {
+            lifecycle: lifecycle.clone(),
+        };
+
+        assert_eq!(lifecycle.clone().close_not_delivered(), Err(error.clone()));
         assert_eq!(error.lifecycle(), &lifecycle);
         assert_eq!(error.into_lifecycle(), lifecycle);
     }
