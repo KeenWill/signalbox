@@ -593,7 +593,13 @@ impl PostgresAutomaticReconciliationRepository {
             model_call,
         )
         .await?;
-        settle_abandoned_attempts(&mut transaction, CLAIM_WINDOW).await?;
+        settle_abandoned_attempts(
+            &mut transaction,
+            CLAIM_WINDOW,
+            self.model_call_policy.retry_backoff_base.is_none(),
+            self.tool_policy.retry_backoff_base.is_none(),
+        )
+        .await?;
         mark_superseded_recoveries(&mut transaction, CLAIM_WINDOW).await?;
         let exhausted_rows = mark_exhausted_recoveries(&mut transaction, CLAIM_WINDOW).await?;
         let mut claim =
@@ -1005,6 +1011,8 @@ async fn discover_recoveries(
 async fn settle_abandoned_attempts(
     connection: &mut PgConnection,
     window: i64,
+    model_call_retry_unbounded: bool,
+    tool_retry_unbounded: bool,
 ) -> Result<(), AutomaticReconciliationRepositoryError> {
     sqlx::query(
         "WITH abandoned AS MATERIALIZED (
@@ -1024,7 +1032,14 @@ async fn settle_abandoned_attempts(
                AND attempt.outcome_kind = 'attempting'
          )
          UPDATE automatic_reconciliation AS recovery
-            SET state_kind = 'scheduled'
+            SET state_kind = 'scheduled',
+                next_attempt_at = CASE
+                    WHEN recovery.model_call_id IS NOT NULL AND $2::boolean
+                    THEN 'infinity'::timestamptz
+                    WHEN recovery.tool_attempt_id IS NOT NULL AND $3::boolean
+                    THEN 'infinity'::timestamptz
+                    ELSE recovery.next_attempt_at
+                END
            FROM abandoned
           WHERE recovery.turn_id = abandoned.turn_id
             AND recovery.state_kind = 'attempting'
@@ -1032,6 +1047,8 @@ async fn settle_abandoned_attempts(
             AND recovery.attempt_count < recovery.attempt_ceiling",
     )
     .bind(window)
+    .bind(model_call_retry_unbounded)
+    .bind(tool_retry_unbounded)
     .execute(connection)
     .await?;
     Ok(())

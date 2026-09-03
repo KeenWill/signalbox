@@ -614,8 +614,9 @@ async fn run_quiescent_watchdog(
                     &mut shutdown,
                 )
                 .await;
+                anchor_next_scan(&mut ticker);
                 if tally.observation_recorded() {
-                    anchor_next_observation(&mut first_scan_after_restart, &mut ticker);
+                    first_scan_after_restart = false;
                 }
             }
         }
@@ -646,7 +647,7 @@ async fn run_slot_held_watchdog(
                             continue;
                         }
                     };
-                if reconcile_slot_held_turns(
+                let observation_recorded = reconcile_slot_held_turns(
                     &repository,
                     ledger,
                     numeric_bounds.slow_substrate_factor_for(SlowSubstrateConditions {
@@ -659,9 +660,10 @@ async fn run_slot_held_watchdog(
                     &mut shutdown,
                     !first_scan_after_restart,
                 )
-                .await
-                {
-                    anchor_next_observation(&mut first_scan_after_restart, &mut ticker);
+                .await;
+                anchor_next_scan(&mut ticker);
+                if observation_recorded {
+                    first_scan_after_restart = false;
                 }
             }
         }
@@ -686,8 +688,7 @@ async fn run_ambiguous_operation_watchdog(
     }
 }
 
-fn anchor_next_observation(first_scan_after_restart: &mut bool, ticker: &mut Interval) {
-    *first_scan_after_restart = false;
+fn anchor_next_scan(ticker: &mut Interval) {
     ticker.reset();
 }
 
@@ -1539,10 +1540,10 @@ mod tests {
         SLOT_HELD_PAGE_TIMEOUT_CAUSE, STALE_TURN_AMBIGUOUS_CAUSE,
         STALE_TURN_LOCK_UNAVAILABLE_CAUSE, STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE,
         SlowSubstrateNumericBounds, StaleTurnTerminalizer, TERMINALIZATION_DEFERRED_CAUSE,
-        TerminalizationWindow, TurnLivenessNumericBounds, TurnLivenessWake,
-        anchor_next_observation, automatic_reconciliation_scan_ceiling_reached,
-        batch_admits_another_reconciliation, complete_before_shutdown, drain_quiescent_rotation,
-        next_turn_liveness_wake, reconcile_turn_liveness, reconciliation_deadline,
+        TerminalizationWindow, TurnLivenessNumericBounds, TurnLivenessWake, anchor_next_scan,
+        automatic_reconciliation_scan_ceiling_reached, batch_admits_another_reconciliation,
+        complete_before_shutdown, drain_quiescent_rotation, next_turn_liveness_wake,
+        reconcile_turn_liveness, reconciliation_deadline,
     };
     use signalbox_application::{
         DurableTurnLivenessObservation, StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome,
@@ -1851,10 +1852,10 @@ mod tests {
         assert_eq!(wake, TurnLivenessWake::Scan);
     }
 
-    /// A completed observation starts a fresh cadence, so work before its
-    /// commit cannot count toward the next persisted ordinal.
+    /// A completed scan starts a fresh cadence, so a possibly committed
+    /// observation cannot count pre-commit work toward its next ordinal.
     #[tokio::test(start_paused = true)]
-    async fn a_completed_observation_anchors_the_next_scan_interval() {
+    async fn a_completed_scan_anchors_the_next_observation_interval() {
         let scan_interval = Duration::from_secs(60);
         let nearly_one_interval = scan_interval - Duration::from_secs(1);
         let (_shutdown, mut receiver) = watch::channel(false);
@@ -1863,8 +1864,7 @@ mod tests {
         let _first = next_turn_liveness_wake(&mut receiver, &mut ticker).await;
         tokio::time::advance(nearly_one_interval).await;
 
-        let mut first_scan_after_restart = true;
-        anchor_next_observation(&mut first_scan_after_restart, &mut ticker);
+        anchor_next_scan(&mut ticker);
         let early = tokio::time::timeout(
             nearly_one_interval,
             next_turn_liveness_wake(&mut receiver, &mut ticker),
@@ -1873,7 +1873,6 @@ mod tests {
         let next = next_turn_liveness_wake(&mut receiver, &mut ticker).await;
 
         assert!(early.is_err());
-        assert!(!first_scan_after_restart);
         assert_eq!(next, TurnLivenessWake::Scan);
     }
 

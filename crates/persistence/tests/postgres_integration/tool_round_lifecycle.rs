@@ -2600,6 +2600,26 @@ async fn automatic_reconciliation_honors_class_budget_and_unbounded_retry_leases
     .bind(i64::try_from(tool_attempt_lease.as_millis())?)
     .fetch_one(&pool)
     .await?;
+    sqlx::query(
+        "UPDATE automatic_reconciliation
+            SET next_attempt_at = statement_timestamp() - interval '1 millisecond'
+          WHERE turn_id = $1",
+    )
+    .bind(earlier_model.turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    let abandoned_model = repository.claim_due_model_call().await?;
+    let abandoned_model_state: (String, bool, String) = sqlx::query_as(
+        "SELECT recovery.state_kind,
+                recovery.next_attempt_at = 'infinity'::timestamptz,
+                attempt.outcome_kind
+           FROM automatic_reconciliation AS recovery
+           JOIN automatic_reconciliation_attempt AS attempt USING (turn_id)
+          WHERE recovery.turn_id = $1 AND attempt.attempt_ordinal = 1",
+    )
+    .bind(earlier_model.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
     repository
         .record_failure(
             first.claimed()[0],
@@ -2611,6 +2631,16 @@ async fn automatic_reconciliation_honors_class_budget_and_unbounded_retry_leases
 
     assert_eq!(first.claimed()[0].attempt().get(), 1);
     assert_eq!(model.claimed().len(), 1);
+    assert_eq!(abandoned_model.claimed(), &[]);
+    assert_eq!(abandoned_model.exhausted(), &[]);
+    assert_eq!(
+        abandoned_model_state,
+        (
+            String::from("scheduled"),
+            true,
+            String::from("infrastructure_failure")
+        )
+    );
     assert!(model_claim_lease_covers_attempt);
     assert!(tool_claim_lease_covers_attempt);
     assert_eq!(
