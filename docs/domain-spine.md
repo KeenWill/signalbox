@@ -2364,6 +2364,7 @@ pub enum AcceptedInputDisposition {
     PendingSteering { binding: SteeringBinding },
     ConsumedAsSteering { call: ModelCallId },
     ReclassifiedAsTurnOrigin { turn: TurnId, reason: SteeringReclassificationReason },
+    ClosedNotDelivered,
 }
 // transitions on a bare disposition are crate-private; AcceptedInputLifecycle
 // is the public transition boundary

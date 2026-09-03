@@ -1,8 +1,10 @@
 # Configuration and credentials
 
 The model-call recovery telemetry vocabulary is re-verified against this PR
-(`agent/turn-lifecycle-hardening`). The lifecycle Prometheus gauge inventory is
-verified against this PR (`agent/lifecycle-t3-metrics`).
+(`agent/turn-lifecycle-hardening`). The migration-failure rejection text on the
+startup log is verified against this PR (`agent/t1-migration-backfill`). The
+lifecycle Prometheus gauge inventory is verified against PR #1478
+(`agent/lifecycle-t3-metrics`).
 
 The browser HTTP listener, same-origin static assets, and generated contract
 bootstrap are verified against this PR (`agent/web-http-transport`). The
@@ -381,15 +383,19 @@ operator failure class, and small typed fields where present (session and turn
 ids, recovered-turn count, grace-window seconds) — never configuration values,
 paths, or URLs. The typed configuration error does not survive to the log:
 `run_hub` collapses every catalog-parse and adapter-construction variant (and
-likewise connection and migration errors) into a generic `Infrastructure` class
-carrying only its phase, so an operator cannot distinguish an unreadable catalog
-from an unknown field, bad version, or invalid limit (see Open edges). The six
-unconditional deployment paths are accepted without I/O at environment parsing
-time; both catalogs and every template prompt file are read during startup.
-Provider and integration credential files remain lazy. A currently routed S3
-blob store is the sole static-file exception: after database connection and the
-configuration-independent recovery scan, startup reads that explicit credential
-to perform the marker and lifecycle checks owned by
+likewise connection errors) into a generic `Infrastructure` class carrying only
+its phase, so an operator cannot distinguish an unreadable catalog from an
+unknown field, bad version, or invalid limit (see Open edges). A failed
+migration is the one exception. It carries the same generic class and phase and
+additionally records the database's own rejection text in a structured field,
+because the phase alone cannot separate a rejected constraint from an
+unreachable database, and that text names schema objects rather than
+configuration. The six unconditional deployment paths are accepted without I/O
+at environment parsing time; both catalogs and every template prompt file are
+read during startup. Provider and integration credential files remain lazy. A
+currently routed S3 blob store is the sole static-file exception: after database
+connection and the configuration-independent recovery scan, startup reads that
+explicit credential to perform the marker and lifecycle checks owned by
 [blob storage](blob-storage.md#stores-routing-and-configuration), before socket
 admission or scheduling.
 
@@ -3268,10 +3274,10 @@ are outside this cluster-delivery policy:
 - `DATABASE_URL` via process environment is explicitly provisional; the
   database-credential delivery channel remains an open decision.
 - signalboxd erases typed configuration diagnostics before logging:
-  catalog-parse and Anthropic-construction variants (and connection and
-  migration errors) collapse to a generic `Infrastructure` class plus phase, so
-  startup logs cannot distinguish failure causes within the `Configuration`
-  phase.
+  catalog-parse and Anthropic-construction variants (and connection errors)
+  collapse to a generic `Infrastructure` class plus phase, so startup logs
+  cannot distinguish failure causes within the `Configuration` phase. A failed
+  migration is the exception and keeps its rejection text.
 - [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance)
   owns the unresolved in-memory credential-hygiene question.
 - No adapter in this build reports remaining provider capacity, so

@@ -6,6 +6,11 @@ discovery, typed registration construction, and explicit-root configuration were
 verified against PR #798 (`agent/agent-docs-skills-foundation`). Durable
 registration, empty eligibility, turn-start evidence, and model-call correlation
 were verified against PR #810 (`agent/agent-docs-skills-model-call-followup`).
+Directory exclusions and limit-set version two were verified against PR #1488
+(`agent/workspace-instruction-exclusions`); regular-file `.git` markers were
+verified against this PR (`agent/discovery-worktree-roots`). The
+incomplete-discovery operator event is verified against this PR
+(`agent/t1-migration-backfill`).
 
 This page is the foundation proposal at the bottom of the workspace-instruction
 implementation stack. It specifies daemon-owned discovery, registration,
@@ -59,7 +64,7 @@ grants no session authority, and eligibility spends no model context.
 
 ## Discovery
 
-Discovery greedily walks the complete directory tree rooted at the session's
+Discovery greedily walks every non-excluded directory rooted at the session's
 daemon-local resolved workspace and each instruction directory explicitly
 registered by the owning
 [configuration grammar](configuration-and-credentials.md#workspace-instruction-roots).
@@ -81,31 +86,41 @@ later placement-revision-correlated protocol that returns bytes and findings
 from the pinned runner workspace. It may not be emulated by asking a
 model-runtime adapter to load ambient files.
 
-The walk considers every nested directory and yields an agent-document candidate
-for each `AGENTS.md` regular file. In the workspace it yields an agent-skill
-candidate for each directory immediately below an `.agents/skills` directory
-that contains a regular `SKILL.md`; `.agents/skills` may occur at any depth.
-Within an explicitly registered root, every nested directory containing a
-regular `SKILL.md` is a candidate, including the root itself. This lets a
-configured root name either one bundle or a collection without requiring the
-workspace convention outside the workspace. Version one does not follow symbolic
-links. It sorts directory entries by raw path spelling before descending, so
-identical trees yield candidates in identical order. Entries that cannot be read
-or classified produce typed discovery findings; they do not disappear as an
-empty successful result.
+Within that boundary, the walk considers every nested directory and yields an
+agent-document candidate for each `AGENTS.md` regular file. In the workspace it
+yields an agent-skill candidate for each directory immediately below an
+`.agents/skills` directory that contains a regular `SKILL.md`; `.agents/skills`
+may occur at any depth. Within an explicitly registered root, every nested
+directory containing a regular `SKILL.md` is a candidate, including the root
+itself. This lets a configured root name either one bundle or a collection
+without requiring the workspace convention outside the workspace. Version one
+does not follow symbolic links. It sorts directory entries by raw path spelling
+before descending, so identical trees yield candidates in identical order.
+Entries that cannot be read or classified produce typed discovery findings; they
+do not disappear as an empty successful result.
 
-The greedy walk is complete only within fixed daemon safety limits. Version one
-admits at most 100,000 classified directory entries, 4,096 findings, 64 MiB of
-candidate source bytes, and 30 seconds of elapsed scan time across all roots.
-These limits are not user-configurable discovery policy. The scan records the
-limit-set version, every consumed count, and a typed `limit_reached` finding
-naming the first exhausted dimension; it then stops without presenting the
-partial inventory as complete. Registration may retain the candidates already
-found, but session creation or turn preparation that requires a complete scan
-fails closed. An incomplete discovery may be retained as append-only diagnostic
-evidence, but no turn manifest names it; a later preparation retries with a new
-scan. Product ignore rules and configurable depth policy remain deferred. The
-4,096-finding bound reserves its final slot for this terminal limit finding.
+Discovery does not descend into VCS metadata directories (`.git`, `.hg`, `.svn`,
+`.jj`), workspace descendants containing one of those directories or a regular
+`.git` file, or build/dependency outputs (`target`, `node_modules`, `.venv`,
+`dist`, `build`). A skipped directory entry counts toward the classified-entry
+bound, but its contents do not.
+
+The greedy walk is complete only within fixed daemon safety limits. The
+version-two limit set admits at most 100,000 classified directory entries, 4,096
+findings, 64 MiB of candidate source bytes, and 30 seconds of elapsed scan time
+across all roots. These limits are not user-configurable discovery policy. The
+scan records the limit-set version, every consumed count, and a typed
+`limit_reached` finding naming the first exhausted dimension; it then stops
+without presenting the partial inventory as complete. Registration may retain
+the candidates already found, but session creation or turn preparation that
+requires a complete scan fails closed. An incomplete discovery may be retained
+as append-only diagnostic evidence, but no turn manifest names it; a later
+preparation retries with a new scan. The turn preparation that fails closed also
+records one operator event naming the exhausted dimension, the limit-set
+version, every consumed count, and the roots the scan walked, because the
+failure reaches the scheduler as a cause code that carries none of them. Product
+ignore rules and configurable depth policy remain deferred. The 4,096-finding
+bound reserves its final slot for this terminal limit finding.
 
 One scan emits a canonical source path only once even when workspace and
 configured roots overlap; the first read fixes its source hash for that scan.
