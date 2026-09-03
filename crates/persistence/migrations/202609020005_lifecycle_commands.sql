@@ -451,6 +451,13 @@ CREATE TABLE session_lifecycle_command (
     rejection_kind text,
     applied_effect_kind text,
     live_turn_id uuid,
+    resume_state_kind text,
+    resume_waiting_kind text,
+    resume_waiting_waker text,
+    resume_waiting_subject_session_id uuid,
+    resume_recovering_op text,
+    resume_blocked_reason text,
+    resume_blocked_cycle bigint,
 
     CONSTRAINT session_lifecycle_command_pkey PRIMARY KEY (command_id),
     CONSTRAINT session_lifecycle_command_kind_closed
@@ -522,6 +529,53 @@ CREATE TABLE session_lifecycle_command (
                  AND (applied_effect_kind = 'ownership_changed'::text)))
         AND ((applied_effect_kind IS NOT DISTINCT FROM 'closure_pending'::text)
              = (live_turn_id IS NOT NULL))
+    ),
+    CONSTRAINT session_lifecycle_command_resume_state_shape CHECK (
+        ((applied_effect_kind IS NOT DISTINCT FROM 'resumed'::text)
+            = (resume_state_kind IS NOT NULL))
+        AND ((resume_state_kind IS NULL) OR (resume_state_kind = ANY (ARRAY[
+            'created'::text,
+            'dispatched'::text,
+            'active'::text,
+            'waiting'::text,
+            'recovering'::text,
+            'blocked'::text
+        ])))
+        AND ((resume_state_kind IS NOT DISTINCT FROM 'waiting'::text)
+            = ((resume_waiting_kind IS NOT NULL)
+                AND (resume_waiting_waker IS NOT NULL)))
+        AND ((resume_state_kind IS NOT DISTINCT FROM 'waiting'::text)
+             OR ((resume_waiting_kind IS NULL)
+                 AND (resume_waiting_waker IS NULL)
+                 AND (resume_waiting_subject_session_id IS NULL)))
+        AND ((resume_waiting_kind IS NOT DISTINCT FROM 'child'::text)
+            = (resume_waiting_subject_session_id IS NOT NULL))
+        AND ((resume_waiting_kind IS NULL)
+             OR ((resume_waiting_kind, resume_waiting_waker) = ANY (ARRAY[
+                ('approval'::text, 'approval_decision'::text),
+                ('external'::text, 'external_recheck'::text),
+                ('child'::text, 'child_settlement'::text),
+                ('provider_retry'::text, 'provider_backoff'::text),
+                ('pipeline'::text, 'pipeline_drain'::text),
+                ('scheduler'::text, 'scheduler_sweep'::text)
+             ])))
+        AND ((resume_state_kind IS NOT DISTINCT FROM 'recovering'::text)
+            = (resume_recovering_op IS NOT NULL))
+        AND ((resume_recovering_op IS NULL) OR (resume_recovering_op = ANY (ARRAY[
+            'model_call'::text, 'tool'::text, 'runner'::text
+        ])))
+        AND ((resume_state_kind IS NOT DISTINCT FROM 'blocked'::text)
+            = ((resume_blocked_reason IS NOT NULL) AND (resume_blocked_cycle IS NOT NULL)))
+        AND ((resume_state_kind IS NOT DISTINCT FROM 'blocked'::text)
+             OR ((resume_blocked_reason IS NULL) AND (resume_blocked_cycle IS NULL)))
+        AND ((resume_blocked_reason IS NULL) OR (resume_blocked_reason = ANY (ARRAY[
+            'user_input_required'::text,
+            'external_change_required'::text,
+            'authorization_required'::text,
+            'execution_failure'::text,
+            'finish_check_failed'::text
+        ])))
+        AND ((resume_blocked_cycle IS NULL) OR (resume_blocked_cycle >= 0))
     ),
     CONSTRAINT session_lifecycle_command_rejection_closed CHECK (
         (rejection_kind IS NULL)
@@ -1517,8 +1571,6 @@ BEGIN
            blocked_cycle = NULL,
            parked_cause = NULL,
            parked_responder = NULL,
-           parked_since = NULL,
-           parked_standing_cause_kind = NULL,
            ended_at = statement_timestamp(),
            terminal_outcome_kind = pending_terminal_outcome_kind,
            terminal_cause_kind = pending_terminal_cause_kind,
@@ -1552,3 +1604,519 @@ CREATE CONSTRAINT TRIGGER turn_lifecycle_settles_pending_terminal
     AFTER UPDATE OF state_kind, delegation_runtime_terminal ON turn_lifecycle
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW EXECUTE FUNCTION settle_session_pending_terminal_from_turn();
+
+-- Lifecycle closure denials are introduced here, after the tool-loop schema
+-- they extend. The applied 202609010004 migration remains byte-for-byte fixed.
+ALTER TABLE tool_approval_decision
+    DROP CONSTRAINT tool_approval_decision_source_closed,
+    DROP CONSTRAINT tool_approval_decision_source_shape;
+
+ALTER TABLE tool_approval_decision
+    ADD CONSTRAINT tool_approval_decision_source_closed CHECK (
+        decision_source = ANY (ARRAY[
+            'user_command'::text,
+            'policy_auto'::text,
+            'session_blanket'::text,
+            'delegate'::text,
+            'user_override'::text,
+            'runtime_safety'::text,
+            'lifecycle_closure'::text
+        ])
+    ),
+    ADD CONSTRAINT tool_approval_decision_source_shape CHECK (
+        (decision_source = 'user_command'::text
+            AND user_command_id IS NOT NULL
+            AND delegate_model_selection_id IS NULL
+            AND delegate_model_call_id IS NULL
+            AND rationale IS NULL
+            AND override_denied_request_id IS NULL)
+        OR (decision_source = ANY (ARRAY[
+                'policy_auto'::text, 'session_blanket'::text
+            ])
+            AND decision_kind = 'approve'::text
+            AND user_command_id IS NULL
+            AND delegate_model_selection_id IS NULL
+            AND delegate_model_call_id IS NULL
+            AND rationale IS NULL
+            AND override_denied_request_id IS NULL)
+        OR (decision_source = 'delegate'::text
+            AND user_command_id IS NULL
+            AND delegate_model_selection_id IS NOT NULL
+            AND delegate_model_call_id IS NOT NULL
+            AND rationale IS NOT NULL
+            AND octet_length(rationale) BETWEEN 1 AND 4096
+            AND override_denied_request_id IS NULL)
+        OR (decision_source = 'user_override'::text
+            AND decision_kind = 'approve'::text
+            AND user_command_id IS NULL
+            AND delegate_model_selection_id IS NULL
+            AND delegate_model_call_id IS NULL
+            AND rationale IS NULL
+            AND override_denied_request_id IS NOT NULL)
+        OR (decision_source = 'runtime_safety'::text
+            AND decision_kind = 'deny'::text
+            AND denial_reason =
+                'Tool arguments were suppressed by the credential boundary'::text
+            AND user_command_id IS NULL
+            AND delegate_model_selection_id IS NULL
+            AND delegate_model_call_id IS NULL
+            AND rationale IS NULL
+            AND override_denied_request_id IS NULL)
+        OR (decision_source = 'lifecycle_closure'::text
+            AND decision_kind = 'deny'::text
+            AND denial_reason IS NULL
+            AND user_command_id IS NOT NULL
+            AND delegate_model_selection_id IS NULL
+            AND delegate_model_call_id IS NULL
+            AND rationale IS NULL
+            AND override_denied_request_id IS NULL)
+    );
+
+CREATE OR REPLACE FUNCTION assert_tool_decision_command_final_state(
+    checked_command_id uuid
+) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    command_record decide_tool_request_command%ROWTYPE;
+    approval_count bigint;
+    earliest_correlation_count bigint;
+BEGIN
+    SELECT *
+      INTO command_record
+      FROM decide_tool_request_command
+     WHERE command_id = checked_command_id;
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+
+    SELECT count(*)
+      INTO approval_count
+      FROM tool_approval_decision AS approval
+     WHERE approval.user_command_id = checked_command_id
+       AND approval.request_id = command_record.request_id
+       AND approval.decision_source IN ('user_command', 'lifecycle_closure')
+       AND approval.decision_kind = command_record.decision_kind
+       AND approval.denial_reason
+           IS NOT DISTINCT FROM command_record.denial_reason;
+
+    SELECT count(*)
+      INTO earliest_correlation_count
+      FROM tool_request AS requested
+      JOIN tool_request AS earliest
+        ON earliest.request_id =
+           command_record.result_earliest_undecided_request_id
+       AND earliest.producing_model_call_id =
+           requested.producing_model_call_id
+       AND earliest.request_ordinal < requested.request_ordinal
+     WHERE requested.request_id = command_record.request_id;
+
+    IF command_record.rejection_kind = 'not_earliest_undecided'
+       AND earliest_correlation_count <> 1
+    THEN
+        RAISE EXCEPTION
+            'tool decision command names an uncorrelated earlier request'
+            USING
+                ERRCODE = '23514',
+                CONSTRAINT =
+                    'decide_tool_request_command_earliest_correlation';
+    END IF;
+
+    IF (
+        command_record.result_kind = 'applied'
+        AND approval_count <> 1
+    ) OR (
+        command_record.result_kind = 'rejected'
+        AND EXISTS (
+            SELECT 1
+              FROM tool_approval_decision
+             WHERE user_command_id = checked_command_id
+        )
+    ) THEN
+        RAISE EXCEPTION
+            'tool decision command lacks its exact approval effect'
+            USING ERRCODE = '23514';
+    END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION require_explicit_tool_approval_effect()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    matching_effects bigint;
+BEGIN
+    IF NEW.decision_source IN (
+        'policy_auto', 'session_blanket', 'runtime_safety', 'lifecycle_closure'
+    ) THEN
+        RETURN NULL;
+    END IF;
+
+    IF NEW.decision_source = 'user_override' THEN
+        SELECT count(*)
+          INTO matching_effects
+          FROM tool_approval_decided_outbox_event AS dispatched
+          JOIN tool_request AS request
+            ON request.request_id = dispatched.request_id
+          JOIN turn_lifecycle AS lifecycle
+            ON lifecycle.turn_id = request.turn_id
+           AND lifecycle.session_id = request.session_id
+         WHERE dispatched.request_id = NEW.request_id
+           AND dispatched.recording_transaction_id = pg_current_xact_id()
+           AND lifecycle.active_tool_round_call_id =
+               request.producing_model_call_id
+           AND (
+                (
+                    lifecycle.state_kind = 'active'
+                    AND lifecycle.active_phase_kind = 'awaiting_tool_approval'
+                    AND lifecycle.approval_tool_request_id = (
+                        SELECT later.request_id
+                          FROM tool_request AS later
+                          LEFT JOIN tool_approval_decision AS later_decision
+                            ON later_decision.request_id = later.request_id
+                         WHERE later.producing_model_call_id =
+                               request.producing_model_call_id
+                           AND later_decision.request_id IS NULL
+                         ORDER BY later.request_ordinal
+                         LIMIT 1
+                    )
+                )
+                OR
+                (
+                    lifecycle.state_kind = 'active'
+                    AND lifecycle.active_phase_kind = 'running'
+                    AND lifecycle.approval_tool_request_id IS NULL
+                    AND lifecycle.recovery_tool_attempt_id IS NULL
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM tool_request AS undecided
+                          LEFT JOIN tool_approval_decision AS undecided_decision
+                            ON undecided_decision.request_id =
+                               undecided.request_id
+                         WHERE undecided.producing_model_call_id =
+                               request.producing_model_call_id
+                           AND undecided_decision.request_id IS NULL
+                    )
+                    AND EXISTS (
+                        SELECT 1
+                          FROM turn_attempt AS successor
+                          JOIN model_call AS producing_call
+                            ON producing_call.model_call_id =
+                               request.producing_model_call_id
+                           AND producing_call.turn_id = request.turn_id
+                           AND producing_call.session_id = request.session_id
+                         WHERE successor.turn_attempt_id =
+                               lifecycle.current_attempt_id
+                           AND successor.turn_id = request.turn_id
+                           AND successor.session_id = request.session_id
+                           AND successor.continued_from_attempt_id =
+                               producing_call.turn_attempt_id
+                           AND successor.state_kind = 'prepared'
+                    )
+                )
+           );
+        IF matching_effects <> 1 THEN
+            RAISE EXCEPTION
+                'user override consumption lacks its atomic proposal effect'
+                USING
+                    ERRCODE = '23514',
+                    CONSTRAINT =
+                        'tool_approval_user_override_requires_atomic_effect';
+        END IF;
+        RETURN NULL;
+    END IF;
+
+    SELECT count(*)
+      INTO matching_effects
+      FROM tool_approval_decided_outbox_event AS dispatched
+      JOIN tool_request AS request
+        ON request.request_id = dispatched.request_id
+      JOIN turn_lifecycle AS lifecycle
+        ON lifecycle.turn_id = request.turn_id
+       AND lifecycle.session_id = request.session_id
+     WHERE dispatched.request_id = NEW.request_id
+       AND dispatched.recording_transaction_id = pg_current_xact_id()
+       AND (
+            lifecycle.active_tool_round_call_id =
+                request.producing_model_call_id
+            OR lifecycle.state_kind = 'terminal'
+       )
+       AND ((
+            SELECT count(*)
+              FROM tool_approval_decided_outbox_event AS transaction_event
+              JOIN tool_approval_decision AS transaction_decision
+                ON transaction_decision.request_id =
+                   transaction_event.request_id
+              JOIN tool_request AS transaction_request
+                ON transaction_request.request_id =
+                   transaction_decision.request_id
+             WHERE transaction_request.producing_model_call_id =
+                   request.producing_model_call_id
+               AND transaction_decision.decision_source NOT IN (
+                    'policy_auto', 'session_blanket', 'runtime_safety'
+               )
+               AND transaction_event.recording_transaction_id =
+                   dispatched.recording_transaction_id
+       ) = 1 OR lifecycle.state_kind = 'terminal')
+       AND NOT EXISTS (
+            SELECT 1
+              FROM tool_request AS earlier
+              LEFT JOIN tool_approval_decision AS earlier_decision
+                ON earlier_decision.request_id = earlier.request_id
+             WHERE earlier.producing_model_call_id =
+                   request.producing_model_call_id
+               AND earlier.request_ordinal < request.request_ordinal
+               AND earlier_decision.request_id IS NULL
+       )
+       AND (
+            (
+                lifecycle.state_kind = 'active'
+                AND lifecycle.active_phase_kind = 'awaiting_tool_approval'
+                AND lifecycle.approval_tool_request_id = (
+                    SELECT later.request_id
+                      FROM tool_request AS later
+                      LEFT JOIN tool_approval_decision AS later_decision
+                        ON later_decision.request_id = later.request_id
+                     WHERE later.producing_model_call_id =
+                           request.producing_model_call_id
+                       AND later_decision.request_id IS NULL
+                     ORDER BY later.request_ordinal
+                     LIMIT 1
+                )
+            )
+            OR
+            (
+                lifecycle.state_kind = 'active'
+                AND lifecycle.active_phase_kind = 'running'
+                AND lifecycle.approval_tool_request_id IS NULL
+                AND lifecycle.recovery_tool_attempt_id IS NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM tool_request AS undecided
+                      LEFT JOIN tool_approval_decision AS undecided_decision
+                        ON undecided_decision.request_id = undecided.request_id
+                     WHERE undecided.producing_model_call_id =
+                           request.producing_model_call_id
+                       AND undecided_decision.request_id IS NULL
+                )
+                AND EXISTS (
+                    SELECT 1
+                      FROM turn_attempt AS successor
+                      JOIN model_call AS producing_call
+                        ON producing_call.model_call_id =
+                           request.producing_model_call_id
+                       AND producing_call.turn_id = request.turn_id
+                       AND producing_call.session_id = request.session_id
+                     WHERE successor.turn_attempt_id =
+                           lifecycle.current_attempt_id
+                       AND successor.turn_id = request.turn_id
+                       AND successor.session_id = request.session_id
+                       AND successor.continued_from_attempt_id =
+                           producing_call.turn_attempt_id
+                       AND successor.state_kind = 'prepared'
+                )
+            )
+            OR
+            (
+                lifecycle.state_kind = 'terminal'
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM tool_request AS undecided
+                      LEFT JOIN tool_approval_decision AS undecided_decision
+                        ON undecided_decision.request_id =
+                           undecided.request_id
+                     WHERE undecided.producing_model_call_id =
+                           request.producing_model_call_id
+                       AND undecided_decision.request_id IS NULL
+                )
+                AND EXISTS (
+                    SELECT 1
+                      FROM turn_attempt AS stopped_attempt
+                      JOIN submit_input_command AS interrupt
+                        ON interrupt.command_id =
+                           stopped_attempt.interrupt_command_id
+                      JOIN durable_command AS interrupt_claim
+                        ON interrupt_claim.command_id = interrupt.command_id
+                     WHERE stopped_attempt.turn_attempt_id =
+                           lifecycle.terminal_attempt_id
+                       AND interrupt.delivery_kind = 'interrupt'
+                       AND interrupt.result_kind = 'applied'
+                       AND interrupt_claim.issuer_kind = 'core'
+                       AND interrupt_claim.claimed_at =
+                           transaction_timestamp()
+                )
+            )
+       );
+    IF matching_effects <> 1 THEN
+        RAISE EXCEPTION
+            'explicit decision lacks its outbox and lifecycle effect'
+            USING
+                ERRCODE = '23514',
+                CONSTRAINT =
+                    'tool_approval_explicit_requires_atomic_effect';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION require_tool_approval_decision_authority()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    matched bigint;
+BEGIN
+    PERFORM 1
+       FROM tool_request
+      WHERE request_id = NEW.request_id
+        FOR UPDATE;
+    IF EXISTS (
+        SELECT 1
+          FROM tool_approval_judge_model_call AS judge
+         WHERE judge.request_id = NEW.request_id
+           AND judge.state_kind <> 'terminal'
+    ) THEN
+        RAISE EXCEPTION 'approval decision races an unfinished judge call'
+            USING ERRCODE = '23514',
+                  CONSTRAINT =
+                      'tool_approval_decision_requires_terminal_judge';
+    END IF;
+    IF NEW.decision_source = 'runtime_safety' THEN
+        SELECT count(*) INTO matched
+          FROM tool_request
+         WHERE request_id = NEW.request_id
+           AND approval_posture = 'auto'
+           AND arguments_kind = 'json'
+           AND arguments_text = '{"redacted":"[redacted]"}';
+        IF matched <> 1 THEN
+            RAISE EXCEPTION 'runtime safety denial lacks suppressed arguments'
+                USING ERRCODE = '23514',
+                      CONSTRAINT =
+                          'tool_approval_runtime_safety_requires_suppressed_arguments';
+        END IF;
+        RETURN NULL;
+    END IF;
+    IF NEW.decision_source IN ('policy_auto', 'session_blanket') THEN
+        SELECT count(*) INTO matched
+          FROM tool_request
+         WHERE request_id = NEW.request_id
+           AND approval_posture = 'auto';
+        IF matched <> 1 THEN
+            RAISE EXCEPTION 'automatic decision exceeds frozen posture'
+                USING ERRCODE = '23514',
+                      CONSTRAINT = 'tool_approval_automatic_requires_auto_posture';
+        END IF;
+        RETURN NULL;
+    END IF;
+    IF NEW.decision_source = 'user_override' THEN
+        SELECT count(*) INTO matched
+          FROM tool_request AS request
+          JOIN tool_approval_user_override AS recorded
+            ON recorded.denied_request_id = NEW.override_denied_request_id
+          JOIN model_call_user_override AS frozen
+            ON frozen.model_call_id = request.producing_model_call_id
+           AND frozen.denied_request_id = recorded.denied_request_id
+          JOIN tool_request AS denied_request
+            ON denied_request.request_id = recorded.denied_request_id
+         WHERE request.request_id = NEW.request_id
+           AND request.approval_posture = 'delegated'
+           AND recorded.session_id = request.session_id
+           AND denied_request.tool_name = request.tool_name
+           AND denied_request.arguments_kind = request.arguments_kind
+           AND denied_request.arguments_text = request.arguments_text;
+        IF matched <> 1 THEN
+            RAISE EXCEPTION
+                'user override consumption lacks a recorded override for a delegated request'
+                USING ERRCODE = '23514',
+                      CONSTRAINT =
+                          'tool_approval_user_override_requires_recorded_override';
+        END IF;
+        RETURN NULL;
+    END IF;
+    IF NEW.decision_source = 'user_command' THEN
+        SELECT count(*) INTO matched
+          FROM tool_request AS request
+         WHERE request.request_id = NEW.request_id
+           AND (
+                request.approval_posture = 'human'
+                OR (
+                    request.approval_posture = 'delegated'
+                    AND EXISTS (
+                        SELECT 1
+                          FROM tool_approval_judge_model_call AS judge
+                         WHERE judge.request_id = request.request_id
+                           AND judge.state_kind = 'terminal'
+                           AND (
+                                (
+                                    judge.terminal_disposition_kind = 'completed'
+                                    AND judge.recommendation_kind =
+                                        'escalate_to_human'
+                                )
+                                OR judge.terminal_disposition_kind IN (
+                                    'known_failed', 'refused', 'cancelled',
+                                    'ambiguous'
+                                )
+                           )
+                    )
+                )
+           );
+        IF matched <> 1 THEN
+            RAISE EXCEPTION 'user decision lacks human approval authority'
+                USING ERRCODE = '23514',
+                      CONSTRAINT = 'tool_approval_user_requires_human_authority';
+        END IF;
+        RETURN NULL;
+    END IF;
+    IF NEW.decision_source = 'lifecycle_closure' THEN
+        SELECT count(*) INTO matched
+          FROM decide_tool_request_command AS command
+          JOIN durable_command AS durable
+            ON durable.command_id = command.command_id
+           AND durable.command_kind = command.command_kind
+           AND durable.storage_version = command.storage_version
+         WHERE command.command_id = NEW.user_command_id
+           AND command.request_id = NEW.request_id
+           AND command.decision_kind = 'deny'
+           AND command.denial_reason IS NULL
+           AND command.result_kind = 'applied'
+           AND durable.issuer_kind = 'core';
+        IF matched <> 1 THEN
+            RAISE EXCEPTION 'lifecycle closure denial lacks core authority'
+                USING ERRCODE = '23514',
+                      CONSTRAINT =
+                          'tool_approval_lifecycle_closure_requires_core';
+        END IF;
+        RETURN NULL;
+    END IF;
+    IF NEW.decision_source <> 'delegate' THEN
+        RETURN NULL;
+    END IF;
+    SELECT count(*) INTO matched
+      FROM tool_request AS request
+      JOIN tool_approval_judge_model_call AS judge
+        ON judge.request_id = request.request_id
+     WHERE request.request_id = NEW.request_id
+       AND request.approval_posture = 'delegated'
+       AND judge.model_call_id = NEW.delegate_model_call_id
+       AND judge.direct_model_selection_id = NEW.delegate_model_selection_id
+       AND judge.state_kind = 'terminal'
+       AND judge.terminal_disposition_kind = 'completed'
+       AND judge.recommendation_kind = NEW.decision_kind
+       AND judge.rationale = NEW.rationale
+       AND NOT EXISTS (
+            SELECT 1 FROM tool_request AS earlier
+            LEFT JOIN tool_approval_decision AS earlier_decision
+              ON earlier_decision.request_id = earlier.request_id
+           WHERE earlier.producing_model_call_id = request.producing_model_call_id
+             AND earlier.request_ordinal < request.request_ordinal
+             AND earlier_decision.request_id IS NULL
+       );
+    IF matched <> 1 THEN
+        RAISE EXCEPTION 'delegate decision lacks matching delegated authority'
+            USING ERRCODE = '23514',
+                  CONSTRAINT = 'tool_approval_delegate_requires_checked_judge';
+    END IF;
+    RETURN NULL;
+END;
+$$;

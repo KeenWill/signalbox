@@ -531,6 +531,43 @@ async fn a_stop_claims_records_its_receipt_and_replays() -> Result<(), Box<dyn E
     Ok(())
 }
 
+/// §7: an applied resume records the state its projection returned, so an
+/// equal retry returns that receipt after the session moves again.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_resume_replays_its_recorded_state_after_the_session_closes() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(0x42);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(0x42))
+        .await?;
+    park_by_statement(&pool, session).await?;
+    let resume = lifecycle_command(0x42, 1, session, SessionLifecycleOperation::Resume);
+
+    let first = recorded(&pool, resume.clone()).await?;
+    SessionLifecycleRepository::new(pool.clone())
+        .close(
+            session,
+            SessionTerminalOutcome::FailedUnknown,
+            LifecycleActor::Watchdog,
+        )
+        .await?;
+    let replay = recorded(&pool, resume).await?;
+
+    assert_eq!(
+        first,
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::Resumed {
+            state: SessionLifecycleState::Active,
+        })
+    );
+    assert_eq!(replay, first);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// A descendant-scoped lifecycle stop with no live turn materializes the same
 /// complete cascade as the deferred interrupt path.
 #[tokio::test(flavor = "multi_thread")]
@@ -1067,13 +1104,13 @@ async fn a_closure_over_a_live_turn_settles_when_the_turn_does() -> Result<(), B
     Ok(())
 }
 
-/// §2: a park closure settles the suspended turn through the committed
+/// §2/§12: a park closure settles the suspended turn through the committed
 /// interrupt machinery; a possibly-executed call terminalizes
-/// `reconciliation_required`, never `cancelled`, and the session records
-/// terminal only then.
+/// `reconciliation_required`, never `cancelled`, and deferred settlement
+/// preserves the same parked failure evidence as immediate closure.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn a_park_closure_settles_the_suspended_turn_through_the_interrupt_machinery()
+async fn a_park_closure_settles_its_turn_and_preserves_failure_evidence()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let parked =
@@ -1101,6 +1138,44 @@ async fn a_park_closure_settles_the_suspended_turn_through_the_interrupt_machine
     )
     .bind(session.into_uuid())
     .execute(&pool)
+    .await?;
+    let deferred_evidence_before: (String, String) = sqlx::query_as(
+        "SELECT parked_since::text, parked_standing_cause_kind
+           FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let immediate_session = creation_session(0x41);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(0x41))
+        .await?;
+    park_by_statement(&pool, immediate_session).await?;
+    sqlx::query(
+        "UPDATE session_lifecycle
+            SET parked_cause = 'retry_budget_exhausted',
+                parked_standing_cause_kind = 'provider_transient'
+          WHERE session_id = $1",
+    )
+    .bind(immediate_session.into_uuid())
+    .execute(&pool)
+    .await?;
+    let immediate_evidence_before: (String, String) = sqlx::query_as(
+        "SELECT parked_since::text, parked_standing_cause_kind
+           FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(immediate_session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    recorded(
+        &pool,
+        lifecycle_command(
+            0x41,
+            1,
+            immediate_session,
+            SessionLifecycleOperation::CloseFailed { cause: None },
+        ),
+    )
     .await?;
     let repository = SessionLifecycleRepository::new(pool.clone());
 
@@ -1205,14 +1280,24 @@ async fn a_park_closure_settles_the_suspended_turn_through_the_interrupt_machine
             },
         }
     );
-    let cleared_park_payload: (bool, bool) = sqlx::query_as(
-        "SELECT parked_since IS NULL, parked_standing_cause_kind IS NULL
+    let deferred_evidence_after: (String, String) = sqlx::query_as(
+        "SELECT parked_since::text, parked_standing_cause_kind
            FROM session_lifecycle WHERE session_id = $1",
     )
     .bind(session.into_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(cleared_park_payload, (true, true));
+    let immediate_evidence_after: (String, String) = sqlx::query_as(
+        "SELECT parked_since::text, parked_standing_cause_kind
+           FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(immediate_session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        (deferred_evidence_after, immediate_evidence_after),
+        (deferred_evidence_before, immediate_evidence_before)
+    );
 
     pool.close().await;
     drop(container);

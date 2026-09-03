@@ -583,8 +583,21 @@ async fn insert_command_record(
             (command_id, command_kind, storage_version, session_id, operation_kind,
              stop_sticky, descendant_scope, successor_session_id, failure_cause_kind,
              finish_condition_kind, finish_condition, result_kind, rejection_kind,
-             applied_effect_kind, live_turn_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+             applied_effect_kind, live_turn_id, resume_state_kind,
+             resume_waiting_kind, resume_waiting_waker,
+             resume_waiting_subject_session_id, resume_recovering_op,
+             resume_blocked_reason, resume_blocked_cycle)
+         SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+                CASE WHEN $14::text = 'resumed' THEN lifecycle.state_kind END,
+                CASE WHEN $14::text = 'resumed' THEN lifecycle.waiting_kind END,
+                CASE WHEN $14::text = 'resumed' THEN lifecycle.waiting_waker END,
+                CASE WHEN $14::text = 'resumed'
+                    THEN lifecycle.waiting_subject_session_id END,
+                CASE WHEN $14::text = 'resumed' THEN lifecycle.recovering_op END,
+                CASE WHEN $14::text = 'resumed' THEN lifecycle.blocked_reason END,
+                CASE WHEN $14::text = 'resumed' THEN lifecycle.blocked_cycle END
+           FROM (VALUES (true)) AS singleton(present)
+           LEFT JOIN session_lifecycle AS lifecycle ON lifecycle.session_id = $4",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(SESSION_LIFECYCLE_KIND)
@@ -652,9 +665,9 @@ async fn existing_or_conflicting(
     Ok(SessionLifecycleCommandHandlingOutcome::Recorded(result))
 }
 
-/// Replays the recorded effect; the outcome and state it carried are read
-/// from the satellite, which a closure fixes and a resume leaves to the
-/// mapping.
+/// Replays the recorded effect. Closure outcomes are fixed in the satellite;
+/// a resume carries its mapped state in the command record because that state
+/// can move again.
 async fn replayed_application(
     connection: &mut PgConnection,
     command: &SessionLifecycleCommand,
@@ -692,9 +705,7 @@ async fn replayed_application(
                     })?,
             }
         }
-        RecordedEffect::Resumed => SessionLifecycleApplication::Resumed {
-            state: record.state(),
-        },
+        RecordedEffect::Resumed { state } => SessionLifecycleApplication::Resumed { state },
         RecordedEffect::OwnershipChanged => SessionLifecycleApplication::OwnershipChanged,
     })
 }
@@ -702,7 +713,7 @@ async fn replayed_application(
 enum RecordedEffect {
     Closed,
     ClosurePending { live_turn: TurnId },
-    Resumed,
+    Resumed { state: SessionLifecycleState },
     OwnershipChanged,
 }
 
@@ -720,7 +731,20 @@ async fn load_recorded(
         "SELECT session_id, operation_kind, stop_sticky, descendant_scope,
                 successor_session_id, failure_cause_kind, finish_condition_kind,
                 finish_condition, result_kind, rejection_kind, applied_effect_kind,
-                live_turn_id
+                live_turn_id, resume_state_kind AS state_kind,
+                resume_waiting_kind AS waiting_kind,
+                resume_waiting_waker AS waiting_waker,
+                resume_waiting_subject_session_id AS waiting_subject_session_id,
+                resume_recovering_op AS recovering_op,
+                resume_blocked_reason AS blocked_reason,
+                resume_blocked_cycle AS blocked_cycle,
+                NULL::text AS parked_cause,
+                NULL::text AS parked_responder,
+                NULL::text AS parked_standing_cause_kind,
+                NULL::text AS terminal_outcome_kind,
+                NULL::text AS terminal_cause_kind,
+                NULL::boolean AS terminal_stop_sticky,
+                NULL::uuid AS terminal_superseded_by
            FROM session_lifecycle_command
           WHERE command_id = $1",
     )
@@ -792,7 +816,10 @@ fn decode_recorded(
             })
         }
         ("applied", None, Some("resumed"), None) => {
-            RecordedResult::Applied(RecordedEffect::Resumed)
+            RecordedResult::Applied(RecordedEffect::Resumed {
+                state: session_lifecycle::decode_lifecycle_state(row)
+                    .map_err(|_| corrupt("resume state"))?,
+            })
         }
         ("applied", None, Some("ownership_changed"), None) => {
             RecordedResult::Applied(RecordedEffect::OwnershipChanged)
