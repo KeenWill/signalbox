@@ -405,6 +405,7 @@ struct AutomaticReconciliationClassPolicy {
     attempt_budget: u32,
     retry_backoff_base: Option<Duration>,
     retry_backoff_cap: Option<Duration>,
+    attempt_lease: Duration,
 }
 
 #[derive(Clone, Debug)]
@@ -423,11 +424,13 @@ impl PostgresAutomaticReconciliationRepository {
                 attempt_budget: retry_ladder_arity_u32(),
                 retry_backoff_base: None,
                 retry_backoff_cap: None,
+                attempt_lease: RECONCILIATION_DEADLINE_DEFAULT,
             },
             tool_policy: AutomaticReconciliationClassPolicy {
                 attempt_budget: retry_ladder_arity_u32(),
                 retry_backoff_base: None,
                 retry_backoff_cap: None,
+                attempt_lease: RECONCILIATION_DEADLINE_DEFAULT,
             },
         }
     }
@@ -439,16 +442,22 @@ impl PostgresAutomaticReconciliationRepository {
         retry_backoff_base: Option<Duration>,
         retry_backoff_cap: Option<Duration>,
     ) -> Self {
-        let policy = AutomaticReconciliationClassPolicy {
-            attempt_budget: match attempt_budget {
-                Some(budget) => budget,
-                None => retry_ladder_arity_u32(),
-            },
+        let attempt_budget = match attempt_budget {
+            Some(budget) => budget,
+            None => retry_ladder_arity_u32(),
+        };
+        self.model_call_policy = AutomaticReconciliationClassPolicy {
+            attempt_budget,
             retry_backoff_base,
             retry_backoff_cap,
+            attempt_lease: self.model_call_policy.attempt_lease,
         };
-        self.model_call_policy = policy;
-        self.tool_policy = policy;
+        self.tool_policy = AutomaticReconciliationClassPolicy {
+            attempt_budget,
+            retry_backoff_base,
+            retry_backoff_cap,
+            attempt_lease: self.tool_policy.attempt_lease,
+        };
         self
     }
 
@@ -466,12 +475,25 @@ impl PostgresAutomaticReconciliationRepository {
             attempt_budget: model_call_attempt_budget,
             retry_backoff_base: model_call_retry_backoff_base,
             retry_backoff_cap: model_call_retry_backoff_cap,
+            attempt_lease: self.model_call_policy.attempt_lease,
         };
         self.tool_policy = AutomaticReconciliationClassPolicy {
             attempt_budget: tool_attempt_budget,
             retry_backoff_base: tool_retry_backoff_base,
             retry_backoff_cap: tool_retry_backoff_cap,
+            attempt_lease: self.tool_policy.attempt_lease,
         };
+        self
+    }
+
+    /// Keeps an in-flight claim live for at least its caller's class bound.
+    pub const fn with_class_attempt_leases(
+        mut self,
+        model_call_attempt_lease: Duration,
+        tool_attempt_lease: Duration,
+    ) -> Self {
+        self.model_call_policy.attempt_lease = model_call_attempt_lease;
+        self.tool_policy.attempt_lease = tool_attempt_lease;
         self
     }
 
@@ -507,6 +529,53 @@ impl PostgresAutomaticReconciliationRepository {
         self.claim_due_for_class(Some(false)).await
     }
 
+    /// Reports whether a due model-call recovery remains after one bounded discovery.
+    pub async fn has_due_model_call(&self) -> Result<bool, AutomaticReconciliationRepositoryError> {
+        self.has_due_for_class(true).await
+    }
+
+    /// Reports whether a due tool recovery remains after one bounded discovery.
+    pub async fn has_due_tool_attempt(
+        &self,
+    ) -> Result<bool, AutomaticReconciliationRepositoryError> {
+        self.has_due_for_class(false).await
+    }
+
+    async fn has_due_for_class(
+        &self,
+        model_call: bool,
+    ) -> Result<bool, AutomaticReconciliationRepositoryError> {
+        let mut transaction = begin_budgeted(&self.pool).await?;
+        discover_recoveries(
+            &mut transaction,
+            CLAIM_WINDOW,
+            i32::try_from(self.model_call_policy.attempt_budget).map_err(|_| {
+                AutomaticReconciliationRepositoryError::Corruption("attempt budget")
+            })?,
+            i32::try_from(self.tool_policy.attempt_budget).map_err(|_| {
+                AutomaticReconciliationRepositoryError::Corruption("attempt budget")
+            })?,
+            Some(model_call),
+        )
+        .await?;
+        let due = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1
+                  FROM automatic_reconciliation
+                 WHERE state_kind = 'scheduled'
+                   AND attempt_count < attempt_ceiling
+                   AND next_attempt_at <= statement_timestamp()
+                   AND (($1 AND model_call_id IS NOT NULL)
+                        OR (NOT $1 AND tool_attempt_id IS NOT NULL))
+            )",
+        )
+        .bind(model_call)
+        .fetch_one(&mut *transaction)
+        .await?;
+        commit_uncancellable(transaction).await?;
+        Ok(due)
+    }
+
     async fn claim_due_for_class(
         &self,
         model_call: Option<bool>,
@@ -521,6 +590,7 @@ impl PostgresAutomaticReconciliationRepository {
             CLAIM_WINDOW,
             model_call_attempt_budget,
             tool_attempt_budget,
+            model_call,
         )
         .await?;
         settle_abandoned_attempts(&mut transaction, CLAIM_WINDOW).await?;
@@ -541,6 +611,14 @@ impl PostgresAutomaticReconciliationRepository {
             claim = claim.bind(millis);
         }
         claim = claim.bind(model_call);
+        claim = claim.bind(duration_millis(
+            self.model_call_policy.attempt_lease,
+            "attempt lease",
+        )?);
+        claim = claim.bind(duration_millis(
+            self.tool_policy.attempt_lease,
+            "attempt lease",
+        )?);
         let rows = claim.fetch_all(&mut *transaction).await?;
         commit_uncancellable(transaction).await?;
 
@@ -892,18 +970,35 @@ fn retry_ladder_millis(
     Ok(ladder)
 }
 
+fn duration_millis(
+    duration: Duration,
+    corruption: &'static str,
+) -> Result<i64, AutomaticReconciliationRepositoryError> {
+    i64::try_from(duration.as_millis())
+        .map_err(|_| AutomaticReconciliationRepositoryError::Corruption(corruption))
+}
+
 async fn discover_recoveries(
     connection: &mut PgConnection,
     window: i64,
     model_call_attempt_budget: i32,
     tool_attempt_budget: i32,
+    model_call: Option<bool>,
 ) -> Result<(), AutomaticReconciliationRepositoryError> {
-    sqlx::query(crate::lock_inventory::AUTOMATIC_RECONCILIATION_DISCOVERY)
-        .bind(window)
-        .bind(model_call_attempt_budget)
-        .bind(tool_attempt_budget)
-        .execute(connection)
-        .await?;
+    let query = match model_call {
+        Some(model_call) => {
+            sqlx::query(crate::lock_inventory::AUTOMATIC_RECONCILIATION_CLASS_DISCOVERY)
+                .bind(window)
+                .bind(model_call_attempt_budget)
+                .bind(tool_attempt_budget)
+                .bind(model_call)
+        }
+        None => sqlx::query(crate::lock_inventory::AUTOMATIC_RECONCILIATION_DISCOVERY)
+            .bind(window)
+            .bind(model_call_attempt_budget)
+            .bind(tool_attempt_budget),
+    };
+    query.execute(connection).await?;
     Ok(())
 }
 
@@ -1140,7 +1235,8 @@ mod tests {
         assert!(claim.contains("WHEN 4 THEN $10::bigint"));
         assert!(claim.contains("ELSE $11::bigint"));
         assert!(claim.contains("$12::boolean"));
-        assert!(!claim.contains("$13"));
+        assert!(claim.contains("$13::bigint"));
+        assert!(claim.contains("$14::bigint"));
         // The schedule is expressed in the same unit the failure path uses.
         assert!(claim.contains("interval '1 millisecond'"));
         assert!(!claim.contains("interval '1 second'"));

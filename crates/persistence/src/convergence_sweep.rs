@@ -167,8 +167,8 @@ pub struct ConvergenceSweepRetryPolicy {
 
 impl ConvergenceSweepRetryPolicy {
     fn stored_retry_delay_seconds(self, consecutive_failures: i16) -> Option<i64> {
-        let mut delay = self.backoff_base?;
         let limit = self.backoff_cap.unwrap_or(Duration::MAX);
+        let mut delay = self.backoff_base?.min(limit);
         let doublings = u32::try_from(consecutive_failures.saturating_sub(1)).ok()?;
         for _ in 0..doublings {
             delay = delay.saturating_mul(2).min(limit);
@@ -1475,6 +1475,16 @@ mod tests {
         };
 
         assert_eq!(policy.stored_retry_delay_seconds(59), Some(1_800));
+    }
+
+    #[test]
+    fn the_first_retry_is_clamped_when_the_base_exceeds_the_cap() {
+        let policy = ConvergenceSweepRetryPolicy {
+            backoff_base: Some(Duration::from_secs(20)),
+            backoff_cap: Some(Duration::from_secs(5)),
+        };
+
+        assert_eq!(policy.stored_retry_delay_seconds(1), Some(5));
     }
 
     #[test]

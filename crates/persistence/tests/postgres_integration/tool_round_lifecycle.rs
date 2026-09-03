@@ -2526,6 +2526,8 @@ async fn inv006_inv025_inv029_inv037_automatic_tool_reconciliation_releases_the_
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn automatic_tool_reconciliation_honors_its_class_budget() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
+    let _earlier_model =
+        crate::model_call_execution_and_recovery::park_restart_ambiguity(&pool, 0x73d8).await?;
     let seed = 0x74d8;
     let (fixture, _, _, request) =
         checkpoint_confirmed_tool_round(&pool, seed, "external-tool", "{}").await?;
@@ -2566,6 +2568,7 @@ async fn automatic_tool_reconciliation_honors_its_class_budget() -> Result<(), B
             .await?,
     );
     let tool_attempt_budget = 1;
+    let tool_attempt_lease = Duration::from_secs(60);
     let repository = PostgresAutomaticReconciliationRepository::new(pool.clone())
         .with_class_policies(
             5,
@@ -2574,8 +2577,21 @@ async fn automatic_tool_reconciliation_honors_its_class_budget() -> Result<(), B
             tool_attempt_budget,
             Some(Duration::ZERO),
             Some(Duration::ZERO),
-        );
+        )
+        .with_class_attempt_leases(Duration::from_secs(600), tool_attempt_lease);
     let first = repository.claim_due_tool_attempt().await?;
+    assert_eq!(first.claimed().len(), 1);
+    let claim_lease_covers_attempt: bool = sqlx::query_scalar(
+        "SELECT recovery.next_attempt_at >= attempt.started_at
+                    + ($2::bigint * interval '1 millisecond')
+           FROM automatic_reconciliation AS recovery
+           JOIN automatic_reconciliation_attempt AS attempt USING (turn_id)
+          WHERE recovery.turn_id = $1 AND attempt.attempt_ordinal = 1",
+    )
+    .bind(first.claimed()[0].turn().into_uuid())
+    .bind(i64::try_from(tool_attempt_lease.as_millis())?)
+    .fetch_one(&pool)
+    .await?;
     repository
         .record_failure(
             first.claimed()[0],
@@ -2585,8 +2601,12 @@ async fn automatic_tool_reconciliation_honors_its_class_budget() -> Result<(), B
 
     let exhausted = repository.claim_due_tool_attempt().await?;
 
-    assert_eq!(first.claimed().len(), 1);
     assert_eq!(first.claimed()[0].attempt().get(), 1);
+    assert!(claim_lease_covers_attempt);
+    assert_eq!(
+        first.claimed()[0].operation(),
+        AutomaticReconciliationOperation::ToolAttempt(tool_attempt)
+    );
     assert_eq!(exhausted.claimed(), &[]);
     assert_eq!(exhausted.exhausted().len(), 1);
     assert_eq!(
