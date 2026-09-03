@@ -6519,6 +6519,7 @@ pub struct AttentionSummary {
     pub active_turn_count: u64,
     pub queued_turn_count: u64,
     pub state: AttentionState,
+    pub lifecycle_state: AttentionLifecycleState,
     pub action: Option<AttentionAction>,
     pub goal_block: Option<AttentionGoalBlock>,
     pub judge: AttentionJudgeFacts,

@@ -38,6 +38,9 @@ ALTER TABLE session_lifecycle
              OR (parked_cause IS NOT NULL)
              OR (state_kind = 'terminal'::text)
              OR (pending_terminal_outcome_kind IS NOT NULL))
+        -- Evidence without its instant is evidence the occurrence projection
+        -- cannot date, which is the numerator counting what no week shows.
+        AND ((parked_standing_cause_kind IS NULL) OR (parked_since IS NOT NULL))
         -- The standing evidence is the evidence the cause names. A closure
         -- reads it to classify the outcome, so a park holding evidence its own
         -- cause contradicts -- or an exhaustion holding none at all -- closes
