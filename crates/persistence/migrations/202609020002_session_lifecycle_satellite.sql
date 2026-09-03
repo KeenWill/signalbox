@@ -410,6 +410,7 @@ CREATE TABLE session_lifecycle (
                     'abandoned'::text
                 ]) AND terminal_cause_kind IS NULL)
             OR (terminal_outcome_kind = 'failed_retryable'::text
+                AND terminal_cause_kind IS NOT NULL
                 AND terminal_cause_kind = ANY (ARRAY[
                     'provider_transient'::text,
                     'provider_quota_exhausted'::text,
@@ -418,6 +419,7 @@ CREATE TABLE session_lifecycle (
                     'retry_budget_exhausted'::text
                 ]))
             OR (terminal_outcome_kind = 'failed_structural'::text
+                AND terminal_cause_kind IS NOT NULL
                 AND terminal_cause_kind = ANY (ARRAY[
                     'context_compaction_wall'::text,
                     'context_headroom_exhausted'::text,
@@ -425,6 +427,7 @@ CREATE TABLE session_lifecycle (
                     'moderation_block'::text
                 ]))
             OR (terminal_outcome_kind = 'retired'::text
+                AND terminal_cause_kind IS NOT NULL
                 AND terminal_cause_kind = ANY (ARRAY[
                     'dispatch_deadline_expired'::text,
                     'start_gate_deadline_expired'::text,
@@ -500,6 +503,7 @@ CREATE TABLE session_lifecycle (
                     'abandoned'::text
                 ]) AND pending_terminal_cause_kind IS NULL)
             OR (pending_terminal_outcome_kind = 'failed_retryable'::text
+                AND pending_terminal_cause_kind IS NOT NULL
                 AND pending_terminal_cause_kind = ANY (ARRAY[
                     'provider_transient'::text,
                     'provider_quota_exhausted'::text,
@@ -508,6 +512,7 @@ CREATE TABLE session_lifecycle (
                     'retry_budget_exhausted'::text
                 ]))
             OR (pending_terminal_outcome_kind = 'failed_structural'::text
+                AND pending_terminal_cause_kind IS NOT NULL
                 AND pending_terminal_cause_kind = ANY (ARRAY[
                     'context_compaction_wall'::text,
                     'context_headroom_exhausted'::text,
@@ -515,6 +520,7 @@ CREATE TABLE session_lifecycle (
                     'moderation_block'::text
                 ]))
             OR (pending_terminal_outcome_kind = 'retired'::text
+                AND pending_terminal_cause_kind IS NOT NULL
                 AND pending_terminal_cause_kind = ANY (ARRAY[
                     'dispatch_deadline_expired'::text,
                     'start_gate_deadline_expired'::text,

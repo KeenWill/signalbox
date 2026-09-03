@@ -2568,3 +2568,45 @@ async fn a_goal_command_cannot_contradict_a_committed_closure() -> Result<(), Bo
     drop(container);
     Ok(())
 }
+
+/// A cause-bearing outcome cannot be stored without its cause. SQL null makes
+/// an unsatisfied comparison null rather than false, so a shape stated only as
+/// a vocabulary test would let a causeless failure commit and then fail to
+/// decode.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_causeless_failure_is_rejected() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(60);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(60))
+        .await?;
+
+    for statement in [
+        "UPDATE session_lifecycle
+            SET terminal_outcome_kind = 'failed_retryable', terminal_cause_kind = NULL
+          WHERE session_id = $1",
+        "UPDATE session_lifecycle
+            SET pending_terminal_outcome_kind = 'failed_retryable',
+                pending_terminal_cause_kind = NULL,
+                pending_terminal_actor_kind = 'watchdog'
+          WHERE session_id = $1",
+    ] {
+        let error = sqlx::query(statement)
+            .bind(session.into_uuid())
+            .execute(&pool)
+            .await
+            .expect_err("a retryable failure names the cause it retried");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(DatabaseError::code)
+                .as_deref(),
+            Some("23514")
+        );
+    }
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
