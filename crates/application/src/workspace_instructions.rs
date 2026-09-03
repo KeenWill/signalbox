@@ -618,10 +618,15 @@ fn contains_vcs_metadata(directory: &OwnedFd) -> io::Result<bool> {
 
     for name in VCS_METADATA_DIRECTORIES {
         match statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(status) if FileType::from_raw_mode(status.st_mode) == FileType::Directory => {
-                return Ok(true);
+            Ok(status) => {
+                let file_type = FileType::from_raw_mode(status.st_mode);
+                if file_type == FileType::Directory
+                    || (name == ".git" && file_type == FileType::RegularFile)
+                {
+                    return Ok(true);
+                }
             }
-            Ok(_) | Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => {}
+            Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => {}
             Err(error) => return Err(error.into()),
         }
     }
@@ -1688,7 +1693,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn excluded_directories_do_not_consume_their_contents_or_yield_documents() {
+    fn excluded_directories_and_worktrees_do_not_consume_contents_or_yield_documents() {
         const SMALL_CLASSIFIED_ENTRY_LIMIT: u64 = 8;
 
         let temporary = tempfile::tempdir().expect("temporary root exists");
@@ -1703,17 +1708,21 @@ mod tests {
             "excluded metadata instructions",
         )
         .expect("metadata agent document is written");
-        let build_output = temporary.path().join("target");
-        fs::create_dir(&build_output).expect("build output directory exists");
+        let build_output = temporary.path().join("src/package/target");
+        fs::create_dir_all(&build_output).expect("deep build output directory exists");
         fill_directory_beyond_limit(&build_output, SMALL_CLASSIFIED_ENTRY_LIMIT);
         fs::write(
             build_output.join("AGENTS.md"),
             "excluded build instructions",
         )
         .expect("build agent document is written");
-        let nested_repository = temporary.path().join("nested-clone");
-        fs::create_dir_all(nested_repository.join(".git"))
-            .expect("nested repository metadata exists");
+        let nested_repository = temporary.path().join("nested-worktree");
+        fs::create_dir(&nested_repository).expect("nested worktree exists");
+        fs::write(
+            nested_repository.join(".git"),
+            "gitdir: ../metadata/worktree",
+        )
+        .expect("nested worktree marker exists");
         fill_directory_beyond_limit(&nested_repository, SMALL_CLASSIFIED_ENTRY_LIMIT);
         fs::write(
             nested_repository.join("AGENTS.md"),
@@ -1729,7 +1738,7 @@ mod tests {
 
         assert!(snapshot.is_complete());
         assert!(snapshot.findings().is_empty());
-        assert_eq!(snapshot.classified_entries(), 4);
+        assert_eq!(snapshot.classified_entries(), 6);
         assert_eq!(snapshot.bundles().len(), 1);
         assert_eq!(
             snapshot.bundles()[0].source_path().absolute_path(),
