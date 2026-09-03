@@ -259,6 +259,19 @@ async fn apply(
     actor: LifecycleActor,
 ) -> Result<SessionLifecycleApplication, ApplyError> {
     let session = command.session();
+    if matches!(
+        command.operation(),
+        SessionLifecycleOperation::Stop {
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            ..
+        }
+    ) {
+        sqlx::query(crate::lock_inventory::DELEGATION_TERMINATION_SESSION_FRONTIER)
+            .bind(session_id_to_uuid(session))
+            .bind("stopped")
+            .execute(&mut *connection)
+            .await?;
+    }
     let held = match load_locked(connection, session).await {
         Ok(held) => held,
         Err(SessionLifecycleRepositoryError::UnknownSession(_)) => {
@@ -269,17 +282,7 @@ async fn apply(
         Err(error) => return Err(error.into()),
     };
     match command.operation() {
-        SessionLifecycleOperation::Stop {
-            sticky,
-            descendant_scope,
-        } => {
-            if *descendant_scope == DescendantTerminationScope::ParentAndDescendants {
-                sqlx::query(crate::lock_inventory::DELEGATION_TERMINATION_SESSION_FRONTIER)
-                    .bind(session_id_to_uuid(session))
-                    .bind("stopped")
-                    .execute(&mut *connection)
-                    .await?;
-            }
+        SessionLifecycleOperation::Stop { sticky, .. } => {
             close(
                 connection,
                 session,

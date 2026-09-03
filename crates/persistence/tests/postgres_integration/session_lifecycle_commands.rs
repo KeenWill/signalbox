@@ -769,20 +769,48 @@ async fn a_park_closure_settles_the_suspended_turn_through_the_interrupt_machine
     )
     .await?;
     let successor = TurnId::from_uuid(Uuid::from_u128(0x11fe_c222));
-    let interrupted = SubmitInputRepository::new(pool.clone())
+    let interrupt = input_with_delivery(
+        0x11fe_c220,
+        0x11fe_c001,
+        "closure interrupt",
+        DeliveryRequest::Interrupt {
+            expected_active_turn: parked.turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let operator_error = SubmitInputRepository::new(pool.clone())
         .handle(
-            input_with_delivery(
-                0x11fe_c220,
-                0x11fe_c001,
-                "closure interrupt",
-                DeliveryRequest::Interrupt {
-                    expected_active_turn: parked.turn,
-                    descendant_scope: DescendantTerminationScope::ParentAlone,
-                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
-                },
-            ),
+            interrupt.clone(),
             AcceptedInputId::from_uuid(Uuid::from_u128(0x11fe_c221)),
             Some(successor),
+        )
+        .await
+        .expect_err("an operator interrupt cannot bypass a committed closure");
+    assert!(matches!(
+        operator_error,
+        SubmitInputRepositoryError::Corruption(SubmitInputCorruption::Inconsistent(
+            "session has a pending terminal handoff"
+        ))
+    ));
+    let interrupted = SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates_alias_resolver_as(
+            interrupt,
+            CommandPrincipal::Core,
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x11fe_c221)),
+            Some(successor),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x11fe_c223)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x11fe_c224)),
+            ),
+            |_| successor,
+            |_| {
+                (
+                    Vec::new(),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(0x11fe_c225)),
+                )
+            },
+            |_| None,
         )
         .await?;
     let settled = repository

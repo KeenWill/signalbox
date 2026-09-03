@@ -684,14 +684,10 @@ impl PostgresGoalPassDisposition {
             .repository
             .unchargeable_automatic_resume_turns(session, &spent_failures)
             .await?;
-        self.owed_to_session(
-            session,
-            AutomaticResumption::after_spent_attempts(
-                SpentAutomaticResumeAttempts::over(&spent_failures, &unchargeable_failures),
-                self.numeric_bounds,
-            ),
-        )
-        .await
+        Ok(AutomaticResumption::after_spent_attempts(
+            SpentAutomaticResumeAttempts::over(&spent_failures, &unchargeable_failures),
+            self.numeric_bounds,
+        ))
     }
 
     /// A scheduled resumption is owed to an owned session only (§6).
@@ -1095,7 +1091,12 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let adapter = self.clone();
         async move {
-            let resumption = adapter.plan_automatic_resumption(session, None).await?;
+            let resumption = adapter
+                .owed_to_session(
+                    session,
+                    adapter.plan_automatic_resumption(session, None).await?,
+                )
+                .await?;
             let candidates = GoalTurnCandidates::new(
                 AcceptedInputId::from_uuid(Uuid::now_v7()),
                 TurnId::from_uuid(Uuid::now_v7()),
@@ -1141,9 +1142,19 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
                 .plan_automatic_resumption(session, Some(turn))
                 .await?;
             let need = resumption.need()?;
+            let unmonitored_need = if matches!(resumption, AutomaticResumption::Scheduled { .. }) {
+                AutomaticResumption::Unmonitored.need()?
+            } else {
+                need.clone()
+            };
             let outcome = match adapter
                 .repository
-                .block_execution_failure(session, need, GoalSchedulerProvenance::new(turn))
+                .block_execution_failure_for_current_ownership(
+                    session,
+                    need,
+                    unmonitored_need,
+                    GoalSchedulerProvenance::new(turn),
+                )
                 .await
             {
                 Ok(outcome) => outcome,

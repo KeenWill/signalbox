@@ -963,7 +963,31 @@ impl GoalRepository {
     ) -> Result<GoalTransitionOutcome, GoalRepositoryError> {
         self.handle_system_transition(
             session,
-            SystemTransition::ExecutionFailure { need, provenance },
+            SystemTransition::ExecutionFailure {
+                need,
+                unmonitored_need: None,
+                provenance,
+            },
+        )
+        .await
+    }
+
+    /// Appends scheduler-only execution-failure blocking and chooses the
+    /// unmonitored need under the session lock when ownership was released.
+    pub async fn block_execution_failure_for_current_ownership(
+        &self,
+        session: SessionId,
+        owned_need: GoalNeed,
+        unmonitored_need: GoalNeed,
+        provenance: GoalSchedulerProvenance,
+    ) -> Result<GoalTransitionOutcome, GoalRepositoryError> {
+        self.handle_system_transition(
+            session,
+            SystemTransition::ExecutionFailure {
+                need: owned_need,
+                unmonitored_need: Some(unmonitored_need),
+                provenance,
+            },
         )
         .await
     }
@@ -971,12 +995,26 @@ impl GoalRepository {
     async fn handle_system_transition(
         &self,
         session: SessionId,
-        transition: SystemTransition,
+        mut transition: SystemTransition,
     ) -> Result<GoalTransitionOutcome, GoalRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         if !lock_session(&mut transaction, session).await? {
             transaction.rollback().await?;
             return Ok(GoalTransitionOutcome::GoalNotAttached);
+        }
+        if let SystemTransition::ExecutionFailure {
+            need,
+            unmonitored_need,
+            ..
+        } = &mut transition
+        {
+            *need = failure_need_for_current_ownership(
+                &mut transaction,
+                session,
+                need.clone(),
+                unmonitored_need.take(),
+            )
+            .await?;
         }
         if matches!(&transition, SystemTransition::Achieved { .. })
             && session_holds_committed_closure(&mut transaction, session).await?
@@ -1051,9 +1089,9 @@ impl GoalRepository {
                     goal.declare_achieved(report, provenance)
                 }
             },
-            SystemTransition::ExecutionFailure { need, provenance } => {
-                goal.block_execution_failure(need, provenance)
-            }
+            SystemTransition::ExecutionFailure {
+                need, provenance, ..
+            } => goal.block_execution_failure(need, provenance),
         };
         let goal = match transitioned {
             Ok(goal) => goal,
@@ -1211,6 +1249,23 @@ async fn session_admits_automatic_resume(
     .fetch_optional(&mut *connection)
     .await?;
     Ok(admits.unwrap_or(false))
+}
+
+async fn failure_need_for_current_ownership(
+    connection: &mut PgConnection,
+    session: SessionId,
+    owned_need: GoalNeed,
+    unmonitored_need: Option<GoalNeed>,
+) -> Result<GoalNeed, GoalRepositoryError> {
+    let Some(unmonitored_need) = unmonitored_need else {
+        return Ok(owned_need);
+    };
+    let owned: bool =
+        sqlx::query_scalar("SELECT owned FROM session_lifecycle WHERE session_id = $1")
+            .bind(session_id_to_uuid(session))
+            .fetch_one(&mut *connection)
+            .await?;
+    Ok(if owned { owned_need } else { unmonitored_need })
 }
 
 fn recorded_scheduler_failure(goal: &Goal, turn: TurnId) -> Option<&GoalEvent> {
@@ -1513,6 +1568,7 @@ enum SystemTransition {
     },
     ExecutionFailure {
         need: GoalNeed,
+        unmonitored_need: Option<GoalNeed>,
         provenance: GoalSchedulerProvenance,
     },
 }

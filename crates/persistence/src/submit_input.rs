@@ -972,6 +972,7 @@ where
     } = prepare_against_locked_state(
         connection,
         command,
+        principal,
         accepted_input,
         turn,
         select_definition,
@@ -2867,6 +2868,7 @@ fn existing_outcome(
 async fn prepare_against_locked_state(
     connection: &mut PgConnection,
     command: SubmitInput,
+    principal: CommandPrincipal,
     accepted_input: AcceptedInputId,
     turn: Option<TurnId>,
     select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
@@ -2943,7 +2945,7 @@ async fn prepare_against_locked_state(
     .bind(session_id_to_uuid(command.session()))
     .fetch_one(&mut *connection)
     .await?;
-    if pending_terminal && !settles_committed_closure(connection, &command).await? {
+    if pending_terminal && !settles_committed_closure(connection, &command, principal).await? {
         return Err(
             SubmitInputCorruption::Inconsistent("session has a pending terminal handoff").into(),
         );
@@ -3127,13 +3129,18 @@ async fn prepare_against_locked_state(
         })
 }
 
-/// Whether this command is the interrupt a committed closure owes its own live
-/// turn (§2). The closure recorded that turn, and the interrupt terminalizing
-/// it is how the handoff settles, so a pending handoff admits exactly it.
+/// Whether this is the core-issued interrupt a committed closure owes its own
+/// live turn (§2). The closure recorded that turn, and the interrupt
+/// terminalizing it is how the handoff settles, so a pending handoff admits
+/// exactly it.
 async fn settles_committed_closure(
     connection: &mut PgConnection,
     command: &SubmitInput,
+    principal: CommandPrincipal,
 ) -> Result<bool, SubmitInputRepositoryError> {
+    if principal != CommandPrincipal::Core {
+        return Ok(false);
+    }
     let DeliveryRequest::Interrupt {
         expected_active_turn,
         ..
