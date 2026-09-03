@@ -363,8 +363,13 @@ impl TurnLivenessRuntime {
         automatic_reconciliation_backoff_cap: Option<Duration>,
         numeric_bounds: TurnLivenessNumericBounds,
     ) -> Self {
-        let disabled_clear_retry_delay =
-            automatic_reconciliation_base_backoff.or(automatic_reconciliation_backoff_cap);
+        let disabled_clear_retry_delay = [
+            automatic_reconciliation_base_backoff,
+            automatic_reconciliation_backoff_cap,
+        ]
+        .into_iter()
+        .flatten()
+        .find(|delay| !delay.is_zero());
         Self {
             repository: PostgresTurnLivenessRepository::new(
                 pool.clone(),
@@ -556,7 +561,15 @@ async fn run_ambiguous_operation_watchdog(
             TurnLivenessWake::Shutdown => return,
             TurnLivenessWake::Scan => {
                 if let Some(observation_repository) = &startup_observation_repository {
-                    match observation_repository.clear_guard_observations().await {
+                    let Some(clear_result) = complete_before_shutdown(
+                        &mut shutdown,
+                        observation_repository.clear_guard_observations(),
+                    )
+                    .await
+                    else {
+                        return;
+                    };
+                    match clear_result {
                         Ok(()) => startup_observation_repository = None,
                         Err(error) => {
                             report_turn_liveness_failure(&error);

@@ -7,7 +7,6 @@ CREATE TABLE turn_liveness_observation (
     current_attempt_id uuid NOT NULL,
     outbox_frontier numeric(20, 0),
     scan_interval_seconds numeric(20, 0) NOT NULL,
-    scan_interval_subsec_nanos integer NOT NULL,
     observation_ordinal bigint NOT NULL,
     CONSTRAINT turn_liveness_observation_pkey PRIMARY KEY (guard_kind, turn_id),
     CONSTRAINT turn_liveness_observation_guard_kind CHECK (
@@ -22,11 +21,8 @@ CREATE TABLE turn_liveness_observation (
     ),
     CONSTRAINT turn_liveness_observation_ordinal CHECK (observation_ordinal > 0),
     CONSTRAINT turn_liveness_observation_scan_interval CHECK (
-        scan_interval_seconds >= 0
+        scan_interval_seconds > 0
         AND scan_interval_seconds <= 18446744073709551615
-        AND scan_interval_subsec_nanos >= 0
-        AND scan_interval_subsec_nanos < 1000000000
-        AND (scan_interval_seconds > 0 OR scan_interval_subsec_nanos > 0)
     ),
     CONSTRAINT turn_liveness_observation_turn_fkey
         FOREIGN KEY (turn_id) REFERENCES turn_lifecycle(turn_id),

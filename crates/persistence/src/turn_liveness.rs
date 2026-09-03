@@ -325,17 +325,15 @@ impl PostgresTurnLivenessRepository {
              )
              INSERT INTO turn_liveness_observation AS observation
                 (guard_kind, turn_id, session_id, current_attempt_id,
-                 outbox_frontier, scan_interval_seconds,
-                 scan_interval_subsec_nanos, observation_ordinal)
+                 outbox_frontier, scan_interval_seconds, observation_ordinal)
              SELECT $1, turn_id, session_id, current_attempt_id,
-                    outbox_frontier, $6, $7, 1
+                    outbox_frontier, $6, 1
                FROM incoming
              ON CONFLICT (guard_kind, turn_id) DO UPDATE
                 SET session_id = EXCLUDED.session_id,
                     current_attempt_id = EXCLUDED.current_attempt_id,
                     outbox_frontier = EXCLUDED.outbox_frontier,
                     scan_interval_seconds = EXCLUDED.scan_interval_seconds,
-                    scan_interval_subsec_nanos = EXCLUDED.scan_interval_subsec_nanos,
                     observation_ordinal = CASE
                         WHEN ROW(
                             observation.current_attempt_id,
@@ -345,12 +343,9 @@ impl PostgresTurnLivenessRepository {
                             EXCLUDED.outbox_frontier
                         )
                         THEN 1
-                        WHEN ROW(
-                            observation.scan_interval_seconds,
-                            observation.scan_interval_subsec_nanos
-                        ) IS DISTINCT FROM ROW($6::numeric, $7::integer)
+                        WHEN observation.scan_interval_seconds IS DISTINCT FROM $6::numeric
                         THEN 1
-                        WHEN NOT $8::boolean
+                        WHEN NOT $7::boolean
                         THEN observation.observation_ordinal
                         ELSE CASE
                             WHEN observation.observation_ordinal < 9223372036854775807
@@ -367,11 +362,6 @@ impl PostgresTurnLivenessRepository {
         .bind(&attempts)
         .bind(&frontiers)
         .bind(Decimal::from(scan_interval.get().as_secs()))
-        .bind(
-            i32::try_from(scan_interval.get().subsec_nanos()).map_err(|source| {
-                TurnLivenessRepositoryError::observation(sqlx::Error::Decode(Box::new(source)))
-            })?,
-        )
         .bind(mode == TurnLivenessObservationMode::Advance)
         .fetch_all(&mut *transaction)
         .await
