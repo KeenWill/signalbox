@@ -86,8 +86,8 @@ decode(input, true);                       // true... what?
 decode(input, StopSequences::Declared);    // the question travels with the answer
 ```
 
-Why: a bool's meaning lives entirely in a parameter name the call site never
-shows. Two-variant enums cost one `enum` line and make every site — call, match,
+Why: a bool's meaning lives entirely in a parameter name the call site does not
+show. Two-variant enums cost one `enum` line and make every site — call, match,
 and failure output — self-describing.
 
 ### 4. Tests are documentation, and read as such
@@ -125,7 +125,7 @@ A production numeric bound stays in code only when removing it can break the
 process itself. Declare that structural **guard** with
 `// numeric-bound: guard - <pathological case prevented>`. A mechanically
 derived guard declares the guard it derives from. Configuration may lower a
-guard but never raise it.
+guard but not raise it.
 
 Every other timeout, interval, attempt budget, concurrency or page bound, and
 retained-detail policy the task names is required deployment configuration, with
@@ -172,7 +172,7 @@ Name the first version that admits the feature and compare stored versions only
 against that threshold. Advancing a writer version must not reinterpret rows
 written under an older feature threshold.
 
-A name has one spelling per file. A type or constant the file imports is never
+A name has one spelling per file. A type or constant the file imports is not
 also written as a crate-qualified path in a signature, field, or body; the two
 spellings advertise one item as two, and a reader comparing sibling signatures
 cannot tell whether they name the same thing. Spell both ways only to
@@ -193,7 +193,7 @@ Where a projected boolean represents a closed axis, decode it into an enum named
 for that axis.
 
 `sqlx::Row::get` and `get_unchecked` are forbidden. A malformed row is a typed,
-fail-closed persistence error, never a panic in an open transaction.
+fail-closed persistence error, not a panic in an open transaction.
 
 A persistence corruption variant remains closed and matchable: it may carry a
 static field or relationship label and, when needed, the observed durable
@@ -202,7 +202,7 @@ formatted prose.
 
 No code under `apps/` writes SQL that names a database table. Table access goes
 through a method on a persistence repository or store that returns typed values
-— domain enums and newtypes, never a `String` compared against a state literal.
+— domain enums and newtypes, not a `String` compared against a state literal.
 Advisory-lock and connection-level statements that name no table are outside the
 rule, as is the `signalbox-debug` diagnostic binary. A schema rename must break
 the persistence crate's own tests, not the daemon at runtime.
@@ -245,11 +245,11 @@ for non-enum or structurally open scrutinees.
 
 ### Absence is a shape, not a sentinel
 
-"This fact is absent" is never an in-band value of a scalar that has real
+"This fact is absent" is not an in-band value of a scalar that has real
 meanings: no sentinel HTTP status, index, or identifier. Use `Option<T>`, or
 split the function so neither half has to represent the empty case.
 
-A boolean flag never restates the presence of an `Option` beside it — a
+A boolean flag does not restate the presence of an `Option` beside it — a
 `truncated` flag next to a `next_cursor`, an in-flight flag next to the
 timestamp that would prove it. Model the two states as one enum, so a
 constructor cannot be handed a contradictory pair and no agreement check is
@@ -258,9 +258,9 @@ needed at runtime. This is principle 5 at a seam rather than inside a module.
 ### Signatures carry labels, not runs
 
 Two adjacent parameters of one function do not share a type. Group them into a
-struct with named fields or give them distinct newtypes, and always do so when
-the parameters carry different sanitization, provenance, or trust contracts, so
-a transposition cannot compile. This extends principle 2 from tuples and test
+struct with named fields or give them distinct newtypes, and do so whenever the
+parameters carry different sanitization, provenance, or trust contracts, so a
+transposition cannot compile. This extends principle 2 from tuples and test
 fixtures to production signatures, where a transposition is most costly and the
 parameter names are invisible at the call site. An
 `#[allow(clippy::too_many_arguments)]` is a signal the rule is being broken, not
@@ -356,7 +356,7 @@ does. Every argument and every `ValueEnum` variant carries a doc comment, since
 that comment is the text a user reads in `--help`; a flag with none ships a
 blank line.
 
-A proc-macro diagnostic is spanned on the user's tokens, never on the macro call
+A proc-macro diagnostic is spanned on the user's tokens, not on the macro call
 site, and each distinct error path has a compile-fail case with a checked
 `.stderr`. A diagnostic pointing at the derive rather than at the offending
 literal cannot be acted on, and the missing goldens are why mis-spanning goes
@@ -560,9 +560,9 @@ guide introduces:
   its IDs with a `0xfeed_cafe_dead_beef` prefix. A value from a generator is
   arbitrary by construction; no reader will mistake it for load-bearing.
 
-- **One-knob fixtures** (TS-4) so arbitrary plumbing never reaches the test body
-  at all, and — where a value must appear literally but any value would do — an
-  `ARBITRARY_`-prefixed constant such as `ARBITRARY_SESSION_ID`
+- **One-knob fixtures** (TS-4) so arbitrary plumbing does not reach the test
+  body at all, and — where a value must appear literally but any value would do
+  — an `ARBITRARY_`-prefixed constant such as `ARBITRARY_SESSION_ID`
   (`crates/runner-wire/src/tests.rs` uses the prefix).
 
 Worked example: `checkpoint_restart_model_call` combines both problems in one
@@ -708,7 +708,7 @@ Where the repository already does this well; point reviews here.
 - [Google Testing Blog — Tests Too DRY? Make Them DAMP!](https://testing.googleblog.com/2019/12/testing-on-toilet-tests-too-dry-make.html)
   — in tests, obviousness outranks deduplication.
 - [Google Testing Blog — Don't Put Logic in Tests](https://testing.googleblog.com/2014/07/testing-on-toilet-dont-put-logic-in.html)
-  — expectations are literal values, never recomputed by test-side logic.
+  — expectations are literal values, not recomputed by test-side logic.
 - [Google Testing Blog — Improve Readability With Positive Booleans](https://testing.googleblog.com/2023/10/improve-readability-with-positive.html)
   — booleans that survive get positive, assertive names.
 - [matklad — How to Test](https://matklad.github.io/2021/05/31/how-to-test.html)

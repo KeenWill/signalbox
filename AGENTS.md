@@ -65,8 +65,7 @@ real fix.
 Code, documentation, commit messages, pull-request text, and branch names cite
 only public sources. Do not include or allude to non-public material of any
 organization. Public open-source work may be cited regardless of publisher. The
-owner's private repositories may be named as provenance, not as normative
-sources.
+owner's private repositories may be named as provenance, not cited as rules.
 
 ## Working on a change
 

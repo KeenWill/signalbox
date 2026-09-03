@@ -192,8 +192,8 @@ for d in all_cancellation_dispositions() {
 // rejection to return the attempt unchanged before its row reads
 // "rejected":
 //     Err(error) => { assert_eq!(error.current().id(), source_id); "rejected" }
-// so the table supplements the per-edge asserts (rule 10); it never
-// replaces them. The helper emits one `#[derive(Debug)]` row struct per
+// so the table supplements the per-edge asserts (rule 10); it does not
+// replace them. The helper emits one `#[derive(Debug)]` row struct per
 // edge; the struct's field names are the rendered column headers.
 assert!(prepared().end_after_cancellation(proof(1), Cancelled).is_ok());
 let rows = after_cancellation_rows(&prepared, proof(1));
