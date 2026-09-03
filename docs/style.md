@@ -43,11 +43,8 @@ record_evidence(identity(TARGET_IDENTITY), call(SUBJECT_CALL));
 
 Why: an unlabeled literal costs a re-read on every future visit — the reader
 must reconstruct from context whether changing it would change the test's
-meaning. A name pays that cost once, at writing time. Corollary: when a test
-*does* care about a value, spell the literal at the assertion (TS-5) — or, where
-the expected value is one the fixture already states, assert against the fixture
-itself (TS-6). The discipline is not "no literals", it is "no literals of
-unknown provenance."
+meaning. A name pays that cost once, at writing time. The discipline is not "no
+literals", it is "no literals of unknown provenance."
 
 ### 2. Position may carry meaning only where types do
 
@@ -76,10 +73,11 @@ field names.
 
 `true` at a call site, in a tuple, or in a match arm tells the reader nothing
 about what was asked. Replace each boolean axis with a two-variant enum named
-for the axis; when the yes-case has data, carry it in the variant. This is the
-"boolean blindness" fix: keep the evidence, not just the bit. A boolean that
-must remain (a struct field mirroring an external schema, say) gets a positive,
-assertive name: `overflowed`, not `no_overflow`.
+for the axis, except a private local boolean inside a function body; when the
+yes-case has data, carry it in the variant. This is the "boolean blindness" fix:
+keep the evidence, not just the bit. A boolean that must remain (a struct field
+mirroring an external schema, say) gets a positive, assertive name:
+`overflowed`, not `no_overflow`.
 
 ```text
 decode(input, true);                       // true... what?
@@ -257,14 +255,13 @@ needed at runtime. This is principle 5 at a seam rather than inside a module.
 
 ### Signatures carry labels, not runs
 
-Two adjacent parameters of one function do not share a type. Group them into a
-struct with named fields or give them distinct newtypes, and do so whenever the
-parameters carry different sanitization, provenance, or trust contracts, so a
-transposition cannot compile. This extends principle 2 from tuples and test
-fixtures to production signatures, where a transposition is most costly and the
-parameter names are invisible at the call site. An
-`#[allow(clippy::too_many_arguments)]` is a signal the rule is being broken, not
-a licence to break it.
+Two adjacent parameters of one function that carry different sanitization,
+provenance, or trust contracts do not share a type: group them into a struct
+with named fields or give them distinct newtypes, so a transposition cannot
+compile. This extends principle 2 from tuples and test fixtures to production
+signatures, where a transposition is most costly and the parameter names are
+invisible at the call site. An `#[allow(clippy::too_many_arguments)]` is a
+signal the rule is being broken, not a licence to break it.
 
 `bool` does not appear as a public struct field or a public function parameter
 in the domain and application crates. Express each such axis as a two-variant
@@ -552,7 +549,7 @@ guide introduces:
   The comments state each value's role: `8` must differ from `7`, and nothing
   more. `TARGET_IDENTITY` carries no comment, so whether `7` is load-bearing is
   left to the reader; under principle 1 it would say "the pinned identity under
-  test; any value `MISMATCHING_IDENTITY` differs from serves". Add that comment
+  test; `MISMATCHING_IDENTITY` differs from `TARGET_IDENTITY`". Add that comment
   when next changing the file.
 
 - **Namespaced generators** for values whose only obligation is distinctness —

@@ -44,10 +44,6 @@ finishing a milestone.
   unconsumed machinery are not substitutes for blocked work.
 - Maintain compact progress checkpoints naming the current track, what has been
   verified, what remains, and any semantic or external blocker.
-- On a pull request touching `crates/domain` or `crates/persistence`, pause the
-  review-fix loop after wave three and wait for the owner's next check-in rather
-  than running it unattended; report the wave history so far at the pause.
-  Non-core pull requests keep the adaptive wave rule in `AGENTS.md` unchanged.
 
 ### Long-running commands
 
@@ -74,10 +70,7 @@ finishing a milestone.
 A milestone is complete when all of its pull requests are finished (per
 `AGENTS.md`) and merged by the owner; finished pull requests awaiting merge are
 not a reason to stop other work. When the milestone's work is delivered, request
-an owner alignment review before selecting the next milestone. That request
-includes each pull request's one-line review-wave history — accepted and
-declined counts partitioned per wave, in wave order, never aggregated across
-waves — so the owner sees the degradation curve.
+an owner alignment review before selecting the next milestone.
 
 ## Writing a goal
 
