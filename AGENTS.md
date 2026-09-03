@@ -17,9 +17,6 @@ owner-approved plans. Do not add speculative product behavior.
 - CI runner routing: `.github/workflows/README.md`. Change a job's `runs-on` and
   that file in the same pull request.
 
-Decisions are recorded in pull-request descriptions and git history. Document
-only what the code cannot say.
-
 ## Minimum mechanism
 
 Build the smallest thing that satisfies the behavior the task names: no config
@@ -168,8 +165,7 @@ successfully.
 CI runs the ignored suites from
 [`.github/postgres-integration-suites.toml`](.github/postgres-integration-suites.toml),
 which names each suite's package, features, shard count, and exclusions. Change
-a suite there, not in the workflow; `scripts/check_docs_consistency.py` fails
-when the manifest, the workflow, and the command above disagree.
+a suite there, not in the workflow.
 
 For documentation changes, also check repository-relative links and the rendered
 Markdown. Put path-specific instructions in the nearest descendant `AGENTS.md`.
@@ -193,10 +189,10 @@ a commit can move another worktree's HEAD. Use
 
 The Postgres integration suites start one container per test through
 testcontainers, and only `ContainerAsync`'s `Drop` removes it, so a test process
-that dies without unwinding leaves containers that pin host memory. Reclaim them
-with [`tooling/sweep-test-containers.sh`](tooling/sweep-test-containers.sh): it
-reports without `--apply`, and removes only containers older than two hours (by
-default) that carry the label
-`signalbox_persistence::disposable_test_container_labels` attaches. Start test
-containers through that helper so the sweep can find them. On a shared machine,
-run the sweep on a timer.
+that dies without unwinding leaves containers that pin host memory. Start test
+containers through the test harness,
+`signalbox_persistence::disposable_test_container_labels`, which attaches the
+label the sweep selects on. Reclaim stranded containers with
+[`tooling/sweep-test-containers.sh`](tooling/sweep-test-containers.sh): it
+reports without `--apply`, and removes only labeled containers older than two
+hours (by default). On a shared machine, run the sweep on a timer.
