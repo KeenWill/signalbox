@@ -1693,7 +1693,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn excluded_directories_and_worktrees_do_not_consume_contents_or_yield_documents() {
+    fn excluded_directories_do_not_consume_their_contents_or_yield_documents() {
         const SMALL_CLASSIFIED_ENTRY_LIMIT: u64 = 8;
 
         let temporary = tempfile::tempdir().expect("temporary root exists");
@@ -1716,13 +1716,9 @@ mod tests {
             "excluded build instructions",
         )
         .expect("build agent document is written");
-        let nested_repository = temporary.path().join("nested-worktree");
-        fs::create_dir(&nested_repository).expect("nested worktree exists");
-        fs::write(
-            nested_repository.join(".git"),
-            "gitdir: ../metadata/worktree",
-        )
-        .expect("nested worktree marker exists");
+        let nested_repository = temporary.path().join("nested-clone");
+        fs::create_dir_all(nested_repository.join(".git"))
+            .expect("nested repository metadata exists");
         fill_directory_beyond_limit(&nested_repository, SMALL_CLASSIFIED_ENTRY_LIMIT);
         fs::write(
             nested_repository.join("AGENTS.md"),
@@ -1739,6 +1735,42 @@ mod tests {
         assert!(snapshot.is_complete());
         assert!(snapshot.findings().is_empty());
         assert_eq!(snapshot.classified_entries(), 6);
+        assert_eq!(snapshot.bundles().len(), 1);
+        assert_eq!(
+            snapshot.bundles()[0].source_path().absolute_path(),
+            adjacent_document.to_string_lossy()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_worktree_is_not_traversed_during_discovery() {
+        const SMALL_CLASSIFIED_ENTRY_LIMIT: u64 = 4;
+
+        let temporary = tempfile::tempdir().expect("temporary root exists");
+        let adjacent_document = temporary.path().join("AGENTS.md");
+        fs::write(&adjacent_document, "workspace instructions")
+            .expect("adjacent agent document is written");
+        let nested_worktree = temporary.path().join("nested-worktree");
+        fs::create_dir(&nested_worktree).expect("nested worktree exists");
+        fs::write(nested_worktree.join(".git"), "gitdir: ../metadata/worktree")
+            .expect("nested worktree marker exists");
+        fill_directory_beyond_limit(&nested_worktree, SMALL_CLASSIFIED_ENTRY_LIMIT);
+        fs::write(
+            nested_worktree.join("AGENTS.md"),
+            "excluded worktree instructions",
+        )
+        .expect("worktree agent document is written");
+        let root = workspace_root(&temporary);
+
+        let snapshot = discover_with_limits(
+            vec![root],
+            test_limits(SMALL_CLASSIFIED_ENTRY_LIMIT, 4, 64, Duration::from_secs(1)),
+        );
+
+        assert!(snapshot.is_complete());
+        assert!(snapshot.findings().is_empty());
+        assert_eq!(snapshot.classified_entries(), 2);
         assert_eq!(snapshot.bundles().len(), 1);
         assert_eq!(
             snapshot.bundles()[0].source_path().absolute_path(),
