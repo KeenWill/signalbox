@@ -30,8 +30,9 @@ integration branch's own run once the stack lands, while a primary with its own
 merge commit or a reference naming itself as carrier rejects even when
 inherited. `scripts/check_docs_consistency.py` enforces this form.
 
-Every paragraph on a page belongs to exactly one of three categories; a page
-that cannot say which category a paragraph is in has a defect:
+Every paragraph on a specification page belongs to exactly one of three
+categories; a page that cannot say which category a paragraph is in has a
+defect:
 
 - **Implemented behavior**: what a page states by default.
 - **Committed unimplemented functionality**: a capability the owner has decided

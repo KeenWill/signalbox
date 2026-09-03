@@ -397,8 +397,7 @@ Clippy denies panicking convenience paths (`expect`, `panic`, `unwrap`, `todo`,
 gates: CI promotes every warning to an error, so a lint is configured only when
 the whole workspace passes it at `deny`.
 
-`missing_docs` is not configured. A follow-up enables it at `deny` only after
-the outstanding undocumented items across the workspace are cleared.
+`missing_docs` is not configured.
 
 `clippy::wildcard_enum_match_arm` is also not configured. Review enforces
 explicit matching until the workspace's remaining wildcard arms are gone and the
