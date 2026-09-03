@@ -209,12 +209,11 @@ recovery as normative behavior:
   while budgeted retries run, and `failed_retryable` is recorded only when the
   session closes with the retryable cause standing — retry budget exhausted, or
   a park closed as failed. Recovery at the point of failure: budgeted backoff;
-  quota causes trigger credential-pool rotation. (Today no quota trigger is
-  wired to the pool machinery: 1,552 `quota_exhausted` calls and zero
-  credential-pool actions.) Retries charge the cycle budget only under §9's
-  fault attribution: a provider transient, quota exhaustion, or infrastructure
-  blip the session did not cause charges nothing. The configured quota action is
-  recorded by the credential pool before a replacement call is prepared.
+  quota causes trigger credential-pool rotation. Retries charge the cycle budget
+  only under §9's fault attribution: a provider transient, quota exhaustion, or
+  infrastructure blip the session did not cause charges nothing. The configured
+  quota action is recorded by the credential pool before a replacement call is
+  prepared.
 - `failed_structural{cause}` — the same input will fail again: compaction wall,
   broken toolchain, moderation block whose resume re-trips the same flag.
   Recovery: never auto-resume. The session parks with the structural cause

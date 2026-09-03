@@ -615,7 +615,7 @@ async fn run_quiescent_watchdog(
                 )
                 .await;
                 if tally.observation_recorded() {
-                    first_scan_after_restart = false;
+                    anchor_next_observation(&mut first_scan_after_restart, &mut ticker);
                 }
             }
         }
@@ -661,7 +661,7 @@ async fn run_slot_held_watchdog(
                 )
                 .await
                 {
-                    first_scan_after_restart = false;
+                    anchor_next_observation(&mut first_scan_after_restart, &mut ticker);
                 }
             }
         }
@@ -684,6 +684,11 @@ async fn run_ambiguous_operation_watchdog(
             }
         }
     }
+}
+
+fn anchor_next_observation(first_scan_after_restart: &mut bool, ticker: &mut Interval) {
+    *first_scan_after_restart = false;
+    ticker.reset();
 }
 
 async fn reconcile_slot_held_turns(
@@ -1535,9 +1540,9 @@ mod tests {
         STALE_TURN_LOCK_UNAVAILABLE_CAUSE, STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE,
         SlowSubstrateNumericBounds, StaleTurnTerminalizer, TERMINALIZATION_DEFERRED_CAUSE,
         TerminalizationWindow, TurnLivenessNumericBounds, TurnLivenessWake,
-        automatic_reconciliation_scan_ceiling_reached, batch_admits_another_reconciliation,
-        complete_before_shutdown, drain_quiescent_rotation, next_turn_liveness_wake,
-        reconcile_turn_liveness, reconciliation_deadline,
+        anchor_next_observation, automatic_reconciliation_scan_ceiling_reached,
+        batch_admits_another_reconciliation, complete_before_shutdown, drain_quiescent_rotation,
+        next_turn_liveness_wake, reconcile_turn_liveness, reconciliation_deadline,
     };
     use signalbox_application::{
         DurableTurnLivenessObservation, StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome,
@@ -1844,6 +1849,32 @@ mod tests {
         let wake = next_turn_liveness_wake(&mut receiver, &mut ticker).await;
 
         assert_eq!(wake, TurnLivenessWake::Scan);
+    }
+
+    /// A completed observation starts a fresh cadence, so work before its
+    /// commit cannot count toward the next persisted ordinal.
+    #[tokio::test(start_paused = true)]
+    async fn a_completed_observation_anchors_the_next_scan_interval() {
+        let scan_interval = Duration::from_secs(60);
+        let nearly_one_interval = scan_interval - Duration::from_secs(1);
+        let (_shutdown, mut receiver) = watch::channel(false);
+        let mut ticker = interval(scan_interval);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let _first = next_turn_liveness_wake(&mut receiver, &mut ticker).await;
+        tokio::time::advance(nearly_one_interval).await;
+
+        let mut first_scan_after_restart = true;
+        anchor_next_observation(&mut first_scan_after_restart, &mut ticker);
+        let early = tokio::time::timeout(
+            nearly_one_interval,
+            next_turn_liveness_wake(&mut receiver, &mut ticker),
+        )
+        .await;
+        let next = next_turn_liveness_wake(&mut receiver, &mut ticker).await;
+
+        assert!(early.is_err());
+        assert!(!first_scan_after_restart);
+        assert_eq!(next, TurnLivenessWake::Scan);
     }
 
     /// A requested shutdown is answered without waiting out the interval.

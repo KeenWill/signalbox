@@ -15,9 +15,11 @@ final-state authority were verified against this PR
 tool-attempt operations is verified against this PR
 (`agent/daemon-live-tool-recovery-reconcile`). The server-enforced
 automatic-reconciliation transaction deadline is verified against this PR
-(`agent/daemon-live-server-bounded-reconciliation`). Recovery discovery's
-contention with an accepting operator interrupt, and that interrupt's atomic
-supersession of the turn's recovery row, are verified against this PR
+(`agent/daemon-live-server-bounded-reconciliation`). Class-specific attempt
+ceilings and configurable convergence retry budgets are re-verified against this
+PR (`agent/lifecycle-t9-watchdog`). Recovery discovery's contention with an
+accepting operator interrupt, and that interrupt's atomic supersession of the
+turn's recovery row, are verified against this PR
 (`agent/fix-liveness-shutdown-recovery`). Recursive-frontier prefix validation
 is verified against this PR
 (`agent/daemon-live-frontier-validation-materialization`). Context-compaction
@@ -281,14 +283,17 @@ Migration `202608210400_convergence_sweep.sql` uses the reserved `2026082104xx`
 block to add the mutable `convergence_sweep_target` scheduler projection, the
 append-only `convergence_sweep_event` audit, and the
 `convergence_sweep_parked_target` operator view. Closed checks bind retry and
-park shapes to the five-attempt `convergence_sweep_retry_budget()` ceiling, bind
-each provider, commission, template, or state-access failure outcome to its
-typed cause and operator need, and prevent partial command-fence or
+park shapes to the retry budget persisted on each target and event, bind each
+provider, commission, template, or state-access failure outcome to its typed
+cause and operator need, and prevent partial command-fence or
 commissioned-dispatch identities. Observation projections are decoded as
 complete pairs by the persistence adapter. The function pins the restore-safe
 schema search path. The cross-component behavior using these records is owned by
 [pull-request convergence reconciliation](convergence-reconciliation.md). The
-pull-request target and model-activity advisory fences described in the lock
+`202609020009_watchdog_durability.sql` migration adds durable turn-liveness
+observations and replaces fixed automatic-reconciliation and convergence retry
+ceilings with the configured values persisted on their owning rows and events.
+The pull-request target and model-activity advisory fences described in the lock
 inventory below are verified against this PR (`agent/daemon-convergence-sweep`).
 Migration `202608210402_repo_watch_pull_request_target_indexes.sql` indexes the
 repository-watch event-to-action path used to census sessions by pull-request
@@ -484,17 +489,17 @@ Representation rules, all enforced in the schema:
   wait and typed attempt-history rows keyed by one-based ordinal. Current state
   is `scheduled`, `attempting`, `reconciled`, `superseded`, or `exhausted`;
   attempt outcome is `attempting`, `reconciled`, `superseded`,
-  `infrastructure_failure`, or `integrity_failure`. Checks close the
-  five-attempt budget, require a completion timestamp exactly for terminal
-  attempt outcomes, and require an exhaustion timestamp exactly for exhausted
-  current state. The same migration widens the reconciliation-required
-  final-state assertion only for an exact `reconciled` row binding that terminal
-  turn, session, and ambiguous model call; every frontier, attempt, call, and
-  outbox proof remains required.
+  `infrastructure_failure`, or `integrity_failure`. A completion timestamp is
+  required exactly for terminal attempt outcomes, and an exhaustion timestamp is
+  required exactly for exhausted current state. The same migration widens the
+  reconciliation-required final-state assertion only for an exact `reconciled`
+  row binding that terminal turn, session, and ambiguous model call; every
+  frontier, attempt, call, and outbox proof remains required.
 - Migration `202608210601` renames that ledger to `automatic_reconciliation` and
   makes its operation identity exactly one of model call or tool attempt. Its
   final-state authority matches both nullable operation columns exactly; tool
-  reconciliation retains the same five-attempt state and history algebra.
+  reconciliation retains the same state and history algebra with its own
+  persisted configured attempt ceiling.
 - Migration `202608080100` closes runner placement history over
   `runner_lost_before_pin`, `pre_pin_replaced`, sourced `runner_lost`, and
   `abandoned` records. Each event retains the complete facts required by its

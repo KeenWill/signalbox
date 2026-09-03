@@ -436,7 +436,8 @@ pub(crate) const AUTOMATIC_RECONCILIATION_CLAIM: &str = "WITH due AS (
                        state_kind = 'attempting',
                        next_attempt_at = CASE
                            WHEN recovery.model_call_id IS NOT NULL THEN
-                               CASE WHEN $2::bigint IS NULL THEN 'infinity'::timestamptz
+                               CASE WHEN $2::bigint IS NULL THEN statement_timestamp()
+                                       + ($13::bigint * interval '1 millisecond')
                                     ELSE statement_timestamp()
                                        + (greatest(
                                             CASE recovery.attempt_count + 1
@@ -449,7 +450,8 @@ pub(crate) const AUTOMATIC_RECONCILIATION_CLAIM: &str = "WITH due AS (
                                             $13::bigint
                                           ) * interval '1 millisecond')
                                END
-                           ELSE CASE WHEN $7::bigint IS NULL THEN 'infinity'::timestamptz
+                           ELSE CASE WHEN $7::bigint IS NULL THEN statement_timestamp()
+                                          + ($14::bigint * interval '1 millisecond')
                                      ELSE statement_timestamp()
                                         + (greatest(
                                              CASE recovery.attempt_count + 1

@@ -2521,12 +2521,14 @@ async fn inv006_inv025_inv029_inv037_automatic_tool_reconciliation_releases_the_
 }
 
 /// A tool ambiguity spends its configured class budget without inheriting the
-/// longer model-call budget.
+/// longer model-call budget, while unbounded retry policies retain finite
+/// in-flight leases for both classes.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn automatic_tool_reconciliation_honors_its_class_budget() -> Result<(), Box<dyn Error>> {
+async fn automatic_reconciliation_honors_class_budget_and_unbounded_retry_leases()
+-> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let _earlier_model =
+    let earlier_model =
         crate::model_call_execution_and_recovery::park_restart_ambiguity(&pool, 0x73d8).await?;
     let seed = 0x74d8;
     let (fixture, _, _, request) =
@@ -2568,20 +2570,26 @@ async fn automatic_tool_reconciliation_honors_its_class_budget() -> Result<(), B
             .await?,
     );
     let tool_attempt_budget = 1;
+    let model_attempt_lease = Duration::from_secs(600);
     let tool_attempt_lease = Duration::from_secs(60);
     let repository = PostgresAutomaticReconciliationRepository::new(pool.clone())
-        .with_class_policies(
-            5,
-            Some(Duration::ZERO),
-            Some(Duration::ZERO),
-            tool_attempt_budget,
-            Some(Duration::ZERO),
-            Some(Duration::ZERO),
-        )
-        .with_class_attempt_leases(Duration::from_secs(600), tool_attempt_lease);
+        .with_class_policies(5, None, None, tool_attempt_budget, None, None)
+        .with_class_attempt_leases(model_attempt_lease, tool_attempt_lease);
+    let model = repository.claim_due_model_call().await?;
     let first = repository.claim_due_tool_attempt().await?;
     assert_eq!(first.claimed().len(), 1);
-    let claim_lease_covers_attempt: bool = sqlx::query_scalar(
+    let model_claim_lease_covers_attempt: bool = sqlx::query_scalar(
+        "SELECT recovery.next_attempt_at >= attempt.started_at
+                    + ($2::bigint * interval '1 millisecond')
+           FROM automatic_reconciliation AS recovery
+           JOIN automatic_reconciliation_attempt AS attempt USING (turn_id)
+          WHERE recovery.turn_id = $1 AND attempt.attempt_ordinal = 1",
+    )
+    .bind(earlier_model.turn.into_uuid())
+    .bind(i64::try_from(model_attempt_lease.as_millis())?)
+    .fetch_one(&pool)
+    .await?;
+    let tool_claim_lease_covers_attempt: bool = sqlx::query_scalar(
         "SELECT recovery.next_attempt_at >= attempt.started_at
                     + ($2::bigint * interval '1 millisecond')
            FROM automatic_reconciliation AS recovery
@@ -2602,7 +2610,9 @@ async fn automatic_tool_reconciliation_honors_its_class_budget() -> Result<(), B
     let exhausted = repository.claim_due_tool_attempt().await?;
 
     assert_eq!(first.claimed()[0].attempt().get(), 1);
-    assert!(claim_lease_covers_attempt);
+    assert_eq!(model.claimed().len(), 1);
+    assert!(model_claim_lease_covers_attempt);
+    assert!(tool_claim_lease_covers_attempt);
     assert_eq!(
         first.claimed()[0].operation(),
         AutomaticReconciliationOperation::ToolAttempt(tool_attempt)
