@@ -1,38 +1,20 @@
 # yaml-language-server: $schema=https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
 #
-# CodeRabbit configuration: pre-merge checks as verdict-logic mirrors of rules
-# owned by AGENTS.md, docs/agents/testing-style.md, docs/agents/goal-mode.md,
-# and the living
-# specification under docs/spec/. Ownership stays with those documents; each check
-# restates only the operational pass/fail logic, and the comment above each
-# check names its owning rule document. Git history retains the rollout context.
+# CodeRabbit configuration. The comment above each custom check names the
+# document that states its rule.
 
 reviews:
   request_changes_workflow: true
-  # Path-specific guidance. Files opening with the non-authoritative-planning
-  # banner (owned as a class by AGENTS.md and stamped on the file itself, e.g.
-  # docs/agents/backlog.md) decide nothing and are not statements of record.
   path_instructions:
     - path: "**"
       instructions: |-
-        Review doctrine owned by AGENTS.md (Minimum mechanism; Finished pull requests). A finding that a mechanism can be removed is a valid finding. A finding asking how a case the PR's task does not name is enforced, guarded, or handled is deferred by default unless the gap corrupts stored data or a committed contract; a dispositioned finding is not re-raised unless it reproduces on the current head. Do not request a config key, table, threshold, gate, or policy the task does not name.
-    - path: "docs/agents/backlog.md"
-      instructions: |-
-        This file opens with a non-authoritative-planning banner: it is the owner's working scratchpad, decides nothing, and is not a statement of record. Do NOT review it for normative-statement placement, decision weight, or PR-description accuracy, and do NOT flag its prose for cross-document consistency, single-source-of-record duplication, or normative wording (must/never/only). Its entries are deliberately loose and are superseded by the owning docs/spec/ page, pull-request record, or docs/open-questions.md when an item is picked up. Treat findings only for plainly broken Markdown or dead repository-relative links.
+        Review rules are stated in AGENTS.md; test code follows docs/agents/testing-style.md.
   pre_merge_checks:
     # Only requested reviewers (not the PR author) may override failing checks.
     override_requested_reviewers_only: true
     # Built-in checks (docstrings, title, description, issue_assessment) keep
     # their schema defaults and are deliberately not restated here.
     custom_checks:
-      # verdict logic for the generated invariant index owned by AGENTS.md
-      - name: "Invariant index is generated from tests"
-        mode: warning
-        instructions: |-
-          Scope: docs/invariants.md and INV tags in Rust test names or attached test doc comments. Pass immediately if neither changes.
-          Fail if docs/invariants.md does not exactly match `python3 scripts/generate_invariants.py --write`, or if a changed INV tag is not attached to a test declaration. The tests are the source of truth; the generated index may contain only IDs and citations.
-          Report the stale tag or file. Do not request hand edits to the generated Markdown.
-
       # verdict logic for the public-source hygiene rule owned by AGENTS.md
       - name: "Public-source hygiene"
         mode: warning
@@ -40,40 +22,6 @@ reviews:
           Scope: all text this PR adds on any surface the rule names — code (comments, string literals, identifiers), documentation, all pull-request text (title and description), commit messages, and the head branch name. Pass immediately if none.
           Fail when added text includes or alludes to non-public material of any organization — internal systems, private documents, specifications not publicly documented, or organization-internal vocabulary — whether as content, source, or inspiration. Citing publicly available open-source projects, papers, and blog posts is always acceptable regardless of publisher. References to the owner's own personal private repositories are acceptable only as provenance notes, never as normative sources (mirroring the owning rule).
           Report each violation by surface, locator, and category only — file path and line for file surfaces, otherwise the surface name with a content-free locator (pull-request title, description, the commit SHA for a commit message, the head branch). Do NOT quote, excerpt, or paraphrase the violating passage: a review comment is itself persistent pull-request text, and echoing the material would republish exactly what the rule exists to keep out.
-
-      # verdict logic for the single-statement-of-record rule owned by AGENTS.md
-      - name: "Normative statements live in one place"
-        mode: warning
-        instructions: |-
-          Scope: Markdown prose added or modified under docs/ or in README.md, excluding any file that already carried the non-authoritative-planning banner at its head on the PR's base branch (e.g. docs/agents/backlog.md) and still carries it at the PR head, and any file this PR adds as a new file opening with that banner — a banner file states nothing of record, so drop it from this check's scope file by file rather than skipping the check whenever such a file is present. A banner this PR stamps onto a file that already existed without one does not exempt that file, and neither does a banner this PR removes: in both directions the reclassification and the prose around it stay in scope. Pass immediately if no in-scope prose changed.
-          Fail when the PR adds a normative statement — a sentence using must, never, always, only, cannot, or "is rejected" about system behavior or process — that duplicates a statement owned elsewhere: the owning cross-crate or wire contract under docs/spec/, an INV-tagged test, a scenario in docs/scenarios.md, or a rule in AGENTS.md or docs/agents/testing-style.md. Duplication means a reader could learn the rule from the new text alone; a restatement is acceptable only when the same sentence or paragraph links to the owning document.
-          Also fail when the PR copies a single-owner list into a second file: the validation command sequence (owned by AGENTS.md), the decision-weight criteria (owned by AGENTS.md), or spec-owned semantics restated into docs/architecture.md or docs/glossary.md.
-          Pass when: the new text is itself the statement of record (a new or updated owning spec-page section or process rule); or the added prose links to its owner in the same paragraph; or the change is a cross-reference, link, or wording fix adding no normative content.
-          Report each failure as: the added sentence, the owning document, and the link that should replace the restatement.
-
-      # verdict logic for the finished-pull-request description rule owned by
-      # AGENTS.md
-      - name: "PR description budget and claim accuracy"
-        mode: warning
-        instructions: |-
-          Evaluate the PR description as it stands now.
-          Fail if any of:
-          1. The description exceeds 350 words (count words outside fenced code blocks).
-          2. A sentence claims the PR enforces, guarantees, ensures, prevents, or validates a behavior that no code or test in this diff implements. For each such verb, locate the enforcing artifact in the diff: a type making the state unrepresentable, a rejecting code path, a database constraint, or a test asserting the behavior. If the obligation only binds future implementors — documentation, a trait contract, a doc-comment requirement with no runtime or test enforcement — the description must present it as a contract; describing a contract as an enforcement is a Fail.
-          3. The description claims test coverage for a case no test at the PR head exercises (verify the named test or behavior by search).
-          Pass when the description is within budget and every enforcement claim maps to a concrete artifact in the diff. Do not fail on style, tone, or missing optional sections. Report each failing claim verbatim with the reason no artifact matches.
-
-      # verdict logic for the rules owned by docs/agents/testing-style.md
-      - name: "Modified tests follow testing-style rules"
-        mode: warning
-        instructions: |-
-          Scope: test code added or modified by this PR — files under crates/*/tests/ and #[cfg(test)] modules touched by the diff. Pass immediately if none.
-          Apply docs/agents/testing-style.md; cite rule numbers in findings:
-          1. Rule 2: an added or modified #[test] body must contain no for/while loop and no if/match selecting between test cases. Straight-line calls to #[track_caller] helpers are the accepted replacement. Fail per offending test.
-          2. Rule 6: an added assertion must not compare against a literal re-encoding a value the fixture already states (e.g. asserting `.as_u64() == 4` where setup built version 4 from a seeded helper). Fail when the literal duplicates a fixture value reachable through an accessor.
-          3. Rule 10: in any file cited by an Enforcement cell of docs/invariants.md, targeted asserts are decisive; a change leaving only an expect![...] snapshot where a targeted assert previously existed is a Fail.
-          4. Rule 17: if the PR renames, splits, or deletes a test in a file cited by docs/invariants.md, the file must still contain tests tagged with each INV the catalog binds to it, and the catalog cell must be updated in this PR when coverage moves. Fail otherwise.
-          5. If the count of #[test] functions in a modified test file decreases, the PR description must state which tests were removed and why (rule 19 deletions qualify). A silent decrease is a Fail.
 
       # verdict logic for the embedded-migrations discipline owned by the
       # persistence-protocol specification (docs/spec/persistence-protocol.md)
@@ -88,20 +36,6 @@ reviews:
           Exception: a migration file this same PR introduced (present in the PR's commits but absent from the base branch) may still be edited within the PR — that is not a violation.
           Chain-collapse carve-out, authorized by docs/proposals/migration-reset.md: while there is exactly one deployment and no release, the chain may be replaced wholesale by a regenerated baseline, split into a few per-domain schema files. Admit a PR that satisfies all four conditions at once — (a) it deletes every file under crates/persistence/migrations/ that exists on the base branch, leaving none behind; (b) the files it adds there are one regenerated baseline: each prefix orders correctly by rule 2, the prefixes form one consecutive run, and there are a few domain-named files (roughly one per schema domain — on the order of ten, never a re-created long chain); (c) it changes no other file under that directory; and (d) its description cites docs/proposals/migration-reset.md and carries the fresh-apply and live equivalence proofs that document says the reset PR pastes in. A PR meeting all four is a Pass for the immutability clause, and rules 1 and 2 still apply to every file it adds. Anything short of all four — a partial deletion, an edit alongside the collapse, a gap or duplicate in the added prefixes, a missing citation or missing proofs — is a Fail exactly as before, so an ordinary PR gains nothing from this paragraph.
           Pass when no base-branch migration file is touched and all added filenames order correctly, or when the chain-collapse carve-out is fully satisfied. Report each violation with the filename and whether it is an edit of a merged migration or an ordering conflict.
-
-      # verdict logic for the sealed-annotation contract owned by
-      # docs/domain-spine.md (spine-maintenance rule owned by AGENTS.md)
-      - name: "Sealed-producer prose stays truthful"
-        mode: warning
-        instructions: |-
-          Scope: the "// sealed:" annotations in docs/domain-spine.md. CI verifies the spine's exported names and inventory counts, not its prose; this check guards the prose.
-          Trigger when the PR (a) adds or changes a public function, method, or constructor in crates/domain or crates/application that produces a type annotated "// sealed:" in docs/domain-spine.md, or (b) edits any "// sealed:" line. Pass immediately otherwise.
-          Fail if, at the PR head:
-          1. A "// sealed:" annotation names a producer (function or method path) that no longer exists in source.
-          2. A sealed-annotated type gains a public producer in this PR that its annotation does not name — including a first-ever producer while the annotation still reads "no public producer in this slice".
-          3. A "// sealed:" annotation is deleted while its type still has no public constructor.
-          Verification: for each sealed annotation on a type whose producing code this PR touches, list the type's public producers in source (search for public fns and methods returning the type) and compare against the producers the annotation names. The sets must match exactly.
-          Report each stale annotation with the type, the producers the prose names, and the producers found in source.
 
 
 knowledge_base:
