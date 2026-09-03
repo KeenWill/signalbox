@@ -364,14 +364,15 @@ intent, unchanged, and the session-level closures record the same cascade
 provenance the goal and turn stops record today, so a delegated child is never
 silently orphaned. The five: `stop{actor, sticky}` at session level, because a
 goal-less owned session needs a stop path; `supersede{successor}`, the closure a
-respawning client issues against its predecessor; `abandon`, the operator
-write-off of a parked session; `close_failed`, the operator closure of a parked
-session as failed with its standing cause — `failed_retryable`,
-`failed_structural`, or `failed_unknown` (§2); and `resume`, the operator or
-coordinator transition of a parked session back to the state §1's mapping
-derives from its suspended turn's phase — `active`, `waiting`, or `recovering`;
-`active` when no turn was suspended — where no goal applies. A parked goal
-session resumes through `goal{resume_with_guidance}` (§9).
+respawning client issues against its predecessor, `successor` omitted when the
+work is gone with nothing replacing it (§2); `abandon`, the operator write-off
+of a parked session; `close_failed`, the operator closure of a parked session as
+failed with its standing cause — `failed_retryable`, `failed_structural`, or
+`failed_unknown` (§2); and `resume`, the operator or coordinator transition of a
+parked session back to the state §1's mapping derives from its suspended turn's
+phase — `active`, `waiting`, or `recovering`; `active` when no turn was
+suspended — where no goal applies. A parked goal session resumes through
+`goal{resume_with_guidance}` (§9).
 
 **Proposed behavior.** The existing goal-command operation named `supersede` —
 new goal generation within the same session — is unrelated to the session
@@ -398,7 +399,8 @@ applied-results-only record, made here rather than silently.
 dispatch-lease tables — `repo_watch_dispatch_start_lease` with its `_expiration`
 and `_quarantine` companions — die. The scheduler's four-table reach-around dies
 with them. A session created with a held start gate stays in `created` until
-`release_start` or gate expiry; expiry retires it (§10).
+`release_start` or, on an owned session, admission expiry, which retires it
+(§10); an unmonitored held gate carries no deadline (§6).
 
 **Proposed behavior.** Ownership is advisory: an owner module observes events
 and issues commands like any other client; it never sits between core and the
@@ -490,11 +492,11 @@ predecessor selection, exactly as retired queued work is excluded today: the
 disposition changes the vocabulary, never the lineage rules.
 
 **Proposed behavior.** Every owned session carries one config-sourced admission
-deadline, armed at creation and covering `created` and `dispatched` alike — a
-held start gate, an awaited first input, or a queued turn that never activates;
-an unmonitored session carries none (§1, §6). Expiry retires the session with
-cause `admission_deadline_expired`, and any queued turn retires with it in the
-same transaction — the machines move together (§1). This closes the 229 zombie
+deadline covering `created` and `dispatched` alike — a held start gate, an
+awaited first input, or a queued turn that never activates; an unmonitored
+session carries none (§1, §6). Expiry retires the session with cause
+`admission_deadline_expired`, and any queued turn retires with it in the same
+transaction — the machines move together (§1). This closes the 229 zombie
 sessions that were created, never ran a turn, and sat idle forever with a
 lifespan of 0.0 hours.
 
@@ -550,8 +552,8 @@ proxies.
   observation this measures: a session that starts small and grows into the wall
   through real work almost always succeeds.
 - `wall_rate` — fraction of sessions dispatched in the calendar week recording
-  cause `context_compaction_wall`. The rate counts every wall, organic growth
-  included; the recorded initial payloads (§15) sit beside it.
+  cause `context_compaction_wall`. The rate counts walls of every kind, organic
+  growth included; the recorded initial payloads (§15) sit beside it.
 - `cause_completeness` — terminal turns whose typed cause is usable — outside
   the catch-all set: `unrecognized`, absent, or a bare unknown bucket — over all
   terminal turns, and, for model calls, usable causes over the calls whose
