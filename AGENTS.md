@@ -1,6 +1,6 @@
 # Agent guidance
 
-Signalbox is built in small slices that implement contracts in `docs/spec/` or
+Signalbox is built in small changes that implement contracts in `docs/spec/` or
 owner-approved plans. Do not add speculative product behavior.
 
 ## Where things live
@@ -30,7 +30,7 @@ cannot work without it, even if the specification allows it. When the task is
 open-ended or the spec is incomplete, take the reading its wording and the
 surrounding code most directly support, build for that reading only, and name
 the decision in the pull request; do not also build for the other readings.
-Measurement in the daemon is fine; a decision on top of a measurement belongs to
+Measurement in the daemon is fine; a decision based on a measurement belongs to
 the owner and lives outside the daemon unless the task says otherwise. Removing
 a mechanism the behavior does not need is a better change than adding one. List
 what you chose not to build.
@@ -49,10 +49,10 @@ dual-read or dual-write paths, version-tolerant decoding, legacy-value aliases,
 data-upgrade scaffolding) protects deployments that do not exist and is a
 defect: do not add it, and do not request it in review.
 
-The one compatibility task owed is a one-time migration carrying a live database
-across a change that invalidates its stored data. Compatibility a `docs/spec/`
-page already retains stays until that page retires it. This rule ends at the
-first durable deployment, defined by the freeze condition in
+The one compatibility task required is a one-time migration that converts a live
+database's stored data when a change invalidates it. Compatibility a
+`docs/spec/` page already retains stays until that page retires it. This rule
+ends at the first durable deployment, defined by the freeze condition in
 [process-protocol](docs/spec/process-protocol.md).
 
 ## Dependencies
@@ -63,8 +63,8 @@ dependencies and state the tradeoff in the pull request. Ask the owner before
 adding a large one.
 
 Do not add version-coupled pins or tests that fail on every dependency bump by
-construction. A bump that changes nothing merges as-is; real breakage gets a
-real fix.
+construction. A bump that changes nothing merges as-is; a bump that breaks
+something gets a fix for the breakage.
 
 ## Public-source hygiene
 
@@ -194,10 +194,10 @@ a commit can move another worktree's HEAD. Use
 
 The Postgres integration suites start one container per test through
 testcontainers, and only `ContainerAsync`'s `Drop` removes it, so a test process
-that dies without unwinding leaves containers that pin host memory. Start test
+that dies without unwinding leaves containers that hold host memory. Start test
 containers through the test harness,
 `signalbox_persistence::disposable_test_container_labels`, which attaches the
-label the sweep selects on. Reclaim stranded containers with
+label the sweep selects on. Remove leftover containers with
 [`tooling/sweep-test-containers.sh`](tooling/sweep-test-containers.sh): it
 reports without `--apply`, and removes only labeled containers older than two
 hours (by default). On a shared machine, run the sweep on a timer.

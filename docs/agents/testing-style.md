@@ -13,10 +13,10 @@ this repository, with identifiers shortened.
 
 ## Fixtures and assertions
 
-1. **A test's body contains its whole story.** A reader determines what is
-   verified, with which inputs, and why the expected result is correct from the
-   test body alone: complete (everything needed to understand the result is
-   present) and concise (nothing else is).
+1. **A test's body is self-contained.** A reader determines what is verified,
+   with which inputs, and why the expected result is correct from the test body
+   alone: complete (everything needed to understand the result is present) and
+   concise (nothing else is).
    ([Software Engineering at Google, ch. 12](https://abseil.io/resources/swe-book/html/ch12.html))
 
 2. **Tests are verified by inspection, not by tests of tests.** Test bodies are
@@ -41,7 +41,7 @@ this repository, with identifiers shortened.
    accidentally pass. When the independence of two values is itself the behavior
    under test, the fixture takes both as named knobs.
 
-5. **A test that cares about a value states it.** State a value the test depends
+5. **A test that depends on a value states it.** State a value the test depends
    on explicitly even when the canonical default happens to match; a test's
    meaning must not depend on defaults defined elsewhere.
 
@@ -60,7 +60,7 @@ this repository, with identifiers shortened.
    would catch and the false alarm it could raise. The ideal test fails only
    when observed behavior violates its requirement, and changes only when the
    requirement itself changes; a test that fails on behavior-preserving
-   refactors is a cost, not a safety net.
+   refactors is a cost, not a safeguard.
    ([Test suites as classifiers](https://blog.nelhage.com/post/test-suites-as-classifiers/))
 
 ### Rewrites from the test sweeps
@@ -93,7 +93,7 @@ let error = SessionReconstitutionInput::new(
 ).reconstitute().unwrap_err();
 assert_eq!(error.failure(), Failure::RequestedSessionMismatch);
 
-// Good: the test perturbs exactly the named fact it cares about.
+// Good: the test perturbs exactly the named fact it depends on.
 let requested_other_session = reconstitution_failure(CurrentSessionFacts {
     requested_session: session_id(2),
     ..CurrentSessionFacts::matching(session_id(1))
@@ -159,7 +159,7 @@ Snapshot assertions use
     [How to Test](https://matklad.github.io/2021/05/31/how-to-test.html)
     describes the single check-function, data-driven form these settle into.
 
-10. **Snapshots supplement invariant enforcement; they do not replace it.** A
+10. **Snapshots supplement invariant enforcement; they do not replace it.** An
     INV-tagged test keeps its precise targeted asserts; a snapshot proves
     output-didn't-change, not invariant-holds.
 
@@ -218,13 +218,13 @@ expect![[r#"
     expresses a relation between observed values — equality, replay stability,
     identity preservation, terminal irreversibility, order-independence. A
     snapshot cannot state a relation; it can only display both sides and leave
-    the comparison to the reader. Use each instrument for what it can state: a
-    law gets an assert that fails when the relation breaks, a value gets a
-    snapshot that shows what it is.
+    the comparison to the reader. Use each for what it can state: a law gets an
+    assert that fails when the relation breaks, a value gets a snapshot that
+    shows what it is.
 
 ## Snapshot supplements and blessing
 
-14. **Prefer supplementary snapshots going forward.** On an error or rejection
+14. **Prefer supplementary snapshots in new tests.** On an error or rejection
     path, printing the complete error payload as a supplement to the decisive
     assert catches unintended changes no assert mentions; a transition-result
     snapshot alongside the law asserts documents the full result for the reader.
@@ -268,25 +268,26 @@ assert_recorded_result_passes_through(SubmitInputResult::Rejected(
 
 ## Split versus unroll
 
-17. **A loop leaves a test body one of two ways.** Few cases exercising one
-    behavior unroll in place into straight-line calls (rule 2); cases exercising
-    distinct behaviors split into separately named tests — one behavior per test
-    (rule 7). The exception is a requirement that is itself atomic: when one
-    contract conjoins correlated guarantees — such as the atomic guarantees the
-    [testing strategy](../../CONTRIBUTING.md#testing) requires of restart and
-    race tests — that conjunction is one behavior and stays in one test even
-    though its description contains "and". Splitting such guarantees across
-    separate executions lets each half pass under a different interleaving while
-    no test can detect a violation of the combined contract. Before renaming or
-    splitting any test, preserve its INV tags in the test name or attached doc
-    comment, then regenerate the [invariant test index](../invariants.md). Keep
-    names stable; the binding reference is the file plus its tags.
+17. **A loop is removed from a test body in one of two ways.** Few cases
+    exercising one behavior unroll in place into straight-line calls (rule 2);
+    cases exercising distinct behaviors split into separately named tests — one
+    behavior per test (rule 7). The exception is a requirement that is itself
+    atomic: when one contract conjoins correlated guarantees — such as the
+    atomic guarantees the [testing strategy](../../CONTRIBUTING.md#testing)
+    requires of restart and race tests — that conjunction is one behavior and
+    stays in one test even though its description contains "and". Splitting such
+    guarantees across separate executions lets each half pass under a different
+    interleaving while no test can detect a violation of the combined contract.
+    Before renaming or splitting any test, preserve its INV tags in the test
+    name or attached doc comment, then regenerate the
+    [invariant test index](../invariants.md). Keep names stable; the binding
+    reference is the file plus its tags.
 
 From the application sweep, `replace_session_defaults.rs` — two behaviors, so a
 split, not an unroll:
 
 ```rust
-// Bad: two behaviors iterate behind one name.
+// Bad: one loop runs two behaviors under one test name.
 fn s01_inv008_inv012_recorded_applied_and_rejected_results_pass_through() {
     for (command, recorded) in [(applied_cmd, applied), (rejected_cmd, rejected)] { /* … */ }
 }
@@ -298,8 +299,8 @@ fn s01_inv008_inv012_recorded_rejected_result_passes_through() { /* … */ }
 
 ## Fixture and helper placement
 
-18. **Helpers live where their meaning lives.** Module-local helpers sit next to
-    the tests that read them; identity constructors used across a crate's test
+18. **Helpers live where they are used.** Module-local helpers sit next to the
+    tests that read them; identity constructors used across a crate's test
     modules stay in that crate's `test_support`. A one-knob constructor is named
     for the domain concept it produces — `accepted_ordinary(acceptance)`,
     `pending_steering(source_turn)`, not for its mechanics.
@@ -350,10 +351,10 @@ expect![[r#"
 
 21. **Tests are explicit declarations, not macro-generated.** A Rust macro does
     not emit or forward `#[test]`, `#[tokio::test]`, or a conditional
-    equivalent. Explicit declarations keep each test's name and whole story
-    visible at its source location (rules 1 and 7), and let the
-    invariant-catalog checker bind every INV-tagged test file deterministically
-    without expanding arbitrary macros.
+    equivalent. Explicit declarations keep each test's name and body visible at
+    its source location (rules 1 and 7), and let the invariant-catalog checker
+    bind every INV-tagged test file deterministically without expanding
+    arbitrary macros.
 
 ## Example
 

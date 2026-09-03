@@ -60,7 +60,7 @@ fields, an enum per axis, or distinct newtypes.
 // The reader must count commas and consult the definition:
 assert_eq!(outcome, (1, 0, 0, true));
 
-// The labels travel with the values:
+// Each value is labeled:
 assert_eq!(outcome, Backfill { scheduler_rows: 1, transcripts: 0,
                                attempts: 0, active_turn_missing: true });
 ```
@@ -81,7 +81,7 @@ mirroring an external schema, say) gets a positive, assertive name:
 
 ```text
 decode(input, true);                       // true... what?
-decode(input, StopSequences::Declared);    // the question travels with the answer
+decode(input, StopSequences::Declared);    // the call site names what was asked
 ```
 
 Why: a bool's meaning lives entirely in a parameter name the call site does not
@@ -99,9 +99,9 @@ documents the test as well as a well-named test function does.
 When prose, a comment, or a test must explain which combinations of fields are
 legal — "if `interrupting` is true, `predecessor` is always set" — first try to
 make the illegal combinations unconstructible, then document whatever remains. A
-`bool` plus an `Option` that must agree is an enum with a payload waiting to be
-written; a validation whose result is immediately forgotten is a parse that
-should have produced a narrower type.
+`bool` plus an `Option` that must agree should be an enum with a payload; a
+validation whose result is immediately forgotten is a parse that should have
+produced a narrower type.
 
 ```text
 // Two fields that must agree, policed by comments and tests:
@@ -172,7 +172,7 @@ written under an older feature threshold.
 
 A name has one spelling per file. A type or constant the file imports is not
 also written as a crate-qualified path in a signature, field, or body; the two
-spellings advertise one item as two, and a reader comparing sibling signatures
+spellings present one item as two, and a reader comparing sibling signatures
 cannot tell whether they name the same thing. Spell both ways only to
 disambiguate two same-named items from different crates, which is the one case
 where the qualification carries the meaning.
@@ -266,7 +266,7 @@ signal the rule is being broken, not a licence to break it.
 `bool` does not appear as a public struct field or a public function parameter
 in the domain and application crates. Express each such axis as a two-variant
 enum named for the question it answers, carrying the yes-case's evidence when it
-has any. The rule reaches exactly the sites where the parameter name is
+has any. The rule applies to exactly the sites where the parameter name is
 invisible to the caller; the private local booleans those crates use
 idiomatically are untouched.
 
@@ -298,7 +298,7 @@ even when the upstream function is currently private: make it public instead.
 Before hand-writing a scanner, framer, encoder, or truncator over bytes or text,
 name the standard-library function or already-declared dependency API you
 rejected, and why, in a comment or the change description. A bounded-input
-framer that survives that check is a sans-IO push-based framer with
+framer that passes that check is a sans-IO push-based framer with
 per-chunk-split tests, following the shared SSE framer, and lives beside the
 constant that bounds it.
 
@@ -406,7 +406,7 @@ lint can be enabled at `deny`.
 
 `scripts/check_style_rules.py` checks the three conventions below, which a text
 scan can decide without type resolution. It runs in CI as a blocking step. A
-rule joins it only once the tree is at zero for that rule.
+rule is added to it only once the tree has no violations of that rule.
 
 | Rule  | Convention it decides                                             |
 | ----- | ----------------------------------------------------------------- |
@@ -415,7 +415,7 @@ rule joins it only once the tree is at zero for that rule.
 | SR-13 | no proc-macro diagnostic is spanned on the macro call site        |
 
 The other conventions in this guide are checked in review, because the fact they
-turn on (who owns a bound, whether two helpers are the same helper, whether an
+depend on (who owns a bound, whether two helpers are the same helper, whether an
 error value is safe to render) is not in the text. Do not add a blanket
 crate-level `allow` to silence a lint warning.
 
@@ -426,7 +426,7 @@ crate-level `allow` to silence a lint warning.
 A struct defined next to the tests that use it needs no ceremony: derive `Debug`
 and `PartialEq`, name the fields, and both assertions and failure output become
 labeled. Match with field names and `..` for the fields a given arm does not
-care about — the pattern then states exactly which facts the arm depends on.
+constrain — the pattern then states exactly which facts the arm depends on.
 
 Worked example:
 `crates/persistence/tests/postgres_integration/model_call_execution_and_recovery.rs:2441-2460`
@@ -447,7 +447,8 @@ assert_eq!(backfilled, (1, "queued".to_owned(), 0, 0, 0, true));
 ```
 
 Which `0` is the frontier count? What is `true`? The reader must line the tuple
-up against the SELECT list by eye. With a local row struct the labels travel:
+up against the SELECT list by eye. With a local row struct each value is
+labeled:
 
 ```rust
 #[derive(Debug, PartialEq, sqlx::FromRow)]
@@ -532,7 +533,7 @@ Three house forms; the first two appear in the repository at the citations
 below, and the third pairs TS-4's one-knob fixture with a naming convention this
 guide introduces:
 
-- **Doc-commented constants** for a test module's cast of identities —
+- **Doc-commented constants** for a test module's set of identities —
   `crates/domain/src/provider_evidence.rs:790-795` is the model:
 
   ```rust
@@ -551,9 +552,9 @@ guide introduces:
   when next changing the file.
 
 - **Namespaced generators** for values whose only obligation is distinctness —
-  `next_test_submit_uuid()` in `postgres_integration/main.rs:1722-1725` brands
-  its IDs with a `0xfeed_cafe_dead_beef` prefix. A value from a generator is
-  arbitrary by construction; no reader will mistake it for load-bearing.
+  `next_test_submit_uuid()` in `postgres_integration/main.rs:1722-1725` prefixes
+  its IDs with `0xfeed_cafe_dead_beef`. A value from a generator is arbitrary by
+  construction; no reader will mistake it for load-bearing.
 
 - **One-knob fixtures** (TS-4) so arbitrary plumbing does not reach the test
   body at all, and — where a value must appear literally but any value would do
@@ -611,8 +612,9 @@ match (kind, has_create, has_defaults, has_input) {
 
 Every arm demands positional cross-referencing, and the actual rule — *exactly
 one typed record exists, and it is the registered kind* — is nowhere stated.
-Pairing each flag with its kind makes the rule the code (with the decision match
-extracted as `sole_typed_record` so unit tests pin its arms without a database):
+Pairing each flag with its kind makes the code state the rule (with the decision
+match extracted as `sole_typed_record` so unit tests pin its arms without a
+database):
 
 ```rust
 let present: Vec<CommandKind> = [
@@ -637,7 +639,7 @@ match present.as_slice() {
 
 Where a match over named facts genuinely needs many axes, build a local struct
 and match with field names plus `..` — an arm then names exactly the facts it
-constrains and stays silent about the rest.
+constrains and omits the rest.
 
 ### E. Baselines and struct update for perturbation tests
 
@@ -658,9 +660,10 @@ signatures. For example, `input_choices(expected: u64, ...)`
 into a `SessionConfigurationDefaultsVersion`; twenty-plus call sites read
 `input_choices(1, ...)` where neither the name `expected` nor the literal `1`
 reveals that the value is a defaults *version*. Take the domain type and the
-call sites explain themselves. Renaming the parameter alone does not reach them:
-Rust shows no argument names at a call, so `expected` and `defaults_version`
-both read as `input_choices(1, ...)` — a definition-site improvement only.
+call sites explain themselves. Renaming the parameter alone does not change
+them: Rust shows no argument names at a call, so `expected` and
+`defaults_version` both read as `input_choices(1, ...)` — a definition-site
+improvement only.
 
 ## Internal exemplars
 
