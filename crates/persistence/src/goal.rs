@@ -401,6 +401,17 @@ impl GoalRepository {
             return Ok(GoalCommandHandlingOutcome::LineageMoved);
         }
 
+        // A committed closure has already decided this session's outcome, and
+        // an operator command names no expected head to catch it. A goal event
+        // contradicting that decision would make the settlement refuse, with
+        // the handoff standing and activation frozen behind it.
+        if session_exists
+            && session_holds_committed_closure(&mut transaction, command.session()).await?
+        {
+            transaction.rollback().await?;
+            return Ok(GoalCommandHandlingOutcome::LineageMoved);
+        }
+
         let mut result = if !session_exists {
             GoalCommandResult::Rejected(GoalCommandRejection::SessionNotFound)
         } else {
@@ -839,6 +850,12 @@ impl GoalRepository {
             transaction.rollback().await?;
             return Ok(GoalTransitionOutcome::GoalNotAttached);
         }
+        if matches!(&transition, SystemTransition::Achieved { .. })
+            && session_holds_committed_closure(&mut transaction, session).await?
+        {
+            transaction.rollback().await?;
+            return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
+        }
         let Some(goal) = load_goal_from_connection(&mut transaction, session).await? else {
             transaction.rollback().await?;
             return Ok(GoalTransitionOutcome::GoalNotAttached);
@@ -981,6 +998,21 @@ pub(crate) async fn record_execution_failure_recovery_cause(
 /// in-memory timer armed before either changed would otherwise resume a
 /// conversation that has since been released, or lift a park that has since
 /// been taken.
+/// Whether a closure has already committed this session to an outcome.
+async fn session_holds_committed_closure(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<bool, GoalRepositoryError> {
+    let committed: Option<bool> = sqlx::query_scalar(
+        "SELECT pending_terminal_outcome_kind IS NOT NULL
+           FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?;
+    Ok(committed.unwrap_or(false))
+}
+
 async fn session_admits_automatic_resume(
     connection: &mut PgConnection,
     session: SessionId,
@@ -1131,6 +1163,9 @@ pub(crate) async fn insert_repo_watch_composed_stop(
     }
     if !lock_session(connection, command.session()).await? {
         return Err(GoalCorruption::Missing("dispatched cutoff session").into());
+    }
+    if session_holds_committed_closure(connection, command.session()).await? {
+        return Ok(false);
     }
     let Some(goal) = load_goal_from_connection(connection, command.session()).await? else {
         return Err(GoalCorruption::Missing("dispatched cutoff goal").into());

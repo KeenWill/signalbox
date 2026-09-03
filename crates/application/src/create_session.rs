@@ -42,7 +42,7 @@ impl Error for InvalidDurableCommandId {}
 /// The complete admitted application request for user-initiated creation.
 ///
 /// The request deliberately has no cause or ancestry input: this slice fixes
-/// them to `UserInitiated` and `None`. Its private fields ensure sentinel
+/// them to `Interactive` and `None`. Its private fields ensure sentinel
 /// command identities cannot reach the use case through this boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreateSessionRequest {

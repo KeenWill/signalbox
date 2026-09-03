@@ -1,14 +1,13 @@
 --
--- Session lifecycle §12: the five metrics, the two companion alarms, and the
--- gate, as views over the durable columns §1–§6 landed.
+-- Session lifecycle §12: the five metrics and the counts beside them, as
+-- views over the durable columns §1–§6 landed.
 --
 
 --
 -- §12's denominator keeps a supersession that closed a park holding a failure
 -- cause, so the standing cause must outlive the park that raised it: through
--- terminalization, and through the resume a committed closure survives between
--- its decision and the turn's boundary. A state that owes neither still cannot
--- carry one.
+-- terminalization, and through the closure committed while the turn is still
+-- reaching its boundary. A state that owes neither still cannot carry one.
 --
 
 -- Supersedes the definition in `202609020002_session_lifecycle_satellite.sql`.
@@ -26,87 +25,50 @@ ALTER TABLE session_lifecycle
             'repo_watch'::text,
             'commissioned_dispatch'::text
         ])))
+        -- The park itself never outlives the state: only the instant and the
+        -- standing evidence carry, and only into a state that owes an outcome.
+        AND ((state_kind = 'parked'::text)
+             OR ((parked_cause IS NULL) AND (parked_responder IS NULL)))
+        AND ((state_kind = 'parked'::text)
+             OR (state_kind = 'terminal'::text)
+             OR (pending_terminal_outcome_kind IS NOT NULL)
+             OR ((parked_since IS NULL)
+                 AND (parked_standing_cause_kind IS NULL)))
         AND ((parked_standing_cause_kind IS NULL)
              OR (parked_cause IS NOT NULL)
              OR (state_kind = 'terminal'::text)
              OR (pending_terminal_outcome_kind IS NOT NULL))
+        -- Evidence without its instant is evidence the occurrence projection
+        -- cannot date, which is the numerator counting what no week shows.
+        AND ((parked_standing_cause_kind IS NULL) OR (parked_since IS NOT NULL))
+        -- The standing evidence is the evidence the cause names. A closure
+        -- reads it to classify the outcome, so a park holding evidence its own
+        -- cause contradicts -- or an exhaustion holding none at all -- closes
+        -- under a classification the park never supported.
+        AND ((parked_cause IS NULL)
+             OR ((parked_cause = 'retry_budget_exhausted'::text)
+                 AND (parked_standing_cause_kind IS NOT NULL)
+                 AND (parked_standing_cause_kind = ANY (ARRAY[
+                    'provider_transient'::text,
+                    'provider_quota_exhausted'::text,
+                    'provider_overloaded'::text,
+                    'infrastructure_failure'::text,
+                    'retry_budget_exhausted'::text
+                 ])))
+             OR ((parked_cause = 'structural_failure'::text)
+                 AND (parked_standing_cause_kind IS NOT NULL)
+                 AND (parked_standing_cause_kind = ANY (ARRAY[
+                    'context_compaction_wall'::text,
+                    'context_headroom_exhausted'::text,
+                    'broken_toolchain'::text,
+                    'moderation_block'::text
+                 ])))
+             OR ((parked_cause <> ALL (ARRAY[
+                    'retry_budget_exhausted'::text,
+                    'structural_failure'::text
+                 ]))
+                 AND (parked_standing_cause_kind IS NULL)))
     );
-
---
--- Deployment policy, the arrangement §1's deadline bounds use: the daemon
--- writes its `[numeric_bounds]` policy here at startup and the views read it.
--- Both value columns null is the `none` marker. Rate thresholds are integer
--- parts per million so a verdict compares exact counts.
---
-
-CREATE TABLE session_lifecycle_metric_bound (
-    bound_kind text NOT NULL,
-    interval_bound interval,
-    count_bound bigint,
-    updated_at timestamp with time zone DEFAULT statement_timestamp() NOT NULL,
-
-    CONSTRAINT session_lifecycle_metric_bound_pkey PRIMARY KEY (bound_kind),
-
-    CONSTRAINT session_lifecycle_metric_bound_kind_closed CHECK (
-        bound_kind = ANY (ARRAY[
-            'deadline_processing_grace'::text,
-            'wall_cohort_maturation'::text,
-            'gate_weeks'::text,
-            'completion_failure_rate_threshold_ppm'::text,
-            'wall_rate_threshold_ppm'::text,
-            'failed_unknown_share_threshold_ppm'::text
-        ])
-    ),
-
-    -- Each bound is one kind of number, and the row carries that kind or
-    -- nothing at all.
-    CONSTRAINT session_lifecycle_metric_bound_shape CHECK (
-        ((bound_kind = ANY (ARRAY[
-            'deadline_processing_grace'::text,
-            'wall_cohort_maturation'::text
-         ])) AND (count_bound IS NULL))
-        OR ((bound_kind = ANY (ARRAY[
-            'gate_weeks'::text,
-            'completion_failure_rate_threshold_ppm'::text,
-            'wall_rate_threshold_ppm'::text,
-            'failed_unknown_share_threshold_ppm'::text
-         ])) AND (interval_bound IS NULL))
-    ),
-
-    CONSTRAINT session_lifecycle_metric_bound_nonnegative CHECK (
-        ((interval_bound IS NULL) OR (interval_bound > '0'::interval))
-        AND ((count_bound IS NULL) OR (count_bound >= 0))
-    )
-);
-
-INSERT INTO session_lifecycle_metric_bound (bound_kind)
-SELECT kind
-  FROM unnest(ARRAY[
-        'deadline_processing_grace',
-        'wall_cohort_maturation',
-        'gate_weeks',
-        'completion_failure_rate_threshold_ppm',
-        'wall_rate_threshold_ppm',
-        'failed_unknown_share_threshold_ppm'
-       ]) AS kind;
-
-CREATE FUNCTION session_lifecycle_metric_interval(kind text) RETURNS interval
-    LANGUAGE sql
-    STABLE
-    AS $$
-    SELECT interval_bound
-      FROM session_lifecycle_metric_bound
-     WHERE bound_kind = kind;
-$$;
-
-CREATE FUNCTION session_lifecycle_metric_count(kind text) RETURNS bigint
-    LANGUAGE sql
-    STABLE
-    AS $$
-    SELECT count_bound
-      FROM session_lifecycle_metric_bound
-     WHERE bound_kind = kind;
-$$;
 
 --
 -- Weeks are UTC weeks: `date_trunc` on a `timestamptz` answers in the reader's
@@ -124,8 +86,8 @@ $$;
 --
 -- §12's terminal cohort. Membership follows the journaled ownership record
 -- rather than the current bit, so a release never removes a session from the
--- gate. The trim and the numerator are recorded per session here rather than
--- restated at every reader.
+-- cohort. The trim and the numerator are recorded per session here rather
+-- than restated at every reader.
 --
 
 CREATE VIEW session_lifecycle_terminal_cohort AS
@@ -198,31 +160,16 @@ SELECT session_row.session_id,
 
 --
 -- §12's dispatch cohort, for `wall_rate`. A session enters `dispatched` when
--- its first turn is queued (§1), and a turn row's write time is immutable,
--- so the earliest one is the durable dispatch instant; `state_entered_at`
--- moves with every later transition and is not.
+-- its first turn is queued (§1), and a turn row's write time is immutable, so
+-- the earliest one is the durable dispatch instant; `state_entered_at` moves
+-- with every later transition and is not.
 --
--- F9's maturation: a cohort is gate-evaluable once no member is both
--- non-terminal and inside the configured window. Under `none`, only an
--- all-terminal cohort matures.
---
-
--- Every metric read takes a grouped minimum of turn write times; the existing
--- session-prefixed indexes are keyed on acceptance position, so without this
--- the aggregate scans every turn ever written.
-CREATE INDEX turn_lifecycle_by_session_write_time
-    ON turn_lifecycle (session_id, recorded_at);
 
 CREATE VIEW session_lifecycle_dispatch_cohort AS
 SELECT dispatched.session_id,
        session_lifecycle_metric_week(dispatched.dispatched_at) AS dispatch_week,
        dispatched.dispatched_at,
        (lifecycle.state_kind = 'terminal'::text) AS terminal,
-       ((lifecycle.state_kind = 'terminal'::text)
-        OR ((session_lifecycle_metric_interval('wall_cohort_maturation') IS NOT NULL)
-            AND ((dispatched.dispatched_at
-                  + session_lifecycle_metric_interval('wall_cohort_maturation'))
-                 <= clock_timestamp()))) AS matured,
        incidence.recorded_context_compaction_wall AS wall
   FROM (
         SELECT turn.session_id, min(turn.recorded_at) AS dispatched_at
@@ -278,12 +225,16 @@ CREATE VIEW session_lifecycle_weekly_metric AS
 WITH wall_occurrence AS (
     -- F9's immediate half: a wall belongs to the week it happened in. §2 parks
     -- a session on a wall and suspends its turn, so the park is the evidence
-    -- and `parked_since` the instant; terminalization carries both forward. A
-    -- turn cause is the evidence for a wall that ended a turn, at that row's
-    -- write week. One session's wall is one occurrence, at the earlier of the
-    -- two.
+    -- and `parked_since` the instant; terminalization carries both forward.
+    -- The park therefore dates the occurrence wherever it exists, and a later
+    -- terminal turn naming the same wall never moves it. A turn cause is the
+    -- next evidence, for a wall that ended a turn without parking the session,
+    -- at that row's write week; a session closed on a wall its turn never
+    -- named is the last, at its closure. The sources are the ones the
+    -- numerator counts, so a walled session always has an occurrence to show.
+    -- One session's wall is one occurrence.
     SELECT session_row.session_id,
-           LEAST(
+           COALESCE(
                (SELECT lifecycle.parked_since
                   FROM session_lifecycle AS lifecycle
                  WHERE lifecycle.session_id = session_row.session_id
@@ -293,7 +244,12 @@ WITH wall_occurrence AS (
                (SELECT min(turn.recorded_at)
                   FROM turn_lifecycle AS turn
                  WHERE turn.session_id = session_row.session_id
-                   AND turn.terminal_cause_kind = 'context_compaction_wall'::text)
+                   AND turn.terminal_cause_kind = 'context_compaction_wall'::text),
+               (SELECT lifecycle.ended_at
+                  FROM session_lifecycle AS lifecycle
+                 WHERE lifecycle.session_id = session_row.session_id
+                   AND lifecycle.terminal_cause_kind
+                       = 'context_compaction_wall'::text)
            ) AS occurred_at
       FROM session AS session_row
 ), weeks AS (
@@ -329,8 +285,7 @@ WITH wall_occurrence AS (
 ), dispatched AS (
     SELECT cohort.dispatch_week AS week,
            count(*) AS cohort_size,
-           count(*) FILTER (WHERE cohort.wall) AS wall,
-           bool_and(cohort.matured) AS matured
+           count(*) FILTER (WHERE cohort.wall) AS wall
       FROM session_lifecycle_dispatch_cohort AS cohort
      GROUP BY cohort.dispatch_week
 ), walls_recorded AS (
@@ -363,7 +318,6 @@ SELECT weeks.week,
        COALESCE(terminal.overflow_finished, 0) AS overflow_finished_count,
        COALESCE(dispatched.cohort_size, 0) AS dispatch_cohort_size,
        COALESCE(dispatched.wall, 0) AS wall_count,
-       COALESCE(dispatched.matured, true) AS wall_cohort_matured,
        COALESCE(walls_recorded.occurrences, 0) AS wall_occurrence_count,
        COALESCE(turn_causes.terminal_turns, 0) AS terminal_turn_count,
        COALESCE(turn_causes.classified_turns, 0) AS classified_terminal_turn_count,
@@ -377,11 +331,8 @@ SELECT weeks.week,
   LEFT JOIN call_causes ON call_causes.week = weeks.week;
 
 --
--- §12's first companion alarm, target zero. An unbounded deadline —
--- `expires_at` null — is never counted; a missing record always is. F8's
--- grace: an expiry counts only once the configured grace has also passed. A
--- grace configured `none` is unbounded like every other, so only the
--- missing-record half counts.
+-- §12's first companion count, target zero. An unbounded deadline —
+-- `expires_at` null — is never counted; a missing record always is.
 --
 
 CREATE VIEW session_lifecycle_deadline_violation AS
@@ -398,10 +349,7 @@ SELECT lifecycle.session_id,
    AND lifecycle.owned
    AND ((deadline.session_id IS NULL)
         OR ((deadline.expires_at IS NOT NULL)
-            AND (session_lifecycle_metric_interval('deadline_processing_grace') IS NOT NULL)
-            AND ((deadline.expires_at
-                  + session_lifecycle_metric_interval('deadline_processing_grace'))
-                 < clock_timestamp())));
+            AND (deadline.expires_at < clock_timestamp())));
 
 
 --
