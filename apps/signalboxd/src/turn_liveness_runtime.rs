@@ -343,6 +343,7 @@ pub struct TurnLivenessRuntime {
     staleness_bound: Option<StaleActiveTurnBound>,
     scan_interval: Option<TurnLivenessScanInterval>,
     automatic_reconciliation_attempt_budget: Option<u32>,
+    automatic_reconciliation_base_backoff: Option<Duration>,
     numeric_bounds: TurnLivenessNumericBounds,
 }
 
@@ -376,6 +377,7 @@ impl TurnLivenessRuntime {
             staleness_bound,
             scan_interval,
             automatic_reconciliation_attempt_budget,
+            automatic_reconciliation_base_backoff,
             numeric_bounds,
         }
     }
@@ -402,7 +404,17 @@ impl TurnLivenessRuntime {
                 };
                 match clear_result {
                     Ok(()) => break,
-                    Err(error) => report_turn_liveness_failure(&error),
+                    Err(error) => {
+                        report_turn_liveness_failure(&error);
+                        let Some(()) = complete_before_shutdown(
+                            &mut shutdown,
+                            crate::sleep_for_policy(self.automatic_reconciliation_base_backoff),
+                        )
+                        .await
+                        else {
+                            return;
+                        };
+                    }
                 }
             }
             while !*shutdown.borrow() && shutdown.changed().await.is_ok() {}
