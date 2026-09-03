@@ -80,7 +80,7 @@ reviews:
           2. Rule 6: an added assertion must not compare against a literal re-encoding a value the fixture already states (e.g. asserting `.as_u64() == 4` where setup built version 4 from a seeded helper). Fail when the literal duplicates a fixture value reachable through an accessor.
           3. Rule 10: in any file cited by an Enforcement cell of docs/invariants.md, targeted asserts are decisive; a change leaving only an expect![...] snapshot where a targeted assert previously existed is a Fail.
           4. Rule 17: if the PR renames, splits, or deletes a test in a file cited by docs/invariants.md, the file must still contain tests tagged with each INV the catalog binds to it, and the catalog cell must be updated in this PR when coverage moves. Fail otherwise.
-          5. If the count of #[test] functions in a modified test file decreases, the PR description or a decision-log entry must state which tests were removed and why (rule 19 deletions qualify). A silent decrease is a Fail.
+          5. If the count of #[test] functions in a modified test file decreases, the PR description must state which tests were removed and why (rule 19 deletions qualify). A silent decrease is a Fail.
 
       # verdict logic for the embedded-migrations discipline owned by the
       # persistence-protocol specification (docs/spec/persistence-protocol.md)

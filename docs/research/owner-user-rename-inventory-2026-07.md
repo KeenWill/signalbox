@@ -241,9 +241,9 @@ before replacing any text.
 ### (d) Historical decision entries
 
 All 309 ownership-family occurrences in `docs/decisions.md` are category (d).
-The ledger is append-only: none is edited. The later rename records one new
-terminology entry and leaves every earlier actor spelling, personal-owner
-statement, and technical-ownership statement intact.
+The ledger is append-only: none is edited. The later rename leaves every earlier
+actor spelling, personal-owner statement, and technical-ownership statement
+intact.
 
 ## 5. Ordered mechanical plan for the later pass
 
@@ -253,10 +253,9 @@ This is execution ordering only; the rulings in section 6 come first.
    protected sets for (b), (c), and (d), including the local-socket,
    graph-owner, ownership-mismatch, and decision-ledger clusters. Resolve every
    (e) item.
-2. Add the terminology decision entry and the bottom-of-stack specification diff
-   that describes the behavior the stack implements. Set the protocol and
-   storage transition scope from the recorded rulings; do not prestate an
-   unimplemented transition on `main`.
+2. Add the bottom-of-stack specification diff that describes the behavior the
+   stack implements. Set the protocol and storage transition scope from the
+   recorded rulings; do not prestate an unimplemented transition on `main`.
 3. Rename the domain public vocabulary and update `docs/domain-spine.md` in the
    same change. Let compiler failures enumerate application, persistence, hub,
    and test call sites.
@@ -311,8 +310,8 @@ audited snapshot.
    `docs/spec/sessions-and-transcript.md:573,597,639,643`, and
    `docs/target-model.md:3,265,402,425`. **Recommendation:** preserve the
    personal meaning but remove actor ambiguity with “repository owner” in the
-   spine or neutral decision-log links such as “the recorded decision”; do not
-   rename these to “user.”
+   spine or neutral phrasing such as “the recorded decision”; do not rename
+   these to “user.”
 5. **Personal decision voice in dated research — 9 occurrences.**
    `docs/research/codex-cli-subscription-protocol.md:21,382` and
    `docs/research/schema-audit-2026-07-24.md:18,25,30,62,72,124,127` refer to
@@ -325,7 +324,7 @@ audited snapshot.
    calls the bound “owner-decided” and the owner’s provisional choice.
    **Recommendation:** do not rewrite an applied migration merely for
    terminology. If migration immutability is not the governing policy, rephrase
-   only to a dated decision-log reference; never use “user-decided.”
+   only to a dated reference in git history; never use “user-decided.”
 7. **Owner-gated open-question wording in production code — 1 occurrence.**
    `crates/model-provider-runtime/src/lib.rs:643` says an open question is
    “owner-gated.” **Recommendation:** replace it with a link-shaped neutral

@@ -5,17 +5,13 @@ use std::{error::Error, fmt};
 use rust_decimal::Decimal;
 use signalbox_application::{RepoWatchConvergenceVerdict, RepoWatchReviewDecision};
 use signalbox_domain::MergeableState;
-use sqlx::{
-    PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid,
-    types::time::PrimitiveDateTime,
-};
+use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::{
     lifecycle_metrics::{
         DECLARE_DEADLINE_VIOLATIONS_CURSOR, DECLARE_WEEKLY_METRICS_CURSOR,
-        LifecycleDeadlineViolation, LifecycleGateVerdict, LifecycleMetricBounds,
-        LifecycleMetricsError, LifecycleWeeklyMetrics, SELECT_BOUNDS, SELECT_CURRENT_WEEK,
-        decode_bounds, decode_violation, decode_week, gate_verdict, reported_week_limit,
+        LifecycleDeadlineViolation, LifecycleMetricsError, LifecycleWeeklyMetrics,
+        MAX_REPORTED_WEEKS, decode_violation, decode_week,
     },
     mapping::{
         RepoWatchSingletonScopeStorageKind, repo_watch_convergence_verdict_from_str,
@@ -426,30 +422,12 @@ impl ProcessOperatorStatusRepository {
         sqlx::query(REPEATABLE_READ_ONLY)
             .execute(&mut *transaction)
             .await?;
-        // Policy and current week come from the same snapshot as the cohorts
-        // they grade. The policy is read before the cursors because it decides
-        // how many weeks one of them carries.
-        let bounds = decode_bounds(
-            &sqlx::query(SELECT_BOUNDS)
-                .fetch_all(&mut *transaction)
-                .await
-                .map_err(ProcessOperatorStatusError::Database)?,
-        )
-        .map_err(|error| lifecycle_read_failure(error, "lifecycle metric bound"))?;
-        let current_week = sqlx::query(SELECT_CURRENT_WEEK)
-            .fetch_one(&mut *transaction)
-            .await?
-            .try_get::<PrimitiveDateTime, _>("week")?;
-        declare_status_cursors(&mut transaction, reported_week_limit(bounds)).await?;
+        declare_status_cursors(&mut transaction).await?;
         Ok(ProcessOperatorStatusReader {
             transaction: Some(transaction),
             phase: ProcessOperatorStatusPhase::HeldSlots,
             counts: ProcessOperatorStatusCounts::default(),
             committed_counts: None,
-            bounds,
-            current_week,
-            weeks: Vec::new(),
-            gate: None,
         })
     }
 }
@@ -471,10 +449,6 @@ pub struct ProcessOperatorStatusReader {
     phase: ProcessOperatorStatusPhase,
     counts: ProcessOperatorStatusCounts,
     committed_counts: Option<ProcessOperatorStatusCounts>,
-    bounds: LifecycleMetricBounds,
-    current_week: PrimitiveDateTime,
-    weeks: Vec<LifecycleWeeklyMetrics>,
-    gate: Option<LifecycleGateVerdict>,
 }
 
 impl ProcessOperatorStatusReader {
@@ -531,12 +505,6 @@ impl ProcessOperatorStatusReader {
                                 "operator status transaction",
                             ))?;
                     transaction.commit().await?;
-                    self.gate = Some(gate_verdict(
-                        &self.weeks,
-                        self.current_week,
-                        self.counts.lifecycle_deadline_violations,
-                        self.bounds,
-                    ));
                     self.committed_counts = Some(self.counts);
                     return Ok(None);
                 }
@@ -571,11 +539,9 @@ impl ProcessOperatorStatusReader {
                 ProcessOperatorStatusPhase::LifecycleWeeks => {
                     self.counts.lifecycle_weeks =
                         increment(self.counts.lifecycle_weeks, "lifecycle week count")?;
-                    let week = decode_week(&row).map_err(|error| {
-                        lifecycle_read_failure(error, "lifecycle weekly metric")
-                    })?;
-                    self.weeks.push(week);
-                    ProcessOperatorStatusItem::LifecycleWeek(week)
+                    ProcessOperatorStatusItem::LifecycleWeek(decode_week(&row).map_err(
+                        |error| lifecycle_read_failure(error, "lifecycle weekly metric"),
+                    )?)
                 }
                 ProcessOperatorStatusPhase::LifecycleDeadlineViolations => {
                     self.counts.lifecycle_deadline_violations = increment(
@@ -603,13 +569,6 @@ impl ProcessOperatorStatusReader {
     pub const fn counts(&self) -> Option<ProcessOperatorStatusCounts> {
         self.committed_counts
     }
-
-    /// Returns the substrate-v0 gate verdict for the committed snapshot.
-    ///
-    /// Absent until every cursor is exhausted, like the counts.
-    pub const fn gate_verdict(&self) -> Option<LifecycleGateVerdict> {
-        self.gate
-    }
 }
 
 /// Carries one lifecycle-metric read failure into this module's own class.
@@ -629,7 +588,6 @@ fn lifecycle_read_failure(
 
 async fn declare_status_cursors(
     transaction: &mut Transaction<'_, Postgres>,
-    reported_weeks: i64,
 ) -> Result<(), sqlx::Error> {
     // A branch-origin hold carries `workflow_branch` where a pull-request
     // origin carries `pull_request_number`; exactly one is non-null per row,
@@ -716,7 +674,7 @@ async fn declare_status_cursors(
     // The two §12 sections read the same views the telemetry pass reads, in
     // the same snapshot as the sections above.
     sqlx::query(DECLARE_WEEKLY_METRICS_CURSOR)
-        .bind(reported_weeks)
+        .bind(MAX_REPORTED_WEEKS)
         .execute(&mut **transaction)
         .await?;
     sqlx::query(DECLARE_DEADLINE_VIOLATIONS_CURSOR)

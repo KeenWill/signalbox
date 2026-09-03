@@ -583,18 +583,22 @@ const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
             (SELECT newest.event_sequence
                FROM outbox_event AS newest
               WHERE newest.session_id = active.session_id
-                AND (
-                    newest.event_kind IN (
-                        'turn_activated',
-                        'model_call_transition',
-                        'tool_batch_transition',
-                        'tool_approval_decided',
-                        'context_compacted'
-                    )
-                    OR (
-                        newest.event_kind = 'turn_terminal'
-                        AND newest.turn_disposition <> 'retired'
-                    )
+                AND newest.event_kind NOT IN (
+                    'session_created',
+                    'session_model_settings_changed',
+                    'turn_model_settings_resolved',
+                    'input_accepted',
+                    'runner_state_transition',
+                    'session_state_changed',
+                    'session_terminal',
+                    'goal_changed',
+                    'command_settled',
+                    'injection_settled',
+                    'session_ownership_changed'
+                )
+                AND NOT (
+                    newest.event_kind = 'turn_terminal'
+                    AND newest.turn_disposition = 'retired'
                 )
               ORDER BY newest.event_sequence DESC
               LIMIT 1) AS outbox_frontier
@@ -664,18 +668,22 @@ const SLOT_HELD_ACTIVE_TURNS: &str = "SELECT active.session_id,
             (SELECT newest.event_sequence
                FROM outbox_event AS newest
               WHERE newest.session_id = active.session_id
-                AND (
-                    newest.event_kind IN (
-                        'turn_activated',
-                        'model_call_transition',
-                        'tool_batch_transition',
-                        'tool_approval_decided',
-                        'context_compacted'
-                    )
-                    OR (
-                        newest.event_kind = 'turn_terminal'
-                        AND newest.turn_disposition <> 'retired'
-                    )
+                AND newest.event_kind NOT IN (
+                    'session_created',
+                    'session_model_settings_changed',
+                    'turn_model_settings_resolved',
+                    'input_accepted',
+                    'runner_state_transition',
+                    'session_state_changed',
+                    'session_terminal',
+                    'goal_changed',
+                    'command_settled',
+                    'injection_settled',
+                    'session_ownership_changed'
+                )
+                AND NOT (
+                    newest.event_kind = 'turn_terminal'
+                    AND newest.turn_disposition = 'retired'
                 )
               ORDER BY newest.event_sequence DESC
               LIMIT 1) AS outbox_frontier
