@@ -223,7 +223,8 @@ pub enum SessionLifecycleApplication {
         outcome: SessionTerminalOutcome,
         /// The turn the committed interrupt machinery settles.
         live_turn: TurnId,
-        /// The defaults epoch the closure's interrupt names, fixed at closure.
+        /// The defaults epoch current when this handling produced its receipt.
+        /// A replacement between attempts costs one attempt a recorded mismatch.
         defaults_version: SessionConfigurationDefaultsVersion,
     },
     /// The park lifted.

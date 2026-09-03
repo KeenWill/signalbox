@@ -1465,6 +1465,7 @@ CREATE FUNCTION settle_session_pending_terminal(subject uuid) RETURNS void
 DECLARE
     held session_lifecycle%ROWTYPE;
     queued uuid;
+    cascade_command uuid;
     last_kind text;
     last_generation numeric(20, 0);
     last_ordinal numeric(20, 0);
@@ -1585,6 +1586,23 @@ BEGIN
            pending_terminal_actor_turn_id = NULL,
            pending_terminal_actor_tool_request_id = NULL
      WHERE session_id = subject;
+
+    SELECT command.command_id INTO cascade_command
+      FROM session_lifecycle_command AS command
+      JOIN durable_command AS durable
+        ON durable.command_id = command.command_id
+     WHERE command.session_id = subject
+       AND command.operation_kind = 'stop'
+       AND command.descendant_scope = 'parent_and_descendants'
+       AND command.result_kind = 'applied'
+       AND command.applied_effect_kind = 'closure_pending'
+     ORDER BY durable.claimed_at, command.command_id
+     LIMIT 1;
+    IF cascade_command IS NOT NULL THEN
+        PERFORM materialize_session_delegation_termination_cascade(
+            cascade_command, 'stopped'
+        );
+    END IF;
 
 END;
 $$;
@@ -2120,3 +2138,39 @@ BEGIN
     RETURN NULL;
 END;
 $$;
+
+-- The delegation helper predates lifecycle handoffs and admitted only an
+-- already-closed lifecycle root. Extend that exact forward definition so the
+-- same materializer also owns a closure completed by deferred settlement.
+DO $migration$
+DECLARE
+    prior_definition text;
+    next_definition text;
+BEGIN
+    SELECT pg_get_functiondef(
+        'materialize_session_delegation_termination_cascade(uuid, text)'::regprocedure
+    ) INTO prior_definition;
+    next_definition := replace(
+        prior_definition,
+        'AND command.applied_effect_kind = ''closed''',
+        'AND command.applied_effect_kind IN (''closed'', ''closure_pending'')'
+    );
+    IF next_definition = prior_definition THEN
+        RAISE EXCEPTION 'delegation cascade helper definition did not match';
+    END IF;
+    EXECUTE next_definition;
+
+    SELECT pg_get_functiondef(
+        'require_delegation_termination_cascade_command()'::regprocedure
+    ) INTO prior_definition;
+    next_definition := replace(
+        prior_definition,
+        'AND command.applied_effect_kind = ''closed''',
+        'AND command.applied_effect_kind IN (''closed'', ''closure_pending'')'
+    );
+    IF next_definition = prior_definition THEN
+        RAISE EXCEPTION 'delegation cascade authority definition did not match';
+    END IF;
+    EXECUTE next_definition;
+END;
+$migration$;

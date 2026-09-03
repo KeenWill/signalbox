@@ -676,6 +676,90 @@ async fn an_immediate_lifecycle_stop_materializes_its_descendant_cascade()
     Ok(())
 }
 
+/// A descendant-scoped stop whose live turn settles naturally materializes
+/// its cascade at the same deferred settlement that closes the parent.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_deferred_lifecycle_stop_materializes_its_descendant_cascade()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x12fe_1000;
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 1));
+    let child = SessionId::from_uuid(Uuid::from_u128(seed + 2));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(
+            seed + 3,
+            seed + 2,
+            ModelSelectionRequest::Direct(selection),
+        ))
+        .await?;
+    let (parent, _) = attach_delegation_relationship_fixture(
+        &pool,
+        child,
+        TurnId::from_uuid(Uuid::from_u128(seed + 4)),
+        selection,
+        seed + 0x100,
+    )
+    .await?;
+    let live = queue_turn(&pool, parent, seed, 1).await?;
+    activate_turn(&pool, parent, seed).await?;
+    let stop = SessionLifecycleCommand::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(seed + 5)),
+        parent,
+        SessionLifecycleOperation::Stop {
+            sticky: StopStickiness::Sticky,
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+        },
+    );
+    let command = stop.command_id();
+
+    let applied = recorded(&pool, stop).await?;
+    fail_live_turn(&pool, parent, seed).await?;
+    let cascade: (String, String, i64) = sqlx::query_as(
+        "SELECT root_source_kind, termination_kind, disposition_count::bigint
+           FROM session_delegation_termination_cascade
+          WHERE root_command_id = $1",
+    )
+    .bind(command.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let settled = SessionLifecycleRepository::new(pool.clone())
+        .load(parent)
+        .await?
+        .expect("the parent keeps its lifecycle row");
+
+    assert_eq!(
+        applied,
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::ClosurePending {
+            outcome: SessionTerminalOutcome::Stopped {
+                sticky: StopStickiness::Sticky,
+            },
+            live_turn: live,
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
+        })
+    );
+    assert_eq!(
+        cascade,
+        (
+            String::from("lifecycle_command"),
+            String::from("stopped"),
+            1
+        )
+    );
+    assert_eq!(
+        settled.state(),
+        SessionLifecycleState::Terminal {
+            outcome: SessionTerminalOutcome::Stopped {
+                sticky: StopStickiness::Sticky,
+            },
+        }
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// The typed command record admits only the effect its operation can produce.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
