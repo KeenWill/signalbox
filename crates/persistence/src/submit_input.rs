@@ -2943,7 +2943,7 @@ async fn prepare_against_locked_state(
     .bind(session_id_to_uuid(command.session()))
     .fetch_one(&mut *connection)
     .await?;
-    if pending_terminal {
+    if pending_terminal && !settles_committed_closure(connection, &command).await? {
         return Err(
             SubmitInputCorruption::Inconsistent("session has a pending terminal handoff").into(),
         );
@@ -3125,6 +3125,34 @@ async fn prepare_against_locked_state(
                 map_model_settings_resolution_error(error)
             }
         })
+}
+
+/// Whether this command is the interrupt a committed closure owes its own live
+/// turn (§2). The closure recorded that turn, and the interrupt terminalizing
+/// it is how the handoff settles, so a pending handoff admits exactly it.
+async fn settles_committed_closure(
+    connection: &mut PgConnection,
+    command: &SubmitInput,
+) -> Result<bool, SubmitInputRepositoryError> {
+    let DeliveryRequest::Interrupt {
+        expected_active_turn,
+        ..
+    } = command.delivery()
+    else {
+        return Ok(false);
+    };
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM session_lifecycle_command
+              WHERE session_id = $1
+                AND applied_effect_kind = 'closure_pending'
+                AND live_turn_id = $2)",
+    )
+    .bind(session_id_to_uuid(command.session()))
+    .bind(turn_id_to_uuid(expected_active_turn))
+    .fetch_one(&mut *connection)
+    .await?)
 }
 
 fn map_model_settings_resolution_error(

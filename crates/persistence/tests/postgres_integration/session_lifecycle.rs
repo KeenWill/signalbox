@@ -2507,7 +2507,7 @@ async fn turn_progress_re_arms_the_active_stall_deadline() -> Result<(), Box<dyn
     // Stands in for the turn-boundary write: a turn terminalizing or a
     // successor activating fires this projection, and §1 keeps the session
     // `active` across both, so the projected shape does not move with it.
-    sqlx::query("SELECT project_session_lifecycle($1, false, false, true)")
+    sqlx::query("SELECT project_session_lifecycle($1, false, NULL, NULL, true)")
         .bind(session.into_uuid())
         .execute(&pool)
         .await?;
