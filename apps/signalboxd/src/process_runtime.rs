@@ -11923,6 +11923,7 @@ where
 struct ConfiguredSubmitInputTransaction<'configuration> {
     repository: SubmitInputRepository,
     model_configuration: &'configuration HubModelConfiguration,
+    principal: CommandPrincipal,
 }
 
 impl SubmitInputTransaction for ConfiguredSubmitInputTransaction<'_> {
@@ -11948,8 +11949,9 @@ impl SubmitInputTransaction for ConfiguredSubmitInputTransaction<'_> {
     {
         let outcome = self
             .repository
-            .handle_with_candidates_alias_resolver(
+            .handle_with_candidates_alias_resolver_as(
                 command,
+                self.principal,
                 accepted_input,
                 turn,
                 cancellation_identities,
@@ -12389,6 +12391,7 @@ where
         ConfiguredSubmitInputTransaction {
             repository,
             model_configuration,
+            principal: CommandPrincipal::Operator,
         },
         eligibility_nudge.clone(),
         tool_dispatch_gate.clone(),
@@ -15781,6 +15784,7 @@ async fn interrupt_for_closure(
                 services.model_configuration.model_capability_catalog(),
             ),
             model_configuration: services.model_configuration.as_ref(),
+            principal: CommandPrincipal::Core,
         },
         services.eligibility_nudge.clone(),
         services.tool_dispatch_gate.clone(),

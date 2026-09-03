@@ -162,6 +162,61 @@ async fn activate_turn(
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_core_issued_interrupt_records_the_core_envelope_principal() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(30);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(30))
+        .await?;
+    let live = queue_turn(&pool, session, 30, 1).await?;
+    activate_turn(&pool, session, 30).await?;
+    let command_id = DurableCommandId::from_uuid(Uuid::from_u128(SEED + 0xf30));
+    let interrupt = SubmitInput::new(
+        command_id,
+        session,
+        UserContent::try_text(String::from("core lifecycle closure interrupt"))
+            .expect("fixture content is admitted"),
+        DeliveryRequest::Interrupt {
+            expected_active_turn: live,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let successor = TurnId::from_uuid(Uuid::from_u128(SEED + 0xf31));
+    let _outcome = SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates_alias_resolver_as(
+            interrupt,
+            CommandPrincipal::Core,
+            AcceptedInputId::from_uuid(Uuid::from_u128(SEED + 0xf32)),
+            Some(successor),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(SEED + 0xf33)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(SEED + 0xf34)),
+            ),
+            |_| successor,
+            |_| {
+                (
+                    Vec::new(),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(SEED + 0xf35)),
+                )
+            },
+            |_| None,
+        )
+        .await?;
+
+    assert_eq!(
+        issuer(&pool, command_id).await?,
+        (String::from("core"), None)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// Fails the live turn through the startup recovery scan: an authorized
 /// failure transition that runs with every trigger armed.
 async fn fail_live_turn(

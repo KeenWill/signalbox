@@ -4,6 +4,9 @@ The user-vocabulary surface on this page was re-verified through this PR
 (`agent/storage-vocabulary-rename`), which renamed the stored actor and issuer
 discriminators this page states.
 
+The lifecycle command and creation-receipt statements are re-verified through
+this PR (`agent/lifecycle-t5-commands`).
+
 The `SubmitInput` multipart storage-version boundary below is the foundation
 proposal from PR `#553` (`agent/blob-storage-foundation`) and becomes verified
 with its implementing child stack.
@@ -314,15 +317,14 @@ failure is an error, not a recorded rejection); `session_lifecycle` (version 1)
 carries `stop{sticky, descendant_scope}`, `supersede{successor}`, `abandon`,
 `close_failed{cause}`, `resume`, `adopt{finish_condition}`, and `release` in one
 typed record with closed, operation-scoped rejections; every claimed lifecycle
-command settles as a `command_settled` receipt, and a rejected creation does too
-(`session_created` is an applied creation's receipt);
-`CreateSessionFromImportedFrontier` also records applied results only, because a
-missing conversation named by the frontier or a boundary absent from that
-conversation is a pre-claim admission error rather than an authoritative
-rejection; `ReplaceSessionDefaults`, `ReplaceSessionMetadata`, `SubmitInput`,
-and `DecideToolRequest` record both applied results and closed, typed rejection
-discriminators. Authoritative rejections claim the identifier exactly as applied
-results do.
+command settles as a `command_settled` receipt (`session_created` is an applied
+creation's receipt); `CreateSessionFromImportedFrontier` also records applied
+results only, because a missing conversation named by the frontier or a boundary
+absent from that conversation is a pre-claim admission error rather than an
+authoritative rejection; `ReplaceSessionDefaults`, `ReplaceSessionMetadata`,
+`SubmitInput`, and `DecideToolRequest` record both applied results and closed,
+typed rejection discriminators. Authoritative rejections claim the identifier
+exactly as applied results do.
 
 ## Replay and equality
 

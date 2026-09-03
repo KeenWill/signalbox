@@ -747,6 +747,47 @@ impl GoalRepository {
             .map(Vec::into_boxed_slice)
     }
 
+    /// Selects one session's latest owned execution-failure block carrying an
+    /// exact need while holding the session lock.
+    ///
+    /// Adoption and block append both serialize on this lock. Rechecking here
+    /// therefore closes either ordering of those commits without arming blocks
+    /// whose durable need requires an operator.
+    pub async fn pending_owned_execution_failure_with_need(
+        &self,
+        session: SessionId,
+        need: &GoalNeed,
+    ) -> Result<Option<GoalEventOrdinal>, GoalRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let exists = lock_session(&mut transaction, session).await?;
+        if !exists || !session_admits_automatic_resume(&mut transaction, session).await? {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+        let ordinal = sqlx::query_scalar::<_, Decimal>(
+            "SELECT event.event_ordinal
+               FROM goal_event AS event
+              WHERE event.session_id = $1
+                AND event.event_kind = 'blocked'
+                AND event.blocked_reason = 'execution_failure'
+                AND event.need = $2
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM goal_event AS later
+                     WHERE later.session_id = event.session_id
+                       AND later.event_ordinal > event.event_ordinal)",
+        )
+        .bind(session_id_to_uuid(session))
+        .bind(need.as_str())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        transaction.rollback().await?;
+        ordinal
+            .map(|ordinal| positive(ordinal).map(GoalEventOrdinal::new))
+            .transpose()
+            .map_err(Into::into)
+    }
+
     /// Reconciles one current goal turn's durable terminal disposition.
     ///
     /// Nonterminal work is left alone, completion queues one idempotent

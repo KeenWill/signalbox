@@ -26,7 +26,7 @@ use signalbox_domain::{
     ContextCompactionId, ContextFrontierId, CreateSession, DeliveryRequest,
     DescendantTerminationScope, DirectModelSelection, DurableCommandId,
     FailedModelCallTurnIdentities, FinishCheckVerdict, FrozenAliasDefinition, Goal,
-    GoalCommandRejection, GoalCommandResult, GoalGuidance, GoalModelBlockedReasonKind,
+    GoalCommandRejection, GoalCommandResult, GoalEvent, GoalGuidance, GoalModelBlockedReasonKind,
     GoalModelProvenance, GoalNeed, GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement,
     GoalUserAction, GoalUserCommand, GoalUserProvenance, LifecycleActor, ModelAlias, ModelCallId,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelSelectionOverride,
@@ -828,10 +828,85 @@ fn assert_applied_transition(outcome: GoalTransitionOutcome) {
 }
 
 #[track_caller]
+fn applied_transition_event(outcome: GoalTransitionOutcome) -> GoalEvent {
+    match outcome {
+        GoalTransitionOutcome::Applied(event) => event,
+        other => panic!("fixture transition must apply, got {other:?}"),
+    }
+}
+
+#[track_caller]
 fn assert_applied_command(outcome: GoalCommandHandlingOutcome) {
     let GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(_)) = outcome else {
         panic!("fixture command must apply");
     };
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn owned_pending_failure_selection_requires_the_exact_need_under_the_session_lock()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let attached_turn = turn_candidates(0xb69);
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(ATTACH_COMMAND),
+                    session(SESSION),
+                    GoalUserAction::Attach(statement("finish the commissioned task")),
+                ),
+                Some(attached_turn),
+                |_| None,
+            )
+            .await?,
+    );
+    assert_eq!(
+        activate_goal_turn(&pool, 0xd69).await?,
+        attached_turn.turn()
+    );
+    terminalize_goal_turn_as_failed(&pool, 0xe69).await?;
+    let unmonitored_need = GoalNeed::try_new(String::from("await adoption to repair execution"))?;
+    let operator_need = GoalNeed::try_new(String::from("operator must repair execution"))?;
+    let blocked = applied_transition_event(
+        repository
+            .block_execution_failure(
+                session(SESSION),
+                unmonitored_need.clone(),
+                GoalSchedulerProvenance::new(attached_turn.turn()),
+            )
+            .await?,
+    );
+
+    assert_eq!(
+        repository
+            .pending_owned_execution_failure_with_need(session(SESSION), &operator_need)
+            .await?,
+        None
+    );
+    assert_eq!(
+        repository
+            .pending_owned_execution_failure_with_need(session(SESSION), &unmonitored_need)
+            .await?,
+        Some(blocked.ordinal())
+    );
+    SessionLifecycleRepository::new(pool.clone())
+        .release(session(SESSION), LifecycleActor::Operator)
+        .await?;
+    assert_eq!(
+        repository
+            .pending_owned_execution_failure_with_need(session(SESSION), &unmonitored_need)
+            .await?,
+        None
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
 }
 
 /// INV-048 / INV-053: a goal-owned accepted input dispatches its frozen model

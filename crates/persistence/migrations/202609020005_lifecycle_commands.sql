@@ -555,6 +555,21 @@ ALTER TABLE create_session_command
 -- transaction records terminal with that actor.
 --
 
+ALTER TABLE session_lifecycle
+    ADD COLUMN start_gate_held boolean NOT NULL,
+    ADD COLUMN finish_condition_kind text,
+    ADD COLUMN finish_condition text;
+
+ALTER TABLE session_lifecycle
+    ADD CONSTRAINT session_lifecycle_finish_condition_shape CHECK (
+        ((finish_condition_kind IS NULL)
+            OR (finish_condition_kind = ANY (ARRAY['external_gate'::text, 'declared'::text])))
+        AND ((finish_condition_kind = 'declared'::text) = (finish_condition IS NOT NULL))
+        AND ((finish_condition IS NULL)
+             OR ((octet_length(finish_condition) >= 1)
+                 AND (octet_length(finish_condition) <= 1048576)))
+    );
+
 ALTER TABLE ONLY session_lifecycle
     ADD CONSTRAINT session_lifecycle_pending_actor_turn_fk
         FOREIGN KEY (pending_terminal_actor_turn_id, session_id)

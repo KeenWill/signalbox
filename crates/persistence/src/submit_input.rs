@@ -680,8 +680,44 @@ impl SubmitInputRepository {
                 signalbox_domain::ContextFrontierId,
             ) + Send,
     {
-        let mut transaction = self.pool.begin().await?;
         let principal = CommandPrincipal::for_actor(command.actor());
+        self.handle_with_candidates_alias_resolver_as(
+            command,
+            principal,
+            accepted_input,
+            turn,
+            cancellation_identities,
+            next_reclassified_turn,
+            next_tool_cancellation,
+            select_definition,
+        )
+        .await
+    }
+
+    /// Handles one command with an authenticated envelope principal and
+    /// deployment model-alias resolution.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn handle_with_candidates_alias_resolver_as<NextTurn, NextToolCancellation>(
+        &self,
+        command: SubmitInput,
+        principal: CommandPrincipal,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+        cancellation_identities: CancelledModelCallTurnIdentities,
+        next_reclassified_turn: NextTurn,
+        next_tool_cancellation: NextToolCancellation,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    ) -> Result<SubmitInputHandlingOutcome, SubmitInputRepositoryError>
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+        NextToolCancellation: FnMut(
+                &[signalbox_domain::ToolRequestId],
+            ) -> (
+                Vec<signalbox_domain::SemanticTranscriptEntryId>,
+                signalbox_domain::ContextFrontierId,
+            ) + Send,
+    {
+        let mut transaction = self.pool.begin().await?;
         let decision = Box::pin(handle_in_transaction(
             &mut transaction,
             command,

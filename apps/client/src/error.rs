@@ -9,6 +9,7 @@ use signalbox_process_protocol::{
     AnthropicServiceTier, CodexCliServiceTier, ConversationImportRejectionClass, ErrorCode,
     ErrorDetail, FailedModelCallCause, FrameDecodeError, FrameEncodeError, GoalCommandRejection,
     MAX_BLOB_READ_BYTES, OpenAiServiceTier, ReasoningLevel, RejectionDetail, ServiceTier,
+    SessionLifecycleCommandRejection,
 };
 
 #[derive(Debug)]
@@ -375,6 +376,27 @@ const fn goal_command_rejection_name(reason: GoalCommandRejection) -> &'static s
     }
 }
 
+const fn session_lifecycle_command_rejection_name(
+    reason: SessionLifecycleCommandRejection,
+) -> &'static str {
+    match reason {
+        SessionLifecycleCommandRejection::SessionNotFound => "session_not_found",
+        SessionLifecycleCommandRejection::TransitionNotAdmitted => "transition_not_admitted",
+        SessionLifecycleCommandRejection::RequiresParked => "requires_parked",
+        SessionLifecycleCommandRejection::ReleaseWhileParked => "release_while_parked",
+        SessionLifecycleCommandRejection::OwnershipUnchanged => "ownership_unchanged",
+        SessionLifecycleCommandRejection::FinishConditionAlreadyDeclared => {
+            "finish_condition_already_declared"
+        }
+        SessionLifecycleCommandRejection::StandingCauseMismatch => "standing_cause_mismatch",
+        SessionLifecycleCommandRejection::SuccessorNotFound => "successor_not_found",
+        SessionLifecycleCommandRejection::SuccessorIsSelf => "successor_is_self",
+        SessionLifecycleCommandRejection::GoalResumeRequired => "goal_resume_required",
+        SessionLifecycleCommandRejection::GoalOutcomeMismatch => "goal_outcome_mismatch",
+        SessionLifecycleCommandRejection::PendingTerminalConflict => "pending_terminal_conflict",
+    }
+}
+
 struct RejectionDisplay(RejectionDetail);
 
 impl fmt::Display for RejectionDisplay {
@@ -437,7 +459,8 @@ impl fmt::Display for RejectionDisplay {
             ),
             RejectionDetail::SessionLifecycleCommandRejected { session_id, reason } => write!(
                 formatter,
-                "session_lifecycle_command_rejected session={session_id} reason={reason:?}"
+                "session_lifecycle_command_rejected session={session_id} reason={}",
+                session_lifecycle_command_rejection_name(reason)
             ),
             RejectionDetail::ActiveTurnPresent {
                 session_id,
@@ -833,7 +856,7 @@ mod tests {
     use expect_test::expect;
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ConversationImportRejectionClass, ErrorCode, ErrorDetail,
-        FailedModelCallCause, RejectionDetail,
+        FailedModelCallCause, RejectionDetail, SessionLifecycleCommandRejection,
     };
     use uuid::Uuid;
 
@@ -878,6 +901,28 @@ mod tests {
         expect![[r#"
             invalid_request: conversation import was rejected (conversation_import_source_too_large limit_bytes=8 declared_size_bytes=7 actual_size_bytes=9)"#]]
         .assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn lifecycle_rejection_uses_its_canonical_wire_label() {
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(19));
+        let error = ClientError::remote(
+            ErrorCode::Rejected,
+            "lifecycle command was rejected".to_owned(),
+            ErrorDetail::rejected(RejectionDetail::SessionLifecycleCommandRejected {
+                session_id,
+                reason: SessionLifecycleCommandRejection::PendingTerminalConflict,
+            }),
+        );
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "rejected: lifecycle command was rejected \
+                 (session_lifecycle_command_rejected session={session_id} \
+                 reason=pending_terminal_conflict)"
+            )
+        );
     }
 
     #[test]

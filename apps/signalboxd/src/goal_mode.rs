@@ -608,17 +608,18 @@ impl PostgresGoalPassDisposition {
     pub fn arm_blocked_goal_resumption(&self, session: SessionId) {
         let adapter = self.clone();
         drop(tokio::spawn(async move {
-            match adapter.repository.load_goal(session).await {
-                Ok(Some(goal)) => {
-                    if let Some(blocked) = goal
-                        .events()
-                        .last()
-                        .filter(|event| is_execution_failure_block(event))
-                    {
-                        adapter
-                            .resume_after_execution_failure(session, blocked.ordinal())
-                            .await;
-                    }
+            let Ok(need) = AutomaticResumption::Unmonitored.need() else {
+                return;
+            };
+            match adapter
+                .repository
+                .pending_owned_execution_failure_with_need(session, &need)
+                .await
+            {
+                Ok(Some(blocked)) => {
+                    adapter
+                        .resume_after_execution_failure(session, blocked)
+                        .await;
                 }
                 Ok(None) => {}
                 Err(error) => tracing::error!(
@@ -709,7 +710,10 @@ impl PostgresGoalPassDisposition {
     ) {
         let delay = match resumption {
             AutomaticResumption::Scheduled { delay } => delay,
-            AutomaticResumption::Unmonitored => return,
+            AutomaticResumption::Unmonitored => {
+                self.arm_blocked_goal_resumption(session);
+                return;
+            }
             AutomaticResumption::Exhausted { .. } => {
                 tracing::warn!(
                     session = %session.into_uuid(),

@@ -51,7 +51,8 @@ The tool-approval decision event surface is verified against this implementing
 change.
 
 The session-lifecycle sections of the operator-status snapshot are verified
-against this PR (`agent/lifecycle-t3-metrics`).
+against this PR (`agent/lifecycle-t3-metrics`). The lifecycle creation-request
+contract is re-verified through this PR (`agent/lifecycle-t5-commands`).
 
 The session-delegation terminal and client surface was re-verified through PR
 #459 (`agent/delegation-client-verbs-v2`), and its daemon await/message
@@ -376,8 +377,7 @@ that variant.
 `create_session` and `create_session_from_template` accept an optional
 `lifecycle` object: `start_gate` (`open`, the default, or `held`), `ownership`
 (`unmonitored`, the default, or `owned`), and `finish_condition` (string). A
-held gate is durable on the lifecycle satellite: the session stays `created` and
-arms the start-gate deadline; `release_start` lands with the deadline engine.
+held gate is durable on the lifecycle satellite: the session stays `created`.
 
 | Type                                 | Additional required members                                                                                                | Meaning                                                                  |
 | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
