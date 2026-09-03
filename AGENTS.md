@@ -24,11 +24,16 @@ restorable.
 
 ## Minimum mechanism
 
-Build the smallest thing that satisfies the behavior the task names: no config
-key, table, threshold, gate, or policy the task does not name. Measurement in
-the daemon is fine; a decision on top of a measurement is the owner's and lives
-outside the daemon. Removing a mechanism the behavior does not need is a better
-change than adding one.
+Build the smallest thing that produces the behavior the task asks for. Add a
+config key, table, threshold, gate, or policy only when the requested behavior
+cannot work without it, even if the specification allows it. When the task is
+open-ended or the spec is incomplete, take the reading its wording and the
+surrounding code most directly support, build for that reading only, and name
+the decision in the pull request; do not also build for the other readings.
+Measurement in the daemon is fine; a decision on top of a measurement belongs to
+the owner and lives outside the daemon unless the task says otherwise. Removing
+a mechanism the behavior does not need is a better change than adding one. List
+what you chose not to build.
 
 In review, a finding that a mechanism can be removed is valid. A finding that
 asks for a guard, handler, or check the task does not name is declined ("not
