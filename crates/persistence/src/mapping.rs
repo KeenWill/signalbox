@@ -1332,14 +1332,12 @@ pub(crate) fn session_recovery_operation_from_str(value: &str) -> Option<Session
 /// Encodes why an owned session waits on a human.
 pub(crate) const fn session_park_cause_to_str(value: SessionParkCause) -> &'static str {
     match value {
-        SessionParkCause::ProgressBudgetExhausted => "progress_budget_exhausted",
         SessionParkCause::RetryBudgetExhausted => "retry_budget_exhausted",
         SessionParkCause::StructuralFailure => "structural_failure",
         SessionParkCause::UnknownFailure => "unknown_failure",
         SessionParkCause::ActiveStallDeadlineExpired => "active_stall_deadline_expired",
         SessionParkCause::WaitingDeadlineExpired => "waiting_deadline_expired",
         SessionParkCause::RecoveringDeadlineExpired => "recovering_deadline_expired",
-        SessionParkCause::BlockedDeadlineExpired => "blocked_deadline_expired",
         SessionParkCause::OperatorHold => "operator_hold",
         SessionParkCause::ModulePark => "module_park",
     }
@@ -1348,14 +1346,12 @@ pub(crate) const fn session_park_cause_to_str(value: SessionParkCause) -> &'stat
 /// Decodes why an owned session waits on a human.
 pub(crate) fn session_park_cause_from_str(value: &str) -> Option<SessionParkCause> {
     match value {
-        "progress_budget_exhausted" => Some(SessionParkCause::ProgressBudgetExhausted),
         "retry_budget_exhausted" => Some(SessionParkCause::RetryBudgetExhausted),
         "structural_failure" => Some(SessionParkCause::StructuralFailure),
         "unknown_failure" => Some(SessionParkCause::UnknownFailure),
         "active_stall_deadline_expired" => Some(SessionParkCause::ActiveStallDeadlineExpired),
         "waiting_deadline_expired" => Some(SessionParkCause::WaitingDeadlineExpired),
         "recovering_deadline_expired" => Some(SessionParkCause::RecoveringDeadlineExpired),
-        "blocked_deadline_expired" => Some(SessionParkCause::BlockedDeadlineExpired),
         "operator_hold" => Some(SessionParkCause::OperatorHold),
         "module_park" => Some(SessionParkCause::ModulePark),
         _ => None,
@@ -1411,7 +1407,6 @@ pub(crate) const fn session_retirement_cause_to_str(value: SessionRetirementCaus
     match value {
         SessionRetirementCause::DispatchDeadlineExpired => "dispatch_deadline_expired",
         SessionRetirementCause::StartGateDeadlineExpired => "start_gate_deadline_expired",
-        SessionRetirementCause::FirstInputDeadlineExpired => "first_input_deadline_expired",
         SessionRetirementCause::StrandedQueuedTurn => "stranded_queued_turn",
     }
 }
@@ -1421,7 +1416,6 @@ pub(crate) fn session_retirement_cause_from_str(value: &str) -> Option<SessionRe
     match value {
         "dispatch_deadline_expired" => Some(SessionRetirementCause::DispatchDeadlineExpired),
         "start_gate_deadline_expired" => Some(SessionRetirementCause::StartGateDeadlineExpired),
-        "first_input_deadline_expired" => Some(SessionRetirementCause::FirstInputDeadlineExpired),
         "stranded_queued_turn" => Some(SessionRetirementCause::StrandedQueuedTurn),
         _ => None,
     }

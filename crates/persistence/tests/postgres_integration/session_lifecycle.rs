@@ -1,5 +1,5 @@
 //! PostgreSQL proof for the session lifecycle satellite: the §1 mapping, the
-//! armed-deadline invariant, the parked override, §2's closures, and §6's
+//! armed deadline, the parked override, §2's closures, and §6's
 //! provenance and ownership journal.
 
 use std::collections::BTreeSet;
@@ -16,8 +16,7 @@ use signalbox_domain::{
 };
 use signalbox_persistence::{
     session_lifecycle::{
-        SessionLifecycleNumericBounds, SessionLifecycleRejection, SessionLifecycleRepository,
-        SessionLifecycleRepositoryError,
+        SessionLifecycleRejection, SessionLifecycleRepository, SessionLifecycleRepositoryError,
     },
     turn_liveness::{PostgresTurnLivenessRepository, TurnLivenessPersistenceBounds},
 };
@@ -56,18 +55,12 @@ fn creation_session(seed: u128) -> SessionId {
     SessionId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + seed + 0x100))
 }
 
-/// Reads the armed deadline's kind and whether it records an unbounded policy.
-async fn armed_deadline(
-    pool: &PgPool,
-    session: SessionId,
-) -> Result<Option<(String, bool)>, sqlx::Error> {
-    let row: Option<(String, Option<OffsetDateTime>)> = sqlx::query_as(
-        "SELECT deadline_kind, expires_at FROM session_deadline WHERE session_id = $1",
-    )
-    .bind(session.into_uuid())
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|(kind, expires_at)| (kind, expires_at.is_none())))
+/// Reads which deadline the session has armed, if any.
+async fn armed_deadline(pool: &PgPool, session: SessionId) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT deadline_kind FROM session_deadline WHERE session_id = $1")
+        .bind(session.into_uuid())
+        .fetch_optional(pool)
+        .await
 }
 
 /// Reads the ownership journal in the order it was written.
@@ -321,9 +314,7 @@ async fn a_command_naming_another_dispatch_than_its_session_is_rejected()
 }
 
 /// §6: a module-dispatched creation records the module and its exact dispatch,
-/// is owned, and arms the first-input deadline §10 gives an owned creation.
-/// The unbounded default records the deadline explicitly rather than omitting
-/// it, which is what §1 requires of a `none` policy.
+/// is owned, and arms the admission deadline §10 gives an owned creation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_dispatched_creation_is_owned_and_holds_its_admission_deadline()
@@ -349,7 +340,7 @@ async fn a_dispatched_creation_is_owned_and_holds_its_admission_deadline()
     );
     assert_eq!(
         armed_deadline(&pool, session).await?,
-        Some((String::from("first_input"), true))
+        Some(String::from("admission"))
     );
 
     let stored: (String, Option<String>, Option<Uuid>) = sqlx::query_as(
@@ -375,19 +366,12 @@ async fn a_dispatched_creation_is_owned_and_holds_its_admission_deadline()
 
 /// §1: the first accepted input moves the session to `dispatched`, not
 /// `active` — the turn is queued, and only activation makes it active. Each
-/// state re-arms the deadline that state defines, from the configured policy.
+/// state arms the deadline that state defines.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn the_mapping_follows_the_turn_from_dispatch_to_activation() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = SessionLifecycleRepository::new(pool.clone());
-    repository
-        .apply_configured_bounds(&SessionLifecycleNumericBounds {
-            dispatch: Some(Duration::from_secs(900)),
-            active_stall: Some(Duration::from_secs(1800)),
-            ..SessionLifecycleNumericBounds::default()
-        })
-        .await?;
     let session = creation_session(3);
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(dispatched_creation(3))
@@ -418,7 +402,7 @@ async fn the_mapping_follows_the_turn_from_dispatch_to_activation() -> Result<()
     assert_eq!(dispatched.state(), SessionLifecycleState::Dispatched);
     assert_eq!(
         armed_deadline(&pool, session).await?,
-        Some((String::from("dispatch"), false))
+        Some(String::from("admission"))
     );
 
     activate_earliest_queued_turn(
@@ -439,7 +423,7 @@ async fn the_mapping_follows_the_turn_from_dispatch_to_activation() -> Result<()
     assert_eq!(active.state(), SessionLifecycleState::Active);
     assert_eq!(
         armed_deadline(&pool, session).await?,
-        Some((String::from("active_stall"), false))
+        Some(String::from("active_stall"))
     );
 
     pool.close().await;
@@ -525,10 +509,8 @@ async fn a_parked_session_leaves_the_liveness_scans() -> Result<(), Box<dyn Erro
         .await?;
 
     assert!(parked.is_parked());
-    assert_eq!(
-        armed_deadline(&pool, session).await?,
-        Some((String::from("parked_renotify"), true))
-    );
+    // A parked session waits on a human, so it runs no deadline at all.
+    assert_eq!(armed_deadline(&pool, session).await?, None);
     assert_eq!(
         liveness
             .quiescent_active_turns(None)
@@ -567,7 +549,7 @@ async fn leaving_a_park_re_enters_the_mapped_state() -> Result<(), Box<dyn Error
     repository
         .park(
             session,
-            SessionParkCause::ProgressBudgetExhausted,
+            SessionParkCause::ActiveStallDeadlineExpired,
             SessionParkResponder::Operator,
             None,
             LifecycleActor::Operator,
@@ -579,7 +561,7 @@ async fn leaving_a_park_re_enters_the_mapped_state() -> Result<(), Box<dyn Error
     assert_eq!(resumed, SessionLifecycleState::Active);
     assert_eq!(
         armed_deadline(&pool, session).await?,
-        Some((String::from("active_stall"), true))
+        Some(String::from("active_stall"))
     );
 
     pool.close().await;
@@ -759,59 +741,6 @@ async fn an_achievement_closure_over_an_open_generation_is_refused() -> Result<(
     Ok(())
 }
 
-/// §2: an operator write-off records the worktree and container cleanup its
-/// closure cannot perform. Every other outcome leaves its resources to a
-/// successor or to nothing at all, so only this one records an obligation.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn an_abandoned_closure_records_its_cleanup_obligation() -> Result<(), Box<dyn Error>> {
-    let (container, pool, _database_url) = migrated_postgres().await?;
-    let repository = SessionLifecycleRepository::new(pool.clone());
-    let abandoned = creation_session(9);
-    let superseded = creation_session(10);
-    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
-        .handle(dispatched_creation(9))
-        .await?;
-    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
-        .handle(dispatched_creation(10))
-        .await?;
-
-    // Parked by statement, standing in for the module park: §1 admits a park
-    // only from the states the turn mapping derives, and this session has no
-    // turn to leave behind when it closes.
-    park_by_statement(&pool, abandoned).await?;
-    repository
-        .close(
-            abandoned,
-            SessionTerminalOutcome::Abandoned,
-            LifecycleActor::Operator,
-        )
-        .await?;
-    repository
-        .close(
-            superseded,
-            SessionTerminalOutcome::Superseded {
-                by: Some(abandoned),
-            },
-            LifecycleActor::Operator,
-        )
-        .await?;
-
-    let obligations: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT session_id, outcome_kind FROM session_cleanup_obligation ORDER BY session_id",
-    )
-    .fetch_all(&pool)
-    .await?;
-    assert_eq!(
-        obligations,
-        vec![(abandoned.into_uuid(), String::from("abandoned"))]
-    );
-
-    pool.close().await;
-    drop(container);
-    Ok(())
-}
-
 /// §6: adopting takes the liveness obligation and arms the deadline the state
 /// defines; releasing drops the forward obligations immediately, disarming the
 /// deadline with the bit. Both transitions are journaled with their actor.
@@ -830,7 +759,7 @@ async fn ownership_flips_arm_and_disarm_the_deadline_and_journal_themselves()
     repository.adopt(session, LifecycleActor::Operator).await?;
     assert_eq!(
         armed_deadline(&pool, session).await?,
-        Some((String::from("first_input"), true))
+        Some(String::from("admission"))
     );
 
     repository
@@ -891,94 +820,7 @@ async fn releasing_a_parked_session_is_rejected() -> Result<(), Box<dyn Error>> 
         lifecycle_rejection(error),
         SessionLifecycleRejection::ReleaseWhileParked
     );
-    assert_eq!(
-        armed_deadline(&pool, session).await?,
-        Some((String::from("parked_renotify"), true))
-    );
-
-    pool.close().await;
-    drop(container);
-    Ok(())
-}
-
-/// §1's invariant, enforced rather than asserted: an owned non-terminal
-/// session that holds the wrong deadline kind fails at commit. The check runs
-/// deferred, so a transaction may move the state and re-arm in either order,
-/// but it cannot commit having done only one.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn an_owned_session_cannot_commit_without_the_deadline_its_state_defines()
--> Result<(), Box<dyn Error>> {
-    let (container, pool, _database_url) = migrated_postgres().await?;
-    let session = creation_session(13);
-    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
-        .handle(dispatched_creation(13))
-        .await?;
-
-    let removed = sqlx::query("DELETE FROM session_deadline WHERE session_id = $1")
-        .bind(session.into_uuid())
-        .execute(&pool)
-        .await
-        .expect_err("an owned non-terminal session cannot lose its armed deadline");
-    assert_eq!(
-        removed
-            .as_database_error()
-            .and_then(DatabaseError::code)
-            .as_deref(),
-        Some("23514")
-    );
-
-    let wrong_kind = sqlx::query(
-        "UPDATE session_deadline SET deadline_kind = 'active_stall',
-                on_expiry_kind = 'park'
-          WHERE session_id = $1",
-    )
-    .bind(session.into_uuid())
-    .execute(&pool)
-    .await
-    .expect_err("a created session cannot hold an active-stall deadline");
-    assert_eq!(
-        wrong_kind
-            .as_database_error()
-            .and_then(DatabaseError::code)
-            .as_deref(),
-        Some("23514")
-    );
-
-    pool.close().await;
-    drop(container);
-    Ok(())
-}
-
-/// §1: an unmonitored session carries no armed deadline, and the invariant
-/// says so both ways — an armed deadline on an unmonitored session is as much
-/// a violation as a missing one on an owned session.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn an_unmonitored_session_cannot_hold_an_armed_deadline() -> Result<(), Box<dyn Error>> {
-    let (container, pool, _database_url) = migrated_postgres().await?;
-    let session = creation_session(14);
-    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
-        .handle(interactive_creation(14))
-        .await?;
-
-    let error = sqlx::query(
-        "INSERT INTO session_deadline
-            (session_id, deadline_kind, on_expiry_kind, expires_at)
-         VALUES ($1, 'first_input', 'retire', NULL)",
-    )
-    .bind(session.into_uuid())
-    .execute(&pool)
-    .await
-    .expect_err("an unmonitored session carries no deadline");
-
-    assert_eq!(
-        error
-            .as_database_error()
-            .and_then(DatabaseError::code)
-            .as_deref(),
-        Some("23514")
-    );
+    assert_eq!(armed_deadline(&pool, session).await?, None);
 
     pool.close().await;
     drop(container);
@@ -1001,7 +843,7 @@ async fn a_terminal_session_admits_no_further_transition() -> Result<(), Box<dyn
         .close(
             session,
             SessionTerminalOutcome::Retired {
-                cause: SessionRetirementCause::FirstInputDeadlineExpired,
+                cause: SessionRetirementCause::StartGateDeadlineExpired,
             },
             LifecycleActor::Watchdog,
         )
@@ -1522,7 +1364,7 @@ async fn a_terminal_session_admits_no_later_queued_turn() -> Result<(), Box<dyn 
         .close(
             session,
             SessionTerminalOutcome::Retired {
-                cause: SessionRetirementCause::FirstInputDeadlineExpired,
+                cause: SessionRetirementCause::StartGateDeadlineExpired,
             },
             LifecycleActor::Watchdog,
         )
@@ -1537,47 +1379,6 @@ async fn a_terminal_session_admits_no_later_queued_turn() -> Result<(), Box<dyn 
             || error.source().is_some_and(
                 |source| format!("{source}").contains("admits no further turn or goal work")
             )
-    );
-
-    pool.close().await;
-    drop(container);
-    Ok(())
-}
-
-/// §1's invariant covers both sides of a move: validating only the destination
-/// would let the source session silently lose the deadline it must hold.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn moving_a_deadline_row_between_sessions_is_rejected() -> Result<(), Box<dyn Error>> {
-    let (container, pool, _database_url) = migrated_postgres().await?;
-    let source = creation_session(30);
-    let destination = creation_session(31);
-    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
-        .handle(dispatched_creation(30))
-        .await?;
-    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
-        .handle(dispatched_creation(31))
-        .await?;
-
-    let error = sqlx::query(
-        "WITH freed AS (
-             DELETE FROM session_deadline WHERE session_id = $2 RETURNING session_id
-         )
-         UPDATE session_deadline SET session_id = $2
-          WHERE session_id = $1 AND EXISTS (SELECT 1 FROM freed)",
-    )
-    .bind(source.into_uuid())
-    .bind(destination.into_uuid())
-    .execute(&pool)
-    .await
-    .expect_err("the source session cannot lose its armed deadline");
-
-    assert_eq!(
-        error
-            .as_database_error()
-            .and_then(DatabaseError::code)
-            .as_deref(),
-        Some("23514")
     );
 
     pool.close().await;
@@ -1899,8 +1700,8 @@ async fn an_actor_identity_from_another_session_is_rejected() -> Result<(), Box<
     Ok(())
 }
 
-/// The armed-deadline table rejects truncation: the invariant triggers are
-/// row-level, so a truncation would disarm every deadline and fire none.
+/// The armed-deadline table rejects truncation: it would silently unbound
+/// every owned session at once.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn the_armed_deadline_table_cannot_be_truncated() -> Result<(), Box<dyn Error>> {
@@ -2251,59 +2052,6 @@ async fn only_an_operator_writes_off_a_parked_session() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// §1/§10: a deployment that changes a bound changes the deadlines already
-/// armed under the previous one. Nothing else would reach them — the arming
-/// trigger fires on the satellite, and a session sitting in `created` has no
-/// transition coming — so a bound narrowed from `none` would never catch the
-/// stalled session it was configured for. The new expiry is measured from the
-/// instant the deadline was armed, not from the reconfiguration.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn a_changed_bound_re_arms_the_deadlines_already_armed() -> Result<(), Box<dyn Error>> {
-    let (container, pool, _database_url) = migrated_postgres().await?;
-    let repository = SessionLifecycleRepository::new(pool.clone());
-    repository
-        .apply_configured_bounds(&SessionLifecycleNumericBounds::default())
-        .await?;
-    let session = creation_session(50);
-    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
-        .handle(dispatched_creation(50))
-        .await?;
-    assert_eq!(
-        armed_deadline(&pool, session).await?,
-        Some((String::from("first_input"), true))
-    );
-
-    repository
-        .apply_configured_bounds(&SessionLifecycleNumericBounds {
-            first_input: Some(Duration::from_secs(1800)),
-            ..SessionLifecycleNumericBounds::default()
-        })
-        .await?;
-
-    let (armed_at, expires_at): (OffsetDateTime, Option<OffsetDateTime>) =
-        sqlx::query_as("SELECT armed_at, expires_at FROM session_deadline WHERE session_id = $1")
-            .bind(session.into_uuid())
-            .fetch_one(&pool)
-            .await?;
-    let served = expires_at.expect("the narrowed bound reaches the armed deadline") - armed_at;
-    assert_eq!(served.whole_seconds(), 1800);
-
-    // And widening back to `none` records the unbounded policy explicitly,
-    // rather than leaving the retired expiry standing.
-    repository
-        .apply_configured_bounds(&SessionLifecycleNumericBounds::default())
-        .await?;
-    assert_eq!(
-        armed_deadline(&pool, session).await?,
-        Some((String::from("first_input"), true))
-    );
-
-    pool.close().await;
-    drop(container);
-    Ok(())
-}
-
 /// §2/§6: the handoff carries the actor that decided, and the settlement
 /// records that actor rather than whichever caller observed the turn reach its
 /// boundary. The settlement takes no actor at all, which is what makes the
@@ -2604,13 +2352,6 @@ async fn a_park_carries_the_standing_evidence_its_cause_names() -> Result<(), Bo
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn turn_progress_re_arms_the_active_stall_deadline() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let repository = SessionLifecycleRepository::new(pool.clone());
-    repository
-        .apply_configured_bounds(&SessionLifecycleNumericBounds {
-            active_stall: Some(Duration::from_secs(1800)),
-            ..SessionLifecycleNumericBounds::default()
-        })
-        .await?;
     let session = creation_session(56);
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(dispatched_creation(56))
@@ -2639,7 +2380,7 @@ async fn turn_progress_re_arms_the_active_stall_deadline() -> Result<(), Box<dyn
     assert!(second > first, "real progress re-arms the stall deadline");
     assert_eq!(
         armed_deadline(&pool, session).await?,
-        Some((String::from("active_stall"), false))
+        Some(String::from("active_stall"))
     );
 
     pool.close().await;

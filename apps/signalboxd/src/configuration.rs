@@ -904,37 +904,9 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
         "max_repository_file_content_bytes",
         NumericBoundKind::Integer,
     ),
-    ("session_dispatch_deadline", NumericBoundKind::Duration),
-    ("session_start_gate_deadline", NumericBoundKind::Duration),
-    ("session_first_input_deadline", NumericBoundKind::Duration),
+    ("session_admission_deadline", NumericBoundKind::Duration),
     ("session_active_stall_deadline", NumericBoundKind::Duration),
-    (
-        "session_waiting_approval_deadline",
-        NumericBoundKind::Duration,
-    ),
-    (
-        "session_waiting_external_deadline",
-        NumericBoundKind::Duration,
-    ),
-    ("session_waiting_child_deadline", NumericBoundKind::Duration),
-    (
-        "session_waiting_provider_retry_deadline",
-        NumericBoundKind::Duration,
-    ),
-    (
-        "session_waiting_pipeline_deadline",
-        NumericBoundKind::Duration,
-    ),
-    (
-        "session_waiting_scheduler_deadline",
-        NumericBoundKind::Duration,
-    ),
-    ("session_recovering_deadline", NumericBoundKind::Duration),
-    ("session_blocked_deadline", NumericBoundKind::Duration),
-    (
-        "session_parked_renotify_interval",
-        NumericBoundKind::Duration,
-    ),
+    ("session_waiting_deadline", NumericBoundKind::Duration),
 ];
 
 impl NumericBoundsConfiguration {
@@ -4714,19 +4686,9 @@ max_stack_comparisons_in_flight = "none"
 max_code_host_result_text_bytes = "none"
 max_code_host_result_items = "none"
 max_repository_file_content_bytes = "none"
-session_dispatch_deadline = "none"
-session_start_gate_deadline = "none"
-session_first_input_deadline = "none"
+session_admission_deadline = "none"
 session_active_stall_deadline = "none"
-session_waiting_approval_deadline = "none"
-session_waiting_external_deadline = "none"
-session_waiting_child_deadline = "none"
-session_waiting_provider_retry_deadline = "none"
-session_waiting_pipeline_deadline = "none"
-session_waiting_scheduler_deadline = "none"
-session_recovering_deadline = "none"
-session_blocked_deadline = "none"
-session_parked_renotify_interval = "none"
+session_waiting_deadline = "none"
 
 [[credential_profiles]]
 name = "anthropic-primary"
