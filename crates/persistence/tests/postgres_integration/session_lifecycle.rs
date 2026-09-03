@@ -1249,6 +1249,49 @@ async fn a_failed_closure_must_carry_the_parks_standing_cause() -> Result<(), Bo
     Ok(())
 }
 
+/// §2: an unknown-failure park cannot close under a classification the park
+/// explicitly did not establish.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_unknown_failure_park_refuses_a_classified_closure() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    let session = creation_session(63);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(63))
+        .await?;
+    activate_first_turn(&pool, session, 63).await?;
+    repository
+        .park(
+            session,
+            SessionParkCause::UnknownFailure,
+            SessionParkResponder::Operator,
+            None,
+            LifecycleActor::Operator,
+        )
+        .await?;
+
+    let error = repository
+        .close(
+            session,
+            SessionTerminalOutcome::FailedRetryable {
+                cause: SessionRetryableCause::ProviderTransient,
+            },
+            LifecycleActor::Operator,
+        )
+        .await
+        .expect_err("an unknown failure cannot acquire a retryable classification at closure");
+
+    assert_eq!(
+        lifecycle_rejection(error),
+        SessionLifecycleRejection::StandingCauseMismatch
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// §6: a `core` classification keeps the exact model or tool identity behind
 /// it. The ownership journal is the audit that would otherwise lose it, making
 /// a tool-driven release indistinguishable from ordinary daemon action.
