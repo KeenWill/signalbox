@@ -15783,6 +15783,22 @@ async fn interrupt_for_closure(
     let Ok(content) = UserContent::try_text(String::from("The session was closed.")) else {
         return Err(());
     };
+    let selected_model = sqlx::query_scalar::<_, uuid::Uuid>(
+        "SELECT direct_selection_id
+           FROM turn_origin_effective_model_configuration($1, $2)",
+    )
+    .bind(live_turn.into_uuid())
+    .bind(session.into_uuid())
+    .fetch_optional(&services.pool)
+    .await
+    .map_err(|error| {
+        tracing::warn!(session = %session.into_uuid(), cause = %error,
+            "closure interrupt could not load its live turn configuration");
+    })?
+    .ok_or_else(|| {
+        tracing::warn!(session = %session.into_uuid(), turn = %live_turn.into_uuid(),
+            "closure interrupt live turn has no effective model configuration");
+    })?;
     let request = SubmitInputRequest::try_new_core_interrupt(
         DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
         session,
@@ -15791,7 +15807,9 @@ async fn interrupt_for_closure(
         descendant_scope,
         PerInputConfigurationChoices::new(
             expected_version,
-            ModelSelectionOverride::UseSessionDefault,
+            ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Direct(
+                DirectModelSelection::from_uuid(selected_model),
+            )),
         ),
     );
     let Ok(request) = request else {

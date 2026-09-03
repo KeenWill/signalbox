@@ -6725,6 +6725,70 @@ async fn lifecycle_closure_retransmission_reports_its_receipt_after_interrupt_pr
     runtime.stop().await
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn lifecycle_closure_interrupt_does_not_resolve_a_retired_session_alias()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, live_turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    let _issued = Box::pin(authorize_issued_model_call(&runtime.pool, session_id)).await?;
+    drop(connection);
+
+    let retired_alias_definition = r#"[[aliases]]
+alias_id = "00000000-0000-0000-0000-000000000002"
+selection_id = "00000000-0000-0000-0000-000000000001"
+
+"#;
+    let configuration_without_alias = MODEL_CONFIGURATION.replacen(retired_alias_definition, "", 1);
+    let _recovered_turn_count = runtime
+        .restart_with_model_configuration(&configuration_without_alias)
+        .await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            3,
+            ClientRequest::StopSession {
+                command_id: command()?,
+                session_id,
+                sticky: true,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            },
+        )
+        .await?;
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        &ServerMessage::SessionLifecycleCommandApplied {
+            session_id,
+            effect: SessionLifecycleEffect::ClosurePending { live_turn_id },
+        }
+    );
+    let closure_state: (String, Option<String>, i64) = sqlx::query_as(
+        "SELECT lifecycle.state_kind, lifecycle.pending_terminal_outcome_kind,
+                count(command.command_id)
+           FROM session_lifecycle AS lifecycle
+           LEFT JOIN submit_input_command AS command
+             ON command.session_id = lifecycle.session_id
+            AND command.delivery_kind = 'interrupt'
+            AND command.actor_kind = 'core'
+            AND command.model_override_kind = 'replace_with'
+            AND command.replacement_model_kind = 'direct'
+          WHERE lifecycle.session_id = $1
+          GROUP BY lifecycle.state_kind, lifecycle.pending_terminal_outcome_kind",
+    )
+    .bind(session_id.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(closure_state, (String::from("terminal"), None, 1));
+
+    drop(connection);
+    runtime.stop().await
+}
+
 /// S07: every stop refusal is a recorded typed rejection — an empty session
 /// records `no_active_turn` and a stale expected turn records
 /// `active_turn_mismatch`.

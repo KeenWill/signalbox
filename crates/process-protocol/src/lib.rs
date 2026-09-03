@@ -3692,8 +3692,7 @@ pub enum ClientRequest {
         command_id: CommandId,
         session_id: CanonicalUuid,
     },
-    /// Take the liveness obligation; the finish condition is required when
-    /// the session carries none.
+    /// Take the liveness obligation, optionally supplying a finish condition.
     AdoptSession {
         command_id: CommandId,
         session_id: CanonicalUuid,
