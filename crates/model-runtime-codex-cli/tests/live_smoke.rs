@@ -96,7 +96,7 @@ code_mode_interrupt                      under development  false
 code_mode_only                           under development  false
 codex_git_commit                         removed            false
 collaboration_modes                      removed            true
-compaction_image_budget                  under development  false
+compaction_image_budget                  stable             true
 computer_use                             stable             true
 concurrent_reasoning_summaries           under development  false
 content_item_kinds                       under development  false
@@ -223,6 +223,10 @@ const NON_CAPABILITY_CODEX_FEATURES: &[&str] = &[
     "code_mode_interrupt",
     "codex_git_commit",
     "collaboration_modes",
+    // Promoted to stable and default-on in 0.150.1. It caps how many images the
+    // CLI carries through its own context compaction: a budget on work the
+    // release already does, reaching nothing outside the exchange, so the
+    // default flip narrows what the CLI retains rather than admitting anything.
     "compaction_image_budget",
     "concurrent_reasoning_summaries",
     "content_item_kinds",
