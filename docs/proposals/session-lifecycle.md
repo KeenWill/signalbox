@@ -710,10 +710,10 @@ program behind it.
 session that never terminalizes never enters any weekly cohort.
 `nonterminal_past_deadline` counts owned sessions whose armed deadline has
 expired without its transition firing, plus owned sessions holding no armed
-deadline at all — the §1 invariant violation, wired as an alarm with target
-zero. A deadline explicitly configured unbounded (§1) is not counted; a missing
-one is. The 281-session class this specification opens with is visible here, not
-in the headline. A second companion alarm delivers §2's promised
+deadline at all — the invariant violation defined in §1, wired as an alarm with
+target zero. A deadline explicitly configured unbounded (§1) is not counted; a
+missing one is. The 281-session class this specification opens with is visible
+here, not in the headline. A second companion alarm delivers §2's promised
 `failed_unknown` watch: the share of `failed_unknown` in the weekly terminal
 cohort, over the headline's denominator, with a config-sourced threshold — a
 rising unknown rate is a classification regression even while the headline holds

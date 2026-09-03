@@ -1518,6 +1518,7 @@ async fn run_hub(
     };
     let convergence_sweep_failure_retry_budget =
         configured_u32("convergence_sweep_failure_retry_budget")?
+            .and_then(|budget| i16::try_from(budget).ok())
             .and_then(|budget| u16::try_from(budget).ok())
             .and_then(NonZeroU16::new)
             .ok_or_else(|| {

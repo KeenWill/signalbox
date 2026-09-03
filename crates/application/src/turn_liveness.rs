@@ -468,11 +468,10 @@ impl TurnLivenessLedger {
     ) -> Box<[StaleTurnCandidate]> {
         let interval_nanos = self.scan_interval.get().as_nanos();
         let bound_nanos = self.bound.get().as_nanos();
+        let adjusted_bound = bound_nanos.saturating_mul(u128::from(slow_substrate_factor.get()));
         let intervals =
-            bound_nanos.saturating_add(interval_nanos.saturating_sub(1)) / interval_nanos;
-        let required = intervals
-            .saturating_mul(u128::from(slow_substrate_factor.get()))
-            .saturating_add(1);
+            adjusted_bound.saturating_add(interval_nanos.saturating_sub(1)) / interval_nanos;
+        let required = intervals.saturating_add(1);
         observations
             .iter()
             .filter(|observation| u128::from(observation.ordinal().get()) >= required)
@@ -643,6 +642,23 @@ mod tests {
         let due = ledger().reconcile(&[observation(1, 31)], factor);
 
         assert!(due.is_empty());
+    }
+
+    /// A slow-substrate factor multiplies duration before scan rounding.
+    #[test]
+    fn slow_substrate_rounding_uses_the_adjusted_duration() {
+        let bound =
+            StaleActiveTurnBound::try_new(Duration::from_secs(61)).expect("fixture bound is valid");
+        let interval = TurnLivenessScanInterval::try_new(Duration::from_secs(60))
+            .expect("fixture interval is valid");
+        let ledger = TurnLivenessLedger::new(bound, interval);
+        let factor = NonZeroU32::new(4).expect("fixture factor is positive");
+
+        let before = ledger.reconcile(&[observation(1, 5)], factor);
+        let due = ledger.reconcile(&[observation(1, 6)], factor);
+
+        assert!(before.is_empty());
+        assert_eq!(due.as_ref(), &[candidate(1)]);
     }
 
     /// Independent guard classes become due according to their own configured bounds.

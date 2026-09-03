@@ -81,7 +81,7 @@ async fn activated_watchdog_session(
     })
 }
 
-/// A daemon replacement reads and advances the same durable observation ordinal.
+/// A daemon replacement retains the durable ordinal until one interval elapses.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn restart_mid_observation_retains_staleness_evidence() -> Result<(), Box<dyn Error>> {
@@ -94,24 +94,27 @@ async fn restart_mid_observation_retains_staleness_evidence() -> Result<(), Box<
         .await?
         .into_candidates();
     let first = first_repository
-        .record_complete_observation(TurnLivenessGuardKind::Quiescent, &candidates)
+        .record_restart_complete_observation(TurnLivenessGuardKind::Quiescent, &candidates)
         .await?;
     drop(first_repository);
     let restarted_repository =
         PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
 
     let second = restarted_repository
+        .record_restart_complete_observation(TurnLivenessGuardKind::Quiescent, &candidates)
+        .await?;
+    let third = restarted_repository
         .record_complete_observation(TurnLivenessGuardKind::Quiescent, &candidates)
         .await?;
     let interval = TurnLivenessScanInterval::try_new(std::time::Duration::from_secs(60))?;
     let bound = StaleActiveTurnBound::try_new(std::time::Duration::from_secs(60))?;
-    let due =
-        TurnLivenessLedger::new(bound, interval).reconcile(&second, std::num::NonZeroU32::MIN);
+    let due = TurnLivenessLedger::new(bound, interval).reconcile(&third, std::num::NonZeroU32::MIN);
 
     assert_eq!(first[0].ordinal().get(), 1);
-    assert_eq!(second[0].ordinal().get(), 2);
-    assert_eq!(due.as_ref(), &[second[0].candidate()]);
-    assert_eq!(second[0].candidate().turn(), fixture.turn);
+    assert_eq!(second[0].ordinal().get(), 1);
+    assert_eq!(third[0].ordinal().get(), 2);
+    assert_eq!(due.as_ref(), &[third[0].candidate()]);
+    assert_eq!(third[0].candidate().turn(), fixture.turn);
 
     pool.close().await;
     drop(container);

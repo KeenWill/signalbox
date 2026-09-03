@@ -429,6 +429,13 @@ impl PostgresConvergenceSweepStore {
         ))
         .execute(&mut *transaction)
         .await?;
+        ensure_target(
+            &mut transaction,
+            repository,
+            pull_request,
+            self.retry_budget,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -974,7 +981,7 @@ impl PostgresConvergenceSweepStore {
             retry_policy,
         } = record;
         let mut transaction = self.pool.begin().await?;
-        ensure_target(
+        let budget = ensure_target(
             &mut transaction,
             repository,
             pull_request,
@@ -1029,8 +1036,6 @@ impl PostgresConvergenceSweepStore {
                     .await?;
             }
         }
-        let budget = i16::try_from(self.retry_budget.get())
-            .map_err(|_| ConvergenceSweepStoreError::Corruption("retry budget"))?;
         let (head, threads) = observation
             .map(|value| {
                 (
@@ -1262,19 +1267,25 @@ async fn ensure_target(
     repository: &RepositorySlug,
     pull_request: PullRequestNumber,
     retry_budget: NonZeroU16,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO convergence_sweep_target (repository, pull_request_number, retry_budget)
+) -> Result<i16, ConvergenceSweepStoreError> {
+    let retry_budget = i16::try_from(retry_budget.get())
+        .map_err(|_| ConvergenceSweepStoreError::Corruption("retry budget"))?;
+    sqlx::query_scalar(
+        "INSERT INTO convergence_sweep_target AS target
+            (repository, pull_request_number, retry_budget)
          VALUES ($1, $2, $3)
          ON CONFLICT (repository, pull_request_number)
-         DO UPDATE SET enrolled = true, retry_budget = EXCLUDED.retry_budget",
+         DO UPDATE SET enrolled = true,
+            retry_budget = CASE WHEN target.state_kind = 'observed'
+                THEN EXCLUDED.retry_budget ELSE target.retry_budget END
+         RETURNING retry_budget",
     )
     .bind(repository.as_str())
     .bind(Decimal::from(pull_request.get()))
-    .bind(i32::from(retry_budget.get()))
-    .execute(&mut **transaction)
-    .await?;
-    Ok(())
+    .bind(retry_budget)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(Into::into)
 }
 
 #[allow(
