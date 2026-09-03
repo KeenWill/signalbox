@@ -7567,8 +7567,6 @@ pub trait CreateSessionFromImportedFrontierIdGenerator {
     fn next_session_id(&mut self) -> SessionId;
     fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
     fn next_context_frontier_id(&mut self) -> ContextFrontierId;
-    fn next_closure_decision_command_id(&mut self) -> DurableCommandId;
-    fn next_closure_turn_attempt_id(&mut self) -> TurnAttemptId;
 }
 
 pub struct UuidV7CreateSessionFromImportedFrontierIdGenerator;
@@ -9768,6 +9766,7 @@ pub trait RepoWatchDispatchTransaction {
     async fn handle_repo_watch_evaluation(
         &mut self,
         evaluation: RepoWatchRuleEvaluation,
+        ids: &mut (impl SubmitInputIdGenerator + Send),
     ) -> Result<RepoWatchRuleEvaluationOutcome, Self::Error>;
 }
 
@@ -11055,6 +11054,8 @@ pub trait SubmitInputIdGenerator {
     fn next_turn_id(&mut self) -> TurnId;
     fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
     fn next_context_frontier_id(&mut self) -> ContextFrontierId;
+    fn next_closure_decision_command_id(&mut self) -> DurableCommandId;
+    fn next_closure_turn_attempt_id(&mut self) -> TurnAttemptId;
 }
 
 pub struct UuidV7SubmitInputIdGenerator;  // Default; impl SubmitInputIdGenerator

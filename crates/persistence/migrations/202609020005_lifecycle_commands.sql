@@ -491,6 +491,33 @@ CREATE TRIGGER session_lifecycle_command_is_append_only
 -- A rejected command may name a session that does not exist, so the session
 -- reference is checked by the applying transaction rather than a key.
 
+CREATE OR REPLACE FUNCTION durable_command_belongs_to_session(checked_command_id uuid, checked_session_id uuid) RETURNS boolean
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT EXISTS (SELECT 1 FROM create_session_command
+        WHERE command_id = checked_command_id AND created_session_id = checked_session_id)
+    OR EXISTS (SELECT 1 FROM create_session_from_imported_frontier_command
+        WHERE command_id = checked_command_id AND created_session_id = checked_session_id)
+    OR EXISTS (SELECT 1 FROM replace_session_defaults_command
+        WHERE command_id = checked_command_id AND session_id = checked_session_id)
+    OR EXISTS (SELECT 1 FROM replace_session_metadata_command
+        WHERE command_id = checked_command_id AND session_id = checked_session_id)
+    OR EXISTS (SELECT 1 FROM submit_input_command
+        WHERE command_id = checked_command_id AND session_id = checked_session_id)
+    OR EXISTS (
+        SELECT 1 FROM decide_tool_request_command AS command
+        JOIN tool_request AS request ON request.request_id = command.request_id
+        WHERE command.command_id = checked_command_id
+          AND request.session_id = checked_session_id
+    )
+    OR EXISTS (SELECT 1 FROM compact_session_command
+        WHERE command_id = checked_command_id AND session_id = checked_session_id)
+    OR EXISTS (SELECT 1 FROM goal_command
+        WHERE command_id = checked_command_id AND session_id = checked_session_id)
+    OR EXISTS (SELECT 1 FROM session_lifecycle_command
+        WHERE command_id = checked_command_id AND session_id = checked_session_id)
+$$;
+
 CREATE OR REPLACE FUNCTION require_durable_command_typed_record() RETURNS trigger
     LANGUAGE plpgsql
     AS $$

@@ -366,6 +366,13 @@ async fn lifecycle_stop_settles_an_awaiting_approval_turn() -> Result<(), Box<dy
             String::from("core")
         )
     );
+    let explicit_decision_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM tool_approval_decided_outbox_event WHERE request_id = $1",
+    )
+    .bind(request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(explicit_decision_events, 0);
     let lifecycle = SessionLifecycleRepository::new(pool.clone())
         .load(fixture.session)
         .await?
@@ -376,6 +383,15 @@ async fn lifecycle_stop_settles_an_awaiting_approval_turn() -> Result<(), Box<dy
             outcome: terminal_outcome,
         }
     );
+    let mut dispatched = Vec::new();
+    drain_outbox(&pool, |event| dispatched.push(event.clone())).await?;
+    assert!(dispatched.iter().any(|event| {
+        event.kind()
+            == &DispatchedOutboxEventKind::CommandSettled {
+                command: lifecycle_command,
+                result: signalbox_persistence::outbox::DispatchedCommandSettlement::Applied,
+            }
+    }));
 
     pool.close().await;
     drop(container);

@@ -1854,7 +1854,7 @@ DECLARE
     matching_effects bigint;
 BEGIN
     IF NEW.decision_source IN (
-        'policy_auto', 'session_blanket', 'runtime_safety'
+        'policy_auto', 'session_blanket', 'runtime_safety', 'lifecycle_closure'
     ) THEN
         RETURN NULL;
     END IF;
