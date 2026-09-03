@@ -2744,7 +2744,7 @@ async fn s03_inv014_prepared_model_call_is_resumable_without_tool_round()
 /// and replay changes neither.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s03_s04_inv006_inv014_inv034_drain_then_restart_leaves_zero_failed_turns()
+async fn s03_s04_inv006_inv014_inv034_startup_recovery_leaves_zero_failed_turns()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
     let prepared = checkpoint_restart_model_call(&pool, 0x2000, false).await?;
@@ -2863,7 +2863,7 @@ async fn s03_s04_inv006_inv014_inv034_drain_then_restart_leaves_zero_failed_turn
 
     let first = scan.execute().await?;
     assert_eq!(first.recovered_turn_count(), 1);
-    let failed_turns: i64 = sqlx::query_scalar(
+    let startup_recovery_failed_turns: i64 = sqlx::query_scalar(
         "SELECT count(*)
            FROM turn_lifecycle
           WHERE session_id = ANY($1::uuid[])
@@ -2876,7 +2876,10 @@ async fn s03_s04_inv006_inv014_inv034_drain_then_restart_leaves_zero_failed_turn
     ])
     .fetch_one(&restarted_pool)
     .await?;
-    assert_eq!(failed_turns, 0);
+    assert_eq!(
+        startup_recovery_failed_turns, 0,
+        "startup recovery leaves no failed turn in this call-aware fixture"
+    );
 
     let prepared_state: (
         String,

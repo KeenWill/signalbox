@@ -141,6 +141,7 @@ struct TerminalizationTally {
     superseded: usize,
     lock_unavailable: usize,
     failed: usize,
+    deferred: usize,
 }
 
 impl TerminalizationTally {
@@ -1041,12 +1042,12 @@ where
         }
     };
     let due = ledger.reconcile(&observations);
-    let attempted = window.take(&due);
+    let selected = window.take(&due);
     let mut tally = TerminalizationTally {
         observation_recorded: true,
         ..TerminalizationTally::default()
     };
-    for candidate in &attempted {
+    for candidate in &selected {
         let Some(outcome) = complete_before_shutdown(
             shutdown,
             terminalize_stale_turn(repository, *candidate, ledger.bound()),
@@ -1057,22 +1058,21 @@ where
         };
         tally.record(outcome);
     }
-    // A cohort larger than the window takes a scan per windowful to attempt in
-    // full, so what deferral costs is laps, not one interval. The alternative
-    // is worse in kind rather than degree: draining a cohort in one scan delays
-    // the next observation of every other session by however long the cohort
-    // takes, which is the property this pass is built to keep.
-    let deferred = due.len() - attempted.len();
-    if deferred > 0 {
+    // A capped window or shutdown can leave due turns unprocessed. Either kind
+    // of deferral costs laps, not one interval, and the replacement daemon must
+    // be told how much work remains rather than how much this window selected.
+    let processed = tally.attempted();
+    tally.deferred = due.len() - processed;
+    if tally.deferred > 0 {
         tracing::info!(
             cause_code = TERMINALIZATION_DEFERRED_CAUSE,
-            deferred_turns = deferred,
-            attempted_turns = tally.attempted(),
+            deferred_turns = tally.deferred,
+            attempted_turns = processed,
             terminalized_turns = tally.terminalized,
             superseded_turns = tally.superseded,
             lock_unavailable_turns = tally.lock_unavailable,
             failed_turns = tally.failed,
-            "more turns came due than one scan attempts; the rest wait for a later scan"
+            "turn-liveness work remains for a later scan"
         );
     }
     tally
@@ -1393,6 +1393,7 @@ mod tests {
         busy: Vec<TurnId>,
         terminalized: AtomicUsize,
         observation_ordinal: AtomicU64,
+        shutdown_after: Option<(usize, watch::Sender<bool>)>,
     }
 
     impl CountingRepository {
@@ -1402,6 +1403,7 @@ mod tests {
                 busy: Vec::new(),
                 terminalized: AtomicUsize::new(0),
                 observation_ordinal: AtomicU64::new(0),
+                shutdown_after: None,
             }
         }
 
@@ -1410,6 +1412,19 @@ mod tests {
         fn with_busy(candidates: Vec<StaleTurnCandidate>, busy: Vec<TurnId>) -> Self {
             Self {
                 busy,
+                ..Self::new(candidates)
+            }
+        }
+
+        /// Lets exactly `processed` terminalizations finish, then holds the
+        /// next one while requesting shutdown.
+        fn with_shutdown_after(
+            candidates: Vec<StaleTurnCandidate>,
+            processed: usize,
+            shutdown: watch::Sender<bool>,
+        ) -> Self {
+            Self {
+                shutdown_after: Some((processed, shutdown)),
                 ..Self::new(candidates)
             }
         }
@@ -1478,6 +1493,12 @@ mod tests {
             candidate: StaleTurnCandidate,
             _identities: AcceptedInputTurnFailureIdentities,
         ) -> Result<StaleTurnOutcome, TurnLivenessRepositoryError> {
+            if let Some((processed, shutdown)) = &self.shutdown_after
+                && self.terminalized.load(Ordering::Relaxed) == *processed
+            {
+                shutdown.send(true).expect("the fixture receiver is held");
+                return std::future::pending().await;
+            }
             if self.busy.contains(&candidate.turn()) {
                 return Err(TurnLivenessRepositoryError::TerminalizationLockUnavailable(
                     sqlx::Error::PoolTimedOut,
@@ -1589,6 +1610,35 @@ mod tests {
 
         assert_eq!(repository.terminalized(), capacity);
         assert_eq!(repository.still_active(), cohort.len() - capacity);
+    }
+
+    /// Shutdown can preempt a selected cohort after partial progress. Every
+    /// unprocessed candidate is reported as deferred for the replacement
+    /// daemon rather than disappearing into the selected-window count.
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_preemption_counts_unprocessed_candidates_as_deferred() {
+        let bound = fixture_staleness_bound();
+        let cohort = vec![candidate(1), candidate(2)];
+        let (shutdown, mut receiver) = watch::channel(false);
+        let processed = cohort.len() - 1;
+        let repository =
+            CountingRepository::with_shutdown_after(cohort.clone(), processed, shutdown);
+        let ledger = fixture_ledger(bound);
+        let mut window = TerminalizationWindow::new(None);
+        let _ = reconcile_once(&repository, ledger, RestartBaseline, &mut window).await;
+
+        let tally = reconcile_turn_liveness(
+            &repository,
+            ledger,
+            TurnLivenessGuardKind::Quiescent,
+            &mut window,
+            Advance,
+            &mut receiver,
+        )
+        .await;
+
+        assert_eq!(tally.attempted(), processed);
+        assert_eq!(tally.deferred, cohort.len() - processed);
     }
 
     /// What one scan defers the next one ends: nothing about a deferred turn

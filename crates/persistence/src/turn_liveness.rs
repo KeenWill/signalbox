@@ -315,39 +315,34 @@ impl PostgresTurnLivenessRepository {
             .collect::<Vec<_>>();
         let frontiers = candidates
             .iter()
-            .map(|candidate| {
-                candidate
-                    .evidence()
-                    .outbox_frontier()
-                    .map_or_else(|| "none".to_owned(), |frontier| frontier.to_string())
-            })
+            .map(|candidate| candidate.evidence().outbox_frontier().map(Decimal::from))
             .collect::<Vec<_>>();
         let rows = sqlx::query(
             "WITH incoming AS (
                 SELECT *
-                  FROM UNNEST($2::uuid[], $3::uuid[], $4::uuid[], $5::text[])
-                       AS item(turn_id, session_id, current_attempt_id, outbox_frontier_token)
+                  FROM UNNEST($2::uuid[], $3::uuid[], $4::uuid[], $5::numeric[])
+                       AS item(turn_id, session_id, current_attempt_id, outbox_frontier)
              )
              INSERT INTO turn_liveness_observation AS observation
                 (guard_kind, turn_id, session_id, current_attempt_id,
-                 outbox_frontier_token, scan_interval_seconds,
+                 outbox_frontier, scan_interval_seconds,
                  scan_interval_subsec_nanos, observation_ordinal)
              SELECT $1, turn_id, session_id, current_attempt_id,
-                    outbox_frontier_token, $6, $7, 1
+                    outbox_frontier, $6, $7, 1
                FROM incoming
              ON CONFLICT (guard_kind, turn_id) DO UPDATE
                 SET session_id = EXCLUDED.session_id,
                     current_attempt_id = EXCLUDED.current_attempt_id,
-                    outbox_frontier_token = EXCLUDED.outbox_frontier_token,
+                    outbox_frontier = EXCLUDED.outbox_frontier,
                     scan_interval_seconds = EXCLUDED.scan_interval_seconds,
                     scan_interval_subsec_nanos = EXCLUDED.scan_interval_subsec_nanos,
                     observation_ordinal = CASE
                         WHEN ROW(
                             observation.current_attempt_id,
-                            observation.outbox_frontier_token
+                            observation.outbox_frontier
                         ) IS DISTINCT FROM ROW(
                             EXCLUDED.current_attempt_id,
-                            EXCLUDED.outbox_frontier_token
+                            EXCLUDED.outbox_frontier
                         )
                         THEN 1
                         WHEN ROW(
@@ -364,7 +359,7 @@ impl PostgresTurnLivenessRepository {
                         END
                     END
              RETURNING turn_id, session_id, current_attempt_id,
-                       outbox_frontier_token, observation_ordinal",
+                       outbox_frontier, observation_ordinal",
         )
         .bind(guard.as_str())
         .bind(&turns)
@@ -613,16 +608,14 @@ impl PostgresTurnLivenessRepository {
 fn decode_durable_observation(
     row: sqlx::postgres::PgRow,
 ) -> Result<DurableTurnLivenessObservation, TurnLivenessRepositoryError> {
-    let token: String = row
-        .try_get("outbox_frontier_token")
-        .map_err(TurnLivenessRepositoryError::observation)?;
-    let frontier = if token == "none" {
-        None
-    } else {
-        Some(token.parse::<u64>().map_err(|source| {
+    let frontier = row
+        .try_get::<Option<Decimal>, _>("outbox_frontier")
+        .map_err(TurnLivenessRepositoryError::observation)?
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|source| {
             TurnLivenessRepositoryError::observation(sqlx::Error::Decode(Box::new(source)))
-        })?)
-    };
+        })?;
     let ordinal: i64 = row
         .try_get("observation_ordinal")
         .map_err(TurnLivenessRepositoryError::observation)?;
