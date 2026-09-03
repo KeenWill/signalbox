@@ -1944,18 +1944,18 @@ session's last live turn settles it at commit
 the causal turn's own event precedes the settlement's): remaining queued turns
 retire as `retired{session_closed}`, an open goal generation closes as
 `session_closed`, a user-stopped generation admits only `stopped`, an achieved
-generation admits every closure, and the satellite records terminal. Every
-claimed `submit_input` or `decide_tool_request` command appends exactly one
-`injection_settled` (`injection_settled_outbox_event_command_id_key`): at
-acceptance for an origin or a rejection, at consumption, reclassification, or
-closure for pending steering, and at the decision for a tool request — a
-decision after its request was decided settles `not_delivered`. A command naming
-no session appends none. Model-call state transitions append
-`model_call_transition`, tool-round creation appends
-`tool_batch_transition { proposed }`, all-resolved result projection appends
-`tool_batch_transition { results_projected }`, and an external-effect ambiguity
-appends `tool_batch_transition { recovery_required }`. Completion closure
-appends `turn_terminal{completed}`, refusal closure appends
+generation admits only an achievement outcome, and the satellite records
+terminal. Every claimed `submit_input` or `decide_tool_request` command appends
+exactly one `injection_settled`
+(`injection_settled_outbox_event_command_id_key`): at acceptance for an origin
+or a rejection, at consumption, reclassification, or closure for pending
+steering, and at the decision for a tool request — a decision after its request
+was decided settles `not_delivered`. A command naming no session appends none.
+Model-call state transitions append `model_call_transition`, tool-round creation
+appends `tool_batch_transition { proposed }`, all-resolved result projection
+appends `tool_batch_transition { results_projected }`, and an external-effect
+ambiguity appends `tool_batch_transition { recovery_required }`. Completion
+closure appends `turn_terminal{completed}`, refusal closure appends
 `turn_terminal{refused}`, and known-failure closure appends
 `turn_terminal{failed}`; interrupt-confirmed cancellation appends
 `turn_terminal{cancelled}`, and live stopped ambiguity appends

@@ -1005,7 +1005,7 @@ END;
 $$;
 
 --
--- `achieved_declared` (§2, ruled 2026-09-02): an achievement no finish check
+-- `achieved_declared` (§2): an achievement no finish check
 -- verifies closes the session with it; `finish_check_failed` is the block a
 -- failing check appends. Supersedes 202609020002_session_lifecycle_satellite.
 --

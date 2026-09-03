@@ -3465,6 +3465,19 @@ pub enum SessionOwnership {
     Unmonitored,
 }
 
+/// Closed finish condition an owned session owes (§7).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FinishCondition {
+    /// Completion is declared outside the session.
+    ExternalGate,
+    /// Completion is checked against exact declared text.
+    Declared {
+        /// Exact statement the finish check evaluates.
+        statement: String,
+    },
+}
+
 /// The §7 lifecycle members of a creation: omission means an open gate, an
 /// unmonitored conversation, and no finish condition.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -3476,9 +3489,9 @@ pub struct SessionLifecycleMembers {
     /// The ownership the creation establishes.
     #[serde(default)]
     pub ownership: SessionOwnership,
-    /// The finish condition an owned session owes, as declared text.
+    /// The finish condition an owned session owes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub finish_condition: Option<String>,
+    pub finish_condition: Option<FinishCondition>,
 }
 
 impl SessionLifecycleMembers {
@@ -3685,7 +3698,7 @@ pub enum ClientRequest {
         command_id: CommandId,
         session_id: CanonicalUuid,
         #[serde(deserialize_with = "deserialize_required_nullable")]
-        finish_condition: Option<String>,
+        finish_condition: Option<FinishCondition>,
     },
     /// Drop the liveness obligation.
     ReleaseSession {
@@ -4169,13 +4182,13 @@ impl ClientRequest {
                 ..
             } => validate_goal_text(guidance)?,
             Self::AdoptSession {
-                finish_condition: Some(finish_condition),
+                finish_condition: Some(FinishCondition::Declared { statement }),
                 ..
-            } => validate_goal_text(finish_condition)?,
+            } => validate_goal_text(statement)?,
             Self::CreateSession {
                 lifecycle:
                     SessionLifecycleMembers {
-                        finish_condition: Some(finish_condition),
+                        finish_condition: Some(FinishCondition::Declared { statement }),
                         ..
                     },
                 ..
@@ -4183,11 +4196,11 @@ impl ClientRequest {
             | Self::CreateSessionFromTemplate {
                 lifecycle:
                     SessionLifecycleMembers {
-                        finish_condition: Some(finish_condition),
+                        finish_condition: Some(FinishCondition::Declared { statement }),
                         ..
                     },
                 ..
-            } => validate_goal_text(finish_condition)?,
+            } => validate_goal_text(statement)?,
             Self::CreateSession { .. }
             | Self::CreateSessionFromTemplate { .. }
             | Self::ListTemplates {}
@@ -4205,6 +4218,10 @@ impl ClientRequest {
             | Self::ResumeSession { .. }
             | Self::AdoptSession {
                 finish_condition: None,
+                ..
+            }
+            | Self::AdoptSession {
+                finish_condition: Some(FinishCondition::ExternalGate),
                 ..
             }
             | Self::ReleaseSession { .. }
@@ -11822,9 +11839,20 @@ mod tests {
             ClientRequest::AdoptSession {
                 command_id: command(12)?,
                 session_id: uuid(3),
-                finish_condition: Some(String::from("the branch is green")),
+                finish_condition: Some(super::FinishCondition::Declared {
+                    statement: String::from("the branch is green"),
+                }),
             },
-            r#"{"type":"adopt_session","command_id":"00000000-0000-0000-0000-00000000000c","session_id":"00000000-0000-0000-0000-000000000003","finish_condition":"the branch is green"}"#,
+            r#"{"type":"adopt_session","command_id":"00000000-0000-0000-0000-00000000000c","session_id":"00000000-0000-0000-0000-000000000003","finish_condition":{"kind":"declared","statement":"the branch is green"}}"#,
+        )?;
+        assert_client_request_round_trip(
+            request(9)?,
+            ClientRequest::AdoptSession {
+                command_id: command(13)?,
+                session_id: uuid(3),
+                finish_condition: Some(super::FinishCondition::ExternalGate),
+            },
+            r#"{"type":"adopt_session","command_id":"00000000-0000-0000-0000-00000000000d","session_id":"00000000-0000-0000-0000-000000000003","finish_condition":{"kind":"external_gate"}}"#,
         )?;
         assert_server_message_round_trip(
             request(9)?,

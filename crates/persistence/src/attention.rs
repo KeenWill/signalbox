@@ -17,6 +17,8 @@ use crate::mapping::{
     SessionLifecycleStateKind, goal_blocked_reason_from_str, session_lifecycle_state_kind_from_str,
 };
 
+const UNMONITORED_EXECUTION_FAILURE_NEED: &str = "The goal turn failed to execute and the session is unmonitored, so no automatic resumption is scheduled. Resolve the failed goal turn's execution condition, then resume the goal.";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AttentionCorruption {
     Missing(&'static str),
@@ -350,7 +352,7 @@ macro_rules! summary_sql {
     SELECT DISTINCT ON (goal.session_id)
            goal.session_id, goal.event_ordinal,
            goal.generation::text AS generation, goal.event_kind,
-           goal.blocked_reason, goal.scheduler_turn_id,
+           goal.blocked_reason, goal.need, goal.scheduler_turn_id,
            LEFT(goal.need, $4) AS need_summary
       FROM goal_event AS goal JOIN selected USING (session_id)
      ORDER BY goal.session_id, goal.event_ordinal DESC
@@ -361,6 +363,7 @@ macro_rules! summary_sql {
       FROM latest_goal AS goal
      WHERE goal.event_kind = 'blocked'
        AND goal.blocked_reason = 'execution_failure'
+       AND goal.need <> $12
        -- A headless approval escalation blocks the goal without arming any
        -- automatic resumption: it writes its `execution_failure` block outside
        -- `PostgresGoalPassDisposition` precisely so that only an operator can
@@ -731,6 +734,7 @@ pub(crate) async fn load_summaries(
         .bind(required_tags)
         .bind(include_archived)
         .bind(after_activity)
+        .bind(UNMONITORED_EXECUTION_FAILURE_NEED)
         .fetch_all(&mut **transaction)
         .await?
         .iter()

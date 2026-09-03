@@ -186,11 +186,11 @@ use signalbox_process_protocol::{
     DescendantTerminationScope as WireDescendantTerminationScope,
     EffectiveModelSettings as WireEffectiveModelSettings, ErrorCode, ErrorDetail,
     FailedModelCallCause, FailedModelCallDisposition, FailedTerminalModelCall,
-    FastMode as WireFastMode, FastModeOverlay as WireFastModeOverlay, FrameDecodeErrorKind,
-    FrameEncodeError, GoalBlockedProvenance as WireGoalBlockedProvenance,
-    GoalBlockedReason as WireGoalBlockedReason, GoalCommandRejection as WireGoalCommandRejection,
-    GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
-    ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
+    FastMode as WireFastMode, FastModeOverlay as WireFastModeOverlay,
+    FinishCondition as WireFinishCondition, FrameDecodeErrorKind, FrameEncodeError,
+    GoalBlockedProvenance as WireGoalBlockedProvenance, GoalBlockedReason as WireGoalBlockedReason,
+    GoalCommandRejection as WireGoalCommandRejection, GoalHistoryEvent, GoalLifecycleState,
+    ImportedContentKind, ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
     ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, LifecycleActorClass,
     MAX_BLOB_READ_BYTES, MAX_FRAME_BYTES, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
@@ -1964,11 +1964,8 @@ where
             session_id,
             finish_condition,
         } => {
-            let finish_condition = match finish_condition
-                .map(FinishConditionStatement::try_new)
-                .transpose()
-            {
-                Ok(statement) => statement.map(FinishCondition::Declared),
+            let finish_condition = match finish_condition.map(domain_finish_condition).transpose() {
+                Ok(finish_condition) => finish_condition,
                 Err(_) => {
                     return write_error(
                         writer,
@@ -9046,6 +9043,15 @@ struct LifecycleMembers {
     finish_condition: Option<FinishCondition>,
 }
 
+fn domain_finish_condition(wire: WireFinishCondition) -> Result<FinishCondition, ()> {
+    match wire {
+        WireFinishCondition::ExternalGate => Ok(FinishCondition::ExternalGate),
+        WireFinishCondition::Declared { statement } => FinishConditionStatement::try_new(statement)
+            .map(FinishCondition::Declared)
+            .map_err(|_| ()),
+    }
+}
+
 impl LifecycleMembers {
     fn admit(wire: SessionLifecycleMembers) -> Result<Self, ()> {
         Ok(Self {
@@ -9059,9 +9065,7 @@ impl LifecycleMembers {
             },
             finish_condition: wire
                 .finish_condition
-                .map(|statement| {
-                    FinishConditionStatement::try_new(statement).map(FinishCondition::Declared)
-                })
+                .map(domain_finish_condition)
                 .transpose()
                 .map_err(|_| ())?,
         })
@@ -17186,9 +17190,9 @@ mod tests {
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportRejectionClass,
         DelegationToolRequestState as WireDelegationToolRequestState, ErrorCode, ErrorDetail,
-        FrameEncodeError, GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker,
-        ImportedSpeaker, MAX_CONTENT_FRAGMENT_BYTES, MetadataActor, ProtocolVersion,
-        RejectionDetail, ReviewFindingInput, ReviewSeverity,
+        FinishCondition as WireFinishCondition, FrameEncodeError, GoalLifecycleState,
+        ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, MAX_CONTENT_FRAGMENT_BYTES,
+        MetadataActor, ProtocolVersion, RejectionDetail, ReviewFindingInput, ReviewSeverity,
         RunnerPlacementRevision as WireRunnerPlacementRevision,
         RunnerSandboxProfile as WireRunnerSandboxProfile,
         RunnerStateTransitionState as WireRunnerStateTransitionState,
@@ -17223,9 +17227,10 @@ mod tests {
         admit_snapshot_reader, admitted_user_content, blob_upload_begin_preflight,
         bounded_rendered_compaction_boundary, canonical_review_request_digest,
         claude_conversion_failure_disposition, codex_conversion_failure_disposition,
-        consume_snapshot_queued_update, context_compaction_failure_disposition, execute_import,
-        foreground_peer_activity, handle_append_conversation_import,
-        handle_begin_conversation_import, handle_commit_conversation_import, import_evidence,
+        consume_snapshot_queued_update, context_compaction_failure_disposition,
+        domain_finish_condition, execute_import, foreground_peer_activity,
+        handle_append_conversation_import, handle_begin_conversation_import,
+        handle_commit_conversation_import, import_evidence,
         imported_conversation_internal_diagnostic, inspect_connection_completion,
         internal_protocol_error, map_rejection, nudge_after_process_await_rejection,
         nudge_after_process_message_rejection, nudge_delegation_issuer, nudge_delegation_wake,
@@ -20917,6 +20922,26 @@ mod tests {
                 ),
                 state: WireRunnerStateTransitionState::WorkingDirectoryChanged,
             }
+        );
+    }
+
+    #[test]
+    fn finish_condition_wire_union_admits_both_domain_variants() {
+        let statement = signalbox_domain::FinishConditionStatement::try_new(String::from(
+            "the branch is green",
+        ))
+        .expect("the fixture statement is admitted");
+        assert_eq!(
+            domain_finish_condition(WireFinishCondition::ExternalGate)
+                .expect("the external gate is admitted"),
+            signalbox_domain::FinishCondition::ExternalGate
+        );
+        assert_eq!(
+            domain_finish_condition(WireFinishCondition::Declared {
+                statement: statement.as_str().to_owned(),
+            })
+            .expect("the declared condition is admitted"),
+            signalbox_domain::FinishCondition::Declared(statement)
         );
     }
 }
