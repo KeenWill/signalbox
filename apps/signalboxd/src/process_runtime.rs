@@ -15888,15 +15888,18 @@ async fn closure_settled(services: &ConnectionServices, session: SessionId) -> b
 const CLOSURE_INTERRUPT_MASK: u128 = 0x5e55_1001_c105_4e00_0000_0000_0000_0001;
 
 /// Derives the interrupt's identity from the closure command's. The two
-/// identities the mask would carry onto nil and max stay fixed instead, which
-/// keeps the derivation a bijection on the admitted identities.
+/// identities the mask would carry onto nil and max swap with each other
+/// instead, which keeps the derivation a bijection on the admitted identities
+/// that never returns its own input.
 fn closure_interrupt_identity(command: DurableCommandId) -> uuid::Uuid {
     let command = command.as_uuid().as_u128();
-    if command == CLOSURE_INTERRUPT_MASK || command == !CLOSURE_INTERRUPT_MASK {
-        uuid::Uuid::from_u128(command)
+    uuid::Uuid::from_u128(if command == CLOSURE_INTERRUPT_MASK {
+        !CLOSURE_INTERRUPT_MASK
+    } else if command == !CLOSURE_INTERRUPT_MASK {
+        CLOSURE_INTERRUPT_MASK
     } else {
-        uuid::Uuid::from_u128(command ^ CLOSURE_INTERRUPT_MASK)
-    }
+        command ^ CLOSURE_INTERRUPT_MASK
+    })
 }
 
 const fn wire_lifecycle_effect(value: SessionLifecycleApplication) -> SessionLifecycleEffect {
@@ -20974,16 +20977,23 @@ mod tests {
                 value,
             )))
         };
-        let images = [
-            identity(super::CLOSURE_INTERRUPT_MASK),
-            identity(super::CLOSURE_INTERRUPT_MASK ^ 0b10),
-            identity(!super::CLOSURE_INTERRUPT_MASK),
-            identity(!super::CLOSURE_INTERRUPT_MASK ^ 0b10),
+        let sources = [
+            super::CLOSURE_INTERRUPT_MASK,
+            super::CLOSURE_INTERRUPT_MASK ^ 0b10,
+            !super::CLOSURE_INTERRUPT_MASK,
+            !super::CLOSURE_INTERRUPT_MASK ^ 0b10,
         ];
+        let images = sources.map(identity);
         assert!(
             images
                 .iter()
                 .all(|image| !image.is_nil() && !image.is_max())
+        );
+        assert!(
+            sources
+                .iter()
+                .zip(&images)
+                .all(|(source, image)| image.as_u128() != *source)
         );
         assert_eq!(images.iter().collect::<BTreeSet<_>>().len(), images.len());
     }
