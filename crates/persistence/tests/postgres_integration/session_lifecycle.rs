@@ -2519,3 +2519,52 @@ async fn a_resume_cannot_lift_a_park_under_a_committed_closure() -> Result<(), B
     drop(container);
     Ok(())
 }
+
+/// §2: a goal command cannot contradict a committed closure. Its own terminal
+/// event would make the settlement refuse, and with the handoff standing and
+/// activation frozen behind it the session could not move at all.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_goal_command_cannot_contradict_a_committed_closure() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    let session = creation_session(59);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(59))
+        .await?;
+    attach_goal(&pool, session, 59).await?;
+    repository
+        .commit_pending_terminal(
+            session,
+            SessionTerminalOutcome::FailedUnknown,
+            LifecycleActor::Watchdog,
+        )
+        .await?;
+
+    let outcome = GoalRepository::new(pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 59 + 0xd00)),
+                session,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+    assert!(matches!(outcome, GoalCommandHandlingOutcome::LineageMoved));
+
+    let settled = repository.settle_pending_terminal(session).await?;
+    assert_eq!(
+        settled,
+        SessionLifecycleState::Terminal {
+            outcome: SessionTerminalOutcome::FailedUnknown,
+        }
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

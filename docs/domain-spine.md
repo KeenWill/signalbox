@@ -10698,6 +10698,7 @@ pub trait EligibilityWorkSource {
 
     fn next(&mut self) -> impl Future<Output = Result<SessionId, Self::Error>> + Send;
     fn take_returned_dispatch_start(&mut self, _session: SessionId) -> bool;
+    fn take_returned_unmonitored(&mut self, _session: SessionId) -> bool;
     fn take_pending_dispatch_start(&mut self) -> Option<SessionId>;
     fn next_pending_dispatch_start(
         &mut self,

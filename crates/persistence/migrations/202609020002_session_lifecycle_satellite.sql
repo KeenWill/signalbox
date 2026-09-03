@@ -1486,6 +1486,15 @@ BEGIN
     THEN
         RETURN NULL;
     END IF;
+    -- A failed closure is not a finished dispatch. The obligation insert
+    -- downstream admits only the three goal kinds, so releasing the batch here
+    -- would retire the dispatch with nothing recorded to retry it.
+    IF NEW.event_kind = 'session_closed'
+       AND NEW.session_outcome_kind IN
+            ('failed_retryable', 'failed_structural', 'failed_unknown')
+    THEN
+        RETURN NULL;
+    END IF;
     PERFORM repo_watch_release_completed_dispatch_batches_for_turn(
         NULL::uuid,
         NEW.session_id
