@@ -235,8 +235,9 @@ it cannot block the resumed pursuit. Continuation stops on blocked, achieved,
 user-stopped, and a superseded generation; supersession's successor is pursuing
 and therefore independently eligible to continue.
 
-**Implemented behavior.** An execution-failure block owes its own bounded
-automatic resumption. The daemon derives from the goal event history how many
+**Implemented behavior.** An execution-failure block on an owned session owes
+its own bounded automatic resumption; on an unmonitored session it names none,
+and adoption arms it. The daemon derives from the goal event history how many
 consecutive automatic resumptions the current run has already spent: the run is
 the trailing alternation of execution-failure blocks and the resumptions that
 answered them, and every other event ends it. That history yields two counts,

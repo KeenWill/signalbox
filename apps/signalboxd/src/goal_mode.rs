@@ -556,13 +556,27 @@ impl PostgresGoalPassDisposition {
             delay: self.numeric_bounds.base_backoff,
         }
         .need()?;
+        let unmonitored_need = AutomaticResumption::Unmonitored.need()?;
         let mut remaining = AUTOMATIC_RESUME_INFRASTRUCTURE_RETRIES;
         let pending = loop {
-            match self
+            // An adopted session's block still names the unmonitored need.
+            let scheduled = self
                 .repository
                 .pending_execution_failures_with_need(&scheduled_need)
-                .await
-            {
+                .await;
+            let adopted = self
+                .repository
+                .pending_execution_failures_with_need(&unmonitored_need)
+                .await;
+            match scheduled.and_then(|scheduled| {
+                adopted.map(|adopted| {
+                    scheduled
+                        .into_vec()
+                        .into_iter()
+                        .chain(adopted.into_vec())
+                        .collect::<Vec<_>>()
+                })
+            }) {
                 Ok(pending) => break pending,
                 Err(error) if remaining > 0 => {
                     remaining = remaining.saturating_sub(1);
@@ -587,6 +601,34 @@ impl PostgresGoalPassDisposition {
             }));
         }
         Ok(count)
+    }
+
+    /// Arms §9 resumption for the execution-failure block an adopted session
+    /// holds: ownership brings the obligation an unmonitored block was not owed.
+    pub fn arm_blocked_goal_resumption(&self, session: SessionId) {
+        let adapter = self.clone();
+        drop(tokio::spawn(async move {
+            match adapter.repository.load_goal(session).await {
+                Ok(Some(goal)) => {
+                    if let Some(blocked) = goal
+                        .events()
+                        .last()
+                        .filter(|event| is_execution_failure_block(event))
+                    {
+                        adapter
+                            .resume_after_execution_failure(session, blocked.ordinal())
+                            .await;
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => tracing::error!(
+                    session = %session.into_uuid(),
+                    cause_code = "goal_adopt_resume_reread_failed",
+                    cause = %error,
+                    "an adopt could not read the goal it should resume"
+                ),
+            }
+        }));
     }
 
     /// Reads the lineage a pending execution-failure block would extend.

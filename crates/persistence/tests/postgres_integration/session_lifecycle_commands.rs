@@ -1032,3 +1032,84 @@ async fn a_supplied_cause_over_a_causeless_park_is_rejected() -> Result<(), Box<
     drop(container);
     Ok(())
 }
+
+/// A pending closure whose only live turn the delegation cascade terminates
+/// logically settles: a runtime-terminal turn is not live.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_pending_closure_settles_when_its_live_turn_becomes_runtime_terminal()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(26);
+    let successor = creation_session(27);
+    let creation = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
+    creation.handle(dispatched_creation(26)).await?;
+    creation.handle(dispatched_creation(27)).await?;
+    let live = queue_turn(&pool, session, 26, 1).await?;
+    activate_turn(&pool, session, 26).await?;
+    let committed = recorded(
+        &pool,
+        lifecycle_command(
+            26,
+            1,
+            session,
+            SessionLifecycleOperation::Supersede { successor },
+        ),
+    )
+    .await?;
+    assert!(matches!(
+        committed,
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::ClosurePending { .. })
+    ));
+
+    // Stand in for a delegated child turn the parent's cascade terminates
+    // logically: the flag is admitted on delegation-origin turns only.
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET origin_kind = 'delegation', origin_accepted_input_id = NULL
+          WHERE turn_id = $1",
+    )
+    .bind(live.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    // The cascade's own proofs are out of scope here; only the settlement
+    // trigger runs on the flag write.
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE turn_lifecycle ENABLE TRIGGER turn_lifecycle_settles_pending_terminal",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("UPDATE turn_lifecycle SET delegation_runtime_terminal = true WHERE turn_id = $1")
+        .bind(live.into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    let settled = SessionLifecycleRepository::new(pool.clone())
+        .load(session)
+        .await?
+        .expect("the session keeps its lifecycle row");
+    assert_eq!(
+        settled.state(),
+        SessionLifecycleState::Terminal {
+            outcome: SessionTerminalOutcome::Superseded {
+                by: Some(successor),
+            },
+        }
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

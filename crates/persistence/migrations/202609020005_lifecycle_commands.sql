@@ -330,7 +330,6 @@ CREATE TABLE session_lifecycle_command (
     rejection_kind text,
     applied_effect_kind text,
     live_turn_id uuid,
-    live_defaults_version numeric(20,0),
 
     CONSTRAINT session_lifecycle_command_pkey PRIMARY KEY (command_id),
     CONSTRAINT session_lifecycle_command_kind_closed
@@ -389,10 +388,6 @@ CREATE TABLE session_lifecycle_command (
             'closed'::text, 'closure_pending'::text, 'resumed'::text, 'ownership_changed'::text
         ])))
         AND ((applied_effect_kind = 'closure_pending'::text) = (live_turn_id IS NOT NULL))
-        AND ((applied_effect_kind = 'closure_pending'::text) = (live_defaults_version IS NOT NULL))
-        AND ((live_defaults_version IS NULL)
-             OR ((live_defaults_version >= (1)::numeric)
-                 AND (live_defaults_version <= '18446744073709551615'::numeric)))
     ),
     CONSTRAINT session_lifecycle_command_rejection_closed CHECK (
         (rejection_kind IS NULL)
@@ -1122,6 +1117,36 @@ SELECT weeks.week,
   LEFT JOIN turn_causes ON turn_causes.week = weeks.week
   LEFT JOIN call_causes ON call_causes.week = weeks.week;
 
+-- Supersedes 202609020004_event_vocabulary: a runtime-terminal turn is not live
+-- (T2's final head carries the same exemption; drop at the merge-forward).
+CREATE OR REPLACE FUNCTION require_terminal_session_has_no_live_turn() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    live uuid;
+BEGIN
+    IF NEW.state_kind <> 'terminal' THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT lifecycle.turn_id INTO live
+      FROM turn_lifecycle AS lifecycle
+     WHERE lifecycle.session_id = NEW.session_id
+       AND lifecycle.state_kind <> 'terminal'
+       AND NOT lifecycle.delegation_runtime_terminal
+     LIMIT 1;
+
+    IF FOUND THEN
+        RAISE EXCEPTION
+            'terminal session % still holds non-terminal turn %',
+            NEW.session_id, live
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NULL;
+END;
+$$;
+
 --
 -- §10: a closure retires the queued turns it strands.
 --
@@ -1351,7 +1376,7 @@ CREATE FUNCTION settle_session_pending_terminal_from_turn() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    IF NEW.state_kind = 'terminal' THEN
+    IF NEW.state_kind = 'terminal' OR NEW.delegation_runtime_terminal THEN
         PERFORM settle_session_pending_terminal(NEW.session_id);
     END IF;
     RETURN NULL;
@@ -1359,6 +1384,6 @@ END;
 $$;
 
 CREATE CONSTRAINT TRIGGER turn_lifecycle_settles_pending_terminal
-    AFTER UPDATE OF state_kind ON turn_lifecycle
+    AFTER UPDATE OF state_kind, delegation_runtime_terminal ON turn_lifecycle
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW EXECUTE FUNCTION settle_session_pending_terminal_from_turn();

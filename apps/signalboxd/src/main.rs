@@ -2536,6 +2536,7 @@ async fn run_hub(
         eligibility_nudge,
         goal_mode_numeric_bounds,
     );
+    let process_runtime = process_runtime.with_goal_resumption(goal_disposition.clone());
     match goal_disposition
         .reconcile_automatic_resumptions_after_restart()
         .await

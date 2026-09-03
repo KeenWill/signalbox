@@ -255,6 +255,7 @@ use tokio::{
     time::{Instant, sleep, sleep_until},
 };
 
+use crate::goal_mode::PostgresGoalPassDisposition;
 use crate::telemetry::{ModelMetricDisposition, TelemetryMetrics, TurnMetricOutcome};
 use crate::{
     BlobStoreRegistry, FatalRecoveryReporter, HubModelConfiguration, LocalProcessListener,
@@ -320,6 +321,7 @@ struct ConnectionServices {
     pool: PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
     tool_dispatch_gate: InProcessToolDispatchGate,
+    goal_resumption: Option<PostgresGoalPassDisposition>,
     model_configuration: Arc<HubModelConfiguration>,
     context_compaction_model: Arc<dyn ContextCompactionModel>,
     template_configuration: Arc<SessionTemplateConfiguration>,
@@ -371,6 +373,7 @@ pub struct ProcessRuntime {
     pool: PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
     tool_dispatch_gate: InProcessToolDispatchGate,
+    goal_resumption: Option<PostgresGoalPassDisposition>,
     model_configuration: HubModelConfiguration,
     context_compaction_model: Arc<dyn ContextCompactionModel>,
     template_configuration: SessionTemplateConfiguration,
@@ -428,6 +431,7 @@ impl ProcessRuntime {
             pool,
             eligibility_nudge,
             tool_dispatch_gate,
+            goal_resumption: None,
             model_configuration,
             context_compaction_model: Arc::new(UnavailableContextCompactionModel),
             template_configuration,
@@ -440,6 +444,14 @@ impl ProcessRuntime {
                 monitor: monitor_updates,
             },
         }
+    }
+
+    /// Wires the goal-mode disposition that arms §9 resumption when an adopt
+    /// takes a blocked goal.
+    #[must_use]
+    pub fn with_goal_resumption(mut self, disposition: PostgresGoalPassDisposition) -> Self {
+        self.goal_resumption = Some(disposition);
+        self
     }
 
     /// Returns the nonblocking sink that places already-redacted provider text
@@ -508,6 +520,7 @@ impl ProcessRuntime {
             pool: self.pool.clone(),
             eligibility_nudge: self.eligibility_nudge.clone(),
             tool_dispatch_gate: self.tool_dispatch_gate,
+            goal_resumption: self.goal_resumption.clone(),
             model_configuration: self.model_configuration,
             context_compaction_model: self.context_compaction_model,
             template_configuration: self.template_configuration,
@@ -848,6 +861,7 @@ struct ConnectionDependencies {
     pool: PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
     tool_dispatch_gate: InProcessToolDispatchGate,
+    goal_resumption: Option<PostgresGoalPassDisposition>,
     model_configuration: HubModelConfiguration,
     context_compaction_model: Arc<dyn ContextCompactionModel>,
     template_configuration: SessionTemplateConfiguration,
@@ -896,6 +910,7 @@ async fn serve_connections(
         pool: dependencies.pool,
         eligibility_nudge: dependencies.eligibility_nudge,
         tool_dispatch_gate: dependencies.tool_dispatch_gate,
+        goal_resumption: dependencies.goal_resumption,
         model_configuration: Arc::new(dependencies.model_configuration),
         context_compaction_model: dependencies.context_compaction_model,
         template_configuration: Arc::new(dependencies.template_configuration),
@@ -15719,6 +15734,11 @@ where
         Ok(SessionLifecycleCommandHandlingOutcome::Recorded(
             SessionLifecycleCommandResult::Applied(application),
         )) => {
+            if matches!(command.operation(), SessionLifecycleOperation::Adopt { .. })
+                && let Some(goal_resumption) = &services.goal_resumption
+            {
+                goal_resumption.arm_blocked_goal_resumption(session);
+            }
             if let SessionLifecycleApplication::ClosurePending {
                 live_turn,
                 defaults_version,
@@ -15828,7 +15848,7 @@ async fn interrupt_for_closure(
         return Err(());
     };
     let request = SubmitInputRequest::try_new(
-        DurableCommandId::from_uuid(closure_interrupt_identity(command.command_id())),
+        DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
         session,
         content,
         DeliveryRequest::Interrupt {
@@ -15883,23 +15903,6 @@ async fn closure_settled(services: &ConnectionServices, session: SessionId) -> b
             .await,
         Ok(Some(record)) if record.state().is_terminal()
     )
-}
-
-const CLOSURE_INTERRUPT_MASK: u128 = 0x5e55_1001_c105_4e00_0000_0000_0000_0001;
-
-/// Derives the interrupt's identity from the closure command's. The two
-/// identities the mask would carry onto nil and max swap with each other
-/// instead, which keeps the derivation a bijection on the admitted identities
-/// that never returns its own input.
-fn closure_interrupt_identity(command: DurableCommandId) -> uuid::Uuid {
-    let command = command.as_uuid().as_u128();
-    uuid::Uuid::from_u128(if command == CLOSURE_INTERRUPT_MASK {
-        !CLOSURE_INTERRUPT_MASK
-    } else if command == !CLOSURE_INTERRUPT_MASK {
-        CLOSURE_INTERRUPT_MASK
-    } else {
-        command ^ CLOSURE_INTERRUPT_MASK
-    })
 }
 
 const fn wire_lifecycle_effect(value: SessionLifecycleApplication) -> SessionLifecycleEffect {
@@ -20968,33 +20971,5 @@ mod tests {
                 state: WireRunnerStateTransitionState::WorkingDirectoryChanged,
             }
         );
-    }
-
-    #[test]
-    fn closure_interrupt_identities_stay_distinct_at_the_reserved_fixed_points() {
-        let identity = |value: u128| {
-            super::closure_interrupt_identity(DurableCommandId::from_uuid(uuid::Uuid::from_u128(
-                value,
-            )))
-        };
-        let sources = [
-            super::CLOSURE_INTERRUPT_MASK,
-            super::CLOSURE_INTERRUPT_MASK ^ 0b10,
-            !super::CLOSURE_INTERRUPT_MASK,
-            !super::CLOSURE_INTERRUPT_MASK ^ 0b10,
-        ];
-        let images = sources.map(identity);
-        assert!(
-            images
-                .iter()
-                .all(|image| !image.is_nil() && !image.is_max())
-        );
-        assert!(
-            sources
-                .iter()
-                .zip(&images)
-                .all(|(source, image)| image.as_u128() != *source)
-        );
-        assert_eq!(images.iter().collect::<BTreeSet<_>>().len(), images.len());
     }
 }
