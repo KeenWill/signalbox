@@ -937,6 +937,15 @@ async fn a_park_closure_settles_the_suspended_turn_through_the_interrupt_machine
     )
     .await?;
     park_by_statement(&pool, session).await?;
+    sqlx::query(
+        "UPDATE session_lifecycle
+            SET parked_cause = 'retry_budget_exhausted',
+                parked_standing_cause_kind = 'provider_transient'
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await?;
     let repository = SessionLifecycleRepository::new(pool.clone());
 
     let committed = recorded(
@@ -1005,7 +1014,9 @@ async fn a_park_closure_settles_the_suspended_turn_through_the_interrupt_machine
     assert_eq!(
         committed,
         SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::ClosurePending {
-            outcome: SessionTerminalOutcome::FailedUnknown,
+            outcome: SessionTerminalOutcome::FailedRetryable {
+                cause: SessionRetryableCause::ProviderTransient,
+            },
             live_turn: parked.turn,
             defaults_version: SessionConfigurationDefaultsVersion::first(),
         })
@@ -1033,9 +1044,19 @@ async fn a_park_closure_settles_the_suspended_turn_through_the_interrupt_machine
     assert_eq!(
         settled.state(),
         SessionLifecycleState::Terminal {
-            outcome: SessionTerminalOutcome::FailedUnknown,
+            outcome: SessionTerminalOutcome::FailedRetryable {
+                cause: SessionRetryableCause::ProviderTransient,
+            },
         }
     );
+    let cleared_park_payload: (bool, bool) = sqlx::query_as(
+        "SELECT parked_since IS NULL, parked_standing_cause_kind IS NULL
+           FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(cleared_park_payload, (true, true));
 
     pool.close().await;
     drop(container);

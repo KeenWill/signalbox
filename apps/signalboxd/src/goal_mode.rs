@@ -623,19 +623,33 @@ impl PostgresGoalPassDisposition {
     /// leaves the block to its operator instead of to a resume the session no
     /// longer owes.
     async fn resume_owned_execution_failure(&self, session: SessionId, need: &GoalNeed) {
-        match self
-            .repository
-            .pending_owned_execution_failure_with_need(session, need)
-            .await
-        {
-            Ok(Some(blocked)) => self.resume_after_execution_failure(session, blocked).await,
-            Ok(None) => {}
-            Err(error) => tracing::error!(
-                session = %session.into_uuid(),
-                cause_code = "goal_blocked_resume_reread_failed",
-                cause = %error,
-                "a blocked goal could not be read under the session lock"
-            ),
+        let mut remaining = AUTOMATIC_RESUME_INFRASTRUCTURE_RETRIES;
+        loop {
+            match self
+                .repository
+                .pending_owned_execution_failure_with_need(session, need)
+                .await
+            {
+                Ok(Some(blocked)) => {
+                    self.resume_after_execution_failure(session, blocked).await;
+                    return;
+                }
+                Ok(None) => return,
+                Err(error) => {
+                    tracing::error!(
+                        session = %session.into_uuid(),
+                        retries_remaining = remaining,
+                        cause_code = "goal_blocked_resume_reread_failed",
+                        cause = %error,
+                        "a blocked goal could not be read under the session lock"
+                    );
+                    if remaining == 0 {
+                        return;
+                    }
+                    remaining = remaining.saturating_sub(1);
+                    sleep_for_policy(self.numeric_bounds.base_backoff).await;
+                }
+            }
         }
     }
 

@@ -1412,6 +1412,8 @@ BEGIN
            blocked_cycle = NULL,
            parked_cause = NULL,
            parked_responder = NULL,
+           parked_since = NULL,
+           parked_standing_cause_kind = NULL,
            ended_at = statement_timestamp(),
            terminal_outcome_kind = pending_terminal_outcome_kind,
            terminal_cause_kind = pending_terminal_cause_kind,

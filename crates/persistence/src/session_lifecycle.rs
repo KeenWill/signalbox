@@ -875,11 +875,15 @@ async fn settle_goal(
 /// two durable records of one ending that disagree.
 fn closed_goal_agrees(state: &GoalState, outcome: SessionTerminalOutcome) -> bool {
     match (state, outcome) {
-        (GoalState::Achieved { .. }, _)
+        (
+            GoalState::Achieved { .. },
+            SessionTerminalOutcome::AchievedVerified | SessionTerminalOutcome::AchievedDeclared,
+        )
         | (GoalState::UserStopped, SessionTerminalOutcome::Stopped { .. }) => true,
         (GoalState::SessionClosed { outcome: settled }, _) => {
             outcome.closure_outcome() == Some(*settled)
         }
+        (GoalState::Achieved { .. }, _) => false,
         (
             GoalState::UserStopped
             | GoalState::Pursuing
@@ -887,6 +891,35 @@ fn closed_goal_agrees(state: &GoalState, outcome: SessionTerminalOutcome) -> boo
             | GoalState::Superseded { .. },
             _,
         ) => false,
+    }
+}
+
+#[cfg(test)]
+mod closed_goal_agreement_tests {
+    use super::*;
+
+    #[test]
+    fn achieved_goal_agrees_only_with_achievement_outcomes() {
+        let achieved = GoalState::Achieved {
+            report: signalbox_domain::GoalModelProvenance::new(
+                signalbox_domain::TurnId::from_uuid(Uuid::from_u128(1)),
+                signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(2)),
+            )
+            .report_ref(),
+        };
+
+        assert!(closed_goal_agrees(
+            &achieved,
+            SessionTerminalOutcome::AchievedVerified
+        ));
+        assert!(closed_goal_agrees(
+            &achieved,
+            SessionTerminalOutcome::AchievedDeclared
+        ));
+        assert!(!closed_goal_agrees(
+            &achieved,
+            SessionTerminalOutcome::FailedUnknown
+        ));
     }
 }
 

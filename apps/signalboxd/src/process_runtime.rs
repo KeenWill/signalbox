@@ -15676,7 +15676,7 @@ where
                     writer,
                     version,
                     request_id,
-                    ProtocolError::mutation_unavailable(false),
+                    ProtocolError::mutation_commit_ambiguous(),
                 )
                 .await;
             }
@@ -15751,8 +15751,7 @@ where
 }
 
 /// Hands a committed closure's live turn to the committed interrupt
-/// machinery (§2). The interrupt's identity derives from the closure command,
-/// so a retried closure replays the same interrupt.
+/// machinery (§2) under a fresh core-owned identity.
 async fn interrupt_for_closure(
     services: &ConnectionServices,
     command: &SessionLifecycleCommand,
