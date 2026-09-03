@@ -655,7 +655,7 @@ fn query_after_the_evidence_horizon_is_unknown() {
         .resolve(
             Provider::Openai,
             "gpt-5.6-sol",
-            "2026-08-25",
+            "9999-12-31",
             CommercialChannel::Api,
         )
         .unwrap();
@@ -819,12 +819,13 @@ fn projection_breaking_source_text_is_rejected() {
 #[test]
 fn source_ownership_uses_the_canonicalized_url_path() {
     let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
-    assert_eq!(
-        raw["sources"][28]["id"],
-        "oai-codex-model-catalog-2026-08-24"
-    );
-    raw["sources"][28]["url"] =
-        Value::String(String::from("https://github.com/openai/../attacker/repo"));
+    let source = raw["sources"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|source| source["id"] == "oai-codex-model-catalog-2026-08-24")
+        .unwrap();
+    source["url"] = Value::String(String::from("https://github.com/openai/../attacker/repo"));
 
     let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
 

@@ -888,9 +888,8 @@ service_tiers = ["auto", "standard_only"]
 # fast_mode = "request_control"
 # service_tiers = ["auto", "default", "fast"]
 
-# Codex CLI catalog, read on 2026-08-06 from the model catalog the pinned CLI
-# fetches from its provider (`codex debug models`, client 0.146) and from the
-# provider's published CLI documentation. The CLI's set is not the API's: it
+# Codex CLI catalog, read from the model catalog bundled with the pinned 0.153.1
+# CLI and from the provider's published CLI documentation. The CLI's set is not the API's: it
 # publishes no dated snapshots, it serves a model the API does not, and the
 # models it shares with the API carry a 272000 raw window where Chat Completions
 # advertises 1050000 for the same spelling. The CLI reserves 5% of the raw
@@ -904,12 +903,25 @@ service_tiers = ["auto", "standard_only"]
 # the one-adapter rule; serving one of them here means moving its row. The
 # provider marks gpt-5.4 and gpt-5.4-mini for retirement.
 #
-# `max_output_tokens` is conservative-unverified on both rows: the fetched
+# `max_output_tokens` is conservative-unverified on all rows: the fetched
 # catalog carries no output-token field under any name and the CLI exposes no
 # setting, so no provider ceiling is known and the value is purely the operator
 # budget the header describes. The catalog advertises no "none" or "minimal"
 # effort for any model, so no row declares them. A declared service tier is the
-# "priority" request value behind the CLI's fast speed tier.
+# "priority" request value behind the CLI's fast speed tier. Astra's bundled
+# entry advertises neither a service tier nor request-controlled fast mode.
+
+# [[models]]
+# # Explicitly configurable but hidden from the CLI picker. Raw default window:
+# # 272000; usable window: 258400. The bundled catalog also carries an 872000
+# # maximum, but does not claim that window for every account.
+# selection_id = "4965fe4f-a9dd-45e5-b09e-21e9a88d6462"
+# target_id = "11b9520a-0491-4164-9fb6-cf2692419d08"
+# model_family = "codex"
+# provider_model = "gpt-6-astra"
+# max_output_tokens = 8192
+# context_window_tokens = 258400
+# reasoning_levels = ["low", "medium", "high", "xhigh", "max", "ultra"]
 
 # [[models]]
 # # The CLI's own default model. Raw window: 272000; usable window: 258400.
