@@ -171,11 +171,11 @@ recovery as normative behavior:
   passes: for repo-watch work, the external gate re-checked on the exact head
   (sessions have been declared achieved on non-converged heads); otherwise the
   finish condition declared at creation or goal-attach. A finish condition is
-  optional everywhere; the check's verdict is recorded. Recovery: none; slots
-  and worktrees are released.
-- `achieved_declared` — achievement recorded with no passing finish check: none
-  was declared, or the recorded verdict did not pass. Recovery: as
-  `achieved_verified`.
+  optional everywhere; the check's verdict is recorded, and a failing check
+  commits no `achieved` event: the goal blocks with the check result as its need
+  text and stays resumable. Recovery: none; slots and worktrees are released.
+- `achieved_declared` — achievement recorded when no finish condition was
+  declared. Recovery: as `achieved_verified`.
 - `failed_retryable{cause}` — provider transient, quota, overload,
   infrastructure blip. A retryable failure on a live owned session does not
   terminalize it: the session passes through `recovering` or `blocked` (§1)
