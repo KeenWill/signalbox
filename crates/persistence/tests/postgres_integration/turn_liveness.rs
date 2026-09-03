@@ -138,6 +138,65 @@ async fn restart_mid_observation_retains_staleness_evidence() -> Result<(), Box<
     Ok(())
 }
 
+/// Disabling either stale-turn supervision input breaks observation continuity
+/// for both guards, so a later deployment starts both ledgers from their first
+/// observation rather than inheriting credit earned before the disabled run.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn disabled_supervision_clears_guard_observation_history() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let _fixture = activated_watchdog_session(&pool, 0x11_000).await?;
+    let interval = TurnLivenessScanInterval::try_new(std::time::Duration::from_secs(60))?;
+    let repository = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
+    let candidates = repository
+        .quiescent_active_turns(None)
+        .await?
+        .into_candidates();
+    let first_quiescent = repository
+        .record_restart_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            interval,
+            &candidates,
+        )
+        .await?;
+    let first_slot_held = repository
+        .record_restart_complete_observation(TurnLivenessGuardKind::SlotHeld, interval, &candidates)
+        .await?;
+    let advanced_quiescent = repository
+        .record_complete_observation(TurnLivenessGuardKind::Quiescent, interval, &candidates)
+        .await?;
+    let advanced_slot_held = repository
+        .record_complete_observation(TurnLivenessGuardKind::SlotHeld, interval, &candidates)
+        .await?;
+
+    repository.clear_guard_observations().await?;
+
+    let reset_quiescent = repository
+        .record_restart_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            interval,
+            &candidates,
+        )
+        .await?;
+    let reset_slot_held = repository
+        .record_restart_complete_observation(TurnLivenessGuardKind::SlotHeld, interval, &candidates)
+        .await?;
+    assert_ne!(
+        advanced_quiescent[0].ordinal(),
+        first_quiescent[0].ordinal()
+    );
+    assert_ne!(
+        advanced_slot_held[0].ordinal(),
+        first_slot_held[0].ordinal()
+    );
+    assert_eq!(reset_quiescent[0].ordinal(), first_quiescent[0].ordinal());
+    assert_eq!(reset_slot_held[0].ordinal(), first_slot_held[0].ordinal());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// Leaves the session's active turn holding a checkpointed, not yet observed
 /// provider call: the exact shape a legitimately long provider interaction has.
 async fn checkpoint_model_call(

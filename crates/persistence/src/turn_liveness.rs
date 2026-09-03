@@ -301,6 +301,15 @@ impl PostgresTurnLivenessRepository {
             .await
     }
 
+    /// Clears observation continuity while stale-turn supervision is disabled.
+    pub async fn clear_guard_observations(&self) -> Result<(), TurnLivenessRepositoryError> {
+        sqlx::query("DELETE FROM turn_liveness_observation")
+            .execute(&self.pool)
+            .await
+            .map_err(TurnLivenessRepositoryError::observation)?;
+        Ok(())
+    }
+
     async fn record_complete_observation_with_progress(
         &self,
         guard: TurnLivenessGuardKind,

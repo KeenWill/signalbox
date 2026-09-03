@@ -393,6 +393,12 @@ impl TurnLivenessRuntime {
     /// the ledger of how long each turn has stood still, and the lap the
     /// terminalization window is partway through.
     pub async fn run(self, shutdown: watch::Receiver<bool>) {
+        if (self.scan_interval.is_none() || self.staleness_bound.is_none())
+            && let Err(error) = self.repository.clear_guard_observations().await
+        {
+            report_turn_liveness_failure(&error);
+            return;
+        }
         let Some(scan_interval) = self.scan_interval else {
             let mut shutdown = shutdown;
             while !*shutdown.borrow() && shutdown.changed().await.is_ok() {}
