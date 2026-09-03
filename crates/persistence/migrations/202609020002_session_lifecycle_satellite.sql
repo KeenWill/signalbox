@@ -1220,7 +1220,8 @@ CREATE TRIGGER session_lifecycle_arms_its_deadline
 CREATE FUNCTION project_session_lifecycle(
     subject uuid,
     lifts_park boolean,
-    operator_authored boolean DEFAULT false
+    operator_authored boolean DEFAULT false,
+    turn_progressed boolean DEFAULT false
 ) RETURNS void
     LANGUAGE plpgsql
     AS $$
@@ -1358,12 +1359,13 @@ BEGIN
        AND held.blocked_reason IS NOT DISTINCT FROM next_blocked_reason
        AND held.blocked_cycle IS NOT DISTINCT FROM next_blocked_cycle
     THEN
-        -- The state did not move, but an `active` session reaching here did so
-        -- because a turn transitioned -- one terminalized, or a successor
-        -- activated -- and that is the progress the stall deadline measures.
-        -- Only the deadline re-arms: the session entered `active` when its
-        -- first turn started, and `state_entered_at` says so.
-        IF held.state_kind = 'active' AND held.owned THEN
+        -- The state did not move, but a turn transitioned under it -- one
+        -- terminalized, or a successor activated -- and that is the progress
+        -- the stall deadline measures. Queueing another turn is admission, not
+        -- progress, and re-arming on it would let a stalled session postpone
+        -- its own deadline. Only the deadline re-arms: the session entered
+        -- `active` when its first turn started, and `state_entered_at` says so.
+        IF turn_progressed AND held.state_kind = 'active' AND held.owned THEN
             UPDATE session_deadline
                SET armed_at = statement_timestamp(),
                    expires_at = NULL
@@ -1421,7 +1423,12 @@ CREATE FUNCTION project_session_lifecycle_from_turn() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    PERFORM project_session_lifecycle(NEW.session_id, false);
+    PERFORM project_session_lifecycle(
+        NEW.session_id,
+        false,
+        false,
+        TG_OP = 'UPDATE'
+    );
     RETURN NULL;
 END;
 $$;

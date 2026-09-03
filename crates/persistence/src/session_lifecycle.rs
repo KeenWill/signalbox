@@ -327,6 +327,16 @@ impl SessionLifecycleRepository {
             )
             .await);
         }
+        // Lifting a park under a committed closure strands the session: the
+        // settlement wants the park it decided on, and the activation gate
+        // wants the handoff gone.
+        if held.pending_terminal.is_some() {
+            return Err(reject(
+                transaction,
+                SessionLifecycleRejection::PendingTerminalConflict,
+            )
+            .await);
+        }
         write_state(
             &mut transaction,
             &held,

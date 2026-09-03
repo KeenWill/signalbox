@@ -210,6 +210,32 @@ async fn queue_first_turn(
     Ok(turn)
 }
 
+/// Queues one more turn beneath a session's live turn.
+async fn queue_successor_turn(
+    pool: &PgPool,
+    session: SessionId,
+    seed: u128,
+) -> Result<(), Box<dyn Error>> {
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + seed + 0xd00)),
+                session,
+                UserContent::try_text(String::from("lifecycle fixture successor"))
+                    .expect("fixture content is admitted"),
+                DeliveryRequest::StartWhenNoActiveTurn {
+                    configuration: input_choices(2, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + seed + 0xe00)),
+            Some(TurnId::from_uuid(Uuid::from_u128(
+                LIFECYCLE_SEED + seed + 0xf00,
+            ))),
+        )
+        .await?;
+    Ok(())
+}
+
 /// Queues and activates one turn for a session that already exists.
 async fn activate_first_turn(
     pool: &PgPool,
@@ -2364,10 +2390,23 @@ async fn turn_progress_re_arms_the_active_stall_deadline() -> Result<(), Box<dyn
             .fetch_one(&pool)
             .await?;
 
+    // Queueing another turn is admission, not progress: it must not postpone
+    // the deadline of a session the scheduler is not advancing.
+    queue_successor_turn(&pool, session, 56).await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, OffsetDateTime>(
+            "SELECT armed_at FROM session_deadline WHERE session_id = $1"
+        )
+        .bind(session.into_uuid())
+        .fetch_one(&pool)
+        .await?,
+        first
+    );
+
     // Stands in for the turn-boundary write: a turn terminalizing or a
     // successor activating fires this projection, and §1 keeps the session
     // `active` across both, so the projected shape does not move with it.
-    sqlx::query("SELECT project_session_lifecycle($1, false, false)")
+    sqlx::query("SELECT project_session_lifecycle($1, false, false, true)")
         .bind(session.into_uuid())
         .execute(&pool)
         .await?;
@@ -2431,6 +2470,49 @@ async fn a_committed_handoff_takes_no_new_turn() -> Result<(), Box<dyn Error>> {
             .expect("the session keeps its lifecycle row")
             .state(),
         SessionLifecycleState::Dispatched
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// §1/§2: a resume cannot lift a park under a committed closure. The
+/// settlement wants the park it decided on and the activation gate wants the
+/// handoff gone, so lifting it strands the session between them.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_resume_cannot_lift_a_park_under_a_committed_closure() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    let session = creation_session(58);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(58))
+        .await?;
+    park_by_statement(&pool, session).await?;
+    repository
+        .commit_pending_terminal(
+            session,
+            SessionTerminalOutcome::Abandoned,
+            LifecycleActor::Operator,
+        )
+        .await?;
+
+    let error = repository
+        .resume(session)
+        .await
+        .expect_err("the committed decision is the one that settles");
+    assert_eq!(
+        lifecycle_rejection(error),
+        SessionLifecycleRejection::PendingTerminalConflict
+    );
+
+    let settled = repository.settle_pending_terminal(session).await?;
+    assert_eq!(
+        settled,
+        SessionLifecycleState::Terminal {
+            outcome: SessionTerminalOutcome::Abandoned,
+        }
     );
 
     pool.close().await;
