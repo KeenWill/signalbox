@@ -296,9 +296,9 @@ requests the kind as a vocabulary change; modules never reconstruct events by
 joining core tables.
 
 **Proposed behavior.** `command_settled` is the one kind that can settle without
-a session — a rejected `create_session`, a command against an unknown session.
-The outbox header's session column, today `NOT NULL` with a foreign key, becomes
-nullable for exactly this kind.
+a session — a command against an unknown session. The outbox header's session
+column, today `NOT NULL` with a foreign key, becomes nullable for exactly this
+kind.
 
 **Proposed behavior.** The session timeline, which queries the per-kind event
 tables directly today, becomes a durable projection maintained from the outbox
@@ -390,10 +390,7 @@ that path requires the identity to exist before submission.
 **Proposed behavior.** Every claimed command settles as a `command_settled`
 receipt carrying applied-or-rejected with a closed rejection kind (§5).
 Pre-claim admission errors keep their committed synchronous error path and
-record nothing. The validations this proposal adds to session creation are
-authoritative recorded rejections: the create-session family gains a
-recorded-rejection result — an explicit change from its committed
-applied-results-only record, made here rather than silently.
+record nothing.
 
 **Proposed behavior.** `start_gate` is a core concept; the module-owned
 dispatch-lease tables — `repo_watch_dispatch_start_lease` with its `_expiration`
