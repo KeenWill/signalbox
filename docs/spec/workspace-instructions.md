@@ -7,8 +7,10 @@ verified against PR #798 (`agent/agent-docs-skills-foundation`). Durable
 registration, empty eligibility, turn-start evidence, and model-call correlation
 were verified against PR #810 (`agent/agent-docs-skills-model-call-followup`).
 Directory exclusions and limit-set version two were verified against PR #1488
-(`agent/workspace-instruction-exclusions`). The incomplete-discovery operator
-event is verified against this PR (`agent/t1-migration-backfill`).
+(`agent/workspace-instruction-exclusions`); regular-file `.git` markers were
+verified against this PR (`agent/discovery-worktree-roots`). The
+incomplete-discovery operator event is verified against this PR
+(`agent/t1-migration-backfill`).
 
 This page is the foundation proposal at the bottom of the workspace-instruction
 implementation stack. It specifies daemon-owned discovery, registration,
@@ -98,10 +100,10 @@ Entries that cannot be read or classified produce typed discovery findings; they
 do not disappear as an empty successful result.
 
 Discovery does not descend into VCS metadata directories (`.git`, `.hg`, `.svn`,
-`.jj`), workspace descendants containing one of those directories, or
-build/dependency outputs (`target`, `node_modules`, `.venv`, `dist`, `build`). A
-skipped directory entry counts toward the classified-entry bound, but its
-contents do not.
+`.jj`), workspace descendants containing one of those directories or a regular
+`.git` file, or build/dependency outputs (`target`, `node_modules`, `.venv`,
+`dist`, `build`). A skipped directory entry counts toward the classified-entry
+bound, but its contents do not.
 
 The greedy walk is complete only within fixed daemon safety limits. The
 version-two limit set admits at most 100,000 classified directory entries, 4,096
