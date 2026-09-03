@@ -361,9 +361,10 @@ macro_rules! summary_sql {
            goal.scheduler_turn_id AS failed_turn_id, 0::integer AS spent,
            0::integer AS attempted
       FROM latest_goal AS goal
+      JOIN session_lifecycle AS lifecycle USING (session_id)
      WHERE goal.event_kind = 'blocked'
        AND goal.blocked_reason = 'execution_failure'
-       AND goal.need <> $12
+       AND (goal.need <> $12 OR lifecycle.owned)
        -- A headless approval escalation blocks the goal without arming any
        -- automatic resumption: it writes its `execution_failure` block outside
        -- `PostgresGoalPassDisposition` precisely so that only an operator can

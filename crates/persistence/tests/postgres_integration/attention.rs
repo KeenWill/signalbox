@@ -706,7 +706,8 @@ async fn the_attention_state_projects_the_durable_session_state() -> Result<(), 
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn unmonitored_execution_failure_exposes_the_operator_action() -> Result<(), Box<dyn Error>> {
+async fn unmonitored_execution_failure_exposes_the_operator_action_until_adopted()
+-> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xa772_0000;
     let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
@@ -722,6 +723,8 @@ async fn unmonitored_execution_failure_exposes_the_operator_action() -> Result<(
         ))
         .await?;
     commission_fixture_session_goal(&pool, session, goal_seed).await?;
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    lifecycle.release(session, LifecycleActor::Operator).await?;
     sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
@@ -762,6 +765,14 @@ async fn unmonitored_execution_failure_exposes_the_operator_action() -> Result<(
         snapshot.summaries[0].action,
         Some(AttentionAction::ProvideGoalNeed)
     );
+
+    lifecycle.adopt(session, LifecycleActor::Operator).await?;
+    let adopted = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS)
+        .snapshot(identity_query(None))
+        .await?;
+
+    assert_eq!(adopted.summaries[0].state, AttentionState::Blocked);
+    assert_eq!(adopted.summaries[0].action, None);
 
     pool.close().await;
     drop(container);

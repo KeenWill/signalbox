@@ -3531,8 +3531,8 @@ async fn drain_then_restart_loses_no_approvals() -> Result<(), Box<dyn Error>> {
     let mut interrupted = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp(), 'operator')",
     )
     .bind(cut.command.into_uuid())
     .execute(&mut *interrupted)
