@@ -1,7 +1,8 @@
 # Configuration and credentials
 
 The model-call recovery telemetry vocabulary is re-verified against this PR
-(`agent/turn-lifecycle-hardening`).
+(`agent/turn-lifecycle-hardening`). The lifecycle Prometheus gauge inventory is
+verified against this PR (`agent/lifecycle-t3-metrics`).
 
 The browser HTTP listener, same-origin static assets, and generated contract
 bootstrap are verified against this PR (`agent/web-http-transport`). The
@@ -503,7 +504,7 @@ rate-limited and a transient failure does not stop later scrapes.
 SIGNALBOX_PROMETHEUS_BIND=127.0.0.1:9464
 ```
 
-The registry contains exactly six metric names:
+The registry contains exactly nine metric names:
 
 - `signalbox_turns_started_total`, with no labels, counts durable turn
   activations. An operator graphs it as the workload-rate denominator and
@@ -516,6 +517,15 @@ The registry contains exactly six metric names:
   values are `completed`, `known_failed`, `refused`, `cancelled`, and
   `ambiguous`, counts durable terminal model calls. It separates provider-call
   health and refusal from ambiguity that requires recovery handling.
+- `signalbox_session_lifecycle_rate_parts_per_million{metric}` publishes each
+  latest complete weekly rate under the closed labels
+  `session_completion_failure_rate`, `failed_unknown_share`,
+  `overflow_incidence`, `finish_given_overflow`, `wall_rate`,
+  `turn_cause_completeness`, and `model_call_cause_completeness`.
+- `signalbox_sessions_nonterminal_past_deadline` is the current count of owned
+  non-terminal sessions past their armed deadline obligation.
+- `signalbox_session_lifecycle_export_fresh` is one after a successful
+  configured refresh and zero after a failed refresh.
 - `signalbox_scheduler_passes_in_flight`, with no labels, is the current count
   of authoritative scheduler passes holding admission slots.
 - `signalbox_scheduler_oldest_in_flight_pass_age_seconds`, with no labels, is
