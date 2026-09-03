@@ -389,17 +389,13 @@ impl TurnLivenessRuntime {
     /// pass outcome ends this task. Each pass reads its whole rotation before
     /// deciding, paging only within itself — nothing about that paging survives
     /// a pass, and paging across passes is what the ledger's forgetting rule
-    /// forbids. What does survive is process-local and carries no authority:
-    /// the ledger of how long each turn has stood still, and the lap the
-    /// terminalization window is partway through.
+    /// forbids. Observation ordinals survive durably; only the terminalization
+    /// lap is process-local and carries no authority.
     pub async fn run(self, shutdown: watch::Receiver<bool>) {
-        if (self.scan_interval.is_none() || self.staleness_bound.is_none())
-            && let Err(error) = self.repository.clear_guard_observations().await
-        {
-            report_turn_liveness_failure(&error);
-            return;
-        }
         let Some(scan_interval) = self.scan_interval else {
+            if let Err(error) = self.repository.clear_guard_observations().await {
+                report_turn_liveness_failure(&error);
+            }
             let mut shutdown = shutdown;
             while !*shutdown.borrow() && shutdown.changed().await.is_ok() {}
             return;
@@ -411,6 +407,7 @@ impl TurnLivenessRuntime {
                 scan_interval,
                 self.automatic_reconciliation_attempt_budget,
                 numeric_bounds,
+                Some(self.repository),
                 shutdown,
             )
             .await;
@@ -437,6 +434,7 @@ impl TurnLivenessRuntime {
             scan_interval,
             self.automatic_reconciliation_attempt_budget,
             numeric_bounds,
+            None,
             shutdown,
         );
         tokio::join!(quiescent, slot_held, ambiguous_operations);
@@ -516,6 +514,7 @@ async fn run_ambiguous_operation_watchdog(
     scan_interval: TurnLivenessScanInterval,
     automatic_reconciliation_attempt_budget: Option<u32>,
     numeric_bounds: TurnLivenessNumericBounds,
+    mut startup_observation_repository: Option<PostgresTurnLivenessRepository>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut ticker = interval(scan_interval.get());
@@ -524,6 +523,15 @@ async fn run_ambiguous_operation_watchdog(
         match next_turn_liveness_wake(&mut shutdown, &mut ticker).await {
             TurnLivenessWake::Shutdown => return,
             TurnLivenessWake::Scan => {
+                if let Some(observation_repository) = &startup_observation_repository {
+                    match observation_repository.clear_guard_observations().await {
+                        Ok(()) => startup_observation_repository = None,
+                        Err(error) => {
+                            report_turn_liveness_failure(&error);
+                            continue;
+                        }
+                    }
+                }
                 reconcile_ambiguous_operations(
                     &repository,
                     automatic_reconciliation_attempt_budget,
