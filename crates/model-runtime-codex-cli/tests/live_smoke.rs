@@ -85,6 +85,7 @@ apps_mcp_path_override                   removed            false
 artifact                                 under development  false
 auth_elicitation                         stable             true
 background_paginated_rollout_migration   under development  false
+bedrock_setup_wizard                     under development  false
 browser_use                              stable             true
 browser_use_external                     stable             true
 browser_use_full_cdp_access              stable             true
@@ -94,12 +95,14 @@ code_mode_buffered_exec                  removed            false
 code_mode_host                           stable             true
 code_mode_interrupt                      under development  false
 code_mode_only                           under development  false
+code_mode_prewarm                        under development  false
 codex_git_commit                         removed            false
 collaboration_modes                      removed            true
-compaction_image_budget                  under development  false
+compaction_image_budget                  stable             true
 computer_use                             stable             true
 concurrent_reasoning_summaries           under development  false
-content_item_kinds                       under development  false
+content_item_kinds                       stable             true
+context_management                       under development  false
 current_time_reminder                    under development  false
 cwd_relative_turn_diffs                  under development  false
 default_mode_request_user_input          under development  false
@@ -136,7 +139,9 @@ item_ids                                 removed            true
 js_repl                                  removed            false
 js_repl_tools_only                       removed            false
 local_thread_store_compression           under development  false
+local_thread_store_shared_compression    removed            false
 mcp_2026_07_28                           under development  false
+mcp_oauth_refresh_coordination           under development  false
 memories                                 stable             false
 mentions_v2                              stable             true
 multi_agent                              stable             true
@@ -144,10 +149,12 @@ multi_agent_mode                         removed            false
 multi_agent_v2                           stable             false
 network_proxy                            experimental       false
 non_prefixed_mcp_tool_names              under development  false
+omit_app_server_notification_media       under development  false
 personality                              stable             true
 plugin_hooks                             removed            false
 plugin_sharing                           stable             true
 plugins                                  stable             true
+powershell_shell_version                 under development  false
 prevent_idle_sleep                       experimental       false
 psp                                      under development  false
 realtime_conversation                    under development  false
@@ -175,9 +182,12 @@ shell_zsh_fork                           under development  false
 skill_env_var_dependency_prompt          removed            false
 skill_mcp_dependency_install             stable             true
 skill_search                             stable             true
+skip_host_skill_discovery                under development  false
+sleep_tool                               stable             true
 sqlite                                   removed            true
 standalone_web_search                    under development  false
 steer                                    removed            true
+step_model_switching                     under development  false
 terminal_resize_reflow                   removed            true
 terminal_visualization_instructions      under development  false
 token_budget                             under development  false
@@ -201,6 +211,7 @@ web_search_cached                        deprecated         false
 web_search_request                       deprecated         false
 workspace_dependencies                   stable             true
 workspace_owner_usage_nudge              removed            false
+write_stdin_approval                     under development  false
 "#;
 
 /// Inventory entries that do not add a model-visible tool, external
@@ -219,8 +230,10 @@ const NON_CAPABILITY_CODEX_FEATURES: &[&str] = &[
     "apply_patch_streaming_events",
     "apps_mcp_path_override",
     "background_paginated_rollout_migration",
+    "bedrock_setup_wizard",
     "chronicle",
     "code_mode_interrupt",
+    "code_mode_prewarm",
     "codex_git_commit",
     "collaboration_modes",
     "compaction_image_budget",
@@ -243,10 +256,12 @@ const NON_CAPABILITY_CODEX_FEATURES: &[&str] = &[
     "js_repl",
     "js_repl_tools_only",
     "local_thread_store_compression",
+    "local_thread_store_shared_compression",
     "mentions_v2",
     "multi_agent_mode",
     "network_proxy",
     "non_prefixed_mcp_tool_names",
+    "omit_app_server_notification_media",
     "personality",
     "plugin_hooks",
     "prevent_idle_sleep",
@@ -267,6 +282,7 @@ const NON_CAPABILITY_CODEX_FEATURES: &[&str] = &[
     "send_async_message",
     "shell_zsh_fork",
     "skill_env_var_dependency_prompt",
+    "skip_host_skill_discovery",
     "sqlite",
     "steer",
     "terminal_resize_reflow",
@@ -286,6 +302,7 @@ const NON_CAPABILITY_CODEX_FEATURES: &[&str] = &[
     "web_search_cached",
     "web_search_request",
     "workspace_owner_usage_nudge",
+    "write_stdin_approval",
 ];
 
 /// A trivial prompt keeps the exchange to the smallest billable turn that
