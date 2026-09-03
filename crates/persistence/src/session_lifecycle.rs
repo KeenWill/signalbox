@@ -18,7 +18,7 @@
 //! transaction, because a pursuing goal beneath a terminal session would keep
 //! scheduling work no one owns.
 
-use std::{error::Error, fmt, time::Duration};
+use std::{error::Error, fmt};
 
 use signalbox_domain::{
     CoreAgency, Goal, GoalState, LifecycleActor, SessionClosureOutcome, SessionCreationCause,
@@ -198,63 +198,6 @@ impl From<GoalRepositoryError> for SessionLifecycleRepositoryError {
     }
 }
 
-/// Deployment policy for every armed session deadline.
-///
-/// `None` is the configured `none` — unbounded, journaled, and alarm-exempt.
-/// The default is unbounded in every position so a caller that has not written
-/// its policy still satisfies §1's invariant with a recorded unbounded
-/// deadline rather than an absent one.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct SessionLifecycleNumericBounds {
-    /// `dispatched` to `active`.
-    pub dispatch: Option<Duration>,
-    /// A held start gate.
-    pub start_gate: Option<Duration>,
-    /// An owned ungated creation's first input.
-    pub first_input: Option<Duration>,
-    /// An active session making no progress.
-    pub active_stall: Option<Duration>,
-    /// An outstanding approval decision.
-    pub waiting_approval: Option<Duration>,
-    /// An external gate.
-    pub waiting_external: Option<Duration>,
-    /// A delegated child.
-    pub waiting_child: Option<Duration>,
-    /// A provider backoff.
-    pub waiting_provider_retry: Option<Duration>,
-    /// Pipeline backlog.
-    pub waiting_pipeline: Option<Duration>,
-    /// A recorded scheduler fault.
-    pub waiting_scheduler: Option<Duration>,
-    /// A running recovery.
-    pub recovering: Option<Duration>,
-    /// A blocked generation.
-    pub blocked: Option<Duration>,
-    /// The parked re-notification interval.
-    pub parked_renotify: Option<Duration>,
-}
-
-impl SessionLifecycleNumericBounds {
-    /// Returns each deadline's durable spelling beside its configured bound.
-    fn rows(&self) -> [(&'static str, Option<Duration>); 13] {
-        [
-            ("dispatch", self.dispatch),
-            ("start_gate", self.start_gate),
-            ("first_input", self.first_input),
-            ("active_stall", self.active_stall),
-            ("waiting_approval", self.waiting_approval),
-            ("waiting_external", self.waiting_external),
-            ("waiting_child", self.waiting_child),
-            ("waiting_provider_retry", self.waiting_provider_retry),
-            ("waiting_pipeline", self.waiting_pipeline),
-            ("waiting_scheduler", self.waiting_scheduler),
-            ("recovering", self.recovering),
-            ("blocked", self.blocked),
-            ("parked_renotify", self.parked_renotify),
-        ]
-    }
-}
-
 /// One session's durable lifecycle facts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SessionLifecycleRecord {
@@ -308,58 +251,6 @@ impl SessionLifecycleRepository {
     /// Uses the supplied pool for atomic transitions and fail-closed loads.
     pub const fn new(pool: PgPool) -> Self {
         Self { pool }
-    }
-
-    /// Writes the deployment's configured deadline policy.
-    ///
-    /// §1 lets a bound live in config or the database. The daemon's
-    /// `[numeric_bounds]` policy is the source; this installs it where the
-    /// arming trigger reads it, so moving a session and re-arming its deadline
-    /// stay one statement.
-    pub async fn apply_configured_bounds(
-        &self,
-        bounds: &SessionLifecycleNumericBounds,
-    ) -> Result<(), SessionLifecycleRepositoryError> {
-        let mut transaction = self.pool.begin().await?;
-        for (kind, bound) in bounds.rows() {
-            // Upsert, not update: a missing policy row reads as `none` in the
-            // arming trigger, so an update that matched nothing would turn a
-            // configured bound into an unbounded one without saying so.
-            sqlx::query(
-                "INSERT INTO session_lifecycle_bound (deadline_kind, bound)
-                 VALUES ($1, $2)
-                 ON CONFLICT (deadline_kind) DO UPDATE
-                    SET bound = EXCLUDED.bound,
-                        updated_at = statement_timestamp()",
-            )
-            .bind(kind)
-            .bind(bound)
-            .execute(&mut *transaction)
-            .await?;
-        }
-        // A policy change reaches the deadlines already armed under the old
-        // one. Nothing else would: the arming trigger fires on the satellite,
-        // and a session sitting in `created` or `parked` has no transition
-        // coming -- so a bound narrowed from `none` would never catch the
-        // stalled session it was configured for. The expiry is recomputed from
-        // the instant each deadline was armed, so the change moves the
-        // deadline without granting the session fresh time.
-        sqlx::query(
-            "UPDATE session_deadline AS armed
-                SET expires_at = CASE
-                        WHEN policy.bound IS NULL THEN NULL
-                        ELSE armed.armed_at + policy.bound
-                    END
-               FROM session_lifecycle_bound AS policy
-              WHERE policy.deadline_kind = armed.deadline_kind
-                AND armed.expires_at IS DISTINCT FROM CASE
-                        WHEN policy.bound IS NULL THEN NULL
-                        ELSE armed.armed_at + policy.bound
-                    END",
-        )
-        .execute(&mut *transaction)
-        .await?;
-        commit(transaction).await
     }
 
     /// Loads one session's lifecycle facts.
@@ -433,6 +324,16 @@ impl SessionLifecycleRepository {
             return Err(reject(
                 transaction,
                 SessionLifecycleRejection::TransitionNotAdmitted,
+            )
+            .await);
+        }
+        // Lifting a park under a committed closure strands the session: the
+        // settlement wants the park it decided on, and the activation gate
+        // wants the handoff gone.
+        if held.pending_terminal.is_some() {
+            return Err(reject(
+                transaction,
+                SessionLifecycleRejection::PendingTerminalConflict,
             )
             .await);
         }
@@ -740,7 +641,6 @@ pub(crate) async fn close_in_transaction(
     }
     settle_goal(connection, session, outcome, actor).await?;
     write_state(connection, &held, terminal, actor).await?;
-    record_cleanup_obligation(connection, session, outcome).await?;
     Ok(terminal)
 }
 
@@ -887,32 +787,6 @@ async fn append_session_closure(
             "settled goal recorded no event",
         ))?;
     goal::insert_event_for_session_closure(connection, session, event).await?;
-    Ok(())
-}
-
-/// Records the cleanup one outcome owes beyond the release its closure already
-/// performed.
-///
-/// Every terminal outcome releases the session's held dispatch slot, which the
-/// closure's own goal event does. Only an operator write-off leaves worktrees
-/// and containers behind, so only it records an obligation for them.
-async fn record_cleanup_obligation(
-    connection: &mut PgConnection,
-    session: SessionId,
-    outcome: SessionTerminalOutcome,
-) -> Result<(), SessionLifecycleRepositoryError> {
-    if !outcome.records_cleanup_obligations() {
-        return Ok(());
-    }
-    sqlx::query(
-        "INSERT INTO session_cleanup_obligation (session_id, outcome_kind)
-         VALUES ($1, $2)
-         ON CONFLICT (session_id) DO NOTHING",
-    )
-    .bind(session_id_to_uuid(session))
-    .bind(EncodedTerminal::from_outcome(outcome).outcome)
-    .execute(&mut *connection)
-    .await?;
     Ok(())
 }
 

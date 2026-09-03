@@ -670,7 +670,7 @@ async fn the_attention_state_projects_the_durable_session_state() -> Result<(), 
     lifecycle
         .park(
             session,
-            SessionParkCause::ProgressBudgetExhausted,
+            SessionParkCause::OperatorHold,
             SessionParkResponder::Operator,
             None,
             LifecycleActor::Core {

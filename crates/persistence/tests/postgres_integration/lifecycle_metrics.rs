@@ -7,8 +7,6 @@
 //! week, an unbounded deadline, and a deadline that has expired. The
 //! assertions are on the numbers.
 
-use std::time::Duration;
-
 use sqlx::types::time::PrimitiveDateTime;
 
 use crate::*;
@@ -25,7 +23,7 @@ use signalbox_persistence::{
     operator_status::{
         ProcessOperatorStatusCounts, ProcessOperatorStatusItem, ProcessOperatorStatusRepository,
     },
-    session_lifecycle::{SessionLifecycleNumericBounds, SessionLifecycleRepository},
+    session_lifecycle::SessionLifecycleRepository,
 };
 
 const METRIC_SEED: u128 = 0x12fe_0000;
@@ -453,12 +451,6 @@ async fn an_unbounded_deadline_is_exempt_and_a_missing_record_is_not() -> Result
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_deadline_counts_once_it_expires_and_not_before() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    SessionLifecycleRepository::new(pool.clone())
-        .apply_configured_bounds(&SessionLifecycleNumericBounds {
-            first_input: Some(Duration::from_secs(60)),
-            ..SessionLifecycleNumericBounds::default()
-        })
-        .await?;
     let session = owned_session(&pool, 0x80).await?;
 
     sqlx::query(
@@ -483,7 +475,7 @@ async fn a_deadline_counts_once_it_expires_and_not_before() -> Result<(), Box<dy
     let expired = LifecycleMetricsRepository::new(pool.clone()).read().await?;
     assert_eq!(expired.nonterminal_past_deadline(), 1);
     let violation = one_deadline_violation(&pool).await?;
-    assert_eq!(violation.deadline_kind(), Some("first_input"));
+    assert_eq!(violation.deadline_kind(), Some("admission"));
     assert!(
         violation
             .expired_for_seconds()

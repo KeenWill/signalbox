@@ -50,7 +50,6 @@ use signalbox_persistence::{
     model_execution::PostgresModelCallRepository,
     repo_watch_dispatch::{PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError},
     scheduler::PostgresEligibilitySweep,
-    session_lifecycle::{SessionLifecycleNumericBounds, SessionLifecycleRepository},
     start_eligible_turn::StartEligibleTurnRepository,
     startup::PostgresStartupScanRepository,
     turn_liveness::TurnLivenessPersistenceBounds,
@@ -1527,21 +1526,6 @@ async fn run_hub(
         configured_u32("automatic_resume_attempt_ceiling")?,
         configured_duration("automatic_resume_startup_retry_delay"),
     );
-    let session_lifecycle_numeric_bounds = SessionLifecycleNumericBounds {
-        dispatch: configured_duration("session_dispatch_deadline"),
-        start_gate: configured_duration("session_start_gate_deadline"),
-        first_input: configured_duration("session_first_input_deadline"),
-        active_stall: configured_duration("session_active_stall_deadline"),
-        waiting_approval: configured_duration("session_waiting_approval_deadline"),
-        waiting_external: configured_duration("session_waiting_external_deadline"),
-        waiting_child: configured_duration("session_waiting_child_deadline"),
-        waiting_provider_retry: configured_duration("session_waiting_provider_retry_deadline"),
-        waiting_pipeline: configured_duration("session_waiting_pipeline_deadline"),
-        waiting_scheduler: configured_duration("session_waiting_scheduler_deadline"),
-        recovering: configured_duration("session_recovering_deadline"),
-        blocked: configured_duration("session_blocked_deadline"),
-        parked_renotify: configured_duration("session_parked_renotify_interval"),
-    };
     // A zero interval reaches `tokio::time::interval`, which refuses a zero
     // period by panicking; a spawned task's panic is a runtime defect that
     // stops the daemon. A configuration that means "never export" spells that
@@ -1842,20 +1826,6 @@ async fn run_hub(
                     SanitizedStartupCause::Static("database_migration_failed"),
                 )
             })?;
-            // The deadline policy lands with the schema it governs. §1 lets a
-            // bound live in config or the database, and it lives in both: this
-            // installs the deployment's `[numeric_bounds]` policy where the
-            // arming trigger reads it, so a session that moves state re-arms
-            // its deadline in the same statement rather than in a caller.
-            SessionLifecycleRepository::new(migration_pool.clone())
-                .apply_configured_bounds(&session_lifecycle_numeric_bounds)
-                .await
-                .map_err(|_| {
-                    erase_startup_cause(
-                        RuntimePhase::Migration,
-                        SanitizedStartupCause::Static("session_deadline_policy_failed"),
-                    )
-                })?;
             tracing::info!(
                 phase = ?RuntimePhase::Migration,
                 "daemon startup phase completed"

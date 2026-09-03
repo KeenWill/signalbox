@@ -6028,14 +6028,12 @@ pub enum SessionRecoveryOperation {
 }
 
 pub enum SessionParkCause {
-    ProgressBudgetExhausted,
     RetryBudgetExhausted,
     StructuralFailure,
     UnknownFailure,
     ActiveStallDeadlineExpired,
     WaitingDeadlineExpired,
     RecoveringDeadlineExpired,
-    BlockedDeadlineExpired,
     OperatorHold,
     ModulePark,
 }
@@ -6067,7 +6065,6 @@ pub enum SessionStructuralCause {
 pub enum SessionRetirementCause {
     DispatchDeadlineExpired,
     StartGateDeadlineExpired,
-    FirstInputDeadlineExpired,
     StrandedQueuedTurn,
 }
 
@@ -6104,7 +6101,6 @@ impl SessionTerminalOutcome {
     pub const fn closure_outcome(&self) -> Option<SessionClosureOutcome>;
     pub const fn forbids_further_escalation(&self) -> bool;
     pub const fn releases_resources(&self) -> bool;
-    pub const fn records_cleanup_obligations(&self) -> bool;
 }
 
 pub enum SessionLifecycleState {
@@ -6137,23 +6133,12 @@ impl SessionLifecycleTransitionError {
 pub enum SessionDeadlineExpiry {
     Retire,
     Park,
-    Renotify,
 }
 
 pub enum SessionDeadlineKind {
-    Dispatch,
-    StartGate,
-    FirstInput,
+    Admission,
     ActiveStall,
-    WaitingApproval,
-    WaitingExternal,
-    WaitingChild,
-    WaitingProviderRetry,
-    WaitingPipeline,
-    WaitingScheduler,
-    Recovering,
-    Blocked,
-    ParkedRenotify,
+    Waiting,
 }
 impl SessionDeadlineKind {
     pub const fn on_expiry(&self) -> SessionDeadlineExpiry;
@@ -10725,6 +10710,7 @@ pub trait EligibilityWorkSource {
 
     fn next(&mut self) -> impl Future<Output = Result<SessionId, Self::Error>> + Send;
     fn take_returned_dispatch_start(&mut self, _session: SessionId) -> bool;
+    fn take_returned_unmonitored(&mut self, _session: SessionId) -> bool;
     fn take_pending_dispatch_start(&mut self) -> Option<SessionId>;
     fn next_pending_dispatch_start(
         &mut self,
