@@ -1199,7 +1199,8 @@ impl TelemetryMetrics {
     ///
     /// A rate with no population leaves its series where it was rather than
     /// exporting a zero the durable columns do not claim. The deadline count
-    /// is instantaneous and always publishes.
+    /// is instantaneous and always publishes, and a completed pass marks the
+    /// series fresh.
     pub(crate) fn observe_lifecycle_metrics(&self, report: &LifecycleMetricsReport) {
         self.lifecycle_nonterminal_past_deadline
             .set(clamp_gauge(report.nonterminal_past_deadline()));
@@ -1231,6 +1232,7 @@ impl TelemetryMetrics {
             "model_call_cause_completeness",
             report.latest_measured(LifecycleWeeklyMetrics::model_call_cause_completeness),
         );
+        self.lifecycle_export_fresh.set(1);
     }
 
     /// Records that the last export failed, so a reader can tell a stale

@@ -26,10 +26,44 @@ ALTER TABLE session_lifecycle
             'repo_watch'::text,
             'commissioned_dispatch'::text
         ])))
+        -- The park itself never outlives the state: only the instant and the
+        -- standing evidence carry, and only into a state that owes an outcome.
+        AND ((state_kind = 'parked'::text)
+             OR ((parked_cause IS NULL) AND (parked_responder IS NULL)))
+        AND ((state_kind = 'parked'::text)
+             OR (state_kind = 'terminal'::text)
+             OR (pending_terminal_outcome_kind IS NOT NULL)
+             OR ((parked_since IS NULL)
+                 AND (parked_standing_cause_kind IS NULL)))
         AND ((parked_standing_cause_kind IS NULL)
              OR (parked_cause IS NOT NULL)
              OR (state_kind = 'terminal'::text)
              OR (pending_terminal_outcome_kind IS NOT NULL))
+        -- The standing evidence is the evidence the cause names. A closure
+        -- reads it to classify the outcome, so a park holding evidence its own
+        -- cause contradicts -- or an exhaustion holding none at all -- closes
+        -- under a classification the park never supported.
+        AND ((parked_cause IS NULL)
+             OR ((parked_cause = 'retry_budget_exhausted'::text)
+                 AND (parked_standing_cause_kind = ANY (ARRAY[
+                    'provider_transient'::text,
+                    'provider_quota_exhausted'::text,
+                    'provider_overloaded'::text,
+                    'infrastructure_failure'::text,
+                    'retry_budget_exhausted'::text
+                 ])))
+             OR ((parked_cause = 'structural_failure'::text)
+                 AND (parked_standing_cause_kind = ANY (ARRAY[
+                    'context_compaction_wall'::text,
+                    'context_headroom_exhausted'::text,
+                    'broken_toolchain'::text,
+                    'moderation_block'::text
+                 ])))
+             OR ((parked_cause <> ALL (ARRAY[
+                    'retry_budget_exhausted'::text,
+                    'structural_failure'::text
+                 ]))
+                 AND (parked_standing_cause_kind IS NULL)))
     );
 
 --
@@ -190,8 +224,11 @@ WITH wall_occurrence AS (
     -- and `parked_since` the instant; terminalization carries both forward.
     -- The park therefore dates the occurrence wherever it exists, and a later
     -- terminal turn naming the same wall never moves it. A turn cause is the
-    -- fallback evidence, for a wall that ended a turn without parking the
-    -- session, at that row's write week. One session's wall is one occurrence.
+    -- next evidence, for a wall that ended a turn without parking the session,
+    -- at that row's write week; a session closed on a wall its turn never
+    -- named is the last, at its closure. The sources are the ones the
+    -- numerator counts, so a walled session always has an occurrence to show.
+    -- One session's wall is one occurrence.
     SELECT session_row.session_id,
            COALESCE(
                (SELECT lifecycle.parked_since
@@ -203,7 +240,12 @@ WITH wall_occurrence AS (
                (SELECT min(turn.recorded_at)
                   FROM turn_lifecycle AS turn
                  WHERE turn.session_id = session_row.session_id
-                   AND turn.terminal_cause_kind = 'context_compaction_wall'::text)
+                   AND turn.terminal_cause_kind = 'context_compaction_wall'::text),
+               (SELECT lifecycle.ended_at
+                  FROM session_lifecycle AS lifecycle
+                 WHERE lifecycle.session_id = session_row.session_id
+                   AND lifecycle.terminal_cause_kind
+                       = 'context_compaction_wall'::text)
            ) AS occurred_at
       FROM session AS session_row
 ), weeks AS (

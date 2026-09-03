@@ -880,6 +880,46 @@ async fn a_parked_wall_is_counted_in_the_week_it_happened() -> Result<(), Box<dy
 }
 
 /// Returns the week the one recorded wall occurrence belongs to.
+/// The wall numerator and the occurrence count read the same three evidences,
+/// so a session closed on a wall its turn never named still shows one.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_wall_named_only_by_the_closure_is_still_one_occurrence() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+
+    let walled = owned_session(&pool, 0x1800).await?;
+    settled_turn_with_cause(&pool, walled, 0x1800, "unclassified_failure").await?;
+    SessionLifecycleRepository::new(pool.clone())
+        .close(
+            walled,
+            SessionTerminalOutcome::FailedStructural {
+                cause: SessionStructuralCause::ContextCompactionWall,
+            },
+            LifecycleActor::Core {
+                agency: CoreAgency::Daemon,
+            },
+        )
+        .await?;
+
+    let report = LifecycleMetricsRepository::new(pool.clone()).read().await?;
+    let walled_sessions: u64 = report
+        .weeks()
+        .iter()
+        .map(|week| week.wall_rate().numerator())
+        .sum();
+    let occurrences: u64 = report
+        .weeks()
+        .iter()
+        .map(LifecycleWeeklyMetrics::wall_occurrences)
+        .sum();
+    assert_eq!(walled_sessions, 1);
+    assert_eq!(occurrences, walled_sessions);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 fn one_wall_occurrence_week(weeks: &[LifecycleWeeklyMetrics]) -> PrimitiveDateTime {
     weeks
         .iter()
