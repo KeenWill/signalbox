@@ -1339,22 +1339,18 @@ carries no rate at all instead of a zero. The pairs are the completion failure
 rate over the trimmed weekly terminal cohort, the `failed_unknown` count inside
 that numerator, overflow incidence over the untrimmed cohort, the finished share
 of exactly those overflow sessions, and the wall rate over the week's dispatch
-cohort, beside that cohort's maturity, the walls recorded in the week whatever
-cohort they belong to, and the two cause-completeness axes. Every numerator is
-at most its own denominator, the trimmed cohort is at most the untrimmed one,
-and `failed_unknown` is at most the completion-failure numerator, because each
-is a subset relation the definitions establish rather than a coincidence of one
-read.
+cohort, the walls recorded in the week whatever cohort they belong to, and the
+two cause-completeness axes. Every numerator is at most its own denominator, the
+trimmed cohort is at most the untrimmed one, and `failed_unknown` is at most the
+completion-failure numerator, because each is a subset relation the definitions
+establish rather than a coincidence of one read.
 
 A `lifecycle_deadline_violation` row names one owned non-terminal session whose
 armed deadline obligation is unmet: its identity, the non-terminal state it
 holds, whether the deadline record is missing outright, and how long the armed
 expiry has been past. Exactly one of those last two is present — a session with
 no armed record has no expiry to be past — and the section's count is the
-`nonterminal_past_deadline` alarm value, whose target is zero. The end message's
-gate verdict is `met`, `not_met`, or `indeterminate`; it is `indeterminate` when
-no gate window is configured or fewer weekly cohorts with a population exist
-than the window requires.
+`nonterminal_past_deadline` alarm value, whose target is zero.
 
 A held-slot row carries dispatch, repository, dispatch origin, rule, singleton,
 ordered session, whole-second held duration, and the independently failing

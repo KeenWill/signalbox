@@ -3294,6 +3294,7 @@ function assertAttentionSummary(summary, path) {{
       "awaiting_tool_recovery",
       "awaiting_reconciliation",
       "runner_lost",
+      "parked",
       "idle",
     ].includes(summary.state) && action === null);
   if (!valid) {{
