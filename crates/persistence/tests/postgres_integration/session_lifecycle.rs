@@ -2477,6 +2477,62 @@ async fn a_committed_handoff_takes_no_new_turn() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// §2: input cannot create a live turn beneath a committed closure, because
+/// that turn would prevent the closure from settling.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn submit_input_refuses_a_committed_terminal_handoff() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(61);
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(61))
+        .await?;
+    lifecycle
+        .commit_pending_terminal(
+            session,
+            SessionTerminalOutcome::FailedUnknown,
+            LifecycleActor::Watchdog,
+        )
+        .await?;
+
+    let error = SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 61 + 0x500)),
+                session,
+                UserContent::try_text(String::from("late lifecycle fixture input"))
+                    .expect("fixture content is admitted"),
+                DeliveryRequest::StartWhenNoActiveTurn {
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 61 + 0x600)),
+            Some(TurnId::from_uuid(Uuid::from_u128(
+                LIFECYCLE_SEED + 61 + 0x700,
+            ))),
+        )
+        .await
+        .expect_err("a committed terminal handoff accepts no more input");
+    assert!(matches!(
+        error,
+        SubmitInputRepositoryError::Corruption(SubmitInputCorruption::Inconsistent(
+            "session has a pending terminal handoff"
+        ))
+    ));
+
+    assert_eq!(
+        lifecycle.settle_pending_terminal(session).await?,
+        SessionLifecycleState::Terminal {
+            outcome: SessionTerminalOutcome::FailedUnknown,
+        }
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// §1/§2: a resume cannot lift a park under a committed closure. The
 /// settlement wants the park it decided on and the activation gate wants the
 /// handoff gone, so lifting it strands the session between them.
@@ -2582,29 +2638,41 @@ async fn a_causeless_failure_is_rejected() -> Result<(), Box<dyn Error>> {
         .handle(dispatched_creation(60))
         .await?;
 
-    for statement in [
+    let terminal_error = sqlx::query(
         "UPDATE session_lifecycle
             SET terminal_outcome_kind = 'failed_retryable', terminal_cause_kind = NULL
           WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a retryable terminal failure names the cause it retried");
+    assert_eq!(
+        terminal_error
+            .as_database_error()
+            .and_then(DatabaseError::code)
+            .as_deref(),
+        Some("23514")
+    );
+
+    let pending_error = sqlx::query(
         "UPDATE session_lifecycle
             SET pending_terminal_outcome_kind = 'failed_retryable',
                 pending_terminal_cause_kind = NULL,
                 pending_terminal_actor_kind = 'watchdog'
           WHERE session_id = $1",
-    ] {
-        let error = sqlx::query(statement)
-            .bind(session.into_uuid())
-            .execute(&pool)
-            .await
-            .expect_err("a retryable failure names the cause it retried");
-        assert_eq!(
-            error
-                .as_database_error()
-                .and_then(DatabaseError::code)
-                .as_deref(),
-            Some("23514")
-        );
-    }
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a retryable pending failure names the cause it retried");
+    assert_eq!(
+        pending_error
+            .as_database_error()
+            .and_then(DatabaseError::code)
+            .as_deref(),
+        Some("23514")
+    );
 
     pool.close().await;
     drop(container);
