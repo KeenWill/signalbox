@@ -34,9 +34,9 @@ use signalbox_domain::{
     ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelCallTerminalOutcome,
     ModelCapabilityCatalog, ModelSelectionOverride, ModelSelectionRequest,
     NonAcceptedTurnPredecessorReconstitutionInput, NonEmptyUnicodeTextFailure, OriginConfiguration,
-    OriginConfigurationReconstitutionInput, OriginModelSettingsError, PerInputConfigurationChoices,
-    PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
-    ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
+    OriginConfigurationReconstitutionInput, OriginModelSettingsError, ParentTerminationKind,
+    PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput, PreparedSubmitInput,
+    ProviderModelIdentity, ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
     ResolvedContextFrontierSnapshot, ResolvedProviderTarget, RunnerGeneration, RunnerId,
     SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
@@ -684,6 +684,7 @@ impl SubmitInputRepository {
         self.handle_with_candidates_alias_resolver_as(
             command,
             principal,
+            ParentTerminationKind::Cancelled,
             accepted_input,
             turn,
             cancellation_identities,
@@ -701,6 +702,7 @@ impl SubmitInputRepository {
         &self,
         command: SubmitInput,
         principal: CommandPrincipal,
+        cascade_root_kind: ParentTerminationKind,
         accepted_input: AcceptedInputId,
         turn: Option<TurnId>,
         cancellation_identities: CancelledModelCallTurnIdentities,
@@ -722,6 +724,7 @@ impl SubmitInputRepository {
             &mut transaction,
             command,
             principal,
+            cascade_root_kind,
             accepted_input,
             turn,
             cancellation_identities,
@@ -836,6 +839,7 @@ async fn handle_in_transaction<NextTurn, NextToolCancellation>(
     connection: &mut PgConnection,
     command: SubmitInput,
     principal: CommandPrincipal,
+    cascade_root_kind: ParentTerminationKind,
     accepted_input: AcceptedInputId,
     turn: Option<TurnId>,
     cancellation_identities: CancelledModelCallTurnIdentities,
@@ -960,7 +964,7 @@ where
     ) {
         sqlx::query(crate::lock_inventory::DELEGATION_TERMINATION_SESSION_FRONTIER)
             .bind(session_id_to_uuid(command.session()))
-            .bind("cancelled")
+            .bind(parent_termination_kind_to_str(cascade_root_kind))
             .execute(&mut *connection)
             .await?;
     }
@@ -998,8 +1002,9 @@ where
         | SubmitInputResult::Rejected(_) => None,
     };
     insert_prepared_command(connection, &prepared).await?;
-    sqlx::query("SELECT materialize_session_delegation_termination_cascade($1)")
+    sqlx::query("SELECT materialize_session_delegation_termination_cascade($1, $2)")
         .bind(durable_command_id_to_uuid(command_id))
+        .bind(parent_termination_kind_to_str(cascade_root_kind))
         .execute(&mut *connection)
         .await?;
     let interrupt_outcome = if let Some(interrupt) = interrupt {
@@ -2747,6 +2752,7 @@ pub(crate) async fn insert_fresh_initial_input(
         connection,
         command,
         principal,
+        ParentTerminationKind::Cancelled,
         accepted_input,
         Some(turn),
         CancelledModelCallTurnIdentities::new(cancellation_entry, cancellation_frontier),
@@ -9913,6 +9919,13 @@ const fn descendant_scope_to_str(value: DescendantTerminationScope) -> &'static 
     match value {
         DescendantTerminationScope::ParentAlone => "parent_alone",
         DescendantTerminationScope::ParentAndDescendants => "parent_and_descendants",
+    }
+}
+
+const fn parent_termination_kind_to_str(value: ParentTerminationKind) -> &'static str {
+    match value {
+        ParentTerminationKind::Stopped => "stopped",
+        ParentTerminationKind::Cancelled => "cancelled",
     }
 }
 

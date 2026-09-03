@@ -376,10 +376,10 @@ $$;
 
 
 --
--- Name: materialize_session_delegation_termination_cascade(uuid); Type: FUNCTION; Schema: public
+-- Name: materialize_session_delegation_termination_cascade(uuid, text); Type: FUNCTION; Schema: public
 --
 
-CREATE FUNCTION materialize_session_delegation_termination_cascade(checked_root_command uuid) RETURNS void
+CREATE FUNCTION materialize_session_delegation_termination_cascade(checked_root_command uuid, checked_root_kind text) RETURNS void
     LANGUAGE plpgsql
     AS $$
 DECLARE
@@ -422,7 +422,7 @@ BEGIN
             'goal_command'::text AS root_source_kind,
             NULL::uuid AS root_turn_id,
             event.generation AS root_goal_generation,
-            'stopped'::text AS termination_kind
+            checked_root_kind AS termination_kind
           FROM goal_command AS command
           JOIN goal_event AS event
             ON event.session_id = command.session_id
@@ -432,18 +432,30 @@ BEGIN
            AND command.result_kind = 'applied'
            AND command.descendant_scope = 'parent_and_descendants'
            AND event.event_kind = 'user_stopped'
+           AND checked_root_kind = 'stopped'
         UNION ALL
         SELECT
             command.session_id,
             'turn_command'::text,
             command.expected_active_turn_id,
             NULL::numeric(20, 0),
-            'cancelled'::text
+            checked_root_kind
           FROM submit_input_command AS command
          WHERE command.command_id = checked_root_command
            AND command.delivery_kind = 'interrupt'
            AND command.result_kind = 'applied'
            AND command.descendant_scope = 'parent_and_descendants'
+           AND checked_root_kind = ANY (ARRAY['stopped'::text, 'cancelled'::text])
+           AND (checked_root_kind = 'cancelled' OR EXISTS (
+                SELECT 1
+                  FROM session_lifecycle_command AS lifecycle
+                 WHERE lifecycle.session_id = command.session_id
+                   AND lifecycle.operation_kind = 'stop'
+                   AND lifecycle.result_kind = 'applied'
+                   AND lifecycle.applied_effect_kind = 'closure_pending'
+                   AND lifecycle.live_turn_id = command.expected_active_turn_id
+                   AND lifecycle.descendant_scope = command.descendant_scope
+           ))
       ) AS root;
     IF root_session IS NULL THEN
         RETURN;
@@ -806,7 +818,6 @@ BEGIN
            AND cascade.root_source_kind = 'turn_command'
            AND cascade.root_turn_id = NEW.expected_active_turn_id
            AND cascade.root_goal_generation IS NULL
-           AND cascade.termination_kind = 'cancelled'
            AND cascade.descendant_scope = NEW.descendant_scope
     ) THEN
         RAISE EXCEPTION 'applied descendant-scoped turn command lacks its cascade proof'
@@ -1430,15 +1441,31 @@ BEGIN
                AND command.result_kind = 'applied'
                AND command.descendant_scope = NEW.descendant_scope
                AND event.event_kind = 'user_stopped'
-               AND event.generation = NEW.root_goal_generation))
+               AND event.generation = NEW.root_goal_generation
+               AND NEW.termination_kind = 'stopped'))
         OR (NEW.root_source_kind = 'turn_command' AND NOT EXISTS (
-            SELECT 1 FROM submit_input_command
-             WHERE command_id = NEW.root_command_id
-               AND session_id = NEW.root_session_id
-               AND delivery_kind = 'interrupt'
-               AND expected_active_turn_id = NEW.root_turn_id
-               AND result_kind = 'applied' AND rejection_kind IS NULL
-               AND descendant_scope = NEW.descendant_scope)) THEN
+            SELECT 1
+              FROM submit_input_command AS command
+             WHERE command.command_id = NEW.root_command_id
+               AND command.session_id = NEW.root_session_id
+               AND command.delivery_kind = 'interrupt'
+               AND command.expected_active_turn_id = NEW.root_turn_id
+               AND command.result_kind = 'applied'
+               AND command.rejection_kind IS NULL
+               AND command.descendant_scope = NEW.descendant_scope
+               AND (NEW.termination_kind = 'cancelled' OR (
+                    NEW.termination_kind = 'stopped'
+                    AND EXISTS (
+                        SELECT 1
+                          FROM session_lifecycle_command AS lifecycle
+                         WHERE lifecycle.session_id = command.session_id
+                           AND lifecycle.operation_kind = 'stop'
+                           AND lifecycle.result_kind = 'applied'
+                           AND lifecycle.applied_effect_kind = 'closure_pending'
+                           AND lifecycle.live_turn_id = command.expected_active_turn_id
+                           AND lifecycle.descendant_scope = command.descendant_scope
+                    )
+               )))) THEN
         RAISE EXCEPTION 'delegation cascade lacks its exact applied root command'
             USING ERRCODE = '23514',
                 CONSTRAINT = 'session_delegation_termination_cascade_command';
@@ -2620,7 +2647,7 @@ CREATE TABLE session_delegation_termination_cascade (
     termination_kind text CONSTRAINT session_delegation_termination_cascad_termination_kind_not_null NOT NULL,
     descendant_scope text CONSTRAINT session_delegation_termination_cascad_descendant_scope_not_null NOT NULL,
     disposition_count numeric(20,0) CONSTRAINT session_delegation_termination_casca_disposition_count_not_null NOT NULL,
-    CONSTRAINT session_delegation_cascade_command_source_shape CHECK ((((root_source_kind = 'turn_command'::text) AND (root_turn_id IS NOT NULL) AND (root_goal_generation IS NULL) AND (termination_kind = 'cancelled'::text)) OR ((root_source_kind = 'goal_command'::text) AND (root_turn_id IS NULL) AND (root_goal_generation IS NOT NULL) AND (termination_kind = 'stopped'::text)))),
+    CONSTRAINT session_delegation_cascade_command_source_shape CHECK ((((root_source_kind = 'turn_command'::text) AND (root_turn_id IS NOT NULL) AND (root_goal_generation IS NULL)) OR ((root_source_kind = 'goal_command'::text) AND (root_turn_id IS NULL) AND (root_goal_generation IS NOT NULL) AND (termination_kind = 'stopped'::text)))),
     CONSTRAINT session_delegation_cascade_goal_generation_positive CHECK (((root_goal_generation IS NULL) OR ((root_goal_generation >= (1)::numeric) AND (root_goal_generation <= '18446744073709551615'::numeric)))),
     CONSTRAINT session_delegation_termination_cascade_descendant_scope_check CHECK ((descendant_scope = 'parent_and_descendants'::text)),
     CONSTRAINT session_delegation_termination_cascade_disposition_count_check CHECK (((disposition_count >= (0)::numeric) AND (disposition_count <= '18446744073709551615'::numeric))),

@@ -65,8 +65,8 @@ use signalbox_domain::{
     ModelSettingsOverlay as DomainModelSettingsOverlay,
     ModelSettingsPrecedence as DomainModelSettingsPrecedence, OverrideDeniedToolRequest,
     OverrideDeniedToolRequestRejectedResult, OverrideDeniedToolRequestResult,
-    ParentTerminationCommandSource, PerInputConfigurationChoices, PullRequestNumber,
-    ReasoningLevel as DomainReasoningLevel, ReconstitutedSessionCreation,
+    ParentTerminationCommandSource, ParentTerminationKind, PerInputConfigurationChoices,
+    PullRequestNumber, ReasoningLevel as DomainReasoningLevel, ReconstitutedSessionCreation,
     ReplaceSessionDefaults as DomainReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
     ReplaceSessionDefaultsResult, ReplaceSessionMetadataRejectedResult,
     ReplaceSessionMetadataResult, RepositorySlug, ReviewChangeRequestNumber, ReviewConfidence,
@@ -11924,6 +11924,7 @@ struct ConfiguredSubmitInputTransaction<'configuration> {
     repository: SubmitInputRepository,
     model_configuration: &'configuration HubModelConfiguration,
     principal: CommandPrincipal,
+    cascade_root_kind: ParentTerminationKind,
 }
 
 impl SubmitInputTransaction for ConfiguredSubmitInputTransaction<'_> {
@@ -11952,6 +11953,7 @@ impl SubmitInputTransaction for ConfiguredSubmitInputTransaction<'_> {
             .handle_with_candidates_alias_resolver_as(
                 command,
                 self.principal,
+                self.cascade_root_kind,
                 accepted_input,
                 turn,
                 cancellation_identities,
@@ -12392,6 +12394,7 @@ where
             repository,
             model_configuration,
             principal: CommandPrincipal::Operator,
+            cascade_root_kind: ParentTerminationKind::Cancelled,
         },
         eligibility_nudge.clone(),
         tool_dispatch_gate.clone(),
@@ -15751,11 +15754,14 @@ async fn interrupt_for_closure(
     expected_version: SessionConfigurationDefaultsVersion,
 ) -> Result<(), ()> {
     let session = command.session();
-    let descendant_scope = match command.operation() {
+    let (descendant_scope, cascade_root_kind) = match command.operation() {
         SessionLifecycleOperation::Stop {
             descendant_scope, ..
-        } => *descendant_scope,
-        _ => DescendantTerminationScope::ParentAlone,
+        } => (*descendant_scope, ParentTerminationKind::Stopped),
+        _ => (
+            DescendantTerminationScope::ParentAlone,
+            ParentTerminationKind::Cancelled,
+        ),
     };
     let Ok(content) = UserContent::try_text(String::from("The session was closed.")) else {
         return Err(());
@@ -15785,6 +15791,7 @@ async fn interrupt_for_closure(
             ),
             model_configuration: services.model_configuration.as_ref(),
             principal: CommandPrincipal::Core,
+            cascade_root_kind,
         },
         services.eligibility_nudge.clone(),
         services.tool_dispatch_gate.clone(),

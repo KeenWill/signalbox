@@ -22,21 +22,23 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnActivationIdentities, AcceptedInputTurnFailureIdentities,
-    AssistantText, CancelledModelCallTurnIdentities, CompletedModelCallIdentities,
-    ContextCompactionId, ContextFrontierId, CreateSession, DeliveryRequest,
-    DescendantTerminationScope, DirectModelSelection, DurableCommandId,
+    AssistantText, CancelledModelCallTurnIdentities, CommandPrincipal,
+    CompletedModelCallIdentities, ContextCompactionId, ContextFrontierId, CreateSession,
+    DeliveryRequest, DescendantTerminationScope, DirectModelSelection, DurableCommandId,
     FailedModelCallTurnIdentities, FinishCheckVerdict, FrozenAliasDefinition, Goal,
     GoalCommandRejection, GoalCommandResult, GoalEvent, GoalGuidance, GoalModelBlockedReasonKind,
     GoalModelProvenance, GoalNeed, GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement,
     GoalUserAction, GoalUserCommand, GoalUserProvenance, LifecycleActor, ModelAlias, ModelCallId,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelSelectionOverride,
-    ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, PerInputConfigurationChoices,
-    PreparedCreateSession, ProviderModelIdentity, ReplaceSessionDefaults, ResolvedProviderTarget,
-    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition,
-    SessionLifecycleState, SessionTerminalOutcome, SubmitInput, SubmitInputAppliedResult,
-    SubmitInputResult, ToolRequestId, TranscriptAncestry, TurnAttemptId, TurnId,
-    TurnModelSettingsResolved, TurnTerminalCause, UserContent,
+    ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, ParentTerminationKind,
+    PerInputConfigurationChoices, PreparedCreateSession, ProviderModelIdentity,
+    ReplaceSessionDefaults, ResolvedProviderTarget, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, SessionId, SessionInputPosition, SessionLifecycleApplication,
+    SessionLifecycleCommand, SessionLifecycleCommandResult, SessionLifecycleOperation,
+    SessionLifecycleState, SessionTerminalOutcome, StopStickiness, SubmitInput,
+    SubmitInputAppliedResult, SubmitInputResult, ToolRequestId, TranscriptAncestry, TurnAttemptId,
+    TurnId, TurnModelSettingsResolved, TurnTerminalCause, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -65,6 +67,9 @@ use signalbox_persistence::{
     },
     scheduler::PostgresEligibilitySweep,
     session_lifecycle::SessionLifecycleRepository,
+    session_lifecycle_command::{
+        SessionLifecycleCommandHandlingOutcome, SessionLifecycleCommandRepository,
+    },
     start_eligible_turn::{CommitCompactionFailurePreviewOutcome, StartEligibleTurnRepository},
     startup::PostgresStartupScanRepository,
     submit_input::SubmitInputRepository,
@@ -3968,6 +3973,154 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
     assert_ne!(
         restarted_queued.turn(),
         TurnId::from_uuid(Uuid::from_u128(queued_bound_turn))
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-010 / INV-012: a descendant-scoped lifecycle stop whose live
+/// turn is closed by its core interrupt carries `stopped` into the cascade, so
+/// a bound child follows `on_parent_stopped` rather than `on_parent_cancelled`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv010_inv012_lifecycle_stop_interrupt_uses_stopped_child_policy()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let parent = 0xf500;
+    let child = 0xf501;
+    let spawning_request = 0xf510;
+    let child_turn = 0xf511;
+    let lifecycle_command = 0xf520;
+    let interrupt_command = 0xf521;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation_fixture(0xf502, parent, 0xf503))
+        .await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation_fixture(0xf504, child, 0xf505))
+        .await?;
+    insert_queued_delegation_fixture(
+        &pool,
+        DelegationFixture {
+            spawning_request,
+            parent_session: parent,
+            parent_turn: 0xf512,
+            child_session: child,
+            child_turn,
+            task_entry: 0xf513,
+            selection: 0xf505,
+            policy_kind: "bound",
+            on_parent_stopped: Some("stop"),
+            on_parent_cancelled: Some("keep_running"),
+        },
+    )
+    .await?;
+    let candidates = turn_candidates(0xf530);
+    assert_applied_command(
+        GoalRepository::new(pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(0xf531),
+                    session(parent),
+                    GoalUserAction::Attach(statement("exercise lifecycle stop cascade")),
+                ),
+                Some(candidates),
+                |_| None,
+            )
+            .await?,
+    );
+    let active_turn = activated_turn(
+        StartEligibleTurnRepository::new(pool.clone())
+            .handle(session(parent), activation_identities(0xf540))
+            .await?,
+    );
+    let stop = SessionLifecycleCommand::new(
+        command(lifecycle_command),
+        session(parent),
+        SessionLifecycleOperation::Stop {
+            sticky: StopStickiness::Sticky,
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+        },
+    );
+    let committed = SessionLifecycleCommandRepository::new(pool.clone())
+        .handle(stop, CommandPrincipal::Operator)
+        .await?;
+    assert_eq!(
+        committed,
+        SessionLifecycleCommandHandlingOutcome::Recorded(SessionLifecycleCommandResult::Applied(
+            SessionLifecycleApplication::ClosurePending {
+                outcome: SessionTerminalOutcome::Stopped {
+                    sticky: StopStickiness::Sticky,
+                },
+                live_turn: active_turn,
+                defaults_version: SessionConfigurationDefaultsVersion::first(),
+            },
+        ))
+    );
+
+    let successor = TurnId::from_uuid(Uuid::from_u128(0xf550));
+    SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates_alias_resolver_as(
+            SubmitInput::new(
+                command(interrupt_command),
+                session(parent),
+                UserContent::try_text(String::from("close the stopped parent"))
+                    .expect("fixture input content is admitted"),
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: active_turn,
+                    descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                    configuration: PerInputConfigurationChoices::new(
+                        SessionConfigurationDefaultsVersion::first(),
+                        ModelSelectionOverride::UseSessionDefault,
+                    ),
+                },
+            ),
+            CommandPrincipal::Core,
+            ParentTerminationKind::Stopped,
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xf551)),
+            Some(successor),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xf552)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xf553)),
+            ),
+            |_| successor,
+            |_| panic!("the fixture has no tool batch to cancel"),
+            |_| None,
+        )
+        .await?;
+
+    let cascade: (String, String) = sqlx::query_as(
+        "SELECT root_source_kind, termination_kind
+           FROM session_delegation_termination_cascade
+          WHERE root_command_id = $1",
+    )
+    .bind(Uuid::from_u128(interrupt_command))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        cascade,
+        (String::from("turn_command"), String::from("stopped"))
+    );
+    let child_disposition: (String, String, String) = sqlx::query_as(
+        "SELECT event.outcome_kind, event.reason_kind, terminal.disposition_kind
+           FROM session_delegation_event AS event
+           JOIN session_delegation_logical_terminal AS terminal
+             ON terminal.spawning_tool_request_id = event.spawning_tool_request_id
+            AND terminal.root_command_id = event.provenance_command_id
+          WHERE event.spawning_tool_request_id = $1
+            AND event.event_kind = 'outcome_recorded'",
+    )
+    .bind(Uuid::from_u128(spawning_request))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        child_disposition,
+        (
+            String::from("child_stopped"),
+            String::from("parent_stopped_parent_and_descendants"),
+            String::from("stopped"),
+        )
     );
 
     pool.close().await;

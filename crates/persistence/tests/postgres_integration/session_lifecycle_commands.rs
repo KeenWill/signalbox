@@ -8,11 +8,11 @@ use crate::*;
 use signalbox_domain::{
     CommandPrincipal, DescendantTerminationScope, FinishCondition, FinishConditionStatement,
     GoalCommandRejection, GoalCommandResult, GoalStatement, GoalUserAction, GoalUserCommand,
-    LifecycleActor, ModuleDispatch, RepoWatchDispatchId, SessionCreationProvenance,
-    SessionFailureCause, SessionLifecycleApplication, SessionLifecycleCommand,
-    SessionLifecycleCommandRejection, SessionLifecycleCommandResult, SessionLifecycleOperation,
-    SessionLifecycleState, SessionOwnership, SessionRetryableCause, SessionTerminalOutcome,
-    StartGate, StopStickiness,
+    LifecycleActor, ModuleDispatch, ParentTerminationKind, RepoWatchDispatchId,
+    SessionCreationProvenance, SessionFailureCause, SessionLifecycleApplication,
+    SessionLifecycleCommand, SessionLifecycleCommandRejection, SessionLifecycleCommandResult,
+    SessionLifecycleOperation, SessionLifecycleState, SessionOwnership, SessionRetryableCause,
+    SessionTerminalOutcome, StartGate, StopStickiness,
 };
 use signalbox_persistence::{
     create_session::CreateSessionHandlingOutcome,
@@ -190,6 +190,7 @@ async fn a_core_issued_interrupt_records_the_core_envelope_principal() -> Result
         .handle_with_candidates_alias_resolver_as(
             interrupt,
             CommandPrincipal::Core,
+            ParentTerminationKind::Cancelled,
             AcceptedInputId::from_uuid(Uuid::from_u128(SEED + 0xf32)),
             Some(successor),
             CancelledModelCallTurnIdentities::new(
@@ -797,6 +798,7 @@ async fn a_park_closure_settles_the_suspended_turn_through_the_interrupt_machine
         .handle_with_candidates_alias_resolver_as(
             interrupt,
             CommandPrincipal::Core,
+            ParentTerminationKind::Cancelled,
             AcceptedInputId::from_uuid(Uuid::from_u128(0x11fe_c221)),
             Some(successor),
             CancelledModelCallTurnIdentities::new(

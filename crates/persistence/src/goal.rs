@@ -539,7 +539,7 @@ impl GoalRepository {
             }
             GoalCommandResult::Rejected(_) => {}
         }
-        sqlx::query("SELECT materialize_session_delegation_termination_cascade($1)")
+        sqlx::query("SELECT materialize_session_delegation_termination_cascade($1, 'stopped')")
             .bind(durable_command_id_to_uuid(command_id))
             .execute(&mut *transaction)
             .await?;
@@ -1460,7 +1460,7 @@ pub(crate) async fn insert_repo_watch_composed_stop(
     insert_command(connection, &command, &result).await?;
     insert_event(connection, command.session(), event).await?;
     retire_ineligible_queued_goal_turn(connection, command.session()).await?;
-    sqlx::query("SELECT materialize_session_delegation_termination_cascade($1)")
+    sqlx::query("SELECT materialize_session_delegation_termination_cascade($1, 'stopped')")
         .bind(durable_command_id_to_uuid(command.command_id()))
         .execute(&mut *connection)
         .await?;
