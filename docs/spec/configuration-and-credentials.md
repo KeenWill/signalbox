@@ -2,7 +2,9 @@
 
 The model-call recovery telemetry vocabulary is re-verified against this PR
 (`agent/turn-lifecycle-hardening`). The migration-failure rejection text on the
-startup log is verified against this PR (`agent/t1-migration-backfill`).
+startup log is verified against this PR (`agent/t1-migration-backfill`). The
+lifecycle Prometheus gauge inventory is verified against PR #1478
+(`agent/lifecycle-t3-metrics`).
 
 The browser HTTP listener, same-origin static assets, and generated contract
 bootstrap are verified against this PR (`agent/web-http-transport`). The
@@ -263,18 +265,18 @@ the same-origin surface owned by
 `GET /api/attention` returns at most 32 session summaries from one read-only
 repeatable-read snapshot, ordered by session identity. A continuation names the
 last session identity and opens the next keyset page; it is not a count-based or
-fixed-tail feed. Each summary carries the current turn classification, exact
-operator action when one is owed, a typed blocked-goal reason and a need summary
-of at most 128 Unicode scalar values, approval-judge outcome counts, and the
-last publication-timestamped durable activity fact. Exact blocked-goal need text
-remains available from the session detail read rather than entering the hot
-fleet page.
+fixed-tail feed. Each summary carries the current turn classification, the
+session's lifecycle state, exact operator action when one is owed, a typed
+blocked-goal reason and a need summary of at most 128 Unicode scalar values,
+approval-judge outcome counts, and the last publication-timestamped durable
+activity fact. Exact blocked-goal need text remains available from the session
+detail read rather than entering the hot fleet page.
 
 Runner loss, model-call recovery ambiguity, tool recovery, reconciliation,
-approval wait, blocked goal, active, queued, and idle remain distinct states.
-Tool recovery carries no reconciliation action because no current command writes
-that wait. The projection uses one set query over the selected identities and
-never constructs the fleet by following individual sessions.
+approval wait, blocked goal, parked, active, queued, and idle remain distinct
+states. Tool recovery carries no reconciliation action because no current
+command writes that wait. The projection uses one set query over the selected
+identities and never constructs the fleet by following individual sessions.
 
 `GET /api/attention/follow` begins with the first coherent attention page and
 its durable change-journal cursor, then emits summary replacements only for
@@ -508,7 +510,7 @@ rate-limited and a transient failure does not stop later scrapes.
 SIGNALBOX_PROMETHEUS_BIND=127.0.0.1:9464
 ```
 
-The registry contains exactly six metric names:
+The registry contains exactly nine metric names:
 
 - `signalbox_turns_started_total`, with no labels, counts durable turn
   activations. An operator graphs it as the workload-rate denominator and
@@ -521,6 +523,15 @@ The registry contains exactly six metric names:
   values are `completed`, `known_failed`, `refused`, `cancelled`, and
   `ambiguous`, counts durable terminal model calls. It separates provider-call
   health and refusal from ambiguity that requires recovery handling.
+- `signalbox_session_lifecycle_rate_parts_per_million{metric}` publishes each
+  latest complete weekly rate under the closed labels
+  `session_completion_failure_rate`, `failed_unknown_share`,
+  `overflow_incidence`, `finish_given_overflow`, `wall_rate`,
+  `turn_cause_completeness`, and `model_call_cause_completeness`.
+- `signalbox_sessions_nonterminal_past_deadline` is the current count of owned
+  non-terminal sessions past their armed deadline obligation.
+- `signalbox_session_lifecycle_export_fresh` is one after a successful
+  configured refresh and zero after a failed refresh.
 - `signalbox_scheduler_passes_in_flight`, with no labels, is the current count
   of authoritative scheduler passes holding admission slots.
 - `signalbox_scheduler_oldest_in_flight_pass_age_seconds`, with no labels, is

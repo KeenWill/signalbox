@@ -36,6 +36,9 @@ use opentelemetry_sdk::{
 use prometheus::{IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry, TextEncoder};
 use signalbox_application::{SchedulerOccupancyObserver, SchedulerOldestInFlightPass};
 use signalbox_model_provider_runtime::ModelCallCauseToken;
+use signalbox_persistence::lifecycle_metrics::{
+    LifecycleMetricsReport, LifecycleRate, LifecycleWeeklyMetrics,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -1065,6 +1068,9 @@ pub struct TelemetryMetrics {
     scheduler_oldest_age_seconds: IntGauge,
     scheduler_oldest_info: IntGaugeVec,
     scheduler_oldest: Arc<Mutex<Option<SchedulerOldestInFlightPass>>>,
+    lifecycle_rate_ppm: IntGaugeVec,
+    lifecycle_nonterminal_past_deadline: IntGauge,
+    lifecycle_export_fresh: IntGauge,
 }
 
 impl TelemetryMetrics {
@@ -1092,6 +1098,24 @@ impl TelemetryMetrics {
             &["disposition"],
         )
         .map_err(|_| metrics_error())?;
+        let lifecycle_rate_ppm = IntGaugeVec::new(
+            Opts::new(
+                "signalbox_session_lifecycle_rate_parts_per_million",
+                "Latest complete weekly session-lifecycle metric, in parts per million.",
+            ),
+            &["metric"],
+        )
+        .map_err(|_| metrics_error())?;
+        let lifecycle_nonterminal_past_deadline = IntGauge::with_opts(Opts::new(
+            "signalbox_sessions_nonterminal_past_deadline",
+            "Owned non-terminal sessions past their armed deadline obligation; target zero.",
+        ))
+        .map_err(|_| metrics_error())?;
+        let lifecycle_export_fresh = IntGauge::with_opts(Opts::new(
+            "signalbox_session_lifecycle_export_fresh",
+            "Whether the latest lifecycle metric export succeeded.",
+        ))
+        .map_err(|_| metrics_error())?;
         let scheduler_occupancy = IntGauge::with_opts(Opts::new(
             "signalbox_scheduler_passes_in_flight",
             "Authoritative scheduler passes currently holding admission slots.",
@@ -1118,6 +1142,15 @@ impl TelemetryMetrics {
             .map_err(|_| metrics_error())?;
         registry
             .register(Box::new(model_terminal.clone()))
+            .map_err(|_| metrics_error())?;
+        registry
+            .register(Box::new(lifecycle_rate_ppm.clone()))
+            .map_err(|_| metrics_error())?;
+        registry
+            .register(Box::new(lifecycle_nonterminal_past_deadline.clone()))
+            .map_err(|_| metrics_error())?;
+        registry
+            .register(Box::new(lifecycle_export_fresh.clone()))
             .map_err(|_| metrics_error())?;
         registry
             .register(Box::new(scheduler_occupancy.clone()))
@@ -1156,7 +1189,72 @@ impl TelemetryMetrics {
             scheduler_oldest_age_seconds,
             scheduler_oldest_info,
             scheduler_oldest: Arc::new(Mutex::new(None)),
+            lifecycle_rate_ppm,
+            lifecycle_nonterminal_past_deadline,
+            lifecycle_export_fresh,
         })
+    }
+
+    /// Publishes one §12 report onto the exported gauges.
+    ///
+    /// A rate with no population is withdrawn rather than exported as a zero
+    /// the durable columns do not claim. The deadline count is instantaneous
+    /// and always publishes, and a completed pass marks the series fresh.
+    pub(crate) fn observe_lifecycle_metrics(&self, report: &LifecycleMetricsReport) {
+        self.lifecycle_nonterminal_past_deadline
+            .set(clamp_gauge(report.nonterminal_past_deadline()));
+        self.set_rate(
+            "session_completion_failure_rate",
+            report.latest_measured(LifecycleWeeklyMetrics::completion_failure),
+        );
+        self.set_rate(
+            "failed_unknown_share",
+            report.latest_measured(LifecycleWeeklyMetrics::failed_unknown_share),
+        );
+        self.set_rate(
+            "overflow_incidence",
+            report.latest_measured(LifecycleWeeklyMetrics::overflow_incidence),
+        );
+        self.set_rate(
+            "finish_given_overflow",
+            report.latest_measured(LifecycleWeeklyMetrics::finish_given_overflow),
+        );
+        self.set_rate(
+            "wall_rate",
+            report.latest_measured(LifecycleWeeklyMetrics::wall_rate),
+        );
+        self.set_rate(
+            "turn_cause_completeness",
+            report.latest_measured(LifecycleWeeklyMetrics::turn_cause_completeness),
+        );
+        self.set_rate(
+            "model_call_cause_completeness",
+            report.latest_measured(LifecycleWeeklyMetrics::model_call_cause_completeness),
+        );
+        self.lifecycle_export_fresh.set(1);
+    }
+
+    /// Records that the last export failed, so a reader can tell a stale
+    /// series from a current one.
+    pub(crate) fn invalidate_lifecycle_metrics(&self) {
+        self.lifecycle_export_fresh.set(0);
+    }
+
+    fn set_rate(&self, metric: &str, rate: Option<LifecycleRate>) {
+        let Some(parts_per_million) = rate.and_then(LifecycleRate::parts_per_million) else {
+            // A rate the report no longer measures is withdrawn rather than
+            // left standing: the export is fresh, so a series it still carries
+            // would be read as a current value.
+            let _ = self.lifecycle_rate_ppm.remove_label_values(&[metric]);
+            return;
+        };
+        let Ok(gauge) = self
+            .lifecycle_rate_ppm
+            .get_metric_with_label_values(&[metric])
+        else {
+            return;
+        };
+        gauge.set(clamp_gauge(parts_per_million));
     }
 
     pub(crate) fn observe_turn_started(&self) {
@@ -1197,6 +1295,15 @@ impl TelemetryMetrics {
         );
         TextEncoder::new().encode_to_string(&self.registry.gather())
     }
+}
+
+/// Presents one unsigned count on a signed Prometheus gauge without wrapping
+/// it into a negative reliability number.
+const fn clamp_gauge(value: u64) -> i64 {
+    if value > i64::MAX as u64 {
+        return i64::MAX;
+    }
+    value as i64
 }
 
 impl SchedulerOccupancyObserver for TelemetryMetrics {

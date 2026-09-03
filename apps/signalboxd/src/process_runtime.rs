@@ -121,6 +121,7 @@ use signalbox_persistence::{
     },
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalRepositoryError},
     goal_turn::GoalTurnCandidates,
+    lifecycle_metrics::LifecycleNonTerminalState,
     model_execution::{ModelCallRepositoryError, PostgresModelCallRepository},
     operator_status::{
         ProcessOperatorStatusConvergenceSeal, ProcessOperatorStatusConvergenceVerdict,
@@ -194,6 +195,8 @@ use signalbox_process_protocol::{
     OperatorStatusConvergenceVerdict as WireOperatorStatusConvergenceVerdict,
     OperatorStatusEndMessage, OperatorStatusHeldSlotBlocker as WireOperatorStatusHeldSlotBlocker,
     OperatorStatusHeldSlotMessage, OperatorStatusHeldSlotOrigin,
+    OperatorStatusLifecycleDeadlineViolationMessage, OperatorStatusLifecycleState,
+    OperatorStatusLifecycleWeekMessage,
     OperatorStatusMergeableState as WireOperatorStatusMergeableState, OperatorStatusMessage,
     OperatorStatusPendingStaleReviewClearanceMessage, OperatorStatusPullRequestConvergenceMessage,
     OperatorStatusQueuedObligationMessage,
@@ -10109,6 +10112,10 @@ async fn spool_operator_status(
                 pending_stale_review_clearance_count: CanonicalU64::new(
                     counts.pending_stale_review_clearances(),
                 ),
+                lifecycle_week_count: CanonicalU64::new(counts.lifecycle_weeks()),
+                lifecycle_deadline_violation_count: CanonicalU64::new(
+                    counts.lifecycle_deadline_violations(),
+                ),
             },
         )))),
     )
@@ -10123,6 +10130,18 @@ async fn spool_operator_status(
         .map_err(SnapshotSpoolError::Io)
         .map_err(OperatorStatusSpoolError::Spool)?;
     Ok(SessionListSpool { file })
+}
+
+const fn wire_lifecycle_state(state: LifecycleNonTerminalState) -> OperatorStatusLifecycleState {
+    match state {
+        LifecycleNonTerminalState::Created => OperatorStatusLifecycleState::Created,
+        LifecycleNonTerminalState::Dispatched => OperatorStatusLifecycleState::Dispatched,
+        LifecycleNonTerminalState::Active => OperatorStatusLifecycleState::Active,
+        LifecycleNonTerminalState::Waiting => OperatorStatusLifecycleState::Waiting,
+        LifecycleNonTerminalState::Recovering => OperatorStatusLifecycleState::Recovering,
+        LifecycleNonTerminalState::Blocked => OperatorStatusLifecycleState::Blocked,
+        LifecycleNonTerminalState::Parked => OperatorStatusLifecycleState::Parked,
+    }
 }
 
 fn wire_operator_status_item(item: ProcessOperatorStatusItem) -> ServerMessage {
@@ -10220,6 +10239,50 @@ fn wire_operator_status_item(item: ProcessOperatorStatusItem) -> ServerMessage {
                         reviewer: item.reviewer().to_owned(),
                         reviewed_head_sha: item.reviewed_head_sha().to_owned(),
                         pending_for_seconds: CanonicalU64::new(item.pending_for_seconds()),
+                    },
+                )),
+            ))
+        }
+        ProcessOperatorStatusItem::LifecycleWeek(item) => ServerMessage::OperatorStatus(Box::new(
+            OperatorStatusMessage::LifecycleWeek(Box::new(OperatorStatusLifecycleWeekMessage {
+                week_start_date: item.week_start_date(),
+                completion_failure_numerator: CanonicalU64::new(
+                    item.completion_failure().numerator(),
+                ),
+                completion_failure_denominator: CanonicalU64::new(
+                    item.completion_failure().denominator(),
+                ),
+                failed_unknown_count: CanonicalU64::new(item.failed_unknown_share().numerator()),
+                overflow_numerator: CanonicalU64::new(item.overflow_incidence().numerator()),
+                overflow_denominator: CanonicalU64::new(item.overflow_incidence().denominator()),
+                finish_given_overflow_numerator: CanonicalU64::new(
+                    item.finish_given_overflow().numerator(),
+                ),
+                wall_numerator: CanonicalU64::new(item.wall_rate().numerator()),
+                wall_denominator: CanonicalU64::new(item.wall_rate().denominator()),
+                wall_occurrence_count: CanonicalU64::new(item.wall_occurrences()),
+                classified_terminal_turn_count: CanonicalU64::new(
+                    item.turn_cause_completeness().numerator(),
+                ),
+                terminal_turn_count: CanonicalU64::new(
+                    item.turn_cause_completeness().denominator(),
+                ),
+                classified_known_failed_call_count: CanonicalU64::new(
+                    item.model_call_cause_completeness().numerator(),
+                ),
+                known_failed_call_count: CanonicalU64::new(
+                    item.model_call_cause_completeness().denominator(),
+                ),
+            })),
+        )),
+        ProcessOperatorStatusItem::LifecycleDeadlineViolation(item) => {
+            ServerMessage::OperatorStatus(Box::new(
+                OperatorStatusMessage::LifecycleDeadlineViolation(Box::new(
+                    OperatorStatusLifecycleDeadlineViolationMessage {
+                        session_id: wire_uuid(item.session().into_uuid()),
+                        state: wire_lifecycle_state(item.state()),
+                        deadline_missing: item.expired_for_seconds().is_none(),
+                        expired_for_seconds: item.expired_for_seconds().map(CanonicalU64::new),
                     },
                 )),
             ))

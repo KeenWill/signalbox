@@ -4203,6 +4203,8 @@ async fn process_runtime_reads_an_empty_operator_status_snapshot() -> Result<(),
                 queued_obligation_count: CanonicalU64::new(0),
                 pull_request_convergence_count: CanonicalU64::new(0),
                 pending_stale_review_clearance_count: CanonicalU64::new(0),
+                lifecycle_week_count: CanonicalU64::new(0),
+                lifecycle_deadline_violation_count: CanonicalU64::new(0),
             },
         ))))
     );
@@ -4302,6 +4304,8 @@ async fn process_runtime_reads_populated_convergence_status_rows() -> Result<(),
                 queued_obligation_count: CanonicalU64::new(0),
                 pull_request_convergence_count: CanonicalU64::new(1),
                 pending_stale_review_clearance_count: CanonicalU64::new(1),
+                lifecycle_week_count: CanonicalU64::new(0),
+                lifecycle_deadline_violation_count: CanonicalU64::new(0),
             },
         ))))
     );

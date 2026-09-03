@@ -1259,15 +1259,64 @@ pub(crate) fn dispatching_module_from_str(value: &str) -> Option<DispatchingModu
 
 /// Encodes one durable `session_lifecycle.state_kind` spelling.
 pub(crate) const fn session_lifecycle_state_to_str(value: &SessionLifecycleState) -> &'static str {
+    session_lifecycle_state_kind_to_str(match value {
+        SessionLifecycleState::Created => SessionLifecycleStateKind::Created,
+        SessionLifecycleState::Dispatched => SessionLifecycleStateKind::Dispatched,
+        SessionLifecycleState::Active => SessionLifecycleStateKind::Active,
+        SessionLifecycleState::Waiting { .. } => SessionLifecycleStateKind::Waiting,
+        SessionLifecycleState::Recovering { .. } => SessionLifecycleStateKind::Recovering,
+        SessionLifecycleState::Blocked { .. } => SessionLifecycleStateKind::Blocked,
+        SessionLifecycleState::Parked { .. } => SessionLifecycleStateKind::Parked,
+        SessionLifecycleState::Terminal { .. } => SessionLifecycleStateKind::Terminal,
+    })
+}
+
+/// One durable `session_lifecycle.state_kind` spelling, without its detail.
+///
+/// Every reader of the column decodes through this, so a state added or
+/// renamed moves one table rather than each reader's own copy of it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionLifecycleStateKind {
+    Created,
+    Dispatched,
+    Active,
+    Waiting,
+    Recovering,
+    Blocked,
+    Parked,
+    Terminal,
+}
+
+/// Encodes one durable `session_lifecycle.state_kind` spelling.
+pub(crate) const fn session_lifecycle_state_kind_to_str(
+    value: SessionLifecycleStateKind,
+) -> &'static str {
     match value {
-        SessionLifecycleState::Created => "created",
-        SessionLifecycleState::Dispatched => "dispatched",
-        SessionLifecycleState::Active => "active",
-        SessionLifecycleState::Waiting { .. } => "waiting",
-        SessionLifecycleState::Recovering { .. } => "recovering",
-        SessionLifecycleState::Blocked { .. } => "blocked",
-        SessionLifecycleState::Parked { .. } => "parked",
-        SessionLifecycleState::Terminal { .. } => "terminal",
+        SessionLifecycleStateKind::Created => "created",
+        SessionLifecycleStateKind::Dispatched => "dispatched",
+        SessionLifecycleStateKind::Active => "active",
+        SessionLifecycleStateKind::Waiting => "waiting",
+        SessionLifecycleStateKind::Recovering => "recovering",
+        SessionLifecycleStateKind::Blocked => "blocked",
+        SessionLifecycleStateKind::Parked => "parked",
+        SessionLifecycleStateKind::Terminal => "terminal",
+    }
+}
+
+/// Decodes one durable `session_lifecycle.state_kind` spelling.
+pub(crate) fn session_lifecycle_state_kind_from_str(
+    value: &str,
+) -> Option<SessionLifecycleStateKind> {
+    match value {
+        "created" => Some(SessionLifecycleStateKind::Created),
+        "dispatched" => Some(SessionLifecycleStateKind::Dispatched),
+        "active" => Some(SessionLifecycleStateKind::Active),
+        "waiting" => Some(SessionLifecycleStateKind::Waiting),
+        "recovering" => Some(SessionLifecycleStateKind::Recovering),
+        "blocked" => Some(SessionLifecycleStateKind::Blocked),
+        "parked" => Some(SessionLifecycleStateKind::Parked),
+        "terminal" => Some(SessionLifecycleStateKind::Terminal),
+        _ => None,
     }
 }
 

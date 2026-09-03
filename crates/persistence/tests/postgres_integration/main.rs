@@ -20,6 +20,7 @@ mod delegation_transactions;
 mod frontier_validation;
 mod hub_fence;
 mod lifecycle_measurement;
+mod lifecycle_metrics;
 mod model_call_execution_and_recovery;
 mod model_call_usage_and_interrupts;
 mod model_credentials_and_tool_batches;

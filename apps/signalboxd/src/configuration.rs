@@ -907,6 +907,10 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
     ("session_admission_deadline", NumericBoundKind::Duration),
     ("session_active_stall_deadline", NumericBoundKind::Duration),
     ("session_waiting_deadline", NumericBoundKind::Duration),
+    (
+        "session_lifecycle_metric_scan_interval",
+        NumericBoundKind::Duration,
+    ),
 ];
 
 impl NumericBoundsConfiguration {
@@ -4689,6 +4693,7 @@ max_repository_file_content_bytes = "none"
 session_admission_deadline = "none"
 session_active_stall_deadline = "none"
 session_waiting_deadline = "none"
+session_lifecycle_metric_scan_interval = "none"
 
 [[credential_profiles]]
 name = "anthropic-primary"

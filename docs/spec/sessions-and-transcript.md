@@ -8,9 +8,10 @@ verified against this PR (`agent/web-session-timeline`). The bounded
 lexical-search projection and query boundary are verified against this PR
 (`agent/web-product-surface-search`), which carries the `agent/web-search-usage`
 boundary it extends. The bounded browser session catalog is verified against
-this PR (`agent/web-session-catalog-follow`). The first typed detail slice is
-verified against this PR (`agent/web-timeline-detail`). The bounded live
-snapshot and follow projection are verified against this PR
+this PR (`agent/web-session-catalog-follow`), and its parked state is
+re-verified against this PR (`agent/lifecycle-t3-metrics`). The first typed
+detail slice is verified against this PR (`agent/web-timeline-detail`). The
+bounded live snapshot and follow projection are verified against this PR
 (`agent/web-session-catalog-follow-live`).
 
 Dedicated-compaction usage as the next queued-turn headroom baseline is verified
@@ -720,9 +721,9 @@ to these bounded reads, not durable session state.
 
 This extends the fleet attention projection rather than maintaining a second
 session-state classifier. Runner loss, tool recovery, recovery ambiguity,
-reconciliation, approval wait, blocked goal, active, queued, and idle remain
-distinct. Page and change reads derive them from the same durable facts and fail
-closed on unknown states or inconsistent shapes.
+reconciliation, approval wait, blocked goal, parked, active, queued, and idle
+remain distinct. Page and change reads derive them from the same durable facts
+and fail closed on unknown states or inconsistent shapes.
 
 ## Bounded browser live session projection
 

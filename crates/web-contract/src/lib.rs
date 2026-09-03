@@ -1848,7 +1848,22 @@ pub enum WebAttentionState {
     AwaitingToolRecovery,
     AwaitingReconciliation,
     RunnerLost,
+    Parked,
     Idle,
+}
+
+/// The durable session state one attention summary projects.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionLifecycleState {
+    Created,
+    Dispatched,
+    Active,
+    Waiting,
+    Recovering,
+    Blocked,
+    Parked,
+    Terminal,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -1922,6 +1937,7 @@ pub struct WebAttentionSummary {
     ))]
     pub current_turn_id: Option<String>,
     pub state: WebAttentionState,
+    pub lifecycle_state: WebAttentionLifecycleState,
     pub action: Option<WebAttentionAction>,
     pub goal_block: Option<WebAttentionGoalBlock>,
     pub judge: WebAttentionJudgeFacts,
@@ -3278,6 +3294,7 @@ function assertAttentionSummary(summary, path) {{
       "awaiting_tool_recovery",
       "awaiting_reconciliation",
       "runner_lost",
+      "parked",
       "idle",
     ].includes(summary.state) && action === null);
   if (!valid) {{

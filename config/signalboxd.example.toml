@@ -164,6 +164,8 @@ session_admission_deadline = "900s"
 session_active_stall_deadline = "1800s"
 # Time a waiting session may wait before it parks for a human.
 session_waiting_deadline = "86400s"
+# How often the daemon refreshes the exported lifecycle-metric gauges.
+session_lifecycle_metric_scan_interval = "300s"
 
 # Blob bytes live outside PostgreSQL. Each deployment generates and then keeps
 # one namespace UUID per physical store. Both directories must already exist,

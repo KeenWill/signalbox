@@ -5087,6 +5087,8 @@ enum OperatorStatusPhase {
     QueuedObligations,
     PullRequestConvergences,
     PendingStaleReviewClearances,
+    LifecycleWeeks,
+    LifecycleDeadlineViolations,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -5095,6 +5097,8 @@ struct OperatorStatusCounts {
     queued_obligations: u64,
     pull_request_convergences: u64,
     pending_stale_review_clearances: u64,
+    lifecycle_weeks: u64,
+    lifecycle_deadline_violations: u64,
 }
 
 async fn status(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(), ClientError> {
@@ -5138,6 +5142,15 @@ async fn status(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(
                         status_increment(counts.pending_stale_review_clearances)?;
                     Some(OperatorStatusPhase::PendingStaleReviewClearances)
                 }
+                OperatorStatusMessage::LifecycleWeek(_) => {
+                    counts.lifecycle_weeks = status_increment(counts.lifecycle_weeks)?;
+                    Some(OperatorStatusPhase::LifecycleWeeks)
+                }
+                OperatorStatusMessage::LifecycleDeadlineViolation(_) => {
+                    counts.lifecycle_deadline_violations =
+                        status_increment(counts.lifecycle_deadline_violations)?;
+                    Some(OperatorStatusPhase::LifecycleDeadlineViolations)
+                }
                 OperatorStatusMessage::End(item)
                     if counts
                         == (OperatorStatusCounts {
@@ -5146,6 +5159,10 @@ async fn status(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(
                             pull_request_convergences: item.pull_request_convergence_count.value(),
                             pending_stale_review_clearances: item
                                 .pending_stale_review_clearance_count
+                                .value(),
+                            lifecycle_weeks: item.lifecycle_week_count.value(),
+                            lifecycle_deadline_violations: item
+                                .lifecycle_deadline_violation_count
                                 .value(),
                         }) =>
                 {
@@ -5186,6 +5203,8 @@ async fn status(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(
         queued_obligations: counts.queued_obligations,
         pull_request_convergences: counts.pull_request_convergences,
         pending_stale_review_clearances: counts.pending_stale_review_clearances,
+        lifecycle_weeks: counts.lifecycle_weeks,
+        lifecycle_deadline_violations: counts.lifecycle_deadline_violations,
     })?;
     spool.seek(SeekFrom::Start(0))?;
     let mut reader = BufReader::new(spool);

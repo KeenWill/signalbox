@@ -5,11 +5,17 @@ use signalbox_application::{
     AttentionChanges, AttentionContinuation, AttentionCursor, AttentionQuery, AttentionSort,
     max_attention_change_items, max_attention_snapshot_items,
 };
-use signalbox_domain::{ReplaceSessionMetadata, SessionMetadataContent};
+use signalbox_application::{AttentionLifecycleState, AttentionState};
+use signalbox_domain::{
+    CoreAgency, LifecycleActor, ModuleDispatch, ReplaceSessionMetadata, RepoWatchDispatchId,
+    SessionCreationProvenance, SessionLifecycleState, SessionMetadataContent, SessionParkCause,
+    SessionParkResponder,
+};
 use signalbox_persistence::attention::{
     AttentionCorruption, AttentionRepository, AttentionRepositoryError,
     AutomaticResumeAttemptBounds,
 };
+use signalbox_persistence::session_lifecycle::SessionLifecycleRepository;
 use signalbox_persistence::session_metadata::SessionMetadataRepository;
 
 const FLEET_SIZE: u128 = 258;
@@ -552,6 +558,144 @@ async fn unknown_session_goal_rejection_is_recorded_and_publishes_no_attention()
     };
     assert_eq!(recorded, 1);
     assert_eq!(published, 0);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Section 1: the attention state is a projection of the durable session state
+/// plus the turn phase, never a machine of its own.
+///
+/// The page is read at each of three durable states, and each time it reports
+/// the state that state projects to. The park is the case that fixes the
+/// direction of the dependency: parking suspends the turn in place and the
+/// satellite stops following the mapping, and the page still reads the
+/// suspended phase — which is what section 1 says leaving the park re-enters.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn the_attention_state_projects_the_durable_session_state() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xa771_0000;
+    let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
+    // Module-dispatched, so the session is owned: section 6 refuses to park an
+    // unmonitored conversation, and the park is what this test turns on.
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(
+            CreateSession::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed)),
+                SessionCreationProvenance::module_dispatched(ModuleDispatch::RepositoryWatch {
+                    dispatch: RepoWatchDispatchId::from_uuid(Uuid::from_u128(seed + 9)),
+                }),
+                SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+                    DirectModelSelection::from_uuid(Uuid::from_u128(seed + 2)),
+                )),
+            )
+            .prepare(session)
+            .expect("a module-dispatched creation without ancestry is preparable"),
+        )
+        .await?;
+    let attention = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS);
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+
+    let created = attention.snapshot(identity_query(None)).await?;
+    assert_eq!(created.summaries[0].state, AttentionState::Idle);
+    assert_eq!(
+        created.summaries[0].lifecycle_state,
+        AttentionLifecycleState::Created
+    );
+    assert_eq!(
+        lifecycle
+            .load(session)
+            .await?
+            .expect("every session owns a lifecycle row")
+            .state(),
+        SessionLifecycleState::Created
+    );
+
+    let turn = TurnId::from_uuid(Uuid::from_u128(seed + 3));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 4)),
+                session,
+                UserContent::try_text(String::from("attention projection input"))
+                    .expect("fixture content is admitted"),
+                DeliveryRequest::StartWhenNoActiveTurn {
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 5)),
+            Some(turn),
+        )
+        .await?;
+
+    let dispatched = attention.snapshot(identity_query(None)).await?;
+    assert_eq!(dispatched.summaries[0].state, AttentionState::Queued);
+    assert_eq!(
+        lifecycle
+            .load(session)
+            .await?
+            .expect("every session owns a lifecycle row")
+            .state(),
+        SessionLifecycleState::Dispatched
+    );
+
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 6),
+            starting_frontier: Uuid::from_u128(seed + 7),
+            initial_attempt: Uuid::from_u128(seed + 8),
+        },
+    )
+    .await?;
+
+    let active = attention.snapshot(identity_query(None)).await?;
+    assert_eq!(active.summaries[0].state, AttentionState::Active);
+    assert_eq!(
+        active.summaries[0].lifecycle_state,
+        AttentionLifecycleState::Active
+    );
+    assert_eq!(
+        lifecycle
+            .load(session)
+            .await?
+            .expect("every session owns a lifecycle row")
+            .state(),
+        SessionLifecycleState::Active
+    );
+
+    lifecycle
+        .park(
+            session,
+            SessionParkCause::OperatorHold,
+            SessionParkResponder::Operator,
+            None,
+            LifecycleActor::Core {
+                agency: CoreAgency::Daemon,
+            },
+        )
+        .await?;
+
+    let parked = attention.snapshot(identity_query(None)).await?;
+    assert_eq!(parked.summaries[0].state, AttentionState::Parked);
+    assert_eq!(
+        parked.summaries[0].lifecycle_state,
+        AttentionLifecycleState::Parked
+    );
+
+    // A park writes no turn, goal, runner, or metadata fact, so without the
+    // lifecycle journal entry a follower would keep the state it last read.
+    // Its kind is not a membership change, so the follower is handed the one
+    // session rather than the whole catalog.
+    let followed = attention.changes_after(active.cursor).await?;
+    let AttentionChanges::Updated { summaries, .. } = followed else {
+        panic!("a lifecycle transition is not a membership change");
+    };
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].session, session);
 
     pool.close().await;
     drop(container);
