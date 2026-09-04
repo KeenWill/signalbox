@@ -1,20 +1,17 @@
 # Repository watch and event dispatch
 
-**Foundation contract.** Repository watch is a credentialed external-ingress
+**Implemented behavior.** Repository watch is a credentialed external-ingress
 boundary from its first operation: the daemon holds a distinct credential-file
 reference for each configured repository, reads secret bytes only for that
 repository's request, and never gives a dispatched session the watch credential.
 Per-repository tokens carry the least GitHub scope needed to read the configured
-signals and dismiss an eligible stale pull-request review. This is the C0
+signals and dismiss an eligible stale pull-request review. This is the
 confused-deputy boundary: a credential for one repository cannot authorize a
 request to another repository. A repository without a credential-file reference
 is invalid configuration and is not watched; a repository absent from the list
 is not watched; an absent repository-watch section means that the subsystem does
 not start. Dispatched sessions retain the approval posture of their named
 session templates, without authority inherited from the watcher.
-
-**Foundation contract.** This bottom specification diff owns the
-four-pull-request repository-watch stack.
 
 ## Configuration and credential boundary
 
@@ -191,7 +188,7 @@ scheduling it. What remains is measured from the durable record of the last
 completed sweep — written inside that sweep's own commit, so a commit that rolls
 back leaves the previous deadline in force — and never from the restarting
 process's own start: a daemon restarting more often than the interval would
-otherwise hand itself a full interval every time and never reach the deadline at
+otherwise reset to a full interval every time and never reach the deadline at
 all. A repository whose recorded sweep is already older than the interval, and a
 first-ever watch with no sweep on record, poll immediately. This keeps
 operational restarts from multiplying the provider request budget independently
@@ -359,21 +356,18 @@ keeps each entry's stream identity and its occurrence sequence. Replacing the
 frontier with an empty one would restart every recurring stream at sequence one,
 and the next occurrence on a stream that already produced events would then mint
 a content identity a durable row already holds, which a commit coalesces — so
-that event and every dispatch it would have caused would be lost without a
-trace. `202608150001` is no precedent for taking that cost: it stamped every row
-that existed then with content-identity version zero and minted version one
-alone from then on, and coalescing searches version one, so nothing its own
-reset could collide with existed. A carried entry names no owning pull request,
-since version two stored none and the one-way hash cannot recover one; the
-stream's next occurrence overwrites the member with the pull request that
-produced it, so only a stream that never recurs again keeps null.
+that event and every dispatch it would have caused would be silently lost. A
+carried entry names no owning pull request, since version two stored none and
+the one-way hash cannot recover one; the stream's next occurrence overwrites the
+member with the pull request that produced it, so only a stream that never
+recurs again keeps null.
 
 Storage version four adds the required compact merged-pull-request baseline
 collection. Migration `202608260002` seeds that collection empty while retaining
 every version-three pull-request observation. The first successful cursor commit
 on the new runtime derives compact baselines from those full merged observations
 and removes the full entries atomically, so migration neither loses the prior
-comparison state nor requires manual cursor surgery. A version-four reader
+comparison state nor requires manual cursor editing. A version-four reader
 requires the collection rather than treating its absence as empty. Each baseline
 records the signal-reviewer filter that produced its retained reactions; a later
 hydration suppresses reaction transitions when that filter changed and replaces
@@ -393,13 +387,13 @@ cursor independently refuses more than 1,000,000 retained baseline subjects. The
 frontier's existing 1,000,000-stream safety ceiling continues to bound the
 recurring streams those subjects own.
 
-No lifecycle releases a stream today, and none may be added without deciding
-which subject provably produces no further occurrence. A merged pull request is
-not one: labels change after merge, and a completed check run's conclusion can
+No lifecycle releases a stream, and none may be added without deciding which
+subject provably produces no further occurrence. A merged pull request is not
+one: labels change after merge, and a completed check run's conclusion can
 change under an unchanged run identity and completion generation, so both remain
 recurring streams. A released counter restarts at one, and the identity it then
 mints collides with a durable one, which commit coalescing discards. The
-1,000,000-stream ceiling is what bounds the frontier meanwhile.
+1,000,000-stream ceiling bounds the frontier.
 
 **Implemented behavior.** A pure differ compares consecutive canonical
 per-pull-request state, branch heads, and completed branch-workflow identities
@@ -422,8 +416,8 @@ and a new attempt under an unchanged run ID does emit. The display name remains
 the rule-visible event payload. A provider fact retained in the consecutive
 comparison baseline is not re-emitted. Rules receive only events: they cannot
 inspect normalized snapshots or rerun the differ. Why: transport independence
-requires both polling and a later authenticated webhook receiver to feed the
-same durable facts.
+requires both polling and an authenticated webhook receiver to feed the same
+durable facts.
 
 **Implemented behavior.** Polling fetches repository state, not rule inputs. The
 branch-workflow projection retains the latest completed run identity and
@@ -556,11 +550,11 @@ fields:
 - a mergeable-state `any_of` list; and
 - a conclusion `any_of` list.
 
-**Implemented behavior.** The last two fields are the ratified payload
-qualifiers. They do not split event kinds by payload. For `ChecksCompleted`,
-`success` and `failure` map to the same conclusion values used by the qualifier.
-A supplied payload qualifier is false for an event kind to which it does not
-apply. Expressiveness grows only by adding versioned fields.
+**Implemented behavior.** The last two fields are payload qualifiers. They do
+not split event kinds by payload. For `ChecksCompleted`, `success` and `failure`
+map to the same conclusion values used by the qualifier. A supplied payload
+qualifier is false for an event kind to which it does not apply. Expressiveness
+grows only by adding versioned fields.
 
 **Implemented behavior.** A branch event cannot satisfy pull-request-only base,
 head, title, body, label, draft, author, or mergeable-state fields. Repository,
@@ -596,7 +590,7 @@ match joins an outstanding delivery obligation, the eventual action uses the
 latest joined event and adds the current-state delivery member defined below; it
 never emits each joined event as a separate action.
 
-**Implemented behavior.** Dispatch context is the ratified tagged union:
+**Implemented behavior.** Dispatch context is the tagged union:
 
 - `PullRequestContext { repo, number, head_sha, event }`; or
 - `BranchContext { repo, branch, workflow, conclusion, event }`.
@@ -727,11 +721,11 @@ session creation included, is refused as conflicting reuse in both directions.
 **Committed unimplemented functionality.** No present session-creation or
 input-submission surface identifies repository watch as a purpose-specific actor
 or creation cause. Version one therefore uses the current user-initiated,
-no-ancestry creation interface and user-attributed input interface. A committed
-follow-up will add purpose-specific durable repository-watch provenance linked
-to `RepoWatchDispatchId`; compatibility requires it to preserve dispatch,
-session, context, and input identities rather than recreate or reinterpret them.
-This paragraph constrains only that future adoption.
+no-ancestry creation interface and user-attributed input interface.
+Purpose-specific durable repository-watch provenance linked to
+`RepoWatchDispatchId` will exist; compatibility requires it to preserve
+dispatch, session, context, and input identities rather than recreate or
+reinterpret them.
 
 ## Deduplication, concurrency, and audit
 
