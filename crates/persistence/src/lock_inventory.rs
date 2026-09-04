@@ -27,9 +27,9 @@
 //! lifecycle store's own park, closure, and ownership writes take the `session`
 //! row first. Repository-watch terminal goal projection locks the complete
 //! unreleased dispatch cohort in session-identity order before projecting its
-//! triggering session; blocker replacement takes the old and replacement
-//! subjects in that order before changing the obligation row; and park release
-//! takes its projected subjects before that row.
+//! triggering session; blocker replacement and park release serialize on the
+//! stable obligation identity, then take the projected subjects in
+//! session-identity order before changing the obligation row.
 
 use signalbox_domain::SessionId;
 
@@ -56,6 +56,10 @@ pub(crate) const REPO_WATCH_DISPATCH_OBLIGATION: &str =
        FROM repo_watch_dispatch_obligation
       WHERE obligation_id = $1
       FOR UPDATE";
+
+pub(crate) const REPO_WATCH_DISPATCH_OBLIGATION_IDENTITY: &str = "SELECT pg_advisory_xact_lock(
+                hashtextextended(repo_watch_dispatch_obligation_lock_key($1), 0)
+            )";
 
 pub(crate) const REPO_WATCH_OBLIGATION_BLOCKER_SUBJECTS: &str = "SELECT lifecycle.session_id
        FROM session_lifecycle AS lifecycle

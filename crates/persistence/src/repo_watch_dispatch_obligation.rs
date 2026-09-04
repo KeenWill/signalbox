@@ -448,6 +448,10 @@ pub(crate) async fn replace_dispatch_obligation_blocker(
             "repository-watch obligation blocker replacement lacks a blocker",
         ));
     }
+    sqlx::query(crate::lock_inventory::REPO_WATCH_DISPATCH_OBLIGATION_IDENTITY)
+        .bind(obligation)
+        .execute(&mut **transaction)
+        .await?;
     // A deferred module-park projection touches both the old and replacement
     // subjects. Acquire that complete lifecycle set first, in canonical order,
     // so a concurrent lifecycle transition cannot meet this write from the

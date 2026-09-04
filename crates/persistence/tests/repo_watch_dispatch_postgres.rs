@@ -3693,6 +3693,75 @@ async fn an_operator_release_restores_the_whole_budget() -> Result<(), Box<dyn E
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn blocker_replacement_serializes_identity_before_operator_park_release()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let obligation = park_dispatch_obligation(&fixture, PARK_FIRST_STOP_COMMAND_ID).await?;
+    let replacement_session = SessionId::from_uuid(Uuid::from_u128(0x58_210));
+    let (template, defaults) = commissioned_template();
+    let replacement_creation = CreateSession::new_from_template(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x58_211)),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
+        template,
+        defaults,
+    )
+    .with_lifecycle(StartGate::Held, SessionOwnership::Owned, None)
+    .prepare(replacement_session)
+    .expect("the replacement blocker creation prepares");
+    assert!(matches!(
+        CreateSessionRepository::new(fixture.pool.clone(), credential_pin())
+            .handle(replacement_creation)
+            .await?,
+        CreateSessionHandlingOutcome::Applied(_)
+    ));
+
+    let mut replacement = fixture.pool.begin().await?;
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(
+                    hashtextextended(repo_watch_dispatch_obligation_lock_key($1), 0)
+                )",
+    )
+    .bind(obligation)
+    .execute(&mut *replacement)
+    .await?;
+    sqlx::query(
+        "UPDATE repo_watch_dispatch_obligation
+            SET blocking_dispatch_id = NULL,
+                external_blocking_session_id = $2
+          WHERE obligation_id = $1",
+    )
+    .bind(obligation)
+    .bind(replacement_session.into_uuid())
+    .execute(&mut *replacement)
+    .await?;
+
+    let release_store = fixture.store.clone();
+    let release = tokio::spawn(async move {
+        release_store
+            .release_parked_dispatch_obligation(obligation, PARK_RELEASE_ACTOR)
+            .await
+    });
+    wait_for_advisory_lock(&fixture.pool).await?;
+    replacement.commit().await?;
+
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), release).await???,
+        RepoWatchObligationParkRelease::Released
+    );
+    assert!(
+        !SessionLifecycleRepository::new(fixture.pool)
+            .load(replacement_session)
+            .await?
+            .expect("the replacement blocker retains its lifecycle row")
+            .state()
+            .is_parked(),
+        "release observes and restores the serialized replacement blocker"
+    );
+    Ok(())
+}
+
 /// An obligation that is not parked has nothing to release, and reporting that
 /// is not an error: an operator racing a release the pull request already
 /// earned must not read as storage failure.

@@ -551,9 +551,26 @@ CREATE CONSTRAINT TRIGGER repo_watch_obligation_parks_core_session
           OR OLD.settled_kind IS DISTINCT FROM NEW.settled_kind)
     EXECUTE FUNCTION park_repo_watch_obligation_sessions();
 
--- Park release restores the projected lifecycle subject. Acquire that subject
--- before the obligation row so lifecycle commands that settle obligations use
--- the same lifecycle-before-obligation order.
+-- Blocker replacement and park release must agree which lifecycle subjects an
+-- obligation names before either path locks them. This identity-scoped lock is
+-- independent of the mutable obligation row, so both paths can serialize
+-- before preserving lifecycle-before-obligation row-lock order.
+CREATE FUNCTION repo_watch_dispatch_obligation_lock_key(
+    candidate_obligation_id uuid
+) RETURNS text
+    LANGUAGE sql IMMUTABLE
+    AS $$
+    SELECT concat_ws(
+        E'\x1f',
+        'repo-watch-obligation',
+        candidate_obligation_id::text
+    )
+$$;
+
+-- Park release restores the projected lifecycle subject. Stabilize its
+-- identity, then acquire that subject before the obligation row so lifecycle
+-- commands that settle obligations use the same lifecycle-before-obligation
+-- order.
 CREATE OR REPLACE FUNCTION repo_watch_release_dispatch_obligation_park_for_progress(
     parked_obligation_id uuid,
     progress_event_id uuid
@@ -563,6 +580,13 @@ CREATE OR REPLACE FUNCTION repo_watch_release_dispatch_obligation_park_for_progr
 DECLARE
     parked_attempts bigint;
 BEGIN
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(
+            repo_watch_dispatch_obligation_lock_key(parked_obligation_id),
+            0
+        )
+    );
+
     PERFORM lifecycle.session_id
       FROM session_lifecycle AS lifecycle
       JOIN (
@@ -621,6 +645,13 @@ CREATE OR REPLACE FUNCTION repo_watch_release_parked_dispatch_obligation(
 DECLARE
     parked_attempts bigint;
 BEGIN
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(
+            repo_watch_dispatch_obligation_lock_key(parked_obligation_id),
+            0
+        )
+    );
+
     PERFORM lifecycle.session_id
       FROM session_lifecycle AS lifecycle
       JOIN (
