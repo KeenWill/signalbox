@@ -1,12 +1,11 @@
 # Review workflows
 
-This page specifies the implemented review-workflow bounded context. The current
-implementation also provides the closed concern library, relational
-orchestration attempt and command-receipt store, client-fed daemon adapter, and
-process and terminal surfaces described below. This page owns review targets,
-workflow runs, session-backed passes, findings, external links, their relational
-store, and application orchestration. Session execution remains owned by
-[sessions and transcript](sessions-and-transcript.md), turn evidence by
+This page specifies the implemented review-workflow bounded context. It owns
+review targets, workflow runs, session-backed passes, findings, external links,
+their relational store, application orchestration, the closed concern library,
+the relational orchestration attempt and command-receipt store, the client-fed
+daemon adapter, and the process and terminal surfaces. Session execution remains
+owned by [sessions and transcript](sessions-and-transcript.md), turn evidence by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool
 execution by [tool loop](tool-loop.md), and relational mechanics shared with the
 rest of the daemon by [persistence protocol](persistence-protocol.md). Invariant
@@ -32,9 +31,8 @@ rejectable during reconstitution (INV-001, INV-040).
 
 Key-like and narrative values preserve their exact UTF-8 content without
 trimming or normalization. Construction rejects empty values, U+0000, and values
-beyond the key or narrative byte limits fixed by this contract. The provisional
-admission budgets are enforced in both domain construction and relational
-checks.
+beyond the key or narrative byte limits fixed by this contract. The admission
+budgets are enforced in both domain construction and relational checks.
 
 ## Targets and frozen policy
 
@@ -49,16 +47,17 @@ A `ReviewTarget` is one immutable snapshot:
 Refreshing a moving change request creates another target snapshot. It never
 rewrites the revision under an existing run.
 
-A parent is a topology fact for that snapshot, not permission to rewrite either
-branch. It must be a distinct target whose canonical provider and repository
-equal the child snapshot's; its canonical head revision must equal the child's
-exact base revision. Construction and reconstitution reject self-parent,
-base-less parented targets, cross-repository edges, revision-disconnected edges,
-and any repeated target in the complete canonical parent chain. Two snapshots of
-the same change request, identified by equal canonical provider, repository, and
-positive change-request number, also cannot be parent and child or otherwise
-both appear in one chain: refresh history is not stack topology. Review-target
-parentage is therefore acyclic and always terminates at a root.
+A parent records stack topology for that snapshot; it does not authorize
+rewriting either branch. It must be a distinct target whose canonical provider
+and repository equal the child snapshot's; its canonical head revision must
+equal the child's exact base revision. Construction and reconstitution reject
+self-parent, base-less parented targets, cross-repository edges,
+revision-disconnected edges, and any repeated target in the complete canonical
+parent chain. Two snapshots of the same change request, identified by equal
+canonical provider, repository, and positive change-request number, also cannot
+be parent and child or otherwise both appear in one chain: refresh history is
+not stack topology. Review-target parentage is therefore acyclic and always
+terminates at a root.
 
 Every `ReviewRun` names one target, one closed workflow kind, and one complete
 `ReviewPolicy`. The implemented workflow kinds are external-context import,
@@ -71,10 +70,10 @@ is an exact integer count of basis points from zero through 10,000, and both
 thresholds apply only to a finding's confidence that the issue is real. Version
 one's exact thresholds and ordering are fixed by this contract; construction and
 reconstitution admit only version one and enforce them. An unknown version fails
-closed until a later maintainer-accepted contract revision adds its exact tuple;
-support for that later version changes only later runs. Why: stored exact policy
-data makes the reason for unattended judgment and publication reconstructible
-without depending on the executing binary's defaults.
+closed until a later contract revision adds its exact tuple; support for that
+later version changes only later runs. Why: stored exact policy data makes the
+reason for unattended judgment and publication reconstructible without depending
+on the executing binary's defaults.
 
 Runs use the closed state machine
 `Queued → Running → {Succeeded, Failed, Blocked, Cancelled}`, with
@@ -246,14 +245,13 @@ additionally name the canonical or successor finding in the same run.
 Accepted findings may be posted, fixed, blocked with a nonempty reason,
 deduplicated, superseded, or made stale. Every `Posted` transition requires the
 finding's `is_real_confidence` to meet the frozen policy's minimum publication
-confidence; severity-label confidence cannot suppress publication, and this
-foundation defines no override. Posted findings may be fixed, blocked,
-superseded, or made stale. Blocked findings may later be fixed, superseded, or
-made stale; a finding blocked by publication may also become posted after
-reconciliation attaches the exact reservation named by that blocking event,
-provided no earlier posted event for the finding consumed it. Each posted event
-consumes its link as publication evidence. Rejected, duplicate, superseded,
-stale, and fixed are terminal.
+confidence; severity-label confidence cannot suppress publication, and no
+override exists. Posted findings may be fixed, blocked, superseded, or made
+stale. Blocked findings may later be fixed, superseded, or made stale; a finding
+blocked by publication may also become posted after reconciliation attaches the
+exact reservation named by that blocking event, provided no earlier posted event
+for the finding consumed it. Each posted event consumes its link as publication
+evidence. Rejected, duplicate, superseded, stale, and fixed are terminal.
 
 Every event carries its owning finding reference, a contiguous one-based
 ordinal, and a same-target pass reference. The event pass's canonical run
@@ -610,9 +608,9 @@ accepted finding meets `minimum_judge_confidence` on `is_real_confidence`;
 severity-label confidence is available to the judge but never filters a finding.
 
 The orchestrator seals this complete plan before admitting its per-finding
-judgment and deduplication events through the existing single-effect pass
-primitives in canonical finding order. An `Applied` result carries the canonical
-finding event, its independently loaded pass and run evidence, and the exact
+judgment and deduplication events through the single-effect pass primitives in
+canonical finding order. An `Applied` result carries the canonical finding
+event, its independently loaded pass and run evidence, and the exact
 judgment-template digest. The service validates the exact planned disposition
 and committed pass result before recording the durable effect receipt. On
 resume, loaded receipts must equal the first `k` members of the plan in that
@@ -627,7 +625,9 @@ only within one immutable target and one equal complete frozen policy. Each
 finding retains its original `ReviewFindingRef`; findings are not copied,
 reparented, or promoted into the judgment run. The event and pass result carry
 the referenced finding's independent target, run, producing pass, and finding
-identities.
+identities. Why: a cross-run reference keeps one pass per run and the original
+evidence chain without duplicating immutable finding content in the judgment
+run.
 
 Admission authenticates that complete ancestry against a canonically succeeded
 read-only-review producer whose sealed `ProducedFindings` inventory contains the
@@ -645,14 +645,6 @@ authenticate each independent identity. Missing or mismatched
 target/run/pass/finding evidence, an unsealed or nonmember producer inventory, a
 policy mismatch, or a graph cycle is corruption rather than a best-effort match.
 
-This targeted relaxation preserves one pass per run and the original evidence
-chain. Allowing multiple passes per run would overturn the run lifecycle,
-one-to-one workflow/pass kind, and relational uniqueness and would still need
-the current exact-producing-pass restriction relaxed; promoting findings into a
-judging run would duplicate immutable content, break the producing pass's sealed
-inventory authority, and require a second provenance mapping. Neither larger
-change is needed to authenticate a same-target, same-policy reference.
-
 ### Repair, publication, import, and escalation
 
 Finding-repair work contains the exact accepted finding inventory only after
@@ -668,20 +660,21 @@ Resuming a blocked repair after reconciliation is committed but unimplemented;
 no present application-store operation replaces that sealed outcome.
 
 External-publication work contains the exact canonical surviving inventory and
-uses the existing reservation-then-attachment pass boundary. A `Published`
-member carries the canonical finding-associated attached link, independently
-loaded publication-run evidence, and exact resolved publication-template digest.
-Before sealing or completing the attempt, the service authenticates their target
-and policy, the succeeded `Publish` pass and concluding `PublishReview` run, and
-the attachment result with its exact posted finding event. The result must cover
-the inventory exactly; any failed, blocked, or cancelled member returns a typed
-`PublicationIncomplete` outcome rather than `Complete`. The existing publication
+uses the reservation-then-attachment pass boundary. A `Published` member carries
+the canonical finding-associated attached link, independently loaded
+publication-run evidence, and exact resolved publication-template digest. Before
+sealing or completing the attempt, the service authenticates their target and
+policy, the succeeded `Publish` pass and concluding `PublishReview` run, and the
+attachment result with its exact posted finding event. The result must cover the
+inventory exactly; any failed, blocked, or cancelled member returns a typed
+`PublicationIncomplete` outcome rather than `Complete`. The publication
 admission check uses only `is_real_confidence` and the immutable target head; a
-moved change request is another target, not permission to post stale results.
+moved change request is another target, and results produced against the earlier
+head are not posted to it.
 
 Post-publication external-context import is committed but unimplemented by the
-present application service. A future continuation must use the existing import
-pass and no-change evidence rather than inferring external state.
+present application service. A future continuation must use the import pass and
+no-change evidence rather than inferring external state.
 
 An incomplete concern barrier, invalid import or judgment evidence, durable seal
 conflict, invalid downstream inventory, or incomplete judgment, repair, or
@@ -783,12 +776,11 @@ compatibility are owned by
 Starting a run requires an existing target plus an accepted input whose
 canonical session and origin turn agree with the requested pass. Fresh run and
 pass admission commits both valid roots in one transaction. An exact retry may
-also complete a compatible run-only intermediate committed by the earlier
-multi-transaction implementation; every such intermediate remains loadable.
-Activation requires that origin turn to be the session's canonical active turn
-and atomically projects the run and pass to running. Completion requests
-authenticate the named turn's canonical terminal outcome and output frontier
-before entering the aggregate transaction.
+also complete a compatible run-only intermediate; every such intermediate
+remains loadable. Activation requires that origin turn to be the session's
+canonical active turn and atomically projects the run and pass to running.
+Completion requests authenticate the named turn's canonical terminal outcome and
+output frontier before entering the aggregate transaction.
 
 Read-only success is admission-atomic. The public command that records findings
 transitions the run and pass to succeeded, binds `ProducedFindings`, and inserts
@@ -817,8 +809,7 @@ the equal durable effect independently of later aggregate stage, reconstructs
 the original operation-stage answer without later facts, and completes recovery.
 A fresh stale command remains rejected. A lost receipt is materialized from its
 recovery record. Recorded receipts are inspected before mutable aggregate-state
-validation; distinct command-identity reuse fails closed. This representation is
-the durable review-command contract.
+validation; distinct command-identity reuse fails closed.
 
 The terminal client exposes target creation, run admission and activation,
 single-finding read-only completion, finding listing, target, run, and finding
