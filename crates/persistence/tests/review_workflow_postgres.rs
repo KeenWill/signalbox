@@ -9257,18 +9257,6 @@ async fn review_orchestration_snapshot_excludes_a_write_committed_after_it_began
 }
 
 /// A snapshot under construction blocks no writer.
-///
-/// This is the regression the redesign exists for. The read previously held
-/// `SHARE` locks over 34 tables for its whole duration, two of which were
-/// `accepted_input` and `turn_lifecycle` — so daemon-wide and across every
-/// session, no user could submit input, no queued turn could start, no
-/// in-flight turn could advance, and no approval could be recorded until a
-/// client-facing read finished.
-///
-/// The snapshot is held mid-construction on a table lock, and a real input
-/// submission that starts a turn must complete anyway. Against the lock-guarded
-/// form this times out: that form takes `accepted_input` first in its lock
-/// inventory, so it is still holding it while it waits for the rest.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn review_orchestration_snapshot_does_not_block_input_or_turns() -> Result<(), Box<dyn Error>>
@@ -9319,8 +9307,8 @@ async fn review_orchestration_snapshot_does_not_block_input_or_turns() -> Result
 /// A single connection is a single transaction, which is what makes the read
 /// coherent under MVCC rather than under locks. Pinning it against a
 /// one-connection pool states that structurally: a construction that reached
-/// for a second connection — as the lock-guarded form did, holding a guard
-/// transaction while its loaders ran elsewhere — could not finish here at all.
+/// for a second connection — one holding a guard transaction while its loaders
+/// ran elsewhere — could not finish here at all.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn review_orchestration_snapshot_completes_on_a_single_connection()

@@ -352,10 +352,9 @@ async fn a_mint_is_refused_under_repeatable_read_after_a_concurrent_winner()
     Ok(())
 }
 
-/// A lone mint under `REPEATABLE READ` is admitted. The previous shape refused
-/// every isolation level but `READ COMMITTED`, because an advisory lock cannot
-/// refresh a snapshot; the constraint has no such dependency, so this fails if
-/// that refusal is reintroduced.
+/// A lone mint under `REPEATABLE READ` is admitted: the constraint has no
+/// advisory-lock dependency on snapshot refresh, so this fails if an
+/// isolation-level refusal is introduced.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_mint_under_repeatable_read_is_admitted() -> Result<(), Box<dyn Error>> {
@@ -887,9 +886,9 @@ async fn assert_aliasing_root_is_refused(
     Ok(())
 }
 
-/// The aliasing spellings the previous path-keyed shape would have admitted as
-/// distinct scopes. Each names the same directory as [`WORKSPACE_ROOT`], and
-/// each must die at the durable boundary rather than at some later comparison.
+/// Aliasing spellings a path-keyed scope would admit as distinct. Each names the
+/// same directory as [`WORKSPACE_ROOT`], and each must die at the durable
+/// boundary rather than at some later comparison.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_workspace_root_aliasing_another_spelling_is_refused() -> Result<(), Box<dyn Error>> {

@@ -3511,7 +3511,7 @@ async fn load_scheduling_projection_with_semantic_frontiers(
 
         let accepting_command: Option<Uuid> = row.try_get("accepting_command_id")?;
         let goal_generation: Option<Decimal> = row.try_get("goal_generation")?;
-        // A command and a goal generation are no longer exclusive. A dispatched
+        // A command and a goal generation are not exclusive. A dispatched
         // work turn is bound to the generation it runs under while keeping the
         // submit command that accepted its tagged context, so the command is
         // what reconstitutes the input and the generation rides alongside it.

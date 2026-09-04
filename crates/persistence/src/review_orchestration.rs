@@ -2817,8 +2817,8 @@ mod tests {
     /// projection inside one `REPEATABLE READ` transaction. Handed a connection
     /// checked straight out of the pool instead, those same helpers run each of
     /// their statements as a separate `READ COMMITTED` autocommit statement.
-    /// That silently drops the per-loader coherence the standalone entry points
-    /// used to inherit from `ReviewWorkflowStore`'s own transactions — a
+    /// That silently drops the per-loader coherence `ReviewWorkflowStore`'s own
+    /// transactions provide — a
     /// multi-statement external-link or pass load could then straddle a
     /// concurrent commit and return exactly the torn external-link projection
     /// that `docs/spec/review-workflows.md` rules out.
