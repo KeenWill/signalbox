@@ -6727,7 +6727,7 @@ async fn lifecycle_closure_retransmission_reports_its_receipt_after_interrupt_pr
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn lifecycle_closure_interrupt_does_not_resolve_a_retired_session_alias()
+async fn lifecycle_closure_interrupt_does_not_resolve_a_retired_session_model()
 -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
@@ -6737,14 +6737,36 @@ async fn lifecycle_closure_interrupt_does_not_resolve_a_retired_session_alias()
     let _issued = Box::pin(authorize_issued_model_call(&runtime.pool, session_id)).await?;
     drop(connection);
 
-    let retired_alias_definition = r#"[[aliases]]
+    let retired_model_definition = r#"[[models]]
+selection_id = "00000000-0000-0000-0000-000000000001"
+target_id = "00000000-0000-0000-0000-000000000003"
+model_family = "anthropic"
+provider_model = "fixture-model"
+max_output_tokens = 256
+context_window_tokens = 200000
+reasoning_levels = ["low"]
+
+"#;
+    let retired_alias_definitions = r#"[[aliases]]
 alias_id = "00000000-0000-0000-0000-000000000002"
 selection_id = "00000000-0000-0000-0000-000000000001"
 
+[[aliases]]
+alias_id = "7fde05bc-b4c3-44f7-8a87-748814c80191"
+selection_id = "00000000-0000-0000-0000-000000000001"
+
+[[aliases]]
+alias_id = "540ce009-c2ec-4a04-b823-c411ea189778"
+selection_id = "00000000-0000-0000-0000-000000000001"
 "#;
-    let configuration_without_alias = MODEL_CONFIGURATION.replacen(retired_alias_definition, "", 1);
+    let configuration_without_model = MODEL_CONFIGURATION
+        .replacen(retired_model_definition, "", 1)
+        .replacen(retired_alias_definitions, "", 1);
     let _recovered_turn_count = runtime
-        .restart_with_model_configuration(&configuration_without_alias)
+        .restart_with_templates(
+            &configuration_without_model,
+            SessionTemplateConfiguration::default(),
+        )
         .await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
 

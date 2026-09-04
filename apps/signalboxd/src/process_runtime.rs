@@ -15818,10 +15818,7 @@ async fn interrupt_for_closure(
     let mut service = SubmitInputService::new(
         UuidV7SubmitInputIdGenerator,
         ConfiguredSubmitInputTransaction {
-            repository: SubmitInputRepository::with_model_capabilities(
-                services.pool.clone(),
-                services.model_configuration.model_capability_catalog(),
-            ),
+            repository: SubmitInputRepository::new(services.pool.clone()),
             model_configuration: services.model_configuration.as_ref(),
             principal: CommandPrincipal::Core,
             cascade_root_kind,

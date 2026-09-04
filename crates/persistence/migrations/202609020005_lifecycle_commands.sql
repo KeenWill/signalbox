@@ -734,7 +734,7 @@ BEGIN
          WHERE command.command_id = checked_root_command
            AND command.operation_kind = 'stop'
            AND command.result_kind = 'applied'
-           AND command.applied_effect_kind = 'closed'
+           AND command.applied_effect_kind IN ('closed', 'closure_pending')
            AND command.descendant_scope = 'parent_and_descendants'
            AND checked_root_kind = 'stopped'
       ) AS root;
@@ -2815,27 +2815,14 @@ BEGIN
 END;
 $$;
 
--- The delegation helper predates lifecycle handoffs and admitted only an
--- already-closed lifecycle root. Extend that exact forward definition so the
--- same materializer also owns a closure completed by deferred settlement.
+-- The delegation authority check predates lifecycle handoffs and admitted
+-- only an already-closed lifecycle root. Extend that exact forward definition
+-- to authenticate a closure completed by deferred settlement too.
 DO $migration$
 DECLARE
     prior_definition text;
     next_definition text;
 BEGIN
-    SELECT pg_get_functiondef(
-        'materialize_session_delegation_termination_cascade(uuid, text)'::regprocedure
-    ) INTO prior_definition;
-    next_definition := replace(
-        prior_definition,
-        'AND command.applied_effect_kind = ''closed''',
-        'AND command.applied_effect_kind IN (''closed'', ''closure_pending'')'
-    );
-    IF next_definition = prior_definition THEN
-        RAISE EXCEPTION 'delegation cascade helper definition did not match';
-    END IF;
-    EXECUTE next_definition;
-
     SELECT pg_get_functiondef(
         'require_delegation_termination_cascade_command()'::regprocedure
     ) INTO prior_definition;

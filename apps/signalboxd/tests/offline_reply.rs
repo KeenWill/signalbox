@@ -13,9 +13,10 @@ use signalbox_application::{
     CreateSessionRequest, CreateSessionService, EligibilityNudge, GoalAwareEligibilityPass,
     GoalPassDisposition, InProcessAttemptDispatchGate, InProcessEligibilityWorkSource,
     InProcessToolDispatchGate, ModelCallCredentialReference, NoToolCatalog, OperatorFailureClass,
-    SchedulerLoop, SchedulerLoopExit, StartEligibleTurnService, SubmitInputOutcome,
-    SubmitInputRequest, SubmitInputService, ToolExecutionInvocation, ToolExecutor,
-    UuidV7SessionIdGenerator, UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator,
+    SchedulerLoop, SchedulerLoopExit, StartEligibleTurnOutcome, StartEligibleTurnService,
+    SubmitInputOutcome, SubmitInputRequest, SubmitInputService, ToolExecutionInvocation,
+    ToolExecutor, UuidV7SessionIdGenerator, UuidV7StartEligibleTurnIdGenerator,
+    UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnActivationIdentities, ContextFrontierId, DeliveryRequest,
@@ -50,8 +51,9 @@ use signalbox_persistence::{
 };
 use signalbox_test_bin::test_bin_path;
 use signalboxd::{
-    ActivatedTurnPass, CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED, FatalExecutionSupervisor,
-    GoalModeNumericBounds, PostgresGoalPassDisposition, PostgresProviderModelExecution,
+    ActivatedTurnExecution, ActivatedTurnPass, CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED,
+    FatalExecutionSupervisor, GoalModeNumericBounds, PostgresGoalPassDisposition,
+    PostgresProviderModelExecution,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -521,7 +523,7 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
 }
 
 /// Runs an owned goal through a completed turn and unsuccessful successor, or
-/// a released goal through its already-queued unsuccessful first turn.
+/// releases its activated first turn before that turn finishes unsuccessfully.
 async fn goal_failure_block_after_success(
     ownership: signalbox_domain::SessionOwnership,
 ) -> Result<(ContainerAsync<Postgres>, PgPool, Goal), Box<dyn Error>> {
@@ -556,26 +558,6 @@ async fn goal_failure_block_after_success(
         )
         .await?;
     assert_goal_command_applied(attached);
-    // Attaching conferred ownership; an unmonitored subject releases it again.
-    if matches!(ownership, signalbox_domain::SessionOwnership::Unmonitored) {
-        let released = signalbox_persistence::session_lifecycle_command::SessionLifecycleCommandRepository::new(pool.clone())
-            .handle(
-                signalbox_domain::SessionLifecycleCommand::new(
-                    DurableCommandId::from_uuid(Uuid::from_u128(0x2103)),
-                    session,
-                    signalbox_domain::SessionLifecycleOperation::Release,
-                ),
-                signalbox_domain::CommandPrincipal::Operator,
-            )
-            .await?;
-        assert!(matches!(
-            released,
-            signalbox_persistence::session_lifecycle_command::SessionLifecycleCommandHandlingOutcome::Recorded(
-                signalbox_domain::SessionLifecycleCommandResult::Applied(_)
-            )
-        ));
-    }
-
     let sweep = PostgresEligibilitySweep::new(pool.clone());
     let (nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
     let _ = nudge.nudge(session);
@@ -609,36 +591,66 @@ async fn goal_failure_block_after_success(
             Vec::new(),
         )),
     );
-    let activated_pass = ActivatedTurnPass::new(
-        StartEligibleTurnService::new(
-            UuidV7StartEligibleTurnIdGenerator,
-            StartEligibleTurnRepository::new(pool.clone()),
-        ),
-        execution,
+    let disposition = PostgresGoalPassDisposition::new(
+        pool.clone(),
+        configuration,
+        nudge,
+        GoalModeNumericBounds::new(None, None, None, None, None),
     );
-    let pass = GoalAwareEligibilityPass::new(
-        activated_pass,
-        PostgresGoalPassDisposition::new(
-            pool.clone(),
-            configuration,
-            nudge,
-            GoalModeNumericBounds::new(None, None, None, None, None),
-        ),
-    );
-    let mut scheduler = SchedulerLoop::new(work_source, pass);
-    let observation_pool = pool.clone();
-    let fatal_shutdown = fatal_execution.clone();
-    let shutdown = async move {
-        tokio::select! {
-            () = wait_for_execution_failure_block(&observation_pool, session) => {}
-            () = fatal_shutdown.wait() => {}
+    match ownership {
+        signalbox_domain::SessionOwnership::Owned => {
+            let activated_pass = ActivatedTurnPass::new(
+                StartEligibleTurnService::new(
+                    UuidV7StartEligibleTurnIdGenerator,
+                    StartEligibleTurnRepository::new(pool.clone()),
+                ),
+                execution,
+            );
+            let pass = GoalAwareEligibilityPass::new(activated_pass, disposition);
+            let mut scheduler = SchedulerLoop::new(work_source, pass);
+            let observation_pool = pool.clone();
+            let fatal_shutdown = fatal_execution.clone();
+            let shutdown = async move {
+                tokio::select! {
+                    () = wait_for_execution_failure_block(&observation_pool, session) => {}
+                    () = fatal_shutdown.wait() => {}
+                }
+            };
+            assert_eq!(
+                timeout(Duration::from_secs(10), scheduler.run_until(shutdown)).await?,
+                SchedulerLoopExit::Shutdown
+            );
         }
-    };
-
-    assert_eq!(
-        timeout(Duration::from_secs(10), scheduler.run_until(shutdown)).await?,
-        SchedulerLoopExit::Shutdown
-    );
+        signalbox_domain::SessionOwnership::Unmonitored => {
+            let mut activation = StartEligibleTurnService::new(
+                UuidV7StartEligibleTurnIdGenerator,
+                StartEligibleTurnRepository::new(pool.clone()),
+            );
+            let StartEligibleTurnOutcome::Activated(activated) =
+                activation.execute(session).await?
+            else {
+                panic!("the owned goal turn must activate before release")
+            };
+            let released = signalbox_persistence::session_lifecycle_command::SessionLifecycleCommandRepository::new(pool.clone())
+                .handle(
+                    signalbox_domain::SessionLifecycleCommand::new(
+                        DurableCommandId::from_uuid(Uuid::from_u128(0x2103)),
+                        session,
+                        signalbox_domain::SessionLifecycleOperation::Release,
+                    ),
+                    signalbox_domain::CommandPrincipal::Operator,
+                )
+                .await?;
+            assert!(matches!(
+                released,
+                signalbox_persistence::session_lifecycle_command::SessionLifecycleCommandHandlingOutcome::Recorded(
+                    signalbox_domain::SessionLifecycleCommandResult::Applied(_)
+                )
+            ));
+            execution.execute(activated).await?;
+            disposition.reconcile_success(session).await?;
+        }
+    }
     assert!(
         !fatal_execution.is_triggered(),
         "a provider refusal is a durable unsuccessful turn, not a fatal execution defect"
