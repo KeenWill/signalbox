@@ -716,8 +716,9 @@ runs while the key is readable.
 
 ## Codex CLI provider adapter
 
-`signalbox-model-runtime-codex-cli` wraps the locally installed Codex CLI event
-protocol at the version `tooling/codex-cli/package.json` pins; its exported
+`signalbox-model-runtime-codex-cli` wraps the Codex CLI event protocol as the
+offline fixture corpus records it; that recorded version is distinct from the
+installation pin in `tooling/codex-cli/package.json`, and the adapter's exported
 version constant is the contract a later composition must pin before wiring the
 adapter. The daemon composition runs a bounded, credential-free version probe
 before opening its socket; model dispatch performs no separate version probe.
