@@ -21,6 +21,10 @@ configuration and credentials in
 [configuration-and-credentials](configuration-and-credentials.md). Invariant
 tags cite [docs/invariants.md](../invariants.md).
 
+Multipart attachment rendering is proposed and not implemented. The
+runner-placement rendering and executable session-tool snapshot paragraphs below
+are proposed and not implemented.
+
 ## Call records and lifecycle
 
 A model call is one durable daemon authorization to attempt a provider
@@ -771,13 +775,13 @@ remains absent. When implemented, it carries the complete nonempty evidence list
 in policy-member order, including exclusion generation or predecessor
 correlation and optional reset, without changing the typed domain cause above.
 
-Every pool-selected `Prepared` call pins the selecting immutable pool-policy
-identity as an insert-only authorization fact beside its credential reference.
-Reconstitution requires that policy to contain the pinned profile with the
-expected target adapter and delivery kind. Every observation-derived trigger
-action reloads this call-pinned revision, so an explicit session credential
-update that commits while the provider interaction is in flight cannot change
-the action applied to its result.
+When implemented, every pool-selected `Prepared` call pins the selecting
+immutable pool-policy identity as an insert-only authorization fact beside its
+credential reference, reconstitution requires that policy to contain the pinned
+profile with the expected target adapter and delivery kind, and every
+observation-derived trigger action reloads this call-pinned revision, so an
+explicit session credential update that commits while the provider interaction
+is in flight cannot change the action applied to its result.
 
 Each successor durably records the predecessor call it follows and the cause
 that authorized it, so a chain is recorded as evidence rather than as two calls
