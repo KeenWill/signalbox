@@ -8684,6 +8684,54 @@ async fn repository_watch_observes_operator_commission_target_ownership()
         .resume(fixture.session)
         .await?;
 
+    let cursor = event_store
+        .load_cursor(&repository)
+        .await?
+        .expect("the repository-watch cursor remains current");
+    event_store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                Some(cursor.generation()),
+                RepoWatchCursorCandidate::new(observation(context(SECOND_HEAD)?)?),
+                vec![identified_event(head_changed_event(
+                    0x60_250,
+                    context(SECOND_HEAD)?,
+                    FIRST_HEAD,
+                )?)],
+            ),
+        )
+        .await?;
+    sqlx::query(
+        "UPDATE repo_watch_dispatch_obligation
+            SET failed_attempts = repo_watch_dispatch_attempt_budget(),
+                last_failed_attempt_at = clock_timestamp()
+          WHERE obligation_id = $1",
+    )
+    .bind(obligation.0)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query("SELECT repo_watch_park_exhausted_dispatch_obligation($1)")
+        .bind(obligation.0)
+        .execute(&fixture.pool)
+        .await?;
+    let core_after_immediate_release = SessionLifecycleRepository::new(fixture.pool.clone())
+        .load(fixture.session)
+        .await?
+        .expect("the external blocker retains its lifecycle row");
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM repo_watch_parked_dispatch_obligation
+              WHERE obligation_id = $1",
+        )
+        .bind(obligation.0)
+        .fetch_one(&fixture.pool)
+        .await?,
+        0
+    );
+    assert!(!core_after_immediate_release.state().is_parked());
+
     let stopped = GoalRepository::new(fixture.pool.clone())
         .handle_user_command(
             GoalUserCommand::new(

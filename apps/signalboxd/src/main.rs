@@ -1433,6 +1433,16 @@ async fn run_hub(
                 SanitizedStartupCause::Static("invalid_turn_liveness_scan_interval"),
             )
         })?;
+    let session_admission_deadline = configured_duration("session_admission_deadline");
+    let session_waiting_deadline = configured_duration("session_waiting_deadline");
+    if turn_liveness_scan_interval.is_none()
+        && (session_admission_deadline.is_some() || session_waiting_deadline.is_some())
+    {
+        return Err(erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static("session_deadlines_require_liveness_scan_interval"),
+        ));
+    }
     let reconciliation_sweep_interval = configured_duration("reconciliation_sweep_interval")
         .map(ReconciliationSweepInterval::try_new)
         .transpose()
@@ -2469,10 +2479,7 @@ async fn run_hub(
     let lifecycle_deadline_runtime = LifecycleDeadlineRuntime::new(
         scheduler_pool.clone(),
         turn_liveness_scan_interval,
-        SessionDeadlineBounds::new(
-            configured_duration("session_admission_deadline"),
-            configured_duration("session_waiting_deadline"),
-        ),
+        SessionDeadlineBounds::new(session_admission_deadline, session_waiting_deadline),
     );
     let goal_disposition = PostgresGoalPassDisposition::new(
         scheduler_pool,

@@ -2,8 +2,9 @@ use std::{error::Error, time::Duration};
 
 use crate::*;
 use signalbox_domain::{
-    DurableCommandId, SessionCreationCause, SessionCreationProvenance, SessionId,
-    SessionLifecycleState, SessionOwnership, StartGate, TranscriptAncestry,
+    DispatchingModule, DurableCommandId, LifecycleActor, SessionCreationCause,
+    SessionCreationProvenance, SessionId, SessionLifecycleState, SessionOwnership,
+    SessionParkCause, SessionParkResponder, StartGate, TranscriptAncestry,
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
@@ -162,6 +163,134 @@ async fn held_sessions_are_not_returned_by_the_eligibility_sweep() -> Result<(),
         .await?;
     assert!(!batch.into_parts().0.contains(&session));
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn admission_clock_survives_the_created_to_dispatched_transition()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let creation = owned_creation(4, StartGate::Open);
+    let session = creation.applied_result().session();
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(creation)
+        .await?;
+    let created_armed_at: sqlx::types::time::OffsetDateTime =
+        sqlx::query_scalar("SELECT armed_at FROM session_deadline WHERE session_id = $1")
+            .bind(session.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+
+    queue_turn(&pool, session, 4).await?;
+    let dispatched_armed_at: sqlx::types::time::OffsetDateTime =
+        sqlx::query_scalar("SELECT armed_at FROM session_deadline WHERE session_id = $1")
+            .bind(session.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(dispatched_armed_at, created_armed_at);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn module_park_passes_through_a_held_start_gate() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let creation = owned_creation(5, StartGate::Held);
+    let session = creation.applied_result().session();
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(creation)
+        .await?;
+
+    let parked = SessionLifecycleRepository::new(pool.clone())
+        .park(
+            session,
+            SessionParkCause::ModulePark,
+            SessionParkResponder::Module {
+                module: DispatchingModule::CommissionedDispatch,
+            },
+            None,
+            LifecycleActor::Module {
+                module: DispatchingModule::CommissionedDispatch,
+            },
+        )
+        .await?;
+
+    assert!(matches!(
+        parked,
+        SessionLifecycleState::Parked {
+            cause: SessionParkCause::ModulePark,
+            ..
+        }
+    ));
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn migration_rewrites_stored_admission_retirement_causes_before_validation()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = unmigrated_postgres().await?;
+    signalbox_persistence::MIGRATOR
+        .run_to(202609020021, &pool)
+        .await?;
+    let terminal_creation = owned_creation(6, StartGate::Open);
+    let terminal_session = terminal_creation.applied_result().session();
+    let pending_creation = owned_creation(7, StartGate::Open);
+    let pending_session = pending_creation.applied_result().session();
+    let creation_repository =
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
+    creation_repository.handle(terminal_creation).await?;
+    creation_repository.handle(pending_creation).await?;
+    sqlx::query(
+        "UPDATE session_lifecycle
+            SET state_kind = 'terminal',
+                state_entered_at = statement_timestamp(),
+                ended_at = statement_timestamp(),
+                terminal_outcome_kind = 'retired',
+                terminal_cause_kind = 'dispatch_deadline_expired'
+          WHERE session_id = $1",
+    )
+    .bind(terminal_session.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE session_lifecycle
+            SET pending_terminal_outcome_kind = 'retired',
+                pending_terminal_cause_kind = 'start_gate_deadline_expired',
+                pending_terminal_actor_kind = 'operator'
+          WHERE session_id = $1",
+    )
+    .bind(pending_session.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    signalbox_persistence::MIGRATOR.run(&pool).await?;
+    let causes: (String, String) = sqlx::query_as(
+        "SELECT terminal.terminal_cause_kind, pending.pending_terminal_cause_kind
+           FROM session_lifecycle AS terminal
+           JOIN session_lifecycle AS pending ON pending.session_id = $2
+          WHERE terminal.session_id = $1",
+    )
+    .bind(terminal_session.into_uuid())
+    .bind(pending_session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(
+        causes,
+        (
+            String::from("admission_deadline_expired"),
+            String::from("admission_deadline_expired"),
+        )
+    );
     pool.close().await;
     drop(container);
     Ok(())

@@ -1162,7 +1162,10 @@ impl PostgresConvergenceSweepStore {
             let lifecycle = crate::session_lifecycle::load_locked(&mut transaction, session)
                 .await
                 .map_err(|error| ConvergenceSweepStoreError::Lifecycle(Box::new(error)))?;
-            if lifecycle.ownership() == SessionOwnership::Owned && !lifecycle.state().is_parked() {
+            if lifecycle.ownership() == SessionOwnership::Owned
+                && !lifecycle.state().is_terminal()
+                && !lifecycle.state().is_parked()
+            {
                 crate::session_lifecycle::park_in_transaction(
                     &mut transaction,
                     session,

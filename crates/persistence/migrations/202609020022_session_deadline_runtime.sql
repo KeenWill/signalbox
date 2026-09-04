@@ -57,17 +57,50 @@ ALTER TABLE session_lifecycle_command
     );
 
 -- Admission is one deadline across both pre-activity states.
+CREATE OR REPLACE FUNCTION guard_session_lifecycle_change() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'session lifecycle rows are never deleted'
+            USING ERRCODE = '23514';
+    END IF;
+    IF OLD.state_kind = 'terminal'
+       AND NOT (
+            NEW.state_kind = 'terminal'
+            AND OLD.terminal_cause_kind IN (
+                'dispatch_deadline_expired', 'start_gate_deadline_expired'
+            )
+            AND NEW.terminal_cause_kind = 'admission_deadline_expired'
+            AND to_jsonb(NEW) - 'terminal_cause_kind'
+                = to_jsonb(OLD) - 'terminal_cause_kind'
+       )
+    THEN
+        RAISE EXCEPTION 'session lifecycle is terminal and cannot change'
+            USING ERRCODE = '23514';
+    END IF;
+    IF NEW.session_id IS DISTINCT FROM OLD.session_id THEN
+        RAISE EXCEPTION 'session lifecycle identity is immutable'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
 DO $rewrite_retirement_cause$
 DECLARE
-    constraint_name text;
-    definition text;
-    rewritten text;
-BEGIN
-    FOREACH constraint_name IN ARRAY ARRAY[
+    constraint_names text[] := ARRAY[
         'session_lifecycle_terminal_cause_closed',
         'session_lifecycle_terminal_shape',
         'session_lifecycle_pending_terminal_shape'
-    ]
+    ];
+    rewritten_definitions text[] := ARRAY[]::text[];
+    constraint_name text;
+    definition text;
+    rewritten text;
+    position integer;
+BEGIN
+    FOREACH constraint_name IN ARRAY constraint_names
     LOOP
         SELECT pg_get_constraintdef(oid) INTO definition
           FROM pg_constraint
@@ -86,15 +119,130 @@ BEGIN
             RAISE EXCEPTION 'constraint % did not carry the prior retirement causes',
                 constraint_name;
         END IF;
+        rewritten_definitions := array_append(rewritten_definitions, rewritten);
+    END LOOP;
+
+    FOREACH constraint_name IN ARRAY constraint_names
+    LOOP
+        EXECUTE format('ALTER TABLE session_lifecycle DROP CONSTRAINT %I', constraint_name);
+    END LOOP;
+
+    UPDATE session_lifecycle
+       SET terminal_cause_kind = CASE
+               WHEN terminal_cause_kind IN (
+                   'dispatch_deadline_expired', 'start_gate_deadline_expired'
+               ) THEN 'admission_deadline_expired'
+               ELSE terminal_cause_kind
+           END,
+           pending_terminal_cause_kind = CASE
+               WHEN pending_terminal_cause_kind IN (
+                   'dispatch_deadline_expired', 'start_gate_deadline_expired'
+               ) THEN 'admission_deadline_expired'
+               ELSE pending_terminal_cause_kind
+           END
+     WHERE terminal_cause_kind IN (
+               'dispatch_deadline_expired', 'start_gate_deadline_expired'
+           )
+        OR pending_terminal_cause_kind IN (
+               'dispatch_deadline_expired', 'start_gate_deadline_expired'
+           );
+
+    SET CONSTRAINTS ALL IMMEDIATE;
+    FOR position IN 1..array_length(constraint_names, 1)
+    LOOP
         EXECUTE format(
-            'ALTER TABLE session_lifecycle DROP CONSTRAINT %I, ADD CONSTRAINT %I %s',
-            constraint_name,
-            constraint_name,
-            rewritten
+            'ALTER TABLE session_lifecycle ADD CONSTRAINT %I %s',
+            constraint_names[position],
+            rewritten_definitions[position]
         );
     END LOOP;
 END
 $rewrite_retirement_cause$;
+
+CREATE OR REPLACE FUNCTION guard_session_lifecycle_change() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'session lifecycle rows are never deleted'
+            USING ERRCODE = '23514';
+    END IF;
+    IF OLD.state_kind = 'terminal' THEN
+        RAISE EXCEPTION 'session lifecycle is terminal and cannot change'
+            USING ERRCODE = '23514';
+    END IF;
+    IF NEW.session_id IS DISTINCT FROM OLD.session_id THEN
+        RAISE EXCEPTION 'session lifecycle identity is immutable'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION arm_session_deadline() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    required text;
+    armed text;
+BEGIN
+    required := session_deadline_kind_for_state(NEW.state_kind);
+
+    IF NOT NEW.owned OR required IS NULL THEN
+        DELETE FROM session_deadline WHERE session_id = NEW.session_id;
+        RETURN NULL;
+    END IF;
+
+    SELECT deadline_kind INTO armed
+      FROM session_deadline
+     WHERE session_id = NEW.session_id;
+
+    IF TG_OP = 'UPDATE'
+       AND armed IS NOT DISTINCT FROM required
+       AND OLD.owned = NEW.owned
+       AND (
+            OLD.state_entered_at = NEW.state_entered_at
+            OR required = 'admission'
+       )
+    THEN
+        RETURN NULL;
+    END IF;
+
+    INSERT INTO session_deadline
+            (session_id, deadline_kind, on_expiry_kind, armed_at)
+         VALUES (
+            NEW.session_id,
+            required,
+            session_deadline_expiry_for_kind(required),
+            statement_timestamp()
+         )
+    ON CONFLICT (session_id) DO UPDATE
+       SET deadline_kind = EXCLUDED.deadline_kind,
+           on_expiry_kind = EXCLUDED.on_expiry_kind,
+           expires_at = NULL,
+           armed_at = EXCLUDED.armed_at;
+
+    RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION hold_session_start_gate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF OLD.state_kind = 'created'
+       AND OLD.start_gate_held
+       AND NEW.state_kind NOT IN ('created', 'terminal')
+       AND NOT (
+            NEW.state_kind = 'parked'
+            AND NEW.parked_cause = 'module_park'
+       )
+    THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END;
+$$;
 
 -- A module obligation that directly names or wraps a live session projects
 -- that park into the core lifecycle queue.
@@ -105,6 +253,14 @@ DECLARE
     subject uuid;
 BEGIN
     IF NEW.parked_at IS NULL OR OLD.parked_at IS NOT NULL THEN
+        RETURN NULL;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+          FROM repo_watch_dispatch_obligation
+         WHERE obligation_id = NEW.obligation_id
+           AND parked_at IS NOT NULL
+    ) THEN
         RETURN NULL;
     END IF;
 
@@ -144,6 +300,7 @@ BEGIN
 END;
 $$;
 
-CREATE TRIGGER repo_watch_obligation_parks_core_session
-    AFTER UPDATE OF parked_at ON repo_watch_dispatch_obligation
+CREATE CONSTRAINT TRIGGER repo_watch_obligation_parks_core_session
+    AFTER UPDATE ON repo_watch_dispatch_obligation
+    DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW EXECUTE FUNCTION park_repo_watch_obligation_sessions();

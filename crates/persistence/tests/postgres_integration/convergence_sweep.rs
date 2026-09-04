@@ -17,7 +17,8 @@ use signalbox_domain::{
     GoalUserAction, GoalUserCommand, LifecycleActor, ModelSelectionRequest, PullRequestNumber,
     RepositorySlug, SessionConfigurationDefaults, SessionId, SessionLifecycleState,
     SessionOwnership, SessionParkCause, SessionParkResponder, SessionSystemPrompt,
-    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance, UserContent,
+    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
+    SessionTerminalOutcome, StopStickiness, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -1099,6 +1100,76 @@ async fn released_session_without_model_activity_does_not_block_failure_parking(
     assert_eq!(disposition, ConvergenceSweepFailureDisposition::Parked);
     assert_eq!(lifecycle.ownership(), SessionOwnership::Unmonitored);
     assert!(!lifecycle.state().is_parked());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_session_without_model_activity_does_not_block_failure_parking()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let commissioned = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
+    let store = PostgresConvergenceSweepStore::new(pool.clone());
+    let repository = repository()?;
+    let observation = observation()?;
+    let (dispatch, session) = dispatched(
+        commissioned
+            .commission(
+                prepared_commission(0x89_20a)?,
+                &mut UuidV7SubmitInputIdGenerator,
+                |_| None,
+            )
+            .await?,
+    );
+    store
+        .record_dispatch_decision(
+            Uuid::from_u128(0x89_21a),
+            &repository,
+            pull_request(),
+            &observation,
+            (dispatch, session),
+            ConvergenceSweepDecision::LiveSession,
+        )
+        .await?;
+    GoalRepository::new(pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                pending_command(0x89_21b),
+                session,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+    SessionLifecycleRepository::new(pool.clone())
+        .close(
+            session,
+            SessionTerminalOutcome::Stopped {
+                sticky: StopStickiness::Redispatchable,
+            },
+            LifecycleActor::Operator,
+        )
+        .await?;
+
+    let disposition = store
+        .record_no_model_activity_failure(
+            Uuid::from_u128(0x89_21c),
+            &repository,
+            pull_request(),
+            &observation,
+            session,
+        )
+        .await?;
+    let lifecycle = SessionLifecycleRepository::new(pool)
+        .load(session)
+        .await?
+        .expect("the terminal session retains its lifecycle row");
+
+    assert_eq!(disposition, ConvergenceSweepFailureDisposition::Parked);
+    assert!(lifecycle.state().is_terminal());
     Ok(())
 }
 

@@ -529,7 +529,7 @@ pub(crate) async fn resume_in_transaction(
                  WHERE session_id = $1 AND state_kind = 'queued'
             ) AND NOT EXISTS (
                 SELECT 1 FROM turn_lifecycle
-                 WHERE session_id = $1 AND state_kind <> 'queued'
+                 WHERE session_id = $1 AND start_lineage_kind IS NOT NULL
             ) THEN 'dispatched'
             ELSE NULL
         END",

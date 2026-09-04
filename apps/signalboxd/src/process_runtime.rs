@@ -15685,6 +15685,9 @@ where
         Ok(SessionLifecycleCommandHandlingOutcome::Recorded(
             SessionLifecycleCommandResult::Applied(application),
         )) => {
+            if application == SessionLifecycleApplication::StartReleased {
+                let _ = services.eligibility_nudge.nudge(session);
+            }
             if matches!(command.operation(), SessionLifecycleOperation::Adopt { .. })
                 && let Some(goal_resumption) = &services.goal_resumption
             {
