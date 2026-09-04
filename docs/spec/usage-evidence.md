@@ -57,11 +57,11 @@ that records truncation when either source calls or groups exceed those hard
 safety ceilings. Why: bounding before grouping prevents an unscoped lifetime
 query from imposing work proportional to retained history.
 
-The result shapes hold their bounds by construction rather than by adapter
-discipline: the credential-profile label is a checked bounded discriminated
-type, a group's optional sums must agree with its key's declared presence
-coverage, a group's cache-normalization state must be consistent with its
-input-token semantics and sums (unknown semantics are never safe,
+The result shapes enforce their bounds by construction rather than relying on
+the adapter to maintain them: the credential-profile label is a checked bounded
+discriminated type, a group's optional sums must agree with its key's declared
+presence coverage, a group's cache-normalization state must be consistent with
+its input-token semantics and sums (unknown semantics are never safe,
 cache-exclusive input is always safe, and a cache-inclusive safety claim
 requires every cache axis present with a representable total and input at least
 that total), a report cannot carry more than the group ceiling, a detail page
