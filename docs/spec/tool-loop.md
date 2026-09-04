@@ -1,93 +1,16 @@
 # Tool loop
 
-The user-vocabulary surface on this page was re-verified through PR #378
-(`agent/user-vocabulary`).
-
-The daemon web-tool composition and conservative declaration defaults are
-verified against PR #433 (`agent/web-search-wiring`). The durable-command
-version cross-link was re-verified through this PR
-(`agent/model-settings-persistence`).
-
-The executor-failure containment contract is verified against this PR
-(`agent/executor-failure-turn-containment`).
-
-Bounded daemon-owned reconciliation of an ambiguous tool attempt is verified
-against this PR (`agent/daemon-live-tool-recovery-reconcile`).
-
-The session-delegation scheduling executor and daemon catalog composition are
-verified against PR #462 (`agent/delegation-runtime-daemon-v2`).
-
-The object root every advertised argument schema declares, and the fold that
-renders an internally tagged argument type into it, are verified through this PR
-(`agent/object-rooted-tool-schemas`).
-
-The `AlwaysConfirm` interaction with an explicitly configured approval posture —
-`Delegated` admitted, `Auto` refused — is verified through this PR
-(`agent/approval-posture-alwaysconfirm`).
-
-The immutable repository-watch authority supplied to a dispatched approval judge
-and the unattended-escalation terminal path are verified against this PR
-(`agent/headless-approval-escalation`).
-
-The operator-attended park after an operator-commissioned approval escalation is
-verified against this PR (`agent/daemon-live-headless-approval-park`).
-
-The automatic non-executable denial of credential-suppressed tool arguments is
-verified against this PR (`agent/daemon-live-redacted-tool-recovery`).
-
-The per-session workspace root the workspace, local Git, and execution families
-bind is verified against this PR (`agent/per-session-workspaces`).
-
-The user override of a delegate denial — its override command, the recorded
-one-shot pre-approval, and the `UserOverride` decision source — is verified
-against this PR (`agent/user-override-denials`).
-
-The change-request-scoped thread mutation contracts and their pre-dispatch
-ownership confirmation are verified through this PR (`agent/thread-ownership`).
-
-The automatic tool-round saturation, 256-round ceiling, and
-retained-frontier-content ceiling contracts are verified through this PR
-(`agent/tool-round-ceiling`) at implementation ref
-`aeaf22867c0c07060bae6dfa26434a013a3c4ceb`.
-
 The daemon blob-read declarations below are the foundation proposal from PR #553
-(`agent/blob-storage-foundation`) and become verified with its implementing
-child stack.
+(`agent/blob-storage-foundation`).
 
 The workspace-instruction addition to the continuation transaction is committed
 unimplemented functionality from PR #796 (`agent/agent-docs-skills-spec`). No
 present tool can create an instruction admission, and the current transaction
 therefore still has the four implemented effects named below.
 
-This page specifies the implemented daemon-owned tool subsystem as verified
-against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
-`signalboxd` name this page states for the catalog-wiring composition root was
-verified through PR #258 (`agent/signalboxd-rename`), and the Tier 0 catalog
-extension through PR #265 (`agent/tool-batch-tier0`). The Tier 1 code-host
-catalog extension is verified through PR #270 (`agent/tool-batch-tier1`), the
-review-thread aggregate retention bound through PR #1181
-(`agent/daemon-live-review-thread-result-budget`) and its scrubbed-result
-enforcement through this PR (`agent/daemon-live-review-thread-scrub-budget`),
-the deterministic review-slog extension through PR #306
-(`agent/review-slog-tools`), the failed-attempt operator event together with the
-credential-shaped code-host detail through PR #285
-(`agent/dev-instance-code-host-credential`), the client decision surface through
-PR #291 (`agent/turn-control-verbs`), and runner-protocol batch reconstitution
-through PR #260 (`agent/runner-protocol-domain`). Template-derived blanket
-creation was verified through PR #311 (`agent/session-templates-spec`), and the
-exact-origin `web_fetch` egress policy and complete bounded file-patch lookup
-through PR #330 (`agent/audit-verified-fixes`). The exact-revision
-repository-read extension is verified through PR #348
-(`agent/repository-read-tools`) at implementation ref
-`2a55dbb65440dfae31b339b6726fe5ace6dab24c`. The runner executable stack rooted
-at this foundation proposal extends the same laws to the runner locus. The
-explicit-approval `AlwaysConfirm` declaration is verified through PR #366
-(`agent/exec-tools`). Lifecycle-closure denial provenance is verified through PR
-#1484 (`agent/lifecycle-t5-commands`). The daemon family inventory and the
-implemented Git and execution names were re-verified through this PR
-(`agent/daemon-wiring`) against implementation ref
-`c8f881f585b49fb11ae5718cd923029ed0218b5d`; its child stack implements their
-daemon composition. This page owns logical tool requests, approval policy and
+This page specifies the implemented daemon-owned tool subsystem. The runner
+executable stack rooted at this foundation proposal extends the same laws to the
+runner locus. This page owns logical tool requests, approval policy and
 decisions, physical tool attempts, result admission, intra-turn continuation,
 crash classification, the compiled registry, and the daemon-local catalog. Turn
 and attempt lifecycle law lives in
@@ -98,11 +21,9 @@ model-call staging and provider translation in
 [identity-and-commands](identity-and-commands.md); and relational mechanics in
 [persistence-protocol](persistence-protocol.md). Invariant tags cite
 [the invariant test index](../invariants.md). The runner-locus paragraphs in
-this page are the foundation proposal at the bottom of their implementing stack
-and become verified only with those child pull requests. The approval-delegation
-stack rooted at this foundation proposal adds frozen per-tool postures, recorded
-judge calls, and typed decision provenance; those paragraphs become verified
-only with its child pull requests.
+this page are the foundation proposal at the bottom of their implementing stack.
+The approval-delegation stack rooted at this foundation proposal adds frozen
+per-tool postures, recorded judge calls, and typed decision provenance.
 
 ## Intra-turn rounds and request batches
 
@@ -1467,9 +1388,6 @@ retrying it. The adapter never returns code-host response bodies as error
 detail.
 
 ### Session plan tools
-
-This catalog family is verified through PR #385 (`agent/plan-dependencies`) at
-implementation ref `550c0f8a9d46560c5dfade52214f2c91982359db`.
 
 The process-lifetime daemon catalog always includes `plan_write` and `plan_read`
 in both base and fully mapped production composition. `signalboxd` binds their

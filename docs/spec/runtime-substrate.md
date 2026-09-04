@@ -3,66 +3,14 @@
 This page specifies the Layer-1 typed model-runtime boundary as implemented in
 `crates/model-runtime`, `crates/model-runtime-anthropic`,
 `crates/model-runtime-openai`, `crates/model-runtime-codex-cli`, and
-`crates/model-runtime-claude-cli`, verified against the implementing stack
-through PR #183 (`agent/provider-call-security-parser`). The Claude Code CLI
-adapter implementation was verified through PR #320
-(`agent/claude-cli-adapter`); its derived version pin, gated compatibility
-smoke, twice-daily schedule, and workflow-self-change trigger were verified
-through PR #468 (`agent/claude-cli-smoke`), including the credential-free
-version gate against the installed pinned executable. Its request-scoped file
-credential delivery and authenticated live smoke are verified against this PR
-(`agent/claude-cli-credential-delivery`). The Codex CLI adapter stack comprises
-PR #264 (`agent/codex-cli-wrap`) and PR #268 (`agent/codex-cli-pin-smoke`); its
-escalation closeout is PR #317 (`agent/escalation-closeout`). The Codex CLI
-typed rate-limit and overload evidence, provider-directed retry delay, and
-pre-stream non-acceptance proof are verified against this PR
-(`agent/multi-account-pools`). The Codex CLI compatibility-smoke automation was
-verified through PR #333 (`agent/ci-tells-truth`); its feature classification,
-ambient-skill catalog probe, and pinned version are verified against the
-`0.153.1` executable through this PR (`agent/gpt6-astra-catalog`). Its
-twice-daily schedule and workflow-self-change trigger were verified through PR
-`#471` (`agent/codex-smoke-schedule`). The Codex CLI adapter's prompt
-tool-authority preamble is verified against this PR
-(`agent/phantom-prohibition`). The composition root's pinned-version startup
-probe is verified against this PR (`agent/daemon-live-codex-pin-preflight`). The
-Codex CLI adapter's preservation of malformed string-carried tool arguments is
-verified against this PR (`agent/daemon-live-codex-malformed-tool-arguments`).
-The `signalboxd` names this page states for the composition root, its telemetry,
-and the production `FileCredentialAccess` were verified through PR #258
-(`agent/signalboxd-rename`); the Anthropic and OpenAI adapter-scoped file
-catalogs are verified against this PR (`agent/credential-pools-parser`). The
-Anthropic adapter's server-side `fallback`-block recognition was verified
-through PR #280 (`agent/provider-identity-normalization`). The HTTP
-fallback-body redaction ordering was verified through PR #330
-(`agent/audit-verified-fixes`). The persistence-repository families in the
-operator-failure inventory were verified through PR #288
-(`agent/audit-fix-docs-coherence`) when there were five of them, and the sixth,
-turn liveness, against this PR (`agent/turn-liveness-watchdog`). The
-streamed-delivery bridge and ephemeral text-delta projection were verified
-through PR #300 (`agent/token-level-streaming`); the Claude 5-family
-thinking-signature stream shape was verified through PR #305
-(`agent/sonnet-streamed-tool-use`). The Codex CLI redaction contract was
-verified through PR #316 (`agent/redaction-hardening`; shape coverage, absorbing
-suppression, enumerated single-split parity, and geometric work bound). Exact
-Codex CLI usage-axis projection is verified against PR #389
-(`agent/cost-accounting`). Model-settings mappings and advisory exceptions are
-verified against PR #437 (`agent/model-settings-adapters`). The Claude Code CLI
-adapter's daemon composition is verified against this PR
-(`agent/wire-claude-cli-adapter`), and the OpenAI adapter's against this PR
-(`agent/wire-openai-adapter`). The Anthropic compatibility smoke was verified
-through PR #465 (`agent/anthropic-api-smoke`), and the OpenAI compatibility
-smoke through PR `#466` (`agent/openai-api-smoke`). The cross-adapter
-`ToolCallsAtLoss` fact carried in boundary-loss evidence is verified against
-this PR (`agent/typed-loss-cause`), against every streamed and buffered loss
-path in the four adapters. A credential-suppressed proposal's participation in
-the structured-output multiplicity guard and in the Claude CLI named tool choice
-is verified against this PR (`agent/fix-client-tools-judge`). The smoke
-workflows' concurrency grouping — pull-request supersession, unique run-id
-groups on `main`, per-event-and-ref supersession for non-main dispatches — is
-verified against this PR (`agent/ci-cancel-superseded-pushes`). This page covers
-the provider-neutral operation, observation, and evidence vocabulary; SSE
-framing; structured-output and tool decode; `ScriptedModel`; the four provider
-adapters; and their credential boundaries. Layer-2 authorization and evidence
+`crates/model-runtime-claude-cli`. The Codex CLI adapter stack comprises PR #264
+(`agent/codex-cli-wrap`) and PR #268 (`agent/codex-cli-pin-smoke`); its
+escalation closeout is PR #317 (`agent/escalation-closeout`). Its feature
+classification, ambient-skill catalog probe, and pinned version follow the
+version pinned in `tooling/codex-cli/package.json`. This page covers the
+provider-neutral operation, observation, and evidence vocabulary; SSE framing;
+structured-output and tool decode; `ScriptedModel`; the four provider adapters;
+and their credential boundaries. Layer-2 authorization and evidence
 classification ([model-call-execution](model-call-execution.md)), credential
 channels, delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
@@ -70,12 +18,7 @@ authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
 companion pages. This page also owns the shared
 [operator failure taxonomy](#operator-failure-taxonomy) — defined in
-`crates/application` and consumed by signalboxd telemetry. The required
-model-exchange deployment policy and its unbounded spelling are verified against
-this PR (`agent/bounds-required-config-gate`). The Anthropic adapter's unforced
-tool choice, its instruction-carried tool demands, and its refusal of every
-sampling control are verified against this PR
-(`agent/anthropic-adapter-claude5`).
+`crates/application` and consumed by signalboxd telemetry.
 
 ## Boundary and crate layout
 
@@ -1366,11 +1309,6 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   content-silent rather than embedding a rejected provider value. Why:
   subscription authentication remains wholly inside the intended CLI control
   surface while credential-shaped reflection still fails closed.
-
-The Codex CLI whole-tool-argument closeout is verified against this PR
-(`agent/daemon-live-redacted-tool-closeout`); its same-turn runtime-safety
-recovery is verified against this PR
-(`agent/daemon-live-redacted-tool-recovery`).
 
 ### Codex CLI shape-redaction scope
 

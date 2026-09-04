@@ -1,72 +1,20 @@
 # Sessions and the transcript
 
-The widened creation-cause vocabulary and its typed module dispatch are verified
-against this PR (`agent/lifecycle-t2-state-machine`).
-
-The bounded browser session descriptor and historical timeline foundation are
-verified against this PR (`agent/web-session-timeline`). The bounded
-lexical-search projection and query boundary are verified against this PR
-(`agent/web-product-surface-search`), which carries the `agent/web-search-usage`
-boundary it extends. The bounded browser session catalog is verified against
-this PR (`agent/web-session-catalog-follow`), and its parked state is
-re-verified against this PR (`agent/lifecycle-t3-metrics`). The first typed
-detail slice is verified against this PR (`agent/web-timeline-detail`). The
-bounded live snapshot and follow projection are verified against this PR
-(`agent/web-session-catalog-follow-live`).
-
-Dedicated-compaction usage as the next queued-turn headroom baseline is verified
-against this PR (`agent/fix-headroom-accounting`).
-
-The user-vocabulary surface on this page was re-verified through PR #378
-(`agent/user-vocabulary`).
-
 The multipart user-content aggregate below is the foundation proposal from PR
-`#553` (`agent/blob-storage-foundation`) and becomes verified with its
-implementing child stack.
+`#553` (`agent/blob-storage-foundation`).
 
 This page specifies the implemented behavior of session creation and ancestry,
 creation from an imported frontier, session-level configuration defaults and
 their replacement, replaceable organizational metadata and listing, the
 long-lived session aggregate, semantic transcript entries, accepted-input user
-content, and actor attribution. It was verified against the implementing stack
-through PR #265 (`agent/tool-batch-tier0`); the defaults-epoch and
-model-identity boundary were additionally verified through PR #272
-(`agent/mid-session-model`); the imported-frontier process surface was verified
-through PR #294 (`agent/continue-imported-conversation`); the session system
-prompt was verified through PR #286 (`agent/session-system-prompt`); and the
-input-delivery surface and its user-reachable steering boundary were verified
-through PR #302 (`agent/mid-turn-steering`). The copy-on-create session-template
-provenance and creation mode were verified through PR #311
-(`agent/session-templates-spec`). Delegated creation provenance and its durable
-mapping are the foundation proposal at the bottom of the delegation stack and
-become verified only with its implementing child pull requests. The append-only
-context-compaction record and projection were verified through PR #312
-(`agent/context-compaction-core`); the command path and canonical visible-range
-selection were verified through PR #314 (`agent/context-compaction-protocol`).
-The bounded automatic range and durable reported-usage trigger are verified
-against this PR (`agent/daemon-live-reported-usage-compaction`). The runner
-placement-entry paragraphs are the foundation proposal at the bottom of their
-implementing stack and become verified only with those child pull requests. The
-imported-conversation record and converter are owned by
-[conversation-import](conversation-import.md). Where a law is cited as
+content, and actor attribution. Delegated creation provenance and its durable
+mapping are the foundation proposal at the bottom of the delegation stack. The
+runner placement-entry paragraphs are the foundation proposal at the bottom of
+their implementing stack. The imported-conversation record and converter are
+owned by [conversation-import](conversation-import.md). Where a law is cited as
 `INV-NNN`, the generated [invariant test index](../invariants.md) resolves it;
 where mechanics owned by another contract are summarized, the owning sibling
 page is linked inline.
-
-The path-scoped session-placement domain and persistence paragraphs were
-verified through PR #423 (`agent/scoped-visibility-placement`); fail-closed
-current-head authentication is additionally verified against the parent slice
-(`agent/scoped-visibility`). The read-scope enforcement and process surface are
-verified against this PR (`agent/scoped-visibility-wiring`).
-Defaults-replacement settings admission and its locked expected-epoch handoff
-are verified against this PR (`agent/model-settings-execution`). The
-automatic-reconciliation child outcome — the failed result carrying the
-`ChildResultUnavailable` reason and the exact reconciled child turn that the
-daemon's durable attempt seals for a parent whose delegated call the provider
-can never settle — is verified against this PR
-(`agent/turn-lifecycle-hardening`). Deployment-owned system-prompt and
-metadata-count admission is verified against this PR
-(`agent/bounds-required-config-protocol`).
 
 ## Session identity and creation provenance
 
@@ -1286,10 +1234,9 @@ edges of [model-call-execution](model-call-execution.md).
 ## Session delegation
 
 This section is the foundation proposal at the bottom of the session-delegation
-stack and becomes verified only with that stack's scheduling and tool/client
-pull requests. A delegated child is a distinct, independently browsable session.
-Its `SessionCreationCause::Delegated` names the exact spawning `ToolRequestId`;
-its `TranscriptAncestry` is independently `None`. Delegation does not copy,
+stack. A delegated child is a distinct, independently browsable session. Its
+`SessionCreationCause::Delegated` names the exact spawning `ToolRequestId`; its
+`TranscriptAncestry` is independently `None`. Delegation does not copy,
 reference, merge, or expose the parent transcript, and it does not widen the
 none-or-one ancestry baseline.
 
