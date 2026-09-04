@@ -4,18 +4,6 @@ Status: proposed for owner decision; design only.
 
 ## Placement and authority
 
-This page records a decision for review, not implemented behavior. It changes no
-page under [`docs/spec/`](../spec/). If accepted, its implementation stack must
-update the owning specification pages as behavior becomes true, add public API
-shapes to [`docs/domain-spine.md`](../domain-spine.md), and put enforced
-invariants in INV-tagged tests. The missing owning records are explicit:
-`AttachmentKind::Audio` belongs in the domain spine and blob-storage attachment
-contract; attachment `part_selector` belongs in the blob-storage rendered-stub
-contract; durable `BlobReference` results, media admission, and preparation
-belong in the tool-loop contract; and later client-facing paged file-media
-messages belong in the process-protocol contract. None is recorded as
-implemented by this proposal.
-
 The immutable blob catalog, attachment stubs, bounded raw reads,
 preparation-time attachment verification, and model input-modality catalog are
 fixed inputs from [blob storage](../spec/blob-storage.md). Blob identity remains
@@ -43,7 +31,7 @@ network-fetching parsers, or automatic attachment materialization.
 
 ## Proposed decisions
 
-Keep three frames distinct:
+Keep three types distinct:
 
 1. `BlobDigest` identifies immutable bytes and says nothing about type.
 2. `FileUse` holds caller-supplied metadata for one use of those bytes.
@@ -71,7 +59,7 @@ so replay names exact immutable bytes rather than rerunning a parser.
 
 ## Type model
 
-These are proposed semantic shapes, not existing declarations:
+Proposed semantic shapes:
 
 ```text
 FileUse {
@@ -104,10 +92,10 @@ ValidatedFile {
 }
 ```
 
-`AttachmentKind::Audio` extends the current closed attachment vocabulary when
-implementation changes the domain, storage, and process wire in place. Kind is
-user intent, not detection evidence. A declared `image/*` file containing other
-bytes remains representable; typed inspection reports the disagreement.
+`AttachmentKind::Audio` extends the closed attachment vocabulary; the domain,
+storage, and process wire change in place. Kind is user intent, not detection
+evidence. A declared `image/*` file containing other bytes remains
+representable; typed inspection reports the disagreement.
 
 `DeclaredMediaType` preserves the exact bounded caller value already held by an
 attachment. `CanonicalMediaType` is a lowercase ASCII type/subtype essence with
@@ -137,8 +125,8 @@ ReadViewDeclaration {
 ```
 
 Examples such as `pages_text`, `page_preview`, `region`, `waveform`, and `clip`
-are provider data, not central enum arms. A genuinely new output kind is a
-foundation change; it cannot be hidden inside a reader registration.
+are provider data, not central enum arms. A new output kind changes the common
+types; a reader registration cannot add one.
 
 ## Detection and validation
 
@@ -304,7 +292,7 @@ result.
 
 ## Registry and adapter boundary
 
-Mirror the model-runtime dependency posture:
+Mirror the model-runtime dependency structure:
 
 - `signalbox-file-media-runtime` owns provider-neutral source, request, result,
   cancellation, registry, and conformance types. It depends on no domain,
@@ -420,7 +408,7 @@ admission mechanism.
 
 Configuration may disable compiled providers and lower bounds. It cannot add
 aliases, choose precedence, raise compiled ceilings, or load executable plugins.
-Runtime plugin loading would turn configuration into code authority.
+Runtime plugin loading would make configuration a source of executable code.
 
 ### Registering a type
 
@@ -429,12 +417,11 @@ Runtime plugin loading would turn configuration into code authority.
    output kinds, and limits.
 3. Run the shared suite and malformed corpus under the real isolation harness.
 4. Add its constructor to daemon composition and optional strict configuration.
-5. Update owning specs in the implementation PR that exposes the provider.
 
 No common tool schema, wire enum, or application branch changes when the
 provider uses existing output kinds. A model adapter changes only when its
-reviewed canonical-media-type inventory is intentionally widened; registering a
-reader does not imply that support.
+reviewed canonical-media-type inventory is widened; registering a reader does
+not imply that support.
 
 ## Processor isolation
 
@@ -463,7 +450,7 @@ descriptors, and output. Before spawning, it atomically reserves one slot and
 the declared memory limit from a process-wide pool of four workers and 2 GiB;
 unavailable capacity returns `ProcessorUnavailable` without spawning or reading
 the source. Reservations are released only after whole-process-tree termination.
-Worker reuse is deferred so compromise cannot cross requests.
+Workers are not reused, so compromise cannot cross requests.
 
 A control result is length-delimited and accepted only after clean worker exit.
 Before classification, validation, publication, or commit, the supervisor
@@ -628,8 +615,8 @@ invalid-continuation failure, and the model may issue a new initial request
 rather than the executor guessing. Providers expose semantic positions such as
 page, row, section, frame, or time span, not parser offsets.
 
-Raw `blob_read` remains beside these tools as the unknown-format and diagnostic
-escape hatch. A typed reader never falls back to raw bytes for recognized
+Raw `blob_read` remains available beside these tools for unknown formats and
+diagnostics. A typed reader never falls back to raw bytes for recognized
 malformed content.
 
 ## Durable results and model preparation
@@ -688,11 +675,10 @@ verified blob, consumes the reservation, releases unused bytes, and commits the
 reference; a known-failure completion transaction releases the reservation
 without registering a blob. Every crash-lost authorized `ExternalEffect` attempt
 remains ambiguous and keeps its reservation through the owning tool loop's
-reconciliation lifecycle; it cannot be retried. The bottom tool-loop
-specification diff in the implementation stack must add an explicit, durable
-reconciliation closure before this reservation mechanism can ship. A closure
-that proves success consumes the reservation while committing the exact result;
-one that proves known failure or records an operator's explicit terminal
+reconciliation lifecycle; it cannot be retried. The tool loop must provide an
+explicit, durable reconciliation closure for this reservation mechanism. A
+closure that proves success consumes the reservation while committing the exact
+result; one that proves known failure or records an operator's explicit terminal
 abandonment releases it. Abandonment is irreversible, records that no later
 result may be committed for the attempt, and is the only safe release when the
 external effect remains unknowable. Until one of those terminal closures
@@ -848,9 +834,8 @@ artifact aggregate, never the blob row.
 
 All source and embedded metadata is attacker-controlled tool content. Readers
 perform no network fetch, write no archive path, execute no active content, and
-do not recursively interpret embedded files in version one. Parser dependencies
-are adapter-confined, pinned, publicly sourced, and covered by malformed
-fixtures. Broad or native dependencies remain ordinary owner gates.
+do not recursively interpret embedded files. Parser dependencies are
+adapter-confined, pinned, publicly sourced, and covered by malformed fixtures.
 
 ## Conformance contract
 
@@ -951,18 +936,13 @@ than replaces fixed contract fixtures.
 
 ## Sliced rollout
 
-Each child targets its predecessor and splits again rather than exceeding the
-normal review budget.
-
 1. **Runtime and registry:** neutral types, registry, bounded ports, failure
    algebra, scripted provider, and shared suite; compose an empty registry.
 2. **Isolation and inspection:** ruled sandbox, verified-source broker,
    supervision, `file_inspect`, and the scripted conformance provider; the
    production registry remains empty.
-3. **First ruled formats:** only after the owner selects the initial format
-   inventory, add the selected adapters and their matching bounded `file_read`
-   result paths, plus durable turn work accounting. Split this slice by family
-   when the ruling would exceed the normal review budget.
+3. **First ruled formats:** add the selected adapters and their matching bounded
+   `file_read` result paths, plus durable turn work accounting.
 4. **Image groundwork:** ruled adapters, pixel validation, region/fit view
    declarations, and conformance fixtures; this slice exposes no rich result.
 5. **Images and provider input:** generated previews, `BlobReference::Image`,
@@ -971,22 +951,17 @@ normal review budget.
 6. **Audio:** attachment kind, ruled adapters, duration/sample checks, clip or
    waveform views, and audio projection only where supported.
 7. **General files:** native `BlobReference::File` only for adapters with an
-   exact reviewed contract; other files stay legible through typed readers.
-8. **Further adapters:** one narrow family per PR. Archives, OCR, transcription,
-   and network readers require separate proposals.
+   exact reviewed contract; other files remain readable through typed readers.
+8. **Further adapters:** one narrow family per slice. Archives, OCR,
+   transcription, and network readers require separate proposals.
 
 No rich result arm lands without one producer-to-provider path and its complete
 preparation-failure proofs.
 
 ## Open questions requiring owner ruling
 
-The authoritative unresolved inventory is
-[`docs/open-questions.md`](../open-questions.md#file-and-media-interpretation).
-It owns the isolation substrate, first formats, parser dependency budget, OCR
-and transcription, provider-native general files, encrypted-file credentials,
-turn budgets, and classification-cache questions. This proposal does not settle
-them.
-
-Acceptance settles only this common architecture. Every parser dependency and
-new provider modality still receives a narrow implementation review and updates
-its owning specification only when behavior exists.
+The unresolved inventory is in
+[`docs/open-questions.md`](../open-questions.md#file-and-media-interpretation):
+the isolation substrate, first formats, parser dependency budget, OCR and
+transcription, provider-native general files, encrypted-file credentials, turn
+budgets, and classification-cache questions. This proposal does not settle them.
