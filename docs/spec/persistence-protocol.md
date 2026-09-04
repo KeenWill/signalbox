@@ -1,8 +1,5 @@
 # Persistence protocol
 
-The multipart accepted-input persistence paragraph below is a foundation
-proposal.
-
 This page covers the Postgres representation in `crates/persistence` (source and
 migrations), migration discipline, durable command storage and replay equality,
 the fail-closed reconstitution boundary, the lock protocol, pending-steering
@@ -14,10 +11,7 @@ identity kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant enforcement lives in
 INV-tagged tests; this page cites tags resolved through the generated
-[invariant index](../invariants.md). The runner-orchestration transaction and
-lock paragraphs are the foundation proposal at the bottom of their implementing
-stack. The session-placement update transaction is the foundation proposal at
-the bottom of its implementing stack.
+[invariant index](../invariants.md).
 
 ## Stack and boundaries
 
@@ -26,7 +20,7 @@ on Tokio. Queries are static SQL through the runtime query API with hand-written
 decoding (`Row::try_get`); there are no query macros, `FromRow` derives, or
 ORM-generated types. Domain types gain no SQLx or serialization traits; each
 adapter module decodes its own rows through explicit fallible functions
-(`decode_complete` and kin in `session.rs`, `create_session.rs`,
+(`decode_complete` and the other decoders in `session.rs`, `create_session.rs`,
 `submit_input.rs`, `replace_session_defaults.rs`), built on the shared identity
 and ordinal scalar conversions in `crates/persistence/src/mapping.rs` (INV-002).
 Why: one coherent driver/pool/migration stack minimizes dependency surface while
@@ -64,53 +58,49 @@ records are immutable.
 
 Connection options are explicit: production parsing forces
 `PgSslMode::VerifyFull`; the ephemeral-test helper forces `Disable`. Pool sizing
-remains at SQLx defaults until an operational slice selects limits.
+is at SQLx defaults.
 
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — fifteen files, `202609010000` through
-`202609010014`, the per-domain baseline that the 2026-09 chain collapse
-regenerated from the retired 149-file pre-alpha chain
-(`docs/proposals/migration-reset.md`) — embedded by `sqlx::migrate!` as the
-static `MIGRATOR` and applied through one `migrate(pool)` operation. The
-baseline files are one schema split by domain and apply only as a whole, in
-filename order; `HUB_FENCE_MIGRATION_VERSION` names the last of them. Migration
-versions below `202609010000` cited elsewhere in this document name files of the
-retired chain — git history is their archive, and the baseline reproduces their
-surviving effects byte-for-byte. SQLx's `_sqlx_migrations` ledger records
-applied files with checksums (the integration tests read the ledger directly);
-serialization of concurrent migration runs is SQLx dependency behavior, relied
-on but not demonstrated in this repo. `.gitattributes` pins migration files to
-LF so checksums do not vary by platform, and a build script re-embeds the set
-whenever a file changes. The production binary holds the singleton daemon guard
-and fences the prior pool generation, then runs `migrate` as its first schema
-phase, followed by the startup scan and runtime (INV-034). The fence migration's
-first installation is the sole case without a prior fenced pool, because no
-earlier schema can have admitted one. Why: checksummed forward-only files make
-every schema change a reviewed, immutable artifact, so a deployed database's
-history is never silently edited.
+`crates/persistence/migrations/`, embedded by `sqlx::migrate!` as the static
+`MIGRATOR` and applied through one `migrate(pool)` operation. Fifteen files,
+`202609010000` through `202609010014`, are the per-domain baseline: one schema
+split by domain that applies only as a whole, in filename order;
+`HUB_FENCE_MIGRATION_VERSION` names the last of them. Migration versions below
+`202609010000` cited elsewhere in this document name files of the retired chain
+the baseline replaced, whose surviving effects it reproduces byte-for-byte.
+SQLx's `_sqlx_migrations` ledger records applied files with checksums (the
+integration tests read the ledger directly); serialization of concurrent
+migration runs is SQLx dependency behavior, relied on but not demonstrated in
+this repo. `.gitattributes` pins migration files to LF so checksums do not vary
+by platform, and a build script re-embeds the set whenever a file changes. The
+production binary holds the singleton daemon guard and fences the prior pool
+generation, then runs `migrate` as its first schema phase, followed by the
+startup scan and runtime (INV-034). The fence migration's first installation is
+the sole case without a prior fenced pool, because no earlier schema can have
+admitted one. Why: checksummed forward-only files make every schema change a
+reviewed, immutable artifact, so a deployed database's history is never silently
+edited.
 
 A migration becomes immutable as soon as its version is recorded in the
 `_sqlx_migrations` table of any database whose history must remain continuous:
-every deployed database, and every recording once the migration's pull request
-merges. Correct an already-recorded migration with a new forward migration;
-never edit, replace, or renumber the recorded migration file. Two exceptions
-exist. A pre-merge recording by a rehearsal installation when the recorded form
-cannot merge — a form that fails validation on fresh databases has no correct
-forward continuation, so the file is corrected before merge and the rehearsal
-installation's ledger row is corrected at its next deployment as a documented
-step, never silently. And the chain collapse that
-`docs/proposals/migration-reset.md` reconciles with this rule: while there is
-exactly one deployment and no release, the whole recorded set may be replaced by
-a regenerated baseline proved schema-equivalent, cutting the deployed database
+every deployed database, and every recording once the migration is on `main`.
+Correct an already-recorded migration with a new forward migration; never edit,
+replace, or renumber the recorded migration file. Two exceptions exist. A
+rehearsal installation's recording of a migration not yet on `main` whose
+recorded form fails validation on fresh databases — such a form has no correct
+forward continuation, so the file is corrected before it reaches `main` and the
+rehearsal installation's ledger row is corrected at its next deployment as a
+documented step, never silently. And a chain collapse: while there is exactly
+one deployment and no release, the whole recorded set may be replaced by a
+regenerated baseline proved schema-equivalent, cutting the deployed database
 over by truncating `_sqlx_migrations` and inserting one row per baseline file in
 one transaction — bookkeeping only, no schema or data mutation. Why: the rule
 exists so no database's history is silently edited; a documented
-rehearsal-ledger correction preserves that while a frozen unmergeable file would
-instead freeze a defect into every future installation, and a collapse replaces
-the ledger loudly, with equivalence proofs, under the ruling that document
-records.
+rehearsal-ledger correction preserves that while freezing a file that fails
+validation would instead freeze a defect into every future installation, and a
+collapse replaces the ledger loudly, with equivalence proofs.
 
 Every function reachable from a table constraint or index expression pins its
 search path in its catalogue definition, rendered through `current_schema` so
@@ -119,32 +109,20 @@ installations whose migrations run outside the default schema keep the
 search path and evaluates check constraints while copying table data, so an
 unpinned body that names another user function unqualified resolves in normal
 operation and fails only during restore; the baseline carries the pin on the
-whole check-reachable set (the retired `202608200001` retrofitted it onto the
-chain's), and the `search_path_postgres` catalogue test (INV-070) derives the
-reachable set from the dependency catalogue — including functions reached only
-through a user-defined operator — then closes transitively over lexically
-call-shaped body references. Quoted identifiers and comments between a function
-name and its opening parenthesis remain calls; names inside comments or strings
-and bare aliases do not. The test fails on any unpinned member or on empty
-discovery, so a future migration cannot reintroduce the gap. Why: a backup that
-cannot restore is a silent failure that surfaces only during recovery, so
-restorability is part of the schema's contract rather than an operational
-afterthought.
+whole check-reachable set, and the `search_path_postgres` catalogue test
+(INV-070) derives the reachable set from the dependency catalogue — including
+functions reached only through a user-defined operator — then closes
+transitively over lexically call-shaped body references. Quoted identifiers and
+comments between a function name and its opening parenthesis remain calls; names
+inside comments or strings and bare aliases do not. The test fails on any
+unpinned member or on empty discovery, so a future migration cannot reintroduce
+the gap. Why: a backup that cannot restore is a silent failure that surfaces
+only during recovery, so restorability is part of the schema's contract rather
+than an operational afterthought.
 
-Prefix reservation across concurrent stacks: the bottom pull request of any
-stack that will add migrations declares a reserved prefix block — a date plus a
-slot range — in its description, and sibling stacks pick disjoint blocks. Once a
-stack holds a reserved block, renumbering its migrations after a base merges is
-forbidden as long as the reserved prefix still exceeds the highest prefix on
-`main`; the ordering guarantee — a strictly greater prefix than the stack's
-ultimate `main`-merge target — is checked against that target rather than
-against a prefix the immediate parent branch carries only because a sibling
-merged into it. Within a stack the guarantee still binds against the stack's own
-migrations: a prefix a child pull request adds strictly exceeds every prefix its
-ancestor branches add, because `_sqlx_migrations` keys applied migrations by
+A migration added to the set carries a prefix strictly greater than every prefix
+already in the set, because `_sqlx_migrations` keys applied migrations by
 version, so a repeated prefix collides and a lower one applies out of order.
-Why: parallel migration-bearing stacks would otherwise collide on the next free
-prefix and churn-renumber each time a sibling merges.
 
 Container-backed integration tests (`postgres-integration` feature, ignored by
 default, failing loudly when Docker is absent) exercise the real constraints,
@@ -153,16 +131,16 @@ triggers, locks, and races described below against a pinned Postgres image.
 Migration `202609020021_watchdog_durability.sql` adds the durable evidence and
 scan ordinal used by both turn-liveness watchdog predicates.
 
-Migration `202608210400_convergence_sweep.sql` uses the reserved `2026082104xx`
-block to add the mutable `convergence_sweep_target` scheduler projection, the
-append-only `convergence_sweep_event` audit, and the
-`convergence_sweep_parked_target` operator view. Closed checks bind retry and
-park shapes to the five-attempt `convergence_sweep_retry_budget()` ceiling, bind
-each provider, commission, template, or state-access failure outcome to its
-typed cause and operator need, and prevent partial command-fence or
-commissioned-dispatch identities. Observation projections are decoded as
-complete pairs by the persistence adapter. The function pins the restore-safe
-schema search path. The cross-component behavior using these records is owned by
+Migration `202608210400_convergence_sweep.sql` adds the mutable
+`convergence_sweep_target` scheduler projection, the append-only
+`convergence_sweep_event` audit, and the `convergence_sweep_parked_target`
+operator view. Closed checks bind retry and park shapes to the five-attempt
+`convergence_sweep_retry_budget()` ceiling, bind each provider, commission,
+template, or state-access failure outcome to its typed cause and operator need,
+and prevent partial command-fence or commissioned-dispatch identities.
+Observation projections are decoded as complete pairs by the persistence
+adapter. The function pins the restore-safe schema search path. The
+cross-component behavior using these records is owned by
 [pull-request convergence reconciliation](convergence-reconciliation.md).
 Migration `202608210402_repo_watch_pull_request_target_indexes.sql` indexes the
 repository-watch event-to-action path used to census sessions by pull-request
@@ -173,8 +151,8 @@ Migration `202608210404_convergence_sweep_immutable_parked_session.sql` persists
 that selected identity and timestamp in the guarded parking transition, so later
 censuses cannot change the operator-visible parked session. Its two check
 constraints are validated rather than declared `NOT VALID`: the whole
-`202608210400`–`202608210404` block lands together, so no database has held an
-inactivity park without those columns, and the schema asserts unconditionally
+`202608210400`–`202608210404` block applies as a whole, so no database has held
+an inactivity park without those columns, and the schema asserts unconditionally
 that every such park carries an operator-visible dispatch identity.
 
 ## Relational representation
@@ -542,18 +520,17 @@ Representation rules, all enforced in the schema:
   execution-possible idempotent work becomes ambiguous and requires
   reconciliation. A same-session foreign or older same-placement attempt
   therefore cannot survive placement readback.
-- The same slice adds the closed `runner_placement_changed` semantic-entry
-  payload: one positive placement revision, total only for that kind, with a
-  foreign key to the same session's placement record at exactly that revision.
-  At most one such entry exists per session and revision, the session
-  placement-frontier pointer names the exact entry and revision, and a deferred
-  check requires the entry to be the final member of the frontier that installed
-  it. Reconstitution resolves the referenced placement record and rejects a
-  missing, cross-session, non-successor, or duplicated reference rather than
-  rendering the entry from its own payload.
-- The runner-orchestration foundation adds one append-only
-  `runner_operation_failure` record for every durably admitted
-  `operation_failed` frame. It stores the exact runner, one closed
+- The closed `runner_placement_changed` semantic-entry payload is one positive
+  placement revision, total only for that kind, with a foreign key to the same
+  session's placement record at exactly that revision. At most one such entry
+  exists per session and revision, the session placement-frontier pointer names
+  the exact entry and revision, and a deferred check requires the entry to be
+  the final member of the frontier that installed it. Reconstitution resolves
+  the referenced placement record and rejects a missing, cross-session,
+  non-successor, or duplicated reference rather than rendering the entry from
+  its own payload.
+- One append-only `runner_operation_failure` record is stored for every durably
+  admitted `operation_failed` frame. It stores the exact runner, one closed
   `operation_kind` (`workspace_provision`, `workspace_release`, or
   `lease_offer`), the runner protocol's closed category, and the complete
   runner-authored detail as separate code, message, and exact JSON-object
@@ -635,9 +612,9 @@ Representation rules, all enforced in the schema:
 Some rules are deliberately enforced twice — typed domain transitions and
 database constraints — for the database-level invariants; a passing SQL row set
 can still fail domain correlation (see reconstitution below). One current-state
-row sits below the guarded tier: the mutable `session_current_defaults` pointer
-carries no guard trigger, so beyond its range `CHECK` and deferred foreign key
-into `session_defaults_version`, pointer discipline rests solely on the
+row is unguarded: the mutable `session_current_defaults` pointer carries no
+guard trigger, so beyond its range `CHECK` and deferred foreign key into
+`session_defaults_version`, pointer discipline rests solely on the
 application-side compare-and-set in `replace_session_defaults.rs`.
 
 ## Durable command storage and replay equality
@@ -868,12 +845,11 @@ Locks per transaction, in acquisition order:
   `FOR NO KEY UPDATE` in canonical session-ID order before taking the child
   scheduler lock. This is the shared prefix for any path that can record a child
   result. **Committed unimplemented functionality — instruction admitted-set
-  head.** No present migration or repository operation stores an admitted set,
-  so the admitted-set locks stated here, in the tool-loop bullet below, and in
-  the `ReplaceSessionDefaults` bullet below are the protocol their implementing
-  child must follow. This inventory, not the contract pages that name the
-  transactions, is where their order and mode are fixed. The instruction
-  eligibility freeze that
+  head.** No present migration or repository operation stores an admitted set;
+  the admitted-set locks stated here, in the tool-loop bullet below, and in the
+  `ReplaceSessionDefaults` bullet below are the protocol that functionality must
+  follow. This inventory fixes their order and mode. The instruction eligibility
+  freeze that
   [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md#the-activation-transaction)
   adds to `StartEligibleTurn`, and the session-eligibility replacement command,
   take the session's admitted-set head immediately after the `session_scheduler`
@@ -895,53 +871,50 @@ Locks per transaction, in acquisition order:
   or take an admitted-set head while holding a pointer row, an action-head, a
   capacity row, or a cursor row. **Committed unimplemented functionality.** No
   present migration or repository operation stores pool state, capacity
-  reservations, or availability waits, so the credential-pool locks described in
-  the rest of this bullet are the protocol its implementing child must follow,
-  not a guarantee this build provides. This bullet is the whole of that
-  protocol: which objects each credential-pool transaction takes, in what order,
-  and in which mode is stated here and nowhere else.
+  reservations, or availability waits; the credential-pool locks described in
+  the rest of this bullet are the protocol that functionality must follow, not a
+  guarantee this build provides. This bullet fixes which objects each
+  credential-pool transaction takes, in what order, and in which mode.
   [The credential-availability machine](credential-availability.md#the-credential-availability-machine)
-  names the transaction that commits each selection ending, which is how a
-  reader arrives at the right sentence below; it states no locks of its own and
-  must not be consulted for any. A transaction that admits a wait or proves
-  exhaustion without preparing a call takes the scheduler lock and the action
-  heads below and no cursor row, because it selects nothing; the admission that
-  creates a contended wait additionally holds capacity rows, as stated further
-  down. Credential-pool call preparation additionally locks the action head of
-  every member of the pinned policy it may select, in profile-reference byte
-  order, immediately after the scheduler lock and before it reads any exclusion
-  state. The mode follows what the transaction does to that member and not which
-  path reached it: `FOR SHARE` for a member whose exclusion state it only reads,
-  and `FOR UPDATE` for one it writes — including the member whose pending
-  `switch_next_turn` displacement a successful preparation consumes, which is a
-  write that reads like a read. This holds for every preparation alike,
-  including the one that releases a credential-availability wait, so no path
-  acquires a weaker mode by arriving through a wait. It then locks every
-  potentially selected bounded profile's shared capacity row `FOR UPDATE`, in
-  the same order, before reading reservation counts. When `round_robin` decides
-  among the first admitted priority's members, preparation next locks that
-  immutable-policy-and-priority cursor row `FOR UPDATE` before reading the
-  cursor, choosing a member, or advancing it with `Prepared`. It rereads the
-  protected selection facts after acquiring each lock and holds all of them
-  through the `Prepared` insert. A transaction that mints, activates, or clears
-  a credential exclusion — a terminal observation applying a pool trigger, a
-  delivery-layer quarantine, or an operator clear — takes those same action
-  heads `FOR UPDATE` at that same ordering position. Share and exclusive modes
-  conflict, so one of the two transactions waits: a `Prepared` insert either
-  precedes the exclusion commit or reads the member as already excluded. This is
-  what a selection needs when it takes no other lock the writer takes — an
-  unbounded `first_listed` member acquires neither a capacity row nor a cursor
-  row. Releasing a bounded profile's reservation takes that profile's capacity
-  row `FOR UPDATE` at the same position and holds it through the atomic
-  release-and-wake commit, and a woken waiter rewriting its own wait evidence
-  takes the capacity rows of every bounded member that evidence names, in the
-  same byte order. A release and a snapshot rewrite therefore cannot interleave:
-  no wait can commit naming a reservation another transaction has already
-  released, and no release can publish its wake between a loser's read and its
-  rewrite. No other path may take a scheduler lock while holding an action-head,
-  capacity-, or cursor-row lock; take an action-head lock while holding a
-  capacity-row or cursor-row lock; or take a capacity-row lock while holding a
-  cursor-row lock.
+  names the transaction that commits each selection ending. A transaction that
+  admits a wait or proves exhaustion without preparing a call takes the
+  scheduler lock and the action heads below and no cursor row, because it
+  selects nothing; the admission that creates a contended wait additionally
+  holds capacity rows, as stated further down. Credential-pool call preparation
+  additionally locks the action head of every member of the pinned policy it may
+  select, in profile-reference byte order, immediately after the scheduler lock
+  and before it reads any exclusion state. The mode follows what the transaction
+  does to that member and not which path reached it: `FOR SHARE` for a member
+  whose exclusion state it only reads, and `FOR UPDATE` for one it writes —
+  including the member whose pending `switch_next_turn` displacement a
+  successful preparation consumes, which is a write, not a read. This holds for
+  every preparation alike, including the one that releases a
+  credential-availability wait, so no path acquires a weaker mode by arriving
+  through a wait. It then locks every potentially selected bounded profile's
+  shared capacity row `FOR UPDATE`, in the same order, before reading
+  reservation counts. When `round_robin` decides among the first admitted
+  priority's members, preparation next locks that immutable-policy-and-priority
+  cursor row `FOR UPDATE` before reading the cursor, choosing a member, or
+  advancing it with `Prepared`. It rereads the protected selection facts after
+  acquiring each lock and holds all of them through the `Prepared` insert. A
+  transaction that mints, activates, or clears a credential exclusion — a
+  terminal observation applying a pool trigger, a delivery-layer quarantine, or
+  an operator clear — takes those same action heads `FOR UPDATE` at that same
+  ordering position. Share and exclusive modes conflict, so one of the two
+  transactions waits: a `Prepared` insert either precedes the exclusion commit
+  or reads the member as already excluded. This is what a selection needs when
+  it takes no other lock the writer takes — an unbounded `first_listed` member
+  acquires neither a capacity row nor a cursor row. Releasing a bounded
+  profile's reservation takes that profile's capacity row `FOR UPDATE` at the
+  same position and holds it through the atomic release-and-wake commit, and a
+  woken waiter rewriting its own wait evidence takes the capacity rows of every
+  bounded member that evidence names, in the same byte order. A release and a
+  snapshot rewrite therefore cannot interleave: no wait can commit naming a
+  reservation another transaction has already released, and no release can
+  publish its wake between a loser's read and its rewrite. No other path may
+  take a scheduler lock while holding an action-head, capacity-, or cursor-row
+  lock; take an action-head lock while holding a capacity-row or cursor-row
+  lock; or take a capacity-row lock while holding a cursor-row lock.
 
 - **Automatic operation reconciliation**: discovery locks the singleton
   discovery-cursor row `FOR UPDATE` and retains it through discovery,
@@ -955,42 +928,42 @@ Locks per transaction, in acquisition order:
   later locks its own singleton cursor row `FOR UPDATE`, then examines and
   updates at most 64 recovery rows from one materialized keyset page. Each
   supersession lap likewise fixes its highest pending recovery identity before
-  paging and wraps after reaching that bound. The bound carries weight here that
-  it does not for discovery: a recovery becomes superseded by a `turn_lifecycle`
-  change rather than by anything this statement writes, so a row the cursor has
-  already passed can acquire that disposition afterwards and must be reinspected
-  — and a lap whose pages a steady arrival rate keeps full would never wrap to
-  reach it. A recovery below the lap's bound is paged on the state it holds when
-  that page is read, so a disposition acquired mid-lap is still seen. Exhaustion
-  parks at most 64 `scheduled` recoveries that spent the whole attempt budget
-  and whose turn still holds the exact matching recovery wait; a recovery whose
-  turn no longer holds that wait is left for supersession rather than parked,
-  because an exhaustion park raises an operator alert that cannot be retracted.
-  Rows over the window are reached by the next scan, since every row this
-  statement selects is also written. `attempting` recoveries are never exhausted
-  directly: settlement returns them to `scheduled` first, which is what closes
-  their attempt-history row. Claiming finally locks one due recovery row
-  `FOR UPDATE SKIP LOCKED`, increments its durable attempt ordinal, sets the
-  exact backoff deadline, and inserts the attempt rows in the same transaction.
-  The attempt budget and the retry ladder claiming applies are bound from the
-  deployment's configured policy, not written into the statement. No
-  reconciliation path may acquire either cursor row while holding a recovery-row
-  lock in the reverse of this order. Applying a claim first performs the
-  immutable delegated-parent lookup. When the claimed session is a delegated
-  child, it locks the parent/child endpoint session rows `FOR NO KEY UPDATE` in
-  ascending session-identity order; it then takes the child's
-  `session_scheduler` row `FOR UPDATE`, reconstitutes the complete scheduling
-  projection, and uses the existing reconciliation-required write transaction. A
-  nondelegated claim takes only the scheduler lock. Every daemon-owned claim,
-  application, and failure-record transaction installs PostgreSQL's local
-  `lock_timeout` before it reads or writes anything, so the only statement that
-  budget can interrupt is one waiting for a row and never the commit; opening
-  the transaction and installing that budget run beyond client cancellation, and
-  the caller's configured deadline sits above both as the last resort, floored
-  so it cannot expire before the database-side budgets report. Operator
-  reconciliation uses the same endpoint-before-scheduler prefix, so automatic
-  reconciliation never introduces the reverse child-scheduler-to-parent-session
-  order.
+  paging and wraps after reaching that bound. The bound is needed here for a
+  reason that does not apply to discovery: a recovery becomes superseded by a
+  `turn_lifecycle` change rather than by anything this statement writes, so a
+  row the cursor has already passed can acquire that disposition afterwards and
+  must be reinspected — and a lap whose pages a steady arrival rate keeps full
+  would never wrap to reach it. A recovery below the lap's bound is paged on the
+  state it holds when that page is read, so a disposition acquired mid-lap is
+  still seen. Exhaustion parks at most 64 `scheduled` recoveries that spent the
+  whole attempt budget and whose turn still holds the exact matching recovery
+  wait; a recovery whose turn no longer holds that wait is left for supersession
+  rather than parked, because an exhaustion park raises an operator alert that
+  cannot be retracted. Rows over the window are reached by the next scan, since
+  every row this statement selects is also written. `attempting` recoveries are
+  never exhausted directly: settlement returns them to `scheduled` first, which
+  is what closes their attempt-history row. Claiming finally locks one due
+  recovery row `FOR UPDATE SKIP LOCKED`, increments its durable attempt ordinal,
+  sets the exact backoff deadline, and inserts the attempt rows in the same
+  transaction. The attempt budget and the retry ladder claiming applies are
+  bound from the deployment's configured policy, not written into the statement.
+  No reconciliation path may acquire either cursor row while holding a
+  recovery-row lock in the reverse of this order. Applying a claim first
+  performs the immutable delegated-parent lookup. When the claimed session is a
+  delegated child, it locks the parent/child endpoint session rows
+  `FOR NO KEY UPDATE` in ascending session-identity order; it then takes the
+  child's `session_scheduler` row `FOR UPDATE`, reconstitutes the complete
+  scheduling projection, and uses the existing reconciliation-required write
+  transaction. A nondelegated claim takes only the scheduler lock. Every
+  daemon-owned claim, application, and failure-record transaction installs
+  PostgreSQL's local `lock_timeout` before it reads or writes anything, so the
+  only statement that budget can interrupt is one waiting for a row and never
+  the commit; opening the transaction and installing that budget run beyond
+  client cancellation, and the caller's configured deadline sits above both as
+  the last resort, floored so it cannot expire before the database-side budgets
+  report. Operator reconciliation uses the same endpoint-before-scheduler
+  prefix, so automatic reconciliation never introduces the reverse
+  child-scheduler-to-parent-session order.
 
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
@@ -1277,7 +1250,7 @@ that explicit shutdown is omitted, or cancelled before the pool drain completes,
 the guard session remains retained until process exit rather than releasing
 while an escaped pool clone may still write.
 
-Two standing constraints (recorded beside the code):
+Two standing constraints:
 
 1. Every turn-lifecycle writer acquires the scheduler-row lock before touching
    `turn_lifecycle` rows. Why: one session-scoped lock serializes activation,
