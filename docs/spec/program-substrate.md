@@ -1,11 +1,8 @@
 # Program substrate
 
-**Foundation contract.** This page owns the durable-execution contract for
-registered programs: TypeScript orchestrators that drive sessions, evaluations,
-and repository-watch reactions through a journaled effect protocol. The entire
-surface below was committed ahead of code as Stage 0 of the substrate build.
-Each remaining committed-unimplemented paragraph records the compatibility
-constraint it imposes on present surfaces. Model execution remains owned by
+This page owns the durable-execution contract for registered programs:
+TypeScript orchestrators that drive sessions, evaluations, and repository-watch
+reactions through a journaled effect protocol. Model execution is owned by
 [model-call execution](model-call-execution.md) and the
 [model-runtime substrate](runtime-substrate.md), sessions and turns by
 [sessions and the transcript](sessions-and-transcript.md) and
@@ -41,21 +38,19 @@ recorded SDK version. Registration rejects every other specifier, including an
 unversioned `@signalbox/program-sdk` name; type stripping preserves the
 canonical import, and isolate loading resolves it only to this host-supplied
 module, never through a filesystem or ambient module loader. Why: a
-single-module contract keeps artifact identity one digest over one file's bytes;
-multi-module programs are a future registration-format decision, not a present
-admission. Registration stores the exact TypeScript source, the stripped
-JavaScript artifact, a digest of each, the SDK version, the frame-contract
-version, and an explicit capability grant list, as immutable rows keyed by
-unique program name and revision. Each digest is SHA-256 in lowercase
-hexadecimal over an exact preimage: for the artifact, the stripped JavaScript
-bytes; for the source, the module's UTF-8 bytes. Both registration paths and
-every later verifier compute identity from these preimages alone, so two correct
-implementations cannot disagree about what a program is. Execution uses only the
-stripped artifact; the TypeScript source is retained for reading and
-re-verification. This constrains present schema planning: program identity is
-`(name, revision)` plus content digests, and nothing may treat a mutable
-location — a repository path, a branch, a file — as what a program *is*. Why:
-digest identity is what lets an in-flight run keep meaning the code it started
+single-module contract keeps artifact identity one digest over one file's bytes.
+Registration stores the exact TypeScript source, the stripped JavaScript
+artifact, a digest of each, the SDK version, the frame-contract version, and an
+explicit capability grant list, as immutable rows keyed by unique program name
+and revision. Each digest is SHA-256 in lowercase hexadecimal over an exact
+preimage: for the artifact, the stripped JavaScript bytes; for the source, the
+module's UTF-8 bytes. Both registration paths and every later verifier compute
+identity from these preimages alone, so two correct implementations cannot
+disagree about what a program is. Execution uses only the stripped artifact; the
+TypeScript source is retained for reading and re-verification. Program identity
+is `(name, revision)` plus content digests, and nothing may treat a mutable
+location — a repository path, a branch, a file — as program identity. Why:
+digest identity is what keeps an in-flight run bound to the code it started
 with.
 
 **Committed unimplemented functionality.** No present surface pins program
@@ -67,15 +62,14 @@ alone is not identity, because identical bytes registered under different names
 or grants are different programs, and a run's authority resolves only from its
 recorded registration. Continuations record the same registration reference
 alongside the predecessor. Re-registration of a name creates a new revision and
-never rebinds an in-flight run. Upgrading a long-lived program is a deliberate
-act: cancel the old run, start the new revision. A frame-contract change is
-handled the same way, per the pre-alpha rule in `AGENTS.md`: no retired contract
-version is decoded by a newer host — that would be compatibility machinery for
+never rebinds an in-flight run. Upgrading a long-lived program means cancelling
+the old run and starting the new revision. A frame-contract change is handled
+the same way, per the pre-alpha rule in `AGENTS.md`: no retired contract version
+is decoded by a newer host — that would be compatibility machinery for
 deployments that do not exist — so a run whose pinned contract version the
 current host no longer speaks is faulted terminally at its next wake with a
-deterministic, journaled `contract_retired` fault, and closing or continuing
-outstanding runs before a contract-changing upgrade is an operational courtesy,
-not a spec obligation.
+deterministic, journaled `contract_retired` fault, and the host does not require
+outstanding runs to be closed or continued before a contract-changing upgrade.
 
 **Committed unimplemented functionality.** No present surface performs
 registration-time type-checking. Two registration paths exist with one trust
@@ -109,8 +103,8 @@ from the grant list does not exist for that program: the host refuses the effect
 before any authority is exercised. Grants are least-privilege from the first
 registered program, and `register` attenuates: a program registering a program
 may request for the child only a subset of its own grants, so no chain of
-program-initiated registrations can mint a capability its root was never granted
-— any expansion goes through the user-authorized registration paths.
+program-initiated registrations can obtain a capability its root was never
+granted — any expansion goes through the user-authorized registration paths.
 
 ## Execution, journal, and replay
 
@@ -135,10 +129,8 @@ synthetic SDK module. A caller supplies the stripped artifact and an existing
 run journal; no isolate is retained between attempts.
 
 **Committed unimplemented functionality.** No admitted run-creation surface
-invokes the host yet. The standalone `deno_core` repository is archived and the
-deno monorepo is its source of truth, so the pin is by crate version with
-upgrades taken deliberately. Every admitted run records the engine version it
-started under. At creation it also records the selected isolate heap ceiling and
+invokes the host. Every admitted run records the engine version it started
+under. At creation it also records the selected isolate heap ceiling and
 per-live-turn execution budget. The execution budget is deterministic engine
 work metering, not elapsed wall time: host queueing, daemon downtime, journal
 I/O, and time awaiting an effect do not consume it, while replay consumes and
@@ -165,12 +157,11 @@ journal per program-run identity. Every nondeterministic act crosses the typed
 frame protocol and is recorded as an immutable journal row. Requests (what the
 program asked, in program order) and deliveries (what the host answered, in
 delivery order) are both journaled. Each row also carries one contiguous global
-journal position, the simplest ordering implied by one journal: it retains the
-request/delivery interleaving needed to know whether the executor must emit its
-next request or receive a recorded delivery. A per-run allocator serializes
-appends and the database checks that the global, request, and delivery sequences
-advance contiguously together; resolution references are unique and can name
-only an earlier answerable request.
+journal position, which retains the request/delivery interleaving needed to know
+whether the executor must emit its next request or receive a recorded delivery.
+A per-run allocator serializes appends and the database checks that the global,
+request, and delivery sequences advance contiguously together; resolution
+references are unique and can name only an earlier answerable request.
 
 Every request carries a per-run monotone request ordinal, and every `answer` and
 `wake` names the request ordinal it resolves, so a delivery is unambiguous under
@@ -206,11 +197,11 @@ without rewriting existing inline rows.
 **Committed unimplemented functionality.** The current host emits only the four
 primitive answerable requests named above. No present executor applies generic
 effects, scope cancellation, terminal-request admission, capability rejection,
-or run terminalization. The typed journal can represent those frames, and the
-database retains their closed discriminators, but the producing transitions
-remain with the registration, executor, and capability slices that can enforce
-them. Module fulfillment is only an execution-attempt observation; it does not
-terminalize the durable run.
+or run terminalization. The typed journal can represent those frames and the
+database retains their closed discriminators; producing them is owned by
+registration, the executor, and the capabilities that enforce them. Module
+fulfillment is only an execution-attempt observation; it does not terminalize
+the durable run.
 
 **Committed unimplemented functionality.** No present surface synchronizes
 journal rows with effects, and the synchronization guarantee differs by effect
@@ -218,18 +209,18 @@ class. A transactional effect — one whose entire consequence is rows this daem
 writes, such as session creation, input submission, or evaluation recording —
 commits its `answer` frame in the same transaction as the consequence, following
 the transactional-outbox append idiom of the
-[persistence protocol](persistence-protocol.md), so the journal and the world
-cannot disagree. An external effect — a model call, a stage execution, anything
-whose consequence lives outside this database — journals its `effect` request
-before the operation is issued, and its outcome when the operation reports; a
-crash between the two leaves a journaled request with no answer, and recovery
-follows the capability's declared recovery rule: adopt the outcome when the
-operation's own durable record proves it completed, re-issue only when the
-capability declares the operation idempotent, and otherwise answer the request
-with a journaled `ambiguous` outcome the program must branch on — mirroring the
-external-effect ambiguity contract of [tool loop](tool-loop.md), which forbids
-pretending an unresolved external loss did not happen. Why: one honest ambiguity
-is recoverable; a false exactly-once claim is not.
+[persistence protocol](persistence-protocol.md), so the journal and the
+consequence cannot disagree. An external effect — a model call, a stage
+execution, anything whose consequence lives outside this database — journals its
+`effect` request before the operation is issued, and its outcome when the
+operation reports; a crash between the two leaves a journaled request with no
+answer, and recovery follows the capability's declared recovery rule: adopt the
+outcome when the operation's own durable record proves it completed, re-issue
+only when the capability declares the operation idempotent, and otherwise answer
+the request with a journaled `ambiguous` outcome the program must branch on —
+following the external-effect ambiguity contract of [tool loop](tool-loop.md),
+which forbids treating an unresolved external loss as if it had not happened.
+Why: a journaled ambiguity is recoverable; a false exactly-once claim is not.
 
 **Implemented behavior.** The domain crate provides a checked replay cursor as
 the executor-facing seam. Resume discards nothing and restores nothing: a woken
@@ -239,16 +230,16 @@ switches to live execution exactly where the journal ends. A replayed request
 that differs from its journaled twin returns a typed nondeterminism failure
 carrying both complete frames, which the persistence adapter can append as a
 closed `fault` delivery; divergence is never silent and never a panic. The seam
-yields at most one recorded delivery per step, committing the future isolate
-host to drain its microtask queue to quiescence between deliveries. A journal
-that already records a terminal delivery never reaches that seam: because such a
+yields at most one recorded delivery per step, committing the isolate host to
+drain its microtask queue to quiescence between deliveries. A journal that
+already records a terminal delivery never reaches that seam: because such a
 delivery resolves no request and ends the attempt that recorded it, the first
 one is the run's outcome and the journal names it without replay. Concurrent
 outstanding requests are permitted — the journaled delivery order is what makes
 promise interleaving identical across live execution and replay. Virtualized
 time advances only at journaled points, and each randomness draw is journaled.
-Why: recording the delivery order is the one discipline that buys unrestricted
-intra-program concurrency without restricting the language.
+Why: recording the delivery order is what permits unrestricted intra-program
+concurrency without restricting the language.
 
 **Implemented behavior.** The program-runtime host applies that cursor to a real
 JavaScript isolate. It assigns each request ordinal at the Rust boundary,
@@ -268,18 +259,17 @@ tail makes the append insert nothing, and this attempt fails with a changed-tail
 protocol error rather than extending a journal it no longer describes. It then
 continues through the same promise-resolution path. The delivery-source seam
 receives only the currently outstanding durable request frames; it is the
-boundary later capability executors implement. A module that throws is an
-isolate failure carrying the engine's own message, never a completion: the
-engine reports the exception through its event loop while the module's
-evaluation future still fulfills, so the host reads the engine result first.
+boundary capability executors implement. A module that throws is an isolate
+failure carrying the engine's own message, never a completion: the engine
+reports the exception through its event loop while the module's evaluation
+future still fulfills, so the host reads the engine result first.
 
-The implemented journal anchor truthfully pins only frame-contract version one.
-It is not yet a complete run aggregate. Registration identity, artifact digest,
-SDK and engine versions, capability grants, heap and execution budgets, frame
-bound, and payload ceiling remain absent until their owning registration,
-run-admission, and configuration producers can supply and enforce them. A later
-slice extends the run aggregate and correlates the journal anchor to it rather
-than backfilling guessed values.
+The implemented journal anchor pins only frame-contract version one. It is not a
+complete run aggregate. Registration identity, artifact digest, SDK and engine
+versions, capability grants, heap and execution budgets, frame bound, and
+payload ceiling are absent until their owning registration, run-admission, and
+configuration producers supply and enforce them. Extending the run aggregate
+correlates the journal anchor to it rather than backfilling guessed values.
 
 **Committed unimplemented functionality.** No present surface bounds journal
 growth. A long-lived program does not accumulate one unbounded journal:
@@ -291,7 +281,7 @@ request-scoped `cancel` delivery; otherwise the host rejects it with a
 deterministic `reject` delivery naming that terminal request and reason
 `outstanding_requests`, without committing terminal state. The program may then
 await or cancel the outstanding requests and submit another terminal request;
-`program_error` remains exclusively the terminal fault defined above. Thus no
+`program_error` is exclusively the terminal fault defined above. Thus no
 external effect can complete after the journal closes. For `continue`, one
 database transaction commits the terminal frame, the predecessor's terminal
 state, and exactly one successor row. The successor has a unique predecessor
@@ -305,11 +295,10 @@ configuration changes — a run's terminal outcome is determined by its own
 durable facts, never by which configuration was live at its final wake — and a
 run reaching its recorded bound terminates with a deterministic, journaled
 `journal_bound` fault, making the per-run replay bound a property of every
-program, cooperative or not. No checkpointing or journal truncation exists,
-because a journal that can be rewritten is not a journal. Why: continuation
-keeps replay linear in one run's work while every historical run remains a
-complete, immutable record, and the fault keeps that claim true for programs
-that never continue.
+program, cooperative or not. No checkpointing or journal truncation exists. Why:
+continuation keeps replay linear in one run's work while every historical run
+remains a complete, immutable record, and the fault keeps that claim true for
+programs that never continue.
 
 **Committed unimplemented functionality.** No present surface parks program
 runs. A run sleeping on a timer or subscription holds no isolate and no memory
@@ -357,16 +346,12 @@ permits at most one wake for the subscription itself, so concurrent matching of
 two events chooses the first in durable event order and cannot resolve one
 request ordinal twice. Recovery re-matching is therefore idempotent, with no
 historical, missed, stale, or duplicate wake at the registration or recovery
-boundary. The scheduler resumes the woken runs. Program subscription identity,
-delivery, and cancellation are decided by this page; the previously open
-standing-subscription foundation question is narrowed in the same diff to the
-client-facing callback surface it still owns. This constrains repository-watch
-storage now: its cursor and event rows are the substrate's event source and must
-remain readable by subscription matching. The present structured-rule dispatch
-surface is committed to converge onto this mechanism — the dispatch action
-becomes a built-in program. Shadowing is only a validation step and never owns
-delivery. The authoritative rule-to-program cutover and frontier-ownership
-contract is owned by
+boundary. The scheduler resumes the woken runs. Repository watch's cursor and
+event rows are the substrate's event source and must remain readable by
+subscription matching. The present structured-rule dispatch surface is committed
+to converge onto this mechanism — the dispatch action becomes a built-in
+program. Shadowing is only a validation step and never owns delivery. The
+rule-to-program cutover and frontier-ownership contract is owned by
 [repository watch](repo-watch.md#deduplication-concurrency-and-audit); this page
 only consumes the resulting subscription and transferred dispatch state. For
 each handled event, the built-in program's `continue` transaction records the
@@ -378,14 +363,13 @@ the predecessor handles its wake are therefore included in durable order, while
 the consumed event itself cannot be delivered twice.
 
 **Committed unimplemented functionality.** No present surface cancels program
-runs. The cancel command, its receipt, and their closed reply algebra are
-committed in the wire-owning contract, [process protocol](process-protocol.md),
-from the substrate's first protocol release, with the same durable-command
-identity mechanics as every user command in
+runs. The cancel command, its receipt, and their closed reply algebra are owned
+by the wire-owning contract, [process protocol](process-protocol.md), with the
+same durable-command identity mechanics as every user command in
 [identity and commands](identity-and-commands.md); this page owns only the
 run-state semantics. Those semantics: a cancel never overwrites a terminal
 outcome — the race against a run's own `terminal` is resolved by whichever
-committed first, and the receipt reports the truth it found (`not_found` and
+committed first, and the receipt reports the state it found (`not_found` and
 `already_terminal` are outcomes, not errors). Cancel authority is user
 authority; an applied cancel is journaled as a `run_cancel` delivery carrying
 the command identity and no request ordinal, so a cancelled run replays to its
@@ -400,11 +384,11 @@ beyond the journal: cancellation is terminal, not advisory.
 **Committed unimplemented functionality.** No present surface lets programs
 create sessions. The session capability composes the existing create-session,
 input-submission, and turn-scheduling services, extended where the present
-contracts have no room for program agency. Two extensions are committed in the
-pages that own them. First, attribution: the committed program-issuance
-extension to the closed actor algebra is recorded in its owning contract,
-[identity and commands](identity-and-commands.md); this page adds only the
-program-specific constraint that program-issued input names the issuing run
+contracts do not provide for program-issued actions. Two extensions are
+committed in the pages that own them. First, attribution: the committed
+program-issuance extension to the closed actor algebra is recorded in its owning
+contract, [identity and commands](identity-and-commands.md); this page adds only
+the program-specific constraint that program-issued input names the issuing run
 identity and is never recorded as user-issued. Second, provenance: the committed
 `workflow` and `eval` creation-cause extensions are recorded in their owning
 contract, [sessions and the transcript](sessions-and-transcript.md); this page
@@ -417,11 +401,11 @@ the runtime boundary — is committed in its owning contract,
 [model-call execution](model-call-execution.md); this page adds only the
 constraint that a program's turn awaits that validated payload or the turn's
 failure, nothing looser. Structure inside one turn is deliberately out of
-contract: a turn is the model's autonomy zone, governed by the same approval
-judge as every session, and a program that needs intra-turn evidence reads the
-durable transcript through a read capability after the fact. Credentials never
-enter the isolate; sessions, model calls, clones, and stage executions all
-happen host-side under existing credential machinery.
+contract: within a turn the model acts autonomously, governed by the same
+approval judge as every session, and a program that needs intra-turn evidence
+reads the durable transcript through a read capability after the fact.
+Credentials never enter the isolate; sessions, model calls, clones, and stage
+executions all happen host-side under existing credential machinery.
 
 ## Open edges
 
