@@ -58,8 +58,8 @@ widen egress authority.
 A finding that demonstrates a violation of the structural output boundary or a
 named bound is an implementation defect. A finding solely about a transformed,
 encoded, or split secret that exact redaction cannot recognize, or about
-provider-content semantics, is dispositioned as an accepted residual with a
-citation to this page and does not require a code change.
+provider-content semantics, is an accepted residual and does not require a code
+change.
 
 ## Open edges
 
