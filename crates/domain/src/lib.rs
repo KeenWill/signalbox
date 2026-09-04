@@ -34,6 +34,7 @@ mod semantic_entry;
 mod session;
 mod session_delegation;
 mod session_lifecycle;
+mod session_lifecycle_command;
 mod session_metadata;
 mod session_placement;
 mod session_template;
@@ -85,12 +86,12 @@ pub use git_remote::{
     max_git_remote_name_bytes, max_git_remote_url_bytes,
 };
 pub use goal::{
-    Goal, GoalBlockProvenance, GoalBlockedReasonKind, GoalEvent, GoalEventKind, GoalEventOrdinal,
-    GoalGeneration, GoalGenerationSnapshot, GoalGuidance, GoalModelBlockedReasonKind,
-    GoalModelProvenance, GoalNeed, GoalReconstitutionError, GoalReconstitutionFailure,
-    GoalReconstitutionInput, GoalReport, GoalReportRef, GoalSchedulerProvenance, GoalState,
-    GoalStatement, GoalTextError, GoalTransitionError, GoalTransitionFailure, GoalTurnSource,
-    GoalUserProvenance,
+    FinishConditionStatement, Goal, GoalBlockProvenance, GoalBlockedReasonKind, GoalEvent,
+    GoalEventKind, GoalEventOrdinal, GoalGeneration, GoalGenerationSnapshot, GoalGuidance,
+    GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed, GoalReconstitutionError,
+    GoalReconstitutionFailure, GoalReconstitutionInput, GoalReport, GoalReportRef,
+    GoalSchedulerProvenance, GoalState, GoalStatement, GoalTextError, GoalTransitionError,
+    GoalTransitionFailure, GoalTurnSource, GoalUserProvenance,
 };
 pub use goal_command::{
     GoalCommandRejection, GoalCommandResult, GoalUserAction, GoalUserCommand,
@@ -289,6 +290,11 @@ pub use session_lifecycle::{
     SessionParkCause, SessionParkResponder, SessionRecoveryOperation, SessionRetirementCause,
     SessionRetryableCause, SessionStructuralCause, SessionTerminalOutcome, SessionWait,
     SessionWaitKind, SessionWaker, StopStickiness,
+};
+pub use session_lifecycle_command::{
+    CommandPrincipal, FinishCheckVerdict, FinishCondition, SessionLifecycleApplication,
+    SessionLifecycleCommand, SessionLifecycleCommandRejection, SessionLifecycleCommandResult,
+    SessionLifecycleOperation, StartGate,
 };
 pub use session_metadata::{
     PreparedReplaceSessionMetadata, ReconstitutedReplaceSessionMetadata, ReplaceSessionMetadata,

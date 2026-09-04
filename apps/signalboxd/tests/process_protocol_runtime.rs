@@ -50,12 +50,12 @@ use signalbox_domain::{
     ImportedConversationFormat, ImportedConversationId, ImportedSessionRelationship,
     ImportedTranscriptEntryId, InitialToolApproval, MergeableState, ModelCallId,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
-    ModelSelectionRequest, ModelTargetCatalog, NormalizedToolArguments, ProviderModelIdentity,
-    PullRequestNumber, ReplaceSessionMetadataResult, RepoWatchAuthorLogin, RepositorySlug,
-    ResolvedProviderTarget, SemanticTranscriptEntryId, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent, ToolCallProposal,
-    ToolName, ToolRequestId, ToolResponsePartIdentity, ToolRoundModelCallIdentities,
-    ToolUsingAssistantResponse, TurnId,
+    ModelSelectionRequest, ModelTargetCatalog, NormalizedToolArguments,
+    PhysicalCancellationModelCallTurnIdentities, ProviderModelIdentity, PullRequestNumber,
+    ReplaceSessionMetadataResult, RepoWatchAuthorLogin, RepositorySlug, ResolvedProviderTarget,
+    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+    SessionId, SessionMetadataContent, ToolCallProposal, ToolName, ToolRequestId,
+    ToolResponsePartIdentity, ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TurnId,
 };
 use signalbox_model_provider_runtime::{
     RuntimeContextCompactionModel, RuntimeInputTokenCountError, RuntimeModelCallProvider,
@@ -110,9 +110,10 @@ use signalbox_process_protocol::{
     ReviewOrchestrationCounts, ReviewOrchestrationSnapshot, ReviewOrchestrationState,
     ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
     ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject,
-    ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, SessionMetadata, SessionPlacement,
-    SettingOverlay, SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry,
-    TranscriptTextEntry, TurnState, UserInputContent, decode_server_line, encode_client_line,
+    ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, SessionLifecycleEffect,
+    SessionMetadata, SessionPlacement, SettingOverlay, SystemPromptMember, SystemPromptText,
+    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, UserInputContent,
+    decode_server_line, encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, BlobStorageClass, BlobStoreRegistry, ContextGuardedTurnPass,
@@ -1550,6 +1551,7 @@ async fn create_alias_session_with(
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 system_prompt: SystemPromptMember::present(None),
                 placement,
+                lifecycle: signalbox_process_protocol::SessionLifecycleMembers::default(),
             },
         )
         .await?;
@@ -1576,6 +1578,7 @@ async fn create_direct_session_with_settings(
                 model_settings,
                 system_prompt: SystemPromptMember::present(None),
                 placement: SessionPlacement::Pathless {},
+                lifecycle: signalbox_process_protocol::SessionLifecycleMembers::default(),
             },
         )
         .await?;
@@ -1881,6 +1884,7 @@ async fn create_session_rejects_a_model_absent_from_the_static_mapping()
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 system_prompt: SystemPromptMember::present(None),
                 placement: SessionPlacement::Pathless {},
+                lifecycle: signalbox_process_protocol::SessionLifecycleMembers::default(),
             },
         )
         .await?;
@@ -6658,6 +6662,173 @@ async fn s07_inv029_stop_turn_requests_cancellation_of_an_issued_call_exactly_on
     runtime.stop().await
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn lifecycle_closure_retransmission_after_settlement_issues_no_second_interrupt()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, live_turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    let (calls, issued, _) =
+        Box::pin(authorize_issued_model_call(&runtime.pool, session_id)).await?;
+    let lifecycle_command = command()?;
+
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            3,
+            ClientRequest::StopSession {
+                command_id: lifecycle_command,
+                session_id,
+                sticky: true,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            },
+        )
+        .await?;
+    let first = response_within(&mut connection).await?;
+    let cancellation = issued
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Cancelled);
+    let terminal = calls
+        .apply_terminal_observation(
+            SessionId::from_uuid(session_id.into_uuid()),
+            cancellation,
+            ModelCallTerminalIdentities::PhysicalCancellation(
+                PhysicalCancellationModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                ),
+            ),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    assert!(matches!(terminal, ModelCallTerminalOutcome::Cancelled(_)));
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            4,
+            ClientRequest::StopSession {
+                command_id: lifecycle_command,
+                session_id,
+                sticky: true,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            },
+        )
+        .await?;
+    let replay = response_within(&mut connection).await?;
+    let expected = ServerMessage::SessionLifecycleCommandApplied {
+        session_id,
+        effect: SessionLifecycleEffect::ClosurePending { live_turn_id },
+    };
+    let applied_core_interrupts: (i64, i64) = sqlx::query_as(
+        "SELECT count(*), count(DISTINCT command.command_id)
+           FROM submit_input_command AS command
+           JOIN durable_command AS envelope USING (command_id)
+          WHERE command.session_id = $1
+            AND command.delivery_kind = 'interrupt'
+            AND command.actor_kind = 'core'
+            AND envelope.issuer_kind = 'core'",
+    )
+    .bind(session_id.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+
+    assert_eq!(first.message(), &expected);
+    assert_eq!(applied_core_interrupts, (1, 1));
+    assert_eq!(replay.message(), &expected);
+
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn lifecycle_closure_interrupt_does_not_resolve_a_retired_session_model()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, live_turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    let _issued = Box::pin(authorize_issued_model_call(&runtime.pool, session_id)).await?;
+    drop(connection);
+
+    let retired_model_definition = r#"[[models]]
+selection_id = "00000000-0000-0000-0000-000000000001"
+target_id = "00000000-0000-0000-0000-000000000003"
+model_family = "anthropic"
+provider_model = "fixture-model"
+max_output_tokens = 256
+context_window_tokens = 200000
+reasoning_levels = ["low"]
+
+"#;
+    let retired_alias_definitions = r#"[[aliases]]
+alias_id = "00000000-0000-0000-0000-000000000002"
+selection_id = "00000000-0000-0000-0000-000000000001"
+
+[[aliases]]
+alias_id = "7fde05bc-b4c3-44f7-8a87-748814c80191"
+selection_id = "00000000-0000-0000-0000-000000000001"
+
+[[aliases]]
+alias_id = "540ce009-c2ec-4a04-b823-c411ea189778"
+selection_id = "00000000-0000-0000-0000-000000000001"
+"#;
+    let configuration_without_model = MODEL_CONFIGURATION
+        .replacen(retired_model_definition, "", 1)
+        .replacen(retired_alias_definitions, "", 1);
+    let _recovered_turn_count = runtime
+        .restart_with_templates(
+            &configuration_without_model,
+            SessionTemplateConfiguration::default(),
+        )
+        .await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            3,
+            ClientRequest::StopSession {
+                command_id: command()?,
+                session_id,
+                sticky: true,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            },
+        )
+        .await?;
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        &ServerMessage::SessionLifecycleCommandApplied {
+            session_id,
+            effect: SessionLifecycleEffect::ClosurePending { live_turn_id },
+        }
+    );
+    let closure_state: (String, Option<String>, i64) = sqlx::query_as(
+        "SELECT lifecycle.state_kind, lifecycle.pending_terminal_outcome_kind,
+                count(command.command_id)
+           FROM session_lifecycle AS lifecycle
+           LEFT JOIN submit_input_command AS command
+             ON command.session_id = lifecycle.session_id
+            AND command.delivery_kind = 'interrupt'
+            AND command.actor_kind = 'core'
+            AND command.model_override_kind = 'replace_with'
+            AND command.replacement_model_kind = 'direct'
+          WHERE lifecycle.session_id = $1
+          GROUP BY lifecycle.state_kind, lifecycle.pending_terminal_outcome_kind",
+    )
+    .bind(session_id.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(closure_state, (String::from("terminal"), None, 1));
+
+    drop(connection);
+    runtime.stop().await
+}
+
 /// S07: every stop refusal is a recorded typed rejection — an empty session
 /// records `no_active_turn` and a stale expected turn records
 /// `active_turn_mismatch`.
@@ -7583,6 +7754,7 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 system_prompt: SystemPromptMember::present(Some(prompt.clone())),
                 placement: SessionPlacement::Pathless {},
+                lifecycle: signalbox_process_protocol::SessionLifecycleMembers::default(),
             },
         )
         .await?;
@@ -7859,6 +8031,7 @@ async fn s01_inv012_create_session_replays_after_capability_removal() -> Result<
                 model_settings: requested_settings,
                 system_prompt: SystemPromptMember::present(None),
                 placement: SessionPlacement::Pathless {},
+                lifecycle: signalbox_process_protocol::SessionLifecycleMembers::default(),
             },
         )
         .await?;
@@ -7882,6 +8055,7 @@ async fn s01_inv012_create_session_replays_after_capability_removal() -> Result<
                 model_settings: requested_settings,
                 system_prompt: SystemPromptMember::present(None),
                 placement: SessionPlacement::Pathless {},
+                lifecycle: signalbox_process_protocol::SessionLifecycleMembers::default(),
             },
         )
         .await?;
@@ -9943,6 +10117,7 @@ impl ReviewRuntimeDriver {
                     command_id: command()?,
                     template_name: String::from(template_name),
                     placement: SessionPlacement::Pathless {},
+                    lifecycle: signalbox_process_protocol::SessionLifecycleMembers::default(),
                 },
             )
             .await?;

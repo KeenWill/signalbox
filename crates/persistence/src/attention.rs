@@ -17,6 +17,8 @@ use crate::mapping::{
     SessionLifecycleStateKind, goal_blocked_reason_from_str, session_lifecycle_state_kind_from_str,
 };
 
+const UNMONITORED_EXECUTION_FAILURE_NEED: &str = "The goal turn failed to execute and the session is unmonitored, so no automatic resumption is scheduled. Resolve the failed goal turn's execution condition, then resume the goal.";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AttentionCorruption {
     Missing(&'static str),
@@ -350,17 +352,25 @@ macro_rules! summary_sql {
     SELECT DISTINCT ON (goal.session_id)
            goal.session_id, goal.event_ordinal,
            goal.generation::text AS generation, goal.event_kind,
-           goal.blocked_reason, goal.scheduler_turn_id,
-           LEFT(goal.need, $4) AS need_summary
-      FROM goal_event AS goal JOIN selected USING (session_id)
+           goal.blocked_reason, COALESCE(arm.need, goal.need) AS need,
+           goal.scheduler_turn_id,
+           LEFT(COALESCE(arm.need, goal.need), $4) AS need_summary
+      FROM goal_event AS goal
+      LEFT JOIN goal_execution_failure_resumption_arm AS arm
+        ON arm.session_id = goal.session_id
+       AND arm.event_ordinal = goal.event_ordinal
+      JOIN selected ON selected.session_id = goal.session_id
      ORDER BY goal.session_id, goal.event_ordinal DESC
 ), automatic_resume_lineage AS (
     SELECT goal.session_id, goal.generation, goal.event_ordinal AS head_ordinal,
            goal.scheduler_turn_id AS failed_turn_id, 0::integer AS spent,
            0::integer AS attempted
       FROM latest_goal AS goal
+      JOIN session_lifecycle AS lifecycle USING (session_id)
      WHERE goal.event_kind = 'blocked'
        AND goal.blocked_reason = 'execution_failure'
+       AND lifecycle.owned
+       AND goal.need <> $12
        -- A headless approval escalation blocks the goal without arming any
        -- automatic resumption: it writes its `execution_failure` block outside
        -- `PostgresGoalPassDisposition` precisely so that only an operator can
@@ -731,6 +741,7 @@ pub(crate) async fn load_summaries(
         .bind(required_tags)
         .bind(include_archived)
         .bind(after_activity)
+        .bind(UNMONITORED_EXECUTION_FAILURE_NEED)
         .fetch_all(&mut **transaction)
         .await?
         .iter()
@@ -1101,6 +1112,7 @@ fn decode_goal_block(
             AttentionBlockedReason::AuthorizationRequired
         }
         Some(GoalBlockedReasonKind::ExecutionFailure) => AttentionBlockedReason::ExecutionFailure,
+        Some(GoalBlockedReasonKind::FinishCheckFailed) => AttentionBlockedReason::FinishCheckFailed,
         None => {
             return Err(AttentionCorruption::Unsupported {
                 field: "goal blocked reason",

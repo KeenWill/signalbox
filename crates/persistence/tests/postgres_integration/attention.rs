@@ -2,8 +2,8 @@
 
 use crate::*;
 use signalbox_application::{
-    AttentionChanges, AttentionContinuation, AttentionCursor, AttentionQuery, AttentionSort,
-    max_attention_change_items, max_attention_snapshot_items,
+    AttentionAction, AttentionChanges, AttentionContinuation, AttentionCursor, AttentionQuery,
+    AttentionSort, max_attention_change_items, max_attention_snapshot_items,
 };
 use signalbox_application::{AttentionLifecycleState, AttentionState};
 use signalbox_domain::{
@@ -25,6 +25,9 @@ const FLEET_SEED: u128 = 0xa770_0000;
 /// automatic-resume budget instead of a number their story never uses.
 const UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS: AutomaticResumeAttemptBounds =
     AutomaticResumeAttemptBounds::unbounded();
+/// Need text for a failure whose automatic resumption was scheduled while owned.
+const SCHEDULED_EXECUTION_FAILURE_NEED: &str =
+    "automatic resumption is scheduled; repair execution";
 
 async fn create_mixed_scale_fleet(pool: &PgPool) -> Result<(), Box<dyn Error>> {
     for offset in 0..FLEET_SIZE {
@@ -696,6 +699,81 @@ async fn the_attention_state_projects_the_durable_session_state() -> Result<(), 
     };
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].session, session);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn released_execution_failure_exposes_the_operator_action_until_adopted()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xa772_0000;
+    let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
+    let goal_seed = seed + 0x10;
+    let goal_turn = Uuid::from_u128(goal_seed + 2);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(
+            seed,
+            seed + 1,
+            ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(Uuid::from_u128(
+                seed + 2,
+            ))),
+        ))
+        .await?;
+    commission_fixture_session_goal(&pool, session, goal_seed).await?;
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    lifecycle.release(session, LifecycleActor::Operator).await?;
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal', start_lineage_kind = 'first_in_session',
+                immediate_predecessor_turn_id = NULL, starting_frontier_id = $2,
+                terminal_frontier_id = $3, terminal_disposition_kind = 'failed',
+                terminal_cause_kind = 'unclassified_failure'
+          WHERE session_id = $1 AND turn_id = $4",
+    )
+    .bind(session.into_uuid())
+    .bind(Uuid::from_u128(seed + 3))
+    .bind(Uuid::from_u128(seed + 4))
+    .bind(goal_turn)
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO goal_event
+            (session_id, event_ordinal, generation, event_kind,
+             blocked_reason, need, scheduler_turn_id)
+         VALUES ($1, 2, 1, 'blocked', 'execution_failure', $2, $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(SCHEDULED_EXECUTION_FAILURE_NEED)
+    .bind(goal_turn)
+    .execute(&pool)
+    .await?;
+    let snapshot = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS)
+        .snapshot(identity_query(None))
+        .await?;
+
+    assert_eq!(snapshot.summaries[0].state, AttentionState::Blocked);
+    assert_eq!(
+        snapshot.summaries[0].action,
+        Some(AttentionAction::ProvideGoalNeed)
+    );
+
+    lifecycle.adopt(session, LifecycleActor::Operator).await?;
+    let adopted = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS)
+        .snapshot(identity_query(None))
+        .await?;
+
+    assert_eq!(adopted.summaries[0].state, AttentionState::Blocked);
+    assert_eq!(adopted.summaries[0].action, None);
 
     pool.close().await;
     drop(container);

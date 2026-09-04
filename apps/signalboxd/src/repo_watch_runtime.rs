@@ -37,7 +37,7 @@ use signalbox_application::{
     RepoWatchTargetedRefreshV1, RepoWatchThreadObservation, RepoWatchThreadState,
     RepoWatchWebhookDeliveryV1, RepoWatchWebhookDeliveryV1Input, RepoWatchWebhookIgnoredReasonV1,
     RepoWatchWebhookMappedNoChangeV1, RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1,
-    RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
+    RepoWatchWorkflowRunObservation, SubmitInputIdGenerator, UuidV7RepoWatchDispatchIdGenerator,
     UuidV7RepoWatchEventIdGenerator, apply_repo_watch_observation_patch_v1,
     derive_repo_watch_events_with_merged_baselines, map_repo_watch_webhook_delivery_v1,
 };
@@ -4626,6 +4626,7 @@ impl RepoWatchDispatchTransaction for RepoWatchDispatchPersistence<'_> {
     async fn handle_repo_watch_evaluation(
         &mut self,
         evaluation: RepoWatchRuleEvaluation,
+        ids: &mut (impl SubmitInputIdGenerator + Send),
     ) -> Result<RepoWatchRuleEvaluationOutcome, Self::Error> {
         let select_definition = |alias: ModelAlias| self.models.resolve_alias(alias);
         match self.obligation.take() {
@@ -4634,13 +4635,18 @@ impl RepoWatchDispatchTransaction for RepoWatchDispatchPersistence<'_> {
                     .handle_repo_watch_obligation_with_alias_resolver(
                         obligation,
                         evaluation,
+                        ids,
                         select_definition,
                     )
                     .await
             }
             None => {
                 self.store
-                    .handle_repo_watch_evaluation_with_alias_resolver(evaluation, select_definition)
+                    .handle_repo_watch_evaluation_with_alias_resolver(
+                        evaluation,
+                        ids,
+                        select_definition,
+                    )
                     .await
             }
         }

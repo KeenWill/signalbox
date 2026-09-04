@@ -580,6 +580,13 @@ pub enum DispatchedDelegationProvenance {
         /// Durable goal stop command.
         command: DurableCommandId,
     },
+    /// Exact parent lifecycle command.
+    ParentLifecycleCommand {
+        /// Parent session.
+        session: SessionId,
+        /// Durable lifecycle stop command.
+        command: DurableCommandId,
+    },
 }
 
 /// Committed content that can wake an exact delegation recipient.
@@ -3173,6 +3180,12 @@ pub(crate) fn decode_delegation_provenance(
                 session,
                 goal_generation: decode_positive_sequence(goal)
                     .map_err(|_| OutboxCorruption::InvalidDelegationEvent)?,
+                command: DurableCommandId::from_uuid(command),
+            })
+        }
+        (Some("parent_lifecycle_command"), None, None, Some(command)) => {
+            Ok(DispatchedDelegationProvenance::ParentLifecycleCommand {
+                session,
                 command: DurableCommandId::from_uuid(command),
             })
         }

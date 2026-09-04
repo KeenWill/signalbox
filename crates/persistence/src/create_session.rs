@@ -6,14 +6,15 @@ use rust_decimal::Decimal;
 use serde_json::Value;
 use signalbox_application::{CreateSessionOutcome, CreateSessionTransaction};
 use signalbox_domain::{
-    CommissionedDispatchId, CreateSessionAppliedResult, CreateSessionReconstitutionFailure,
-    CreateSessionReconstitutionInput, DirectModelSelection, DispatchingModule, DurableCommandId,
-    ModelAlias, ModelSelectionRequest, ModuleDispatch, PreparedCreateSession,
-    ReconstitutedSessionCreation, RepoWatchDispatchId, RootPlacementGlobalReadIntent,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionPlacement, SessionPlacementEventKind, SessionPlacementPath,
+    CommandPrincipal, CommissionedDispatchId, CreateSessionAppliedResult,
+    CreateSessionReconstitutionFailure, CreateSessionReconstitutionInput, DirectModelSelection,
+    DispatchingModule, DurableCommandId, ModelAlias, ModelSelectionRequest, ModuleDispatch,
+    PreparedCreateSession, ReconstitutedSessionCreation, RepoWatchDispatchId,
+    RootPlacementGlobalReadIntent, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionOwnership, SessionPlacement, SessionPlacementEventKind, SessionPlacementPath,
     SessionPlacementVersion, SessionTemplateContentDigest, SessionTemplateName,
-    SessionTemplateProvenance, TranscriptAncestry, VersionedSessionPlacement,
+    SessionTemplateProvenance, StartGate, TranscriptAncestry, VersionedSessionPlacement,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -24,9 +25,10 @@ use crate::command_registry::{
 use crate::mapping::{
     PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
     dangerous_tool_auto_approval_to_str, defaults_version_from_numeric,
-    defaults_version_to_numeric, durable_command_id_to_uuid, model_settings_from_json,
-    model_settings_to_json, session_creation_cause_to_str, session_id_from_uuid,
-    session_id_to_uuid, session_placement_event_kind_from_str, session_placement_event_kind_to_str,
+    defaults_version_to_numeric, durable_command_id_to_uuid, finish_condition_columns,
+    finish_condition_from_columns, model_settings_from_json, model_settings_to_json,
+    session_creation_cause_to_str, session_id_from_uuid, session_id_to_uuid,
+    session_placement_event_kind_from_str, session_placement_event_kind_to_str,
 };
 use crate::outbox;
 
@@ -233,7 +235,8 @@ impl CreateSessionRepository {
                 | CommandKind::UpdateSessionPlacement
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
-                | CommandKind::WithdrawGitRemote,
+                | CommandKind::WithdrawGitRemote
+                | CommandKind::SessionLifecycle,
             ) => {
                 transaction.rollback().await?;
                 return Ok(CreateSessionHandlingOutcome::ConflictingReuse { command_id });
@@ -241,15 +244,20 @@ impl CreateSessionRepository {
             None => {}
         }
 
+        let issuer =
+            crate::command_registry::issuer_columns(signalbox_domain::CommandPrincipal::Operator);
         let claimed = sqlx::query(
             "INSERT INTO durable_command
-                (command_id, command_kind, storage_version, claimed_at)
-             VALUES ($1, $2, $3, transaction_timestamp())
+                (command_id, command_kind, storage_version, claimed_at,
+                 issuer_kind, issuer_module)
+             VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
              ON CONFLICT DO NOTHING",
         )
         .bind(durable_command_id_to_uuid(command_id))
         .bind(COMMAND_KIND)
         .bind(WRITTEN_STORAGE_VERSION)
+        .bind(issuer.0)
+        .bind(issuer.1)
         .execute(&mut *transaction)
         .await?
         .rows_affected()
@@ -283,7 +291,8 @@ impl CreateSessionRepository {
                     | CommandKind::UpdateSessionPlacement
                     | CommandKind::RegisterWorkspace
                     | CommandKind::MintGitRemote
-                    | CommandKind::WithdrawGitRemote,
+                    | CommandKind::WithdrawGitRemote
+                    | CommandKind::SessionLifecycle,
                 ) => CreateSessionHandlingOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(
@@ -341,7 +350,8 @@ impl CreateSessionRepository {
                 | CommandKind::UpdateSessionPlacement
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
-                | CommandKind::WithdrawGitRemote,
+                | CommandKind::WithdrawGitRemote
+                | CommandKind::SessionLifecycle,
             ) => Err(CreateSessionRepositoryError::DifferentCommandKind { command_id }),
         }
     }
@@ -402,9 +412,10 @@ pub(crate) async fn insert_fresh_prepared(
     connection: &mut PgConnection,
     prepared: PreparedCreateSession,
     credential_pin: &crate::SessionCredentialPin,
+    principal: CommandPrincipal,
 ) -> Result<(), CreateSessionRepositoryError> {
     let command_id = prepared.command().command_id();
-    if !claim_create_session_command(connection, command_id).await? {
+    if !claim_create_session_command(connection, command_id, principal).await? {
         return Err(CreateSessionCorruption::Inconsistent(
             "fresh repository-watch command identity collided",
         )
@@ -422,16 +433,21 @@ pub(crate) async fn insert_fresh_prepared(
 pub(crate) async fn claim_create_session_command(
     connection: &mut PgConnection,
     command_id: DurableCommandId,
+    principal: CommandPrincipal,
 ) -> Result<bool, CreateSessionRepositoryError> {
+    let issuer = crate::command_registry::issuer_columns(principal);
     Ok(sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, $2, $3, transaction_timestamp())
+            (command_id, command_kind, storage_version, claimed_at,
+             issuer_kind, issuer_module)
+         VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
          ON CONFLICT DO NOTHING",
     )
     .bind(durable_command_id_to_uuid(command_id))
     .bind(COMMAND_KIND)
     .bind(WRITTEN_STORAGE_VERSION)
+    .bind(issuer.0)
+    .bind(issuer.1)
     .execute(&mut *connection)
     .await?
     .rows_affected()
@@ -446,7 +462,6 @@ pub(crate) async fn insert_prepared(
     let command = prepared.command();
     let session = prepared.session();
     let defaults = session.configuration_defaults();
-    let command_selection = encode_selection(command.initial_configuration_defaults().model());
     let stored_selection = encode_selection(defaults.defaults().model());
 
     let cause = command.provenance().cause();
@@ -475,7 +490,15 @@ pub(crate) async fn insert_prepared(
     .bind(dispatch_ref)
     .execute(&mut *connection)
     .await?;
-    crate::session_lifecycle::insert_created(connection, session.id(), &cause).await?;
+    crate::session_lifecycle::insert_created(
+        connection,
+        session.id(),
+        &cause,
+        command.ownership(),
+        command.start_gate(),
+        command.finish_condition(),
+    )
+    .await?;
 
     let (placement_path, root_intent) = encode_placement(session.placement().placement());
     sqlx::query(
@@ -552,6 +575,34 @@ pub(crate) async fn insert_prepared(
     .execute(&mut *connection)
     .await?;
 
+    insert_command_record(connection, command, prepared.applied_result()).await?;
+
+    outbox::append(
+        connection,
+        outbox::OutboxEvent::SessionCreated {
+            session: session.id(),
+            cause,
+            ownership: command.ownership(),
+        },
+    )
+    .await?;
+
+    Ok(())
+}
+
+/// Writes an applied creation's typed command record and `session_created`
+/// receipt.
+async fn insert_command_record(
+    connection: &mut PgConnection,
+    command: &signalbox_domain::CreateSession,
+    applied: CreateSessionAppliedResult,
+) -> Result<(), CreateSessionRepositoryError> {
+    let cause = command.provenance().cause();
+    let (dispatching_module, dispatch_ref) = encode_module_dispatch(cause);
+    let (placement_path, root_intent) = encode_placement(command.placement());
+    let command_selection = encode_selection(command.initial_configuration_defaults().model());
+    let (finish_kind, finish_statement) = finish_condition_columns(command.finish_condition());
+    let created_session = session_id_to_uuid(applied.session());
     sqlx::query(
         "INSERT INTO create_session_command
             (command_id, command_kind, storage_version,
@@ -561,16 +612,19 @@ pub(crate) async fn insert_prepared(
              template_name, template_content_digest,
              placement_path, root_global_read_intent,
              result_kind, created_session_id,
-             dispatching_module, dispatch_ref)
+             dispatching_module, dispatch_ref,
+             start_gate, ownership, finish_condition_kind, finish_condition)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-                 $19, $20)",
+                 $19, $20, $21, $22, $23, $24)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(COMMAND_KIND)
     .bind(WRITTEN_STORAGE_VERSION)
     .bind(session_creation_cause_to_str(&cause))
     .bind(NO_ANCESTRY)
-    .bind(defaults_version_to_numeric(defaults.version()))
+    .bind(defaults_version_to_numeric(
+        SessionConfigurationDefaultsVersion::first(),
+    ))
     .bind(command_selection.kind)
     .bind(command_selection.direct)
     .bind(command_selection.alias)
@@ -601,23 +655,46 @@ pub(crate) async fn insert_prepared(
     .bind(placement_path)
     .bind(root_intent)
     .bind(APPLIED)
-    .bind(session_id_to_uuid(prepared.applied_result().session()))
+    .bind(created_session)
     .bind(dispatching_module)
     .bind(dispatch_ref)
+    .bind(start_gate_to_str(command.start_gate()))
+    .bind(ownership_to_str(command.ownership()))
+    .bind(finish_kind)
+    .bind(finish_statement)
     .execute(&mut *connection)
     .await?;
-
-    outbox::append(
-        connection,
-        outbox::OutboxEvent::SessionCreated {
-            session: session.id(),
-            cause,
-            ownership: crate::session_lifecycle::creation_ownership(&cause),
-        },
-    )
-    .await?;
-
     Ok(())
+}
+
+const fn start_gate_to_str(value: StartGate) -> &'static str {
+    match value {
+        StartGate::Open => "open",
+        StartGate::Held => "held",
+    }
+}
+
+fn start_gate_from_str(value: &str) -> Option<StartGate> {
+    match value {
+        "open" => Some(StartGate::Open),
+        "held" => Some(StartGate::Held),
+        _ => None,
+    }
+}
+
+const fn ownership_to_str(value: SessionOwnership) -> &'static str {
+    match value {
+        SessionOwnership::Owned => "owned",
+        SessionOwnership::Unmonitored => "unmonitored",
+    }
+}
+
+fn ownership_from_str(value: &str) -> Option<SessionOwnership> {
+    match value {
+        "owned" => Some(SessionOwnership::Owned),
+        "unmonitored" => Some(SessionOwnership::Unmonitored),
+        _ => None,
+    }
 }
 
 struct EncodedSelection {
@@ -668,6 +745,10 @@ async fn load_from_connection(
             c.placement_path AS command_placement_path,
             c.root_global_read_intent AS command_root_intent,
             c.result_kind,
+            c.start_gate,
+            c.ownership,
+            c.finish_condition_kind,
+            c.finish_condition,
             c.created_session_id AS result_session_id,
             s.session_id AS stored_session_id,
             s.creation_cause AS stored_cause,
@@ -802,7 +883,32 @@ fn decode_complete(
             command_placement,
         ),
     };
-    require_spelling(&row, "result_kind", APPLIED)?;
+    let start_gate: String = required(&row, "start_gate")?;
+    let ownership: String = required(&row, "ownership")?;
+    let finish_condition = finish_condition_from_columns(
+        row.try_get("finish_condition_kind")?,
+        row.try_get("finish_condition")?,
+    )
+    .map_err(CreateSessionCorruption::Inconsistent)?;
+    let command = command.with_lifecycle(
+        start_gate_from_str(&start_gate).ok_or(CreateSessionCorruption::Unsupported {
+            field: "start_gate",
+            value: start_gate,
+        })?,
+        ownership_from_str(&ownership).ok_or(CreateSessionCorruption::Unsupported {
+            field: "ownership",
+            value: ownership,
+        })?,
+        finish_condition,
+    );
+    let result_kind: String = required(&row, "result_kind")?;
+    if result_kind != APPLIED {
+        return Err(CreateSessionCorruption::Unsupported {
+            field: "result_kind",
+            value: result_kind,
+        }
+        .into());
+    }
     let result_session = session_id_from_uuid(required(&row, "result_session_id")?);
 
     let stored_session_uuid: Uuid = required(&row, "stored_session_id")?;

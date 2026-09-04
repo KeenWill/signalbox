@@ -357,7 +357,13 @@ fn every_delegation_provenance() -> Vec<DispatchedDelegationProvenance> {
                     command: command(ARBITRARY_COMMAND_SEED),
                 })
             }
-            DispatchedDelegationProvenance::ParentGoalCommand { .. } => None,
+            DispatchedDelegationProvenance::ParentGoalCommand { .. } => {
+                Some(DispatchedDelegationProvenance::ParentLifecycleCommand {
+                    session: session(UNDECODABLE_SESSION),
+                    command: command(ARBITRARY_COMMAND_SEED),
+                })
+            }
+            DispatchedDelegationProvenance::ParentLifecycleCommand { .. } => None,
         };
         provenances.push(current);
     }
@@ -688,7 +694,7 @@ fn row_decoded_families_are_enumerated() {
     // The storage discriminator is decoder-driven above; this is the dispatched
     // projection, which is still decoded from the row's shape.
     assert_eq!(every_delegation_policy().len(), 2);
-    assert_eq!(every_delegation_provenance().len(), 3);
+    assert_eq!(every_delegation_provenance().len(), 4);
     assert_eq!(every_model_call_state().len(), 4);
     assert_eq!(every_model_call_disposition().len(), 5);
     assert_eq!(every_tool_batch_state().len(), 3);

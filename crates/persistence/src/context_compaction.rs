@@ -933,14 +933,22 @@ async fn prepare_in_transaction(
     // saw the winner raised a raw uniqueness violation instead of losing the
     // claim. An unnamed arbiter covers every unique index on the row, which is
     // what every other durable command claim in this crate already does.
+    let issuer = crate::command_registry::issuer_columns(if request.automatic_for_turn.is_some() {
+        signalbox_domain::CommandPrincipal::Core
+    } else {
+        signalbox_domain::CommandPrincipal::Operator
+    });
     let claimed = sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, $2, 1, clock_timestamp())
+            (command_id, command_kind, storage_version, claimed_at,
+             issuer_kind, issuer_module)
+         VALUES ($1, $2, 1, clock_timestamp(), $3, $4)
          ON CONFLICT DO NOTHING",
     )
     .bind(request.command.into_uuid())
     .bind(COMMAND_KIND)
+    .bind(issuer.0)
+    .bind(issuer.1)
     .execute(&mut **transaction)
     .await?
     .rows_affected();

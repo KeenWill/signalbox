@@ -4379,6 +4379,7 @@ fn decode_logical_delegation_terminal(
                 provenance,
                 DispatchedDelegationProvenance::ParentTurnCommand { .. }
                     | DispatchedDelegationProvenance::ParentGoalCommand { .. }
+                    | DispatchedDelegationProvenance::ParentLifecycleCommand { .. }
             ) {
                 return Err(ProcessReadCorruption::Inconsistent(
                     "logical delegation terminal shape",
@@ -5477,6 +5478,11 @@ fn decode_process_tool_approval(
         {
             Ok(None)
         }
+        (ToolApprovalDecisionSourceStorageKind::LifecycleClosure, Some(_), None, None, None)
+            if decision == (ToolApprovalDecision::Deny { reason: None }) =>
+        {
+            Ok(None)
+        }
         (ToolApprovalDecisionSourceStorageKind::UserCommand, Some(command), None, None, None) => {
             Ok(Some(ProcessToolApproval {
                 decision,
@@ -5540,6 +5546,7 @@ fn decode_process_tool_approval(
             | ToolApprovalDecisionSourceStorageKind::UserCommand
             | ToolApprovalDecisionSourceStorageKind::Delegate
             | ToolApprovalDecisionSourceStorageKind::RuntimeSafety
+            | ToolApprovalDecisionSourceStorageKind::LifecycleClosure
             | ToolApprovalDecisionSourceStorageKind::UserOverride,
             ..,
         ) => Err(ProcessReadCorruption::Inconsistent("tool approval provenance shape").into()),

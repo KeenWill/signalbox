@@ -484,7 +484,7 @@ pub(crate) async fn continuation_exists(
     .await?)
 }
 
-/// Retires the queued goal turn the current goal lineage no longer pursues.
+/// Retires the queued goal turn that is no longer eligible to run.
 ///
 /// The turn reaches `terminal{retired}` and its `turn_terminal` event appends
 /// in the caller's transaction; a session with no such turn changes nothing.
@@ -511,9 +511,17 @@ pub(crate) async fn retire_ineligible_queued_goal_turn(
                    AND queued.turn_id = goal.turn_id
                    AND queued.state_kind = 'queued'
                  WHERE goal.session_id = $1
-                   AND NOT goal_turn_is_runtime_relevant(
-                       goal.session_id,
-                       goal.turn_id
+                   AND (
+                       NOT goal_turn_is_runtime_relevant(
+                           goal.session_id,
+                           goal.turn_id
+                       )
+                       OR NOT EXISTS (
+                           SELECT 1
+                             FROM session_lifecycle AS session
+                            WHERE session.session_id = goal.session_id
+                              AND session.owned
+                       )
                    )
                  ORDER BY accepted.acceptance_position DESC
                  LIMIT 1

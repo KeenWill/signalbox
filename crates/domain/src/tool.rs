@@ -637,6 +637,9 @@ pub enum ToolDecisionSource {
     Delegate,
     /// The provider credential boundary suppressed executable arguments.
     RuntimeSafety,
+    /// A committed session closure denied a parked request before interrupting
+    /// the live turn.
+    LifecycleClosure,
     /// A user-recorded one-shot override of a delegate denial supplied approval
     /// when the session re-proposed the denied command.
     UserOverride,
@@ -650,6 +653,7 @@ impl ToolDecisionSource {
             | Self::SessionBlanket
             | Self::SessionOverride
             | Self::RuntimeSafety
+            | Self::LifecycleClosure
             | Self::UserOverride => false,
         }
     }
@@ -1035,6 +1039,16 @@ impl ToolApprovalResolution {
         }
     }
 
+    pub(crate) const fn lifecycle_closure(request: ToolRequestId) -> Self {
+        Self {
+            request,
+            decision: ToolApprovalDecision::Deny { reason: None },
+            source: ToolDecisionSource::LifecycleClosure,
+            decider: None,
+            rationale: None,
+        }
+    }
+
     fn user(
         command: DurableCommandId,
         request: ToolRequestId,
@@ -1137,6 +1151,7 @@ enum StoredToolApprovalEvidence {
         frozen_posture: DangerousToolAutoApproval,
     },
     RuntimeSafety(ToolRequestId),
+    LifecycleClosure(ToolRequestId),
     UserOverride {
         request: ToolRequestId,
         command: DurableCommandId,
@@ -1197,6 +1212,13 @@ impl ToolApprovalResolutionReconstitutionInput {
     pub const fn runtime_safety(request: ToolRequestId) -> Self {
         Self {
             evidence: StoredToolApprovalEvidence::RuntimeSafety(request),
+        }
+    }
+
+    /// Supplies one denial caused by a committed session closure.
+    pub const fn lifecycle_closure(request: ToolRequestId) -> Self {
+        Self {
+            evidence: StoredToolApprovalEvidence::LifecycleClosure(request),
         }
     }
 
@@ -1278,6 +1300,9 @@ impl ToolApprovalResolutionReconstitutionInput {
             } => None,
             StoredToolApprovalEvidence::RuntimeSafety(request) => {
                 Some(ToolApprovalResolution::runtime_safety(*request))
+            }
+            StoredToolApprovalEvidence::LifecycleClosure(request) => {
+                Some(ToolApprovalResolution::lifecycle_closure(*request))
             }
             StoredToolApprovalEvidence::UserOverride {
                 request,
@@ -1461,6 +1486,26 @@ impl DecideToolRequest {
         }
         let resolution =
             ToolApprovalResolution::user(self.command_id, self.request, self.decision.clone());
+        Ok(PreparedDecideToolRequest {
+            command: self,
+            result: DecideToolRequestResult::Applied(DecideToolRequestAppliedResult { resolution }),
+        })
+    }
+
+    /// Prepares a closure-sourced denial against the exact request record.
+    pub fn prepare_lifecycle_closure_applied(
+        self,
+        request: &ToolRequest,
+    ) -> Result<PreparedDecideToolRequest, DecideToolRequestPreparationError> {
+        if request.id != self.request
+            || self.decision != (ToolApprovalDecision::Deny { reason: None })
+        {
+            return Err(DecideToolRequestPreparationError {
+                command: self,
+                provided_request: request.id,
+            });
+        }
+        let resolution = ToolApprovalResolution::lifecycle_closure(self.request);
         Ok(PreparedDecideToolRequest {
             command: self,
             result: DecideToolRequestResult::Applied(DecideToolRequestAppliedResult { resolution }),

@@ -212,6 +212,13 @@ fn oversized_frame_is_import_source(request: &ClientRequest) -> bool {
         | ClientRequest::ReadGoal { .. }
         | ClientRequest::ResumeGoal { .. }
         | ClientRequest::StopGoal { .. }
+        | ClientRequest::StopSession { .. }
+        | ClientRequest::SupersedeSession { .. }
+        | ClientRequest::AbandonSession { .. }
+        | ClientRequest::CloseSessionFailed { .. }
+        | ClientRequest::ResumeSession { .. }
+        | ClientRequest::AdoptSession { .. }
+        | ClientRequest::ReleaseSession { .. }
         | ClientRequest::SupersedeGoal { .. }
         | ClientRequest::SubmitInput { .. }
         | ClientRequest::CompactSession { .. }

@@ -1721,6 +1721,9 @@ fn attention_goal_block_dto(
                 AttentionBlockedReason::ExecutionFailure => {
                     WebAttentionBlockedReason::ExecutionFailure
                 }
+                AttentionBlockedReason::FinishCheckFailed => {
+                    WebAttentionBlockedReason::FinishCheckFailed
+                }
             },
             need_summary: goal.need_summary,
         })

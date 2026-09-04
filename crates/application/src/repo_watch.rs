@@ -8,6 +8,8 @@ use std::{
     num::NonZeroU64,
 };
 
+use crate::SubmitInputIdGenerator;
+
 use sha2::{Digest, Sha256};
 
 use signalbox_domain::{
@@ -22,7 +24,7 @@ use signalbox_domain::{
     RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchWorkflowRunAttempt, RepositorySlug,
     ReviewState, ReviewThreadId, SemanticTranscriptEntryId, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationProvenance, SessionId, SessionTemplateName,
-    SessionTemplateProvenance, SubmitInput, TurnId, UserContent, WorkflowName,
+    SessionTemplateProvenance, SubmitInput, TurnAttemptId, TurnId, UserContent, WorkflowName,
 };
 
 /// Supplies identities in the exact order in which the differ emits facts.
@@ -3091,10 +3093,6 @@ pub struct RepoWatchPreparedDispatchAction {
     action: RepoWatchActionV1,
     prepared_session: PreparedCreateSession,
     initial_input: SubmitInput,
-    accepted_input: AcceptedInputId,
-    turn: TurnId,
-    cancellation_entry: SemanticTranscriptEntryId,
-    cancellation_frontier: ContextFrontierId,
     goal: GoalUserCommand,
 }
 
@@ -3122,20 +3120,12 @@ impl RepoWatchPreparedDispatchAction {
         RepoWatchActionV1,
         PreparedCreateSession,
         SubmitInput,
-        AcceptedInputId,
-        TurnId,
-        SemanticTranscriptEntryId,
-        ContextFrontierId,
         GoalUserCommand,
     ) {
         (
             self.action,
             self.prepared_session,
             self.initial_input,
-            self.accepted_input,
-            self.turn,
-            self.cancellation_entry,
-            self.cancellation_frontier,
             self.goal,
         )
     }
@@ -3186,6 +3176,7 @@ pub trait RepoWatchDispatchTransaction {
     fn handle_repo_watch_evaluation(
         &mut self,
         evaluation: RepoWatchRuleEvaluation,
+        ids: &mut (impl SubmitInputIdGenerator + Send),
     ) -> impl Future<Output = Result<RepoWatchRuleEvaluationOutcome, Self::Error>> + Send;
 }
 
@@ -3194,10 +3185,6 @@ pub trait RepoWatchDispatchIdGenerator {
     fn next_dispatch_id(&mut self) -> RepoWatchDispatchId;
     fn next_command_id(&mut self) -> DurableCommandId;
     fn next_session_id(&mut self) -> SessionId;
-    fn next_accepted_input_id(&mut self) -> AcceptedInputId;
-    fn next_turn_id(&mut self) -> TurnId;
-    fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
-    fn next_context_frontier_id(&mut self) -> ContextFrontierId;
 }
 
 /// Production UUIDv7 identity source for repository-watch dispatch.
@@ -3216,7 +3203,9 @@ impl RepoWatchDispatchIdGenerator for UuidV7RepoWatchDispatchIdGenerator {
     fn next_session_id(&mut self) -> SessionId {
         SessionId::from_uuid(uuid::Uuid::now_v7())
     }
+}
 
+impl SubmitInputIdGenerator for UuidV7RepoWatchDispatchIdGenerator {
     fn next_accepted_input_id(&mut self) -> AcceptedInputId {
         AcceptedInputId::from_uuid(uuid::Uuid::now_v7())
     }
@@ -3231,6 +3220,14 @@ impl RepoWatchDispatchIdGenerator for UuidV7RepoWatchDispatchIdGenerator {
 
     fn next_context_frontier_id(&mut self) -> ContextFrontierId {
         ContextFrontierId::from_uuid(uuid::Uuid::now_v7())
+    }
+
+    fn next_closure_decision_command_id(&mut self) -> DurableCommandId {
+        DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+    }
+
+    fn next_closure_turn_attempt_id(&mut self) -> TurnAttemptId {
+        TurnAttemptId::from_uuid(uuid::Uuid::now_v7())
     }
 }
 
@@ -3287,7 +3284,7 @@ impl<Ids, Transaction> RepoWatchDispatchService<Ids, Transaction> {
 
 impl<Ids, Transaction> RepoWatchDispatchService<Ids, Transaction>
 where
-    Ids: RepoWatchDispatchIdGenerator,
+    Ids: RepoWatchDispatchIdGenerator + SubmitInputIdGenerator + Send,
     Transaction: RepoWatchDispatchTransaction,
 {
     pub async fn evaluate(
@@ -3306,11 +3303,14 @@ where
         if actions.is_empty() {
             return self
                 .transaction
-                .handle_repo_watch_evaluation(RepoWatchRuleEvaluation::NotMatched {
-                    event,
-                    rule_id: rule.id().clone(),
-                    rule_version: rule.version(),
-                })
+                .handle_repo_watch_evaluation(
+                    RepoWatchRuleEvaluation::NotMatched {
+                        event,
+                        rule_id: rule.id().clone(),
+                        rule_version: rule.version(),
+                    },
+                    &mut self.ids,
+                )
                 .await
                 .map_err(RepoWatchDispatchServiceError::Transaction);
         }
@@ -3355,10 +3355,6 @@ where
                 .synthesized_goal_statement(rule.id())
                 .map_err(RepoWatchDispatchPreparationError::GoalStatement)
                 .map_err(RepoWatchDispatchServiceError::Preparation)?;
-            let accepted_input = self.ids.next_accepted_input_id();
-            let turn = self.ids.next_turn_id();
-            let cancellation_entry = self.ids.next_semantic_entry_id();
-            let cancellation_frontier = self.ids.next_context_frontier_id();
             let goal = GoalUserCommand::new(
                 self.ids.next_command_id(),
                 session,
@@ -3368,23 +3364,22 @@ where
                 action,
                 prepared_session,
                 initial_input,
-                accepted_input,
-                turn,
-                cancellation_entry,
-                cancellation_frontier,
                 goal,
             });
         }
         self.transaction
-            .handle_repo_watch_evaluation(RepoWatchRuleEvaluation::Matched {
-                dispatch_id,
-                event,
-                rule_id: rule.id().clone(),
-                rule_version: rule.version(),
-                singleton,
-                cooldown: rule.cooldown(),
-                actions: prepared_actions.into_boxed_slice(),
-            })
+            .handle_repo_watch_evaluation(
+                RepoWatchRuleEvaluation::Matched {
+                    dispatch_id,
+                    event,
+                    rule_id: rule.id().clone(),
+                    rule_version: rule.version(),
+                    singleton,
+                    cooldown: rule.cooldown(),
+                    actions: prepared_actions.into_boxed_slice(),
+                },
+                &mut self.ids,
+            )
             .await
             .map_err(RepoWatchDispatchServiceError::Transaction)
     }

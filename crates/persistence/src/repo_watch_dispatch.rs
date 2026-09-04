@@ -11,7 +11,7 @@ use std::{
 use rust_decimal::Decimal;
 use signalbox_application::{
     RepoWatchDispatchTransaction, RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
-    RepoWatchSingletonKey,
+    RepoWatchSingletonKey, SubmitInputIdGenerator,
 };
 use signalbox_domain::{
     DescendantTerminationScope, DurableCommandId, FrozenAliasDefinition, GoalUserAction,
@@ -1317,6 +1317,7 @@ impl PostgresRepoWatchDispatchStore {
     pub async fn handle_repo_watch_evaluation_with_alias_resolver<SelectDefinition>(
         &self,
         evaluation: RepoWatchRuleEvaluation,
+        ids: &mut impl SubmitInputIdGenerator,
         select_definition: SelectDefinition,
     ) -> Result<RepoWatchRuleEvaluationOutcome, RepoWatchDispatchRepositoryError>
     where
@@ -1324,6 +1325,7 @@ impl PostgresRepoWatchDispatchStore {
     {
         self.handle_repo_watch_evaluation_with_admission(
             evaluation,
+            ids,
             select_definition,
             EvaluationAdmission::Fresh,
         )
@@ -1335,6 +1337,7 @@ impl PostgresRepoWatchDispatchStore {
         &self,
         obligation: crate::repo_watch_dispatch_obligation::RepoWatchDispatchObligation,
         evaluation: RepoWatchRuleEvaluation,
+        ids: &mut impl SubmitInputIdGenerator,
         select_definition: SelectDefinition,
     ) -> Result<RepoWatchRuleEvaluationOutcome, RepoWatchDispatchRepositoryError>
     where
@@ -1342,6 +1345,7 @@ impl PostgresRepoWatchDispatchStore {
     {
         self.handle_repo_watch_evaluation_with_admission(
             evaluation,
+            ids,
             select_definition,
             EvaluationAdmission::Obligation(Box::new(obligation)),
         )
@@ -1351,6 +1355,7 @@ impl PostgresRepoWatchDispatchStore {
     async fn handle_repo_watch_evaluation_with_admission<SelectDefinition>(
         &self,
         evaluation: RepoWatchRuleEvaluation,
+        ids: &mut impl SubmitInputIdGenerator,
         select_definition: SelectDefinition,
         admission: EvaluationAdmission,
     ) -> Result<RepoWatchRuleEvaluationOutcome, RepoWatchDispatchRepositoryError>
@@ -1679,16 +1684,8 @@ impl PostgresRepoWatchDispatchStore {
                             "action ordinal exceeds storage",
                         )
                     })?;
-                    let (
-                        configured_action,
-                        prepared_session,
-                        initial_input,
-                        accepted_input,
-                        turn,
-                        cancellation_entry,
-                        cancellation_frontier,
-                        goal,
-                    ) = action.into_parts();
+                    let (configured_action, prepared_session, initial_input, goal) =
+                        action.into_parts();
                     let RepoWatchActionV1::DispatchSession(configured_dispatch) = configured_action;
                     let session = prepared_session.applied_result().session();
                     let command = prepared_session.command();
@@ -1716,9 +1713,17 @@ impl PostgresRepoWatchDispatchStore {
                     let submit_command_id = initial_input.command_id();
                     let template_name = provenance.name().as_str().to_owned();
                     let template_digest = provenance.content_digest().as_bytes().to_vec();
-                    insert_fresh_prepared(&mut transaction, prepared_session, &self.credential_pin)
-                        .await
-                        .map_err(RepoWatchDispatchRepositoryError::SessionCreation)?;
+                    let principal = signalbox_domain::CommandPrincipal::Module {
+                        module: signalbox_domain::DispatchingModule::RepositoryWatch,
+                    };
+                    insert_fresh_prepared(
+                        &mut transaction,
+                        prepared_session,
+                        &self.credential_pin,
+                        principal,
+                    )
+                    .await
+                    .map_err(RepoWatchDispatchRepositoryError::SessionCreation)?;
                     sqlx::query(
                         "INSERT INTO repo_watch_dispatch_action
                             (dispatch_id, action_ordinal, event_id, session_id,
@@ -1758,13 +1763,16 @@ impl PostgresRepoWatchDispatchStore {
                     .bind(dispatch_start_lease_millis)
                     .execute(&mut *transaction)
                     .await?;
-                    crate::submit_input::insert_fresh_initial_input(
-                        &mut transaction,
-                        initial_input,
+                    let crate::submit_input::FreshInitialInput {
                         accepted_input,
                         turn,
                         cancellation_entry,
                         cancellation_frontier,
+                    } = crate::submit_input::insert_fresh_initial_input(
+                        &mut transaction,
+                        initial_input,
+                        principal,
+                        &mut *ids,
                         select_definition,
                     )
                     .await
@@ -1805,6 +1813,7 @@ impl PostgresRepoWatchDispatchStore {
                     crate::goal::insert_fresh_commissioned_goal(
                         &mut transaction,
                         goal,
+                        principal,
                         accepted_input,
                         turn,
                     )
@@ -1861,8 +1870,9 @@ impl RepoWatchDispatchTransaction for PostgresRepoWatchDispatchStore {
     async fn handle_repo_watch_evaluation(
         &mut self,
         evaluation: RepoWatchRuleEvaluation,
+        ids: &mut (impl SubmitInputIdGenerator + Send),
     ) -> Result<RepoWatchRuleEvaluationOutcome, Self::Error> {
-        self.handle_repo_watch_evaluation_with_alias_resolver(evaluation, |_| None)
+        self.handle_repo_watch_evaluation_with_alias_resolver(evaluation, ids, |_| None)
             .await
     }
 }

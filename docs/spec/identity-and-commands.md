@@ -4,6 +4,9 @@ The user-vocabulary surface on this page was re-verified through this PR
 (`agent/storage-vocabulary-rename`), which renamed the stored actor and issuer
 discriminators this page states.
 
+The lifecycle command and creation-receipt statements are re-verified through
+this PR (`agent/lifecycle-t5-commands`).
+
 The `SubmitInput` multipart storage-version boundary below is the foundation
 proposal from PR `#553` (`agent/blob-storage-foundation`) and becomes verified
 with its implementing child stack.
@@ -112,17 +115,17 @@ crate cannot mint an identity. `crates/application` enables the `v7` feature and
 defines one generator trait per orchestration slice, each with a production
 UUIDv7 implementation:
 
-| Generator                                            | Mints                                                                                                                                    |
-| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `UuidV7SessionIdGenerator`                           | `SessionId`                                                                                                                              |
-| `UuidV7ImportedConversationIdGenerator`              | `ImportedConversationId`, `ImportedTranscriptEntryId`                                                                                    |
-| `UuidV7CreateSessionFromImportedFrontierIdGenerator` | `SessionId`, `SemanticTranscriptEntryId`, `ContextFrontierId`                                                                            |
-| `UuidV7SubmitInputIdGenerator`                       | `AcceptedInputId`, `TurnId`, `SemanticTranscriptEntryId`, `ContextFrontierId`                                                            |
-| `UuidV7StartEligibleTurnIdGenerator`                 | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId`                                                                        |
-| `UuidV7StartupScanIdGenerator`                       | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors)                                                     |
-| `UuidV7ModelCallExecutionIdGenerator`                | `ModelCallId`, `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors)                                      |
-| `UuidV7ToolLoopIdGenerator`                          | `ToolRequestId`, `ToolAttemptId`, `ModelCallId`, `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId`, `TurnId`             |
-| `UuidV7CommissionedDispatchIdGenerator`              | `CommissionedDispatchId`, `DurableCommandId`, `SessionId`, `AcceptedInputId`, `TurnId`, `SemanticTranscriptEntryId`, `ContextFrontierId` |
+| Generator                                            | Mints                                                                                                                        |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `UuidV7SessionIdGenerator`                           | `SessionId`                                                                                                                  |
+| `UuidV7ImportedConversationIdGenerator`              | `ImportedConversationId`, `ImportedTranscriptEntryId`                                                                        |
+| `UuidV7CreateSessionFromImportedFrontierIdGenerator` | `SessionId`, `SemanticTranscriptEntryId`, `ContextFrontierId`                                                                |
+| `UuidV7SubmitInputIdGenerator`                       | `AcceptedInputId`, `TurnId`, `SemanticTranscriptEntryId`, `ContextFrontierId`, `DurableCommandId`, `TurnAttemptId`           |
+| `UuidV7StartEligibleTurnIdGenerator`                 | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId`                                                            |
+| `UuidV7StartupScanIdGenerator`                       | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors)                                         |
+| `UuidV7ModelCallExecutionIdGenerator`                | `ModelCallId`, `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors)                          |
+| `UuidV7ToolLoopIdGenerator`                          | `ToolRequestId`, `ToolAttemptId`, `ModelCallId`, `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId`, `TurnId` |
+| `UuidV7CommissionedDispatchIdGenerator`              | `CommissionedDispatchId`, `DurableCommandId`, `SessionId`                                                                    |
 
 `ProviderTargetEvidenceId` exists as a domain type but has no production minting
 seam yet; its generator lands with its owning slice. `WorkspaceId`,
@@ -201,10 +204,18 @@ key `command_id`, a closed `command_kind` discriminator (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
 `replace_session_metadata`, `submit_input`, `decide_tool_request`,
 `override_denied_tool_request`, `review_workflow`, `compact_session`,
-`update_session_placement`, `replace_lost_runner`, `abandon_lost_runner`,
-`promote_pending_runner`), a kind-scoped `storage_version`, and `claimed_at`
-(`transaction_timestamp()`), which is non-semantic operational metadata. No
-command kind, session, or client has a separate command-ID namespace.
+`update_session_placement`, `session_lifecycle`, `replace_lost_runner`,
+`abandon_lost_runner`, `promote_pending_runner`), a kind-scoped
+`storage_version`, `claimed_at` (`transaction_timestamp()`), which is
+non-semantic operational metadata, and the authenticated issuer principal —
+`issuer_kind` (`core`, `operator`, `module`, `watchdog`) with `issuer_module`
+naming the module — stamped by the boundary that admitted the command. The
+lifecycle actor classification derives from the principal and the domain actor:
+a module principal wins, otherwise the actor classifies. A goal event a command
+authored projects the session's actor from that command's envelope issuer, so
+daemon core's automatic resume and a module's composed stop never read as the
+operator's. No command kind, session, or client has a separate command-ID
+namespace.
 
 Each admitted kind has one purpose-specific typed record family
 (`create_session_command`, `create_session_from_imported_frontier_command`,
@@ -212,20 +223,20 @@ Each admitted kind has one purpose-specific typed record family
 `submit_input_command`, `decide_tool_request_command`,
 `override_denied_tool_request_command`, `review_workflow_command`,
 `compact_session_command`, `update_session_placement_command`,
-`replace_lost_runner_command`, `abandon_lost_runner_command`,
-`promote_pending_runner_command`) keyed one-to-one by `command_id`, storing
-every caller-supplied semantic field under `CHECK` constraints and foreign keys.
-Every family except replacement also stores its terminal `applied`/`rejected`
-discriminator and typed result fields in that row. A compact-session record
-begins `pending` with its exact dedicated Prepared call, then changes exactly
-once to `applied` with its receipt or to `failed`; its request fields never
-change. Runner replacement instead has one immutable request row plus at most
-one append-only `replace_lost_runner_result`: the request row satisfies
-typed-claim completeness while provisioning crosses the runner boundary, and no
-success or rejection response exists until the result row commits. Kind and
-version agreement between the registry row and its typed record is enforced by a
-composite foreign key, and a deferred constraint trigger
-(`durable_command_requires_typed_record`, executing function
+`session_lifecycle_command`, `replace_lost_runner_command`,
+`abandon_lost_runner_command`, `promote_pending_runner_command`) keyed
+one-to-one by `command_id`, storing every caller-supplied semantic field under
+`CHECK` constraints and foreign keys. Every family except replacement also
+stores its terminal `applied`/`rejected` discriminator and typed result fields
+in that row. A compact-session record begins `pending` with its exact dedicated
+Prepared call, then changes exactly once to `applied` with its receipt or to
+`failed`; its request fields never change. Runner replacement instead has one
+immutable request row plus at most one append-only `replace_lost_runner_result`:
+the request row satisfies typed-claim completeness while provisioning crosses
+the runner boundary, and no success or rejection response exists until the
+result row commits. Kind and version agreement between the registry row and its
+typed record is enforced by a composite foreign key, and a deferred constraint
+trigger (`durable_command_requires_typed_record`, executing function
 `require_durable_command_typed_record`) requires exactly one typed record per
 claim at every transaction boundary. Why: typed relational records keep each
 command's comparison payload and result reviewable and constraint-checked
@@ -301,15 +312,19 @@ lands; version 6 adds path-scoped placement, and version 7 composes model
 settings with that implemented shape. Each field is absent before its
 introducing version, so an older reader rejects a newer creation record instead
 of discarding either decision. `ReplaceSessionMetadata` and `DecideToolRequest`
-use version 1. `CreateSession` records applied results only (its one preparation
-failure is an error, not a recorded rejection);
-`CreateSessionFromImportedFrontier` also records applied results only, because a
-missing conversation named by the frontier or a boundary absent from that
-conversation is a pre-claim admission error rather than an authoritative
-rejection; `ReplaceSessionDefaults`, `ReplaceSessionMetadata`, `SubmitInput`,
-and `DecideToolRequest` record both applied results and closed, typed rejection
-discriminators. Authoritative rejections claim the identifier exactly as applied
-results do.
+use version 1. `CreateSession` records applied results (its one preparation
+failure is an error, not a recorded rejection); `session_lifecycle` (version 1)
+carries `stop{sticky, descendant_scope}`, `supersede{successor}`, `abandon`,
+`close_failed{cause}`, `resume`, `adopt{finish_condition}`, and `release` in one
+typed record with closed, operation-scoped rejections; every claimed lifecycle
+command settles as a `command_settled` receipt (`session_created` is an applied
+creation's receipt); `CreateSessionFromImportedFrontier` also records applied
+results only, because a missing conversation named by the frontier or a boundary
+absent from that conversation is a pre-claim admission error rather than an
+authoritative rejection; `ReplaceSessionDefaults`, `ReplaceSessionMetadata`,
+`SubmitInput`, and `DecideToolRequest` record both applied results and closed,
+typed rejection discriminators. Authoritative rejections claim the identifier
+exactly as applied results do.
 
 ## Replay and equality
 
@@ -400,7 +415,7 @@ rejection must use a new identifier.
 ## Actor attribution
 
 `Actor` (`crates/domain/src/actor.rs`) is the closed typed provenance of a
-durable command's initiating agency: `User`, `Model { turn: TurnId }`,
+durable command's initiating agency: `User`, `Core`, `Model { turn: TurnId }`,
 `Recovery`, or `Tool { request: ToolRequestId }`. Equality is structural; a
 carried identity is a validated reference, not minting authority, and
 attribution confers no lifecycle, authorization, or approval authority (INV-001,
@@ -408,7 +423,8 @@ INV-020).
 
 `SubmitInput` and `ReplaceSessionMetadata` are the command kinds whose durable
 payloads carry an `actor` field. The `SubmitInput` application constructor fixes
-`Actor::User`. Metadata replacement has two purpose-specific constructors: the
+`Actor::User`; its internal lifecycle-closure interrupt constructor fixes
+`Actor::Core`. Metadata replacement has two purpose-specific constructors: the
 process-facing form fixes `Actor::User`, while the tool-facing form requires one
 exact `ToolRequestId` and fixes `Actor::Tool { request }`. Neither accepts an
 arbitrary actor, and model/recovery issuers remain unconstructible.
@@ -421,7 +437,7 @@ claimed identifier under a different claimed agency. For metadata replacement,
 the recorded actor is also the applied last-writer provenance.
 
 Storage follows the closed-discriminator convention: `actor_kind`
-(`user`/`model`/`recovery`/`tool`) plus `actor_turn_id` and
+(`user`/`core`/`model`/`recovery`/`tool`) plus `actor_turn_id` and
 `actor_tool_request_id` reference columns with a `CHECK`-enforced variant shape
 in `submit_input_command` and `replace_session_metadata_command`. Metadata
 receipts additionally carry constructor-selected `issuer_kind` (`user`/`tool`)
@@ -505,5 +521,5 @@ edges.
 - UUIDv7 timestamp disclosure and namespace scope must be reassessed before
   identities are exposed outside the single-user boundary or treated as
   capabilities.
-- Which command kinds may admit non-user actors, and under what verification,
-  remains with reserved delegation and authorization decisions.
+- Any further command kinds that admit non-user actors remain with reserved
+  delegation and authorization decisions.

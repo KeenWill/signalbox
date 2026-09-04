@@ -23,16 +23,17 @@ use crate::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
     AcceptedInputQueuePriority, AcceptedInputQueueWork, AcceptedInputSchedulingProjection, Actor,
     AppliedInterruptCommandResult, AppliedInterruptState, BlobDigest, CurrentTurnAttemptState,
-    DeliveryRequest, DurableCommandId, FrozenAliasDefinition, FrozenModelSelection, GoalGeneration,
-    GoalTurnSource, ModelAlias, ModelCapabilityCatalog, ModelChangeAdjustment,
-    ModelSelectionRequest, ModelSettingsOverlay, OriginConfiguration, OriginModelSettingsError,
-    PerInputConfigurationChoices, ReconciliationReason, Session, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition, SteeringBinding,
-    TurnDisposition, TurnId, UserContent, ValidatedModelSettings,
-    VersionedSessionConfigurationDefaults, derive_accepted_input_total_order,
+    DeliveryRequest, DescendantTerminationScope, DurableCommandId, FrozenAliasDefinition,
+    FrozenModelSelection, GoalGeneration, GoalTurnSource, ModelAlias, ModelCapabilityCatalog,
+    ModelChangeAdjustment, ModelSelectionRequest, ModelSettingsOverlay, OriginConfiguration,
+    OriginModelSettingsError, PerInputConfigurationChoices, ReconciliationReason, Session,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
+    SessionInputPosition, SteeringBinding, TurnDisposition, TurnId, UserContent,
+    ValidatedModelSettings, VersionedSessionConfigurationDefaults,
+    derive_accepted_input_total_order,
 };
 
-/// One canonical user-global durable input command.
+/// One canonical globally claimed durable input command.
 ///
 /// Equality and hashing intentionally exclude [`DurableCommandId`]. They
 /// include the command discriminator by type and every other caller-supplied
@@ -49,8 +50,7 @@ pub struct SubmitInput {
 impl SubmitInput {
     /// Constructs the complete canonical typed payload for the baseline user.
     ///
-    /// docs/spec/identity-and-commands.md admits no non-user actor at
-    /// this durable-command boundary.
+    /// Lifecycle closure uses the separate core-only interrupt constructor.
     pub const fn new(
         command_id: DurableCommandId,
         session: SessionId,
@@ -63,6 +63,28 @@ impl SubmitInput {
             actor: Actor::User,
             content,
             delivery,
+        }
+    }
+
+    /// Constructs a daemon-core interrupt without model, tool, or user agency.
+    pub const fn new_core_interrupt(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        expected_active_turn: TurnId,
+        descendant_scope: DescendantTerminationScope,
+        configuration: PerInputConfigurationChoices,
+    ) -> Self {
+        Self {
+            command_id,
+            session,
+            actor: Actor::Core,
+            content,
+            delivery: DeliveryRequest::Interrupt {
+                expected_active_turn,
+                descendant_scope,
+                configuration,
+            },
         }
     }
 
@@ -2239,9 +2261,7 @@ pub struct SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstit
 /// Complete checked domain inputs for reconstructing one recorded submission.
 ///
 /// The stored actor is the durable spelling of the command's attributed
-/// agency; the canonical command cannot carry it because its constructor
-/// fixes the baseline user, so every path supplies it separately for the
-/// domain-owned comparison.
+/// agency and is supplied separately for the domain-owned comparison.
 #[derive(Clone, Debug)]
 pub struct SubmitInputReconstitutionInput {
     command: SubmitInput,

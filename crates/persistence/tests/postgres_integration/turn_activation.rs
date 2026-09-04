@@ -2835,8 +2835,8 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
     let mut cross_wired = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'submit_input', 3, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'submit_input', 3, transaction_timestamp(), 'operator')",
     )
     .bind(Uuid::from_u128(0x466))
     .execute(&mut *cross_wired)

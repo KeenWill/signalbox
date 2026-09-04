@@ -3106,8 +3106,8 @@ async fn s34_inv008_inv012_inv046_system_prompt_rides_the_frozen_defaults_epoch(
     // digest disagrees with the installed epoch cannot commit.
     let mut disagreeing = pool.begin().await?;
     sqlx::query(
-        "INSERT INTO durable_command (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'replace_session_defaults', 3, now())",
+        "INSERT INTO durable_command (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'replace_session_defaults', 3, now(), 'operator')",
     )
     .bind(Uuid::from_u128(0xa58))
     .execute(&mut *disagreeing)

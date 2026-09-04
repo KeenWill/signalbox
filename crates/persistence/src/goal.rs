@@ -7,14 +7,15 @@ use std::{error::Error, fmt, num::NonZeroU64};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    AcceptedInputId, CoreAgency, DescendantTerminationScope, DurableCommandId,
-    FrozenAliasDefinition, Goal, GoalBlockProvenance, GoalBlockedReasonKind, GoalCommandRejection,
-    GoalCommandResult, GoalEvent, GoalEventKind, GoalEventOrdinal, GoalGeneration, GoalGuidance,
-    GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed, GoalReconstitutionFailure,
-    GoalReconstitutionInput, GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement,
-    GoalTextError, GoalTransitionError, GoalTransitionFailure, GoalTurnSource, GoalUserAction,
-    GoalUserCommand, GoalUserProvenance, LifecycleActor, ModelAlias, ModelSelectionOverride,
-    OriginConfiguration, ReconstitutedGoalCommand, SessionClosureOutcome, SessionId, TurnId,
+    AcceptedInputId, CommandPrincipal, CoreAgency, DescendantTerminationScope, DurableCommandId,
+    FinishCheckVerdict, FinishCondition, FrozenAliasDefinition, Goal, GoalBlockProvenance,
+    GoalBlockedReasonKind, GoalCommandRejection, GoalCommandResult, GoalEvent, GoalEventKind,
+    GoalEventOrdinal, GoalGeneration, GoalGuidance, GoalModelBlockedReasonKind,
+    GoalModelProvenance, GoalNeed, GoalReconstitutionFailure, GoalReconstitutionInput, GoalReport,
+    GoalSchedulerProvenance, GoalState, GoalStatement, GoalTextError, GoalTransitionError,
+    GoalTransitionFailure, GoalTurnSource, GoalUserAction, GoalUserCommand, GoalUserProvenance,
+    LifecycleActor, ModelAlias, ModelSelectionOverride, OriginConfiguration,
+    ReconstitutedGoalCommand, SessionClosureOutcome, SessionId, SessionTerminalOutcome, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
@@ -41,6 +42,7 @@ use crate::{
     },
     outbox::{self, OutboxEvent},
     session::SessionCorruption,
+    session_lifecycle::SessionLifecycleRepositoryError,
 };
 
 const STORAGE_VERSION: i16 = 1;
@@ -96,6 +98,8 @@ pub enum GoalCommandHandlingOutcome {
 pub enum GoalTransitionOutcome {
     /// The transition appended this event.
     Applied(GoalEvent),
+    /// The session's closure is pending; the closure settles the goal.
+    SessionClosing,
     /// The session has no attached goal.
     GoalNotAttached,
     /// The current state rejected the requested transition.
@@ -292,8 +296,14 @@ impl GoalRepository {
     where
         SelectDefinition: FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     {
-        self.handle_command(command, candidates, None, select_definition)
-            .await
+        self.handle_command(
+            command,
+            candidates,
+            None,
+            CommandPrincipal::Operator,
+            select_definition,
+        )
+        .await
     }
 
     /// Handles a user command only while the goal's last recorded event is
@@ -316,8 +326,14 @@ impl GoalRepository {
     where
         SelectDefinition: FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     {
-        self.handle_command(command, candidates, Some(expected_head), select_definition)
-            .await
+        self.handle_command(
+            command,
+            candidates,
+            Some(expected_head),
+            CommandPrincipal::Core,
+            select_definition,
+        )
+        .await
     }
 
     async fn handle_command<SelectDefinition>(
@@ -325,6 +341,7 @@ impl GoalRepository {
         command: GoalUserCommand,
         candidates: Option<GoalTurnCandidates>,
         expected_head: Option<GoalEventOrdinal>,
+        principal: CommandPrincipal,
         select_definition: SelectDefinition,
     ) -> Result<GoalCommandHandlingOutcome, GoalRepositoryError>
     where
@@ -349,15 +366,19 @@ impl GoalRepository {
             return Ok(GoalCommandHandlingOutcome::TargetBusy { session });
         }
 
+        let issuer = crate::command_registry::issuer_columns(principal);
         let claimed = sqlx::query(
             "INSERT INTO durable_command
-                (command_id, command_kind, storage_version, claimed_at)
-             VALUES ($1, $2, $3, transaction_timestamp())
+                (command_id, command_kind, storage_version, claimed_at,
+                 issuer_kind, issuer_module)
+             VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
              ON CONFLICT DO NOTHING",
         )
         .bind(durable_command_id_to_uuid(command_id))
         .bind(GOAL_KIND)
         .bind(STORAGE_VERSION)
+        .bind(issuer.0)
+        .bind(issuer.1)
         .execute(&mut *transaction)
         .await?
         .rows_affected()
@@ -401,11 +422,14 @@ impl GoalRepository {
             return Ok(GoalCommandHandlingOutcome::LineageMoved);
         }
 
-        // A committed closure has already decided this session's outcome, and
-        // an operator command names no expected head to catch it. A goal event
-        // contradicting that decision would make the settlement refuse, with
-        // the handoff standing and activation frozen behind it.
+        // A committed closure has already decided this session's outcome, and a
+        // goal event contradicting that decision would make the settlement
+        // refuse, with the handoff standing and activation frozen behind it. An
+        // internal call names an expected head and reads that as the lineage
+        // moving; a client command names none and takes the durable
+        // `session_closing` rejection below.
         if session_exists
+            && expected_head.is_some()
             && session_holds_committed_closure(&mut transaction, command.session()).await?
         {
             transaction.rollback().await?;
@@ -414,6 +438,8 @@ impl GoalRepository {
 
         let mut result = if !session_exists {
             GoalCommandResult::Rejected(GoalCommandRejection::SessionNotFound)
+        } else if session_is_closing(&mut transaction, command.session()).await? {
+            GoalCommandResult::Rejected(GoalCommandRejection::SessionClosing)
         } else {
             match apply_user_command(&mut transaction, &command, expected_head).await? {
                 UserCommandApplication::Recorded(result) => result,
@@ -470,6 +496,22 @@ impl GoalRepository {
         match &result {
             GoalCommandResult::Applied(event) => {
                 insert_event(&mut transaction, command.session(), event).await?;
+                if matches!(command.action(), GoalUserAction::Attach(_)) {
+                    crate::session_lifecycle::confer_ownership_in_transaction(
+                        &mut transaction,
+                        command.session(),
+                        principal.classify(None),
+                    )
+                    .await
+                    .map_err(|error| match error {
+                        SessionLifecycleRepositoryError::Database(error)
+                        | SessionLifecycleRepositoryError::CommitAmbiguous(error) => {
+                            GoalRepositoryError::Database(error)
+                        }
+                        _ => GoalCorruption::Inconsistent("attached session refused ownership")
+                            .into(),
+                    })?;
+                }
                 if event_may_retire_queued_turn(event) {
                     retire_ineligible_queued_goal_turn(&mut transaction, command.session()).await?;
                 }
@@ -497,7 +539,7 @@ impl GoalRepository {
             }
             GoalCommandResult::Rejected(_) => {}
         }
-        sqlx::query("SELECT materialize_session_delegation_termination_cascade($1)")
+        sqlx::query("SELECT materialize_session_delegation_termination_cascade($1, 'stopped')")
             .bind(durable_command_id_to_uuid(command_id))
             .execute(&mut *transaction)
             .await?;
@@ -573,7 +615,8 @@ impl GoalRepository {
                 | CommandKind::UpdateSessionPlacement
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
-                | CommandKind::WithdrawGitRemote,
+                | CommandKind::WithdrawGitRemote
+                | CommandKind::SessionLifecycle,
             ) => Err(GoalRepositoryError::DifferentCommandKind { command_id }),
         }
     }
@@ -582,6 +625,13 @@ impl GoalRepository {
     pub async fn load_goal(&self, session: SessionId) -> Result<Option<Goal>, GoalRepositoryError> {
         let mut connection = self.pool.acquire().await?;
         load_goal_from_connection(&mut connection, session).await
+    }
+
+    /// Whether the daemon holds the session's liveness obligation (§6): an
+    /// automatic resume is owed to an owned session only.
+    pub async fn session_owned(&self, session: SessionId) -> Result<bool, GoalRepositoryError> {
+        let mut connection = self.pool.acquire().await?;
+        session_owned(&mut connection, session).await
     }
 
     /// Loads the current turn in one goal generation.
@@ -667,6 +717,9 @@ impl GoalRepository {
             // spending model work on its own.
             "SELECT event.session_id, event.event_ordinal
                FROM goal_event AS event
+               LEFT JOIN goal_execution_failure_resumption_arm AS arm
+                 ON arm.session_id = event.session_id
+                AND arm.event_ordinal = event.event_ordinal
                JOIN session_lifecycle AS lifecycle
                  ON lifecycle.session_id = event.session_id
                 AND lifecycle.owned
@@ -674,7 +727,7 @@ impl GoalRepository {
                 AND lifecycle.pending_terminal_outcome_kind IS NULL
               WHERE event.event_kind = 'blocked'
                 AND event.blocked_reason = 'execution_failure'
-                AND event.need = $1
+                AND COALESCE(arm.need, event.need) = $1
                 AND NOT EXISTS (
                     SELECT 1
                       FROM goal_event AS later
@@ -694,6 +747,107 @@ impl GoalRepository {
             })
             .collect::<Result<Vec<_>, GoalRepositoryError>>()
             .map(Vec::into_boxed_slice)
+    }
+
+    /// Selects one session's latest owned execution-failure block carrying an
+    /// exact effective need while holding the session lock.
+    ///
+    /// Adoption and block append both serialize on this lock. Rechecking here
+    /// therefore closes either ordering of those commits without arming blocks
+    /// whose durable need requires an operator.
+    pub async fn pending_owned_execution_failure_with_need(
+        &self,
+        session: SessionId,
+        need: &GoalNeed,
+    ) -> Result<Option<GoalEventOrdinal>, GoalRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let exists = lock_session(&mut transaction, session).await?;
+        if !exists || !session_admits_automatic_resume(&mut transaction, session).await? {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+        let ordinal = sqlx::query_scalar::<_, Decimal>(
+            "SELECT event.event_ordinal
+               FROM goal_event AS event
+               LEFT JOIN goal_execution_failure_resumption_arm AS arm
+                 ON arm.session_id = event.session_id
+                AND arm.event_ordinal = event.event_ordinal
+              WHERE event.session_id = $1
+                AND event.event_kind = 'blocked'
+                AND event.blocked_reason = 'execution_failure'
+                AND COALESCE(arm.need, event.need) = $2
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM goal_event AS later
+                     WHERE later.session_id = event.session_id
+                       AND later.event_ordinal > event.event_ordinal)",
+        )
+        .bind(session_id_to_uuid(session))
+        .bind(need.as_str())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        transaction.rollback().await?;
+        ordinal
+            .map(|ordinal| positive(ordinal).map(GoalEventOrdinal::new))
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    /// Persists the scheduled need an adopted execution-failure block acquires.
+    ///
+    /// The session lock serializes the ownership check with release and block
+    /// append. The append-only overlay makes an ambiguous retry idempotent and
+    /// leaves the historical goal event unchanged.
+    pub async fn arm_owned_execution_failure(
+        &self,
+        session: SessionId,
+        unmonitored_need: &GoalNeed,
+        scheduled_need: &GoalNeed,
+    ) -> Result<Option<GoalEventOrdinal>, GoalRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let exists = lock_session(&mut transaction, session).await?;
+        if !exists || !session_admits_automatic_resume(&mut transaction, session).await? {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+        let ordinal = sqlx::query_scalar::<_, Decimal>(
+            "WITH candidate AS (
+                SELECT event.session_id, event.event_ordinal
+                  FROM goal_event AS event
+                 WHERE event.session_id = $1
+                   AND event.event_kind = 'blocked'
+                   AND event.blocked_reason = 'execution_failure'
+                   AND event.need = $2
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM goal_event AS later
+                        WHERE later.session_id = event.session_id
+                          AND later.event_ordinal > event.event_ordinal)
+            ), inserted AS (
+                INSERT INTO goal_execution_failure_resumption_arm
+                    (session_id, event_ordinal, need)
+                SELECT session_id, event_ordinal, $3 FROM candidate
+                ON CONFLICT DO NOTHING
+                RETURNING event_ordinal
+            )
+            SELECT event_ordinal FROM inserted
+            UNION ALL
+            SELECT arm.event_ordinal
+              FROM goal_execution_failure_resumption_arm AS arm
+              JOIN candidate USING (session_id, event_ordinal)
+             WHERE arm.need = $3
+            LIMIT 1",
+        )
+        .bind(session_id_to_uuid(session))
+        .bind(unmonitored_need.as_str())
+        .bind(scheduled_need.as_str())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        commit(transaction).await?;
+        ordinal
+            .map(|ordinal| positive(ordinal).map(GoalEventOrdinal::new))
+            .transpose()
+            .map_err(Into::into)
     }
 
     /// Reconciles one current goal turn's durable terminal disposition.
@@ -756,6 +910,10 @@ impl GoalRepository {
             }
             GoalTurnTerminalState::Completed => {}
         }
+        if !session_owned(&mut transaction, session).await? {
+            transaction.rollback().await?;
+            return Ok(GoalTurnContinuationOutcome::NotPursuing);
+        }
         if continuation_exists(&mut transaction, session, predecessor).await? {
             transaction.rollback().await?;
             return Ok(GoalTurnContinuationOutcome::AlreadyScheduled);
@@ -815,15 +973,48 @@ impl GoalRepository {
         .await
     }
 
-    /// Appends a model-declared achievement and final report reference.
+    /// Appends a model-declared achievement gated on its finish check: a
+    /// passing verdict commits `achieved_verified` to the session's terminal
+    /// handoff, an unverified one `achieved_declared`, a failing one nothing.
     pub async fn declare_achieved(
         &self,
         session: SessionId,
         report: GoalReport,
         provenance: GoalModelProvenance,
+        verdict: FinishCheckVerdict,
     ) -> Result<GoalTransitionOutcome, GoalRepositoryError> {
-        self.handle_system_transition(session, SystemTransition::Achieved { report, provenance })
-            .await
+        self.handle_system_transition(
+            session,
+            SystemTransition::Achieved {
+                report,
+                provenance,
+                verdict,
+            },
+        )
+        .await
+    }
+
+    /// Loads the finish condition one session declares.
+    pub async fn load_finish_condition(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<FinishCondition>, GoalRepositoryError> {
+        let row = sqlx::query(
+            "SELECT finish_condition_kind, finish_condition
+               FROM session_lifecycle
+              WHERE session_id = $1",
+        )
+        .bind(session_id_to_uuid(session))
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        crate::mapping::finish_condition_from_columns(
+            row.try_get("finish_condition_kind")?,
+            row.try_get("finish_condition")?,
+        )
+        .map_err(|detail| GoalCorruption::Inconsistent(detail).into())
     }
 
     /// Appends scheduler-only execution-failure blocking without retry.
@@ -835,7 +1026,31 @@ impl GoalRepository {
     ) -> Result<GoalTransitionOutcome, GoalRepositoryError> {
         self.handle_system_transition(
             session,
-            SystemTransition::ExecutionFailure { need, provenance },
+            SystemTransition::ExecutionFailure {
+                need,
+                unmonitored_need: None,
+                provenance,
+            },
+        )
+        .await
+    }
+
+    /// Appends scheduler-only execution-failure blocking and chooses the
+    /// unmonitored need under the session lock when ownership was released.
+    pub async fn block_execution_failure_for_current_ownership(
+        &self,
+        session: SessionId,
+        owned_need: GoalNeed,
+        unmonitored_need: GoalNeed,
+        provenance: GoalSchedulerProvenance,
+    ) -> Result<GoalTransitionOutcome, GoalRepositoryError> {
+        self.handle_system_transition(
+            session,
+            SystemTransition::ExecutionFailure {
+                need: owned_need,
+                unmonitored_need: Some(unmonitored_need),
+                provenance,
+            },
         )
         .await
     }
@@ -843,12 +1058,26 @@ impl GoalRepository {
     async fn handle_system_transition(
         &self,
         session: SessionId,
-        transition: SystemTransition,
+        mut transition: SystemTransition,
     ) -> Result<GoalTransitionOutcome, GoalRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         if !lock_session(&mut transaction, session).await? {
             transaction.rollback().await?;
             return Ok(GoalTransitionOutcome::GoalNotAttached);
+        }
+        if let SystemTransition::ExecutionFailure {
+            need,
+            unmonitored_need,
+            ..
+        } = &mut transition
+        {
+            *need = failure_need_for_current_ownership(
+                &mut transaction,
+                session,
+                need.clone(),
+                unmonitored_need.take(),
+            )
+            .await?;
         }
         if matches!(&transition, SystemTransition::Achieved { .. })
             && session_holds_committed_closure(&mut transaction, session).await?
@@ -860,6 +1089,10 @@ impl GoalRepository {
             transaction.rollback().await?;
             return Ok(GoalTransitionOutcome::GoalNotAttached);
         };
+        if session_is_closing(&mut transaction, session).await? {
+            transaction.rollback().await?;
+            return Ok(GoalTransitionOutcome::SessionClosing);
+        }
         match transition.authority() {
             SystemTransitionAuthority::ModelDeclaration => {}
             SystemTransitionAuthority::SchedulerFailure => {
@@ -892,18 +1125,36 @@ impl GoalRepository {
                 }
             }
         }
+        let mut settled = None;
         let transitioned = match transition {
             SystemTransition::Blocked {
                 reason,
                 need,
                 provenance,
             } => goal.declare_blocked(reason, need, provenance),
-            SystemTransition::Achieved { report, provenance } => {
-                goal.declare_achieved(report, provenance)
-            }
-            SystemTransition::ExecutionFailure { need, provenance } => {
-                goal.block_execution_failure(need, provenance)
-            }
+            SystemTransition::Achieved {
+                report,
+                provenance,
+                verdict,
+            } => match verdict {
+                FinishCheckVerdict::Failed { detail } => goal.block_finish_check(
+                    GoalNeed::try_new(detail).map_err(|_| {
+                        GoalCorruption::Inconsistent("finish check result is not need text")
+                    })?,
+                    provenance,
+                ),
+                FinishCheckVerdict::Passed => {
+                    settled = Some((SessionTerminalOutcome::AchievedVerified, provenance));
+                    goal.declare_achieved(report, provenance)
+                }
+                FinishCheckVerdict::Unverified => {
+                    settled = Some((SessionTerminalOutcome::AchievedDeclared, provenance));
+                    goal.declare_achieved(report, provenance)
+                }
+            },
+            SystemTransition::ExecutionFailure {
+                need, provenance, ..
+            } => goal.block_execution_failure(need, provenance),
         };
         let goal = match transitioned {
             Ok(goal) => goal,
@@ -914,6 +1165,26 @@ impl GoalRepository {
         };
         let event = latest_event(&goal)?;
         insert_event(&mut transaction, session, &event).await?;
+        if let Some((outcome, provenance)) = settled {
+            crate::session_lifecycle::commit_pending_terminal_in_transaction(
+                &mut transaction,
+                session,
+                outcome,
+                LifecycleActor::Core {
+                    agency: CoreAgency::Tool {
+                        request: provenance.tool_request(),
+                    },
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                SessionLifecycleRepositoryError::Database(error)
+                | SessionLifecycleRepositoryError::CommitAmbiguous(error) => {
+                    GoalRepositoryError::Database(error)
+                }
+                _ => GoalCorruption::Inconsistent("achieved session refused its handoff").into(),
+            })?;
+        }
         // A blocked or achieved transition retires the generation's queued
         // turns from the live-queue projection and the timeline work facts,
         // so the change must reach the process monitor as a durable outbox
@@ -992,12 +1263,21 @@ pub(crate) async fn record_execution_failure_recovery_cause(
     Ok(())
 }
 
-/// Whether the session still admits the automatic resume that named its block.
-///
-/// Both facts are read under the session lock the caller already holds: an
-/// in-memory timer armed before either changed would otherwise resume a
-/// conversation that has since been released, or lift a park that has since
-/// been taken.
+/// Whether a closure is committed to the session's terminal handoff.
+async fn session_is_closing(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<bool, GoalRepositoryError> {
+    let closing: Option<bool> = sqlx::query_scalar(
+        "SELECT pending_terminal_outcome_kind IS NOT NULL OR state_kind = 'terminal'
+           FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?;
+    Ok(closing.unwrap_or(false))
+}
+
 /// Whether a closure has already committed this session to an outcome.
 async fn session_holds_committed_closure(
     connection: &mut PgConnection,
@@ -1013,6 +1293,12 @@ async fn session_holds_committed_closure(
     Ok(committed.unwrap_or(false))
 }
 
+/// Whether the session still admits the automatic resume that named its block.
+///
+/// Both facts are read under the session lock the caller already holds: an
+/// in-memory timer armed before either changed would otherwise resume a
+/// conversation that has since been released, or lift a park that has since
+/// been taken.
 async fn session_admits_automatic_resume(
     connection: &mut PgConnection,
     session: SessionId,
@@ -1028,13 +1314,39 @@ async fn session_admits_automatic_resume(
     Ok(admits.unwrap_or(false))
 }
 
+async fn failure_need_for_current_ownership(
+    connection: &mut PgConnection,
+    session: SessionId,
+    owned_need: GoalNeed,
+    unmonitored_need: Option<GoalNeed>,
+) -> Result<GoalNeed, GoalRepositoryError> {
+    let Some(unmonitored_need) = unmonitored_need else {
+        return Ok(owned_need);
+    };
+    let owned = session_owned(connection, session).await?;
+    Ok(if owned { owned_need } else { unmonitored_need })
+}
+
+async fn session_owned(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<bool, GoalRepositoryError> {
+    let owned: Option<bool> =
+        sqlx::query_scalar("SELECT owned FROM session_lifecycle WHERE session_id = $1")
+            .bind(session_id_to_uuid(session))
+            .fetch_optional(&mut *connection)
+            .await?;
+    Ok(owned.unwrap_or(false))
+}
+
 fn recorded_scheduler_failure(goal: &Goal, turn: TurnId) -> Option<&GoalEvent> {
     goal.events().iter().find(|event| match event.kind() {
         GoalEventKind::Blocked { block, .. } => match block {
             signalbox_domain::GoalBlockProvenance::ExecutionFailure { provenance } => {
                 provenance.turn() == turn
             }
-            signalbox_domain::GoalBlockProvenance::Model { .. } => false,
+            signalbox_domain::GoalBlockProvenance::Model { .. }
+            | signalbox_domain::GoalBlockProvenance::FinishCheck { .. } => false,
         },
         GoalEventKind::Commissioned { .. }
         | GoalEventKind::Resumed { .. }
@@ -1096,18 +1408,23 @@ fn scheduler_failure_rejection(
 pub(crate) async fn insert_fresh_commissioned_goal(
     connection: &mut PgConnection,
     command: GoalUserCommand,
+    principal: CommandPrincipal,
     accepted_input: AcceptedInputId,
     turn: TurnId,
 ) -> Result<(), GoalRepositoryError> {
+    let issuer = crate::command_registry::issuer_columns(principal);
     let claimed = sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, $2, $3, transaction_timestamp())
+            (command_id, command_kind, storage_version, claimed_at,
+             issuer_kind, issuer_module)
+         VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
          ON CONFLICT DO NOTHING",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(GOAL_KIND)
     .bind(STORAGE_VERSION)
+    .bind(issuer.0)
+    .bind(issuer.1)
     .execute(&mut *connection)
     .await?
     .rows_affected()
@@ -1178,15 +1495,22 @@ pub(crate) async fn insert_repo_watch_composed_stop(
     {
         return Ok(false);
     }
+    let issuer =
+        crate::command_registry::issuer_columns(signalbox_domain::CommandPrincipal::Module {
+            module: signalbox_domain::DispatchingModule::RepositoryWatch,
+        });
     let claimed = sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, $2, $3, transaction_timestamp())
+            (command_id, command_kind, storage_version, claimed_at,
+             issuer_kind, issuer_module)
+         VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
          ON CONFLICT DO NOTHING",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(GOAL_KIND)
     .bind(STORAGE_VERSION)
+    .bind(issuer.0)
+    .bind(issuer.1)
     .execute(&mut *connection)
     .await?
     .rows_affected()
@@ -1207,7 +1531,7 @@ pub(crate) async fn insert_repo_watch_composed_stop(
     insert_command(connection, &command, &result).await?;
     insert_event(connection, command.session(), event).await?;
     retire_ineligible_queued_goal_turn(connection, command.session()).await?;
-    sqlx::query("SELECT materialize_session_delegation_termination_cascade($1)")
+    sqlx::query("SELECT materialize_session_delegation_termination_cascade($1, 'stopped')")
         .bind(durable_command_id_to_uuid(command.command_id()))
         .execute(&mut *connection)
         .await?;
@@ -1311,9 +1635,11 @@ enum SystemTransition {
     Achieved {
         report: GoalReport,
         provenance: GoalModelProvenance,
+        verdict: FinishCheckVerdict,
     },
     ExecutionFailure {
         need: GoalNeed,
+        unmonitored_need: Option<GoalNeed>,
         provenance: GoalSchedulerProvenance,
     },
 }
@@ -1543,7 +1869,8 @@ async fn existing_or_conflicting(
         | CommandKind::UpdateSessionPlacement
         | CommandKind::RegisterWorkspace
         | CommandKind::MintGitRemote
-        | CommandKind::WithdrawGitRemote => {
+        | CommandKind::WithdrawGitRemote
+        | CommandKind::SessionLifecycle => {
             return Ok(GoalCommandHandlingOutcome::ConflictingReuse {
                 command_id: command.command_id(),
             });
@@ -1766,7 +2093,8 @@ impl<'a> EncodedEvent<'a> {
                 encoded.blocked_reason = Some(goal_blocked_reason_to_str(block.reason_kind()));
                 encoded.need = Some(need.as_str());
                 match block {
-                    GoalBlockProvenance::Model { provenance, .. } => {
+                    GoalBlockProvenance::Model { provenance, .. }
+                    | GoalBlockProvenance::FinishCheck { provenance } => {
                         encoded.model_turn = Some(turn_id_to_uuid(provenance.turn()));
                         encoded.model_tool_request =
                             Some(tool_request_id_to_uuid(provenance.tool_request()));
@@ -1834,14 +2162,19 @@ pub(crate) async fn load_goal_from_connection(
     session: SessionId,
 ) -> Result<Option<Goal>, GoalRepositoryError> {
     let rows = sqlx::query(
-        "SELECT event_ordinal, generation, event_kind, statement,
-                blocked_reason, need, guidance, report, user_command_id,
+        "SELECT event.event_ordinal, event.generation, event.event_kind,
+                event.statement, event.blocked_reason,
+                COALESCE(arm.need, event.need) AS need,
+                event.guidance, event.report, event.user_command_id,
                 model_turn_id, model_tool_request_id, scheduler_turn_id,
                 session_outcome_kind, closure_actor_kind, closure_actor_module,
                 closure_actor_turn_id, closure_actor_tool_request_id
-           FROM goal_event
-          WHERE session_id = $1
-          ORDER BY event_ordinal",
+           FROM goal_event AS event
+           LEFT JOIN goal_execution_failure_resumption_arm AS arm
+             ON arm.session_id = event.session_id
+            AND arm.event_ordinal = event.event_ordinal
+          WHERE event.session_id = $1
+          ORDER BY event.event_ordinal",
     )
     .bind(session_id_to_uuid(session))
     .fetch_all(&mut *connection)
@@ -1964,6 +2297,15 @@ fn decode_event(row: &sqlx::postgres::PgRow) -> Result<GoalEvent, GoalCorruption
                         tool_request_id_from_uuid(required(
                             model_tool_request,
                             "blocked model tool request",
+                        )?),
+                    ),
+                },
+                GoalBlockedReasonKind::FinishCheckFailed => GoalBlockProvenance::FinishCheck {
+                    provenance: GoalModelProvenance::new(
+                        turn_id_from_uuid(required(model_turn, "finish check model turn")?),
+                        tool_request_id_from_uuid(required(
+                            model_tool_request,
+                            "finish check model tool request",
                         )?),
                     ),
                 },

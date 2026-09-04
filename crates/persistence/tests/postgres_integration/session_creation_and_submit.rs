@@ -409,10 +409,10 @@ async fn s01_inv003_inv008_inv012_create_session_schema_preserves_typed_facts()
 
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
          VALUES
             ('10000000-0000-4000-8000-000000000001',
-             'create_session', 1, TIMESTAMPTZ '2026-07-18 00:00:00+00')",
+             'create_session', 1, TIMESTAMPTZ '2026-07-18 00:00:00+00', 'operator')",
     )
     .execute(&mut *transaction)
     .await?;
@@ -426,8 +426,8 @@ async fn s01_inv003_inv008_inv012_create_session_schema_preserves_typed_facts()
     .await?;
     sqlx::query(
         "INSERT INTO session_lifecycle
-            (session_id, state_kind, owned, actor_kind)
-         VALUES ('70000000-0000-7000-8000-000000000001', 'created', false, 'operator')",
+            (session_id, state_kind, owned, start_gate_held, actor_kind)
+         VALUES ('70000000-0000-7000-8000-000000000001', 'created', false, false, 'operator')",
     )
     .execute(&mut *transaction)
     .await?;
@@ -465,12 +465,12 @@ async fn s01_inv003_inv008_inv012_create_session_schema_preserves_typed_facts()
             (command_id, command_kind, storage_version,
              creation_cause, ancestry_kind, initial_defaults_version,
              model_selection_kind, direct_model_selection_id, model_alias_id,
-             result_kind, created_session_id)
+             result_kind, created_session_id, start_gate, ownership)
          VALUES
             ('10000000-0000-4000-8000-000000000001',
              'create_session', 1, 'interactive', 'none', 1,
              'direct', '70000000-0000-7000-8000-000000000002', NULL,
-             'applied', '70000000-0000-7000-8000-000000000001')",
+             'applied', '70000000-0000-7000-8000-000000000001', 'open', 'unmonitored')",
     )
     .execute(&mut *transaction)
     .await?;
@@ -512,10 +512,10 @@ async fn s01_inv003_inv008_inv012_create_session_schema_preserves_typed_facts()
 
     let duplicate_command_id = sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
          VALUES
             ('10000000-0000-4000-8000-000000000001',
-             'create_session', 1, TIMESTAMPTZ '2026-07-18 00:00:01+00')",
+             'create_session', 1, TIMESTAMPTZ '2026-07-18 00:00:01+00', 'operator')",
     )
     .execute(&pool)
     .await
@@ -543,10 +543,10 @@ async fn inv012_registry_and_create_session_constraints_reject_torn_or_conflicti
     let mut registry_only = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
          VALUES
             ('10000000-0000-4000-8000-000000000011',
-             'create_session', 1, TIMESTAMPTZ '2026-07-18 00:00:00+00')",
+             'create_session', 1, TIMESTAMPTZ '2026-07-18 00:00:00+00', 'operator')",
     )
     .execute(&mut *registry_only)
     .await?;
@@ -564,10 +564,10 @@ async fn inv012_registry_and_create_session_constraints_reject_torn_or_conflicti
 
     let invalid_kind = sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
          VALUES
             ('10000000-0000-4000-8000-000000000012',
-             'unsupported_command', 1, TIMESTAMPTZ '2026-07-18 00:00:00+00')",
+             'unsupported_command', 1, TIMESTAMPTZ '2026-07-18 00:00:00+00', 'operator')",
     )
     .execute(&pool)
     .await
@@ -591,8 +591,8 @@ async fn inv012_registry_and_create_session_constraints_reject_torn_or_conflicti
     .await?;
     sqlx::query(
         "INSERT INTO session_lifecycle
-            (session_id, state_kind, owned, actor_kind)
-         VALUES ('70000000-0000-7000-8000-000000000021', 'created', false, 'operator')",
+            (session_id, state_kind, owned, start_gate_held, actor_kind)
+         VALUES ('70000000-0000-7000-8000-000000000021', 'created', false, false, 'operator')",
     )
     .execute(&mut *session_without_command)
     .await?;
@@ -686,10 +686,10 @@ async fn s01_schema_rejects_invalid_provenance_defaults_and_mutation() -> Result
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
          VALUES
             ('10000000-0000-4000-8000-000000000013',
-             'create_session', 1, TIMESTAMPTZ '2026-07-18 00:00:00+00')",
+             'create_session', 1, TIMESTAMPTZ '2026-07-18 00:00:00+00', 'operator')",
     )
     .execute(&mut *transaction)
     .await?;
@@ -703,8 +703,8 @@ async fn s01_schema_rejects_invalid_provenance_defaults_and_mutation() -> Result
     .await?;
     sqlx::query(
         "INSERT INTO session_lifecycle
-            (session_id, state_kind, owned, actor_kind)
-         VALUES ('70000000-0000-7000-8000-000000000013', 'created', false, 'operator')",
+            (session_id, state_kind, owned, start_gate_held, actor_kind)
+         VALUES ('70000000-0000-7000-8000-000000000013', 'created', false, false, 'operator')",
     )
     .execute(&mut *transaction)
     .await?;
@@ -742,12 +742,12 @@ async fn s01_schema_rejects_invalid_provenance_defaults_and_mutation() -> Result
             (command_id, command_kind, storage_version,
              creation_cause, ancestry_kind, initial_defaults_version,
              model_selection_kind, direct_model_selection_id, model_alias_id,
-             result_kind, created_session_id)
+             result_kind, created_session_id, start_gate, ownership)
          VALUES
             ('10000000-0000-4000-8000-000000000013',
              'create_session', 1, 'interactive', 'none', 1,
              'alias', NULL, '70000000-0000-7000-8000-000000000014',
-             'applied', '70000000-0000-7000-8000-000000000013')",
+             'applied', '70000000-0000-7000-8000-000000000013', 'open', 'unmonitored')",
     )
     .execute(&mut *transaction)
     .await?;
@@ -1090,20 +1090,20 @@ async fn inv012_incomplete_or_unknown_claims_fail_closed_as_corruption()
     .await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
          VALUES
             ('10000000-0000-4000-8000-000000000131',
-             'create_session', 1, transaction_timestamp()),
+             'create_session', 1, transaction_timestamp(), 'operator'),
             ('10000000-0000-4000-8000-000000000132',
-             'create_session', 99, transaction_timestamp()),
+             'create_session', 99, transaction_timestamp(), 'operator'),
             ('10000000-0000-4000-8000-000000000133',
-             'replace_session_defaults', 1, transaction_timestamp()),
+             'replace_session_defaults', 1, transaction_timestamp(), 'operator'),
             ('10000000-0000-4000-8000-000000000134',
-             'replace_session_defaults', 99, transaction_timestamp()),
+             'replace_session_defaults', 99, transaction_timestamp(), 'operator'),
             ('10000000-0000-4000-8000-000000000135',
-             'submit_input', 3, transaction_timestamp()),
+             'submit_input', 3, transaction_timestamp(), 'operator'),
             ('10000000-0000-4000-8000-000000000136',
-             'submit_input', 99, transaction_timestamp())",
+             'submit_input', 99, transaction_timestamp(), 'operator')",
     )
     .execute(&pool)
     .await?;
@@ -1231,10 +1231,10 @@ async fn inv002_inv008_inv012_defaults_schema_enforces_typed_receipts() -> Resul
     let mut registry_only = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
          VALUES
             ('10000000-0000-4000-8000-000000000201',
-             'replace_session_defaults', 1, transaction_timestamp())",
+             'replace_session_defaults', 1, transaction_timestamp(), 'operator')",
     )
     .execute(&mut *registry_only)
     .await?;
@@ -1285,10 +1285,10 @@ async fn inv002_inv008_inv012_defaults_schema_enforces_typed_receipts() -> Resul
     let mut missing_installed = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
          VALUES
             ('10000000-0000-4000-8000-000000000205',
-             'replace_session_defaults', 1, transaction_timestamp())",
+             'replace_session_defaults', 1, transaction_timestamp(), 'operator')",
     )
     .execute(&mut *missing_installed)
     .await?;
@@ -2591,8 +2591,8 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'submit_input', 3, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'submit_input', 3, transaction_timestamp(), 'operator')",
     )
     .bind(Uuid::from_u128(0x3ff))
     .execute(&mut *transaction)
@@ -2755,8 +2755,8 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'submit_input', 3, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'submit_input', 3, transaction_timestamp(), 'operator')",
     )
     .bind(Uuid::from_u128(0x3fb))
     .execute(&mut *transaction)
@@ -2922,8 +2922,8 @@ async fn submit_command_schema_rejects_content_above_maximum() -> Result<(), Box
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'submit_input', 3, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'submit_input', 3, transaction_timestamp(), 'operator')",
     )
     .bind(Uuid::from_u128(0x323))
     .execute(&mut *transaction)

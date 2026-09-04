@@ -1365,8 +1365,8 @@ async fn insert_session_for_with_creation_cause(
     .await?;
     sqlx::query(
         "INSERT INTO session_lifecycle
-            (session_id, state_kind, owned, actor_kind)
-         VALUES ($1, 'created', false, 'operator')",
+            (session_id, state_kind, owned, start_gate_held, actor_kind)
+         VALUES ($1, 'created', false, false, 'operator')",
     )
     .bind(session)
     .execute(&mut *transaction)
@@ -1453,8 +1453,8 @@ async fn insert_bounded_propagation_session_fixture(
     .await?;
     sqlx::query(
         "INSERT INTO session_lifecycle
-            (session_id, state_kind, owned, actor_kind)
-         SELECT session_id, 'created', false, 'operator'
+            (session_id, state_kind, owned, start_gate_held, actor_kind)
+         SELECT session_id, 'created', false, false, 'operator'
            FROM unnest($1::uuid[]) AS fixture(session_id)",
     )
     .bind(&session_uuids)
@@ -1732,8 +1732,8 @@ async fn replace_approval_with_user_command(
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp(), 'operator')",
     )
     .bind(command)
     .execute(&mut *transaction)
@@ -2714,8 +2714,8 @@ async fn append_denied_request_to_continuing_tool_round_projection(
     let mut decision = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp(), 'operator')",
     )
     .bind(command)
     .execute(&mut *decision)

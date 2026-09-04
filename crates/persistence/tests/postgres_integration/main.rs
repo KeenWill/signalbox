@@ -29,6 +29,7 @@ mod restart_recovery_and_submit;
 mod search;
 mod session_creation_and_submit;
 mod session_lifecycle;
+mod session_lifecycle_commands;
 mod session_live;
 mod session_plan;
 mod session_timeline;
@@ -753,8 +754,8 @@ async fn append_raw_parent_lifecycle_update(
     .await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'goal', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'goal', 1, transaction_timestamp(), 'operator')",
     )
     .bind(command_id)
     .execute(&mut *connection)
@@ -822,8 +823,8 @@ async fn insert_raw_parent_lifecycle_without_update(
     .await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'goal', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'goal', 1, transaction_timestamp(), 'operator')",
     )
     .bind(command_id)
     .execute(&mut *connection)
@@ -1927,8 +1928,8 @@ async fn insert_pending_compact_command(
     .await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'compact_session', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'compact_session', 1, transaction_timestamp(), 'operator')",
     )
     .bind(command)
     .execute(&mut *transaction)
@@ -2549,8 +2550,8 @@ async fn insert_raw_session_lifecycle(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO session_lifecycle
-            (session_id, state_kind, owned, actor_kind)
-         VALUES ($1, 'created', $2, 'operator')",
+            (session_id, state_kind, owned, start_gate_held, actor_kind)
+         VALUES ($1, 'created', $2, false, 'operator')",
     )
     .bind(session)
     .bind(owned)
@@ -2598,8 +2599,8 @@ async fn insert_outbox_session_fixture_with_creation_cause(
 
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'create_session', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'create_session', 1, transaction_timestamp(), 'operator')",
     )
     .bind(command)
     .execute(&mut *transaction)
@@ -2639,12 +2640,12 @@ async fn insert_outbox_session_fixture_with_creation_cause(
             (command_id, command_kind, storage_version,
              creation_cause, ancestry_kind, initial_defaults_version,
              model_selection_kind, direct_model_selection_id, model_alias_id,
-             result_kind, created_session_id)
+             result_kind, created_session_id, start_gate, ownership)
          VALUES (
             $1, 'create_session', 1,
             $4, 'none', 1,
             'direct', $2, NULL,
-            'applied', $3
+            'applied', $3, 'open', 'unmonitored'
          )",
     )
     .bind(command)
@@ -2798,8 +2799,8 @@ async fn insert_malformed_submit_rejection(
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         SELECT $1, command_kind, storage_version, transaction_timestamp()
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         SELECT $1, command_kind, storage_version, transaction_timestamp(), 'operator'
            FROM durable_command
           WHERE command_id = $2",
     )
@@ -2868,8 +2869,8 @@ async fn insert_cross_wired_occupied_rejection(
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         SELECT $1, command_kind, storage_version, transaction_timestamp()
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         SELECT $1, command_kind, storage_version, transaction_timestamp(), 'operator'
            FROM durable_command
           WHERE command_id = $2",
     )
@@ -2941,8 +2942,8 @@ async fn insert_parked_approval_interrupt_rejection(
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         SELECT $1, command_kind, storage_version, transaction_timestamp()
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         SELECT $1, command_kind, storage_version, transaction_timestamp(), 'operator'
            FROM durable_command
           WHERE command_id = $2",
     )
@@ -3068,6 +3069,14 @@ impl SubmitInputIdGenerator for FixedSubmitInputIds {
 
     fn next_context_frontier_id(&mut self) -> ContextFrontierId {
         ContextFrontierId::from_uuid(next_test_submit_uuid())
+    }
+
+    fn next_closure_decision_command_id(&mut self) -> DurableCommandId {
+        DurableCommandId::from_uuid(next_test_submit_uuid())
+    }
+
+    fn next_closure_turn_attempt_id(&mut self) -> TurnAttemptId {
+        TurnAttemptId::from_uuid(next_test_submit_uuid())
     }
 }
 
@@ -3910,6 +3919,9 @@ fn assert_goal_transition_applied(outcome: &GoalTransitionOutcome) {
         GoalTransitionOutcome::NotCurrentGoalTurn => {
             panic!("the goal transition named a turn outside the current goal generation")
         }
+        GoalTransitionOutcome::SessionClosing => {
+            panic!("the goal transition found a pending session closure")
+        }
     }
 }
 
@@ -4136,8 +4148,8 @@ async fn insert_user_approval_decision_event(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp(), 'operator')",
     )
     .bind(command)
     .execute(&mut *connection)

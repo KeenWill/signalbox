@@ -23,8 +23,9 @@ use signalbox_application::{
     RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate, RepoWatchReviewDecision,
     RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTemplateResolver,
     RepoWatchWorkflowRunObservation, StartEligibleTurnOutcome, StartEligibleTurnService,
-    UuidV7CommissionedDispatchIdGenerator, UuidV7RepoWatchDispatchIdGenerator,
-    UuidV7StartEligibleTurnIdGenerator,
+    SubmitInputIdGenerator, UuidV7CommissionedDispatchIdGenerator,
+    UuidV7RepoWatchDispatchIdGenerator, UuidV7StartEligibleTurnIdGenerator,
+    UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
     AcceptedInputId, ActiveTurnPhase, AssistantResponsePart, BranchName,
@@ -179,7 +180,6 @@ const STOPPED_TERMINAL_MERGED_EVENT_ID: u128 = 0x59_100;
 const STOPPED_TERMINAL_STOP_COMMAND_ID: u128 = 0x59_200;
 const TERMINATION_RACE_STOP_COMMAND_ID: u128 = 0x59_300;
 const SUCCESSOR_GOAL_ATTACH_COMMAND_ID: u128 = 0x59_400;
-const SUCCESSOR_GOAL_STOP_COMMAND_ID: u128 = 0x59_500;
 const RELEASED_ACHIEVEMENT_REQUEST_ID: u128 = 0x59_600;
 const SUCCESSOR_GOAL_INPUT_ID: u128 = 0x59_700;
 const SUCCESSOR_GOAL_TURN_ID: u128 = 0x59_800;
@@ -189,7 +189,6 @@ const REOPENED_CLOSE_REOPENED_EVENT_ID: u128 = 0x5a_200;
 const REOPENED_CLOSE_STOP_COMMAND_ID: u128 = 0x5a_300;
 const SIBLING_ACHIEVEMENT_REQUEST_ID: u128 = 0x5b_000;
 const SIBLING_ATTACH_COMMAND_ID: u128 = 0x5b_100;
-const SIBLING_STOP_COMMAND_ID: u128 = 0x5b_200;
 const SIBLING_GOAL_INPUT_ID: u128 = 0x5b_300;
 const SIBLING_GOAL_TURN_ID: u128 = 0x5b_400;
 const UNKNOWN_DELIVERED_REQUEST_ID: u128 = 0x5c_000;
@@ -831,6 +830,7 @@ impl RepoWatchDispatchTransaction for ObligationTransaction {
     async fn handle_repo_watch_evaluation(
         &mut self,
         evaluation: RepoWatchRuleEvaluation,
+        ids: &mut (impl SubmitInputIdGenerator + Send),
     ) -> Result<RepoWatchRuleEvaluationOutcome, Self::Error> {
         let obligation =
             self.obligation
@@ -839,7 +839,7 @@ impl RepoWatchDispatchTransaction for ObligationTransaction {
                     "test obligation transaction was reused",
                 ))?;
         self.store
-            .handle_repo_watch_obligation_with_alias_resolver(obligation, evaluation, |_| None)
+            .handle_repo_watch_obligation_with_alias_resolver(obligation, evaluation, ids, |_| None)
             .await
     }
 }
@@ -1176,6 +1176,7 @@ async fn declare_session_goal_achieved(
                 session,
                 GoalReport::try_new(report).expect("fixture goal report is valid"),
                 GoalModelProvenance::new(turn, request),
+                signalbox_domain::FinishCheckVerdict::Unverified,
             )
             .await?,
     );
@@ -2933,7 +2934,9 @@ async fn a_released_dispatch_escalates_resumed_work_to_its_operator() -> Result<
                 provenance,
                 defaults,
             )?;
-    let ownership = commissioned.commission(competing, |_| None).await?;
+    let ownership = commissioned
+        .commission(competing, &mut UuidV7SubmitInputIdGenerator, |_| None)
+        .await?;
     let (resumed_repository, resumed_prepared, resumed_turn, _resumed_requests) =
         checkpoint_dispatched_delegated_approval(&fixture, 0x50_300).await?;
     let resumed_approvals = resumed_repository.approval_judge_repository();
@@ -4219,35 +4222,36 @@ async fn achievement_after_a_head_change_requeues_once_and_then_seals() -> Resul
     Ok(())
 }
 
-/// The released-batch guard only excludes successor generations once the whole
-/// batch releases. While a sibling action still holds it, an achieved session
-/// may accept an unrelated successor goal, so the terminal event that decides
-/// the requeue is the one ending the generation the dispatch commissioned.
+/// An achievement closes its session, so no successor goal can follow it; the
+/// pursuing sibling still holds the batch.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_successor_goal_beside_a_pursuing_sibling_owes_nothing() -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture().await?;
     let session = fixture.session(0);
     declare_dispatched_goal_achieved(&fixture, 0, SIBLING_ACHIEVEMENT_REQUEST_ID).await?;
-    assert_applied_goal_command(
-        GoalRepository::new(fixture.pool.clone())
-            .handle_user_command(
-                GoalUserCommand::new(
-                    DurableCommandId::from_uuid(Uuid::from_u128(SIBLING_ATTACH_COMMAND_ID)),
-                    session,
-                    GoalUserAction::Attach(GoalStatement::try_new(String::from(
-                        "an unrelated successor goal beside a pursuing sibling",
-                    ))?),
-                ),
-                Some(GoalTurnCandidates::new(
-                    AcceptedInputId::from_uuid(Uuid::from_u128(SIBLING_GOAL_INPUT_ID)),
-                    TurnId::from_uuid(Uuid::from_u128(SIBLING_GOAL_TURN_ID)),
-                )),
-                |_| None,
-            )
-            .await?,
+    let successor = GoalRepository::new(fixture.pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(SIBLING_ATTACH_COMMAND_ID)),
+                session,
+                GoalUserAction::Attach(GoalStatement::try_new(String::from(
+                    "an unrelated successor goal beside a pursuing sibling",
+                ))?),
+            ),
+            Some(GoalTurnCandidates::new(
+                AcceptedInputId::from_uuid(Uuid::from_u128(SIBLING_GOAL_INPUT_ID)),
+                TurnId::from_uuid(Uuid::from_u128(SIBLING_GOAL_TURN_ID)),
+            )),
+            |_| None,
+        )
+        .await?;
+    assert_eq!(
+        successor,
+        GoalCommandHandlingOutcome::Recorded(signalbox_domain::GoalCommandResult::Rejected(
+            signalbox_domain::GoalCommandRejection::SessionClosing
+        ))
     );
-    withdraw_dispatched_goal(&fixture.pool, session, SIBLING_STOP_COMMAND_ID).await?;
 
     assert_eq!(
         release_count(&fixture).await?,
@@ -4258,35 +4262,36 @@ async fn a_successor_goal_beside_a_pursuing_sibling_owes_nothing() -> Result<(),
     Ok(())
 }
 
-/// A released batch has already accounted for its dispatched work. Its session
-/// may afterwards accept an unrelated successor goal, whose own termination
-/// reaches the release trigger through the same action link; owing a requeue for
-/// that generation would redispatch an event that already converged.
+/// An achievement closes its session and releases the dispatch once; a
+/// successor goal on the closed session is refused and owes nothing.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_successor_goal_on_a_released_dispatch_owes_nothing() -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
     let session = fixture.session(0);
     declare_dispatched_goal_achieved(&fixture, 0, RELEASED_ACHIEVEMENT_REQUEST_ID).await?;
-    assert_applied_goal_command(
-        GoalRepository::new(fixture.pool.clone())
-            .handle_user_command(
-                GoalUserCommand::new(
-                    DurableCommandId::from_uuid(Uuid::from_u128(SUCCESSOR_GOAL_ATTACH_COMMAND_ID)),
-                    session,
-                    GoalUserAction::Attach(GoalStatement::try_new(String::from(
-                        "an unrelated successor goal for this session",
-                    ))?),
-                ),
-                Some(GoalTurnCandidates::new(
-                    AcceptedInputId::from_uuid(Uuid::from_u128(SUCCESSOR_GOAL_INPUT_ID)),
-                    TurnId::from_uuid(Uuid::from_u128(SUCCESSOR_GOAL_TURN_ID)),
-                )),
-                |_| None,
-            )
-            .await?,
+    let successor = GoalRepository::new(fixture.pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(SUCCESSOR_GOAL_ATTACH_COMMAND_ID)),
+                session,
+                GoalUserAction::Attach(GoalStatement::try_new(String::from(
+                    "an unrelated successor goal for this session",
+                ))?),
+            ),
+            Some(GoalTurnCandidates::new(
+                AcceptedInputId::from_uuid(Uuid::from_u128(SUCCESSOR_GOAL_INPUT_ID)),
+                TurnId::from_uuid(Uuid::from_u128(SUCCESSOR_GOAL_TURN_ID)),
+            )),
+            |_| None,
+        )
+        .await?;
+    assert_eq!(
+        successor,
+        GoalCommandHandlingOutcome::Recorded(signalbox_domain::GoalCommandResult::Rejected(
+            signalbox_domain::GoalCommandRejection::SessionClosing
+        ))
     );
-    withdraw_dispatched_goal(&fixture.pool, session, SUCCESSOR_GOAL_STOP_COMMAND_ID).await?;
 
     assert_eq!(release_count(&fixture).await?, 1);
     assert_eq!(outstanding_obligation_count(&fixture.pool).await?, 0);
@@ -4609,6 +4614,18 @@ async fn merged_pull_request_ends_the_commissioned_goal() -> Result<(), Box<dyn 
     assert_eq!(goal.current().state(), &GoalState::UserStopped);
     assert_eq!(cutoff_goal_count, 1);
     assert_eq!(release_count(&fixture).await?, 1);
+    // The composed stop is repository watch's own command (§6), and the
+    // envelope says so for every projection that reads it.
+    let issuer: (String, Option<String>) = sqlx::query_as(
+        "SELECT issuer_kind, issuer_module FROM durable_command WHERE command_id = $1",
+    )
+    .bind(Uuid::from_u128(0x51_100))
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        issuer,
+        (String::from("module"), Some(String::from("repo_watch")))
+    );
     Ok(())
 }
 
@@ -8072,8 +8089,9 @@ async fn commissioned_fixture() -> Result<CommissionedFixture, Box<dyn Error>> {
             provenance,
             defaults,
         )?;
-    let CommissionDispatchOutcome::Dispatched { dispatch, session } =
-        store.commission(prepared, |_| None).await?
+    let CommissionDispatchOutcome::Dispatched { dispatch, session } = store
+        .commission(prepared, &mut UuidV7SubmitInputIdGenerator, |_| None)
+        .await?
     else {
         panic!("the fixture commission dispatches fresh")
     };
@@ -8171,7 +8189,9 @@ async fn resume_started_before_release_retains_target_ownership() -> Result<(), 
         provenance,
         defaults,
     )?;
-    let ownership = store.commission(prepared, |_| None).await?;
+    let ownership = store
+        .commission(prepared, &mut UuidV7SubmitInputIdGenerator, |_| None)
+        .await?;
 
     assert_applied_goal_transition(blocked);
     assert_applied_goal_command(resumed);
@@ -8194,7 +8214,9 @@ async fn operator_commission_observes_repository_watch_target_ownership()
         )?;
 
     assert_eq!(
-        store.commission(prepared, |_| None).await?,
+        store
+            .commission(prepared, &mut UuidV7SubmitInputIdGenerator, |_| None)
+            .await?,
         CommissionDispatchOutcome::TargetBusy {
             session: fixture.session(0),
         }
@@ -8231,7 +8253,12 @@ async fn operator_commission_observes_repository_watch_dispatch_cool_off()
                 defaults,
             )?;
     let outcome = store
-        .commission_after_cool_off(prepared, Duration::from_secs(60), |_| None)
+        .commission_after_cool_off(
+            prepared,
+            &mut UuidV7SubmitInputIdGenerator,
+            Duration::from_secs(60),
+            |_| None,
+        )
         .await?;
 
     assert_applied_goal_command(stopped);
@@ -8289,7 +8316,12 @@ async fn operator_commission_uses_repository_watch_batch_admission_for_cool_off(
         defaults,
     )?;
     let outcome = store
-        .commission_after_cool_off(prepared, Duration::from_secs(60), |_| None)
+        .commission_after_cool_off(
+            prepared,
+            &mut UuidV7SubmitInputIdGenerator,
+            Duration::from_secs(60),
+            |_| None,
+        )
         .await?;
 
     assert_applied_goal_command(stopped);
@@ -8336,7 +8368,9 @@ async fn repository_watch_session_prevents_inactivity_parking() -> Result<(), Bo
     let CommissionDispatchOutcome::Dispatched {
         session: inactive_session,
         ..
-    } = commissioned.commission(prepared, |_| None).await?
+    } = commissioned
+        .commission(prepared, &mut UuidV7SubmitInputIdGenerator, |_| None)
+        .await?
     else {
         panic!("the inactive fixture commission dispatches fresh")
     };
@@ -8633,7 +8667,10 @@ async fn repository_watch_observes_operator_commission_target_ownership()
     let CommissionDispatchOutcome::Dispatched {
         session: replacement_session,
         ..
-    } = fixture.store.commission(replacement, |_| None).await?
+    } = fixture
+        .store
+        .commission(replacement, &mut UuidV7SubmitInputIdGenerator, |_| None)
+        .await?
     else {
         panic!("the replacement commission dispatches after the blocker stops")
     };
@@ -8866,7 +8903,10 @@ async fn a_replayed_commission_returns_its_committed_session() -> Result<(), Box
             defaults,
         )?;
     assert_eq!(
-        fixture.store.commission(replay, |_| None).await?,
+        fixture
+            .store
+            .commission(replay, &mut UuidV7SubmitInputIdGenerator, |_| None)
+            .await?,
         CommissionDispatchOutcome::Replayed {
             dispatch: fixture.dispatch_id,
             session: fixture.session,
@@ -8887,7 +8927,10 @@ async fn a_replayed_commission_returns_its_committed_session() -> Result<(), Box
         defaults,
     )?;
     assert_eq!(
-        fixture.store.commission(conflicting, |_| None).await?,
+        fixture
+            .store
+            .commission(conflicting, &mut UuidV7SubmitInputIdGenerator, |_| None)
+            .await?,
         CommissionDispatchOutcome::ConflictingReuse
     );
 
@@ -8929,7 +8972,10 @@ async fn a_replayed_commission_returns_its_committed_session() -> Result<(), Box
         defaults,
     )?;
     assert_eq!(
-        fixture.store.commission(changed, |_| None).await?,
+        fixture
+            .store
+            .commission(changed, &mut UuidV7SubmitInputIdGenerator, |_| None)
+            .await?,
         CommissionDispatchOutcome::ConflictingReuse
     );
 
@@ -8988,7 +9034,10 @@ async fn a_replayed_commission_returns_its_committed_session() -> Result<(), Box
         defaults,
     )?;
     assert_eq!(
-        fixture.store.commission(reused, |_| None).await?,
+        fixture
+            .store
+            .commission(reused, &mut UuidV7SubmitInputIdGenerator, |_| None)
+            .await?,
         CommissionDispatchOutcome::ConflictingReuse
     );
 

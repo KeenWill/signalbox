@@ -9,6 +9,7 @@ use std::{error::Error, num::NonZeroU64, time::Duration};
 use super::migrated_postgres;
 use signalbox_application::{
     CommissionDispatchRequest, CommissionedDispatchFence, UuidV7CommissionedDispatchIdGenerator,
+    UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
     BranchName, CommitSha, DangerousToolAutoApproval, DescendantTerminationScope,
@@ -582,9 +583,11 @@ async fn racing_pull_request_commissions_skip_the_second_live_session() -> Resul
     let first = prepared_commission(0x89_201)?;
     let second = prepared_commission(0x89_202)?;
 
+    let (mut first_ids, mut second_ids) =
+        (UuidV7SubmitInputIdGenerator, UuidV7SubmitInputIdGenerator);
     let (first, second) = tokio::join!(
-        store.commission(first, |_| None),
-        store.commission(second, |_| None),
+        store.commission(first, &mut first_ids, |_| None),
+        store.commission(second, &mut second_ids, |_| None),
     );
     let (dispatched, busy) = dispatched_and_busy(first?, second?);
 
@@ -600,7 +603,11 @@ async fn locked_admission_rejects_a_recent_terminal_dispatch_during_cool_off()
     let store = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
     let (_, first_session) = dispatched(
         store
-            .commission(prepared_commission(0x89_205)?, |_| None)
+            .commission(
+                prepared_commission(0x89_205)?,
+                &mut UuidV7SubmitInputIdGenerator,
+                |_| None,
+            )
             .await?,
     );
     let stopped = GoalRepository::new(pool)
@@ -624,6 +631,7 @@ async fn locked_admission_rejects_a_recent_terminal_dispatch_during_cool_off()
     let second = store
         .commission_after_cool_off(
             prepared_commission(0x89_206)?,
+            &mut UuidV7SubmitInputIdGenerator,
             Duration::from_secs(60),
             |_| None,
         )
@@ -646,7 +654,11 @@ async fn target_cool_off_uses_the_database_clock() -> Result<(), Box<dyn Error>>
     let sweep = PostgresConvergenceSweepStore::new(pool.clone());
     let _ = dispatched(
         commissioned
-            .commission(prepared_commission(0x89_207)?, |_| None)
+            .commission(
+                prepared_commission(0x89_207)?,
+                &mut UuidV7SubmitInputIdGenerator,
+                |_| None,
+            )
             .await?,
     );
 
@@ -673,7 +685,11 @@ async fn a_new_target_censuses_an_existing_commissioned_dispatch() -> Result<(),
     let commissioned = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
     let sweep = PostgresConvergenceSweepStore::new(pool);
     let outcome = commissioned
-        .commission(prepared_commission(0x89_203)?, |_| None)
+        .commission(
+            prepared_commission(0x89_203)?,
+            &mut UuidV7SubmitInputIdGenerator,
+            |_| None,
+        )
         .await?;
     let (_, commissioned_session) = dispatched(outcome);
     let observed_after_dispatch = observation()?;
@@ -718,7 +734,11 @@ async fn first_census_observation_becomes_the_external_dispatch_baseline()
     let observation = observation()?;
     let (dispatch, session) = dispatched(
         commissioned
-            .commission(prepared_commission(0x89_220)?, |_| None)
+            .commission(
+                prepared_commission(0x89_220)?,
+                &mut UuidV7SubmitInputIdGenerator,
+                |_| None,
+            )
             .await?,
     );
 
@@ -768,7 +788,11 @@ async fn a_committed_pending_dispatch_is_available_for_projection_repair()
         )
         .await?;
     let outcome = commissioned
-        .commission(prepared_commission(command)?, |_| None)
+        .commission(
+            prepared_commission(command)?,
+            &mut UuidV7SubmitInputIdGenerator,
+            |_| None,
+        )
         .await?;
     let (dispatch, session) = dispatched(outcome);
     let commissioned_at: sqlx::types::time::OffsetDateTime =
@@ -940,7 +964,11 @@ async fn live_session_without_model_activity_is_parked() -> Result<(), Box<dyn E
     let observation = observation()?;
     let (dispatch, session) = dispatched(
         commissioned
-            .commission(prepared_commission(0x89_208)?, |_| None)
+            .commission(
+                prepared_commission(0x89_208)?,
+                &mut UuidV7SubmitInputIdGenerator,
+                |_| None,
+            )
             .await?,
     );
     store
@@ -1016,7 +1044,11 @@ async fn stale_inactive_session_cannot_park_a_newer_dispatch() -> Result<(), Box
     let observation = observation()?;
     let (_, stale_session) = dispatched(
         commissioned
-            .commission(prepared_commission(0x89_230)?, |_| None)
+            .commission(
+                prepared_commission(0x89_230)?,
+                &mut UuidV7SubmitInputIdGenerator,
+                |_| None,
+            )
             .await?,
     );
     let stopped = GoalRepository::new(pool)
@@ -1034,7 +1066,11 @@ async fn stale_inactive_session_cannot_park_a_newer_dispatch() -> Result<(), Box
         .await?;
     let (_, latest_session) = dispatched(
         commissioned
-            .commission(prepared_commission(0x89_232)?, |_| None)
+            .commission(
+                prepared_commission(0x89_232)?,
+                &mut UuidV7SubmitInputIdGenerator,
+                |_| None,
+            )
             .await?,
     );
 

@@ -2650,6 +2650,8 @@ where
 pub enum MetadataActor {
     /// The user wrote the snapshot.
     User {},
+    /// Daemon core wrote the snapshot without delegated agency.
+    Core {},
     /// Model output from one exact turn wrote the snapshot.
     Model {
         /// The turn whose model output acted.
@@ -3100,6 +3102,8 @@ fn validate_review_orchestration_snapshot(
 pub enum GoalCommandRejection {
     /// The target session does not exist.
     SessionNotFound,
+    /// The session's closure is pending; the closure settles the goal.
+    SessionClosing,
     /// A goal is already pursuing or blocked.
     GoalAlreadyAttached,
     /// The session has no goal lineage.
@@ -3130,6 +3134,7 @@ pub enum GoalBlockedReason {
     AuthorizationRequired,
     /// The preceding goal turn failed and was not retried.
     ExecutionFailure,
+    FinishCheckFailed,
 }
 
 /// Provenance for one blocked event at the process boundary.
@@ -3194,6 +3199,8 @@ pub enum SessionClosureOutcome {
     FailedStructural,
     /// Closed with no classified cause.
     FailedUnknown,
+    /// A human or rule stopped the session.
+    Stopped,
     /// A newer session owns the work, or the work is gone.
     Superseded,
     /// An operator wrote the session off.
@@ -3308,7 +3315,8 @@ fn validate_goal_event(event: &GoalHistoryEvent) -> Result<(), FrameValidationEr
             let scheduler_reason = match reason {
                 GoalBlockedReason::UserInputRequired
                 | GoalBlockedReason::ExternalChangeRequired
-                | GoalBlockedReason::AuthorizationRequired => false,
+                | GoalBlockedReason::AuthorizationRequired
+                | GoalBlockedReason::FinishCheckFailed => false,
                 GoalBlockedReason::ExecutionFailure => true,
             };
             let scheduler_provenance = match provenance {
@@ -3435,6 +3443,114 @@ pub enum CommissionedSessionFence {
     },
 }
 
+/// Whether a creation holds its start gate (§7).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartGate {
+    /// The session may dispatch as soon as it has input.
+    #[default]
+    Open,
+    /// The session stays `created` until `release_start` or gate expiry.
+    Held,
+}
+
+/// Whether the daemon holds a liveness obligation for the session (§6).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionOwnership {
+    /// The daemon drives the session to a declared terminal outcome.
+    Owned,
+    /// A conversation the daemon does not drive.
+    #[default]
+    Unmonitored,
+}
+
+/// Closed finish condition an owned session owes (§7).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FinishCondition {
+    /// Completion is declared outside the session.
+    ExternalGate,
+    /// Completion is checked against exact declared text.
+    Declared {
+        /// Exact statement the finish check evaluates.
+        statement: String,
+    },
+}
+
+/// The §7 lifecycle members of a creation: omission means an open gate, an
+/// unmonitored conversation, and no finish condition.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionLifecycleMembers {
+    /// Whether the creation holds its start gate.
+    #[serde(default)]
+    pub start_gate: StartGate,
+    /// The ownership the creation establishes.
+    #[serde(default)]
+    pub ownership: SessionOwnership,
+    /// The finish condition an owned session owes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_condition: Option<FinishCondition>,
+}
+
+impl SessionLifecycleMembers {
+    /// Whether every member holds its omission value.
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// The standing failure cause a parked session closes with (§2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionFailureCause {
+    ProviderTransient,
+    ProviderQuotaExhausted,
+    ProviderOverloaded,
+    InfrastructureFailure,
+    RetryBudgetExhausted,
+    ContextCompactionWall,
+    ContextHeadroomExhausted,
+    BrokenToolchain,
+    ModerationBlock,
+}
+
+/// Closed session-lifecycle command rejection vocabulary (§7).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLifecycleCommandRejection {
+    SessionNotFound,
+    TransitionNotAdmitted,
+    RequiresParked,
+    ReleaseWhileParked,
+    OwnershipUnchanged,
+    FinishConditionAlreadyDeclared,
+    StandingCauseMismatch,
+    SuccessorNotFound,
+    SuccessorIsSelf,
+    GoalResumeRequired,
+    GoalOutcomeMismatch,
+    PendingTerminalConflict,
+}
+
+/// What an applied lifecycle command did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SessionLifecycleEffect {
+    /// The session recorded terminal.
+    Closed {},
+    /// The outcome is committed; the named live turn settles first.
+    ClosurePending {
+        /// The turn the committed interrupt machinery settles.
+        live_turn_id: CanonicalUuid,
+    },
+    /// The park lifted.
+    Resumed {},
+    /// The ownership bit flipped.
+    OwnershipChanged {},
+}
+
 /// Closed versioned request family.
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -3454,6 +3570,9 @@ pub enum ClientRequest {
         /// Explicit opt-in placement, defaulting to legacy pathless behavior.
         #[serde(default, skip_serializing_if = "SessionPlacement::is_pathless")]
         placement: SessionPlacement,
+        /// §7 start gate, ownership, and finish condition.
+        #[serde(default, skip_serializing_if = "SessionLifecycleMembers::is_default")]
+        lifecycle: SessionLifecycleMembers,
     },
     /// Create a user-initiated session from one daemon-held template.
     CreateSessionFromTemplate {
@@ -3464,6 +3583,9 @@ pub enum ClientRequest {
         /// Explicit opt-in placement, defaulting to legacy pathless behavior.
         #[serde(default, skip_serializing_if = "SessionPlacement::is_pathless")]
         placement: SessionPlacement,
+        /// §7 start gate, ownership, and finish condition.
+        #[serde(default, skip_serializing_if = "SessionLifecycleMembers::is_default")]
+        lifecycle: SessionLifecycleMembers,
     },
     /// Atomically commission one session from a daemon-held template: create
     /// it under a recorded immutable authority fence, attach its goal, and
@@ -3536,6 +3658,51 @@ pub enum ClientRequest {
         session_id: CanonicalUuid,
         /// Newly commissioned immutable statement.
         statement: String,
+    },
+    /// Close a session `stopped{sticky}` from any non-terminal state (§7).
+    StopSession {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
+        /// Whether re-dispatch stays suppressed until the source is updated.
+        sticky: bool,
+        /// Explicit delegated-child scope.
+        descendant_scope: DescendantTerminationScope,
+    },
+    /// Close a session `superseded{by}` in favour of its successor.
+    SupersedeSession {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
+        /// The session that takes the work.
+        successor_session_id: CanonicalUuid,
+    },
+    /// Write off a parked session as `abandoned`.
+    AbandonSession {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
+    },
+    /// Close a parked session as failed; null closes with its standing cause.
+    CloseSessionFailed {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        cause: Option<SessionFailureCause>,
+    },
+    /// Return a parked goal-less session to its mapped state.
+    ResumeSession {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
+    },
+    /// Take the liveness obligation, optionally supplying a finish condition.
+    AdoptSession {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        finish_condition: Option<FinishCondition>,
+    },
+    /// Drop the liveness obligation.
+    ReleaseSession {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
     },
     /// Submit user input with an admitted delivery treatment.
     SubmitInput {
@@ -4013,6 +4180,26 @@ impl ClientRequest {
                 guidance: Some(guidance),
                 ..
             } => validate_goal_text(guidance)?,
+            Self::AdoptSession {
+                finish_condition: Some(FinishCondition::Declared { statement }),
+                ..
+            } => validate_goal_text(statement)?,
+            Self::CreateSession {
+                lifecycle:
+                    SessionLifecycleMembers {
+                        finish_condition: Some(FinishCondition::Declared { statement }),
+                        ..
+                    },
+                ..
+            }
+            | Self::CreateSessionFromTemplate {
+                lifecycle:
+                    SessionLifecycleMembers {
+                        finish_condition: Some(FinishCondition::Declared { statement }),
+                        ..
+                    },
+                ..
+            } => validate_goal_text(statement)?,
             Self::CreateSession { .. }
             | Self::CreateSessionFromTemplate { .. }
             | Self::ListTemplates {}
@@ -4023,6 +4210,20 @@ impl ClientRequest {
             | Self::ReadGoal { .. }
             | Self::ResumeGoal { guidance: None, .. }
             | Self::StopGoal { .. }
+            | Self::StopSession { .. }
+            | Self::SupersedeSession { .. }
+            | Self::AbandonSession { .. }
+            | Self::CloseSessionFailed { .. }
+            | Self::ResumeSession { .. }
+            | Self::AdoptSession {
+                finish_condition: None,
+                ..
+            }
+            | Self::AdoptSession {
+                finish_condition: Some(FinishCondition::ExternalGate),
+                ..
+            }
+            | Self::ReleaseSession { .. }
             | Self::SubmitInput { .. }
             | Self::CompactSession { .. }
             | Self::ReadTranscript { .. }
@@ -4858,6 +5059,13 @@ pub enum RejectionDetail {
         length_bytes: CanonicalU64,
         blob_length_bytes: CanonicalU64,
     },
+    /// A durable session-lifecycle command was rejected by current state.
+    SessionLifecycleCommandRejected {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Closed reason.
+        reason: SessionLifecycleCommandRejection,
+    },
 }
 
 impl RejectionDetail {
@@ -4909,6 +5117,7 @@ impl RejectionDetail {
             | Self::SessionPlacementCurrentVersionMismatch { .. }
             | Self::SessionPlacementVersionExhausted { .. }
             | Self::GoalCommandRejected { .. }
+            | Self::SessionLifecycleCommandRejected { .. }
             | Self::ActiveTurnPresent { .. }
             | Self::CommissionTargetBusy { .. }
             | Self::ActiveTurnMismatch { .. }
@@ -6559,6 +6768,15 @@ pub enum DelegationProvenance {
         /// Explicit kill-time descendant choice.
         descendant_scope: DescendantTerminationScope,
     },
+    /// Exact parent lifecycle command.
+    ParentLifecycleCommand {
+        /// Parent session.
+        parent_session_id: CanonicalUuid,
+        /// Durable lifecycle stop command.
+        command_id: CanonicalUuid,
+        /// Explicit kill-time descendant choice.
+        descendant_scope: DescendantTerminationScope,
+    },
 }
 
 /// Exact decision recorded for one explicit tool approval.
@@ -6999,6 +7217,9 @@ fn direct_child_result_shape_is_valid(
         }
         | DelegationProvenance::ParentGoalCommand {
             parent_session_id, ..
+        }
+        | DelegationProvenance::ParentLifecycleCommand {
+            parent_session_id, ..
         } => {
             *parent_session_id != child_session_id
                 && child_result_shape_is_valid(
@@ -7036,6 +7257,14 @@ fn parent_delegation_provenance_is_cascade(
                 && goal_generation.value() > 0
                 && parent_delegation_provenance_has_cascade(provenance)
         }
+        DelegationProvenance::ParentLifecycleCommand {
+            parent_session_id: provenance_parent,
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            ..
+        } => {
+            *provenance_parent == parent_session_id
+                && parent_delegation_provenance_has_cascade(provenance)
+        }
         _ => false,
     }
 }
@@ -7047,6 +7276,9 @@ fn delegation_provenance_parent(provenance: &DelegationProvenance) -> Option<Can
             parent_session_id, ..
         }
         | DelegationProvenance::ParentGoalCommand {
+            parent_session_id, ..
+        }
+        | DelegationProvenance::ParentLifecycleCommand {
             parent_session_id, ..
         } => Some(*parent_session_id),
         _ => None,
@@ -7064,6 +7296,10 @@ fn parent_delegation_provenance_has_cascade(provenance: &DelegationProvenance) -
             goal_generation,
             ..
         } => goal_generation.value() > 0,
+        DelegationProvenance::ParentLifecycleCommand {
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            ..
+        } => true,
         _ => false,
     }
 }
@@ -7543,6 +7779,13 @@ pub enum ServerMessage {
         session_id: CanonicalUuid,
         /// Append-only commissioned-dispatch record carrying the fence.
         dispatch_id: CanonicalUuid,
+    },
+    /// A durable session-lifecycle command applied.
+    SessionLifecycleCommandApplied {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// What the command did.
+        effect: SessionLifecycleEffect,
     },
     /// One delegated child spawn was recorded or equally replayed.
     SessionSpawned {
@@ -9202,6 +9445,7 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
         | RejectionDetail::UnsupportedFastMode { .. }
         | RejectionDetail::UnsupportedServiceTier { .. }
         | RejectionDetail::GoalCommandRejected { .. }
+        | RejectionDetail::SessionLifecycleCommandRejected { .. }
         | RejectionDetail::ActiveTurnPresent { .. }
         | RejectionDetail::CommissionTargetBusy { .. }
         | RejectionDetail::ActiveTurnMismatch { .. }
@@ -9311,6 +9555,7 @@ fn validate_conversation_import_detail(
         | RejectionDetail::SessionPlacementCurrentVersionMismatch { .. }
         | RejectionDetail::SessionPlacementVersionExhausted { .. }
         | RejectionDetail::GoalCommandRejected { .. }
+        | RejectionDetail::SessionLifecycleCommandRejected { .. }
         | RejectionDetail::ActiveTurnPresent { .. }
         | RejectionDetail::CommissionTargetBusy { .. }
         | RejectionDetail::ActiveTurnMismatch { .. }
@@ -9974,12 +10219,13 @@ mod tests {
         RunnerPlacementRevision, RunnerProjection, RunnerProjectionSelector, RunnerProjectionState,
         RunnerRepositoryKey, RunnerSandboxProfile, RunnerStateTransitionState,
         RunnerWorkingDirectory, ServerFrame, ServerMessage, ServiceTier, SessionEvent,
-        SessionMetadata, SettingOverlay, SystemPromptMember, SystemPromptText,
-        ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState, ToolDecision,
-        TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval, TurnModelSettingsSnapshot,
-        TurnState, UsageProvenance, UserAttachmentKind, UserInputContent, UserInputPart,
-        decode_client_line, decode_server_line, encode_client_line, encode_server_line,
-        operator_status_calendar_date_is_valid, validate_adjustments,
+        SessionLifecycleEffect, SessionLifecycleMembers, SessionMetadata, SettingOverlay,
+        SystemPromptMember, SystemPromptText, ToolApprovalEventDecider, ToolApprovalEventDecision,
+        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval,
+        TurnModelSettingsSnapshot, TurnState, UsageProvenance, UserAttachmentKind,
+        UserInputContent, UserInputPart, decode_client_line, decode_server_line,
+        encode_client_line, encode_server_line, operator_status_calendar_date_is_valid,
+        validate_adjustments,
     };
     use signalbox_domain::ToolDecisionRationale;
     use uuid::Uuid;
@@ -11568,6 +11814,55 @@ mod tests {
             },
             r#"{"type":"supersede_goal","command_id":"00000000-0000-0000-0000-000000000007","session_id":"00000000-0000-0000-0000-000000000003","statement":"ship clarified goal mode"}"#,
         )?;
+        assert_client_request_round_trip(
+            request(9)?,
+            ClientRequest::StopSession {
+                command_id: command(10)?,
+                session_id: uuid(3),
+                sticky: true,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            },
+            r#"{"type":"stop_session","command_id":"00000000-0000-0000-0000-00000000000a","session_id":"00000000-0000-0000-0000-000000000003","sticky":true,"descendant_scope":"parent_alone"}"#,
+        )?;
+        assert_client_request_round_trip(
+            request(9)?,
+            ClientRequest::CloseSessionFailed {
+                command_id: command(11)?,
+                session_id: uuid(3),
+                cause: None,
+            },
+            r#"{"type":"close_session_failed","command_id":"00000000-0000-0000-0000-00000000000b","session_id":"00000000-0000-0000-0000-000000000003","cause":null}"#,
+        )?;
+        assert_client_request_round_trip(
+            request(9)?,
+            ClientRequest::AdoptSession {
+                command_id: command(12)?,
+                session_id: uuid(3),
+                finish_condition: Some(super::FinishCondition::Declared {
+                    statement: String::from("the branch is green"),
+                }),
+            },
+            r#"{"type":"adopt_session","command_id":"00000000-0000-0000-0000-00000000000c","session_id":"00000000-0000-0000-0000-000000000003","finish_condition":{"kind":"declared","statement":"the branch is green"}}"#,
+        )?;
+        assert_client_request_round_trip(
+            request(9)?,
+            ClientRequest::AdoptSession {
+                command_id: command(13)?,
+                session_id: uuid(3),
+                finish_condition: Some(super::FinishCondition::ExternalGate),
+            },
+            r#"{"type":"adopt_session","command_id":"00000000-0000-0000-0000-00000000000d","session_id":"00000000-0000-0000-0000-000000000003","finish_condition":{"kind":"external_gate"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(9)?,
+            ServerMessage::SessionLifecycleCommandApplied {
+                session_id: uuid(3),
+                effect: SessionLifecycleEffect::ClosurePending {
+                    live_turn_id: uuid(4),
+                },
+            },
+            r#"{"type":"session_lifecycle_command_applied","session_id":"00000000-0000-0000-0000-000000000003","effect":{"type":"closure_pending","live_turn_id":"00000000-0000-0000-0000-000000000004"}}"#,
+        )?;
         assert_server_message_round_trip(
             request(8)?,
             ServerMessage::GoalHistoryStart {
@@ -13066,6 +13361,7 @@ mod tests {
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 system_prompt: SystemPromptMember::present(None),
                 placement: super::SessionPlacement::Pathless {},
+                lifecycle: SessionLifecycleMembers::default(),
             },
         )?;
         assert_client_request_current_version(request(2)?, ClientRequest::ListSessions {})?;
@@ -15377,6 +15673,7 @@ mod tests {
                 "exact prompt text".to_owned(),
             )?)),
             placement: super::SessionPlacement::Pathless {},
+            lifecycle: SessionLifecycleMembers::default(),
         };
         let frame = ClientFrame::try_new_for_version(ProtocolVersion::One, request_id, create)?;
         let encoded = encode_client_line(&frame)?;
@@ -15400,6 +15697,7 @@ mod tests {
             model_settings: ModelSettingsOverlay::inherit_all(),
             system_prompt: SystemPromptMember::present(None),
             placement: super::SessionPlacement::Pathless {},
+            lifecycle: SessionLifecycleMembers::default(),
         };
         let promptless_frame =
             ClientFrame::try_new_for_version(ProtocolVersion::One, request_id, promptless_create)?;
@@ -15595,6 +15893,7 @@ mod tests {
                 command_id: command(2)?,
                 template_name: "reviewer".to_owned(),
                 placement: super::SessionPlacement::Pathless {},
+                lifecycle: SessionLifecycleMembers::default(),
             },
         )?;
         let encoded_create = encode_client_line(&create)?;
@@ -15657,6 +15956,7 @@ mod tests {
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 system_prompt: SystemPromptMember::present(None),
                 placement: root.clone(),
+                lifecycle: SessionLifecycleMembers::default(),
             },
         )?;
         assert_eq!(
@@ -16648,6 +16948,7 @@ mod tests {
     fn inv033_metadata_writer_actor_round_trips_every_agency()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_metadata_actor_round_trips(MetadataActor::User {}, r#"{"type":"user"}"#)?;
+        assert_metadata_actor_round_trips(MetadataActor::Core {}, r#"{"type":"core"}"#)?;
         assert_metadata_actor_round_trips(
             MetadataActor::Model { turn_id: uuid(2) },
             r#"{"type":"model","turn_id":"00000000-0000-0000-0000-000000000002"}"#,

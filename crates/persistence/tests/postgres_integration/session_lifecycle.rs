@@ -1004,10 +1004,11 @@ async fn a_closure_handoff_disposes_pending_steering_before_settlement()
             .await?,
         signalbox_application::StaleTurnOutcome::Terminalized
     );
-    assert_eq!(
-        repository.settle_pending_terminal(session).await?,
-        SessionLifecycleState::Terminal { outcome }
-    );
+    let settled = repository
+        .load(session)
+        .await?
+        .expect("the session keeps its lifecycle row");
+    assert_eq!(settled.state(), SessionLifecycleState::Terminal { outcome });
 
     pool.close().await;
     drop(container);
@@ -1056,6 +1057,7 @@ async fn the_terminal_outcome_vocabulary_matches_its_database_constraint()
         admitted,
         BTreeSet::from([
             String::from("achieved_verified"),
+            String::from("achieved_declared"),
             String::from("failed_retryable"),
             String::from("failed_structural"),
             String::from("failed_unknown"),
@@ -2784,7 +2786,7 @@ async fn turn_progress_re_arms_the_active_stall_deadline() -> Result<(), Box<dyn
     // Stands in for the turn-boundary write: a turn terminalizing or a
     // successor activating fires this projection, and §1 keeps the session
     // `active` across both, so the projected shape does not move with it.
-    sqlx::query("SELECT project_session_lifecycle($1, false, false, true)")
+    sqlx::query("SELECT project_session_lifecycle($1, false, NULL, NULL, true)")
         .bind(session.into_uuid())
         .execute(&pool)
         .await?;
@@ -2956,7 +2958,8 @@ async fn a_resume_cannot_lift_a_park_under_a_committed_closure() -> Result<(), B
 
 /// §2: a goal command cannot contradict a committed closure. Its own terminal
 /// event would make the settlement refuse, and with the handoff standing and
-/// activation frozen behind it the session could not move at all.
+/// activation frozen behind it the session could not move at all, so a client
+/// command takes the durable `session_closing` rejection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_goal_command_cannot_contradict_a_committed_closure() -> Result<(), Box<dyn Error>> {
@@ -2988,7 +2991,12 @@ async fn a_goal_command_cannot_contradict_a_committed_closure() -> Result<(), Bo
             |_| None,
         )
         .await?;
-    assert!(matches!(outcome, GoalCommandHandlingOutcome::LineageMoved));
+    assert_eq!(
+        outcome,
+        GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Rejected(
+            GoalCommandRejection::SessionClosing
+        ))
+    );
 
     let settled = repository.settle_pending_terminal(session).await?;
     assert_eq!(

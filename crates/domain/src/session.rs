@@ -72,6 +72,27 @@ pub enum SessionCreationCause {
     },
 }
 
+impl SessionCreationCause {
+    /// Returns the ownership a creation takes when the command names none.
+    pub const fn default_ownership(&self) -> crate::SessionOwnership {
+        match self {
+            Self::Interactive => crate::SessionOwnership::Unmonitored,
+            Self::ModuleDispatched { .. } | Self::Delegated { .. } => {
+                crate::SessionOwnership::Owned
+            }
+        }
+    }
+
+    /// Returns the finish condition a creation carries when the command
+    /// names none: dispatched work is gated on the dispatch's external gate.
+    pub const fn default_finish_condition(&self) -> Option<crate::FinishCondition> {
+        match self {
+            Self::ModuleDispatched { .. } => Some(crate::FinishCondition::ExternalGate),
+            Self::Interactive | Self::Delegated { .. } => None,
+        }
+    }
+}
+
 /// Identifies one exact immutable source boundary in semantic history.
 ///
 /// A transcript frontier is related to, but need not share the storage
@@ -270,6 +291,9 @@ pub struct CreateSession {
     provenance: SessionCreationProvenance,
     creation_defaults: SessionCreationDefaults,
     placement: SessionPlacement,
+    start_gate: crate::StartGate,
+    ownership: crate::SessionOwnership,
+    finish_condition: Option<crate::FinishCondition>,
 }
 
 impl CreateSession {
@@ -285,6 +309,9 @@ impl CreateSession {
             provenance,
             creation_defaults: SessionCreationDefaults::Explicit(initial_configuration_defaults),
             placement: SessionPlacement::pathless(),
+            start_gate: crate::StartGate::Open,
+            ownership: provenance.cause().default_ownership(),
+            finish_condition: provenance.cause().default_finish_condition(),
         }
     }
 
@@ -300,6 +327,9 @@ impl CreateSession {
             provenance,
             creation_defaults: SessionCreationDefaults::Explicit(initial_configuration_defaults),
             placement,
+            start_gate: crate::StartGate::Open,
+            ownership: provenance.cause().default_ownership(),
+            finish_condition: provenance.cause().default_finish_condition(),
         }
     }
 
@@ -319,6 +349,9 @@ impl CreateSession {
                 resolved: resolved_configuration_defaults,
             },
             placement: SessionPlacement::pathless(),
+            start_gate: crate::StartGate::Open,
+            ownership: provenance.cause().default_ownership(),
+            finish_condition: provenance.cause().default_finish_condition(),
         }
     }
 
@@ -338,6 +371,9 @@ impl CreateSession {
                 resolved: resolved_configuration_defaults,
             },
             placement,
+            start_gate: crate::StartGate::Open,
+            ownership: provenance.cause().default_ownership(),
+            finish_condition: provenance.cause().default_finish_condition(),
         }
     }
 
@@ -373,6 +409,35 @@ impl CreateSession {
     /// Borrows the placement pinned by this creation record.
     pub const fn placement(&self) -> &SessionPlacement {
         &self.placement
+    }
+
+    /// Installs the §7 lifecycle members: the start gate, the ownership, and
+    /// the finish condition an owned session owes.
+    pub fn with_lifecycle(
+        mut self,
+        start_gate: crate::StartGate,
+        ownership: crate::SessionOwnership,
+        finish_condition: Option<crate::FinishCondition>,
+    ) -> Self {
+        self.start_gate = start_gate;
+        self.ownership = ownership;
+        self.finish_condition = finish_condition;
+        self
+    }
+
+    /// Returns whether the creation holds its start gate.
+    pub const fn start_gate(&self) -> crate::StartGate {
+        self.start_gate
+    }
+
+    /// Returns the ownership the creation establishes.
+    pub const fn ownership(&self) -> crate::SessionOwnership {
+        self.ownership
+    }
+
+    /// Borrows the finish condition the creation declares.
+    pub const fn finish_condition(&self) -> Option<&crate::FinishCondition> {
+        self.finish_condition.as_ref()
     }
 
     /// Establishes the first immutable defaults version this creation
@@ -417,6 +482,9 @@ impl PartialEq for CreateSession {
     fn eq(&self, other: &Self) -> bool {
         self.provenance == other.provenance
             && self.placement == other.placement
+            && self.start_gate == other.start_gate
+            && self.ownership == other.ownership
+            && self.finish_condition == other.finish_condition
             && match (&self.creation_defaults, &other.creation_defaults) {
                 (
                     SessionCreationDefaults::Explicit(left),
@@ -441,6 +509,9 @@ impl std::hash::Hash for CreateSession {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.provenance.hash(state);
         self.placement.hash(state);
+        self.start_gate.hash(state);
+        self.ownership.hash(state);
+        self.finish_condition.hash(state);
         match &self.creation_defaults {
             SessionCreationDefaults::Explicit(defaults) => {
                 0_u8.hash(state);

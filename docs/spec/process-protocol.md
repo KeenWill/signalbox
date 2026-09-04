@@ -54,7 +54,8 @@ The tool-approval decision event surface is verified against this implementing
 change.
 
 The session-lifecycle sections of the operator-status snapshot are verified
-against this PR (`agent/lifecycle-t3-metrics`).
+against this PR (`agent/lifecycle-t3-metrics`). The lifecycle creation-request
+contract is re-verified through this PR (`agent/lifecycle-t5-commands`).
 
 The session-delegation terminal and client surface was re-verified through PR
 #459 (`agent/delegation-client-verbs-v2`), and its daemon await/message
@@ -331,6 +332,13 @@ that variant.
 | `resume_goal`                           | `command_id` and `session_id` (canonical UUID strings), `guidance` (string or null)                                                                                                                                                                                                                                                                             | Resume the blocked current generation, optionally using exact guidance as its next turn input.                                                                                                                                                                                                                                                                                  |
 | `stop_goal`                             | `command_id` and `session_id` (canonical UUID strings), `descendant_scope` (`parent_alone` or `parent_and_descendants`)                                                                                                                                                                                                                                         | Terminalize the pursuing or blocked current generation by explicit user action, with an explicit delegated-child scope.                                                                                                                                                                                                                                                         |
 | `supersede_goal`                        | `command_id` and `session_id` (canonical UUID strings), `statement` (string)                                                                                                                                                                                                                                                                                    | Atomically supersede the current generation and begin pursuing a new immutable statement in the same lineage.                                                                                                                                                                                                                                                                   |
+| `stop_session`                          | `command_id` and `session_id` (canonical UUID strings), `sticky` (boolean), `descendant_scope` (`parent_alone` or `parent_and_descendants`)                                                                                                                                                                                                                     | Close the session `stopped{sticky}` from any non-terminal state; a live turn settles through the interrupt machinery first.                                                                                                                                                                                                                                                     |
+| `supersede_session`                     | `command_id`, `session_id`, and `successor_session_id` (canonical UUID strings)                                                                                                                                                                                                                                                                                 | Close the session `superseded{by}` in favour of its successor.                                                                                                                                                                                                                                                                                                                  |
+| `abandon_session`                       | `command_id` and `session_id` (canonical UUID strings)                                                                                                                                                                                                                                                                                                          | Write off a parked session as `abandoned`.                                                                                                                                                                                                                                                                                                                                      |
+| `close_session_failed`                  | `command_id` and `session_id` (canonical UUID strings), `cause` (closed failure-cause string, or null for the park's standing cause)                                                                                                                                                                                                                            | Close a parked session as failed with its standing cause.                                                                                                                                                                                                                                                                                                                       |
+| `resume_session`                        | `command_id` and `session_id` (canonical UUID strings)                                                                                                                                                                                                                                                                                                          | Return a parked goal-less session to the state its suspended turn maps to.                                                                                                                                                                                                                                                                                                      |
+| `adopt_session`                         | `command_id` and `session_id` (canonical UUID strings), `finish_condition` (condition or null: `external_gate`, or `declared` with statement text)                                                                                                                                                                                                              | Take the liveness obligation, declaring the finish condition when the session carries none.                                                                                                                                                                                                                                                                                     |
+| `release_session`                       | `command_id` and `session_id` (canonical UUID strings)                                                                                                                                                                                                                                                                                                          | Drop the liveness obligation.                                                                                                                                                                                                                                                                                                                                                   |
 | `submit_input`                          | `command_id` and `session_id` (canonical UUID strings), `content` (ordered content-part array), `expected_defaults_version` (canonical decimal string, or null only for steering), `model_settings` (settings overlay), and optional `delivery`                                                                                                                 | Submit exact user content with the selected closed delivery intent; omitting `delivery` retains `StartWhenNoActiveTurn`.                                                                                                                                                                                                                                                        |
 | `read_transcript`                       | `session_id` (canonical UUID string)                                                                                                                                                                                                                                                                                                                            | Read one authoritative durable transcript snapshot and its observation cursor.                                                                                                                                                                                                                                                                                                  |
 | `follow_session`                        | `session_id` (canonical UUID string)                                                                                                                                                                                                                                                                                                                            | Receive an initial authoritative snapshot, then this process incarnation's ordered durable update events committed after the snapshot cursor for the same session; also receive ephemeral provider-text deltas.                                                                                                                                                                 |
@@ -368,6 +376,12 @@ that variant.
 | `replace_lost_runner` (proposed)        | `command_id` and `session_id` (canonical UUID strings), `expected_placement_revision` (positive canonical decimal string), and `replacement` (target object)                                                                                                                                                                                                    | Replace the exact current lost placement with a different live runner, atomically activate one pending replacement enrollment, or — for a registration-triggered loss, where it is the only version-one recovery — re-enroll the same runner against its current connection; pinned loss provisions a new workspace boundary, while pre-pin loss returns to unpinned selection. |
 | `abandon_lost_runner` (proposed)        | `command_id` and `session_id` (canonical UUID strings), `expected_placement_revision` (positive canonical decimal string)                                                                                                                                                                                                                                       | Terminalize the exact lost placement only after the existing turn-control algebra has left no active turn; queued work remains and later sees only daemon-executable tools.                                                                                                                                                                                                     |
 | `promote_pending_runner` (proposed)     | `command_id` and `pending_request_id` (canonical UUID strings)                                                                                                                                                                                                                                                                                                  | Activate the one provisioning-only pending enrollment on the deployment-scoped fact that this daemon's active runner is durably gone; it names and mutates no session placement.                                                                                                                                                                                                |
+
+`create_session` and `create_session_from_template` accept an optional
+`lifecycle` object: `start_gate` (`open`, the default, or `held`), `ownership`
+(`unmonitored`, the default, or `owned`), and `finish_condition`
+(`external_gate`, or `declared` with statement text). A held gate is durable on
+the lifecycle satellite: the session stays `created`.
 
 | Type                                 | Additional required members                                                                                                | Meaning                                                                  |
 | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
@@ -1040,10 +1054,12 @@ Message objects carry a required string `type` and reject fields not admitted by
 that variant. Every accepted non-review mutation, conversation-import transport
 request, or blob-upload transport request — `create_session`,
 `create_session_from_template`, `commission_session`,
-`create_session_from_imported_frontier`, `submit_input`, `reconcile_turn`,
-`stop_turn`, `decide_tool_request`, `replace_session_metadata`,
-`replace_session_defaults`, `compact_session`, `cancel_program_run`,
-`update_session_placement`, `import_conversation`, `begin_conversation_import`,
+`create_session_from_imported_frontier`, `stop_session`, `supersede_session`,
+`abandon_session`, `close_session_failed`, `resume_session`, `adopt_session`,
+`release_session`, `submit_input`, `reconcile_turn`, `stop_turn`,
+`decide_tool_request`, `replace_session_metadata`, `replace_session_defaults`,
+`compact_session`, `cancel_program_run`, `update_session_placement`,
+`import_conversation`, `begin_conversation_import`,
 `append_conversation_import`, `commit_conversation_import`,
 `abort_conversation_import`, `begin_blob_upload`, `append_blob_upload`,
 `commit_blob_upload`, `abort_blob_upload`, `spawn_session`, `await_session`,
@@ -1052,6 +1068,10 @@ request, or blob-upload transport request — `create_session`,
 
 - `session_created` with `session_id` and the complete installed
   `model_settings` snapshot;
+- `session_lifecycle_command_applied` with `session_id` and `effect` (`closed`,
+  `closure_pending { live_turn_id }`, `resumed`, `ownership_changed`); a
+  recorded rejection is `rejected` with
+  `session_lifecycle_command_rejected { session_id, reason }`;
 - `session_commissioned` with the created `session_id` and the `dispatch_id` of
   the append-only recorded fence; an equal replay of the same command identity
   re-emits the committed receipt, and the same identity naming a different
@@ -1509,7 +1529,7 @@ and the value-bearing forms retain the unsupported value.
 unwritten snapshot has the empty non-archived metadata object and a null
 `last_writer`; an applied replacement always has a non-null last writer. A
 last-writer object has `updated_at_unix_micros` (canonical nonnegative decimal
-microseconds since the Unix epoch) and one closed actor object: `user`,
+microseconds since the Unix epoch) and one closed actor object: `user`, `core`,
 `model { turn_id }`, `recovery`, or `tool { tool_request_id }`. That inventory
 is exactly the durable actor inventory, because the projection is total over
 what storage admits: `replace_session_metadata` on this boundary always writes
@@ -2201,6 +2221,8 @@ The two outcome events use one closed nested union. `outcome` is `returned`,
 `parent_turn_command { parent_session_id, parent_turn_id, command_id, descendant_scope }`,
 or
 `parent_goal_command { parent_session_id, goal_generation, command_id, descendant_scope }`,
+or
+`parent_lifecycle_command { parent_session_id, command_id, descendant_scope }`,
 where `goal_generation` is a positive canonical decimal string and
 `descendant_scope` uses the request spelling above. Goal-stop provenance never
 carries or fabricates a parent turn. The admitted correlations are exhaustive:
@@ -2218,8 +2240,8 @@ carries or fabricates a parent turn. The admitted correlations are exhaustive:
 `child_result` admits every row except `already_terminal` and
 `continue_running`; `child_lifecycle_disposition` admits only parent-command
 `stopped`, `cancelled`, `already_terminal`, and `continue_running` rows. A
-parent-command outcome admits either `parent_turn_command` or
-`parent_goal_command` provenance and requires `parent_and_descendants` for
+parent-command outcome admits `parent_turn_command`, `parent_goal_command`, or
+`parent_lifecycle_command` provenance and requires `parent_and_descendants` for
 `stopped`, parent-caused `cancelled`, and `continue_running`. An
 `already_terminal` row additionally requires the relationship's pre-existing
 immutable child result and never creates or replaces it; traversal continues
@@ -2732,20 +2754,21 @@ reaches the user as a named diagnostic rather than a generic local encode
 failure. Each result is one line carrying the summary's session identity,
 archive state, defaults version, model selection, dangerous-tool posture,
 last-writer actor and timestamp, sorted comma-joined tags, and title. The actor
-prints as its wire kind — `user`, `model`, `recovery`, or `tool` — without the
-reference the kind carries, which the line has no field for. An unwritten
-metadata snapshot prints `last_writer=none`, `updated_at_unix_micros=none`, and
-empty tag and title values, which a present tag or title never is. A tag may
-itself contain the space that ends its field, the comma that separates it from a
-sibling, or the backslash that introduces an escape, so all three are escaped
-inside a tag exactly as a control code point is; every backslash in the tag
-field therefore opens an escape the client wrote, and the field decodes back to
-the exact tag set. The title is the line's last field, keeps its spaces, and is
-rendered to be read rather than decoded. When the page end names a continuation
-cursor, the client prints `next_after_session_id=<uuid>` to standard error after
-the results; a page is therefore never silently truncated, and that value is the
-next invocation's `--after`. The client also validates that a page never exceeds
-its requested limit.
+prints as its wire kind — `user`, `core`, `model`, `recovery`, or `tool` —
+without the reference the kind carries, which the line has no field for. An
+unwritten metadata snapshot prints `last_writer=none`,
+`updated_at_unix_micros=none`, and empty tag and title values, which a present
+tag or title never is. A tag may itself contain the space that ends its field,
+the comma that separates it from a sibling, or the backslash that introduces an
+escape, so all three are escaped inside a tag exactly as a control code point
+is; every backslash in the tag field therefore opens an escape the client wrote,
+and the field decodes back to the exact tag set. The title is the line's last
+field, keeps its spaces, and is rendered to be read rather than decoded. When
+the page end names a continuation cursor, the client prints
+`next_after_session_id=<uuid>` to standard error after the results; a page is
+therefore never silently truncated, and that value is the next invocation's
+`--after`. The client also validates that a page never exceeds its requested
+limit.
 
 `conversations` is the separate verb for `list_conversations` and follows the
 same one-request, one-page discipline as `search`. `--title` is the exact

@@ -13,13 +13,12 @@
 use std::{error::Error, fmt};
 
 use signalbox_domain::{
-    AcceptedInputId, BranchName, CommissionedDispatchId, CommitSha, ContextFrontierId,
-    CreateSession, DeliveryRequest, DurableCommandId, GoalStatement, GoalUserAction,
-    GoalUserCommand, ModelSelectionOverride, ModuleDispatch, PerInputConfigurationChoices,
-    PreparedCreateSession, PullRequestNumber, RepositorySlug, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationProvenance,
-    SessionId, SessionTemplateName, SessionTemplateProvenance, SubmitInput, TurnId, UserContent,
-    UserContentPart,
+    BranchName, CommissionedDispatchId, CommitSha, CreateSession, DeliveryRequest,
+    DurableCommandId, GoalStatement, GoalUserAction, GoalUserCommand, ModelSelectionOverride,
+    ModuleDispatch, PerInputConfigurationChoices, PreparedCreateSession, PullRequestNumber,
+    RepositorySlug, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+    SessionCreationProvenance, SessionId, SessionTemplateName, SessionTemplateProvenance,
+    SubmitInput, UserContent, UserContentPart,
 };
 
 use crate::create_session::InvalidDurableCommandId;
@@ -62,10 +61,6 @@ pub trait CommissionedDispatchIdGenerator {
     fn next_dispatch_id(&mut self) -> CommissionedDispatchId;
     fn next_command_id(&mut self) -> DurableCommandId;
     fn next_session_id(&mut self) -> SessionId;
-    fn next_accepted_input_id(&mut self) -> AcceptedInputId;
-    fn next_turn_id(&mut self) -> TurnId;
-    fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
-    fn next_context_frontier_id(&mut self) -> ContextFrontierId;
 }
 
 /// Production UUIDv7 identity source for commissioned dispatch.
@@ -83,22 +78,6 @@ impl CommissionedDispatchIdGenerator for UuidV7CommissionedDispatchIdGenerator {
 
     fn next_session_id(&mut self) -> SessionId {
         SessionId::from_uuid(uuid::Uuid::now_v7())
-    }
-
-    fn next_accepted_input_id(&mut self) -> AcceptedInputId {
-        AcceptedInputId::from_uuid(uuid::Uuid::now_v7())
-    }
-
-    fn next_turn_id(&mut self) -> TurnId {
-        TurnId::from_uuid(uuid::Uuid::now_v7())
-    }
-
-    fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId {
-        SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7())
-    }
-
-    fn next_context_frontier_id(&mut self) -> ContextFrontierId {
-        ContextFrontierId::from_uuid(uuid::Uuid::now_v7())
     }
 }
 
@@ -223,10 +202,6 @@ impl CommissionDispatchRequest {
             fence: self.fence,
             prepared_session,
             initial_input,
-            accepted_input: ids.next_accepted_input_id(),
-            turn: ids.next_turn_id(),
-            cancellation_entry: ids.next_semantic_entry_id(),
-            cancellation_frontier: ids.next_context_frontier_id(),
             goal,
         })
     }
@@ -302,10 +277,6 @@ pub struct PreparedCommissionedDispatch {
     fence: CommissionedDispatchFence,
     prepared_session: PreparedCreateSession,
     initial_input: SubmitInput,
-    accepted_input: AcceptedInputId,
-    turn: TurnId,
-    cancellation_entry: SemanticTranscriptEntryId,
-    cancellation_frontier: ContextFrontierId,
     goal: GoalUserCommand,
 }
 
@@ -347,10 +318,6 @@ impl PreparedCommissionedDispatch {
     }
 
     /// Decomposes into exactly the parts the durable transaction commits.
-    #[allow(
-        clippy::type_complexity,
-        reason = "one-shot decomposition mirrors the dispatch action"
-    )]
     pub fn into_parts(
         self,
     ) -> (
@@ -358,10 +325,6 @@ impl PreparedCommissionedDispatch {
         CommissionedDispatchFence,
         PreparedCreateSession,
         SubmitInput,
-        AcceptedInputId,
-        TurnId,
-        SemanticTranscriptEntryId,
-        ContextFrontierId,
         GoalUserCommand,
     ) {
         (
@@ -369,10 +332,6 @@ impl PreparedCommissionedDispatch {
             self.fence,
             self.prepared_session,
             self.initial_input,
-            self.accepted_input,
-            self.turn,
-            self.cancellation_entry,
-            self.cancellation_frontier,
             self.goal,
         )
     }
@@ -514,7 +473,7 @@ mod tests {
             prepared.prepared_session().command().command_id(),
             commanded
         );
-        let (_, _, _, initial_input, _, _, _, _, goal) = prepared.into_parts();
+        let (_, _, _, initial_input, goal) = prepared.into_parts();
         assert_eq!(initial_input.session(), session);
         assert_eq!(goal.session(), session);
         assert!(matches!(goal.action(), GoalUserAction::Attach(_)));

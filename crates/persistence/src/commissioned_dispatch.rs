@@ -12,9 +12,11 @@ use std::{error::Error, fmt, time::Duration};
 use rust_decimal::Decimal;
 use signalbox_application::{
     CommissionDispatchRequest, CommissionedDispatchFence, PreparedCommissionedDispatch,
+    SubmitInputIdGenerator,
 };
 use signalbox_domain::{
-    CommissionedDispatchId, DurableCommandId, FrozenAliasDefinition, ModelAlias, SessionId,
+    CommandPrincipal, CommissionedDispatchId, DispatchingModule, DurableCommandId,
+    FrozenAliasDefinition, ModelAlias, SessionId,
 };
 use sqlx::{PgPool, Row};
 
@@ -207,12 +209,13 @@ impl PostgresCommissionedDispatchStore {
     pub async fn commission<SelectDefinition>(
         &self,
         prepared: PreparedCommissionedDispatch,
+        ids: &mut impl SubmitInputIdGenerator,
         select_definition: SelectDefinition,
     ) -> Result<CommissionDispatchOutcome, CommissionedDispatchRepositoryError>
     where
         SelectDefinition: Fn(ModelAlias) -> Option<FrozenAliasDefinition> + Copy + Send,
     {
-        self.commission_with_cool_off(prepared, None, select_definition)
+        self.commission_with_cool_off(prepared, ids, None, select_definition)
             .await
     }
 
@@ -220,19 +223,21 @@ impl PostgresCommissionedDispatchStore {
     pub async fn commission_after_cool_off<SelectDefinition>(
         &self,
         prepared: PreparedCommissionedDispatch,
+        ids: &mut impl SubmitInputIdGenerator,
         cool_off: Duration,
         select_definition: SelectDefinition,
     ) -> Result<CommissionDispatchOutcome, CommissionedDispatchRepositoryError>
     where
         SelectDefinition: Fn(ModelAlias) -> Option<FrozenAliasDefinition> + Copy + Send,
     {
-        self.commission_with_cool_off(prepared, Some(cool_off), select_definition)
+        self.commission_with_cool_off(prepared, ids, Some(cool_off), select_definition)
             .await
     }
 
     async fn commission_with_cool_off<SelectDefinition>(
         &self,
         prepared: PreparedCommissionedDispatch,
+        ids: &mut impl SubmitInputIdGenerator,
         cool_off: Option<Duration>,
         select_definition: SelectDefinition,
     ) -> Result<CommissionDispatchOutcome, CommissionedDispatchRepositoryError>
@@ -289,17 +294,7 @@ impl PostgresCommissionedDispatchStore {
             transaction.rollback().await?;
             return Ok(CommissionDispatchOutcome::TargetCoolingOff { session });
         }
-        let (
-            dispatch_id,
-            fence,
-            prepared_session,
-            initial_input,
-            accepted_input,
-            turn,
-            cancellation_entry,
-            cancellation_frontier,
-            goal,
-        ) = prepared.into_parts();
+        let (dispatch_id, fence, prepared_session, initial_input, goal) = prepared.into_parts();
         let session = prepared_session.applied_result().session();
         if initial_input.session() != session {
             return Err(CommissionedDispatchRepositoryError::Corruption(
@@ -311,9 +306,16 @@ impl PostgresCommissionedDispatchStore {
                 "commissioned goal targets another session",
             ));
         }
-        if !crate::create_session::claim_create_session_command(&mut transaction, command_id)
-            .await
-            .map_err(CommissionedDispatchRepositoryError::SessionCreation)?
+        let principal = CommandPrincipal::Module {
+            module: DispatchingModule::CommissionedDispatch,
+        };
+        if !crate::create_session::claim_create_session_command(
+            &mut transaction,
+            command_id,
+            principal,
+        )
+        .await
+        .map_err(CommissionedDispatchRepositoryError::SessionCreation)?
         {
             // Lost the claim to a concurrent commit. Re-read the winner under
             // a fresh statement snapshot: an equal committed commission is a
@@ -351,13 +353,11 @@ impl PostgresCommissionedDispatchStore {
             &fence,
         )
         .await?;
-        crate::submit_input::insert_fresh_initial_input(
+        let minted = crate::submit_input::insert_fresh_initial_input(
             &mut transaction,
             initial_input,
-            accepted_input,
-            turn,
-            cancellation_entry,
-            cancellation_frontier,
+            principal,
+            ids,
             select_definition,
         )
         .await
@@ -366,9 +366,15 @@ impl PostgresCommissionedDispatchStore {
         // scheduling one of its own, so the session runs its template once,
         // against the operator's context, under the generation that turn is
         // recorded in — exactly as a repository-watch dispatch action does.
-        crate::goal::insert_fresh_commissioned_goal(&mut transaction, goal, accepted_input, turn)
-            .await
-            .map_err(CommissionedDispatchRepositoryError::GoalCommission)?;
+        crate::goal::insert_fresh_commissioned_goal(
+            &mut transaction,
+            goal,
+            principal,
+            minted.accepted_input,
+            minted.turn,
+        )
+        .await
+        .map_err(CommissionedDispatchRepositoryError::GoalCommission)?;
         transaction.commit().await.map_err(|error| {
             CommissionedDispatchRepositoryError::Database {
                 commit_ambiguous: commit_failure_is_ambiguous(&error),

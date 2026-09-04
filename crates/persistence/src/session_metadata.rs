@@ -201,15 +201,21 @@ impl SessionMetadataRepository {
             return Ok(outcome);
         }
 
+        let issuer = crate::command_registry::issuer_columns(
+            signalbox_domain::CommandPrincipal::for_actor(command.actor()),
+        );
         let claimed = sqlx::query(
             "INSERT INTO durable_command
-                (command_id, command_kind, storage_version, claimed_at)
-             VALUES ($1, $2, $3, transaction_timestamp())
+                (command_id, command_kind, storage_version, claimed_at,
+                 issuer_kind, issuer_module)
+             VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
              ON CONFLICT DO NOTHING",
         )
         .bind(durable_command_id_to_uuid(command_id))
         .bind(REPLACE_SESSION_METADATA_KIND)
         .bind(STORAGE_VERSION)
+        .bind(issuer.0)
+        .bind(issuer.1)
         .execute(&mut *transaction)
         .await?
         .rows_affected()
@@ -284,7 +290,8 @@ impl SessionMetadataRepository {
                 | CommandKind::UpdateSessionPlacement
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
-                | CommandKind::WithdrawGitRemote,
+                | CommandKind::WithdrawGitRemote
+                | CommandKind::SessionLifecycle,
             ) => Err(SessionMetadataRepositoryError::DifferentCommandKind { command_id }),
         }
     }
@@ -638,7 +645,8 @@ async fn existing_or_conflicting(
         | CommandKind::UpdateSessionPlacement
         | CommandKind::RegisterWorkspace
         | CommandKind::MintGitRemote
-        | CommandKind::WithdrawGitRemote => {
+        | CommandKind::WithdrawGitRemote
+        | CommandKind::SessionLifecycle => {
             return Ok(ReplaceSessionMetadataHandlingOutcome::ConflictingReuse {
                 command_id: command.command_id(),
             });
@@ -942,7 +950,7 @@ fn decode_command(
     )?;
     match command_actor {
         Actor::User | Actor::Tool { .. } => {}
-        Actor::Model { .. } | Actor::Recovery => {
+        Actor::Core | Actor::Model { .. } | Actor::Recovery => {
             return Err(SessionMetadataCorruption::Unsupported {
                 field: "command actor",
                 value: actor_kind,
@@ -1195,6 +1203,11 @@ fn encode_actor(actor: Actor) -> EncodedActor {
             turn: None,
             tool_request: None,
         },
+        Actor::Core => EncodedActor {
+            kind: "core",
+            turn: None,
+            tool_request: None,
+        },
         Actor::Model { turn } => EncodedActor {
             kind: "model",
             turn: Some(turn.into_uuid()),
@@ -1221,6 +1234,7 @@ fn decode_actor(
 ) -> Result<Actor, SessionMetadataRepositoryError> {
     match (kind.as_str(), turn, tool_request) {
         ("user", None, None) => Ok(Actor::User),
+        ("core", None, None) => Ok(Actor::Core),
         ("model", Some(turn), None) => Ok(Actor::Model {
             turn: TurnId::from_uuid(turn),
         }),
@@ -1348,6 +1362,7 @@ mod tests {
     #[test]
     fn actor_storage_round_trips_every_variant() {
         assert_actor_storage_round_trip(Actor::User);
+        assert_actor_storage_round_trip(Actor::Core);
         assert_actor_storage_round_trip(Actor::Model {
             turn: TurnId::from_uuid(Uuid::from_u128(1)),
         });

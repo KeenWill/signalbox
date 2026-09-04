@@ -469,6 +469,8 @@ pub enum TurnTerminalCause {
     UnclassifiedFailure,
     /// A queued goal turn became ineligible under its goal's lineage.
     GoalTurnIneligible,
+    /// A queued turn retired by its session's closure.
+    SessionClosed,
 }
 
 #[cfg(test)]

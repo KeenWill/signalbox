@@ -109,6 +109,9 @@ impl LifecycleActor {
     pub const fn classify(actor: Actor) -> Self {
         match actor {
             Actor::User => Self::Operator,
+            Actor::Core => Self::Core {
+                agency: CoreAgency::Daemon,
+            },
             Actor::Recovery => Self::Watchdog,
             Actor::Model { turn } => Self::Core {
                 agency: CoreAgency::Model { turn },
@@ -371,6 +374,8 @@ pub enum StopStickiness {
 pub enum SessionTerminalOutcome {
     /// The declared finish check passed. Slots and worktrees are released.
     AchievedVerified,
+    /// Achieved on the model's word: no declared finish check passed.
+    AchievedDeclared,
     /// The session closed with a retryable cause standing.
     FailedRetryable {
         /// The standing cause.
@@ -404,10 +409,11 @@ pub enum SessionTerminalOutcome {
 
 /// The outcomes that settle a live goal generation with their own event.
 ///
-/// `achieved_verified` and `stopped` are absent because the goal contract
-/// already spells them: a verified achievement settles as `achieved` and a
-/// session stop as `user_stopped`, and appending a second terminal event for
-/// the same act would record one closure twice.
+/// `achieved_verified` is absent because the goal contract already spells
+/// it: a verified achievement settles as `achieved`, and appending a second
+/// terminal event for the same act would record one closure twice. A
+/// session-level stop records `stopped` here; `user_stopped` stays the goal
+/// command's own event.
 ///
 /// The member each outcome carries — the standing cause, the successor, the
 /// retirement predicate — stays on the lifecycle satellite the same
@@ -421,6 +427,8 @@ pub enum SessionClosureOutcome {
     FailedStructural,
     /// The session closed with no classified cause.
     FailedUnknown,
+    /// A human or rule stopped the session.
+    Stopped,
     /// A newer session owns the work, or the work is gone.
     Superseded,
     /// An operator wrote the session off.
@@ -433,10 +441,11 @@ impl SessionTerminalOutcome {
     /// Returns the goal event this outcome owes a live generation.
     ///
     /// `None` means the goal contract already has the event: an achievement
-    /// settles as `achieved` and a stop as `user_stopped`.
+    /// settles as `achieved`.
     pub const fn closure_outcome(&self) -> Option<SessionClosureOutcome> {
         match self {
-            Self::AchievedVerified | Self::Stopped { .. } => None,
+            Self::AchievedVerified | Self::AchievedDeclared => None,
+            Self::Stopped { .. } => Some(SessionClosureOutcome::Stopped),
             Self::FailedRetryable { .. } => Some(SessionClosureOutcome::FailedRetryable),
             Self::FailedStructural { .. } => Some(SessionClosureOutcome::FailedStructural),
             Self::FailedUnknown => Some(SessionClosureOutcome::FailedUnknown),
@@ -454,6 +463,7 @@ impl SessionTerminalOutcome {
         match self {
             Self::Superseded { .. } => true,
             Self::AchievedVerified
+            | Self::AchievedDeclared
             | Self::FailedRetryable { .. }
             | Self::FailedStructural { .. }
             | Self::FailedUnknown
@@ -612,6 +622,7 @@ impl SessionLifecycleState {
                 ) => false,
             },
             SessionTerminalOutcome::AchievedVerified
+            | SessionTerminalOutcome::AchievedDeclared
             | SessionTerminalOutcome::FailedRetryable { .. }
             | SessionTerminalOutcome::FailedStructural { .. }
             | SessionTerminalOutcome::FailedUnknown
@@ -1082,7 +1093,7 @@ mod tests {
     }
 
     #[test]
-    fn an_achievement_and_a_stop_owe_the_goal_no_new_event() {
+    fn an_achievement_owes_the_goal_no_new_event_and_a_stop_settles_it() {
         assert_eq!(
             SessionTerminalOutcome::AchievedVerified.closure_outcome(),
             None
@@ -1092,7 +1103,7 @@ mod tests {
                 sticky: StopStickiness::Redispatchable,
             }
             .closure_outcome(),
-            None
+            Some(SessionClosureOutcome::Stopped)
         );
     }
 

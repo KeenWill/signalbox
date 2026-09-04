@@ -18,7 +18,7 @@ export type WebAttentionActivity = {
 
 export type WebAttentionActivityKind = "session" | "turn" | "goal" | "approval_judge" | "runner";
 
-export type WebAttentionBlockedReason = "user_input_required" | "external_change_required" | "authorization_required" | "execution_failure";
+export type WebAttentionBlockedReason = "user_input_required" | "external_change_required" | "authorization_required" | "execution_failure" | "finish_check_failed";
 
 export type WebAttentionGoalBlock = {
   readonly generation: string;

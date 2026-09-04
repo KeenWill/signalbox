@@ -343,11 +343,11 @@ async fn insert_imported_session_scaffolding_with_creation_cause(
 ) -> Result<(), sqlx::Error> {
     sqlx::raw_sql(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
          VALUES
             ('30000000-0000-4000-8000-000000000039',
              'create_session_from_imported_frontier', 1,
-             transaction_timestamp());",
+             transaction_timestamp(), 'operator');",
     )
     .execute(&mut **transaction)
     .await?;
@@ -367,8 +367,8 @@ async fn insert_imported_session_scaffolding_with_creation_cause(
     .await?;
     sqlx::query(
         "INSERT INTO session_lifecycle
-            (session_id, state_kind, owned, actor_kind)
-         VALUES ('40000000-0000-4000-8000-000000000039', 'created', false, 'operator')",
+            (session_id, state_kind, owned, start_gate_held, actor_kind)
+         VALUES ('40000000-0000-4000-8000-000000000039', 'created', false, false, 'operator')",
     )
     .execute(&mut **transaction)
     .await?;
@@ -813,11 +813,11 @@ async fn s28_inv039_imported_creation_registry_claim_requires_typed_record()
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
          VALUES
             ('30000000-0000-4000-8000-000000000039',
              'create_session_from_imported_frontier', 1,
-             transaction_timestamp())",
+             transaction_timestamp(), 'operator')",
     )
     .execute(&mut *transaction)
     .await?;

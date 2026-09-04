@@ -335,8 +335,8 @@ Implemented table families (across the forward-only migrations):
   `replace_session_defaults_command`, `replace_session_metadata_command`,
   `submit_input_command`, `decide_tool_request_command`,
   `replace_lost_runner_command`, `replace_lost_runner_result`,
-  `abandon_lost_runner_command`, `promote_pending_runner_command`, and
-  `goal_command`);
+  `abandon_lost_runner_command`, `promote_pending_runner_command`,
+  `goal_command`, and `session_lifecycle_command`);
 - `session`, `imported_session_seed`, `session_defaults_version`,
   `session_current_defaults`, `session_scheduler`, plus the immutable
   `session_model_settings_changed` and `turn_model_settings_resolved` evidence
@@ -783,24 +783,25 @@ identifier: `command_id` is the primary key across all kinds and sessions
 `create_session_from_imported_frontier`, `replace_session_defaults`,
 `replace_session_metadata`, `submit_input`, `decide_tool_request`,
 `review_workflow`, `review_orchestration`, `compact_session`, `goal`,
-`update_session_placement`) and a kind-scoped `storage_version`. The gates above
-fix the current numbers: create-session records write version 7, imported-create
-records write version 5, replace-defaults records write version 4, and
-submit-input records write version 3; every other closed kind writes version 1.
-The four settings-bearing families require the migration's provider-default full
-settings or inherit-all overlay on every earlier supported version.
-Create-session records reconstitute version 1 with the disabled dangerous-tool
-posture, and versions 1 and 2 with no system prompt — a pre-version-three row
-carrying one fails closed in both the schema and every Rust reader. A
-pre-version-four create row carrying template provenance and a pre-version-six
-create row carrying path placement likewise fail closed. Imported-create version
-4 remains unsupported compatibility space for committed runner placement, so the
-model-settings writer skips it. Metadata, decision, review-workflow, compaction,
-and runner-recovery records use version 1. Each kind has one typed subordinate
-request record keyed by `command_id` that stores every caller-supplied semantic
-field in typed, `CHECK`-constrained columns. Every kind except runner
-replacement also stores the terminal `applied`/`rejected` result and typed
-result fields there. `replace_lost_runner_command` is the immutable request and
+`update_session_placement`, `session_lifecycle`) and a kind-scoped
+`storage_version`. The gates above fix the current numbers: create-session
+records write version 7, imported-create records write version 5,
+replace-defaults records write version 4, and submit-input records write version
+3; every other closed kind writes version 1. The four settings-bearing families
+require the migration's provider-default full settings or inherit-all overlay on
+every earlier supported version. Create-session records reconstitute version 1
+with the disabled dangerous-tool posture, and versions 1 and 2 with no system
+prompt — a pre-version-three row carrying one fails closed in both the schema
+and every Rust reader. A pre-version-four create row carrying template
+provenance and a pre-version-six create row carrying path placement likewise
+fail closed. Imported-create version 4 remains unsupported compatibility space
+for committed runner placement, so the model-settings writer skips it. Metadata,
+decision, review-workflow, compaction, and runner-recovery records use version
+1\. Each kind has one typed subordinate request record keyed by `command_id` that
+stores every caller-supplied semantic field in typed, `CHECK`-constrained
+columns. Every kind except runner replacement also stores the terminal
+`applied`/`rejected` result and typed result fields there.
+`replace_lost_runner_command` is the immutable request and
 provisioning-authorization root; at most one append-only
 `replace_lost_runner_result` supplies its terminal result after off-transaction
 runner I/O. Result-shape `CHECK` constraints tie each rejection kind to exactly
@@ -1936,20 +1937,28 @@ before the replacement `input_accepted`. Dispatch rechecks that the named turn
 is terminal under that disposition. Every goal event appends `goal_changed`; an
 adopt or release appends `session_ownership_changed`; a transition into
 `terminal` appends `session_terminal` from the satellite's own trigger.
-`session_state_changed` and `command_settled` are committed unimplemented
-functionality: each has its typed record and decoder and no present surface
-appends it — the deadline engine and the command surface will. Every claimed
-`submit_input` or `decide_tool_request` command appends exactly one
-`injection_settled` (`injection_settled_outbox_event_command_id_key`): at
-acceptance for an origin or a rejection, at consumption, reclassification, or
-closure for pending steering, and at the decision for a tool request — a
-decision after its request was decided settles `not_delivered`. A command naming
-no session appends none. Model-call state transitions append
-`model_call_transition`, tool-round creation appends
-`tool_batch_transition { proposed }`, all-resolved result projection appends
-`tool_batch_transition { results_projected }`, and an external-effect ambiguity
-appends `tool_batch_transition { recovery_required }`. Completion closure
-appends `turn_terminal{completed}`, refusal closure appends
+`session_state_changed` is committed unimplemented functionality: it has its
+typed record and decoder and no present surface appends it — the deadline engine
+will. The `session_lifecycle` family appends `command_settled` for every claimed
+command. A closure that finds a live turn commits its outcome to the satellite's
+handoff with the acting principal; the transaction that terminalizes the
+session's last live turn settles it at commit
+(`turn_lifecycle_settles_pending_terminal`, a deferred constraint trigger, so
+the causal turn's own event precedes the settlement's): remaining queued turns
+retire as `retired{session_closed}`, an open goal generation closes as
+`session_closed`, a user-stopped generation admits only `stopped`, an achieved
+generation admits only an achievement outcome, and the satellite records
+terminal. Every claimed `submit_input` or `decide_tool_request` command appends
+exactly one `injection_settled`
+(`injection_settled_outbox_event_command_id_key`): at acceptance for an origin
+or a rejection, at consumption, reclassification, or closure for pending
+steering, and at the decision for a tool request — a decision after its request
+was decided settles `not_delivered`. A command naming no session appends none.
+Model-call state transitions append `model_call_transition`, tool-round creation
+appends `tool_batch_transition { proposed }`, all-resolved result projection
+appends `tool_batch_transition { results_projected }`, and an external-effect
+ambiguity appends `tool_batch_transition { recovery_required }`. Completion
+closure appends `turn_terminal{completed}`, refusal closure appends
 `turn_terminal{refused}`, and known-failure closure appends
 `turn_terminal{failed}`; interrupt-confirmed cancellation appends
 `turn_terminal{cancelled}`, and live stopped ambiguity appends

@@ -9,9 +9,9 @@ use std::{error::Error, fmt, future::Future};
 
 use signalbox_domain::{
     CreateSession as DomainCreateSession, CreateSessionAppliedResult,
-    CreateSessionPreparationFailure, DurableCommandId, PreparedCreateSession,
+    CreateSessionPreparationFailure, DurableCommandId, FinishCondition, PreparedCreateSession,
     SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
-    SessionPlacement, SessionTemplateProvenance, TranscriptAncestry,
+    SessionOwnership, SessionPlacement, SessionTemplateProvenance, StartGate, TranscriptAncestry,
 };
 
 /// Why a caller-supplied command identity cannot enter canonical construction.
@@ -50,6 +50,9 @@ pub struct CreateSessionRequest {
     initial_configuration_defaults: SessionConfigurationDefaults,
     template_provenance: Option<SessionTemplateProvenance>,
     placement: SessionPlacement,
+    start_gate: StartGate,
+    ownership: SessionOwnership,
+    finish_condition: Option<FinishCondition>,
 }
 
 impl CreateSessionRequest {
@@ -70,6 +73,9 @@ impl CreateSessionRequest {
             initial_configuration_defaults,
             template_provenance: None,
             placement: SessionPlacement::pathless(),
+            start_gate: StartGate::Open,
+            ownership: SessionOwnership::Unmonitored,
+            finish_condition: None,
         })
     }
 
@@ -92,6 +98,9 @@ impl CreateSessionRequest {
             initial_configuration_defaults: resolved_configuration_defaults,
             template_provenance: Some(template_provenance),
             placement: SessionPlacement::pathless(),
+            start_gate: StartGate::Open,
+            ownership: SessionOwnership::Unmonitored,
+            finish_condition: None,
         })
     }
 
@@ -114,6 +123,34 @@ impl CreateSessionRequest {
     pub fn with_placement(mut self, placement: SessionPlacement) -> Self {
         self.placement = placement;
         self
+    }
+
+    /// Installs the §7 start gate, ownership, and finish condition.
+    pub fn with_lifecycle(
+        mut self,
+        start_gate: StartGate,
+        ownership: SessionOwnership,
+        finish_condition: Option<FinishCondition>,
+    ) -> Self {
+        self.start_gate = start_gate;
+        self.ownership = ownership;
+        self.finish_condition = finish_condition;
+        self
+    }
+
+    /// Returns whether the creation holds its start gate.
+    pub const fn start_gate(&self) -> StartGate {
+        self.start_gate
+    }
+
+    /// Returns the ownership the creation establishes.
+    pub const fn ownership(&self) -> SessionOwnership {
+        self.ownership
+    }
+
+    /// Borrows the finish condition the creation declares.
+    pub const fn finish_condition(&self) -> Option<&FinishCondition> {
+        self.finish_condition.as_ref()
     }
 
     /// Borrows the creation-time placement decision.
@@ -255,6 +292,9 @@ where
             initial_configuration_defaults,
             template_provenance,
             placement,
+            start_gate,
+            ownership,
+            finish_condition,
         } = request;
         let provenance = SessionCreationProvenance::new(
             SessionCreationCause::Interactive,
@@ -274,7 +314,8 @@ where
                 initial_configuration_defaults,
                 placement,
             ),
-        };
+        }
+        .with_lifecycle(start_gate, ownership, finish_condition);
         let prepared = command
             .prepare(candidate_session)
             .map_err(|error| CreateSessionError::Preparation(error.failure()))?;

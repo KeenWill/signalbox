@@ -2656,8 +2656,8 @@ async fn s19_inv010_delegation_cascade_rejects_unrelated_disposition_source()
     .await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'goal', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'goal', 1, transaction_timestamp(), 'operator')",
     )
     .bind(root_command.into_uuid())
     .execute(&mut *cascade)

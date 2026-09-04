@@ -45,9 +45,9 @@ use signalbox_process_protocol::{
     ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
     ReviewPublicationTerminalOutcome, ReviewRepairOutcome, ReviewRepairTerminalOutcome,
     ReviewRunSnapshot, RunnerConnectionHealth, RunnerProjection, RunnerProjectionState,
-    RunnerStateTransitionState, ServerFrame, ServerMessage, SessionEvent, SessionPlacement,
-    SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TurnState,
-    decode_server_line, encode_client_line, encode_server_line,
+    RunnerStateTransitionState, ServerFrame, ServerMessage, SessionEvent, SessionLifecycleMembers,
+    SessionPlacement, SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision,
+    TurnState, decode_server_line, encode_client_line, encode_server_line,
 };
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
@@ -438,6 +438,7 @@ fn delegation_rejection_matches(
         | RejectionDetail::SessionPlacementCurrentVersionMismatch { .. }
         | RejectionDetail::SessionPlacementVersionExhausted { .. }
         | RejectionDetail::GoalCommandRejected { .. }
+        | RejectionDetail::SessionLifecycleCommandRejected { .. }
         | RejectionDetail::ActiveTurnPresent { .. }
         | RejectionDetail::CommissionTargetBusy { .. }
         | RejectionDetail::ActiveTurnMismatch { .. }
@@ -535,6 +536,7 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         },
         ServerMessage::SessionCreated { .. }
         | ServerMessage::SessionCommissioned { .. }
+        | ServerMessage::SessionLifecycleCommandApplied { .. }
         | ServerMessage::SessionPlacementUpdated { .. }
         | ServerMessage::InputSubmitted { .. }
         | ServerMessage::SteeringSubmitted { .. }
@@ -641,6 +643,7 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         },
         ServerMessage::SessionCreated { .. }
         | ServerMessage::SessionCommissioned { .. }
+        | ServerMessage::SessionLifecycleCommandApplied { .. }
         | ServerMessage::SessionSpawned { .. }
         | ServerMessage::SessionAwaitRegistered { .. }
         | ServerMessage::ChildResult { .. }
@@ -759,6 +762,7 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         },
         ServerMessage::SessionCreated { .. }
         | ServerMessage::SessionCommissioned { .. }
+        | ServerMessage::SessionLifecycleCommandApplied { .. }
         | ServerMessage::SessionSpawned { .. }
         | ServerMessage::SessionAwaitRegistered { .. }
         | ServerMessage::ChildResult { .. }
@@ -1996,6 +2000,7 @@ async fn create(
             model_settings: ModelSettingsOverlay::inherit_all(),
             system_prompt: SystemPromptMember::present(system_prompt),
             placement,
+            lifecycle: SessionLifecycleMembers::default(),
         })
         .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
@@ -2306,6 +2311,9 @@ fn delegation_provenance_matches(
         }
         | DelegationProvenance::ParentGoalCommand {
             parent_session_id, ..
+        }
+        | DelegationProvenance::ParentLifecycleCommand {
+            parent_session_id, ..
         } => parent_session_id == expectation.parent_session_id,
     }
 }
@@ -2329,6 +2337,7 @@ async fn create_from_template(
             command_id,
             template_name,
             placement,
+            lifecycle: SessionLifecycleMembers::default(),
         })
         .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
@@ -10342,6 +10351,7 @@ mod tests {
                     model_settings: ModelSettingsOverlay::inherit_all(),
                     system_prompt: SystemPromptMember::present(None),
                     placement: SessionPlacement::Pathless {},
+                    lifecycle: signalbox_process_protocol::SessionLifecycleMembers::default(),
                 }
             );
             let response = ServerFrame::try_new_for_version(

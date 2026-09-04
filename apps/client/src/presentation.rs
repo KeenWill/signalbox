@@ -3580,6 +3580,14 @@ fn delegation_provenance(provenance: &DelegationProvenance) -> String {
             goal_generation.value(),
             descendant_scope_label(*descendant_scope)
         ),
+        DelegationProvenance::ParentLifecycleCommand {
+            parent_session_id,
+            command_id,
+            descendant_scope,
+        } => format!(
+            "parent_lifecycle_command:{parent_session_id}:{command_id}:{}",
+            descendant_scope_label(*descendant_scope)
+        ),
     }
 }
 
@@ -3596,6 +3604,7 @@ const fn goal_blocked_reason_label(reason: GoalBlockedReason) -> &'static str {
         GoalBlockedReason::ExternalChangeRequired => "external_change_required",
         GoalBlockedReason::AuthorizationRequired => "authorization_required",
         GoalBlockedReason::ExecutionFailure => "execution_failure",
+        GoalBlockedReason::FinishCheckFailed => "finish_check_failed",
     }
 }
 
@@ -3605,6 +3614,7 @@ const fn session_closure_outcome_label(outcome: SessionClosureOutcome) -> &'stat
         SessionClosureOutcome::FailedStructural => "failed_structural",
         SessionClosureOutcome::FailedUnknown => "failed_unknown",
         SessionClosureOutcome::Superseded => "superseded",
+        SessionClosureOutcome::Stopped => "stopped",
         SessionClosureOutcome::Abandoned => "abandoned",
         SessionClosureOutcome::Retired => "retired",
     }
@@ -3738,6 +3748,7 @@ const fn last_writer_actor_label(last_writer: Option<MetadataLastWriter>) -> &'s
     match last_writer {
         Some(last_writer) => match last_writer.actor() {
             MetadataActor::User {} => "user",
+            MetadataActor::Core {} => "core",
             MetadataActor::Model { .. } => "model",
             MetadataActor::Recovery {} => "recovery",
             MetadataActor::Tool { .. } => "tool",

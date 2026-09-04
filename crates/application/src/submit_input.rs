@@ -1,8 +1,9 @@
 //! Durable input-submission orchestration.
 //!
 //! docs/spec/identity-and-commands.md owns hub-minted identity supply and
-//! user-global command replay, and admits only the user actor at the
-//! baseline command boundary. Authoritative session loading, position
+//! user-global command replay. The baseline boundary fixes the user actor,
+//! while lifecycle closure has one core-only interrupt constructor.
+//! Authoritative session loading, position
 //! allocation, preparation, and recording remain inside one atomic
 //! transaction port.
 
@@ -10,7 +11,8 @@ use std::{error::Error, fmt, future::Future};
 
 use signalbox_domain::{
     AcceptedInputId, CancelledModelCallTurnIdentities, ContextFrontierId, DeliveryRequest,
-    DurableCommandId, SemanticTranscriptEntryId, SessionId, SubmitInput as DomainSubmitInput,
+    DescendantTerminationScope, DurableCommandId, PerInputConfigurationChoices,
+    SemanticTranscriptEntryId, SessionId, SubmitInput as DomainSubmitInput,
     SubmitInputAppliedResult, SubmitInputResult, TurnId, UserContent, UserContentPart,
 };
 
@@ -58,14 +60,41 @@ impl Error for SubmitInputRequestError {}
 /// Content is already a checked domain value. Private fields ensure the nil
 /// and max command-identity sentinels reserved by
 /// docs/spec/identity-and-commands.md cannot enter canonical command
-/// construction through this boundary. The user actor is fixed by the
-/// service rather than accepted as caller input.
+/// construction through this boundary. Purpose-specific constructors fix
+/// either the baseline user or lifecycle-closure core actor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubmitInputRequest {
     command_id: DurableCommandId,
     session: SessionId,
     content: UserContent,
-    delivery: DeliveryRequest,
+    kind: SubmitInputRequestKind,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SubmitInputRequestKind {
+    User(DeliveryRequest),
+    CoreInterrupt {
+        expected_active_turn: TurnId,
+        descendant_scope: DescendantTerminationScope,
+        configuration: PerInputConfigurationChoices,
+    },
+}
+
+impl SubmitInputRequestKind {
+    const fn delivery(&self) -> DeliveryRequest {
+        match self {
+            Self::User(delivery) => *delivery,
+            Self::CoreInterrupt {
+                expected_active_turn,
+                descendant_scope,
+                configuration,
+            } => DeliveryRequest::Interrupt {
+                expected_active_turn: *expected_active_turn,
+                descendant_scope: *descendant_scope,
+                configuration: *configuration,
+            },
+        }
+    }
 }
 
 impl SubmitInputRequest {
@@ -76,7 +105,13 @@ impl SubmitInputRequest {
         content: UserContent,
         delivery: DeliveryRequest,
     ) -> Result<Self, SubmitInputRequestError> {
-        Self::try_new_with_content_limit(command_id, session, content, delivery, None)
+        Self::admit(
+            command_id,
+            session,
+            content,
+            SubmitInputRequestKind::User(delivery),
+            None,
+        )
     }
 
     /// Validates structural admission and the deployment's optional content policy.
@@ -85,6 +120,44 @@ impl SubmitInputRequest {
         session: SessionId,
         content: UserContent,
         delivery: DeliveryRequest,
+        max_content_utf8_bytes: Option<usize>,
+    ) -> Result<Self, SubmitInputRequestError> {
+        Self::admit(
+            command_id,
+            session,
+            content,
+            SubmitInputRequestKind::User(delivery),
+            max_content_utf8_bytes,
+        )
+    }
+
+    /// Validates a daemon-core interrupt before canonical command construction.
+    pub fn try_new_core_interrupt(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        expected_active_turn: TurnId,
+        descendant_scope: DescendantTerminationScope,
+        configuration: PerInputConfigurationChoices,
+    ) -> Result<Self, SubmitInputRequestError> {
+        Self::admit(
+            command_id,
+            session,
+            content,
+            SubmitInputRequestKind::CoreInterrupt {
+                expected_active_turn,
+                descendant_scope,
+                configuration,
+            },
+            None,
+        )
+    }
+
+    fn admit(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        kind: SubmitInputRequestKind,
         max_content_utf8_bytes: Option<usize>,
     ) -> Result<Self, SubmitInputRequestError> {
         if command_id.as_uuid().is_nil() {
@@ -111,7 +184,7 @@ impl SubmitInputRequest {
             command_id,
             session,
             content,
-            delivery,
+            kind,
         })
     }
 
@@ -132,7 +205,7 @@ impl SubmitInputRequest {
 
     /// Returns the caller's explicit delivery treatment.
     pub const fn delivery(&self) -> DeliveryRequest {
-        self.delivery
+        self.kind.delivery()
     }
 }
 
@@ -172,6 +245,13 @@ pub trait SubmitInputIdGenerator {
 
     /// Generates one candidate terminal-frontier identity.
     fn next_context_frontier_id(&mut self) -> ContextFrontierId;
+
+    /// Generates one candidate command identity for a closure denial.
+    fn next_closure_decision_command_id(&mut self) -> DurableCommandId;
+
+    /// Generates one candidate continuation attempt after the final closure
+    /// denial.
+    fn next_closure_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
 }
 
 /// Production UUIDv7 generator for input-handling candidate identities.
@@ -193,6 +273,14 @@ impl SubmitInputIdGenerator for UuidV7SubmitInputIdGenerator {
 
     fn next_context_frontier_id(&mut self) -> ContextFrontierId {
         ContextFrontierId::from_uuid(uuid::Uuid::now_v7())
+    }
+
+    fn next_closure_decision_command_id(&mut self) -> DurableCommandId {
+        DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+    }
+
+    fn next_closure_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId {
+        signalbox_domain::TurnAttemptId::from_uuid(uuid::Uuid::now_v7())
     }
 }
 
@@ -223,7 +311,11 @@ pub trait SubmitInputTransaction {
     type Error;
 
     /// Handles one canonical command and its hub-minted identity candidates.
-    fn handle<NextTurn, NextToolCancellation>(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the atomic port keeps each identity candidate family explicit"
+    )]
+    fn handle<NextTurn, NextToolCancellation, NextClosureDecision, NextClosureAttempt>(
         &mut self,
         command: DomainSubmitInput,
         accepted_input: AcceptedInputId,
@@ -231,13 +323,17 @@ pub trait SubmitInputTransaction {
         cancellation_identities: CancelledModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
         next_tool_cancellation: NextToolCancellation,
+        next_closure_decision: NextClosureDecision,
+        next_closure_attempt: NextClosureAttempt,
     ) -> impl Future<Output = Result<SubmitInputOutcome, Self::Error>> + Send
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
         NextToolCancellation: FnMut(
                 &[signalbox_domain::ToolRequestId],
             ) -> (Vec<SemanticTranscriptEntryId>, ContextFrontierId)
-            + Send;
+            + Send,
+        NextClosureDecision: FnMut() -> DurableCommandId + Send,
+        NextClosureAttempt: FnMut() -> signalbox_domain::TurnAttemptId + Send;
 }
 
 /// Coordinates the durable input-submission use case.
@@ -282,7 +378,7 @@ where
     Transaction: SubmitInputTransaction,
     Nudge: EligibilityNudge,
 {
-    /// Constructs and handles one user-attributed input command.
+    /// Constructs and handles one admitted input command.
     ///
     /// Each invocation creates fresh candidates, including retransmission
     /// after a lost acknowledgement. The atomic port remains authoritative:
@@ -292,8 +388,14 @@ where
         &mut self,
         request: SubmitInputRequest,
     ) -> Result<SubmitInputOutcome, Transaction::Error> {
-        let session = request.session;
-        let interrupt_turn = match request.delivery {
+        let SubmitInputRequest {
+            command_id,
+            session,
+            content,
+            kind,
+        } = request;
+        let delivery = kind.delivery();
+        let interrupt_turn = match delivery {
             DeliveryRequest::Interrupt {
                 expected_active_turn,
                 ..
@@ -306,18 +408,29 @@ where
             Some(turn) => Some(self.tool_dispatch_gate.acquire(turn).await),
             None => None,
         };
-        let turn = match request.delivery {
+        let turn = match delivery {
             DeliveryRequest::NextSafePoint { .. } => None,
             DeliveryRequest::StartWhenNoActiveTurn { .. }
             | DeliveryRequest::Interrupt { .. }
             | DeliveryRequest::AfterCurrentTurn { .. } => Some(self.ids.next_turn_id()),
         };
-        let command = DomainSubmitInput::new(
-            request.command_id,
-            request.session,
-            request.content,
-            request.delivery,
-        );
+        let command = match kind {
+            SubmitInputRequestKind::User(delivery) => {
+                DomainSubmitInput::new(command_id, session, content, delivery)
+            }
+            SubmitInputRequestKind::CoreInterrupt {
+                expected_active_turn,
+                descendant_scope,
+                configuration,
+            } => DomainSubmitInput::new_core_interrupt(
+                command_id,
+                session,
+                content,
+                expected_active_turn,
+                descendant_scope,
+                configuration,
+            ),
+        };
         let accepted_input = self.ids.next_accepted_input_id();
         let cancellation_identities = CancelledModelCallTurnIdentities::new(
             self.ids.next_semantic_entry_id(),
@@ -348,6 +461,16 @@ where
                             .collect(),
                         ids.next_context_frontier_id(),
                     )
+                },
+                || {
+                    ids.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .next_closure_decision_command_id()
+                },
+                || {
+                    ids.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .next_closure_turn_attempt_id()
                 },
             )
             .await;
@@ -580,6 +703,16 @@ mod tests {
                 0x2000 + self.accepted_input_calls as u128,
             ))
         }
+
+        fn next_closure_decision_command_id(&mut self) -> DurableCommandId {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x3000 + self.accepted_input_calls as u128))
+        }
+
+        fn next_closure_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId {
+            signalbox_domain::TurnAttemptId::from_uuid(Uuid::from_u128(
+                0x4000 + self.accepted_input_calls as u128,
+            ))
+        }
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -612,7 +745,7 @@ mod tests {
     impl SubmitInputTransaction for FakeTransaction {
         type Error = FakeTransactionError;
 
-        fn handle<NextTurn, NextToolCancellation>(
+        fn handle<NextTurn, NextToolCancellation, NextClosureDecision, NextClosureAttempt>(
             &mut self,
             command: DomainSubmitInput,
             accepted_input: AcceptedInputId,
@@ -620,6 +753,8 @@ mod tests {
             _cancellation_identities: CancelledModelCallTurnIdentities,
             _next_reclassified_turn: NextTurn,
             _next_tool_cancellation: NextToolCancellation,
+            _next_closure_decision: NextClosureDecision,
+            _next_closure_attempt: NextClosureAttempt,
         ) -> impl Future<Output = Result<SubmitInputOutcome, Self::Error>> + Send
         where
             NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
@@ -629,6 +764,8 @@ mod tests {
                     Vec<signalbox_domain::SemanticTranscriptEntryId>,
                     signalbox_domain::ContextFrontierId,
                 ) + Send,
+            NextClosureDecision: FnMut() -> DurableCommandId + Send,
+            NextClosureAttempt: FnMut() -> signalbox_domain::TurnAttemptId + Send,
         {
             self.observed.push((command, accepted_input, turn));
             ready(

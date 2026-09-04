@@ -50,6 +50,7 @@ pub mod session;
 pub mod session_credentials;
 pub mod session_delegation;
 pub mod session_lifecycle;
+pub mod session_lifecycle_command;
 pub mod session_live;
 pub mod session_metadata;
 pub mod session_placement;

@@ -128,6 +128,7 @@ const fn listed_position(cause: TurnTerminalCause) -> usize {
         TurnTerminalCause::ReportedUsageContextStillExceeded => 19,
         TurnTerminalCause::UnclassifiedFailure => 20,
         TurnTerminalCause::GoalTurnIneligible => 21,
+        TurnTerminalCause::SessionClosed => 22,
     }
 }
 
@@ -148,7 +149,7 @@ fn encoded_cause_spellings() -> BTreeSet<String> {
         .collect()
 }
 
-const EVERY_TERMINAL_CAUSE: [TurnTerminalCause; 22] = [
+const EVERY_TERMINAL_CAUSE: [TurnTerminalCause; 23] = [
     TurnTerminalCause::Completed,
     TurnTerminalCause::ModelRefusal,
     TurnTerminalCause::InterruptApplied,
@@ -171,6 +172,7 @@ const EVERY_TERMINAL_CAUSE: [TurnTerminalCause; 22] = [
     TurnTerminalCause::ReportedUsageContextStillExceeded,
     TurnTerminalCause::UnclassifiedFailure,
     TurnTerminalCause::GoalTurnIneligible,
+    TurnTerminalCause::SessionClosed,
 ];
 
 /// Every insert-time lifecycle stamp is required of the row and filled by the
