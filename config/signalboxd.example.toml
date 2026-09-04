@@ -714,9 +714,10 @@ service_tiers = ["auto", "standard_only"]
 # others leave free and records what it gave up; a deployment that would rather
 # serve a model through the other family moves the row instead of copying it.
 #
-# Every capability value below was read from its provider on 2026-08-06 and
-# will go stale. A row whose value could not be established from a provider
-# source says so in place and carries the conservative value instead.
+# Except for a catalog that records a later date, every capability value below
+# was read from its provider on 2026-08-06 and will go stale. A row whose value
+# could not be established from a provider source says so in place and carries
+# the conservative value instead.
 
 # OpenAI Chat Completions catalog, read from the provider's model, pricing, and
 # deprecation pages under developers.openai.com/api/docs on 2026-08-06. Every
@@ -888,11 +889,12 @@ service_tiers = ["auto", "standard_only"]
 # fast_mode = "request_control"
 # service_tiers = ["auto", "default", "fast"]
 
-# Codex CLI catalog, read from the model catalog bundled with the pinned 0.153.1
-# CLI and from the provider's published CLI documentation. The CLI's set is not the API's: it
-# publishes no dated snapshots, it serves a model the API does not, and the
-# models it shares with the API carry a 272000 raw window where Chat Completions
-# advertises 1050000 for the same spelling. The CLI reserves 5% of the raw
+# Codex CLI catalog, read on 2026-09-03 from the model catalog bundled with the
+# pinned 0.153.1 CLI and from the provider's published CLI documentation. The
+# CLI's set is not the API's: it publishes no dated snapshots, it serves a model
+# the API does not, and the models it shares with the API carry a 272000 raw
+# window where Chat Completions advertises 1050000 for the same spelling. The
+# CLI reserves 5% of the raw
 # window internally, so each configured context ceiling below is the 95% usable
 # window that the CLI actually admits. The CLI validates neither a model
 # spelling nor an effort at startup — a wrong value fails at the provider — so
