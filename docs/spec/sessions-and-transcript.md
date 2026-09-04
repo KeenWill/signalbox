@@ -128,7 +128,7 @@ resolution follow the shared durable-command contract owned by
 [identity-and-commands](identity-and-commands.md), implemented for this kind in
 `crates/persistence/src/create_session.rs`. The session-specific consequence:
 equal replay returns the recorded receipt, which may name a different session
-than the freshly minted candidate; the unused candidate is simply discarded.
+than the freshly minted candidate; the unused candidate is discarded.
 
 ### Path-scoped session placement
 
@@ -159,9 +159,9 @@ allowed; ancestors, pathless targets, and disjoint subtrees are refused. A
 refusal is typed evidence containing that requesting directory and the closed
 reason `OutsideRequestingDirectorySubtree`, never an empty successful result.
 The conversation tool renders ordinary refusals with the full reason name. If a
-maximum-width directory would exceed the unchanged durable error-detail bound,
-it uses the closed compact spelling `o<requesting-directory>`; `o` means that
-same outside-requesting-directory-subtree reason and the directory remains
+maximum-width directory would exceed the durable error-detail bound, it uses the
+closed compact spelling `o<requesting-directory>`; `o` means that same
+outside-requesting-directory-subtree reason and the directory remains
 byte-exact. The conversation-introspection adapter enforces this decision when
 it opens a selected native transcript. It loads requester and target placement
 and applies the prefix decision in the same repeatable-read transaction that
@@ -319,12 +319,11 @@ nonempty admitted set rejects its proposed model selection unless every target
 the current configuration can select from that direct selection or alias has a
 typed system-instruction transport and capacity for the complete retained
 workspace-instruction region. The replacement checks this before committing the
-successor defaults epoch. What this page requires is the atomicity, not a lock
-recipe: the replacement must resolve every possible target and validate the
-complete retained region under the same serialization it commits the successor
-epoch under, so an admission or activation occurs wholly before or after it and
-cannot invalidate the evidence it checked. Which rows that serialization takes,
-in what order, and in which mode belong to the
+successor defaults epoch. The replacement must resolve every possible target and
+validate the complete retained region under the same serialization it commits
+the successor epoch under, so an admission or activation occurs wholly before or
+after it and cannot invalidate the evidence it checked. Which rows that
+serialization takes, in what order, and in which mode belong to the
 [persistence lock protocol](persistence-protocol.md#lock-protocol), which owns
 that inventory for every transaction. Rejection is typed and leaves the current
 defaults and admitted set unchanged. No present replacement path performs this
@@ -354,16 +353,15 @@ extends through a generated exact-encoding SHA-256 digest column because
 megabyte text cannot join a btree key.
 
 The immutable epoch row is the prompt's single content authority. Origin
-acceptance keeps freezing only the epoch; per-turn origin rows copy no prompt
-text, and model-call preparation reads the prompt through the calling turn's
-frozen defaults version — including a reclassified-steering origin's inherited
-version — so every call the turn prepares sets `ModelOperation.system` to
-exactly that epoch's prompt, or none. A replacement that changes only the system
-prompt appends no semantic transcript entry: the new instructions reach the
-provider whole and out of band on the successor turn's calls, and the turn's
-frozen epoch already records durably which prompt governed it. The
-`ModelIdentityChanged` boundary below remains keyed to the frozen direct model
-selection alone.
+acceptance freezes only the epoch; per-turn origin rows copy no prompt text, and
+model-call preparation reads the prompt through the calling turn's frozen
+defaults version — including a reclassified-steering origin's inherited version
+— so every call the turn prepares sets `ModelOperation.system` to exactly that
+epoch's prompt, or none. A replacement that changes only the system prompt
+appends no semantic transcript entry: the new instructions reach the provider
+whole and out of band on the successor turn's calls, and the turn's frozen epoch
+already records durably which prompt governed it. The `ModelIdentityChanged`
+boundary below is keyed to the frozen direct model selection alone.
 
 ### Session-template provenance
 
@@ -573,10 +571,9 @@ and `eval` variants for sessions created by registered programs under the
 (and, for `eval`, the trial identity the [evaluation system](eval-system.md)
 defines), is constructible only by the substrate's host-side session capability,
 and joins the stored closed-discriminator convention beside `interactive`,
-`module_dispatched`, and `delegated`. This constrains present change:
-creation-cause readers must not assume the present vocabulary is final, and the
-stored discriminator's decode surface must stay extensible without
-reinterpreting existing spellings.
+`module_dispatched`, and `delegated`. Creation-cause readers must not assume the
+present vocabulary is final, and the stored discriminator's decode surface must
+stay extensible without reinterpreting existing spellings.
 
 ## The session aggregate
 
@@ -870,10 +867,7 @@ and closed:
   checked successor placement record at a user-explicit relocation boundary. One
   entry kind covers every session-relocation fact: a move to a different runner
   and a working-directory move on the same runner both require it, and the
-  referenced record is the authority for which of them occurred. Splitting the
-  kind so that a working-directory-only move carries its own payload variant
-  changes no other contract on this page, since every consumer resolves the
-  record rather than reading the payload;
+  referenced record is the authority for which of them occurred;
 - `TurnFailed { turn }` — an explicit marker that the turn terminalized as
   failed;
 - `AssistantText { producing_call, value }` — exact assistant text with
@@ -1103,7 +1097,7 @@ That third producer serves two endings, which share its commit shape exactly.
 This page owns the transcript-producer column of
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine),
 and that column is total over all nine endings: `pre-call fail` and
-`wait-transition fail (no call)` use this new producer; `post-failure fail` and
+`wait-transition fail (no call)` use this producer; `post-failure fail` and
 `terminal` use the existing model-call known-failure closure, because their turn
 did issue a call and that closure is already the writer which commits one; and
 `selected`, `contended-wait`, `exhausted-wait`, and `successor` have no producer
