@@ -6,7 +6,8 @@ catalog wiring is outside it.
 
 [Remote destination authority](#remote-destination-authority) states the durable
 workspace record and the destination schema; the push transport that resolves
-against them is committed but unimplemented.
+against them is undecided
+([open questions](../open-questions.md#scheduling-and-runners)).
 
 The deployment injects a workspace root into each constructed suite. The daemon
 composes one suite for the configured root, and one further suite for each
@@ -137,7 +138,8 @@ different authority:
 
 Retiring a destination is a new durable fact rather than an edit, because the
 minting tables are append-only. A withdrawal retires exactly one mint and frees
-its name, so a withdrawal and its replacement may commit in one transaction.
+its name, so a withdrawal and its replacement may be recorded in one
+transaction.
 
 ## Explicitly accepted residuals
 
