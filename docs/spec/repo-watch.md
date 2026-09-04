@@ -14,84 +14,7 @@ not start. Dispatched sessions retain the approval posture of their named
 session templates, without authority inherited from the watcher.
 
 **Foundation contract.** This bottom specification diff owns the
-four-pull-request repository-watch stack. The version-one domain vocabulary and
-validation shapes were verified against PR #430 (`agent/repo-watch-spec`). The
-persistence and rule-dispatch behavior below is verified against PR #446
-(`agent/repo-watch-dispatch`). The polling and differ behavior below, the goal a
-dispatch commissions with its session, the binding of the dispatched work turn
-to that goal's generation, and the occupied-refusal obligation and collapsed
-current-state delivery are verified against PR #812
-(`agent/repo-watch-dispatch-loop`). The request-envelope behavior is verified
-against this PR (`agent/daemon-ops-overnight`). Runtime-relevance release,
-held-slot diagnostics, and terminal-target cutoff are also verified against this
-PR. The provider members the poller adopts as check-suite and check-run
-completion generations are verified against PR #541
-(`fix/check-run-updated-at`). Eager merge-forward dispatch is verified against
-PR #886 (`agent/eager-merge-forward`). Requeue after non-converged dispatch
-termination is verified against PR #894
-(`agent/dispatch-requeue-on-invalidation`). Safe rule revision admission and
-configuration diagnostics are verified against PR #863
-(`agent/repo-watch-rule-robustness`). Bounded dispatch-start leases, priority
-nudges, expiry retirement, and nudge outcome telemetry are verified against this
-PR (`agent/dispatch-start-lease`). Exact-head convergence assessment and cutoff
-are verified against PR #832 (`agent/dispatch-autonomy-convergence`). The
-dispatch attempt budget, the delay between attempts, the parked state, and both
-ways out of it are verified against PR #980 (`agent/dispatch-retry-budget`). The
-source-independent event occurrence identity, its durable frontier, the
-commit-time coalescing of a restated occurrence, and the storage migration are
-verified against PR #870 (`agent/repo-watch-content-identity`). The
-authenticated webhook intake, its ingress ceilings, shadow projection, parity
-view and causes, and targeted refresh behavior are verified against this PR
-(`agent/repo-watch-webhook-receiver`). The projection coverage enumeration,
-pull-request issue-comment behavior, per-page hydration coalescing, and
-workflow-run branch symmetry below are verified against PR #891
-(`agent/webhook-event-mapping`). Webhook drain liveness and stall reporting are
-verified against PR #896 (`agent/webhook-projection-drain`); the drain attempt
-deadline is verified against this PR
-(`agent/daemon-live-webhook-drain-deadline`), and the enclosing webhook-attempt
-deadline is verified against this PR
-(`agent/daemon-live-webhook-attempt-deadline`). The provider-wide page backoff
-is verified against this PR (`agent/daemon-live-webhook-provider-backoff`).
-Webhook preemption of slow complete reconciliation is verified against PR #926
-(`agent/webhook-projection-preemption-review`). The finite cutoff and dispatch
-reconciliation quanta ahead of and after a webhook drain are verified against
-this PR (`agent/daemon-live-bounded-repo-reconciliation`). Repeatable preemption
-of convergence-cutoff backlogs is verified against this PR
-(`agent/repo-watch-cursor-drain-baselines`). Repeatable preemption while durable
-drain pages remain is verified against this PR
-(`agent/daemon-live-repeatable-webhook-preemption`). The progressing-drain work
-budget and continuation wake are verified against this PR
-(`agent/daemon-live-webhook-progress-budget`). Merged-pull-request cursor
-compaction and payload-scaled webhook deadlines are verified against PR #1332
-(`agent/repo-watch-cursor-drain-bounds`); post-settlement logical cursor sizing
-and compact comparison baselines are verified against this PR
-(`agent/repo-watch-cursor-drain-baselines`). Primary webhook intake, the
-producer each event row records, the parity view's promotion bound, and the
-frontier entry's ownership member are verified against this PR
-(`agent/webhook-primary-mode`). The approval-judge dispatch fence and unattended
-escalation release described below are verified against this PR
-(`agent/headless-approval-escalation`). The operator-commissioned dispatch fence
-is verified against this PR (`agent/commissioned-dispatch-fence`); its attended
-escalation park is verified against this PR
-(`agent/daemon-live-headless-approval-park`). Bounded cleanup of cancelled
-complete-poll fetches is verified against this PR
-(`agent/daemon-live-webhook-cancelled-fetch-bound`). External
-commissioned-session obligation blocking and blocker replacement are verified
-against this PR (`agent/daemon-convergence-sweep`). Conservative stale
-blocking-review dismissal is verified against this PR
-(`agent/dispatch-autonomy-review-clearance`). The bounded repository-watch
-operator projections are verified against this PR
-(`agent/web-repo-watch-projection`). The durable record of the last completed
-sweep and the restart scheduling measured from it, the classification that
-decides which failures stop a drain page — a provider throttle against a
-resource-scoped permission rejection, a GraphQL error envelope read from either
-carrier the provider spells its classification in, and an exhausted attempt
-resource budget — the bound on consecutive webhook preemptions of a still-due
-complete poll, and the attempt-deadline cancellation fence with its
-post-terminal dispatch classification are verified against this PR
-(`agent/fix-repo-watch-drain-classifiers`), which supersedes the warm-restart
-poll scheduling previously verified against
-`agent/daemon-live-warm-start-poll-cadence`.
+four-pull-request repository-watch stack.
 
 ## Configuration and credential boundary
 
@@ -286,8 +209,7 @@ one paginated commit search in place of the request-per-suite fanout, while an
 empty inventory needs no run query and a larger one enumerates each suite
 individually. Every completed provider identity returned by that projection
 enters the comparison baseline; the provider's latest-attempt default cannot
-silently discard a completion between polls. This bounded request optimization
-is verified against this PR (`agent/daemon-live-github-rest-quota`).
+silently discard a completion between polls.
 
 **Implemented behavior.** Daemon shutdown wins a race with a repository task's
 clean exit. Once shutdown is observable, the supervisor drains every watch task

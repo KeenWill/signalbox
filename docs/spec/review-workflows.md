@@ -1,20 +1,12 @@
 # Review workflows
 
-This page specifies the implemented review-workflow bounded context. Its domain
-and store foundation was verified through PR #221
-(`agent/review-workflow-spec`); two-axis finding confidence is verified through
-PR #329 (`agent/review-finding-confidence`); targeted cross-run finding
-references and the application orchestration boundary are verified through PR
-#336 (`agent/review-orchestrator`); durable relational current-status admission
-is verified through PR #343 (`agent/review-orchestrator`). The current
+This page specifies the implemented review-workflow bounded context. The current
 implementation also provides the closed concern library, relational
 orchestration attempt and command-receipt store, client-fed daemon adapter, and
-process and terminal surfaces described below, verified against PR #349
-(`agent/review-orchestrator-wiring`). The user-vocabulary surface on this page
-was re-verified through PR #378 (`agent/user-vocabulary`). This page owns review
-targets, workflow runs, session-backed passes, findings, external links, their
-relational store, and application orchestration. Session execution remains owned
-by [sessions and transcript](sessions-and-transcript.md), turn evidence by
+process and terminal surfaces described below. This page owns review targets,
+workflow runs, session-backed passes, findings, external links, their relational
+store, and application orchestration. Session execution remains owned by
+[sessions and transcript](sessions-and-transcript.md), turn evidence by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool
 execution by [tool loop](tool-loop.md), and relational mechanics shared with the
 rest of the daemon by [persistence protocol](persistence-protocol.md). Invariant
