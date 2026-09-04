@@ -3,14 +3,10 @@
 **Proposed for owner decision; design only.** Nothing on this page is
 implemented. Normative paragraphs are marked **Proposed behavior** and describe
 what the daemon must do once this specification is ratified; unmarked prose is
-context. The proposal is grounded in the owner's 2026-09-01 live-database census
-and failure taxonomy; provenance is held in the owner's records. Owner rulings
-restated here are binding and are not re-argued.
+context.
 
-This specification changes when capabilities land, not which capabilities exist:
-reliability work lands first, and no wanted feature is removed. Goal mode,
-custom compaction, and the API adapters all stay: base behavior first,
-complexity iterated back on afterward behind evals.
+This specification removes no wanted feature. Goal mode, custom compaction, and
+the API adapters all stay.
 
 ## Why
 
@@ -28,16 +24,15 @@ failing to reach their finish point, then 2–5%.
 Two rules apply to every section below.
 
 **Proposed behavior.** Lifecycle state, deadlines, budgets, and recovery live in
-daemon core. No module implements or re-implements any of them. If a module
-needs lifecycle behavior that core does not provide, it requests a core change.
+daemon core. No module implements or re-implements any of them. Lifecycle
+behavior a module needs and core does not provide is added to core.
 
 **Proposed behavior.** Every numeric bound in this specification — deadlines,
 watchdog bounds, retry backoffs — is defined in config, never hardcoded. Values
 named in this text are example defaults. Config may set any such bound to none,
 meaning unbounded. The only hardcoded limits permitted are guards against
 algorithmic explosion — unbounded loops, unbounded recursion, unbounded queue
-growth. A new lifecycle limit is a product decision; it is surfaced to the owner
-before it ships.
+growth. A new lifecycle limit is a product decision.
 
 ## 1. Session state machine
 
@@ -48,13 +43,11 @@ core-owned lifecycle satellite of the session row, the pattern every mutable
 per-session value follows today; the committed append-only guard on `session`
 itself is untouched, and prose here that says "the session row" means that
 satellite. The satellite takes a declared place in the committed lock order — in
-the session-then-scheduler prefix, never acquired after the scheduler row — and
-the implementing change amends the lock inventory. The states: `created`,
-`dispatched`, `active`, `waiting`, `recovering`, `blocked`, `parked`,
-`terminal`. Today no durable session state exists; the nearest thing is the web
-queue's derived `AttentionState` classifier. Once the column lands, the
-classifier becomes a projection of these states plus turn phase — never an
-independent machine.
+the session-then-scheduler prefix, never acquired after the scheduler row. The
+states: `created`, `dispatched`, `active`, `waiting`, `recovering`, `blocked`,
+`parked`, `terminal`. Today no durable session state exists; the nearest thing
+is the web queue's derived `AttentionState` classifier. The classifier becomes a
+projection of these states plus turn phase — never an independent machine.
 
 ```text
 CREATED ─┬─→ DISPATCHED ─→ ACTIVE
@@ -80,10 +73,9 @@ moves it to `dispatched`, not `active`: the accepted turn is queued and
 activated by the unchanged scheduler contract, and only turn activation makes
 the session `active` — so for an owned session the admission deadline covers a
 queued interactive turn that never activates. Deadlines are owned-session
-obligations everywhere in this specification: the states describe, ownership
-governs, and no state arms any deadline on an unmonitored session (§6). A queued
-successor turn inside a live session never re-enters `dispatched`; the active
-stall deadline covers it.
+obligations everywhere in this specification: no state arms any deadline on an
+unmonitored session (§6). A queued successor turn inside a live session never
+re-enters `dispatched`; the active stall deadline covers it.
 
 **Proposed behavior.** `created` and `dispatched` are distinct from `active`
 because 229 sessions died between creation and first turn and 52 died with a
@@ -100,12 +92,12 @@ and the 10 external-gate stalls: an expired approval escalates and survives turn
 boundaries instead of failing the turn (17 headless-escalation kills). Where a
 module's redispatch owns the retry — the unattended repo-watch escalation fails
 its turn today precisely because a fresh dispatch supersedes it — the redispatch
-closes the parked predecessor as `superseded{by}`, so survival never duplicates
-pursuit.
+closes the parked predecessor as `superseded{by}`, so the redispatched session
+never duplicates the closed predecessor's pursuit.
 
 **Proposed behavior.** For an owned session, `active` carries a stall deadline;
 an unmonitored conversation carries none, per §6. The model-call count per
-session is recorded as a measurement the owner reads. Runaways were loud, not
+session is recorded as a measurement the owner reads. Runaways were visible, not
 silent: 200+ model calls against an already-merged branch, one four-day session.
 
 **Proposed behavior.** An owned session's deadlines are three — admission (§10),
@@ -128,13 +120,13 @@ never disagree. The mapping: a turn in `running` ⇒ `active`;
 turn ⇒ `blocked`. `parked` is the one session state that overrides the mapping:
 parking suspends a live turn in place — the turn keeps its phase, and no model
 call, tool execution, or delivery proceeds while the session is parked — and
-terminalizes nothing (§13). The eligibility sweep and the liveness watchdog gain
-the parked conjunct in the same change: a parked session's rows are neither
-sweep candidates nor watchdog candidates until it leaves `parked`. Leaving
-`parked` re-enters the state the mapping gives for the suspended turn's phase.
-The mapping therefore governs every non-parked session; a deadline expiry that
-parks mid-turn uses this suspension, which is how an expired approval survives
-without failing its turn (the waiting rule above).
+terminalizes nothing (§13). The eligibility sweep and the liveness watchdog
+carry the parked conjunct: a parked session's rows are neither sweep candidates
+nor watchdog candidates until it leaves `parked`. Leaving `parked` re-enters the
+state the mapping gives for the suspended turn's phase. The mapping therefore
+governs every non-parked session; a deadline expiry that parks mid-turn uses
+this suspension, which is how an expired approval survives without failing its
+turn (the waiting rule above).
 
 **Proposed behavior.** Module machinery that parks its own targets today —
 `convergence_sweep_target` rows in `parked`, repo-watch external obligations
@@ -166,8 +158,8 @@ never survive beneath a terminal session, scheduling work no one owns. The park
 then closes with the outcome that matches its resolution: `superseded{by}` when
 a fresh respawn takes the work; `abandoned` on operator write-off;
 `failed_retryable{cause}`, `failed_structural{cause}`, or `failed_unknown` when
-it closes as failed with the cause standing. Each outcome carries its warranted
-recovery as normative behavior:
+it closes as failed with the cause standing. Each outcome's recovery below is
+normative:
 
 - `achieved_verified` — recorded when the session's declared finish check
   passes: for repo-watch work, the external gate re-checked on the exact head
@@ -239,7 +231,7 @@ resets every staleness clock exactly when restarts are the leading creator of
 stuck sessions. This proposal keeps the repeated-observation structure and its
 clock-skew argument — ordering authority stays with commit-ordered sequences,
 and no wall-clock comparison alone ends work — and makes the observations
-durable, so a restart costs nothing instead of one more bound per wedge.
+durable, so a restart resets no staleness clock.
 
 ## 4. Mandatory cause classification
 
@@ -280,11 +272,11 @@ and `turn_tool_reconciliation_required`, whose distinct tool-attempt payload the
 typed disposition keeps) and subsumes `goal_turn_retired` as
 `turn_terminal{disposition: retired}`. The turn-progress frontier keeps its
 exclusion by disposition: `turn_terminal{retired}` is not turn progress —
-retiring queued work happens to a session while its active turn sits still — and
-the frontier's partial index migrates to a disposition-aware predicate in the
-same change. The consumers that decode the old kinds — the session-timeline
-projection, the operator-attention triggers, the process-protocol decoders —
-migrate in the same change. The remaining kinds (`model_call_transition`,
+retiring queued work happens to a session while its active turn makes no
+progress — and the frontier's partial index uses a disposition-aware predicate.
+The consumers that decode the old kinds — the session-timeline projection, the
+operator-attention triggers, the process-protocol decoders — decode
+`turn_terminal`. The remaining kinds (`model_call_transition`,
 `tool_batch_transition`, `tool_approval_decided`, `input_accepted`,
 `turn_activated`, `turn_model_settings_resolved`,
 `session_model_settings_changed`, `context_compacted`,
@@ -293,9 +285,9 @@ not part of the module-facing vocabulary, unavailable across the module seam —
 the process protocol's wire fan-out keeps decoding every one of them unchanged;
 clients lose nothing.
 
-**Proposed behavior.** If a module needs an event kind core does not emit, it
-requests the kind as a vocabulary change; modules never reconstruct events by
-joining core tables.
+**Proposed behavior.** An event kind a module needs and core does not emit is
+added to the core vocabulary; modules never reconstruct events by joining core
+tables.
 
 **Proposed behavior.** `command_settled` is the one kind that can settle without
 a session — a command against an unknown session. The outbox header's session
@@ -305,8 +297,7 @@ kind.
 **Proposed behavior.** The session timeline, which queries the per-kind event
 tables directly today, becomes a durable projection maintained from the outbox
 write. The singleton delivery row and the outbox's append-only rule are
-untouched; the structural fix for outbox growth remains frontier normalization,
-the owner's standing 2026-08-23 ruling.
+untouched; the structural fix for outbox growth remains frontier normalization.
 
 ## 6. Provenance and ownership
 
@@ -342,10 +333,9 @@ its exact domain actor. The lifecycle record derives its classification from
 that actor: `User` reads as `operator`, the recovery scan as `watchdog`, model-
 and tool-initiated agency as `core` with the exact turn and request identity
 kept in the payload, and module-issued commands as `module{name}`. The committed
-program-issuance arm is preserved untouched: the vocabulary stays extensible to
-the verified program-run actor the identity contract commits — a run-scoped
-reference, not `module{name}` — which lands with the program substrate. Today
-manual operator workarounds — the crutch layer — are indistinguishable from
+program-issuance arm is untouched: the vocabulary stays extensible to the
+program-run actor the identity contract commits — a run-scoped reference, not
+`module{name}`. Today manual operator workarounds are indistinguishable from
 daemon actions in the record.
 
 ## 7. Command surface
@@ -431,9 +421,8 @@ steering into the successor origin turn stands and settles the injection
 `delivered`. Session terminalization — where no successor turn can exist —
 closes pending steering with a `not_delivered` receipt; pending steering never
 refuses it. That closure is a third pending-steering disposition added to the
-committed two (consumed, reclassified): the pending-steering guard is amended
-for it in the implementing change, explicitly — the schema today forbids any
-drop.
+committed two (consumed, reclassified), and the pending-steering guard, which
+today forbids any drop, admits it.
 
 **Proposed behavior.** Injecting into an unmonitored session creates no
 obligations. Injecting into an owned session resets no deadline.
@@ -454,14 +443,13 @@ different request.
 
 **Proposed behavior.** Every resume journals its guidance and its actor, so
 automatic and operator resumes are distinguishable in the durable record. All
-5,590 resumes in the measured window look identical. Goal-mode code landed since
+5,590 resumes in the measured window look identical. Committed goal-mode code
 gives automatic resumes a domain-separated derived identity and journaled
-guidance text. It already carries a config-sourced attempt budget whose
-infrastructure retries charge nothing, and, independently, the committed
-lifetime attempt ceiling that counts every attempt whatever its fault
-attribution — the limit that ends a run whose every failure is exempt. Both
-stay: a run ends at whichever limit it reaches first, read by the same operator
-projection, exactly as committed.
+guidance text. It carries a config-sourced attempt budget whose infrastructure
+retries charge nothing, and, independently, the committed lifetime attempt
+ceiling that counts every attempt whatever its fault attribution — the limit
+that ends a run whose every failure is exempt. Both stay unchanged: a run ends
+at whichever limit it reaches first, read by the same operator projection.
 
 **Proposed behavior.** Reaching either limit transitions the goal's session from
 `blocked` to `parked`, where the owner sees it. Exhaustion is never a silent
@@ -473,11 +461,10 @@ failed session; the respawn closes its predecessor's park as `superseded{by}`
 
 **Proposed behavior.** Goal mode is reserved for long-horizon work — hours or
 days. Routine dispatch uses plain sessions with vendor compaction. Goal mode is
-never stripped. Its compaction contract: a goal session that compacts re-reads
+never removed. Its compaction contract: a goal session that compacts re-reads
 its goal after compaction and carries its working state forward — testable
 because the next turn's context contains the goal statement and the carried
-state. This extends the base case, a plain session that can compact and finish,
-and is improved later behind evals.
+state. This extends the base case: a plain session that can compact and finish.
 
 ## 10. Retired and the admission deadline
 
@@ -497,9 +484,8 @@ deadline covering `created` and `dispatched` alike — a held start gate, an
 awaited first input, or a queued turn that never activates; an unmonitored
 session carries none (§1, §6). Expiry retires the session with cause
 `admission_deadline_expired`, and any queued turn retires with it in the same
-transaction — the machines move together (§1). This closes the 229 zombie
-sessions that were created, never ran a turn, and sat idle forever with a
-lifespan of 0.0 hours.
+transaction (§1). This closes the 229 zombie sessions that were created, never
+ran a turn, and sat idle forever with a lifespan of 0.0 hours.
 
 ## 11. Compaction observability
 
@@ -518,14 +504,14 @@ compaction-failure trace is 23 `goal_execution_failure_recovery` rows, all with
 the single cause `context_compaction_input_does_not_fit`.
 
 **Proposed behavior.** Every compaction records whether it was vendor or custom,
-and on which adapter. The owner ruling covers all four adapters — codex_cli,
-claude_code CLI, Anthropic API, OpenAI API — codex first. This is the eval
-scaffold the compaction ruling requires.
+and on which adapter. This covers all four adapters — codex_cli, claude_code
+CLI, Anthropic API, OpenAI API — and is the record the compaction evals are
+built on.
 
-**Proposed behavior.** Vendor compaction is the default path. The home-rolled
+**Proposed behavior.** Vendor compaction is the default path. The custom
 compactor stays as the eval baseline — never deleted, re-added per adapter once
 the eval system can reliably measure it. The re-enable gate itself is a product
-decision surfaced to the owner at that point, not shipped silently.
+decision.
 
 **Proposed behavior.** A compaction-wall event records the session's initial
 payload size alongside the wall (§15). Their handling is §2's park-and-respawn
@@ -550,11 +536,11 @@ proxies.
   turn.
 - `P(finish | overflow)` — of the sessions counted by `overflow_incidence`, the
   fraction whose terminal outcome is `achieved_verified` or `achieved_declared`.
-  The owner's observation this measures: a session that starts small and grows
-  into the wall through real work almost always succeeds.
+  This measures the observation that a session that starts small and grows into
+  the wall through real work almost always succeeds.
 - `wall_rate` — fraction of sessions dispatched in the calendar week recording
   cause `context_compaction_wall`. The rate counts walls of every kind, organic
-  growth included; the recorded initial payloads (§15) sit beside it.
+  growth included; the recorded initial payloads (§15) are read alongside it.
 - `cause_completeness` — terminal turns whose typed cause is usable — outside
   the catch-all set: `unrecognized`, absent, or a bare unknown bucket — over all
   terminal turns, and, for model calls, usable causes over the calls whose
@@ -575,15 +561,15 @@ work are owner decisions made outside the daemon.
 ## 13. Watchdog and recovery posture
 
 **Proposed behavior.** Recovery preserves rather than terminalizes whenever the
-guarded operation may still be live. The measured record demands it: 100 of 777
-incident reports (12.9%) are root-caused safety-backfire. The window's worst
-population-wide outages were caused by protection machinery: a 1-second
-reconciliation bound terminalizing live 10-minute model calls, and a restart
-chain parking all 24 commissioned sessions at once. Turn-level failure
-terminalization that arms goal recovery — the liveness pass ending a provably
-wedged turn as failed, blocking its goal with `execution_failure` — is not
-session terminalization and stays: this section governs session disposition, not
-the committed turn watchdog's disposition of dead work.
+guarded operation may still be live. Why: 100 of 777 incident reports (12.9%)
+are root-caused safety-backfire. The window's worst population-wide outages were
+caused by protection machinery: a 1-second reconciliation bound terminalizing
+live 10-minute model calls, and a restart chain parking all 24 commissioned
+sessions at once. Turn-level failure terminalization that arms goal recovery —
+the liveness pass ending a provably wedged turn as failed, blocking its goal
+with `execution_failure` — is not session terminalization and stays: this
+section governs session disposition, not the committed turn watchdog's
+disposition of dead work.
 
 **Proposed behavior.** Recovery bounds are config-sourced; the reconciliation
 bound behind the recorded backfire is raised.
@@ -596,22 +582,21 @@ and no human attention is owed. No deadline expiry is a silent hold, and none
 terminalizes work whose operation may be live.
 
 **Proposed behavior.** No staleness machinery exists outside core. Modules and
-the future substrate subscribe to deadline events; they do not grow their own
-watchdogs. The default posture for a tripped guard is wait, ask, or hand off to
-`parked` — never terminalize on local staleness evidence alone.
+the future substrate subscribe to deadline events; they do not implement their
+own watchdogs. The default posture for a tripped guard is wait, ask, or hand off
+to `parked` — never terminalize on local staleness evidence alone.
 
 ## 14. Schema
 
-**Proposed behavior.** The dogfood DB never fences a good schema change. At
-most, an agent shoehorns old rows later.
+**Proposed behavior.** Existing dogfood data never blocks a schema change. At
+most, old rows are backfilled afterward.
 
 **Proposed behavior.** Lifecycle DDL lands as layered statements in the clean
 per-domain schema files — sessions, goals, outbox — split by purpose, never
 chronologically. Forward changes are small separate migrations that the next
-collapse folds back in. A collapse is a deliberate chain reset under the owner's
-rule-now-reset-later ruling: the forward-only immutability rule governs between
-collapses, and each collapse is its own sanctioned one-time rewrite, exactly as
-the 2026-09-01 fifteen-file baseline was.
+collapse folds back in. A collapse is a deliberate chain reset: the forward-only
+immutability rule governs between collapses, and each collapse is a sanctioned
+one-time rewrite.
 
 ## 15. Dispatch payload
 
@@ -623,10 +608,10 @@ measurements when its first input is accepted — that input is what the session
 was handed.
 
 **Proposed behavior.** Per-template payload sizes are a view the owner reads
-alongside `wall_rate` (§12). The owner's reframe binds this section: frequent
-walls mean the payload was too large to begin with — judge passes and fixup
-briefs handed too many comments or too much commit diff history — not organic
-context growth. Payload sizing is fixed first; the wall path is the backstop.
+alongside `wall_rate` (§12). Frequent walls mean the payload was too large to
+begin with — judge passes and fixup briefs handed too many comments or too much
+commit diff history — not organic context growth. Payload sizing is fixed first;
+the wall path is the fallback.
 
 **Proposed behavior.** Sessions that start around 10% full and hit the wall
 through real work almost always succeed; they count in the rate (§12), and the
@@ -634,7 +619,7 @@ recorded initial payloads are what separate dispatch-defect walls from those
 rare organic ones.
 
 **Proposed behavior.** When a wall still occurs, the session parks with cause
-`context_compaction_wall`. The backstop is respawn-fresh, which closes the park
+`context_compaction_wall`. The fallback is respawn-fresh, which closes the park
 as `superseded{by}`; a park closed as failed records
 `failed_structural{context_compaction_wall}` (§2, §9). Auto-resume into the same
 wall is forbidden. The codex goal path already suppresses automatic resumption
@@ -647,4 +632,4 @@ view renders the recorded initial payload — size, source, and content. The
 sessions list shows each session's state and payload size at a glance. The
 existing dashboard could not show the owner that nearly all dispatched sessions
 were dead. The sessions list, session-text reading, and dispatch-payload display
-are the requirements the first web slice is defined against.
+are required.
