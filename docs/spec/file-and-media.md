@@ -93,10 +93,10 @@ may claim only through complete streaming validation. No successful path returns
 an ordinary declaration as evidence.
 
 A recognized-malformed probe is terminal; incompatible recognized types are
-ambiguous. Strong or ordinary structural validation cannot quietly return
-no-match and fall through. A provisional structural, declared, or streaming
-candidate that does not validate resumes the remaining fallback path and becomes
-ordinary unknown when none succeeds. Successful detection that disagrees with a
+ambiguous. Strong or ordinary structural validation cannot return no-match and
+fall through. A provisional structural, declared, or streaming candidate that
+does not validate resumes the remaining fallback path and becomes ordinary
+unknown when none succeeds. Successful detection that disagrees with a
 syntactically canonical caller declaration becomes `DeclaredTypeMismatch`,
 blocking typed reads without changing the blob or its metadata. Recognized
 encrypted or locked content is terminal `EncryptedOrLocked`; version one has no
