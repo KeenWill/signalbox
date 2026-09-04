@@ -8,15 +8,11 @@ eligibility derivation, the scheduler, and startup recovery. Code homes:
 `crates/persistence/src/{start_eligible_turn,startup,scheduler,turn_liveness,`
 `model_call_reconciliation,lock_inventory}.rs` and its migrations, and
 `apps/signalboxd/src/{main,process_runtime,turn_liveness_runtime,telemetry}.rs`.
-INV-tagged tests are the enforcement of record; tags below resolve through the
-generated [invariant test index](../invariants.md). Designed lifecycle behavior
-that has no committed code path appears only under [Open edges](#open-edges).
-Runner-loss recovery and recovery-only startup remain committed unimplemented
-functionality as labeled below. Sibling pages named in scope deferrals below
-(identity-and-commands, sessions-and-transcript, persistence-protocol,
-model-call-execution, configuration-and-credentials, runtime-substrate) are
-companion pages of this spec set; each deferral names the owning page rather
-than restating its material.
+INV tags below resolve through the generated
+[invariant test index](../invariants.md). Designed lifecycle behavior that has
+no committed code path appears only under [Open edges](#open-edges). Runner-loss
+recovery and recovery-only startup are committed unimplemented functionality,
+labeled below.
 
 ## Turns, states, and the single active slot
 
@@ -26,7 +22,7 @@ freeze is
 [configuration-and-credentials](configuration-and-credentials.md#model-selection-validation)
 scope; defaults-epoch binding is
 [sessions-and-transcript](sessions-and-transcript.md#session-defaults-and-replacement)
-scope. The implemented slice stores three lifecycle states per turn
+scope. Each turn stores one of three lifecycle states
 (`turn_lifecycle.state_kind`): `queued`, `active`, and `terminal`, with the
 terminal disposition kind closed to `failed`, `completed`, `refused`,
 `cancelled`, `reconciliation_required`, and `retired` (migrations
@@ -37,15 +33,14 @@ queue order and predecessor selection. A terminal turn records a non-null typed
 `terminal_cause_kind` from a closed vocabulary its disposition admits, and a
 non-terminal turn records none (migration `202609020001`).
 `unclassified_failure` is the only catch-all spelling. The domain
-`TurnDisposition` algebra carries all six accepted variants — `Completed`,
-`Refused`, `Failed`, `Cancelled { cause }`, `ReconciliationRequired { marker }`,
-`Retired` — but `Cancelled` is constructible only from an
-`AppliedInterruptProof`. `ReconciliationRequired` remains constructible only
-from a sealed `ReconciliationMarker`. Committed transitions produce every
-variant: interrupted physical ambiguity produces proof-bearing
-`ReconciliationRequired`, and confirmed interrupted cancellation produces
-proof-bearing `Cancelled`. Runner abandonment creates no additional turn-ending
-authority.
+`TurnDisposition` algebra carries six variants — `Completed`, `Refused`,
+`Failed`, `Cancelled { cause }`, `ReconciliationRequired { marker }`, `Retired`
+— but `Cancelled` is constructible only from an `AppliedInterruptProof`.
+`ReconciliationRequired` is constructible only from a sealed
+`ReconciliationMarker`. Committed transitions produce every variant: interrupted
+physical ambiguity produces proof-bearing `ReconciliationRequired`, and
+confirmed interrupted cancellation produces proof-bearing `Cancelled`. Runner
+abandonment creates no additional turn-ending authority.
 
 The domain `ActiveTurnPhase` algebra is `Running { current_attempt }`,
 `AwaitingApproval { request }`,
@@ -69,18 +64,17 @@ batch and carries no live turn or tool attempt ([tool-loop](tool-loop.md)).
 present `ActiveTurnPhase`, storage discriminator, startup-scan branch, scheduler
 path, or process state supplies the pool-availability wait in
 [model-call execution](model-call-execution.md#availability-successor-calls),
-and no present runtime can enter it. Its implementing child must add a distinct
-active phase with a closed `exhausted`/`contended` cause that retains the
-session slot and durably binds the frozen pool-policy snapshot. The exhausted
-form carries every policy member's exclusion evidence and optional reset, plus
-the optional deadline the machine computes from them — this page carries the
-field, never its formula, since only the machine decides which exclusion kinds
-expire at a reset they report. The contended form carries every durable
-exclusion in the selection snapshot and the complete nonempty set of
-otherwise-admissible bounded members with exact invocation-reservation
-identities. Startup may reconstitute either only from that complete evidence.
-Which ending a selection attempt reaches — and therefore whether a wait is
-stored at all, and in which form — is owned by
+and no present runtime can enter it. That wait must be a distinct active phase
+with a closed `exhausted`/`contended` cause that retains the session slot and
+durably binds the frozen pool-policy snapshot. The exhausted form carries every
+policy member's exclusion evidence and optional reset, plus the optional
+deadline the machine computes from them — this page carries the field, never its
+formula, since only the machine decides which exclusion kinds expire at a reset
+they report. The contended form carries every durable exclusion in the selection
+snapshot and the complete nonempty set of otherwise-admissible bounded members
+with exact invocation-reservation identities. Startup may reconstitute either
+only from that complete evidence. Which ending a selection attempt reaches — and
+therefore whether a wait is stored at all, and in which form — is owned by
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine).
 This page owns two of that table's columns, turn phase with attempt disposition
 and wake conditions, and states no rule about which row is reached. Startup
@@ -95,7 +89,7 @@ reservations, whose observation path this daemon still owns, and must resolve
 every fenced prior-process reservation before scheduling — proving that exact
 process group absent, or terminating it and then proving absence — before
 closing it as lost. It is never retained for a later death notice, since the
-observation that would release it died with its daemon. A prior-process
+observation that would release it was lost with its daemon. A prior-process
 `pending_spawn` reservation is ambiguous and fails startup before scheduling.
 The scheduler makes a reached deadline, an exact reservation release, or a
 durable member-availability update eligible. Because a capacity bound is a live
@@ -124,7 +118,7 @@ would call the same profile again without bound. Every other exclusion the wait
 recorded — an ordinary reset-aware membership exclusion, an `avoid_new_sessions`
 exclusion, a profile quarantine — is re-read from its current active state
 instead, because a release that re-applied a reset which had already passed
-would re-enter the same wait on the very wake its deadline exists to produce.
+would re-enter the same wait on the wake its deadline exists to produce.
 
 Eligibility is permission to retry selection, not a guarantee of a slot. One
 release can make several contended waits eligible while admitting only one, so
@@ -138,17 +132,16 @@ contended form. If no bounded member remains — every former one is now durably
 excluded — the contention is over and the transaction re-runs the pool's
 exhaustion policy rather than assuming a wait. Which ending that re-run reaches
 is the contended-to-exhausted rule of
-[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
-and this page adds nothing to it: the turn moves to whichever row that table
-names, and releasing a contended wait does not change which one. A `fail` pool
-therefore cannot be left parked indefinitely by having entered contention first,
-and cannot acquire a pre-call cause it never earned. Releasing a bounded
-reservation holds that profile's capacity row across the atomic release-and-wake
-commit, and a rewrite holds the capacity rows of every bounded member its
-evidence names, so a completion cannot slip between a loser's read and its
-commit. A reservation identity therefore never outlives the wait that names it,
-and losing a race costs a re-park rather than a failed turn, a missed wake, or
-an admission above the bound.
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine):
+the turn moves to whichever row that table names, and releasing a contended wait
+does not change which one. A `fail` pool therefore cannot be left parked
+indefinitely by having entered contention first, and cannot acquire a pre-call
+cause it never earned. Releasing a bounded reservation holds that profile's
+capacity row across the atomic release-and-wake commit, and a rewrite holds the
+capacity rows of every bounded member its evidence names, so a completion cannot
+slip between a loser's read and its commit. A reservation identity therefore
+never outlives the wait that names it, and losing a race costs a re-park rather
+than a failed turn, a missed wake, or an admission above the bound.
 
 The wait has an exact occupied-slot control matrix. `steer` is accepted as
 ordinary pending steering bound to this source turn and remains pending until a
@@ -167,9 +160,9 @@ so a stop transaction that left it pending would be rejected at commit. Equal
 replay returns that receipt; a released or otherwise changed wait returns the
 ordinary active-turn mismatch. A goal `stop_goal` or supersede command remains a
 goal-state transition and does not manufacture turn-interrupt authority; if the
-caller also wants to release this active slot it submits the existing
-`stop_turn` command. No approval or reconciliation command applies to the wait.
-This compatibility constraint does not add that phase or these branches to the
+caller also wants to release this active slot it submits the `stop_turn`
+command. No approval or reconciliation command applies to the wait. This
+compatibility constraint does not add that phase or these branches to the
 implemented closed vocabulary above.
 
 At most one turn per session is `active`. Enforcement is layered:
@@ -200,24 +193,23 @@ themselves (INV-006).
 The scheduler lock is not acquired first by every writer, and it does not make
 deadlock unrepresentable by itself. Activation and startup recovery take it as
 their only explicit row lock; submit-input locks the session row before it, in
-`FOR NO KEY UPDATE` mode. Deadlock freedom rests on two standing constraints,
-documented at both lock sites: every turn-lifecycle writer acquires the
-scheduler lock before touching `turn_lifecycle` rows, and no production path may
-take PostgreSQL's strongest row-lock mode on the session row. The second is
-load-bearing: defaults replacement holds the current-defaults pointer row while
-its `session_defaults_version` insert requests `FOR KEY SHARE` on the session
-row through its foreign key, so a submit-input `FOR UPDATE` there would close
-that lock-order cycle into a real deadlock (40P01); `FOR NO KEY UPDATE` does not
-conflict with referential `KEY SHARE` locks while remaining self-exclusive.
+`FOR NO KEY UPDATE` mode. Deadlock freedom rests on two standing constraints:
+every turn-lifecycle writer acquires the scheduler lock before touching
+`turn_lifecycle` rows, and no production path may take PostgreSQL's strongest
+row-lock mode on the session row. The second is necessary: defaults replacement
+holds the current-defaults pointer row while its `session_defaults_version`
+insert requests `FOR KEY SHARE` on the session row through its foreign key, so a
+submit-input `FOR UPDATE` there would close that lock-order cycle into a real
+deadlock (40P01); `FOR NO KEY UPDATE` does not conflict with referential
+`KEY SHARE` locks while remaining self-exclusive.
 
 ## Turn attempts
 
-A turn attempt is one exclusive physical orchestration tenure. The implemented
+A turn attempt is one exclusive physical orchestration tenure.
 `CurrentTurnAttempt` factors the attempt identity outside its state and closes
 the nonterminal states to `Prepared`, `Running`, and `StopRequested { causes }`.
-All transitions are crate-private, sealed behind the (future) turn aggregate;
-callers cannot forge a running attempt, an ended attempt, or terminal history
-(compile-fail-tested).
+All transitions are crate-private and sealed; callers cannot forge a running
+attempt, an ended attempt, or terminal history.
 
 Stop causes are a canonical union algebra: `CancellationOnly` carries one
 applied interrupt proof; `FatalMismatch` carries a nonempty mismatch failure set
@@ -226,14 +218,14 @@ stop upgrades it without losing the proof; equal replay is idempotent; a
 distinct second interrupt proof is rejected without changing state. Ended
 attempts carry cause-specific terminal history: `WithoutStop`,
 `AfterCancellation`, and `AfterFatalMismatch`, whose disposition enums make
-dishonest ends unrepresentable — a fatal-stopped attempt cannot claim
+inconsistent ends unrepresentable — a fatal-stopped attempt cannot claim
 completion, refusal, cancellation, or a wait yield, and `WithoutStop` cannot
 claim `Cancelled`. Why: encoding the stop/disposition compatibility matrix in
-types means restart cannot construct a state the accepted lifecycle prohibits.
+types means restart cannot construct a state the lifecycle prohibits.
 
-Committed attempt facts include the initial `Prepared` attempt created by
-activation, `running`, and proof-bearing `stop_requested` state kinds, the
-startup scan's lost closures, and the model-call slice's cause-specific terminal
+Stored attempt facts include the initial `Prepared` attempt created by
+activation, the `running` and proof-bearing `stop_requested` state kinds, the
+startup scan's lost closures, and model-call execution's cause-specific terminal
 histories. `stop_requested` stores the exact applied interrupt command and
 predecessor needed to reconstruct `CancellationOnly`; the correlated call is
 durably `cancellation_requested`. `turn_attempt` storage enforces one initial
@@ -286,20 +278,20 @@ queued turn, and constructs atomically-committable state:
   list supplied by a caller is not start authority); and
 - the initial `Prepared` attempt.
 
-`SingleSource` native-fork ancestry remains unschedulable and fails
-reconstitution with `UnsupportedSessionAncestry`. Imported ancestry is admitted
-only when its seed satisfies the complete imported-session contract in
+`SingleSource` native-fork ancestry is unschedulable and fails reconstitution
+with `UnsupportedSessionAncestry`. Imported ancestry is admitted only when its
+seed satisfies the complete imported-session contract in
 [sessions-and-transcript](sessions-and-transcript.md) (INV-038, INV-039).
 
 Imported ancestry does not alter lifecycle order, eligibility, slot ownership,
 or lineage. Its resume/fork relationship is immutable creation provenance, not a
-scheduler mode. The first native turn is still `FirstInSession`; imported
-entries are a context prefix, not a synthetic predecessor turn. Migration
-`202607240003_imported_session_first_native_frontier.sql` changes only the
-first-frontier lifecycle check: a native session still starts with its one
-origin entry, while an imported session must start with its exact stored seed
-membership followed by that origin entry. All other lifecycle evidence checks
-remain shared.
+scheduler mode. The first native turn is `FirstInSession`; imported entries are
+a context prefix, not a synthetic predecessor turn. Only the first-frontier
+lifecycle check (migration
+`202607240003_imported_session_first_native_frontier.sql`) depends on ancestry:
+a native session starts with its one origin entry, while an imported session
+must start with its exact stored seed membership followed by that origin entry.
+All other lifecycle evidence checks are shared.
 
 ## The activation transaction
 
@@ -349,17 +341,16 @@ transaction. The replacement command takes that same scheduler lock and the
 admitted-set lock after it, so a replacement either precedes activation and
 enters the snapshot or follows activation and affects only a later turn. No
 present replacement or nonempty eligibility surface exists; nevertheless, the
-first workspace-instruction slice inserts the one canonical empty manifest in
-this same activation transaction. No post-activation insert is permitted: an
-interrupt or other terminalization may win immediately after activation, and
-every started or terminal turn must already own exactly one turn-start manifest.
-Later nonempty eligibility changes only the copied values and rendered rows, not
-this atomic boundary. A later turn therefore cannot render retained admissions
-that its initial manifest omitted.
+one canonical empty manifest is inserted in this same activation transaction. No
+post-activation insert is permitted: an interrupt or other terminalization may
+win immediately after activation, and every started or terminal turn must
+already own exactly one turn-start manifest. Later nonempty eligibility changes
+only the copied values and rendered rows, not this atomic boundary. A later turn
+therefore cannot render retained admissions that its initial manifest omitted.
 
 Both authoritative repositories — activation and startup recovery — classify
-commit failures (`commit_failure_is_ambiguous`, tested in each): SQLSTATE
-08007/40003 or any non-database error during the commit await surfaces
+commit failures (`commit_failure_is_ambiguous`): SQLSTATE 08007/40003 or any
+non-database error during the commit await surfaces
 `Infrastructure { commit_ambiguous: true }`, because the commit may have durably
 taken effect despite the error return; failures proven to precede commit are
 never marked ambiguous.
@@ -389,11 +380,10 @@ the sweep (INV-007).
   model call covers both an ordinary not-yet-driven call and an attachment check
   retained for retry after temporary store unavailability. The
   `turn_lifecycle_queued_by_session` partial index is created for the queued
-  query shape, though planner adoption is not pinned by any test. Results are
-  paged 16 sessions per query with a fixed per-cycle bound; continuation pages
-  run immediately. The baseline interval is one second; missed ticks are
-  delayed, not burst. A failed sweep is logged with its operator classification
-  and retried at the next interval.
+  query shape. Results are paged 16 sessions per query with a fixed per-cycle
+  bound; continuation pages run immediately. The baseline interval is one
+  second; missed ticks are delayed, not burst. A failed sweep is logged with its
+  operator classification and retried at the next interval.
 
 - **Loop.** `SchedulerLoop::run_until` spawns at most 16 concurrent per-session
   passes. Every explicit nonzero application bound, including the deployment's
@@ -418,12 +408,12 @@ the sweep (INV-007).
   direct-read permit: its physical attempt remains in flight during store
   traversal, and it reacquires a slot before committing correlated result
   evidence or crash-loss classification. The independent direct-read admission
-  budget remains fixed, so at most 16 direct reads can wait at that
-  reacquisition point regardless of the scheduler-pass override. One admitted
-  authoritative pass may occupy its slot for at most fifteen minutes. A checked
-  application bound may lower that compiled ceiling but cannot raise it or admit
-  zero or subsecond values. Expiry invokes a detached daemon recovery handoff
-  before dropping the pass future, then immediately releases the admission slot.
+  budget is fixed, so at most 16 direct reads can wait at that reacquisition
+  point regardless of the scheduler-pass override. One admitted authoritative
+  pass may occupy its slot for at most fifteen minutes. A checked application
+  bound may lower that compiled ceiling but cannot raise it or admit zero or
+  subsecond values. Expiry invokes a detached daemon recovery handoff before
+  dropping the pass future, then immediately releases the admission slot.
   Active-turn execution reports the exact turn after its resumable-work lookup
   and before driving that work, so a pass that begins between operations still
   gives the handoff the identity of any model call or tool attempt it later
@@ -436,10 +426,10 @@ the sweep (INV-007).
   identity before awaiting the preparation rather than after, because the await
   is itself droppable — a preparation can commit and lose its acknowledgement to
   the occupancy bound, and an identity recorded only on success would leave that
-  durable compaction unnamed and so unrecovered. Reporting early costs nothing
-  in the other direction: recovery names the exact call, so one that never
-  became durable is found absent and nothing is touched. Until the window has
-  staked an identity it reports none, so expiry inside the read-only boundary
+  durable compaction unnamed and so unrecovered. Reporting early is safe in the
+  other direction: recovery names the exact call, so one that never became
+  durable is found absent and nothing is touched. Until the window has an
+  identity to report it reports none, so expiry inside the read-only boundary
   preflight owes no recovery at all. Naming the session alone would not be
   enough. The handoff runs detached after its slot is released and waits between
   attempts, so by the time it reaches the database a later eligibility sweep may
@@ -466,7 +456,7 @@ the sweep (INV-007).
   provider retry backoff, so a turn making continuous durable progress can reach
   the ceiling, and recovery never re-admits the pass it replaced. The handoff
   therefore imposes the same unchanged-evidence requirement both watchdogs below
-  do and the ceiling by itself lacks. It invokes the existing startup-recovery
+  do and the ceiling by itself lacks. It invokes the startup-recovery
   transaction only for a turn whose evidence — the attempt holding its tenure
   and the session's turn-progress frontier — stood still between two
   observations. A turn seen once is not yet settled; a turn whose evidence
@@ -478,16 +468,16 @@ the sweep (INV-007).
 
   A nudge ends the handoff only where a fresh pass can act on it. A running turn
   still holding a live tool round is resumed by the admitted pass, which then
-  owns it, leaving the outer watchdog's far longer ceiling as its only later
-  judge. A turn that durable progress left running *without* a tool round clears
-  no re-admission predicate — not pass resumption, and not queued-turn
+  owns it, leaving the outer watchdog's far longer ceiling as the only later
+  bound on it. A turn that durable progress left running *without* a tool round
+  clears no re-admission predicate — not pass resumption, and not queued-turn
   activation, which the session's own active turn excludes — so the nudge would
   admit a pass that does nothing. Such a turn stays under the handoff's
   remaining observations and is terminalized there once its evidence stands
-  still, rather than being stranded until the outer watchdog. A resumability
-  read that does not settle is treated as a resumption, since no failed read may
-  make a turn terminalizable on this shorter interval while a pass may already
-  be driving it. Every terminal handoff nudges the session back into eligibility
+  still, rather than being left until the outer watchdog. A resumability read
+  that does not settle is treated as a resumption, since no failed read may make
+  a turn terminalizable on this shorter interval while a pass may already be
+  driving it. Every terminal handoff nudges the session back into eligibility
   admission.
 
   The outer watchdog below remains responsible if those attempts all fail.
@@ -519,8 +509,8 @@ signalboxd's `ActivatedTurnPass` hands it to an `ActivatedTurnExecution` —
 `ModelCallExecutionService` over the `ModelCallProvider` port — so each pass
 activates and then drives the turn's model call. signalboxd depends on
 `model-runtime`/`model-runtime-anthropic` through the `model-provider-runtime`
-bridge; application and persistence still declare no runtime-crate dependency.
-The same execution composition drives approval, tool attempts, and continuation
+bridge; application and persistence declare no runtime-crate dependency. The
+same execution composition drives approval, tool attempts, and continuation
 through the ports owned by [tool-loop](tool-loop.md).
 
 ## Turn-liveness watchdog
@@ -543,45 +533,44 @@ attempt is `prepared` or `running` and has not ended, rather than
 dedicated compaction call outside `terminal`, and no `tool_attempt` outside
 `terminal`. The phase filter is what excludes approval parking,
 `awaiting_child`, both recovery waits, and the runner-loss wait: those are
-durable waits this pass judges no part of. The attempt filter admits `prepared`
+durable waits this pass does not judge. The attempt filter admits `prepared`
 because an attempt reaches `running` only when a model call is authorized on it,
-so a `prepared` attempt is a turn activated but never dispatched — a wedge
+so a `prepared` attempt is a turn activated but never dispatched — a wedged turn
 nothing else reaches, since the eligibility sweep's active arm requires a live
 tool round. `stop_requested` stays out because an interrupt is in flight and is
 owned elsewhere.
 
-Pending steering is deliberately not one of these conjuncts. A steering input is
-consumed at a safe point by a model call, so with every conjunct above already
-proving no call, attempt, or round is live, a steered turn that is otherwise
-quiescent is wedged rather than working — and it is the one wedge a user is
-actively trying to reach. Excluding it made that turn permanently invisible to
-this pass, since neither the eligibility sweep nor the submit-time nudge
-re-drives a running-phase turn with no tool round. A turn parked in any wait
-keeps its steering out of reach through the phase filter, not through this one.
+Pending steering is not one of these conjuncts. A steering input is consumed at
+a safe point by a model call, so with every conjunct above already proving no
+call, attempt, or round is live, a steered turn that is otherwise quiescent is
+wedged rather than working — and it is the one wedged turn a user is actively
+trying to reach. Excluding it would make that turn permanently invisible to this
+pass, since neither the eligibility sweep nor the submit-time nudge re-drives a
+running-phase turn with no tool round. A turn parked in any wait keeps its
+steering out of reach through the phase filter, not through this one.
 
 Every conjunct is an absence the candidate query proves for itself, so a shape
 it cannot consult is a shape it does not clear — absent evidence skips the turn
-rather than condemning it.
+rather than terminalizing it.
 
 **The outer slot-held shape.** A second inventory covers an active `running`
 turn whose current attempt is `prepared`, `running`, or `stop_requested` and
 whose durable rows still show a live model call, dedicated compaction call, or
-tool attempt (or the stop request itself). This deliberately complements the
-quiescent operation-absence predicate. It excludes every durable parked phase,
-including `awaiting_tool_approval`: approval remains the judge's surface and
-this watchdog never decides it. The inventory uses the same complete,
-session-keyed paging, progress evidence, repeated-observation ledger, and
-sixty-four-turn fair window as the quiescent inventory, but keeps an independent
-ledger and lap.
+tool attempt (or the stop request itself). This complements the quiescent
+operation-absence predicate. It excludes every durable parked phase, including
+`awaiting_tool_approval`: approval remains the judge's surface and this watchdog
+never decides it. The inventory uses the same complete, session-keyed paging,
+progress evidence, repeated-observation ledger, and sixty-four-turn fair window
+as the quiescent inventory, but keeps an independent ledger and lap.
 
 A slot-held turn whose evidence remains unchanged for thirty minutes is handed
-to the existing startup-recovery transaction under the session scheduler lock.
-Each detached database attempt has its own ten-second wall-clock bound, which is
-not the wider ceiling automatic reconciliation spends below. That admits
-ordinary serialization through the shared outbox frontier after the session lock
-while the sixty-four-turn fair window still bounds how long a fully stalled
-database can delay the next watchdog wake — one ceiling shared between the two
-would multiply the wider of them across that window and carry the delay past the
+to the startup-recovery transaction under the session scheduler lock. Each
+detached database attempt has its own ten-second wall-clock bound, which is not
+the wider ceiling automatic reconciliation uses below. That admits ordinary
+serialization through the shared outbox frontier after the session lock while
+the sixty-four-turn fair window still bounds how long a fully stalled database
+can delay the next watchdog wake — one ceiling shared between the two would
+multiply the wider of them across that window and carry the delay past the
 sixty-minute scheduler-pass ceiling this watchdog backstops. A timeout is
 commit-ambiguous and leaves the unchanged durable evidence due for a later
 observation. That transaction reconstitutes and classifies the exact current
@@ -592,24 +581,23 @@ classification. The sixty-minute scheduler-pass ceiling is a final same-process
 safety bound; the liveness watchdog remains responsible for reclaiming a wedged
 pass from unchanged durable evidence before that ceiling.
 
-**Staleness.** No lifecycle table stores an activity timestamp, and this page
-introduces none: a stored clock would be one more thing to keep true. Staleness
-is decided by repeated observation instead. Each pass records, per candidate
-turn, its session's turn-progress frontier — the greatest `event_sequence` the
-session has emitted for an event that a turn's own execution produces — and the
-turn's current attempt. A turn is due only once that evidence has been observed
-unchanged for at least the bound governing its watchdog. The composed
-`staleness_bound` governs only the quiescent watchdog; the slot-held watchdog
-always uses the separate thirty-minute hard ceiling so lowering the quiescent
-bound cannot classify live model-call, tool, or stop work as stale early. Any
-progress at all restarts the applicable bound, so a turn that resumed cannot be
-ended on the strength of its earlier silence.
+**Staleness.** No lifecycle table stores an activity timestamp; staleness is
+decided by repeated observation rather than a stored clock. Each pass records,
+per candidate turn, its session's turn-progress frontier — the greatest
+`event_sequence` the session has emitted for an event that a turn's own
+execution produces — and the turn's current attempt. A turn is due only once
+that evidence has been observed unchanged for at least the bound governing its
+watchdog. The composed `staleness_bound` governs only the quiescent watchdog;
+the slot-held watchdog always uses the separate thirty-minute hard ceiling so
+lowering the quiescent bound cannot classify live model-call, tool, or stop work
+as stale early. Any progress at all restarts the applicable bound, so a turn
+that resumed cannot be ended because of its earlier silence.
 
 The frontier is the outbox's rather than the transcript's because the outbox
 assigns its sequence in commit order, and every session-scoped transition kind
 lands in that one table. It is scoped to turn progress rather than to the
 session because some of those kinds are things that happen *to* a session while
-its active turn sits still: one ordinary submission writes both the input
+its active turn is idle: one ordinary submission writes both the input
 acceptance and the turn's model-settings resolution; replacing session defaults,
 creating a session, a runner state transition, the session's own lifecycle,
 goal, ownership, and settlement records, and `turn_terminal{retired}` — retiring
@@ -618,29 +606,29 @@ hold a wedged turn open indefinitely by submitting input. What remains is
 emitted only by a transition of a turn, its model calls, its tool rounds, or its
 approvals, none of which can occur while the turn does nothing. The scope is
 written as those exclusions rather than as a list of what counts, so a kind
-added later is read as progress until someone decides otherwise: counting an
-unrelated event delays terminalizing a wedge, where missing a real one would end
-a turn that was working. An identity ordering would have been unsound here: a
+added later is read as progress unless it is excluded: counting an unrelated
+event delays terminalizing a wedged turn, where missing a real one would end a
+turn that was working. An identity ordering would have been unsound here: a
 backward clock adjustment, or an earlier mint skewed into the future, lets a
 freshly appended identity sort below the recorded one, and a frontier that does
 not move reads as silence on a session that progressed — which is the one error
 this pass may never make. A commit-ordered sequence cannot move backwards
 whatever a clock does. Both observations are also chosen so that reading them
-costs the same whatever a session's history weighs: the attempt is a column of
-the lifecycle row already read, and the frontier is one backward index lookup on
-`outbox_event_turn_progress_by_session`, whose partial predicate is that same
-exclusion. Aggregates over a session's history would have made a once-a-minute
-pass cost more the longer a session lived. The same requirement binds the
-in-flight conjuncts above, which are absence checks over append-only tables:
-each one is answered from an index leading with the session, and the two that
-had none — the dedicated compaction call and the tool attempt — are indexed
-partially on the live rows those checks name, so what is indexed is bounded by
-how much is happening at once rather than by how much has ever happened. No part
-of one inventory read scans a history. The staleness bound is also refused below
-whole-second precision, so the bound an audit line reports is exactly the bound
-in force. The ledger persists commit-ordered evidence and scan ordinals. Its
-first complete observation after restart preserves an existing ordinal; later
-observations advance it only after the configured scan interval.
+costs the same regardless of how long a session's history is: the attempt is a
+column of the lifecycle row already read, and the frontier is one backward index
+lookup on `outbox_event_turn_progress_by_session`, whose partial predicate is
+that same exclusion. Aggregates over a session's history would have made a
+once-a-minute pass cost more the longer a session lived. The same requirement
+binds the in-flight conjuncts above, which are absence checks over append-only
+tables: each one is answered from an index leading with the session, and the
+dedicated compaction call and the tool attempt are indexed partially on the live
+rows those checks name, so what is indexed is bounded by how much is happening
+at once rather than by how much has ever happened. No part of one inventory read
+scans a history. The staleness bound is also refused below whole-second
+precision, so the bound an audit line reports is exactly the bound in force. The
+ledger persists commit-ordered evidence and scan ordinals. Its first complete
+observation after restart preserves an existing ordinal; later observations
+advance it only after the configured scan interval.
 
 **Coverage.** One scan observes the whole quiescent population, so the bound is
 a property of the binary rather than of how many sessions happen to be
@@ -683,30 +671,29 @@ is what makes the lap finish: a turn can be due forever without ending, and
 turns that become due while a lap runs would otherwise be served ahead of the
 members waiting behind them.
 
-What that costs is stated exactly, because it is the one number here that
-depends on population. The staleness bound governs when a turn becomes *due*,
-and that remains independent of how many turns are quiescent: every turn is
-observed on every scan. Ending them is not. A lap of more than one window takes
-a scan per windowful to work through, and a turn's wait is the sum of two laps
-rather than one: a turn becoming due while a lap runs is not among its members,
-so it waits for that lap's remaining members to drain and then for its own place
-in the lap that opens next. The wait is therefore
-`⌈remaining ÷ 64⌉ + ⌈position ÷ 64⌉ − 1` scan intervals, counting from the scan
-that found it due: that scan serves a window of its own, so it is one of the two
-terms rather than an interval before them. A turn found while 63 members remain
-waits one interval — that scan drains the 63, and the next opens the lap holding
-it — and a turn already in the first window of its own lap waits none. At its
-worst, a turn arriving into a full lap and then taking the last place in the
-next, the wait is `⌈previous ÷ 64⌉ + ⌈own ÷ 64⌉ − 2`: a turn becoming due while
-a lap runs became due after that lap had already opened, so at least one of its
-scans is behind it before the count begins. A cohort at the inventory's capacity
-would take over eleven days per lap to work through, so a turn arriving into one
-waits two. That is accepted rather than overlooked: the alternative is a scan
-that runs until its cohort is drained, which delays the next observation of
-*every* session, including the ones whose turns are working. A watchdog may be
-slow to finish; it may not stop watching. What deferral does not cost is the
-turn: one left alone had nothing change, so it is observed unchanged and comes
-due again on a later scan, waiting rather than being forgotten.
+That deferral is the one cost here that depends on population, so it is bounded
+exactly. The staleness bound governs when a turn becomes *due*, and that remains
+independent of how many turns are quiescent: every turn is observed on every
+scan. Ending them is not. A lap of more than one window takes a scan per
+windowful to work through, and a turn's wait is the sum of two laps rather than
+one: a turn becoming due while a lap runs is not among its members, so it waits
+for that lap's remaining members to drain and then for its own place in the lap
+that opens next. The wait is therefore `⌈remaining ÷ 64⌉ + ⌈position ÷ 64⌉ − 1`
+scan intervals, counting from the scan that found it due: that scan serves a
+window of its own, so it is one of the two terms rather than an interval before
+them. A turn found while 63 members remain waits one interval — that scan drains
+the 63, and the next opens the lap holding it — and a turn already in the first
+window of its own lap waits none. At its worst, a turn arriving into a full lap
+and then taking the last place in the next, the wait is
+`⌈previous ÷ 64⌉ + ⌈own ÷ 64⌉ − 2`: a turn becoming due while a lap runs became
+due after that lap had already opened, so at least one of its scans is behind it
+before the count begins. A cohort at the inventory's capacity would take over
+eleven days per lap to work through, so a turn arriving into one waits two. That
+is accepted: the alternative is a scan that runs until its cohort is drained,
+which delays the next observation of *every* session, including the ones whose
+turns are working. Deferral does not lose the turn: one left alone had nothing
+change, so it is observed unchanged and comes due again on a later scan, waiting
+rather than being forgotten.
 
 **Deployment bounds.** The required daemon configuration owns the staleness
 bound and scan interval. Either may be `"none"`: no scan interval leaves the
@@ -719,37 +706,36 @@ waits for the first positive finite automatic-reconciliation backoff (base, then
 cap) before retrying until it succeeds or shutdown arrives; when neither is
 finite, it reports the failure once and idles without retrying. Finite values
 pass checked constructors that reject zero, subsecond precision, and an
-unrepresentable timer range; no compiled policy value remains.
+unrepresentable timer range; no policy value is compiled in.
 
 **Terminalization.** A due turn ends through the same committed failed-turn
-transition startup recovery commits, through the same reviewed statement and so
-taking the same lock: the session's `session_scheduler` row is locked
-`FOR UPDATE`, and nothing else is. That places this among the scheduler-family
-transactions holding only that row. The session/scheduler pair order recorded by
+transition startup recovery commits, through the same statement and so taking
+the same lock: the session's `session_scheduler` row is locked `FOR UPDATE`, and
+nothing else is. That places this among the scheduler-family transactions
+holding only that row. The session/scheduler pair order recorded by
 `crates/persistence/src/lock_inventory.rs` — the `session` row first — governs
 the transactions that lock both, which this is not; a scheduler-first
-acquisition of the pair would deadlock against every path that takes them in
-that order and must not be introduced here or anywhere else. Holding the
-scheduler row serializes this pass against the other transactions that take it,
-which include turn activation and startup recovery directly, and submit input
-once it reaches the scheduler row behind the session row.
+acquisition of the pair must not exist anywhere, since it would deadlock against
+every path that takes them in that order. Holding the scheduler row serializes
+this pass against the other transactions that take it, which include turn
+activation and startup recovery directly, and submit input once it reaches the
+scheduler row behind the session row.
 
-An attempt waits under two budgets, because it asks two different questions of
-two different rows. Reaching a pooled connection and then the scheduler row is
-bounded at 250 milliseconds: the transactions holding that row are short, so a
-longer wait means the session is busy, which is itself evidence against the turn
-being wedged — the attempt reports contention rather than a fault, and the lap
-reaches the turn again. Everything after the row is held is bounded at one
-second instead, because appending to the outbox takes a row every writer in the
-daemon holds until it commits; a few hundred milliseconds there is ordinary
-traffic, and refusing on it would make the pass fail whenever the daemon was
-busy. What that second buys is that one indefinite holder of that row cannot
-stall the phase, which an unbounded wait would allow — the same stall the first
-budget exists to prevent, one statement later. A wait refused after the row is
-held is an ordinary failed attempt, never contention on this session. The
-recovery transaction the slot-held watchdog and the expiry handoff share
-installs the same pair, in the same order and for the same reasons, because it
-reaches the same outbox row.
+An attempt waits under two budgets, because the two rows it takes have different
+contention. Reaching a pooled connection and then the scheduler row is bounded
+at 250 milliseconds: the transactions holding that row are short, so a longer
+wait means the session is busy, which is itself evidence against the turn being
+wedged — the attempt reports contention rather than a fault, and the lap reaches
+the turn again. Everything after the row is held is bounded at one second
+instead, because appending to the outbox takes a row every writer in the daemon
+holds until it commits; a few hundred milliseconds there is ordinary traffic,
+and refusing on it would make the pass fail whenever the daemon was busy. That
+second means one indefinite holder of that row cannot stall the phase, which an
+unbounded wait would allow — the same stall the first budget exists to prevent,
+one statement later. A wait refused after the row is held is an ordinary failed
+attempt, never contention on this session. The recovery transaction the
+slot-held watchdog and the expiry handoff share installs the same pair, in the
+same order and for the same reasons, because it reaches the same outbox row.
 
 Neither budget can leave a commit's outcome unknown, which is what rules out
 bounding the attempt by a statement timeout or by cancelling its future instead.
@@ -840,10 +826,10 @@ and during its sequential recovery transactions.
 
 The automatic budget is five attempts. Each attempt locks the same session
 scheduler row as the operator path, reconstitutes the complete scheduling
-projection, and applies the existing reconciliation-required transition to the
-exact ambiguous operation and ended attempt. Tool recovery additionally rebuilds
-the proposal-ordered result suffix. It neither claims what the provider or tool
-did nor rewrites the ambiguous operation, and it reclassifies pending steering
+projection, and applies the reconciliation-required transition to the exact
+ambiguous operation and ended attempt. Tool recovery additionally rebuilds the
+proposal-ordered result suffix. It neither claims what the provider or tool did
+nor rewrites the ambiguous operation, and it reclassifies pending steering
 through the same terminal boundary. A concurrent operator decision or other
 authoritative transition wins by ordinary row locking and records the automatic
 attempt as `superseded`. After five failures, the recovery row becomes
@@ -925,8 +911,8 @@ end (INV-034):
   — reports its session the same way, so the wait is named on the restart that
   creates it and not only on a later one. The report is scoped to the model-call
   wait: `AwaitingRecoveryDecision` also carries a tool-attempt ambiguity set,
-  which has no operator surface and stays classified as before, so a reported
-  session always names a decision an operator can make;
+  which has no operator surface and keeps the classification above, so a
+  reported session always names a decision an operator can make;
 - an approval wait remains parked unchanged, with no fabricated decision or live
   attempt; and
 - a running tool attempt follows its stored effect class: prepared or
@@ -975,15 +961,15 @@ observation rolls back as `NoActiveTurn`. There is no process-incarnation column
 and no lease: under the single-daemon deployment contract, every nonterminal
 attempt observed at startup is a prior-process abandonment (INV-010). The
 advisory guard is acquired before this scan and held on its dedicated connection
-for the complete process lifetime, so a second daemon cannot run the premise
-concurrently.
+for the complete process lifetime, so a second daemon cannot run concurrently
+and break that premise.
 
 ## Occupied-slot input handling
 
 Command construction, user-global deduplication, and acceptance atomicity are
 [identity-and-commands](identity-and-commands.md) scope. The process protocol
-exposes the existing delivery algebra as the closed `start_when_idle`, `steer`,
-and `queue` intents, mapped respectively to `StartWhenNoActiveTurn`,
+exposes the delivery algebra as the closed `start_when_idle`, `steer`, and
+`queue` intents, mapped respectively to `StartWhenNoActiveTurn`,
 `NextSafePoint`, and `AfterCurrentTurn`;
 [process-protocol](process-protocol.md#client-requests) owns the wire shapes.
 The occupied-slot delivery outcomes implemented here are:
@@ -997,18 +983,17 @@ The occupied-slot delivery outcomes implemented here are:
   configuration-free binding to the exact active source turn; its acceptance
   position derives from the validated session acceptance tail. No turn is
   created; the daemon returns a normal typed receipt carrying that input,
-  position, and source turn. A reclassification path now exists: terminalization
-  of the source turn reclassifies pending steering into a queued successor
-  origin turn that inherits the source turn's configuration
-  (`queued_input_origin.source_configuration_turn_id`), except under a committed
-  closure handoff, which closes it as `closed_not_delivered` rather than
-  reclassifying it. At the next model-call preparation, every pending input is
-  consumed under the atomic boundary in
+  position, and source turn. Terminalization of the source turn reclassifies
+  pending steering into a queued successor origin turn that inherits the source
+  turn's configuration (`queued_input_origin.source_configuration_turn_id`),
+  except under a committed closure handoff, which closes it as
+  `closed_not_delivered` rather than reclassifying it. At the next model-call
+  preparation, every pending input is consumed under the atomic boundary in
   [model-call-execution](model-call-execution.md) (INV-036). Every accepted
   input settles one `injection_settled` receipt: an origin `delivered` to its
   turn at acceptance, steering `delivered` when consumed or reclassified,
   `not_delivered` when closed, and every recorded rejection `rejected` with its
-  kind ([session-lifecycle](../proposals/session-lifecycle.md) §8).
+  kind.
 - `AfterCurrentTurn` creates an ordinary queued origin turn with frozen
   configuration and an immutable acceptance position; it fixes no predecessor
   until eligibility. While the source turn holds the slot it cannot activate.
@@ -1105,17 +1090,16 @@ wait indefinitely on a call that will never complete. Why: the two rules — a
 call keeping its ordinary completion law and a replacement extending the next
 context frontier — are jointly satisfiable in exactly this order, and the
 persistence triggers that enforce prefix-only extension reject every other order
-at commit, so an implementation that appends the boundary early fails loudly in
-its own tests rather than writing a mis-ordered transcript. For
-`RunnerLostBeforePin`, replacement installs the new exact selector and returns
-the placement to `Unpinned` at the successor revision; it creates no semantic
-boundary, workspace, grant, or lease. Workspace provisioning and the first pin
-remain part of the eventual initial dispatch. `AbandonLostRunner` requires the
-same exact lost revision and no active turn, then installs terminal
-`RunnerAbandoned` placement state. If a turn is active it records
-`ActiveTurnRequiresExistingControl`; the user first uses the existing
+at commit, so a boundary appended early is rejected rather than written as a
+mis-ordered transcript. For `RunnerLostBeforePin`, replacement installs the new
+exact selector and returns the placement to `Unpinned` at the successor
+revision; it creates no semantic boundary, workspace, grant, or lease. Workspace
+provisioning and the first pin remain part of the eventual initial dispatch.
+`AbandonLostRunner` requires the same exact lost revision and no active turn,
+then installs terminal `RunnerAbandoned` placement state. If a turn is active it
+records `ActiveTurnRequiresExistingControl`; the user first uses the
 `stop_turn`, approval-decision, or reconciliation flow until the slot is empty,
-so abandonment never mints cancellation authority. With no active turn,
+so abandonment never creates cancellation authority. With no active turn,
 including an idle session with queued turns, no turn or frontier is fabricated;
 queued work remains queued and later runs with the daemon-only executable-tool
 snapshot because the terminal placement can issue no runner lease. No case turns
@@ -1171,9 +1155,9 @@ summary or result. Live authorization and terminalization serialize on the
 session row and exactly replay an already-landed transition after an ambiguous
 commit. Unreferenced snapshots and compaction records fail closed.
 
-The exact historical start law remains closed. Its prefix is either the
-immediate predecessor's terminal snapshot (or the imported seed for the first
-native turn), or the validated chain tip's result when the start follows that
+The exact historical start law is closed. Its prefix is either the immediate
+predecessor's terminal snapshot (or the imported seed for the first native
+turn), or the validated chain tip's result when the start follows that
 compaction. A historical start committed before the chain tip remains admissible
 only when its entire stored frontier is an exact semantic prefix of the tip's
 source; this preserves old starts without authorizing a later turn to omit the
@@ -1188,8 +1172,8 @@ resolves only through the checked session-creation producer; its separate
 one-to-one `ImportedSessionSeed` must name the exact stored frontier identity
 whose membership matches the selected imported prefix. Substituting an
 equal-content reminted identity for that seed fails reconstitution.
-`SingleSource` ancestry resolution remains unimplemented. `TranscriptFrontier`
-itself is [sessions-and-transcript](sessions-and-transcript.md) scope.
+`SingleSource` ancestry resolution is unimplemented. `TranscriptFrontier` itself
+is [sessions-and-transcript](sessions-and-transcript.md) scope.
 
 ## Evidence-bearing reconstitution
 
@@ -1211,23 +1195,22 @@ are conclusions derived from complete owner facts, never trusted discriminators.
   phase.
 - A failed terminal turn that ended through a physical attempt durably names its
   exact ended attempt and optional terminal call
-  (`turn_lifecycle.terminal_attempt_id`, `terminal_model_call_id`, backfilled
-  and closed by migration `202607220003`). Reconstitution validates that
-  provenance fail-closed through the typed
-  `FailedTurnExecutionReconstitutionInput` — an ended `known_failure` or `lost`
-  attempt, plus a correlated `known_failed`/`cancelled` call when one exists —
-  instead of accepting an evidence-free failure record, and the deferred
-  `assert_failed_terminal_execution_final_state` assertion re-closes the shape
-  at every commit. When the failure closed a tool round, the same input names
-  the complete user-sourced denial resolutions backing every `ToolDenied` result
-  entry in the terminal suffix; a `ToolDenied` entry whose request lacks an
-  exact `Deny` resolution — including a missing or approving decision — fails
-  reconstitution rather than fabricating a user denial. A failed turn may
-  instead name the round's own continuation call — created at the continuation
-  boundary and later lost or known-failed. Reconstitution accepts that call
-  exactly when its whole frontier is the completed round's batch-correlated
-  result projection, extended by any steering it consumed, and the terminal
-  frontier extends the call frontier by the failure marker alone; a
+  (`turn_lifecycle.terminal_attempt_id`, `terminal_model_call_id`; migration
+  `202607220003`). Reconstitution validates that provenance fail-closed through
+  the typed `FailedTurnExecutionReconstitutionInput` — an ended `known_failure`
+  or `lost` attempt, plus a correlated `known_failed`/`cancelled` call when one
+  exists — instead of accepting an evidence-free failure record, and the
+  deferred `assert_failed_terminal_execution_final_state` assertion re-closes
+  the shape at every commit. When the failure closed a tool round, the same
+  input names the complete user-sourced denial resolutions backing every
+  `ToolDenied` result entry in the terminal suffix; a `ToolDenied` entry whose
+  request lacks an exact `Deny` resolution — including a missing or approving
+  decision — fails reconstitution rather than fabricating a user denial. A
+  failed turn may instead name the round's own continuation call — created at
+  the continuation boundary and later lost or known-failed. Reconstitution
+  accepts that call exactly when its whole frontier is the completed round's
+  batch-correlated result projection, extended by any steering it consumed, and
+  the terminal frontier extends the call frontier by the failure marker alone; a
   round-completed continuation window never contains a turn-end closure.
 - A cancelled terminal turn reconstructs only from
   `CancelledTurnExecutionReconstitutionInput`: its exact ended attempt carries
@@ -1325,33 +1308,33 @@ resolves the one-time imported display-title backfill
 marks every prior-process nonterminal runner connection lost. Blob
 initialization failure stops startup before the backfill, either socket binding,
 or scheduling; unrouted historical S3 bindings retain their lazy runtime check.
-It then — once the credential-pool child is composed — establishes each
-`codex_home` profile's credential-home identity, resolves every prior-process
-capacity reservation, resolves every retained OAuth refresh-in-progress marker
-to a replacement token or a quarantine, scavenges every crash-left OAuth scratch
-home, and runs the legacy family-to-policy backfill
+It then establishes each `codex_home` profile's credential-home identity,
+resolves every prior-process capacity reservation, resolves every retained OAuth
+refresh-in-progress marker to a replacement token or a quarantine, scavenges
+every crash-left OAuth scratch home, and runs the legacy family-to-policy
+backfill
 ([configuration and credentials](configuration-and-credentials.md#credential-deliveries)).
 Those five gates sit after the recovery scan so a failure cannot block recovery
 of acknowledged work, and before any socket binding or scheduling so no request
 reaches a historical session whose policy is not yet rewritten and no CLI call
-runs against an unestablished credential home. The two OAuth gates are here for
-the same reason and are not optional cleanup. A retained marker names a
-single-flight refresh whose owning daemon is gone, so a preparation that
-admitted work first would either join a flight that no longer exists or reuse a
-generation the provider may already have rotated, which the pinned client treats
-as permanent failure. A crash-left scratch home holds real tokens on disk under
-a directory nothing is now watching, so scavenging it before admitting work is
-what bounds how long those tokens outlive the process that minted them. No
-present composition performs any of the five. It then binds the runner socket,
-binds the process socket, then concurrently admits runner enrollment and
-protocol requests, dispatches the outbox, schedules eligible work, and
-supervises turn liveness. On a database without the fence migration, the guarded
-first migration creates the fence row before the daemon initializes its first
-fenced pool. No request, dispatch cursor advance, or scheduler pass occurs
-before recovery completes. Any phase failure is a failed startup with a
-classified, key-bearing log line and a failure exit code. Runner recovery-only
-binding and reconciliation remain the committed unimplemented ordering stated
-under [startup scan and recovery](#startup-scan-and-recovery).
+runs against an unestablished credential home. The two OAuth gates are required
+for the same reason. A retained marker names a single-flight refresh whose
+owning daemon is gone, so a preparation that admitted work first would either
+join a flight that no longer exists or reuse a generation the provider may
+already have rotated, which the pinned client treats as permanent failure. A
+crash-left scratch home holds real tokens on disk under a directory nothing is
+now watching, so scavenging it before admitting work is what bounds how long
+those tokens outlive the process that minted them. No present composition
+performs any of the five. It then binds the runner socket, binds the process
+socket, then concurrently admits runner enrollment and protocol requests,
+dispatches the outbox, schedules eligible work, and supervises turn liveness. On
+a database without the fence migration, the guarded first migration creates the
+fence row before the daemon initializes its first fenced pool. No request,
+dispatch cursor advance, or scheduler pass occurs before recovery completes. Any
+phase failure is a failed startup with a classified, key-bearing log line and a
+failure exit code. Runner recovery-only binding and reconciliation are the
+committed unimplemented ordering stated under
+[startup scan and recovery](#startup-scan-and-recovery).
 
 The dedicated guard connection is checked once per second while the runtime is
 active. Losing that session is a fatal fencing event: admission, dispatch, and
@@ -1380,20 +1363,20 @@ session's exclusive current-generation fence so even detached pool sessions have
 ended, removes only this daemon's identity-pinned and revalidated socket, and
 releases the advisory locks by closing its dedicated guard connection. Window
 expiry abandons remaining tasks, warns, and skips the unbounded pool drain;
-process exit releases its sessions. Why signal-driven shutdown is polish, not
-correctness: abrupt exit at any point is safe because durable rows plus the next
-guarded startup scan recover work and the durable outbox cursor redelivers an
-uncommitted offer (INV-032, INV-034), so the grace window buys only latency.
-Repositories and services are cheap per-invocation clones over the shared pool;
-no shared locked service instance exists.
+process exit releases its sessions. Why signal-driven shutdown affects latency,
+not correctness: abrupt exit at any point is safe because durable rows plus the
+next guarded startup scan recover work and the durable outbox cursor redelivers
+an uncommitted offer (INV-032, INV-034), so the grace window reduces only
+latency. Repositories and services are cheap per-invocation clones over the
+shared pool; no shared locked service instance exists.
 
 ## Delegated waits, messages, and wake turns
 
-This section is the session-delegation foundation proposal. A spawned child's
-first turn has a closed delegated-task origin naming the exact spawning request;
-its starting frontier contains the checked `DelegatedTask` entry and contains no
-synthetic accepted input. Every later turn uses the ordinary accepted-input or
-delegation-wake origin appropriate to the work that queued it.
+A spawned child's first turn has a closed delegated-task origin naming the exact
+spawning request; its starting frontier contains the checked `DelegatedTask`
+entry and contains no synthetic accepted input. Every later turn uses the
+ordinary accepted-input or delegation-wake origin appropriate to the work that
+queued it.
 
 `AwaitingChild { wait }` is an active phase with no current attempt. Its wait
 names the exact foreground `await_session` request, spawning request, and child;
@@ -1460,20 +1443,19 @@ holding it. The same cancelled-turn evidence cannot be selected as a stopped
 outcome. Detached child work stays independently schedulable after the parent's
 turn or goal has terminalized.
 
-**SPEC PROPOSAL — immediate descendant terminalization.** A bound `Stop` or
-`Cancel` policy action commits an authoritative logical terminal proof for the
-child in the same transaction as the parent command, relationship disposition,
-delivered child result, and wake. That proof carries the exact parent-command
-authority and is terminal even when a provider or tool operation was already
-physically in flight. The child is no longer scheduler work: an immutable
-one-to-one lifecycle projection releases its active or queued index slot, while
-the retained turn reads as the typed parent-terminated outcome and remains the
-immediate terminal predecessor of later independent work. Its retained terminal
-frontier preserves that execution lineage for accepted-input and delegation-wake
-activation. Physical cancellation latency cannot revive it, replace its result,
-or change the typed stop/cancel provenance. A background or bound `KeepRunning`
-edge has no such proof and remains schedulable. This proposal is accepted with
-the implementing stack's merge.
+**Immediate descendant terminalization.** A bound `Stop` or `Cancel` policy
+action commits an authoritative logical terminal proof for the child in the same
+transaction as the parent command, relationship disposition, delivered child
+result, and wake. That proof carries the exact parent-command authority and is
+terminal even when a provider or tool operation was already physically in
+flight. The child is no longer scheduler work: an immutable one-to-one lifecycle
+projection releases its active or queued index slot, while the retained turn
+reads as the typed parent-terminated outcome and remains the immediate terminal
+predecessor of later independent work. Its retained terminal frontier preserves
+that execution lineage for accepted-input and delegation-wake activation.
+Physical cancellation latency cannot revive it, replace its result, or change
+the typed stop/cancel provenance. A background or bound `KeepRunning` edge has
+no such proof and remains schedulable.
 
 Startup and the periodic sweep recognize child waits, pending delegation inbox
 content, and undelivered results from durable rows. They neither infer a result
@@ -1494,22 +1476,18 @@ from child transcript state nor depend on process-local wake memory.
 - The eligible terminal-failure path (queued turn fixes its start and fails
   without an attempt for a structurally unexecutable configuration) is
   unimplemented; activation is the only eligibility outcome.
-- Native `SingleSource` ancestry remains unschedulable
+- Native `SingleSource` ancestry is unschedulable
   (`UnsupportedSessionAncestry`); selecting and resolving native fork boundaries
   is unimplemented. Imported-conversation ancestry has its own exact
   selected-prefix frontier path and does not close that fork question.
 - Continuation safe points after tool results consume pending steering through
   the atomic boundary in [tool-loop](tool-loop.md).
-- Startup recovery now classifies model-call evidence (a `Prepared` call proves
-  no send authorization existed, so startup validates its stored frontier and
-  leaves the call, attempt, and turn unchanged for the ordinary scheduler to
-  retry; an unstopped in-flight call parks the turn as ambiguous in
-  `awaiting_model_call_recovery`), tool-loop evidence, and delegated-result
-  waits. The model-call park is resolved automatically through the bounded
-  durable attempt protocol above, or by the existing user reconciliation command
-  if it wins the race; the process surface asks for operator action only after
-  the automatic budget is exhausted. Neither path resolves what the provider
-  actually did. Provider-evidence resolution remains an
+- Startup recovery classifies model-call evidence, tool-loop evidence, and
+  delegated-result waits. The model-call park is resolved automatically through
+  the bounded durable attempt protocol above, or by the user reconciliation
+  command if it wins the race; the process surface asks for operator action only
+  after the automatic budget is exhausted. Neither path resolves what the
+  provider actually did. Provider-evidence resolution remains an
   [open question](../open-questions.md#turn-lifecycle); the tool-attempt
   ambiguity wait keeps its own operator surface deferred with that question.
 - Whether a terminal turn carries a durable cause, which would separate a
@@ -1518,8 +1496,8 @@ from child transcript state nor depend on process-local wake memory.
   [open question](../open-questions.md#turn-lifecycle).
 - Per-session scan gating and fairness remain an
   [open question](../open-questions.md#turn-lifecycle); deployment configuration
-  now owns the sweep interval and turn-liveness staleness and scan bounds. The
+  owns the sweep interval and turn-liveness staleness and scan bounds. The
   process-wide advisory singleton guard is specified by
   [process-protocol](process-protocol.md).
-- LISTEN/NOTIFY remains the documented multi-process extension only; the
-  baseline is single-process nudge plus sweep.
+- LISTEN/NOTIFY is the multi-process extension only; the baseline is
+  single-process nudge plus sweep.
