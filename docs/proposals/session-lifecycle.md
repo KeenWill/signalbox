@@ -92,8 +92,8 @@ and the 10 external-gate stalls: an expired approval escalates and survives turn
 boundaries instead of failing the turn (17 headless-escalation kills). Where a
 module's redispatch owns the retry — the unattended repo-watch escalation fails
 its turn today precisely because a fresh dispatch supersedes it — the redispatch
-closes the parked predecessor as `superseded{by}`, so the surviving park never
-duplicates the redispatched work.
+closes the parked predecessor as `superseded{by}`, so the redispatched session
+never duplicates the closed predecessor's pursuit.
 
 **Proposed behavior.** For an owned session, `active` carries a stall deadline;
 an unmonitored conversation carries none, per §6. The model-call count per
