@@ -50,12 +50,12 @@ use signalbox_domain::{
     ImportedConversationFormat, ImportedConversationId, ImportedSessionRelationship,
     ImportedTranscriptEntryId, InitialToolApproval, MergeableState, ModelCallId,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
-    ModelSelectionRequest, ModelTargetCatalog, NormalizedToolArguments, ProviderModelIdentity,
-    PullRequestNumber, ReplaceSessionMetadataResult, RepoWatchAuthorLogin, RepositorySlug,
-    ResolvedProviderTarget, SemanticTranscriptEntryId, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent, ToolCallProposal,
-    ToolName, ToolRequestId, ToolResponsePartIdentity, ToolRoundModelCallIdentities,
-    ToolUsingAssistantResponse, TurnId,
+    ModelSelectionRequest, ModelTargetCatalog, NormalizedToolArguments,
+    PhysicalCancellationModelCallTurnIdentities, ProviderModelIdentity, PullRequestNumber,
+    ReplaceSessionMetadataResult, RepoWatchAuthorLogin, RepositorySlug, ResolvedProviderTarget,
+    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+    SessionId, SessionMetadataContent, ToolCallProposal, ToolName, ToolRequestId,
+    ToolResponsePartIdentity, ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TurnId,
 };
 use signalbox_model_provider_runtime::{
     RuntimeContextCompactionModel, RuntimeInputTokenCountError, RuntimeModelCallProvider,
@@ -6664,14 +6664,15 @@ async fn s07_inv029_stop_turn_requests_cancellation_of_an_issued_call_exactly_on
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn lifecycle_closure_retransmission_reports_its_receipt_after_interrupt_progress()
+async fn lifecycle_closure_retransmission_after_settlement_issues_no_second_interrupt()
 -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
     let (_, live_turn_id) =
         submit_first_input(&mut connection, session_id, String::from("first request")).await?;
-    let _issued = Box::pin(authorize_issued_model_call(&runtime.pool, session_id)).await?;
+    let (calls, issued, _) =
+        Box::pin(authorize_issued_model_call(&runtime.pool, session_id)).await?;
     let lifecycle_command = command()?;
 
     connection
@@ -6687,6 +6688,23 @@ async fn lifecycle_closure_retransmission_reports_its_receipt_after_interrupt_pr
         )
         .await?;
     let first = response_within(&mut connection).await?;
+    let cancellation = issued
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Cancelled);
+    let terminal = calls
+        .apply_terminal_observation(
+            SessionId::from_uuid(session_id.into_uuid()),
+            cancellation,
+            ModelCallTerminalIdentities::PhysicalCancellation(
+                PhysicalCancellationModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                ),
+            ),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    assert!(matches!(terminal, ModelCallTerminalOutcome::Cancelled(_)));
     connection
         .request_version(
             ProtocolVersion::One,

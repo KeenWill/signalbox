@@ -1526,7 +1526,7 @@ ALTER TABLE goal_command
 --
 -- §2: a session-level stop settles an open goal generation with the session's
 -- outcome; `user_stopped` stays the goal command's own event. An achieved
--- generation that was never verified admits every later closure.
+-- generation admits only an achieved-verified or achieved-declared closure.
 --
 
 -- Supersedes 202609020002_session_lifecycle_satellite.

@@ -15678,6 +15678,7 @@ where
                 defaults_version,
                 ..
             } = application
+                && !closure_settled(services, session).await
                 && interrupt_for_closure(services, &command, live_turn, defaults_version)
                     .await
                     .is_err()
