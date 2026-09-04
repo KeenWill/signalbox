@@ -170,7 +170,9 @@ The pool's trigger policy does not see it, and no row above describes it.
 ## Derived views
 
 Every other page's treatment of this machine is a derived view: a sentence
-naming the column that page projects, plus a link here.
+naming the column that page projects, plus a link here. A derived view may
+restate a cell's content for local readability and must not extend it. Where a
+derived view and a row disagree, the row governs.
 
 Each projection below is a column above, and names the page that owns it:
 
