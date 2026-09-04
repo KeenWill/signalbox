@@ -260,9 +260,9 @@ combination is rejected merely for being workspace-free
 the composition axes, and
 [tool-loop](tool-loop.md#registry-placement-and-effect-metadata) owns which
 declarations carry a workspace requirement). Why: advertising a tool that cannot
-be admitted at lease claim spends a model round to learn what preparation
-already knew, and accurate advertisement is cheaper than a late refusal. An
-exact-identity selector binds that runner and registration revision for a
+be admitted at lease claim spends a model round to learn what preparation had
+already determined, and accurate advertisement is cheaper than a late refusal.
+An exact-identity selector binds that runner and registration revision for a
 possible first dispatch, so its loss produces `RunnerLostBeforePin`. A
 capability-class selector freezes the class and required availability, not a
 runner identity; the eventual first dispatch may select only a then-current
@@ -636,8 +636,8 @@ its pool authorizes an availability successor against a *different* eligible
 profile ([availability successor calls](#availability-successor-calls)) — the
 `terminal` and `successor` rows of
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine),
-which states the four ordered gates that send a failure to the first rather than
-the second, the first gate it fails deciding — and ambiguity parks the turn for
+which states the four ordered gates that decide between them; a failure ends
+`terminal` at the first gate it fails — and ambiguity parks the turn for
 recovery. That exception is substitution, never repetition: no path re-issues a
 call against the profile that failed. A later scheduler pass never treats an
 issued unclassified call as fresh authorization. Why: a lost acknowledgement
@@ -740,21 +740,20 @@ by whether the exhaustion selects a wait — which `fail` never does and `park`
 does only while some exclusion a wake can clear remains — together with whether
 this **availability chain** has already issued a call, the chain and not the
 turn, since a later tool round opens a fresh chain against a turn that has
-already issued calls. Every such ending, and every projection of each, is stated
-once by
+already issued calls. Every such ending, and every projection of each, is
+defined by
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine).
 
-This page owns one column of
-[that table](credential-availability.md#the-credential-availability-machine) —
-terminal evidence and cause — and states only that column here. A chain that
-already observed a qualifying provider failure carries that last observed cause
-and its `ProviderError` evidence. A turn that reached an exhausted pool before
-issuing any call instead carries the distinct `credential_pool_exhausted`
-preparation cause together with the frozen policy's durable member-exclusion
-evidence; it never fabricates provider evidence and never borrows a stale
-provider cause, because no provider request was issued for it to have observed.
-A parked turn carries no terminal evidence at all: it has not terminalized, and
-is not one of this page's terminal outcomes.
+This page owns the terminal-evidence-and-cause column of
+[that table](credential-availability.md#the-credential-availability-machine). A
+chain that already observed a qualifying provider failure carries that last
+observed cause and its `ProviderError` evidence. A turn that reached an
+exhausted pool before issuing any call instead carries the distinct
+`credential_pool_exhausted` preparation cause together with the frozen policy's
+durable member-exclusion evidence; it never fabricates provider evidence and
+never borrows a stale provider cause, because no provider request was issued for
+it to have observed. A parked turn carries no terminal evidence at all: it has
+not terminalized, and is not one of this page's terminal outcomes.
 
 **Implemented behavior — typed pool exhaustion.** A sealed
 `CredentialPoolExhaustedModelCallTurn` carries the pool identity separately from
@@ -775,20 +774,20 @@ correlation and optional reset, without changing the typed domain cause above.
 Every pool-selected `Prepared` call pins the selecting immutable pool-policy
 identity as an insert-only authorization fact beside its credential reference.
 Reconstitution requires that policy to contain the pinned profile with the
-expected target adapter and delivery kind. Every observation- derived trigger
+expected target adapter and delivery kind. Every observation-derived trigger
 action reloads this call-pinned revision, so an explicit session credential
 update that commits while the provider interaction is in flight cannot change
 the action applied to its result.
 
 Each successor durably records the predecessor call it follows and the cause
-that authorized it, so a chain reads as evidence rather than as two calls that
-happen to share a turn. A goal-mode turn whose pool exhaustion selects no wait
-blocks with the ordinary `execution_failure` reason ([goal-mode](goal-mode.md));
-one that selects a wait remains the current goal turn and appends nothing,
-because no terminal disposition exists yet. The discriminator is wait selection
-and not the configured value, so a `park` pool whose members this turn's own
-chain exclusions have all removed blocks like any other failure rather than
-staying current forever.
+that authorized it, so a chain is recorded as evidence rather than as two calls
+that happen to share a turn. A goal-mode turn whose pool exhaustion selects no
+wait blocks with the ordinary `execution_failure` reason
+([goal-mode](goal-mode.md)); one that selects a wait remains the current goal
+turn and appends nothing, because no terminal disposition exists yet. The
+discriminator is wait selection and not the configured value, so a `park` pool
+whose members this turn's own chain exclusions have all removed blocks like any
+other failure rather than staying current forever.
 
 ## Provider observation classification
 
@@ -916,8 +915,8 @@ into the prepared model operation, and the runtime boundary enforces it — the
 turn's outcome payload validates against the declared schema or the turn reports
 its failure, never an unvalidated approximation. The
 [model-runtime substrate](runtime-substrate.md) already admits an optional
-per-call structured-output contract; this paragraph constrains the session path
-between them: nothing may assume a prepared model operation carries no output
+per-call structured-output contract; the session path between them is
+constrained: nothing may assume a prepared model operation carries no output
 contract, and the prepared-operation shape must stay extensible to the recorded
 schema without reinterpreting existing calls.
 
