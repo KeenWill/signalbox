@@ -155,6 +155,8 @@ const PARKED_TARGET_CUTOFF_COMMAND_ID: u128 = 0x58_801;
 const NONMATCHING_PROGRESS_EVENT_ID: u128 = 0x58_600;
 const SIBLING_COUNT_FIRST_STOP_COMMAND_ID: u128 = 0x58_700;
 const SIBLING_COUNT_SECOND_STOP_COMMAND_ID: u128 = 0x58_701;
+const SIBLING_PARK_FIRST_STOP_COMMAND_ID: u128 = 0x58_710;
+const SIBLING_PARK_SECOND_STOP_COMMAND_ID: u128 = 0x58_711;
 const CROSS_TARGET_CONFLICT_EVENT_ID: u128 = 0x58_501;
 const REPOSITORY_SCOPED_RULE: &str = "merge-forward-per-repository";
 const BATCH_DELAY_FIRST_STOP_COMMAND_ID: u128 = 0x58_400;
@@ -1322,6 +1324,26 @@ async fn wait_for_advisory_lock(pool: &PgPool) -> Result<(), Box<dyn Error>> {
             .fetch_one(pool)
             .await?;
             if waiting {
+                return Ok::<(), sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
+async fn wait_for_lock_waiters(pool: &PgPool, expected: i64) -> Result<(), Box<dyn Error>> {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*)
+                   FROM pg_stat_activity
+                  WHERE wait_event_type = 'Lock'",
+            )
+            .fetch_one(pool)
+            .await?;
+            if waiting >= expected {
                 return Ok::<(), sqlx::Error>(());
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -3875,6 +3897,113 @@ async fn one_batch_counts_one_attempt_however_many_siblings_fail() -> Result<(),
 
     assert_eq!(after_first_sibling, 1);
     assert_eq!(outstanding_failed_attempts(&fixture.pool).await?, 1);
+    Ok(())
+}
+
+/// A terminal goal projects its complete repository-watch dispatch cohort
+/// before its own lifecycle row. Concurrent siblings therefore serialize
+/// before an exhausted obligation parks the batch, instead of each retaining
+/// one lifecycle row while the module park waits for the other.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn concurrent_sibling_terminations_serialize_before_parking_their_dispatch()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(0),
+        SIBLING_COUNT_FIRST_STOP_COMMAND_ID,
+    )
+    .await?;
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(1),
+        SIBLING_COUNT_SECOND_STOP_COMMAND_ID,
+    )
+    .await?;
+    let obligation = load_next_obligation(&fixture)
+        .await?
+        .expect("the first failed batch leaves a dispatchable obligation");
+    let cursor = PostgresRepoWatchStore::new(fixture.pool.clone())
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+    let (successor_dispatch, successor_sessions) = dispatched(
+        evaluate_obligation(&fixture, obligation, cursor.candidate().observation()).await?,
+    );
+    sqlx::query(
+        "UPDATE repo_watch_dispatch_obligation
+            SET failed_attempts = repo_watch_dispatch_attempt_budget() - 1,
+                last_failed_attempt_at = clock_timestamp()
+          WHERE settled_dispatch_id = $1",
+    )
+    .bind(successor_dispatch.as_uuid())
+    .execute(&fixture.pool)
+    .await?;
+
+    let singleton_holder = hold_singleton_advisory_key(&fixture).await?;
+    let first_pool = fixture.pool.clone();
+    let first_session = successor_sessions[0];
+    let first = tokio::spawn(async move {
+        GoalRepository::new(first_pool)
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(
+                        SIBLING_PARK_FIRST_STOP_COMMAND_ID,
+                    )),
+                    first_session,
+                    GoalUserAction::Stop {
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    },
+                ),
+                None,
+                |_| None,
+            )
+            .await
+    });
+    wait_for_advisory_lock(&fixture.pool).await?;
+    let second_pool = fixture.pool.clone();
+    let second_session = successor_sessions[1];
+    let second = tokio::spawn(async move {
+        GoalRepository::new(second_pool)
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(
+                        SIBLING_PARK_SECOND_STOP_COMMAND_ID,
+                    )),
+                    second_session,
+                    GoalUserAction::Stop {
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    },
+                ),
+                None,
+                |_| None,
+            )
+            .await
+    });
+    wait_for_lock_waiters(&fixture.pool, 2).await?;
+    singleton_holder.commit().await?;
+
+    assert_applied_goal_command(tokio::time::timeout(Duration::from_secs(3), first).await???);
+    assert_applied_goal_command(tokio::time::timeout(Duration::from_secs(3), second).await???);
+    let parked_sessions: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM session_lifecycle
+          WHERE session_id = ANY($1)
+            AND state_kind = 'parked'
+            AND parked_cause = 'module_park'
+            AND parked_responder = 'repo_watch'",
+    )
+    .bind(
+        successor_sessions
+            .iter()
+            .map(|session| session.into_uuid())
+            .collect::<Vec<_>>(),
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(parked_sessions, 2);
     Ok(())
 }
 

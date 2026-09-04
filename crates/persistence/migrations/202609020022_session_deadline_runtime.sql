@@ -65,108 +65,6 @@ BEGIN
         RAISE EXCEPTION 'session lifecycle rows are never deleted'
             USING ERRCODE = '23514';
     END IF;
-    IF OLD.state_kind = 'terminal'
-       AND NOT (
-            NEW.state_kind = 'terminal'
-            AND OLD.terminal_cause_kind IN (
-                'dispatch_deadline_expired', 'start_gate_deadline_expired'
-            )
-            AND NEW.terminal_cause_kind = 'admission_deadline_expired'
-            AND to_jsonb(NEW) - 'terminal_cause_kind'
-                = to_jsonb(OLD) - 'terminal_cause_kind'
-       )
-    THEN
-        RAISE EXCEPTION 'session lifecycle is terminal and cannot change'
-            USING ERRCODE = '23514';
-    END IF;
-    IF NEW.session_id IS DISTINCT FROM OLD.session_id THEN
-        RAISE EXCEPTION 'session lifecycle identity is immutable'
-            USING ERRCODE = '23514';
-    END IF;
-    RETURN NEW;
-END;
-$$;
-
-DO $rewrite_retirement_cause$
-DECLARE
-    constraint_names text[] := ARRAY[
-        'session_lifecycle_terminal_cause_closed',
-        'session_lifecycle_terminal_shape',
-        'session_lifecycle_pending_terminal_shape'
-    ];
-    rewritten_definitions text[] := ARRAY[]::text[];
-    constraint_name text;
-    definition text;
-    rewritten text;
-    position integer;
-BEGIN
-    FOREACH constraint_name IN ARRAY constraint_names
-    LOOP
-        SELECT pg_get_constraintdef(oid) INTO definition
-          FROM pg_constraint
-         WHERE conrelid = 'session_lifecycle'::regclass
-           AND conname = constraint_name;
-        rewritten := replace(
-            definition,
-            '''dispatch_deadline_expired''::text, ''start_gate_deadline_expired''::text',
-            '''admission_deadline_expired''::text'
-        );
-        IF rewritten = definition
-           OR rewritten LIKE '%dispatch_deadline_expired%'
-           OR rewritten LIKE '%start_gate_deadline_expired%'
-           OR rewritten NOT LIKE '%admission_deadline_expired%'
-        THEN
-            RAISE EXCEPTION 'constraint % did not carry the prior retirement causes',
-                constraint_name;
-        END IF;
-        rewritten_definitions := array_append(rewritten_definitions, rewritten);
-    END LOOP;
-
-    FOREACH constraint_name IN ARRAY constraint_names
-    LOOP
-        EXECUTE format('ALTER TABLE session_lifecycle DROP CONSTRAINT %I', constraint_name);
-    END LOOP;
-
-    UPDATE session_lifecycle
-       SET terminal_cause_kind = CASE
-               WHEN terminal_cause_kind IN (
-                   'dispatch_deadline_expired', 'start_gate_deadline_expired'
-               ) THEN 'admission_deadline_expired'
-               ELSE terminal_cause_kind
-           END,
-           pending_terminal_cause_kind = CASE
-               WHEN pending_terminal_cause_kind IN (
-                   'dispatch_deadline_expired', 'start_gate_deadline_expired'
-               ) THEN 'admission_deadline_expired'
-               ELSE pending_terminal_cause_kind
-           END
-     WHERE terminal_cause_kind IN (
-               'dispatch_deadline_expired', 'start_gate_deadline_expired'
-           )
-        OR pending_terminal_cause_kind IN (
-               'dispatch_deadline_expired', 'start_gate_deadline_expired'
-           );
-
-    SET CONSTRAINTS ALL IMMEDIATE;
-    FOR position IN 1..array_length(constraint_names, 1)
-    LOOP
-        EXECUTE format(
-            'ALTER TABLE session_lifecycle ADD CONSTRAINT %I %s',
-            constraint_names[position],
-            rewritten_definitions[position]
-        );
-    END LOOP;
-END
-$rewrite_retirement_cause$;
-
-CREATE OR REPLACE FUNCTION guard_session_lifecycle_change() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    IF TG_OP = 'DELETE' THEN
-        RAISE EXCEPTION 'session lifecycle rows are never deleted'
-            USING ERRCODE = '23514';
-    END IF;
     IF OLD.state_kind = 'terminal' THEN
         RAISE EXCEPTION 'session lifecycle is terminal and cannot change'
             USING ERRCODE = '23514';
@@ -178,6 +76,165 @@ BEGIN
     RETURN NEW;
 END;
 $$;
+
+ALTER TABLE session_lifecycle
+    DROP CONSTRAINT session_lifecycle_terminal_cause_closed,
+    DROP CONSTRAINT session_lifecycle_terminal_shape,
+    DROP CONSTRAINT session_lifecycle_pending_terminal_shape;
+
+ALTER TABLE session_lifecycle
+    ADD CONSTRAINT session_lifecycle_terminal_cause_closed CHECK (
+        (terminal_cause_kind IS NULL)
+        OR (terminal_cause_kind = ANY (ARRAY[
+            'provider_transient'::text,
+            'provider_quota_exhausted'::text,
+            'provider_overloaded'::text,
+            'infrastructure_failure'::text,
+            'retry_budget_exhausted'::text,
+            'context_compaction_wall'::text,
+            'context_headroom_exhausted'::text,
+            'broken_toolchain'::text,
+            'moderation_block'::text,
+            'admission_deadline_expired'::text,
+            'stranded_queued_turn'::text
+        ]))
+    ),
+    ADD CONSTRAINT session_lifecycle_terminal_shape CHECK (
+        ((state_kind = 'terminal'::text)
+            = ((ended_at IS NOT NULL) AND (terminal_outcome_kind IS NOT NULL)))
+        AND ((terminal_outcome_kind IS NULL)
+             OR ((terminal_outcome_kind = 'stopped'::text)
+                 = (terminal_stop_sticky IS NOT NULL)))
+        AND ((state_kind = 'terminal'::text) = (ended_at IS NOT NULL))
+        AND ((state_kind = 'terminal'::text) = (terminal_outcome_kind IS NOT NULL))
+        AND ((terminal_outcome_kind IS NOT NULL)
+             OR ((terminal_stop_sticky IS NULL)
+                 AND (terminal_superseded_by IS NULL)
+                 AND (terminal_cause_kind IS NULL)
+                 AND (ended_at IS NULL)))
+        AND ((terminal_superseded_by IS NULL)
+             OR (terminal_outcome_kind = 'superseded'::text))
+        AND ((terminal_superseded_by IS NULL)
+             OR (terminal_superseded_by <> session_id))
+        AND (
+            (terminal_outcome_kind IS NULL AND terminal_cause_kind IS NULL)
+            OR (terminal_outcome_kind = ANY (ARRAY[
+                    'achieved_verified'::text,
+                    'achieved_declared'::text,
+                    'failed_unknown'::text,
+                    'stopped'::text,
+                    'superseded'::text,
+                    'abandoned'::text
+                ]) AND terminal_cause_kind IS NULL)
+            OR (terminal_outcome_kind = 'failed_retryable'::text
+                AND terminal_cause_kind IS NOT NULL
+                AND terminal_cause_kind = ANY (ARRAY[
+                    'provider_transient'::text,
+                    'provider_quota_exhausted'::text,
+                    'provider_overloaded'::text,
+                    'infrastructure_failure'::text,
+                    'retry_budget_exhausted'::text
+                ]))
+            OR (terminal_outcome_kind = 'failed_structural'::text
+                AND terminal_cause_kind IS NOT NULL
+                AND terminal_cause_kind = ANY (ARRAY[
+                    'context_compaction_wall'::text,
+                    'context_headroom_exhausted'::text,
+                    'broken_toolchain'::text,
+                    'moderation_block'::text
+                ]))
+            OR (terminal_outcome_kind = 'retired'::text
+                AND terminal_cause_kind IS NOT NULL
+                AND terminal_cause_kind = ANY (ARRAY[
+                    'admission_deadline_expired'::text,
+                    'stranded_queued_turn'::text
+                ]))
+        )
+    ),
+    ADD CONSTRAINT session_lifecycle_pending_terminal_shape CHECK (
+        ((pending_terminal_outcome_kind IS NULL)
+            OR (state_kind <> 'terminal'::text))
+        AND ((pending_terminal_outcome_kind IS NOT NULL)
+             OR ((pending_terminal_cause_kind IS NULL)
+                 AND (pending_terminal_stop_sticky IS NULL)
+                 AND (pending_terminal_superseded_by IS NULL)
+                 AND (pending_terminal_actor_kind IS NULL)))
+        AND ((pending_terminal_outcome_kind IS NULL)
+             = (pending_terminal_actor_kind IS NULL))
+        AND ((pending_terminal_actor_kind IS NULL)
+             OR (pending_terminal_actor_kind = ANY (ARRAY[
+                    'core'::text,
+                    'operator'::text,
+                    'module'::text,
+                    'watchdog'::text
+                ])))
+        AND ((pending_terminal_actor_kind IS NOT DISTINCT FROM 'module'::text)
+             = (pending_terminal_actor_module IS NOT NULL))
+        AND ((pending_terminal_actor_module IS NULL)
+             OR (pending_terminal_actor_module = ANY (ARRAY[
+                    'repo_watch'::text,
+                    'commissioned_dispatch'::text
+                ])))
+        AND ((pending_terminal_actor_turn_id IS NULL)
+             OR (pending_terminal_actor_tool_request_id IS NULL))
+        AND ((pending_terminal_actor_kind IS NOT DISTINCT FROM 'core'::text)
+             OR ((pending_terminal_actor_turn_id IS NULL)
+                 AND (pending_terminal_actor_tool_request_id IS NULL)))
+        AND ((pending_terminal_outcome_kind IS NULL)
+             OR (pending_terminal_outcome_kind = ANY (ARRAY[
+                    'achieved_verified'::text,
+                    'achieved_declared'::text,
+                    'failed_retryable'::text,
+                    'failed_structural'::text,
+                    'failed_unknown'::text,
+                    'stopped'::text,
+                    'superseded'::text,
+                    'abandoned'::text,
+                    'retired'::text
+                ])))
+        AND ((pending_terminal_outcome_kind IS NULL)
+             OR ((pending_terminal_outcome_kind = 'stopped'::text)
+                 = (pending_terminal_stop_sticky IS NOT NULL)))
+        AND ((pending_terminal_superseded_by IS NULL)
+             OR (pending_terminal_outcome_kind = 'superseded'::text))
+        AND ((pending_terminal_superseded_by IS NULL)
+             OR (pending_terminal_superseded_by <> session_id))
+        AND (
+            (pending_terminal_outcome_kind IS NULL
+                AND pending_terminal_cause_kind IS NULL)
+            OR (pending_terminal_outcome_kind = ANY (ARRAY[
+                    'achieved_verified'::text,
+                    'achieved_declared'::text,
+                    'failed_unknown'::text,
+                    'stopped'::text,
+                    'superseded'::text,
+                    'abandoned'::text
+                ]) AND pending_terminal_cause_kind IS NULL)
+            OR (pending_terminal_outcome_kind = 'failed_retryable'::text
+                AND pending_terminal_cause_kind IS NOT NULL
+                AND pending_terminal_cause_kind = ANY (ARRAY[
+                    'provider_transient'::text,
+                    'provider_quota_exhausted'::text,
+                    'provider_overloaded'::text,
+                    'infrastructure_failure'::text,
+                    'retry_budget_exhausted'::text
+                ]))
+            OR (pending_terminal_outcome_kind = 'failed_structural'::text
+                AND pending_terminal_cause_kind IS NOT NULL
+                AND pending_terminal_cause_kind = ANY (ARRAY[
+                    'context_compaction_wall'::text,
+                    'context_headroom_exhausted'::text,
+                    'broken_toolchain'::text,
+                    'moderation_block'::text
+                ]))
+            OR (pending_terminal_outcome_kind = 'retired'::text
+                AND pending_terminal_cause_kind IS NOT NULL
+                AND pending_terminal_cause_kind = ANY (ARRAY[
+                    'admission_deadline_expired'::text,
+                    'stranded_queued_turn'::text
+                ]))
+        )
+    );
 
 CREATE OR REPLACE FUNCTION arm_session_deadline() RETURNS trigger
     LANGUAGE plpgsql
@@ -240,6 +297,58 @@ BEGIN
         RETURN OLD;
     END IF;
     RETURN NEW;
+END;
+$$;
+
+-- A terminal repository-watch goal can spend the dispatch lineage's retry
+-- budget and park every session in its batch. Lock that complete cohort in
+-- session identity order before the ordinary goal projection locks its one
+-- subject, so concurrent sibling terminations cannot each hold one lifecycle
+-- row while the deferred park projection waits for the other.
+CREATE OR REPLACE FUNCTION project_session_lifecycle_from_goal()
+RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    authored_kind text;
+    authored_module text;
+BEGIN
+    IF NEW.event_kind IN
+        ('blocked', 'achieved', 'user_stopped', 'session_closed')
+    THEN
+        PERFORM lifecycle.session_id
+          FROM session_lifecycle AS lifecycle
+          JOIN (
+                SELECT cohort.session_id
+                  FROM repo_watch_dispatch_action AS subject
+                  JOIN repo_watch_dispatch_action AS cohort
+                    ON cohort.dispatch_id = subject.dispatch_id
+                 WHERE subject.session_id = NEW.session_id
+                   AND NOT EXISTS (
+                        SELECT 1
+                          FROM repo_watch_dispatch_release AS released
+                         WHERE released.dispatch_id = subject.dispatch_id
+                   )
+          ) AS dispatch_subject USING (session_id)
+         ORDER BY lifecycle.session_id
+           FOR UPDATE OF lifecycle;
+    END IF;
+
+    IF NEW.user_command_id IS NOT NULL THEN
+        SELECT command.issuer_kind, command.issuer_module
+          INTO STRICT authored_kind, authored_module
+          FROM durable_command AS command
+         WHERE command.command_id = NEW.user_command_id;
+    END IF;
+    PERFORM project_session_lifecycle(
+        NEW.session_id,
+        NEW.event_kind = 'resumed',
+        authored_kind,
+        authored_module,
+        false,
+        NEW.event_kind IN ('commissioned', 'resumed', 'superseded')
+    );
+    RETURN NULL;
 END;
 $$;
 

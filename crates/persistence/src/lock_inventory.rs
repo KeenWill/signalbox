@@ -22,13 +22,14 @@
 //! projects a new session state already holds the satellite when the
 //! projection runs.
 //!
-//! Four paths acquire the satellite outside a scheduler statement, all without
-//! a scheduler row in the same transaction: session creation, which inserts it;
-//! the lifecycle store's own park, closure, and ownership writes, which take the
-//! `session` row first; and repository-watch blocker replacement, which locks
-//! the old and replacement subjects in session-identity order before changing
-//! the obligation row, while park release takes its projected subjects before
-//! that row.
+//! Paths that acquire the satellite outside a scheduler statement hold no
+//! scheduler row in the same transaction. Session creation inserts it. The
+//! lifecycle store's own park, closure, and ownership writes take the `session`
+//! row first. Repository-watch terminal goal projection locks the complete
+//! unreleased dispatch cohort in session-identity order before projecting its
+//! triggering session; blocker replacement takes the old and replacement
+//! subjects in that order before changing the obligation row; and park release
+//! takes its projected subjects before that row.
 
 use signalbox_domain::SessionId;
 
