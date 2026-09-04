@@ -373,8 +373,9 @@ failed with its standing cause — `failed_retryable`, `failed_structural`, or
 `failed_unknown` (§2); and `resume`, the operator or coordinator transition of a
 parked session back to the state §1's mapping derives from its suspended turn's
 phase — `active`, `waiting`, or `recovering`; `active` when no turn was
-suspended — where no goal applies. A parked goal session resumes through
-`goal{resume_with_guidance}` (§9).
+suspended — where no blocked goal applies. A parked session with a blocked goal
+resumes through `goal{resume_with_guidance}` (§9); one with a pursuing goal may
+use `resume`.
 
 **Proposed behavior.** The existing goal-command operation named `supersede` —
 new goal generation within the same session — is unrelated to the session
