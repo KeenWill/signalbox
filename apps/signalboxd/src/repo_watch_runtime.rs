@@ -2272,8 +2272,8 @@ impl RepositoryWatchTask {
                 }
                 self.rules_activated = true;
             }
-            // Leading reconciliation failures no longer gate the drain:
-            // pending deliveries owe none of that work, and gating here left
+            // Leading reconciliation failures do not gate the drain: pending
+            // deliveries owe none of that work, and gating here would leave
             // every newly admitted delivery waiting on unrelated dispatch
             // trouble. The failure is preserved and reported once the drain
             // has run.
