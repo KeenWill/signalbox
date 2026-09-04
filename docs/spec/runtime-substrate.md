@@ -717,48 +717,49 @@ runs while the key is readable.
 ## Codex CLI provider adapter
 
 `signalbox-model-runtime-codex-cli` wraps the locally installed Codex CLI event
-protocol at the version `tooling/codex-cli/package.json` pins. The daemon
-composition runs a bounded, credential-free version probe before opening its
-socket; model dispatch performs no separate version probe. Preparation validates
-and renders the complete operation, writes the non-secret response-envelope
-schema to a private temporary file, and returns a one-shot capability without
-starting a process. Admitted schemas and replayed tool arguments remain raw JSON
-through prompt serialization; a shallow raw member scan still requires each
-schema to declare an object root. Execution consumes the capability as exactly
-one `codex exec --json --ephemeral` spawn on Unix, passes the full rendered
-frontier on stdin, requires absolute configured executable and working-root
-paths, selects the exact resolved model, ignores user configuration and rule
-files, and explicitly disables every feature in the pinned CLI inventory that
-can add a model-visible tool, external interaction, instruction source, or
-delegated execution surface outside the declared tools, or that can replace the
-pinned executable the version contract names. It independently disables
-configured agents, ambient skill-instruction injection, MCP servers, and web
-search, sets the project-instruction byte budget to zero, and uses the read-only
-CLI sandbox; prompt text is never a capability boundary. Strict configuration
-turns an unavailable control into a closed failure instead of silently relaxing
-this invocation boundary. Before spawn it clears the parent environment, then
-copies only its explicit home/Codex-home, executable and temporary path, XDG,
-locale/terminal, certificate, and proxy allowlist; unrelated service variables
-do not reach the CLI. A proxy variable whose URL authority embeds userinfo
-(`scheme://user:secret@host`) is refused before `SendCommenced` as
-`ProvenUnsent(ConnectFailed)` naming only the variable — the CLI could reflect
-its proxy configuration in output the adapter can only shape-redact, so an
-inherited proxy credential never reaches the child; a proxy value that is not
-UTF-8 cannot be verified credential-free and is refused the same way. A `HOME`
-or `CODEX_HOME` the parent cannot resolve to an absolute directory — empty, or
-relative with no resolvable current directory to resolve it against — is refused
-the same way, because the child would otherwise read its login store from
-beneath its own configured working root and select an unintended ambient login;
-a resolvable one is absolutized against the parent's directory before spawn. It
-neither resumes nor persists a Codex thread. Why: a fresh ephemeral invocation
-keeps provider session state out of memory, and the caller supplies the complete
-conversation frontier instead of an in-memory resume pointer. The read-only
-sandbox and working root are the adapter's filesystem boundary. Unix supervision
-contains the process group the adapter creates, so construction rejects hosts
-where process-group control is unavailable; a descendant that deliberately
-leaves that group is outside the adapter's boundary. Host isolation owns
-containment beyond the created group — specifically the runner sandbox in
-build-out — and is not an adapter claim.
+protocol at the version `tooling/codex-cli/package.json` pins; its exported
+version constant is the contract a later composition must pin before wiring the
+adapter. The daemon composition runs a bounded, credential-free version probe
+before opening its socket; model dispatch performs no separate version probe.
+Preparation validates and renders the complete operation, writes the non-secret
+response-envelope schema to a private temporary file, and returns a one-shot
+capability without starting a process. Admitted schemas and replayed tool
+arguments remain raw JSON through prompt serialization; a shallow raw member
+scan still requires each schema to declare an object root. Execution consumes
+the capability as exactly one `codex exec --json --ephemeral` spawn on Unix,
+passes the full rendered frontier on stdin, requires absolute configured
+executable and working-root paths, selects the exact resolved model, ignores
+user configuration and rule files, and explicitly disables every feature in the
+pinned CLI inventory that can add a model-visible tool, external interaction,
+instruction source, or delegated execution surface outside the declared tools,
+or that can replace the pinned executable the version contract names. It
+independently disables configured agents, ambient skill-instruction injection,
+MCP servers, and web search, sets the project-instruction byte budget to zero,
+and uses the read-only CLI sandbox; prompt text is never a capability boundary.
+Strict configuration turns an unavailable control into a closed failure instead
+of silently relaxing this invocation boundary. Before spawn it clears the parent
+environment, then copies only its explicit home/Codex-home, executable and
+temporary path, XDG, locale/terminal, certificate, and proxy allowlist;
+unrelated service variables do not reach the CLI. A proxy variable whose URL
+authority embeds userinfo (`scheme://user:secret@host`) is refused before
+`SendCommenced` as `ProvenUnsent(ConnectFailed)` naming only the variable — the
+CLI could reflect its proxy configuration in output the adapter can only
+shape-redact, so an inherited proxy credential never reaches the child; a proxy
+value that is not UTF-8 cannot be verified credential-free and is refused the
+same way. A `HOME` or `CODEX_HOME` the parent cannot resolve to an absolute
+directory — empty, or relative with no resolvable current directory to resolve
+it against — is refused the same way, because the child would otherwise read its
+login store from beneath its own configured working root and select an
+unintended ambient login; a resolvable one is absolutized against the parent's
+directory before spawn. It neither resumes nor persists a Codex thread. Why: a
+fresh ephemeral invocation keeps provider session state out of memory, and the
+caller supplies the complete conversation frontier instead of an in-memory
+resume pointer. The read-only sandbox and working root are the adapter's
+filesystem boundary. Unix supervision contains the process group the adapter
+creates, so construction rejects hosts where process-group control is
+unavailable; a descendant that deliberately leaves that group is outside the
+adapter's boundary. Host isolation owns containment beyond the created group —
+specifically the runner sandbox in build-out — and is not an adapter claim.
 
 The rendered prompt opens with a preamble whose tool-authority statement is
 singular and positionally first: the serialized `tools` array is named the
