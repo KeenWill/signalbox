@@ -8,6 +8,8 @@ journaling, and replay are owned by the substrate page and not restated here;
 model scoring is ordinary session traffic owned by
 [model-call execution](model-call-execution.md); the sandboxed process boundary
 for stage executors is owned by [tool loop](tool-loop.md)'s execution surface.
+Other than the implemented standalone approval-judge surfaces, everything below
+is committed unimplemented functionality.
 
 ## Evaluations are programs
 
