@@ -521,6 +521,9 @@ pub(crate) async fn resume_in_transaction(
     }
     let admission_state: Option<String> = sqlx::query_scalar(
         "SELECT CASE
+            WHEN (
+                SELECT start_gate_held FROM session_lifecycle WHERE session_id = $1
+            ) THEN 'created'
             WHEN NOT EXISTS (
                 SELECT 1 FROM turn_lifecycle WHERE session_id = $1
             ) THEN 'created'

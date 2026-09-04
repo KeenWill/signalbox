@@ -199,15 +199,17 @@ async fn admission_clock_survives_the_created_to_dispatched_transition()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn module_park_passes_through_a_held_start_gate() -> Result<(), Box<dyn Error>> {
+async fn held_start_gate_survives_a_module_park_and_resume() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let creation = owned_creation(5, StartGate::Held);
     let session = creation.applied_result().session();
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation)
         .await?;
+    queue_turn(&pool, session, 5).await?;
 
-    let parked = SessionLifecycleRepository::new(pool.clone())
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    let parked = repository
         .park(
             session,
             SessionParkCause::ModulePark,
@@ -228,6 +230,17 @@ async fn module_park_passes_through_a_held_start_gate() -> Result<(), Box<dyn Er
             ..
         }
     ));
+    assert_eq!(
+        repository.resume(session).await?,
+        SessionLifecycleState::Created
+    );
+    let resumed: (String, bool) = sqlx::query_as(
+        "SELECT state_kind, start_gate_held FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(resumed, (String::from("created"), true));
     pool.close().await;
     drop(container);
     Ok(())

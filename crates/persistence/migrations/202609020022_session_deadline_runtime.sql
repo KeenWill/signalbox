@@ -230,8 +230,7 @@ CREATE OR REPLACE FUNCTION hold_session_start_gate() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    IF OLD.state_kind = 'created'
-       AND OLD.start_gate_held
+    IF NEW.start_gate_held
        AND NEW.state_kind NOT IN ('created', 'terminal')
        AND NOT (
             NEW.state_kind = 'parked'

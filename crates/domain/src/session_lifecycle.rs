@@ -867,6 +867,24 @@ mod tests {
     fn a_module_can_park_an_admission_state() {
         assert_admits(SessionLifecycleState::Created, parked());
         assert_admits(dispatched(), parked());
+        assert_admits(parked(), SessionLifecycleState::Created);
+        assert_admits(parked(), dispatched());
+        assert_admits(
+            dispatched(),
+            SessionLifecycleState::Terminal {
+                outcome: SessionTerminalOutcome::Retired {
+                    cause: SessionRetirementCause::StrandedQueuedTurn,
+                },
+            },
+        );
+        assert_rejects(
+            SessionLifecycleState::Created,
+            SessionLifecycleState::Terminal {
+                outcome: SessionTerminalOutcome::Retired {
+                    cause: SessionRetirementCause::StrandedQueuedTurn,
+                },
+            },
+        );
     }
 
     #[test]
