@@ -114,9 +114,9 @@ A destination is scoped to a **workspace**, and a workspace is a durable record
 with its own identity. The root path is canonicalized exactly once, when the
 workspace record is minted, and is stored in canonical form; every scope
 comparison afterwards is between identities, and there is no comparison-time
-normalization. One live destination exists per workspace and name. Why: keyed by
-path, `/srv/workspace` and `/srv/workspace/.` are one directory under two keys,
-and that rule would have admitted two destinations for it.
+normalization. At most one live destination exists per workspace and name. Why:
+keyed by path, `/srv/workspace` and `/srv/workspace/.` are one directory under
+two keys, and that rule would have admitted two destinations for it.
 
 **Committed unimplemented functionality.** No present surface mints a workspace
 record. The schema admits three tiers of minting, and they are to carry
