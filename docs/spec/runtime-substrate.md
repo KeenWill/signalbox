@@ -18,11 +18,11 @@ typed rate-limit and overload evidence, provider-directed retry delay, and
 pre-stream non-acceptance proof are verified against this PR
 (`agent/multi-account-pools`). The Codex CLI compatibility-smoke automation was
 verified through PR #333 (`agent/ci-tells-truth`); its feature classification,
-ambient-skill catalog probe, and pinned version are verified against the
-`0.153.1` executable through this PR (`agent/gpt6-astra-catalog`). Its
-twice-daily schedule and workflow-self-change trigger were verified through PR
-`#471` (`agent/codex-smoke-schedule`). The Codex CLI adapter's prompt
-tool-authority preamble is verified against this PR
+ambient-skill catalog probe, and startup gate are verified against the version
+pinned in `tooling/codex-cli/package.json` through this PR
+(`agent/gpt6-astra-catalog`). Its twice-daily schedule and workflow-self-change
+trigger were verified through PR `#471` (`agent/codex-smoke-schedule`). The
+Codex CLI adapter's prompt tool-authority preamble is verified against this PR
 (`agent/phantom-prohibition`). The composition root's pinned-version startup
 probe is verified against this PR (`agent/daemon-live-codex-pin-preflight`). The
 Codex CLI adapter's preservation of malformed string-carried tool arguments is
