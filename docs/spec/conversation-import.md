@@ -709,7 +709,7 @@ One transaction resolves or inserts a complete aggregate:
   `AlreadyImported` only after the same conversion-equivalence check; writers
   acquire both shared raw hashes and globally unique imported-entry identities
   in their respective sorted key order while storing physical positions
-  explicitly; and
+  explicitly;
 - every raw occurrence stores and rechecks its conversion digest before its
   normalized value is accepted; and
 - deferred constraints require exact declared counts, contiguous positions,
