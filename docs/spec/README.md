@@ -5,30 +5,7 @@ These pages, together with INV-tagged tests indexed in
 [domain-spine.md](../domain-spine.md), are the normative specification of
 Signalbox's implemented cross-component and wire behavior. `AGENTS.md` is the
 guidance for agents working on the repository; this README owns the conventions
-the pages follow. Each page names the code ref it was last verified against and
-is updated in the same pull request as any behavior change it describes. A
-verification reference names that pull request as `` PR #N (`branch-ref`) `` and
-may narrow the claim to the surface the pull request settled, either as a
-semicolon tail inside the parentheses — `` PR #N (`branch-ref`; <scope>) `` — or
-as prose following the parenthetical; a scope tail is free-form prose that must
-render as more than whitespace and block-quote markers, may name code in
-backticks without the span's own parentheses closing the reference, and must
-stay inside the reference's own block, and a page may carry one reference per
-verified surface. One tail form is semantically special: a pull request that
-landed inside another pull request's merge (a stack merged from its top leaves
-inner pull requests with no first-parent merge commits) cites its carrier with
-the exact tail `` PR #N (`branch-ref`; via PR #M `carrier-branch`) ``, and the
-reference is accepted only when `#N` itself has no first-parent merge commit and
-the carrier's number and branch either match one or name the single in-flight
-pull request (the event identity, or the checked-out branch locally, and never
-the reference's own pull request) — a carrying merge cannot precede the
-carrier's own pull request. Inheritance preserves a carried reference's tail
-exactly, so a base page's carrier cannot be dropped by a child that merely
-repeats it; a matching inherited carrier that has not yet entered integration
-history stays accepted on that basis alone, deferring judgment to the
-integration branch's own run once the stack lands, while a primary with its own
-merge commit or a reference naming itself as carrier rejects even when
-inherited. `scripts/check_docs_consistency.py` enforces this form.
+the pages follow.
 
 Every paragraph on a specification page belongs to exactly one of three
 categories; a page that cannot say which category a paragraph is in has a
