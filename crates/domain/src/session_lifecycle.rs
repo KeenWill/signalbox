@@ -584,9 +584,16 @@ impl SessionLifecycleState {
             (Self::Parked { .. }, Self::Created | Self::Dispatched) => true,
             (Self::Terminal { .. }, _) | (_, Self::Created) => false,
             (_, Self::Terminal { outcome }) => self.admits_outcome(outcome),
-            (Self::Created, Self::Dispatched | Self::Parked { .. }) => true,
+            (Self::Created, Self::Dispatched) => true,
+            (
+                Self::Created | Self::Dispatched,
+                Self::Parked {
+                    cause: SessionParkCause::ModulePark,
+                    ..
+                },
+            ) => true,
             (Self::Created, _) => false,
-            (Self::Dispatched, Self::Parked { .. }) => true,
+            (Self::Dispatched, Self::Parked { .. }) => false,
             (Self::Dispatched | Self::Parked { .. }, _) => next.is_mapped(),
             (_, Self::Parked { .. }) => self.is_mapped(),
             _ => self.is_mapped() && next.is_mapped(),
@@ -771,6 +778,16 @@ mod tests {
         }
     }
 
+    fn module_parked() -> SessionLifecycleState {
+        SessionLifecycleState::Parked {
+            cause: SessionParkCause::ModulePark,
+            responder: SessionParkResponder::Module {
+                module: DispatchingModule::RepositoryWatch,
+            },
+            standing: None,
+        }
+    }
+
     fn stopped() -> SessionLifecycleState {
         SessionLifecycleState::Terminal {
             outcome: SessionTerminalOutcome::Stopped {
@@ -865,10 +882,16 @@ mod tests {
 
     #[test]
     fn a_module_can_park_an_admission_state() {
-        assert_admits(SessionLifecycleState::Created, parked());
-        assert_admits(dispatched(), parked());
-        assert_admits(parked(), SessionLifecycleState::Created);
-        assert_admits(parked(), dispatched());
+        assert_admits(SessionLifecycleState::Created, module_parked());
+        assert_admits(dispatched(), module_parked());
+        assert_rejects(SessionLifecycleState::Created, parked());
+        assert_rejects(dispatched(), parked());
+        assert_admits(module_parked(), SessionLifecycleState::Created);
+        assert_admits(module_parked(), dispatched());
+    }
+
+    #[test]
+    fn a_stranded_queued_turn_only_retires_a_dispatch() {
         assert_admits(
             dispatched(),
             SessionLifecycleState::Terminal {
