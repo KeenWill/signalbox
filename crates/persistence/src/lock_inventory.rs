@@ -22,10 +22,10 @@
 //! projects a new session state already holds the satellite when the
 //! projection runs.
 //!
-//! Paths that acquire the satellite outside a scheduler statement hold no
-//! scheduler row: session creation inserts it, and lifecycle commands, expiry,
-//! and module parks take the `session` row first. Expiry then locks the
-//! session's deadline row after the satellite.
+//! Two paths acquire the satellite outside a scheduler statement, both without
+//! a scheduler row in the same transaction: session creation, which inserts it,
+//! and the lifecycle store's own park, closure, and ownership writes, which
+//! take the `session` row first.
 
 use signalbox_domain::SessionId;
 
