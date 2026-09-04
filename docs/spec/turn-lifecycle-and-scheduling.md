@@ -89,7 +89,7 @@ reservations, whose observation path this daemon still owns, and must resolve
 every fenced prior-process reservation before scheduling — proving that exact
 process group absent, or terminating it and then proving absence — before
 closing it as lost. It is never retained for a later death notice, since the
-observation that would release it died with its daemon. A prior-process
+observation that would release it was lost with its daemon. A prior-process
 `pending_spawn` reservation is ambiguous and fails startup before scheduling.
 The scheduler makes a reached deadline, an exact reservation release, or a
 durable member-availability update eligible. Because a capacity bound is a live
@@ -132,17 +132,16 @@ contended form. If no bounded member remains — every former one is now durably
 excluded — the contention is over and the transaction re-runs the pool's
 exhaustion policy rather than assuming a wait. Which ending that re-run reaches
 is the contended-to-exhausted rule of
-[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
-and this page adds nothing to it: the turn moves to whichever row that table
-names, and releasing a contended wait does not change which one. A `fail` pool
-therefore cannot be left parked indefinitely by having entered contention first,
-and cannot acquire a pre-call cause it never earned. Releasing a bounded
-reservation holds that profile's capacity row across the atomic release-and-wake
-commit, and a rewrite holds the capacity rows of every bounded member its
-evidence names, so a completion cannot slip between a loser's read and its
-commit. A reservation identity therefore never outlives the wait that names it,
-and losing a race costs a re-park rather than a failed turn, a missed wake, or
-an admission above the bound.
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine):
+the turn moves to whichever row that table names, and releasing a contended wait
+does not change which one. A `fail` pool therefore cannot be left parked
+indefinitely by having entered contention first, and cannot acquire a pre-call
+cause it never earned. Releasing a bounded reservation holds that profile's
+capacity row across the atomic release-and-wake commit, and a rewrite holds the
+capacity rows of every bounded member its evidence names, so a completion cannot
+slip between a loser's read and its commit. A reservation identity therefore
+never outlives the wait that names it, and losing a race costs a re-park rather
+than a failed turn, a missed wake, or an admission above the bound.
 
 The wait has an exact occupied-slot control matrix. `steer` is accepted as
 ordinary pending steering bound to this source turn and remains pending until a
@@ -475,10 +474,10 @@ the sweep (INV-007).
   activation, which the session's own active turn excludes — so the nudge would
   admit a pass that does nothing. Such a turn stays under the handoff's
   remaining observations and is terminalized there once its evidence stands
-  still, rather than being stranded until the outer watchdog. A resumability
-  read that does not settle is treated as a resumption, since no failed read may
-  make a turn terminalizable on this shorter interval while a pass may already
-  be driving it. Every terminal handoff nudges the session back into eligibility
+  still, rather than being left until the outer watchdog. A resumability read
+  that does not settle is treated as a resumption, since no failed read may make
+  a turn terminalizable on this shorter interval while a pass may already be
+  driving it. Every terminal handoff nudges the session back into eligibility
   admission.
 
   The outer watchdog below remains responsible if those attempts all fail.
@@ -534,7 +533,7 @@ attempt is `prepared` or `running` and has not ended, rather than
 dedicated compaction call outside `terminal`, and no `tool_attempt` outside
 `terminal`. The phase filter is what excludes approval parking,
 `awaiting_child`, both recovery waits, and the runner-loss wait: those are
-durable waits this pass judges no part of. The attempt filter admits `prepared`
+durable waits this pass does not judge. The attempt filter admits `prepared`
 because an attempt reaches `running` only when a model call is authorized on it,
 so a `prepared` attempt is a turn activated but never dispatched — a wedged turn
 nothing else reaches, since the eligibility sweep's active arm requires a live
@@ -567,7 +566,7 @@ as the quiescent inventory, but keeps an independent ledger and lap.
 A slot-held turn whose evidence remains unchanged for thirty minutes is handed
 to the startup-recovery transaction under the session scheduler lock. Each
 detached database attempt has its own ten-second wall-clock bound, which is not
-the wider ceiling automatic reconciliation spends below. That admits ordinary
+the wider ceiling automatic reconciliation uses below. That admits ordinary
 serialization through the shared outbox frontier after the session lock while
 the sixty-four-turn fair window still bounds how long a fully stalled database
 can delay the next watchdog wake — one ceiling shared between the two would
@@ -692,10 +691,9 @@ before the count begins. A cohort at the inventory's capacity would take over
 eleven days per lap to work through, so a turn arriving into one waits two. That
 is accepted: the alternative is a scan that runs until its cohort is drained,
 which delays the next observation of *every* session, including the ones whose
-turns are working. A watchdog may be slow to finish; it may not stop watching.
-Deferral does not lose the turn: one left alone had nothing change, so it is
-observed unchanged and comes due again on a later scan, waiting rather than
-being forgotten.
+turns are working. Deferral does not lose the turn: one left alone had nothing
+change, so it is observed unchanged and comes due again on a later scan, waiting
+rather than being forgotten.
 
 **Deployment bounds.** The required daemon configuration owns the staleness
 bound and scan interval. Either may be `"none"`: no scan interval leaves the
