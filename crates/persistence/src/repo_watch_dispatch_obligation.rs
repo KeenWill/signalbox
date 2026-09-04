@@ -452,35 +452,12 @@ pub(crate) async fn replace_dispatch_obligation_blocker(
     // subjects. Acquire that complete lifecycle set first, in canonical order,
     // so a concurrent lifecycle transition cannot meet this write from the
     // opposite side of the obligation row.
-    sqlx::query(
-        "SELECT lifecycle.session_id
-           FROM session_lifecycle AS lifecycle
-           JOIN (
-                SELECT current.external_blocking_session_id AS session_id
-                  FROM repo_watch_dispatch_obligation AS current
-                 WHERE current.obligation_id = $1
-                   AND current.external_blocking_session_id IS NOT NULL
-                UNION
-                SELECT action.session_id
-                  FROM repo_watch_dispatch_obligation AS current
-                  JOIN repo_watch_dispatch_action AS action
-                    ON action.dispatch_id = current.blocking_dispatch_id
-                 WHERE current.obligation_id = $1
-                UNION
-                SELECT $2::uuid WHERE $2::uuid IS NOT NULL
-                UNION
-                SELECT action.session_id
-                  FROM repo_watch_dispatch_action AS action
-                 WHERE action.dispatch_id = $3
-           ) AS subject USING (session_id)
-          ORDER BY lifecycle.session_id
-            FOR UPDATE OF lifecycle",
-    )
-    .bind(obligation)
-    .bind(blocker.stored_external_session())
-    .bind(blocker.stored_dispatch())
-    .execute(&mut **transaction)
-    .await?;
+    sqlx::query(crate::lock_inventory::REPO_WATCH_OBLIGATION_BLOCKER_SUBJECTS)
+        .bind(obligation)
+        .bind(blocker.stored_external_session())
+        .bind(blocker.stored_dispatch())
+        .execute(&mut **transaction)
+        .await?;
     let updated = sqlx::query(
         "UPDATE repo_watch_dispatch_obligation
             SET blocking_dispatch_id = $2,

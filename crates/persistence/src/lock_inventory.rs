@@ -22,10 +22,12 @@
 //! projects a new session state already holds the satellite when the
 //! projection runs.
 //!
-//! Two paths acquire the satellite outside a scheduler statement, both without
-//! a scheduler row in the same transaction: session creation, which inserts it,
-//! and the lifecycle store's own park, closure, and ownership writes, which
-//! take the `session` row first.
+//! Three paths acquire the satellite outside a scheduler statement, all without
+//! a scheduler row in the same transaction: session creation, which inserts it;
+//! the lifecycle store's own park, closure, and ownership writes, which take the
+//! `session` row first; and repository-watch blocker replacement, which locks
+//! the old and replacement subjects in session-identity order before changing
+//! the obligation row.
 
 use signalbox_domain::SessionId;
 
@@ -52,6 +54,29 @@ pub(crate) const REPO_WATCH_DISPATCH_OBLIGATION: &str =
        FROM repo_watch_dispatch_obligation
       WHERE obligation_id = $1
       FOR UPDATE";
+
+pub(crate) const REPO_WATCH_OBLIGATION_BLOCKER_SUBJECTS: &str = "SELECT lifecycle.session_id
+       FROM session_lifecycle AS lifecycle
+       JOIN (
+            SELECT current.external_blocking_session_id AS session_id
+              FROM repo_watch_dispatch_obligation AS current
+             WHERE current.obligation_id = $1
+               AND current.external_blocking_session_id IS NOT NULL
+            UNION
+            SELECT action.session_id
+              FROM repo_watch_dispatch_obligation AS current
+              JOIN repo_watch_dispatch_action AS action
+                ON action.dispatch_id = current.blocking_dispatch_id
+             WHERE current.obligation_id = $1
+            UNION
+            SELECT $2::uuid WHERE $2::uuid IS NOT NULL
+            UNION
+            SELECT action.session_id
+              FROM repo_watch_dispatch_action AS action
+             WHERE action.dispatch_id = $3
+       ) AS subject USING (session_id)
+      ORDER BY lifecycle.session_id
+        FOR UPDATE OF lifecycle";
 
 pub(crate) const REPO_WATCH_ACTIVE_DISPATCH_OBLIGATION: &str = "SELECT obligation.obligation_id
            FROM repo_watch_dispatch_obligation AS obligation
