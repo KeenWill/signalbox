@@ -1,7 +1,7 @@
 # Identity, commands, and telemetry correlation
 
-The `SubmitInput` multipart storage-version boundary below is a foundation
-proposal.
+The `SubmitInput` multipart storage-version boundary below is proposed and not
+implemented.
 
 This page describes the implemented identity, durable-command, and
 telemetry-correlation behavior of Signalbox, including the imported identity
@@ -15,8 +15,8 @@ transaction mechanics, locking, and the reconstitution seam are owned by
 are owned by [sessions-and-transcript](sessions-and-transcript.md),
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), and
 [configuration-and-credentials](configuration-and-credentials.md). The runner
-recovery command families are the foundation proposal at the bottom of their
-implementing stack.
+recovery command families are committed unimplemented functionality; no present
+command surface provides them.
 
 ## Identity model
 
@@ -47,12 +47,11 @@ Identities fall into three supply classes:
 - **Daemon-minted durable-fact identity** — `SessionId`,
   `ImportedConversationId`, `ImportedTranscriptEntryId`, `AcceptedInputId`,
   `TurnId`, `TurnAttemptId`, `SemanticTranscriptEntryId`, `ContextFrontierId`,
-  `ModelCallId`, `ToolRequestId`, and `ToolAttemptId` today;
+  `ModelCallId`, `ToolRequestId`, and `ToolAttemptId`;
   `ProviderTargetEvidenceId` is assigned here but not yet minted (see Open
   edges). All production generators mint UUIDv7 (`uuid::Uuid::now_v7()`). Why:
-  the recorded rationale for UUIDv7 is insertion locality for append-heavy
-  Postgres B-tree keys without changing the 128-bit storage shape; no
-  index-level artifact measures this.
+  UUIDv7 gives insertion locality for append-heavy Postgres B-tree keys without
+  changing the 128-bit storage shape; no index-level artifact measures this.
 - **Configuration reference key** — `DirectModelSelection` and `ModelAlias`.
   Callers supply them inside command payloads to name operator-configured model
   selections; they persist in `uuid` columns (`direct_model_selection_id`,
@@ -104,11 +103,9 @@ UUIDv7 implementation:
 | `UuidV7CommissionedDispatchIdGenerator`              | `CommissionedDispatchId`, `DurableCommandId`, `SessionId`                                                                    |
 
 `ProviderTargetEvidenceId` exists as a domain type but has no production minting
-seam yet; its generator lands with its owning slice. `WorkspaceId`,
-`GitRemoteMintId`, and `GitRemoteWithdrawalId` are in the same position: the
-durable schema that stores them exists, nothing writes it yet, and their
-generators land with the store and the operator verbs. What each identity scopes
-is stated under
+seam. `WorkspaceId`, `GitRemoteMintId`, and `GitRemoteWithdrawalId` are in the
+same position: the durable schema that stores them exists and nothing writes it.
+What each identity scopes is stated under
 [remote destination authority](git-authority-threat-model.md#remote-destination-authority).
 
 Orchestration generates each fresh candidate immediately before the domain
@@ -122,8 +119,7 @@ reclassified-successor candidate per locked pending input; terminal closure and
 startup recovery draw one reclassified successor per locked pending input. The
 adapter invokes each closure under the lock and immediately supplies the typed
 value to the domain transition. Persistence never owns or synthesizes an
-identity, and no Postgres column has an identity-generating default (verified
-across all migrations).
+identity, and no Postgres column has an identity-generating default.
 
 Imported-frontier session creation draws its fixed session and seed-frontier
 candidates before the transaction. It passes the same orchestration slice's
@@ -187,11 +183,11 @@ non-semantic operational metadata, and the authenticated issuer principal —
 `issuer_kind` (`core`, `operator`, `module`, `watchdog`) with `issuer_module`
 naming the module — stamped by the boundary that admitted the command. The
 lifecycle actor classification derives from the principal and the domain actor:
-a module principal wins, otherwise the actor classifies. A goal event a command
-authored projects the session's actor from that command's envelope issuer, so
-daemon core's automatic resume and a module's composed stop never read as the
-operator's. No command kind, session, or client has a separate command-ID
-namespace.
+a module principal takes precedence; otherwise the actor classifies. A goal
+event a command authored projects the session's actor from that command's
+envelope issuer, so daemon core's automatic resume and a module's composed stop
+never read as the operator's. No command kind, session, or client has a separate
+command-ID namespace.
 
 Each admitted kind has one purpose-specific typed record family
 (`create_session_command`, `create_session_from_imported_frontier_command`,
@@ -283,8 +279,8 @@ dangerous blanket approval disabled and versions 1 and 2 with no system prompt.
 Create-session versions 1 through 3 carry no template provenance; version 4 and
 every later supported version require provenance for template mode and require
 its absence for explicit mode. Create-session version 5 reserves the optional
-session runner placement and remains unsupported until that payload's decoder
-lands; version 6 adds path-scoped placement, and version 7 composes model
+session runner placement and is unsupported: no present decoder provides that
+payload; version 6 adds path-scoped placement, and version 7 composes model
 settings with that implemented shape. Each field is absent before its
 introducing version, so an older reader rejects a newer creation record instead
 of discarding either decision. `ReplaceSessionMetadata` and `DecideToolRequest`
@@ -367,10 +363,8 @@ terminal result; a CAS lost without a version change is corruption
 Each single-transaction application service calls its atomic transaction port
 exactly once and surfaces infrastructure failure to its caller without retry or
 receipt reconstruction (the `CreateSessionTransaction` contract in
-`crates/application/src/create_session.rs`, the
-`CreateSessionFromImportedFrontierTransaction` contract, and the corresponding
-transaction-failure tests in all six services, including
-`decide_service_returns_transaction_failure_without_retry`). Because a failed
+`crates/application/src/create_session.rs` and the
+`CreateSessionFromImportedFrontierTransaction` contract). Because a failed
 transaction claims no identifier, retransmitting under the same
 `DurableCommandId` is the caller's retry path and replays or claims cleanly.
 Compaction's off-transaction provider effect is the deliberate exception: its
@@ -408,9 +402,9 @@ arbitrary actor, and model/recovery issuers remain unconstructible.
 equality and hashing: replaying a claimed identifier under a different actor is
 conflicting reuse (INV-012). Checked metadata reconstitution independently
 decodes the stored actor and compares it with the canonical command value. Why:
-attribution recorded outside these checks could be laundered by replaying one
-claimed identifier under a different claimed agency. For metadata replacement,
-the recorded actor is also the applied last-writer provenance.
+without these checks, replaying one claimed identifier under a different claimed
+agency could substitute that agency for the recorded attribution. For metadata
+replacement, the recorded actor is also the applied last-writer provenance.
 
 Storage follows the closed-discriminator convention: `actor_kind`
 (`user`/`core`/`model`/`recovery`/`tool`) plus `actor_turn_id` and
@@ -466,33 +460,26 @@ UUID, prefix, digest, or token appears in any `tracing` call in the codebase.
 Typed error `Debug`/`Display` representations may contain a raw command
 identifier (for example `DifferentCommandKind` in the persistence repositories)
 and are treated as internal values; the telemetry paths log classification
-fields, not formatted errors. The keyed correlation-token scheme that would
-restore per-command telemetry correlation is a retired unimplemented design;
-command-scoped events currently carry no command correlation at all. See Open
-edges.
+fields, not formatted errors. Command-scoped events carry no command
+correlation. See Open edges.
 
 ## Open edges
 
-- The `dc1` durable-command telemetry token (HMAC epoch scheme, mounted epoch
-  document, fail-closed startup validation, sanitized panic hook) is a retired
-  unimplemented design; telemetry currently omits durable-command correlation
-  rather than tokenizing it
+- Telemetry omits durable-command correlation rather than tokenizing it
   ([telemetry correlation](../open-questions.md#telemetry-correlation)).
-- `ReplaceSessionDefaults` v1/v2 payloads and storage carry no `actor` field
-  despite the accepted adoption path expecting one from the kind's first
-  accepted version; the truthful `User` backfill via another kind-scoped storage
-  version remains available but unexercised.
-- `CreateSession` actor adoption remains an explicit maintainer choice; v1/v2
-  leave its attribution implicit.
+- `ReplaceSessionDefaults` v1/v2 payloads and storage carry no `actor` field; a
+  `User` backfill via another kind-scoped storage version is available but
+  unexercised.
+- `CreateSession` actor adoption is undecided; v1/v2 leave its attribution
+  implicit.
 - No recorded-transition record family has adopted actor attribution;
   startup-scan terminalizations do not yet record a `Recovery` actor.
 - Public URL identity encodings remain undecided
   ([identity representation](../open-questions.md#identity-representation));
   local wire forms are owned by [process-protocol](process-protocol.md).
 - `ProviderTargetEvidenceId` has an assigned supply class but no production
-  minting seam. Tool request and attempt UUIDv7 generators are implemented by
-  the application tool-loop service. `ProviderModelIdentity` is persisted and
-  configuration-supplied; provider-identity normalization remains open
+  minting seam. `ProviderModelIdentity` is persisted and configuration-supplied;
+  provider-identity normalization remains open
   ([model fallback and provenance](../open-questions.md#model-fallback-and-provenance)).
 - UUIDv7 timestamp disclosure and namespace scope must be reassessed before
   identities are exposed outside the single-user boundary or treated as
