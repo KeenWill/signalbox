@@ -1,7 +1,5 @@
 # Configuration and credentials
 
-The blob catalog and input-modality grammar below are a foundation proposal.
-
 This page describes the implemented configuration and credential behavior of
 Signalbox. This includes signalboxd configuration loading in
 `apps/signalboxd/src/configuration.rs` and `apps/signalboxd/src/main.rs`, the
@@ -15,9 +13,8 @@ law lives in [docs/invariants.md](../invariants.md), cited here by tag. The
 runner credential use during provisioning or execution remains committed
 unimplemented functionality as labeled below. The credential-profile and
 credential-pool grammar, its fail-closed admission, the deliveries this build
-supplies, the fail-closed rejection of reserved Codex deliveries, the
-operator-chosen model-provider profile names, and the retirement of both
-provider key-file environment channels are implemented in
+supplies, the fail-closed rejection of reserved Codex deliveries, and the
+operator-chosen model-provider profile names are implemented in
 `apps/signalboxd/src/credential_pools.rs` and
 `apps/signalboxd/src/configuration.rs`. Preparation-time pool selection, durable
 trigger actions and chain exclusions, the availability successor calls owned by
@@ -45,11 +42,10 @@ direction: one environment variable cannot name the paths of several accounts,
 and a deployment holding two keys for one provider must be able to say so.
 
 The complete set of unconditional process settings, including the two
-integration credentials of which there is exactly one each, is below. Because
-the model-provider paths moved into the profile catalog, this list is the
-complete set of deployment values the daemon reads from the environment; `PATH`,
-`RUST_LOG`, and the telemetry variables are read for their own purposes and are
-stated where each is owned.
+integration credentials of which there is exactly one each, is below. This list
+is the complete set of deployment values the daemon reads from the environment;
+`PATH`, `RUST_LOG`, and the telemetry variables are read for their own purposes
+and are stated where each is owned.
 
 - `DATABASE_URL` — complete PostgreSQL connection URL. Production connections
   force `sslmode=verify-full` regardless of URL parameters. This environment
@@ -95,17 +91,16 @@ API routing takes precedence over static files: an unknown `/api/**` path
 returns a structured API `404` and never the web application's `index.html`. The
 daemon does not emit permissive CORS headers and adds no account, login,
 bearer-token, application-session, TLS, proxy, VPN, or ingress machinery. The
-listener therefore rejects non-loopback binds; any future remote deployment
-requires an explicit authentication and transport-security design first.
-Unauthenticated session reads — the session catalog, session descriptor, session
-timeline, live snapshot and follow stream, bounded lexical search, bounded usage
-summary and usage-call detail, operator attention snapshot and its follow
-stream, and the blob descriptor and content routes — additionally require a
-loopback `Host` authority: `localhost` or an IPv4 or IPv6 loopback address, with
-an optional port. Another authority receives a structured `403 Forbidden`
-transport error with code `non_loopback_host_rejected` before session data,
-search results, usage and cost results, blob metadata, or blob bytes are read,
-and before a descriptor read may start image derivation work.
+listener therefore rejects non-loopback binds. Unauthenticated session reads —
+the session catalog, session descriptor, session timeline, live snapshot and
+follow stream, bounded lexical search, bounded usage summary and usage-call
+detail, operator attention snapshot and its follow stream, and the blob
+descriptor and content routes — additionally require a loopback `Host`
+authority: `localhost` or an IPv4 or IPv6 loopback address, with an optional
+port. Another authority receives a structured `403 Forbidden` transport error
+with code `non_loopback_host_rejected` before session data, search results,
+usage and cost results, blob metadata, or blob bytes are read, and before a
+descriptor read may start image derivation work.
 
 `GET /api/bootstrap` describes the production browser contract. It returns the
 exact contract family `signalbox.web-http`, version `2`, the `bounded_json`,
@@ -144,7 +139,7 @@ session's lifecycle state, exact operator action when one is owed, a typed
 blocked-goal reason and a need summary of at most 128 Unicode scalar values,
 approval-judge outcome counts, and the last publication-timestamped durable
 activity fact. Exact blocked-goal need text remains available from the session
-detail read rather than entering the hot fleet page.
+detail read rather than entering the attention summary.
 
 Runner loss, model-call recovery ambiguity, tool recovery, reconciliation,
 approval wait, blocked goal, parked, active, queued, and idle remain distinct
@@ -184,12 +179,12 @@ buffering ceiling. Browser mutation routes use `POST`, require
 host and effective port to equal the request `Host` authority. Because the
 listener is plain HTTP, a `Host` without an explicit port has effective port 80;
 the daemon never derives that port from the supplied origin. A missing origin is
-admitted for non-browser and same-origin clients as the issue contract requires;
-an invalid, opaque, missing-authority, or cross-origin pair receives a
-structured transport error. Only crossing the buffering ceiling produces
-`413 Payload Too Large`; another failure while reading the request body produces
-a distinct `400 Bad Request` transport error. Application errors occupy a
-separate error kind and are not inferred from HTTP status alone.
+admitted for non-browser and same-origin clients; an invalid, opaque,
+missing-authority, or cross-origin pair receives a structured transport error.
+Only crossing the buffering ceiling produces `413 Payload Too Large`; another
+failure while reading the request body produces a distinct `400 Bad Request`
+transport error. Application errors occupy a separate error kind and are not
+inferred from HTTP status alone.
 
 Incremental responses are `application/x-ndjson`: each item is serialized only
 when the response body polls it, carries one trailing newline, and is at most
@@ -234,12 +229,12 @@ with the driver and the server, which derive them from the URL alone: an omitted
 port is the fixed 5432, and an omitted database name is the user name the URL
 states. The refusal names the offending channel and never its contents, and it
 happens before any database contact. A deployment carries every connection
-parameter in the URL. The separate local test connection path is unchanged and
-keeps SQLx's behavior; it is a development and test channel by intent — the
-integration suites and `signalbox-debug`, which reads its own
-`SIGNALBOX_DEBUG_DATABASE_URL` — and no check confines the URL it is given to a
-local cluster, so the refusals above are what stand between a production cluster
-and ambient configuration, not that path's name.
+parameter in the URL. The separate local test connection path keeps SQLx's
+behavior; it is a development and test channel by intent — the integration
+suites and `signalbox-debug`, which reads its own `SIGNALBOX_DEBUG_DATABASE_URL`
+— and no check confines the URL it is given to a local cluster, so the refusals
+above, not that path's name, are what keep ambient configuration away from a
+production cluster.
 
 A missing or empty required value, an unreadable or invalid model or template
 catalog, an invalid or unreadable referenced prompt file, or a failed Anthropic,
@@ -273,8 +268,8 @@ explicit credential to perform the marker and lifecycle checks owned by
 [blob storage](blob-storage.md#stores-routing-and-configuration), before socket
 admission or scheduling.
 
-The deployed daemon supplies no Anthropic or OpenAI endpoint or timeout knob; it
-constructs each adapter with its defaults. The
+The deployed daemon supplies no Anthropic or OpenAI endpoint or timeout setting;
+it constructs each adapter with its defaults. The
 [runtime-substrate](runtime-substrate.md) page owns those transport defaults,
 positive caller-level exchange-timeout overrides, and the whole-exchange bound.
 Startup ordering, recovery scanning, and shutdown policy are
@@ -303,9 +298,7 @@ calls that verb.
 The reloadable sections are the model and alias catalog with its rate windows,
 the session-template catalog, and the repository-watch configuration, whose
 reload transaction is owed to [repo-watch](repo-watch.md); every other section
-is startup-only. This widens
-[#660](https://github.com/KeenWill/signalbox/issues/660), which named the latter
-two.
+is startup-only.
 
 ## Telemetry export
 
@@ -388,11 +381,11 @@ The registry contains exactly nine metric names:
 
 - `signalbox_turns_started_total`, with no labels, counts durable turn
   activations. An operator graphs it as the workload-rate denominator and
-  compares it with terminalization to spot work that is not closing.
+  compares it with terminalization to find work that is not terminalizing.
 - `signalbox_turns_terminalized_total{outcome}`, whose only label values are
   `completed`, `failed`, `refused`, `cancelled`, and `reconciliation_required`,
-  counts durable terminal turn outcomes. It earns its place as the user-visible
-  success, failure, refusal, cancellation, and user-intervention rate.
+  counts durable terminal turn outcomes. It is the user-visible success,
+  failure, refusal, cancellation, and user-intervention rate.
 - `signalbox_model_calls_terminalized_total{disposition}`, whose only label
   values are `completed`, `known_failed`, `refused`, `cancelled`, and
   `ambiguous`, counts durable terminal model calls. It separates provider-call
