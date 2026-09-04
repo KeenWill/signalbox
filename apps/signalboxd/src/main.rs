@@ -50,6 +50,7 @@ use signalbox_persistence::{
     model_execution::PostgresModelCallRepository,
     repo_watch_dispatch::{PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError},
     scheduler::PostgresEligibilitySweep,
+    session_deadline::SessionDeadlineBounds,
     start_eligible_turn::StartEligibleTurnRepository,
     startup::PostgresStartupScanRepository,
     turn_liveness::TurnLivenessPersistenceBounds,
@@ -67,14 +68,14 @@ use signalboxd::{
     ExpiredPassRecoveryPolicy, FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError,
     FencedPoolFloorReconciliation, FileCredentialAccess, GitHubCodeHostTransport,
     GoalModeNumericBounds, HubModelConfiguration, HubModelConfigurationError,
-    LifecycleMetricsRuntime, LocalProcessListener, LocalSocketError, MappedDaemonCredentialInputs,
-    ModelAdapter, OtlpRuntime, PostgresGoalPassDisposition, PostgresProviderModelExecution,
-    ProcessRuntime, ProcessRuntimeError, PrometheusServer, ReportedUsageCompaction,
-    RepositoryWatchNumericBounds, RepositoryWatchRuntime, RepositoryWatchRuntimeError,
-    SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
-    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
-    TelemetryExportFilter, TelemetryMetrics, TurnLivenessNumericBounds, TurnLivenessRuntime,
-    WebBlobRuntime, WorkspaceInstructionRuntime,
+    LifecycleDeadlineRuntime, LifecycleMetricsRuntime, LocalProcessListener, LocalSocketError,
+    MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime, PostgresGoalPassDisposition,
+    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
+    ReportedUsageCompaction, RepositoryWatchNumericBounds, RepositoryWatchRuntime,
+    RepositoryWatchRuntimeError, SessionTemplateConfiguration, SessionTemplateConfigurationError,
+    SingleHubGuardError, SystemCurrentTimeClock, TelemetryConfiguration,
+    TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
+    TurnLivenessNumericBounds, TurnLivenessRuntime, WebBlobRuntime, WorkspaceInstructionRuntime,
     model_adapter::ConfiguredModelRuntime,
     reconcile_fenced_pool_floor, run_web_image_derivative_worker_if_requested,
     usage_limits::UsageLimitedModelCallProvider,
@@ -679,6 +680,7 @@ enum RuntimeTaskExit {
     ConvergenceSweep,
     WebHttp(Result<(), WebHttpRuntimeError>),
     TurnLiveness,
+    LifecycleDeadline,
     LifecycleMetrics,
 }
 
@@ -725,6 +727,7 @@ enum RuntimeTaskDefect {
     ConvergenceSweepCompletedBeforeShutdown,
     WebHttpCompletedBeforeShutdown,
     TurnLivenessCompletedBeforeShutdown,
+    LifecycleDeadlineCompletedBeforeShutdown,
     LifecycleMetricsCompletedBeforeShutdown,
     TaskCancelled,
     TaskPanicked,
@@ -752,6 +755,9 @@ impl RuntimeTaskDefect {
             }
             Self::WebHttpCompletedBeforeShutdown => "web_http_completed_before_shutdown",
             Self::TurnLivenessCompletedBeforeShutdown => "turn_liveness_completed_before_shutdown",
+            Self::LifecycleDeadlineCompletedBeforeShutdown => {
+                "lifecycle_deadline_completed_before_shutdown"
+            }
             Self::LifecycleMetricsCompletedBeforeShutdown => {
                 "lifecycle_metrics_completed_before_shutdown"
             }
@@ -1152,6 +1158,7 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         | Ok(RuntimeTaskExit::ConvergenceSweep)
         | Ok(RuntimeTaskExit::WebHttp(Ok(())))
         | Ok(RuntimeTaskExit::TurnLiveness)
+        | Ok(RuntimeTaskExit::LifecycleDeadline)
         | Ok(RuntimeTaskExit::LifecycleMetrics) => RuntimeTaskCompletion::Clean,
         Ok(RuntimeTaskExit::Process(Err(error))) => {
             report_process_runtime_failure(&error);
@@ -2459,6 +2466,14 @@ async fn run_hub(
         automatic_reconciliation_backoff_cap,
         turn_liveness_numeric_bounds,
     );
+    let lifecycle_deadline_runtime = LifecycleDeadlineRuntime::new(
+        scheduler_pool.clone(),
+        turn_liveness_scan_interval,
+        SessionDeadlineBounds::new(
+            configured_duration("session_admission_deadline"),
+            configured_duration("session_waiting_deadline"),
+        ),
+    );
     let goal_disposition = PostgresGoalPassDisposition::new(
         scheduler_pool,
         model_configuration.clone(),
@@ -2523,6 +2538,7 @@ async fn run_hub(
     let (convergence_sweep_shutdown, convergence_sweep_shutdown_receiver) = watch::channel(false);
     let (web_http_shutdown, web_http_shutdown_receiver) = watch::channel(false);
     let (turn_liveness_shutdown, turn_liveness_shutdown_receiver) = watch::channel(false);
+    let (lifecycle_deadline_shutdown, lifecycle_deadline_shutdown_receiver) = watch::channel(false);
     let (lifecycle_metrics_shutdown, lifecycle_metrics_shutdown_receiver) = watch::channel(false);
     let mut runtime_tasks = JoinSet::new();
     runtime_tasks.spawn(async move {
@@ -2603,6 +2619,12 @@ async fn run_hub(
             .run(turn_liveness_shutdown_receiver)
             .await;
         RuntimeTaskExit::TurnLiveness
+    });
+    runtime_tasks.spawn(async move {
+        lifecycle_deadline_runtime
+            .run(lifecycle_deadline_shutdown_receiver)
+            .await;
+        RuntimeTaskExit::LifecycleDeadline
     });
     if let Some(lifecycle_metrics_runtime) = lifecycle_metrics_runtime {
         runtime_tasks.spawn(async move {
@@ -2703,6 +2725,12 @@ async fn run_hub(
                         );
                         RuntimeStopCause::RuntimeDefect
                     }
+                    Some(Ok(RuntimeTaskExit::LifecycleDeadline)) => {
+                        report_runtime_task_defect(
+                            RuntimeTaskDefect::LifecycleDeadlineCompletedBeforeShutdown,
+                        );
+                        RuntimeStopCause::RuntimeDefect
+                    }
                     Some(Ok(RuntimeTaskExit::Scheduler(_))) => {
                         report_runtime_task_defect(
                             RuntimeTaskDefect::SchedulerCompletedBeforeShutdown,
@@ -2736,6 +2764,7 @@ async fn run_hub(
             let _ = convergence_sweep_shutdown.send(true);
             let _ = web_http_shutdown.send(true);
             let _ = turn_liveness_shutdown.send(true);
+            let _ = lifecycle_deadline_shutdown.send(true);
             let _ = lifecycle_metrics_shutdown.send(true);
             let (drain, components_clean) = drain_runtime_tasks(
                 &mut runtime_tasks,

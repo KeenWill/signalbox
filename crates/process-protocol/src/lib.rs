@@ -3538,6 +3538,8 @@ pub enum SessionLifecycleCommandRejection {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionLifecycleEffect {
+    /// The held start gate opened.
+    StartReleased {},
     /// The session recorded terminal.
     Closed {},
     /// The outcome is committed; the named live turn settles first.
@@ -3701,6 +3703,11 @@ pub enum ClientRequest {
     },
     /// Drop the liveness obligation.
     ReleaseSession {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
+    },
+    /// Open a held start gate so queued admission work may dispatch.
+    ReleaseStart {
         command_id: CommandId,
         session_id: CanonicalUuid,
     },
@@ -4224,6 +4231,7 @@ impl ClientRequest {
                 ..
             }
             | Self::ReleaseSession { .. }
+            | Self::ReleaseStart { .. }
             | Self::SubmitInput { .. }
             | Self::CompactSession { .. }
             | Self::ReadTranscript { .. }

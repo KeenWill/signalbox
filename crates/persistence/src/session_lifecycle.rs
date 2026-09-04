@@ -290,32 +290,16 @@ impl SessionLifecycleRepository {
         actor: LifecycleActor,
     ) -> Result<SessionLifecycleState, SessionLifecycleRepositoryError> {
         let mut transaction = self.pool.begin().await?;
-        let held = load_locked(&mut transaction, session).await?;
-        if held.ownership == SessionOwnership::Unmonitored {
-            return Err(reject(transaction, SessionLifecycleRejection::ParkWhileUnmonitored).await);
-        }
-        if !cause.admits_standing(standing) {
-            return Err(reject(transaction, SessionLifecycleRejection::ParkStandingMismatch).await);
-        }
-        let parked = SessionLifecycleState::Parked {
-            cause,
-            responder,
-            standing,
-        };
-        // A park installs the standing evidence a closure will carry forward,
-        // so it cannot contradict a decision already committed: settlement
-        // would then refuse the outcome the closure had recorded.
-        if held
-            .pending_terminal
-            .is_some_and(|committed| !closure_carries_standing_cause(&parked, committed))
-        {
-            return Err(reject(
-                transaction,
-                SessionLifecycleRejection::StandingCauseMismatch,
-            )
-            .await);
-        }
-        write_state(&mut transaction, &held, parked, actor).await?;
+        let parked =
+            match park_in_transaction(&mut transaction, session, cause, responder, standing, actor)
+                .await
+            {
+                Ok(parked) => parked,
+                Err(SessionLifecycleRepositoryError::Rejected(rejection)) => {
+                    return Err(reject(transaction, rejection).await);
+                }
+                Err(error) => return Err(error),
+            };
         commit(transaction).await?;
         Ok(parked)
     }
@@ -460,6 +444,9 @@ impl SessionLifecycleRepository {
         if held.state.is_parked() && transition == SessionOwnershipTransition::Released {
             return Err(reject(transaction, SessionLifecycleRejection::ReleaseWhileParked).await);
         }
+        if transition == SessionOwnershipTransition::Released {
+            release_start_if_held(&mut transaction, session, actor).await?;
+        }
         sqlx::query("UPDATE session_lifecycle SET owned = $2 WHERE session_id = $1")
             .bind(session_id_to_uuid(session))
             .bind(transition.ownership().is_owned())
@@ -468,6 +455,43 @@ impl SessionLifecycleRepository {
         journal_ownership(&mut transaction, session, transition, actor).await?;
         commit(transaction).await
     }
+}
+
+/// Parks one session inside the caller's transaction.
+pub(crate) async fn park_in_transaction(
+    connection: &mut PgConnection,
+    session: SessionId,
+    cause: SessionParkCause,
+    responder: SessionParkResponder,
+    standing: Option<SessionFailureCause>,
+    actor: LifecycleActor,
+) -> Result<SessionLifecycleState, SessionLifecycleRepositoryError> {
+    let held = load_locked(connection, session).await?;
+    if held.ownership == SessionOwnership::Unmonitored {
+        return Err(SessionLifecycleRepositoryError::Rejected(
+            SessionLifecycleRejection::ParkWhileUnmonitored,
+        ));
+    }
+    if !cause.admits_standing(standing) {
+        return Err(SessionLifecycleRepositoryError::Rejected(
+            SessionLifecycleRejection::ParkStandingMismatch,
+        ));
+    }
+    let parked = SessionLifecycleState::Parked {
+        cause,
+        responder,
+        standing,
+    };
+    if held
+        .pending_terminal
+        .is_some_and(|committed| !closure_carries_standing_cause(&parked, committed))
+    {
+        return Err(SessionLifecycleRepositoryError::Rejected(
+            SessionLifecycleRejection::StandingCauseMismatch,
+        ));
+    }
+    write_state(connection, &held, parked, actor).await?;
+    Ok(parked)
 }
 
 /// Lifts one park inside the caller's transaction.
@@ -644,6 +668,7 @@ pub(crate) async fn release_in_transaction(
             SessionLifecycleRejection::ReleaseWhileParked,
         ));
     }
+    release_start_if_held(connection, session, actor).await?;
     flip_ownership_in_transaction(
         connection,
         session,
@@ -651,6 +676,53 @@ pub(crate) async fn release_in_transaction(
         actor,
     )
     .await
+}
+
+/// Opens a held start gate inside the caller's transaction.
+pub(crate) async fn release_start_in_transaction(
+    connection: &mut PgConnection,
+    session: SessionId,
+    actor: LifecycleActor,
+) -> Result<SessionLifecycleState, SessionLifecycleRepositoryError> {
+    let held = load_locked(connection, session).await?;
+    let start_gate_held: bool =
+        sqlx::query_scalar("SELECT start_gate_held FROM session_lifecycle WHERE session_id = $1")
+            .bind(session_id_to_uuid(session))
+            .fetch_one(&mut *connection)
+            .await?;
+    if held.state != SessionLifecycleState::Created || !start_gate_held {
+        return Err(SessionLifecycleRepositoryError::Rejected(
+            SessionLifecycleRejection::TransitionNotAdmitted,
+        ));
+    }
+    sqlx::query("UPDATE session_lifecycle SET start_gate_held = false WHERE session_id = $1")
+        .bind(session_id_to_uuid(session))
+        .execute(&mut *connection)
+        .await?;
+    let (actor_kind, actor_module, _, _) = encode_actor(actor);
+    sqlx::query("SELECT project_session_lifecycle($1, false, $2, $3)")
+        .bind(session_id_to_uuid(session))
+        .bind(actor_kind)
+        .bind(actor_module)
+        .execute(&mut *connection)
+        .await?;
+    Ok(load_locked(connection, session).await?.state)
+}
+
+async fn release_start_if_held(
+    connection: &mut PgConnection,
+    session: SessionId,
+    actor: LifecycleActor,
+) -> Result<(), SessionLifecycleRepositoryError> {
+    let start_gate_held: bool =
+        sqlx::query_scalar("SELECT start_gate_held FROM session_lifecycle WHERE session_id = $1")
+            .bind(session_id_to_uuid(session))
+            .fetch_one(&mut *connection)
+            .await?;
+    if start_gate_held {
+        release_start_in_transaction(connection, session, actor).await?;
+    }
+    Ok(())
 }
 
 /// Attaching a goal confers ownership (§6): an unmonitored session becomes

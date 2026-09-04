@@ -212,8 +212,8 @@ impl PostgresEligibilitySweep {
                         )
                    )
              ), candidates AS (
-                -- §1: a parked session's rows are neither sweep candidates nor
-                -- watchdog candidates until it leaves `parked`. The exclusion
+                -- §1: parked and start-gated sessions are not sweep candidates.
+                -- The exclusion
                 -- is inside the candidate set rather than on the outer filter
                 -- because the rotation's high-water mark is derived from this
                 -- set: a parked session chosen as `scan_through` would stall
@@ -224,7 +224,9 @@ impl PostgresEligibilitySweep {
                         SELECT 1
                           FROM session_lifecycle AS lifecycle
                          WHERE lifecycle.session_id = swept.session_id
-                           AND lifecycle.state_kind = 'parked'
+                           AND (lifecycle.state_kind = 'parked'
+                                OR (lifecycle.state_kind = 'created'
+                                    AND lifecycle.start_gate_held))
                  )
              ), bounded AS (
                 SELECT COALESCE(

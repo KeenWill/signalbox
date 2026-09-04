@@ -1,6 +1,6 @@
 //! Claim, apply, and settle the §7 session-lifecycle command family.
 //!
-//! One registry kind carries the seven operations. Every claimed command
+//! One registry kind carries the lifecycle operations. Every claimed command
 //! records its typed row and a `command_settled` receipt; a closure that finds
 //! a live turn commits its outcome to the satellite's handoff and reports the
 //! turn the committed interrupt machinery settles.
@@ -297,6 +297,10 @@ async fn apply(
         Err(error) => return Err(error.into()),
     };
     match command.operation() {
+        SessionLifecycleOperation::ReleaseStart => {
+            session_lifecycle::release_start_in_transaction(connection, session, actor).await?;
+            Ok(SessionLifecycleApplication::StartReleased)
+        }
         SessionLifecycleOperation::Stop { sticky, .. } => {
             close(
                 connection,
@@ -480,7 +484,7 @@ async fn live_active_turn(
 
 /// Retires every queued turn the closure strands (§10), one at a time so
 /// each retirement publishes its own `turn_terminal{retired}`.
-async fn retire_queued_turns(
+pub(crate) async fn retire_queued_turns(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<(), sqlx::Error> {
@@ -563,6 +567,9 @@ async fn insert_command_record(
         ),
     };
     let (effect, live_turn) = match result {
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::StartReleased) => {
+            (Some("start_released"), None)
+        }
         SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::Closed { .. }) => {
             (Some("closed"), None)
         }
@@ -686,6 +693,7 @@ async fn replayed_application(
         )),
     };
     Ok(match effect {
+        RecordedEffect::StartReleased => SessionLifecycleApplication::StartReleased,
         RecordedEffect::Closed => SessionLifecycleApplication::Closed {
             outcome: outcome()?,
         },
@@ -711,6 +719,7 @@ async fn replayed_application(
 }
 
 enum RecordedEffect {
+    StartReleased,
     Closed,
     ClosurePending { live_turn: TurnId },
     Resumed { state: SessionLifecycleState },
@@ -771,6 +780,7 @@ fn decode_recorded(
     )
     .map_err(corrupt)?;
     let operation = match (operation.as_str(), sticky, scope, successor, failure_cause) {
+        ("release_start", None, None, None, None) => SessionLifecycleOperation::ReleaseStart,
         ("stop", Some(sticky), Some(scope), None, None) => SessionLifecycleOperation::Stop {
             sticky: if sticky {
                 StopStickiness::Sticky
@@ -809,6 +819,9 @@ fn decode_recorded(
         effect.as_deref(),
         live_turn,
     ) {
+        ("applied", None, Some("start_released"), None) => {
+            RecordedResult::Applied(RecordedEffect::StartReleased)
+        }
         ("applied", None, Some("closed"), None) => RecordedResult::Applied(RecordedEffect::Closed),
         ("applied", None, Some("closure_pending"), Some(live_turn)) => {
             RecordedResult::Applied(RecordedEffect::ClosurePending {

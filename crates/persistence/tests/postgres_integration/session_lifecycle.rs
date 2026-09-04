@@ -870,7 +870,7 @@ async fn a_terminal_session_admits_no_further_transition() -> Result<(), Box<dyn
         .close(
             session,
             SessionTerminalOutcome::Retired {
-                cause: SessionRetirementCause::StartGateDeadlineExpired,
+                cause: SessionRetirementCause::AdmissionDeadlineExpired,
             },
             LifecycleActor::Watchdog,
         )
@@ -1558,7 +1558,7 @@ async fn a_terminal_session_admits_no_later_queued_turn() -> Result<(), Box<dyn 
         .close(
             session,
             SessionTerminalOutcome::Retired {
-                cause: SessionRetirementCause::StartGateDeadlineExpired,
+                cause: SessionRetirementCause::AdmissionDeadlineExpired,
             },
             LifecycleActor::Watchdog,
         )

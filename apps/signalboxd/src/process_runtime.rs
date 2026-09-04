@@ -1358,6 +1358,7 @@ fn conversation_import_request_requires_permit(
         | ClientRequest::ResumeSession { .. }
         | ClientRequest::AdoptSession { .. }
         | ClientRequest::ReleaseSession { .. }
+        | ClientRequest::ReleaseStart { .. }
         | ClientRequest::SupersedeGoal { .. }
         | ClientRequest::SubmitInput { .. }
         | ClientRequest::CompactSession { .. }
@@ -1568,6 +1569,7 @@ impl SnapshotReaderAdmission {
             | ClientRequest::ResumeSession { .. }
             | ClientRequest::AdoptSession { .. }
             | ClientRequest::ReleaseSession { .. }
+            | ClientRequest::ReleaseStart { .. }
             | ClientRequest::SupersedeGoal { .. }
             | ClientRequest::SubmitInput { .. }
             | ClientRequest::CompactSession { .. }
@@ -1998,6 +2000,21 @@ where
                 command_id.into_uuid(),
                 session_id,
                 SessionLifecycleOperation::Release,
+                services,
+            )
+            .await
+        }
+        ClientRequest::ReleaseStart {
+            command_id,
+            session_id,
+        } => {
+            handle_session_lifecycle_command(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                session_id,
+                SessionLifecycleOperation::ReleaseStart,
                 services,
             )
             .await
@@ -15866,6 +15883,7 @@ async fn closure_settled(services: &ConnectionServices, session: SessionId) -> b
 
 const fn wire_lifecycle_effect(value: SessionLifecycleApplication) -> SessionLifecycleEffect {
     match value {
+        SessionLifecycleApplication::StartReleased => SessionLifecycleEffect::StartReleased {},
         SessionLifecycleApplication::Closed { .. } => SessionLifecycleEffect::Closed {},
         SessionLifecycleApplication::ClosurePending { live_turn, .. } => {
             SessionLifecycleEffect::ClosurePending {

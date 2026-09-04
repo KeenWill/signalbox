@@ -48,6 +48,7 @@ pub mod scheduler;
 pub mod search;
 pub mod session;
 pub mod session_credentials;
+pub mod session_deadline;
 pub mod session_delegation;
 pub mod session_lifecycle;
 pub mod session_lifecycle_command;

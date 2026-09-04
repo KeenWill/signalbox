@@ -7,7 +7,10 @@ use std::{
 };
 
 use rust_decimal::{Decimal, prelude::ToPrimitive};
-use signalbox_domain::{CommitSha, DurableCommandId, PullRequestNumber, RepositorySlug, SessionId};
+use signalbox_domain::{
+    CommitSha, DispatchingModule, DurableCommandId, LifecycleActor, PullRequestNumber,
+    RepositorySlug, SessionId, SessionParkCause, SessionParkResponder,
+};
 use sqlx::{
     PgConnection, PgPool,
     types::{Uuid, time::OffsetDateTime},
@@ -180,6 +183,7 @@ impl ConvergenceSweepRetryPolicy {
 struct FailureTransitionRow {
     consecutive_failures: i16,
     parking_kind: String,
+    parked_session_id: Option<Uuid>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -313,6 +317,7 @@ pub enum ConvergenceSweepStoreError {
     Database(sqlx::Error),
     CommitAmbiguous(sqlx::Error),
     Corruption(&'static str),
+    Lifecycle(Box<crate::session_lifecycle::SessionLifecycleRepositoryError>),
 }
 
 impl fmt::Display for ConvergenceSweepStoreError {
@@ -326,6 +331,7 @@ impl fmt::Display for ConvergenceSweepStoreError {
                 formatter,
                 "convergence sweep state is inconsistent: {reason}"
             ),
+            Self::Lifecycle(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -334,6 +340,7 @@ impl Error for ConvergenceSweepStoreError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
+            Self::Lifecycle(error) => Some(error.as_ref()),
             Self::Corruption(_) => None,
         }
     }
@@ -1115,7 +1122,8 @@ impl PostgresConvergenceSweepStore {
                     CASE state_kind
                         WHEN $12 THEN 'parked'
                         ELSE 'retry_scheduled'
-                    END AS parking_kind",
+                    END AS parking_kind,
+                    parked_session_id",
         )
         .bind(repository.as_str())
         .bind(Decimal::from(pull_request.get()))
@@ -1147,6 +1155,30 @@ impl PostgresConvergenceSweepStore {
             };
         };
         let parking = FailureParking::decode(&updated.parking_kind)?;
+        if parking == FailureParking::Parked
+            && let Some(parked_session) = updated.parked_session_id
+        {
+            let session = SessionId::from_uuid(parked_session);
+            let lifecycle = crate::session_lifecycle::load_locked(&mut transaction, session)
+                .await
+                .map_err(|error| ConvergenceSweepStoreError::Lifecycle(Box::new(error)))?;
+            if !lifecycle.state().is_parked() {
+                crate::session_lifecycle::park_in_transaction(
+                    &mut transaction,
+                    session,
+                    SessionParkCause::ModulePark,
+                    SessionParkResponder::Module {
+                        module: DispatchingModule::CommissionedDispatch,
+                    },
+                    None,
+                    LifecycleActor::Module {
+                        module: DispatchingModule::CommissionedDispatch,
+                    },
+                )
+                .await
+                .map_err(|error| ConvergenceSweepStoreError::Lifecycle(Box::new(error)))?;
+            }
+        }
         insert_event(
             &mut transaction,
             event_id,

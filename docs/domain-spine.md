@@ -6111,8 +6111,7 @@ pub enum SessionStructuralCause {
 }
 
 pub enum SessionRetirementCause {
-    DispatchDeadlineExpired,
-    StartGateDeadlineExpired,
+    AdmissionDeadlineExpired,
     StrandedQueuedTurn,
 }
 
@@ -6236,6 +6235,7 @@ pub enum FinishCheckVerdict {
 }
 
 pub enum SessionLifecycleOperation {
+    ReleaseStart,
     Stop { sticky: StopStickiness, descendant_scope: DescendantTerminationScope },
     Supersede { successor: SessionId },
     Abandon,
@@ -6272,6 +6272,7 @@ pub enum SessionLifecycleCommandRejection {
 }
 
 pub enum SessionLifecycleApplication {
+    StartReleased,
     Closed { outcome: SessionTerminalOutcome },
     ClosurePending {
         outcome: SessionTerminalOutcome,

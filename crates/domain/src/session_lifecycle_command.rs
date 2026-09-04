@@ -1,4 +1,4 @@
-//! The §7 session-lifecycle command surface: the seven operations one
+//! The §7 session-lifecycle command surface: the lifecycle operations one
 //! durable command family carries, the finish condition an owned session
 //! owes, the verdict a finish check returns, and the authenticated principal
 //! every command envelope records.
@@ -90,9 +90,11 @@ pub enum FinishCheckVerdict {
     Unverified,
 }
 
-/// One of the seven §7 lifecycle operations.
+/// One of the §7 lifecycle operations.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum SessionLifecycleOperation {
+    /// Open a held start gate so queued admission work may dispatch.
+    ReleaseStart,
     /// Close the session `stopped{sticky}` from any non-terminal state.
     Stop {
         /// Whether re-dispatch stays suppressed.
@@ -212,6 +214,8 @@ pub enum SessionLifecycleCommandRejection {
 /// What an applied lifecycle command did.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionLifecycleApplication {
+    /// The held start gate opened.
+    StartReleased,
     /// The session recorded terminal.
     Closed {
         /// The recorded outcome.

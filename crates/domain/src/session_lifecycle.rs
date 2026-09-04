@@ -339,10 +339,8 @@ pub enum SessionStructuralCause {
 /// Why a session that never did the work was retired.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SessionRetirementCause {
-    /// The dispatched session never reached `active`.
-    DispatchDeadlineExpired,
-    /// A held start gate was never released.
-    StartGateDeadlineExpired,
+    /// The session never reached its first activity before admission expired.
+    AdmissionDeadlineExpired,
     /// The one-time closure of a stranded queued-turn session.
     StrandedQueuedTurn,
 }
@@ -604,13 +602,12 @@ impl SessionLifecycleState {
     const fn admits_outcome(&self, outcome: &SessionTerminalOutcome) -> bool {
         match outcome {
             SessionTerminalOutcome::Retired { cause } => match (self, cause) {
-                (Self::Created, SessionRetirementCause::StartGateDeadlineExpired)
-                | (
-                    Self::Dispatched,
-                    SessionRetirementCause::DispatchDeadlineExpired
-                    | SessionRetirementCause::StrandedQueuedTurn,
-                ) => true,
-                (Self::Created | Self::Dispatched, _) => false,
+                (
+                    Self::Created | Self::Dispatched,
+                    SessionRetirementCause::AdmissionDeadlineExpired,
+                )
+                | (Self::Dispatched, SessionRetirementCause::StrandedQueuedTurn) => true,
+                (Self::Created, SessionRetirementCause::StrandedQueuedTurn) => false,
                 (
                     Self::Active
                     | Self::Waiting { .. }
@@ -784,7 +781,7 @@ mod tests {
     fn start_gate_retired() -> SessionLifecycleState {
         SessionLifecycleState::Terminal {
             outcome: SessionTerminalOutcome::Retired {
-                cause: SessionRetirementCause::StartGateDeadlineExpired,
+                cause: SessionRetirementCause::AdmissionDeadlineExpired,
             },
         }
     }
@@ -792,7 +789,7 @@ mod tests {
     fn retired() -> SessionLifecycleState {
         SessionLifecycleState::Terminal {
             outcome: SessionTerminalOutcome::Retired {
-                cause: SessionRetirementCause::DispatchDeadlineExpired,
+                cause: SessionRetirementCause::AdmissionDeadlineExpired,
             },
         }
     }
@@ -1122,7 +1119,7 @@ mod tests {
         );
         assert_eq!(
             SessionTerminalOutcome::Retired {
-                cause: SessionRetirementCause::DispatchDeadlineExpired,
+                cause: SessionRetirementCause::AdmissionDeadlineExpired,
             }
             .closure_outcome(),
             Some(SessionClosureOutcome::Retired)

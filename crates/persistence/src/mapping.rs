@@ -1567,8 +1567,7 @@ pub(crate) fn session_structural_cause_from_str(value: &str) -> Option<SessionSt
 /// Encodes which admission or closure predicate retired a session.
 pub(crate) const fn session_retirement_cause_to_str(value: SessionRetirementCause) -> &'static str {
     match value {
-        SessionRetirementCause::DispatchDeadlineExpired => "dispatch_deadline_expired",
-        SessionRetirementCause::StartGateDeadlineExpired => "start_gate_deadline_expired",
+        SessionRetirementCause::AdmissionDeadlineExpired => "admission_deadline_expired",
         SessionRetirementCause::StrandedQueuedTurn => "stranded_queued_turn",
     }
 }
@@ -1576,8 +1575,7 @@ pub(crate) const fn session_retirement_cause_to_str(value: SessionRetirementCaus
 /// Decodes which admission or closure predicate retired a session.
 pub(crate) fn session_retirement_cause_from_str(value: &str) -> Option<SessionRetirementCause> {
     match value {
-        "dispatch_deadline_expired" => Some(SessionRetirementCause::DispatchDeadlineExpired),
-        "start_gate_deadline_expired" => Some(SessionRetirementCause::StartGateDeadlineExpired),
+        "admission_deadline_expired" => Some(SessionRetirementCause::AdmissionDeadlineExpired),
         "stranded_queued_turn" => Some(SessionRetirementCause::StrandedQueuedTurn),
         _ => None,
     }
@@ -1645,6 +1643,7 @@ pub(crate) const fn session_lifecycle_operation_to_str(
     value: &SessionLifecycleOperation,
 ) -> &'static str {
     match value {
+        SessionLifecycleOperation::ReleaseStart => "release_start",
         SessionLifecycleOperation::Stop { .. } => "stop",
         SessionLifecycleOperation::Supersede { .. } => "supersede",
         SessionLifecycleOperation::Abandon => "abandon",
