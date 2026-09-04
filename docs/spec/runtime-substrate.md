@@ -611,7 +611,7 @@ output usage-presence check without demanding it be nonzero.
 The OpenAI smoke also accepts one loss shape: the exchange that stopped at its
 own output ceiling. Chat Completions reports that as `finish_reason: "length"`,
 which this adapter deliberately leaves unmapped, so the decoder ends the stream
-as `BoundaryLoss` carrying the token verbatim. That is a truthful report about
+as `BoundaryLoss` carrying the token verbatim. That is an accurate report about
 answer length, not a protocol break — the request was accepted and the body
 framed and decoded — so failing the smoke on it would assert something about
 answer quality, which this smoke does not do. The acceptance is keyed to that
@@ -653,8 +653,7 @@ the adapter crate or the workflow itself — an exception to `CONTRIBUTING.md`'s
 general testing-strategy default that a credentialed live-provider smoke is
 never the merge gate. Provider unavailability, rate limiting, or a misconfigured
 credential therefore reports as a temporary red rather than a verdict on the
-change's correctness; the remedy is rerunning the smoke once the provider or
-environment recovers.
+change's correctness.
 
 The workflow reports on every pull request without a path filter. GitHub
 independently withholds secrets from ordinary fork `pull_request` runs
@@ -758,8 +757,8 @@ sandbox and working root are the adapter's filesystem boundary. Unix supervision
 contains the process group the adapter creates, so construction rejects hosts
 where process-group control is unavailable; a descendant that deliberately
 leaves that group is outside the adapter's boundary. Host isolation owns
-containment beyond the created group — specifically the runner sandbox in
-build-out — and is not an adapter claim.
+containment beyond the created group — specifically the runner sandbox — and is
+not an adapter claim.
 
 The rendered prompt opens with a preamble whose tool-authority statement is
 singular and positionally first: the serialized `tools` array is named the
@@ -1061,12 +1060,11 @@ a typed assistant `tool_use` followed by a user `tool_result`, and the adapter
 returns the proposal for external authorization and execution. A controlled
 `SessionStart` hook waits for a private readiness marker written only after the
 bridge has answered `tools/list`. The bridge accepts exactly the MCP
-`2025-11-25` initialization protocol observed from Claude Code `2.1.220`; its
-`tools/call` request carries the declared name and object arguments, and its
-fixed result returns one text content block. This closes the print-mode
-discovery race: the accepted `system/init` must report that server `connected`
-and its `tools` set must equal the qualified declared MCP surface before any
-assistant content is admitted.
+`2025-11-25` initialization protocol; its `tools/call` request carries the
+declared name and object arguments, and its fixed result returns one text
+content block. This closes the print-mode discovery race: the accepted
+`system/init` must report that server `connected` and its `tools` set must equal
+the qualified declared MCP surface before any assistant content is admitted.
 
 The invocation excludes ambient settings, sessions, slash commands, browser
 integration, plugins, and built-in tools. `--tools` selects an empty built-in
@@ -1335,8 +1333,8 @@ new one is a regression and a repaired one must shrink the ledger, so the set
 cannot drift in either direction. A shape the contract covers that the sink
 still leaks is carried as `KNOWN-FAILING`, which is a defect ledger and never an
 `ACCEPTED-UNCOVERED` classification — that status records only what this
-contract openly declines to cover. Fail-closed suppression is absorbing for the
-sink's lifetime: usage reports, other fact boundaries, and terminal flushes
+contract explicitly declines to cover. Fail-closed suppression is absorbing for
+the sink's lifetime: usage reports, other fact boundaries, and terminal flushes
 never re-enable provider-controlled bytes. Streamed lookbehind's 64-KiB memory
 bound is independent of its work bound. One initial unsafe-suffix classification
 decides whether a prefix is held; it is not charged as reclassification. After a
