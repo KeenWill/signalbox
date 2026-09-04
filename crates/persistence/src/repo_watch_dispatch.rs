@@ -327,7 +327,7 @@ impl PostgresRepoWatchDispatchStore {
         let sessions = sqlx::query_scalar::<_, Uuid>(
             "SELECT lifecycle.session_id
                FROM session_lifecycle AS lifecycle
-              WHERE lifecycle.state_kind = 'dispatched'
+              WHERE lifecycle.state_kind IN ('dispatched', 'active')
                 AND lifecycle.actor_kind = 'module'
                 AND lifecycle.actor_module = 'repo_watch'
                 AND lifecycle.owned
