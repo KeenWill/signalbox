@@ -1,29 +1,13 @@
 # Conversation import
 
-The user-vocabulary surface on this page was re-verified through PR #378
-(`agent/user-vocabulary`).
-
-The raw-source blob convergence below is verified against this implementing
-change (`agent/blob-storage-import-convergence`), atop the foundation proposal
-from PR #553 (`agent/blob-storage-foundation`).
-
 This page specifies immutable imported conversation snapshots, raw source-record
 preservation, source-neutral normalization, addressable imported frontiers, the
 format-versioned converter seam, Claude Code session and Codex rollout JSONL
 converters, the append-only Postgres import store, evidence-derived display
 titles, the user-operated one-file and directory-scan import surfaces, and the
-imported-conversation inspection read. The one-file surface was verified against
-the implementing stack through PR #252 (`agent/import-surfaces`); the directory
-scan through PR #284 (`agent/import-directory-scan`); the derived display title
-through PR #304 (`agent/unified-conversation-listing`); and the
-imported-conversation inspection read through PR #303
-(`agent/imported-conversation-inspection`); and the chunked transport, total
-bound, and typed rejection evidence against PR #401
-(`agent/import-chunks-protocol`) and PR #402 (`agent/import-chunks`). Bounded
-browser discovery, inspection, and continuation are verified against this PR
-(`agent/web-discovery-reads`). Session creation from one imported frontier is
-owned by [sessions-and-transcript](sessions-and-transcript.md); native turn
-activation and model-call rendering are owned by
+imported-conversation inspection read. Session creation from one imported
+frontier is owned by [sessions-and-transcript](sessions-and-transcript.md);
+native turn activation and model-call rendering are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) and
 [model-call-execution](model-call-execution.md).
 

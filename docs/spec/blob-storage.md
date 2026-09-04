@@ -1,73 +1,10 @@
 # Blob storage
 
 This page is the foundation proposal introduced by PR #553
-(`agent/blob-storage-foundation`). Its implemented-behavior statements become
-verified with its implementing child stack and take effect with the full stack.
-A paragraph that names itself unimplemented is committed unimplemented
-functionality and carries only its stated compatibility constraint.
-
-The blob digest and external spelling, deterministic object-key producer,
-streaming whole-object and ranged store contract, filesystem publication,
-verification, and corrupt-object repair behavior, and shared store conformance
-suite are verified against PR #555 (`agent/blob-storage-substrate`).
-
-The path-style S3 adapter, explicit rotating credential-file reads, streaming
-multipart publication, namespace and lifecycle authentication, bounded
-transport, and opt-in live conformance suite are verified against this
-implementing change (`agent/blob-storage-s3`).
-
-The append-only identity, store-binding, and verified-replica catalog and its
-transactional registration behavior are verified against PR #581
-(`agent/blob-storage-catalog`).
-
-The configuration catalog, route validation, filesystem namespace admission, and
-startup store registry are verified against this implementing change
-(`agent/blob-storage-registry`).
-
-The disk-backed upload lifecycle, routed-store-only live deduplication,
-publication-before-registration ordering, process-protocol messages, and shared
-bulk-ingest resource bounds are verified against this implementing change
-(`agent/blob-storage-upload`).
-
-The terminal upload command and PostgreSQL/socket lifecycle proofs are verified
-against this implementing change (`agent/blob-storage-upload-terminal`).
-
-Bounded direct metadata and range reads, replica fallback classification,
-non-waiting process admission, and the terminal read commands are verified
-against this implementing change (`agent/blob-storage-read-wire`).
-
-The canonical multipart domain algebra and ordered process-protocol vocabulary
-are verified against this implementing change
-(`agent/blob-storage-multipart-algebra`).
-
-Same-origin browser delivery, immutable derivation provenance, and lazy isolated
-image derivatives are verified against this PR (`agent/web-blob-delivery`).
-
-Registry-first attachment catalog admission, distinct-digest byte accounting,
-and durable typed rejection replay are verified against this implementing change
-(`agent/blob-storage-attachment-admission`).
-
-Prospective rendered-frontier attachment accounting and affected queued-input
-revalidation are verified against this implementing change
-(`agent/blob-storage-attachment-frontier-admission`).
-
-Provider-neutral ordered attachment stubs and immutable catalog-length
-projection are verified against this implementing change
-(`agent/blob-storage-attachment-rendering`).
-
-Distinct attachment sizing and streamed replica verification, typed
-missing/corrupt closure before send authorization, and typed unavailable retry
-are verified against this implementing change
-(`agent/blob-storage-attachment-preparation`).
-
-The text-only blob-read family, frontier-derived digest authorization, and
-durable per-request and per-turn admission counters are verified against this
-implementing change (`agent/blob-storage-read-tools`).
-
-Imported raw-source publication, aggregate-owned catalog registration,
-blob-backed checked loads, normalized runtime projections, and the one-time
-final-schema migration are verified against this implementing change
-(`agent/blob-storage-import-convergence`).
+(`agent/blob-storage-foundation`). Its implemented-behavior statements take
+effect with the full stack. A paragraph that names itself unimplemented is
+committed unimplemented functionality and carries only its stated compatibility
+constraint.
 
 It owns one thing: how Signalbox stores, identifies, references, and reads
 immutable binary content — blob identity, the durable replica catalog, store
