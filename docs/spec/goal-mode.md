@@ -3,36 +3,8 @@
 **Implemented behavior.** This page owns the cross-crate contract for one
 commissioned goal attached to a session: its immutable statements, event-sourced
 state, user commands, model declarations, scheduler continuation, process wire,
-and terminal-client verbs. The domain and persistence surface was verified
-through PR #384 (`agent/goal-mode-runtime`). The scheduling, model-tool,
-process, and terminal surfaces were verified through PR #384
-(`agent/goal-mode-runtime`). The session-closure event that settles a live
-generation beneath a terminal session is verified against this PR
-(`agent/lifecycle-t2-state-machine`). Dispatch-composed commissions and the
-generation a turn's authority resolves to were verified through PR #562
-(`agent/dispatch-session-goals`). The binding of an already-accepted turn to a
-generation was verified through PR #578 (`agent/commission-binding`). Resolving
-that authority again when a consumer commits is verified against this PR
-(`agent/judge-completion-recheck`). Repository-watch-composed stops are verified
-against this PR (`agent/daemon-ops-overnight`). This bottom specification diff
-owns both stack slices. Bounded automatic resumption of execution-failure blocks
-is verified against this PR (`agent/goal-blocked-autoresume`); durable arming of
-an adopted block is verified against this PR (`agent/lifecycle-t5-commands`).
-The unattended repository-watch approval exemption is verified against this PR
-(`agent/headless-approval-escalation`), and durable non-resumable compaction
-failure parking against this PR (`agent/daemon-live-compaction-terminal-park`).
-Operator-attended parking of an operator-commissioned escalation is verified
-against this PR (`agent/daemon-live-headless-approval-park`). Restart
-reconciliation of pending automatic resumptions is verified against this PR
-(`agent/daemon-live-goal-resume-rearm`). Automatic-resume failure accounting and
-its twenty-attempt ceiling are verified against this PR
-(`agent/daemon-live-goal-resume-failure-budget`). Chargeable-failure resume
-guidance is verified against this PR
-(`agent/daemon-live-chargeable-resume-guidance`). Total-attempt backoff pacing,
-the lifetime attempt ceiling, and cause-aware planning on every path that plans
-an execution-failure block are verified against this PR
-(`agent/fix-goal-resume-budget`). Identity and durable-command mechanics remain
-owned by [identity and commands](identity-and-commands.md), turn execution by
+and terminal-client verbs. Identity and durable-command mechanics remain owned
+by [identity and commands](identity-and-commands.md), turn execution by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool dispatch
 by [tool loop](tool-loop.md), and framing by
 [process protocol](process-protocol.md). INV-048 is the lifecycle enforcement

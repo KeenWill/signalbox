@@ -3,13 +3,9 @@
 **Foundation contract.** This page owns the durable-execution contract for
 registered programs: TypeScript orchestrators that drive sessions, evaluations,
 and repository-watch reactions through a journaled effect protocol. The entire
-surface below was committed ahead of code as Stage 0 of the substrate build,
-verified against PR #580 (`agent/program-substrate-spec`). The durable journal
-and executor-facing replay seam are verified against this PR
-(`agent/program-substrate-journal`), and the isolate host is verified against
-this PR (`agent/program-substrate-isolate-host`); each remaining
-committed-unimplemented paragraph records the compatibility constraint it
-imposes on present surfaces. Model execution remains owned by
+surface below was committed ahead of code as Stage 0 of the substrate build.
+Each remaining committed-unimplemented paragraph records the compatibility
+constraint it imposes on present surfaces. Model execution remains owned by
 [model-call execution](model-call-execution.md) and the
 [model-runtime substrate](runtime-substrate.md), sessions and turns by
 [sessions and the transcript](sessions-and-transcript.md) and

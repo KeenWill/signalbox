@@ -1,21 +1,6 @@
 # Runner protocol and placement
 
-The user-vocabulary surface on this page was re-verified through PR #378
-(`agent/user-vocabulary`).
-
-This page specifies the implemented runner-protocol domain foundation as
-verified against the implementing stack through PR #260
-(`agent/runner-protocol-domain`); its durable Postgres representation and
-restart-recovery authority were verified through PR #267
-(`agent/runner-persistence`). The durable connection/loss-head offer and claim
-fences are re-verified through this PR (`agent/runner-loss-epoch`). Sandbox,
-repository-entry, permission-override, manifest-recovery, structural wire, and
-persistence-adapter contracts were re-verified through PR #350
-(`agent/runner-wire-protocol`). The corrected reconstitution mismatch contract
-was re-verified through PR #322 (`agent/docs-discipline`; pinned and pinned-loss
-request mismatches). The placement loss-source, pre-pin replacement and
-abandonment state shapes, and append-only reconstitution-history contract are
-re-verified through this PR (`agent/runner-placement-loss-domain`). It owns
+This page specifies the implemented runner-protocol domain foundation. It owns
 logical runner enrollment, daemon-authoritative catalog validation, runner
 leases, the independent session-composition axes, session placement and
 affinity, credential-profile grants, and workspace requirements. The tool
@@ -25,25 +10,13 @@ session transcript and frontier mechanics remain owned by
 remain owned by [tool loop](tool-loop.md). Invariant tags cite
 [the invariant test index](../invariants.md).
 
-The connection-loss persistence transaction was verified against this PR
-(`agent/runner-loss-session-transaction`). Daemon paging of its durable cursors
-and startup resumption were verified against this PR
-(`agent/runner-loss-daemon-propagation`).
-
-The registration-only executable slice is verified through PR #376
-(`agent/runner-daemon`). It adds the dedicated local listener, durable
-idempotent enrollment receipts, exact resume and replacement-advertisement
-registration, the `signalbox-runner` binary, explicit credential/repository
-availability, and heartbeat liveness exchange with durable connection epochs,
-shutdown, suspect, and loss facts. Its fatal stale-shutdown close, complete
-rejection correlations, and lifecycle observability are re-verified through PR
-#382 (`agent/runner-honesty`). Recovery inventory, workspaces, leases,
-execution, and model calls remain unimplemented as labeled below. Remote
-transport and dynamic policy stay under [Open edges](#open-edges).
-
-The additive persisted `AlwaysConfirm` declaration vocabulary is verified
-through PR #366 (`agent/exec-tools`). The runner workstation-registry
-reclassification is verified through this PR (`agent/daemon-wiring`).
+The registration-only executable slice adds the dedicated local listener,
+durable idempotent enrollment receipts, exact resume and
+replacement-advertisement registration, the `signalbox-runner` binary, explicit
+credential/repository availability, and heartbeat liveness exchange with durable
+connection epochs, shutdown, suspect, and loss facts. Recovery inventory,
+workspaces, leases, execution, and model calls remain unimplemented as labeled
+below. Remote transport and dynamic policy stay under [Open edges](#open-edges).
 
 ## Version-one executable boundary
 

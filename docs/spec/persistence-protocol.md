@@ -1,139 +1,13 @@
 # Persistence protocol
 
-The session-lifecycle satellite's place in the lock order is verified against
-this PR (`agent/lifecycle-t2-state-machine`). The `closed_not_delivered`
-disposition and `injection_settled` emission are verified against PR #1483
-(`agent/lifecycle-t7-injection`).
+The multipart accepted-input persistence paragraph below is a foundation
+proposal.
 
-The workspace-instruction discovery, registration, empty turn-start manifest,
-and model-call correlation were verified against PR #810
-(`agent/agent-docs-skills-model-call-followup`).
-
-The durable automatic model-call reconciliation state, attempt history, and
-final-state authority were verified against this PR
-(`agent/turn-lifecycle-hardening`). Their generalization to exact model-call or
-tool-attempt operations is verified against this PR
-(`agent/daemon-live-tool-recovery-reconcile`). The server-enforced
-automatic-reconciliation transaction deadline is verified against this PR
-(`agent/daemon-live-server-bounded-reconciliation`). Recovery discovery's
-contention with an accepting operator interrupt, and that interrupt's atomic
-supersession of the turn's recovery row, are verified against this PR
-(`agent/fix-liveness-shutdown-recovery`). Recursive-frontier prefix validation
-is verified against this PR
-(`agent/daemon-live-frontier-validation-materialization`). Context-compaction
-evidence validation is verified against this PR
-(`agent/daemon-live-context-compaction-validation`). Compaction-leaf selection
-before recursive turn-start validation is verified against this PR
-(`agent/daemon-live-compaction-leaf-validation-scope`). Deferred immutable
-tool-round validation scope is verified against this PR
-(`agent/daemon-live-deferred-round-validation-scope`). Immutable frontier-header
-ancestry before exact prefix-member fallback is verified against this PR
-(`agent/daemon-live-frontier-ancestry-fast-path`). Successor compaction
-validation from its immutable predecessor and bounded current suffix is verified
-against this PR (`agent/daemon-live-current-compaction-validation-scope`).
-
-The outbox headers' `recorded_at` statement stamp is verified against this PR
-(`agent/lifecycle-t1-measurement`).
-
-The program-journal append transaction, reconstitution boundary, lock inventory,
-and migration were verified against this PR (`agent/program-substrate-journal`).
-
-The immutable blob-derivation family and migration inventory are verified
-against this PR (`agent/web-blob-delivery`).
-
-The restore-safety search-path pin on check-reachable functions, and the lexical
-catalogue test holding it, were verified against this PR
-(`agent/daemon-live-restore-call-lexing`).
-
-The delegate denial-reason storage — the superseded decision-shape constraint
-and its byte-precise checks — was verified against this PR
-(`agent/judge-denial-reason`).
-
-The runner connection authority head, durable loss epoch, and lease offer/claim
-fences were verified against the parent slice (`agent/runner-loss-epoch`).
-Placement-relative lease-offer fencing was verified against the parent slice
-(`agent/runner-loss-propagation`). The bounded runner-loss propagation cursor
-and ordered page read were verified against this PR
-(`agent/runner-loss-session-propagation`). The atomic per-session runner-loss
-propagation transaction and cursor completion were verified against this PR
-(`agent/runner-loss-session-transaction`). Daemon paging after terminal loss and
-startup resumption of every pending cursor were verified against this PR
-(`agent/runner-loss-daemon-propagation`).
-
-The runner-state transition outbox representation, relational source checks, and
-dispatch projection were verified against this PR
-(`agent/runner-event-outbox-persistence`). The established-successor outbox
-source check was re-verified against this PR
-(`agent/daemon-runner-health-events`).
-
-The runner-recovery turn-phase representation and read boundary were verified
-against this PR (`agent/runner-awaiting-recovery-persistence`). The
-recorded-migration immutability rule was verified against this PR
-(`agent/mechanical-cleanup-batch`).
-
-The user-vocabulary surface on this page was re-verified through PR #378
-(`agent/user-vocabulary`).
-
-The multipart accepted-input persistence paragraph below is the foundation
-proposal from PR `#553` (`agent/blob-storage-foundation`) and becomes verified
-with its implementing child stack.
-
-The baseline persistence protocol was verified through PR #175
-(`agent/stop-requests`); the prefix-reservation discipline was added in PR #235
-(`agent/review-process-amendments`); the migration inventory was verified
-through PR #254 (`agent/fix-parked-approval-interrupt`), was verified again in
-PR #227 (`agent/review-workflow-persistence`), through this PR
-(`agent/runner-placement-loss-persistence`), and again in this PR
-(`agent/git-remote-authority`); the metadata command issuer proof was verified
-through PR #265 (`agent/tool-batch-tier0`); the `apps/signalboxd`
-migration-invocation home was verified through PR #258
-(`agent/signalboxd-rename`); the model-identity frontier shape was verified
-through PR #272 (`agent/mid-session-model`); the runner lease-admission trigger
-lock was verified against PR #267 (`agent/runner-persistence`); the current
-classifier names, ambiguity reconstitution facts, and command-adapter boundaries
-were verified through PR #288 (`agent/audit-fix-docs-coherence`); the session
-system-prompt columns were verified through PR #286
-(`agent/session-system-prompt`); the terminal model-call token evidence columns
-and transcript reader were verified through this PR (`agent/token-usage`); the
-additive provider-failure cause column was verified through PR #330
-(`agent/audit-verified-fixes`); the session-template provenance columns and
-storage version four were verified through PR #311
-(`agent/session-templates-spec`); and the context-compaction transaction and
-lock inventory were verified against PR #314
-(`agent/context-compaction-protocol`). The crate-shared commit-ambiguity helper
-was verified against this PR (`agent/domain-cleanup`); the session-plan event
-sequence was verified through PR #380 (`agent/plan-tool`) and its dependency
-extension against PR #385 (`agent/plan-dependencies`); and the goal event
-transaction, trigger lock, and goal-turn outbox provenance were verified through
-PR #384 (`agent/goal-mode-runtime`), with the appends owed when a generation
-binds an already-accepted turn verified against this PR
-(`agent/commission-binding`); and the approval-judge call, decision, and posture
-storage were verified through PR #420 (`agent/approval-judge-storage`); the
-approval-judge lifecycle transactions were verified through this PR
-(`agent/approval-judge-execution-support`); the approval-decision outbox is
-verified against this implementing change; the session-placement event, current
-head, and creation transaction were verified through PR #415
-(`agent/scoped-visibility-creation`); and the exact stop-command descendant
-scopes, delegated transcript origins, foreground-result closure, pre-outbox
-cascade locks, typed delegation wake origins, and exact delegation update and
-wake obligations were verified through this PR
-(`agent/delegation-persistence-schema`); the delegated child-input, await,
-peer-message, terminal-observation, and restart-recovery locks plus wait/message
-replay satellites and headers were verified through this PR
-(`agent/delegation-runtime-persistence-v2`), and the broader child-terminal
-endpoint locks were verified through this PR
-(`agent/delegation-runtime-daemon-v2`); the model-settings command fields,
-immutable evidence, snapshot projection, and typed outbox records were verified
-through this PR (`agent/model-settings-persistence`); the defaults-replacement
-pointer-lock admission is verified through this PR
-(`agent/model-settings-execution`). The runner placement loss-source,
-lost-before-pin, pre-pin replacement, and abandonment records are verified
-through this PR (`agent/runner-placement-loss-persistence`). This page covers
-the Postgres representation in `crates/persistence` (source and migrations),
-migration discipline, durable command storage and replay equality, the
-fail-closed reconstitution boundary, the lock protocol, pending-steering durable
-state, the corruption taxonomy, commit-ambiguity handling, and the transactional
-outbox. Session aggregate semantics live in
+This page covers the Postgres representation in `crates/persistence` (source and
+migrations), migration discipline, durable command storage and replay equality,
+the fail-closed reconstitution boundary, the lock protocol, pending-steering
+durable state, the corruption taxonomy, commit-ambiguity handling, and the
+transactional outbox. Session aggregate semantics live in
 [sessions-and-transcript](sessions-and-transcript.md), turn and attempt
 lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
 identity kinds and command construction in
@@ -142,9 +16,8 @@ identity kinds and command construction in
 INV-tagged tests; this page cites tags resolved through the generated
 [invariant index](../invariants.md). The runner-orchestration transaction and
 lock paragraphs are the foundation proposal at the bottom of their implementing
-stack and become verified only with those child pull requests. The
-session-placement update transaction is the foundation proposal at the bottom of
-its implementing stack and becomes verified only with its child pull request.
+stack. The session-placement update transaction is the foundation proposal at
+the bottom of its implementing stack.
 
 ## Stack and boundaries
 
@@ -290,9 +163,7 @@ typed cause and operator need, and prevent partial command-fence or
 commissioned-dispatch identities. Observation projections are decoded as
 complete pairs by the persistence adapter. The function pins the restore-safe
 schema search path. The cross-component behavior using these records is owned by
-[pull-request convergence reconciliation](convergence-reconciliation.md). The
-pull-request target and model-activity advisory fences described in the lock
-inventory below are verified against this PR (`agent/daemon-convergence-sweep`).
+[pull-request convergence reconciliation](convergence-reconciliation.md).
 Migration `202608210402_repo_watch_pull_request_target_indexes.sql` indexes the
 repository-watch event-to-action path used to census sessions by pull-request
 target. Migration `202608210403_convergence_sweep_parked_session.sql` projects
@@ -314,12 +185,10 @@ outside session plans and commissioned goals, the guarded row is the durable
 statement of record and current state is not rebuilt by replaying events
 (INV-005). Session plans and commissioned goals are deliberate exceptions: each
 has a session-local append-only event sequence as its durable statement of
-record, and its current state is the checked fold of that complete history. The
-plan exception was verified against this PR (`agent/plan-tool`), and the goal
-exception through PR #384 (`agent/goal-mode-runtime`). Why: database-level
-invariants (INV-009, INV-012) stay declarative over current-state rows, while
-plan and goal history is retained product evidence rather than an implementation
-log.
+record, and its current state is the checked fold of that complete history. Why:
+database-level invariants (INV-009, INV-012) stay declarative over current-state
+rows, while plan and goal history is retained product evidence rather than an
+implementation log.
 
 Implemented table families (across the forward-only migrations):
 
@@ -1625,13 +1494,12 @@ decode the stored selection without substituting a default, so equal replay
 returns the recorded result and changed-scope reuse conflicts.
 
 This section is the foundation proposal for migration
-`202608020018_session_delegation.sql` and becomes verified only with the full
-delegation stack. The migration widens `session.creation_cause` with
-`delegated`, adds the spawning request column required only by that cause, and
-keeps `ancestry_kind = none` as an independent required fact. The deferred
-session-creation-family check admits a delegated session only when one complete
-`session_delegation` row names it; user and imported creation families remain
-unchanged.
+`202608020018_session_delegation.sql`. The migration widens
+`session.creation_cause` with `delegated`, adds the spawning request column
+required only by that cause, and keeps `ancestry_kind = none` as an independent
+required fact. The deferred session-creation-family check admits a delegated
+session only when one complete `session_delegation` row names it; user and
+imported creation families remain unchanged.
 
 `session_delegation` is append-only and keyed by the globally unique spawning
 `tool_request_id`. It correlates that request's parent session and turn, one

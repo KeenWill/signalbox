@@ -1,46 +1,22 @@
 # Identity, commands, and telemetry correlation
 
-The user-vocabulary surface on this page was re-verified through this PR
-(`agent/storage-vocabulary-rename`), which renamed the stored actor and issuer
-discriminators this page states.
-
-The lifecycle command and creation-receipt statements are re-verified through
-this PR (`agent/lifecycle-t5-commands`).
-
-The `SubmitInput` multipart storage-version boundary below is the foundation
-proposal from PR `#553` (`agent/blob-storage-foundation`) and becomes verified
-with its implementing child stack.
+The `SubmitInput` multipart storage-version boundary below is a foundation
+proposal.
 
 This page describes the implemented identity, durable-command, and
 telemetry-correlation behavior of Signalbox, including the imported identity
-kinds and command family and the tool-loop identity kinds and decision command,
-as verified against the implementing stack through PR #224
-(`agent/session-metadata-domain`). The behavior lives in `crates/domain`
-(identity newtypes, command payloads, actor attribution, replay equality),
-`crates/application` (identity generation, command boundaries),
-`crates/persistence` (the user-global command registry and typed record
-families), and `apps/signalboxd` (telemetry wiring); those `apps/signalboxd`
-code homes were verified through PR #258 (`agent/signalboxd-rename`). Storage
+kinds and command family and the tool-loop identity kinds and decision command.
+The behavior lives in `crates/domain` (identity newtypes, command payloads,
+actor attribution, replay equality), `crates/application` (identity generation,
+command boundaries), `crates/persistence` (the user-global command registry and
+typed record families), and `apps/signalboxd` (telemetry wiring). Storage
 transaction mechanics, locking, and the reconstitution seam are owned by
 [persistence-protocol](persistence-protocol.md); per-command product semantics
 are owned by [sessions-and-transcript](sessions-and-transcript.md),
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), and
-[configuration-and-credentials](configuration-and-credentials.md). The
-model-settings command version boundaries were verified through this PR
-(`agent/model-settings-persistence`). The tool-attributed metadata command and
-reconstitution surface was verified through PR #265 (`agent/tool-batch-tier0`).
-The failed tool-attempt telemetry fields were verified through PR #285
-(`agent/dev-instance-code-host-credential`). The current command/telemetry
-identity-generation, command-family, and ambiguity-ownership inventory was
-verified through PR #288 (`agent/audit-fix-docs-coherence`); the
-context-compaction command lifecycle was verified through PR #314
-(`agent/context-compaction-protocol`). The checked placement-update request
-boundary and path-scoped placement command family were verified through PR #400
-(`agent/scoped-visibility-wiring`). The runner recovery command families are the
-foundation proposal at the bottom of their implementing stack and become
-verified only with those child pull requests. The commissioned-session command
-construction boundary is verified against this PR
-(`agent/commissioned-dispatch-fence`).
+[configuration-and-credentials](configuration-and-credentials.md). The runner
+recovery command families are the foundation proposal at the bottom of their
+implementing stack.
 
 ## Identity model
 

@@ -1,11 +1,5 @@
 # Model and session settings
 
-Verified against PR #436 (`agent/model-settings-domain`) for its foundation
-proposal and domain/runtime value shapes, and PR #437
-(`agent/model-settings-adapters`) for provider-adapter translation. Persistence
-evidence and its legacy cutover were verified through PR #441
-(`agent/model-settings-persistence`).
-
 This page is the foundation proposal at the bottom of the model-settings
 implementation stack. It specifies the cross-crate contract for model reasoning,
 speed, and service-tier settings; the per-model capability catalog; durable

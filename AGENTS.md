@@ -6,7 +6,7 @@ owner-approved plans. Do not add speculative product behavior.
 ## Where things live
 
 - Cross-crate and wire contracts: `docs/spec/`. `docs/spec/README.md` states the
-  page conventions and the verification reference each page carries.
+  page conventions.
 - Public API of the domain and application crates: `docs/domain-spine.md`,
   checked by CI against source.
 - Invariants: INV-tagged tests. `docs/invariants.md` is their generated index.
@@ -83,10 +83,10 @@ owner's private repositories may be named as provenance, not cited as rules.
   change is recorded, not fixed.
 - A change to a public item in the domain or application crates updates
   `docs/domain-spine.md` in the same pull request.
-- A change to behavior a `docs/spec/` page describes updates that page and its
-  verification reference in the same pull request. In a stack, the bottom spec
-  diff covers the behavior its children implement; a child adds a spec edit only
-  for behavior the bottom diff does not describe.
+- A change to behavior a `docs/spec/` page describes updates that page in the
+  same pull request. In a stack, the bottom spec diff covers the behavior its
+  children implement; a child adds a spec edit only for behavior the bottom diff
+  does not describe.
 - Foundation-weight changes (cross-crate or wire semantics, a boundary between
   domain, storage, wire, or framework representations, weakening an invariant, a
   technology that constrains several components, closing a recorded open

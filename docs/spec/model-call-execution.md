@@ -1,63 +1,13 @@
 # Model-call execution
 
-The daemon-owned terminal treatment of a restart-ambiguous model call is
-verified against this PR (`agent/turn-lifecycle-hardening`).
+Multipart attachment rendering remains part of a foundation proposal.
 
-Post-response configured-usage treatment is verified against this PR
-(`agent/daemon-live-known-failed-cause`).
-
-Pre-activation reconciliation from durable terminal-call usage is verified
-against this PR (`agent/daemon-live-ambiguous-usage-compaction`).
-
-Same-turn tool-continuation headroom closure is verified against this PR
-(`agent/fix-headroom-accounting`). Queued-turn post-usage transcript headroom is
-verified against this PR (`agent/fix-headroom-accounting`), and its durable
-proof on a successor frontier is verified against this PR
-(`agent/daemon-live-headroom-disjoint-suffix`). Dedicated-compaction usage as
-the next queued-turn baseline is verified against this PR
-(`agent/fix-headroom-accounting`). Automatic compaction's exact model-visible
-input boundary is verified against this PR
-(`agent/daemon-live-compaction-rendered-input-bound`). Codex advisory output
-reservation behavior is re-verified against this PR
-(`agent/daemon-live-codex-output-reservation`). Failed automatic-compaction
-terminal closure is verified against this PR
-(`agent/daemon-live-terminalize-compaction-failure`). Request-size failure
-recovery is verified against this PR
-(`agent/daemon-live-request-too-large-compaction`). Successor compaction's
-no-progress closure is verified against this PR
-(`agent/daemon-live-compaction-no-progress`). Durable parking when no safe
-compaction input can fit is verified against this PR
-(`agent/daemon-live-compaction-terminal-park`).
-
-Non-ambiguous execution-failure containment is verified against this PR
-(`agent/daemon-live-nonambiguous-execution-containment`).
-
-Credential-pool action and outbox allocator lock ordering is verified against
-this PR (`agent/daemon-live-tool-continuation-order`). The tool-result
-continuation guard's narrowed write scope is verified against this PR
-(`agent/daemon-live-continuation-guard-scope`). Counted activation's pre-guard
-call preparation is verified against this PR
-(`agent/daemon-live-counted-activation-guard-scope`).
-
-The user-vocabulary surface on this page was re-verified through PR #378
-(`agent/user-vocabulary`).
-
-The durable usage-provenance column and read projection are verified against PR
-`#389` (`agent/cost-accounting`).
-
-Multipart attachment rendering remains part of the foundation proposal from PR
-#553 (`agent/blob-storage-foundation`). Distinct attachment sizing, streamed
-replica verification, typed pre-authorization failure, and retryable
-unavailability are verified against this implementing change
-(`agent/blob-storage-attachment-preparation`).
-
-This page describes the implemented model-call orchestration chain as verified
-against the implementing stack through PR #201 (`agent/tool-loop-proof`):
-rendering a context frontier into provider messages, the staged prepare /
-authorize-send / commit-observation effects, assistant content, intra-turn tool
-rounds and final turn completion, provider failure classification into physical
-dispositions, and the retry prohibition. What a credential-pool selection
-attempt can end as, and every projection of each ending, is owned by
+This page describes the implemented model-call orchestration chain: rendering a
+context frontier into provider messages, the staged prepare / authorize-send /
+commit-observation effects, assistant content, intra-turn tool rounds and final
+turn completion, provider failure classification into physical dispositions, and
+the retry prohibition. What a credential-pool selection attempt can end as, and
+every projection of each ending, is owned by
 [credential availability](credential-availability.md); this page owns the
 terminal-evidence-and-cause column of that table and the successor call's own
 mechanics. Tool requests, approvals, attempts, and continuation are owned by
@@ -71,37 +21,9 @@ shutdown composition in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); and model
 configuration and credentials in
 [configuration-and-credentials](configuration-and-credentials.md). The
-`apps/signalboxd` supervision and `signalbox-debug` code homes this page names
-were verified through PR #258 (`agent/signalboxd-rename`); the
-[provider-target identity](#provider-target-identity) rule and the sanitized
-model-call cause codes were verified through PR #280
-(`agent/provider-identity-normalization`). The complete frontier-payload
-projection and identity-before-terminal-evidence precedence were verified
-through PR #288 (`agent/audit-fix-docs-coherence`); durable closed
-provider-failure causes were verified through PR #330
-(`agent/audit-verified-fixes`); the session system prompt on the prepared
-operation was verified through PR #286 (`agent/session-system-prompt`).
-Provider-reported token evidence retention and exact commit-ambiguity comparison
-were verified through PR #301 (`agent/token-usage`); the empty-thinking
-completion rule was verified through PR #305 (`agent/sonnet-streamed-tool-use`).
-Configured token-limit enforcement and the routed Anthropic/Codex production
-composition are verified through PR #373 (`agent/adapter-wiring`). The
-crate-shared commit-ambiguity helper home was verified against this PR
-(`agent/domain-cleanup`). The context-summary projection and dedicated
-compaction-call evidence were verified through PR #312
-(`agent/context-compaction-core`); the explicit trigger, dormant automatic
-preparation machinery, configured prompt, and provider-native input-counting
-implementation were verified through PR #314
-(`agent/context-compaction-protocol`). The production scheduler's
-provider-reported-usage trigger for that automatic machinery is verified against
-this PR (`agent/daemon-live-reported-usage-compaction`). Session-delegation
-semantic rendering and its provider-neutral bridge were verified against this PR
-(`agent/delegation`). The runner-placement rendering and executable session-tool
-snapshot paragraphs are the foundation proposal at the bottom of their
-implementing stack and become verified only with those child pull requests.
-Availability successor calls and their durable provider-directed backoff are
-verified against this PR (`agent/multi-account-pools`). Invariant tags cite
-[docs/invariants.md](../invariants.md).
+runner-placement rendering and executable session-tool snapshot paragraphs are
+the foundation proposal at the bottom of their implementing stack. Invariant
+tags cite [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
 

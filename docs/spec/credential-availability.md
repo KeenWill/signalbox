@@ -1,8 +1,5 @@
 # Credential availability
 
-This page was introduced and verified through PR #453
-(`agent/credential-pools-grammar`).
-
 It owns one thing: what a credential-pool selection attempt can end as, and what
 every other page must say about each ending. The pool grammar, membership
 ranking, trigger vocabulary, and admission rules are owned by

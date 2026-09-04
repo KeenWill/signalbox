@@ -1,162 +1,35 @@
 # Configuration and credentials
 
-The model-call recovery telemetry vocabulary is re-verified against this PR
-(`agent/turn-lifecycle-hardening`). The migration-failure rejection text on the
-startup log is verified against this PR (`agent/t1-migration-backfill`). The
-lifecycle Prometheus gauge inventory is verified against PR #1478
-(`agent/lifecycle-t3-metrics`).
-
-The browser HTTP listener, same-origin static assets, and generated contract
-bootstrap are verified against this PR (`agent/web-http-transport`). The
-composed bounded session descriptor and historical-window routes are verified
-against this PR (`agent/web-session-timeline`). The version-two imports
-capabilities and production adapter are verified against this PR
-(`agent/web-discovery-reads`). Contract version two and its blob routes are
-verified against this PR (`agent/web-blob-delivery`). The fleet-attention
-snapshot and monitor stream are verified against this PR
-(`agent/web-attention-projections`). The bounded session catalog route and its
-loopback authority placement are verified against this PR
-(`agent/web-session-catalog-follow`). The bounded live-session snapshot and
-monitor-backed follow routes are verified against this PR
-(`agent/web-session-catalog-follow-live`). The bounded lexical-search route and
-generated DTOs are verified against this PR (`agent/web-search-usage`). The
-dedicated browser usage/cost routes and generated DTOs are verified against this
-PR (`agent/web-usage-http`). The repository-watch browser projection and
-Activity surface are verified against this PR
-(`agent/web-attention-activity-surfaces`). The typed item, turn, and
-contiguous-region detail routes and their bootstrap advertisement are verified
-against this PR (`agent/web-timeline-detail`).
-
-The daemon model-settings configuration surface is verified against the
-implementing stack through this PR (`agent/model-settings-execution`).
-
-The usable context-ceiling definition and Codex CLI catalog values are
-re-verified against this PR (`agent/daemon-live-codex-effective-window`). The
-bounded Codex CLI startup pin probe is verified against this PR
-(`agent/daemon-live-codex-pin-preflight`). The GPT-6 Astra Codex CLI catalog
-value is verified against this PR (`agent/gpt6-astra-catalog`).
-
-The required numeric-bound configuration grammar and scheduler admission policy
-are verified against this PR (`agent/bounds-required-config-protocol`). The
-fenced pool floor reconciliation policy is verified against this PR
-(`agent/daemon-live-nondisruptive-pool-reconcile`). The fenced PostgreSQL
-prewarm policy is verified against this PR
-(`agent/daemon-live-configured-pool-prewarm`).
-
-The delegated tool-approval posture, judge selection, and daemon composition are
-verified against the implementing stack through this PR
-(`agent/approval-judge-daemon`). The posture values `unsandboxed_exec` accepts,
-and which of them changes its resolved approval, are re-verified against this PR
-(`agent/approval-posture-alwaysconfirm`).
-
-The daemon-local Git and execution-tool dependencies are verified against this
-stack through this PR (`agent/daemon-exec-tools`).
-
-The derivation of each session's workspace root from the configured root is
-verified against this PR (`agent/per-session-workspaces`).
-
-The execution family's permission defaults and the confinement its bubblewrap
-profile does and does not provide are verified against this PR
-(`agent/exec-sandbox-net-fence`). Its explicit container-process-namespace
-variant is verified against this PR (`agent/kubernetes-bwrap-proc`).
-
-Direct unsandboxed Git execution from sandbox-created linked worktrees is
-verified against this PR (`agent/unsandboxed-worktree-gitdir`). Sandboxed Git
-execution from host-created linked worktrees is verified against this PR
-(`agent/daemon-live-sandbox-linked-worktree-git`).
-
-The explicit read-only Cargo registry cache is verified against this PR
-(`agent/daemon-live-sandbox-provisioning`).
-
-The daemon web-tool composition, Brave credential channel, and shipped human
-postures are verified against PR #433 (`agent/web-search-wiring`).
-
-The user-vocabulary surface on this page was re-verified through PR #378
-(`agent/user-vocabulary`).
-
-The credential billing-kind registry and versioned per-model rate catalog are
-verified against PR #389 (`agent/cost-accounting`).
-
-The `PATH` spelling of `mcp_bridge_executable` and its resolution precedence are
-verified against this PR (`agent/mcp-bridge-wiring`).
-
-The rule binding one provider-model spelling to one adapter is verified against
-this PR (`agent/adapter-model-catalogs`).
-
-The blob catalog and input-modality grammar below are the foundation proposal
-from PR #553 (`agent/blob-storage-foundation`) and become verified with its
-implementing child stack.
-
-The configured workspace-instruction root grammar below is verified against PR
-#798 (`agent/agent-docs-skills-foundation`).
-
-The daemon-tool `workspace_root` canonical grammar below is re-verified against
-PR #810 (`agent/agent-docs-skills-model-call-followup`).
-
-The runtime-bridge invalid-schema diagnostic fields and redaction boundary are
-verified against this PR (`agent/tool-evals-mcp`).
+The blob catalog and input-modality grammar below are a foundation proposal.
 
 This page describes the implemented configuration and credential behavior of
-Signalbox, verified against the implementing stack through PR #217
-(`agent/credential-reference-total`). This includes signalboxd configuration
-loading in `apps/signalboxd/src/configuration.rs` and
-`apps/signalboxd/src/main.rs`, the static TOML catalog, and the provider bridge
-in `crates/model-provider-runtime`, together with the model-runtime crates it
-composes (`crates/model-runtime/src/credential.rs` and the redaction pipeline in
-`crates/model-runtime-anthropic/src/runtime.rs`); the database-channel refusals
-in [process configuration](#process-configuration) were verified through PR #237
-(`agent/fix-pg-env-surface`), in `production_connection_options` under
-`crates/persistence/src/lib.rs`; the `signalboxd` binary name, its
-`apps/signalboxd` code homes, and the `config/signalboxd.example.toml`
-checked-in example path were verified through PR #258
-(`agent/signalboxd-rename`). The daemon-held GitHub credential channel and its
-code-host result redaction are verified through PR #270
-(`agent/tool-batch-tier1`). The per-turn pinning behavior at a mid-session
-defaults boundary was verified through PR #272 (`agent/mid-session-model`). The
-credential-file value narrowing and the credential-shaped code-host detail were
-verified through PR #285 (`agent/dev-instance-code-host-credential`). The static
-copy-on-create session-template catalog was verified through PR #311
-(`agent/session-templates-spec`); the review-library parsing, generated
-templates, and orchestration template digests are verified through PR #349
-(`agent/review-orchestrator-wiring`). The static web-fetch egress allowlist is
-verified through PR #330 (`agent/audit-verified-fixes`). The opt-in telemetry
-export contract is verified through PR #347 (`agent/telemetry-export`). The
-static model-to-adapter mapping and append-only session credential history are
-verified through PR #373 (`agent/adapter-wiring`); the `claude_cli` mapping and
-process paths are verified against this PR (`agent/wire-claude-cli-adapter`),
-and its file-delivery mapping against this PR
-(`agent/claude-cli-credential-delivery`). The `openai` mapping is verified
-against this PR (`agent/wire-openai-adapter`), and its complete adapter-scoped
-file-profile catalog is verified against this PR
-(`agent/credential-pools-parser`). The composed code-host, pull-request,
-workspace, and conversation tool families are verified through PR #377
-(`agent/tools-daemon-wiring`). The mapped local Git identity and repository-root
-requirements are verified through this PR (`agent/daemon-wiring`).
-Placement-scoped native conversation reads are verified through PR #400
-(`agent/scoped-visibility-wiring`). Invariant law lives in
-[docs/invariants.md](../invariants.md), cited here by tag. The runner
-configuration parser, filesystem admission, exact availability advertisement,
-and checked-in example are verified through PR #376 (`agent/runner-daemon`).
-Runner credential use during provisioning or execution remains committed
+Signalbox. This includes signalboxd configuration loading in
+`apps/signalboxd/src/configuration.rs` and `apps/signalboxd/src/main.rs`, the
+static TOML catalog, and the provider bridge in `crates/model-provider-runtime`,
+together with the model-runtime crates it composes
+(`crates/model-runtime/src/credential.rs` and the redaction pipeline in
+`crates/model-runtime-anthropic/src/runtime.rs`), and the database-channel
+refusals in [process configuration](#process-configuration) under
+`production_connection_options` in `crates/persistence/src/lib.rs`. Invariant
+law lives in [docs/invariants.md](../invariants.md), cited here by tag. The
+runner credential use during provisioning or execution remains committed
 unimplemented functionality as labeled below. The credential-profile and
 credential-pool grammar, its fail-closed admission, the deliveries this build
 supplies, the fail-closed rejection of reserved Codex deliveries, the
 operator-chosen model-provider profile names, and the retirement of both
-provider key-file environment channels are verified against this PR
-(`agent/credential-pools-parser`), in `apps/signalboxd/src/credential_pools.rs`
-and `apps/signalboxd/src/configuration.rs`. Preparation-time pool selection,
-durable trigger actions and chain exclusions, and the availability successor
-calls owned by
+provider key-file environment channels are implemented in
+`apps/signalboxd/src/credential_pools.rs` and
+`apps/signalboxd/src/configuration.rs`. Preparation-time pool selection, durable
+trigger actions and chain exclusions, the availability successor calls owned by
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine),
-together with durable per-call pool-policy snapshots, are verified against this
-PR (`agent/multi-account-pools`). Codex `codex_home` admission and the
-per-member `CODEX_HOME` the selected profile delivers to each Codex CLI child
-are verified against this PR (`agent/codex-home-pool-delivery`), in
+together with durable per-call pool-policy snapshots, are implemented. Codex
+`codex_home` admission and the per-member `CODEX_HOME` the selected profile
+delivers to each Codex CLI child are implemented in
 `apps/signalboxd/src/credential_pools.rs` and
 `crates/model-runtime-codex-cli/src/runtime.rs`. Codex `file` and `oauth`,
 capacity reservations, and legacy family-to-reference migration remain committed
 unimplemented functionality as labeled below. Every other paragraph on this page
-describes behavior verified against the references above.
+describes implemented behavior.
 
 ## Process configuration
 
@@ -971,15 +844,13 @@ omit it. These declarations are static adapter capability, not values inferred
 from model token windows. No present parser or adapter exposes these fields
 until the admission slice lands.
 
-The conversation-import bound was verified against PR #401
-(`agent/import-chunks-protocol`). The optional `[conversation_import]` table has
-exactly one `max_source_bytes` positive integer. It bounds both a single-shot
-source and the exact source bytes retained while one per-connection chunked
-import is assembled. An absent table uses 268,435,456 bytes (256 MiB).
-Single-shot import rejects a source above the configured value before
-conversion. Begin rejects a declaration above the configured value before
-assembly, append rejects the first observed size above it, and commit rechecks
-the value against the actual appended byte count.
+The optional `[conversation_import]` table has exactly one `max_source_bytes`
+positive integer. It bounds both a single-shot source and the exact source bytes
+retained while one per-connection chunked import is assembled. An absent table
+uses 268,435,456 bytes (256 MiB). Single-shot import rejects a source above the
+configured value before conversion. Begin rejects a declaration above the
+configured value before assembly, append rejects the first observed size above
+it, and commit rechecks the value against the actual appended byte count.
 
 The optional `[blob_storage]` table, its one-through-32 store catalog, distinct
 store-name and namespace-UUID bindings, exact filesystem and S3 fields, static
@@ -3140,9 +3011,6 @@ and therefore does not promise those files are unreadable; that access is
 outside the credential-grant channel.
 
 ## Always-composed session plan family
-
-This family is verified through PR #387 (`agent/tool-exercise-smoke`) at
-implementation ref `6ca4e31dffcb5b88d9f149cf1c347f8aa34843a3`.
 
 `plan_write` and `plan_read` have no `[[tool_mappings]]` entry. Both the
 compatibility base composition and the complete four-mapping composition

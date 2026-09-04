@@ -1,117 +1,16 @@
 # Process protocol
 
-Steering into a stopping turn is verified against PR #1483
-(`agent/lifecycle-t7-injection`).
+This page is the normative boundary between a local client process and
+`signalboxd`; domain values, PostgreSQL records, and wire messages remain
+distinct representations.
 
-Deployment-owned process limits and the `read_deployment_limits` projection are
-verified against this PR (`agent/bounds-required-config-protocol`). The ordered
-user-content part-array vocabulary is verified against this PR
-(`agent/blob-storage-multipart-algebra`).
-
-The bounded automatic model-call recovery status projected on active turns is
-verified against this PR (`agent/turn-lifecycle-hardening`). Its tool-attempt
-counterpart is verified against this PR
-(`agent/daemon-live-tool-recovery-reconcile`); the terminal client's following
-of an unexhausted tool recovery wait, and the native client's decoding of both
-recovery turn states, are verified against this PR
-(`agent/fix-client-tools-judge`).
-
-The typed runner-state session event, daemon outbox projection, authoritative
-session-summary and transcript-snapshot runner projections, and the runner
-request/projection implementation boundary were verified against this PR
-(`agent/runner-event-outbox-persistence`). Fresh-epoch connected recovery is
-re-verified through this PR (`agent/daemon-runner-health-events`).
-
-The `active_awaiting_runner_recovery` transcript-turn vocabulary was verified
-against this PR (`agent/runner-awaiting-recovery-persistence`).
-
-The user-vocabulary surface on this page was re-verified through PR #378
-(`agent/user-vocabulary`).
-
-The typed usage provenance, derived-cost row shape, and labeled client
-aggregation are verified against PR #389 (`agent/cost-accounting`).
-
-The delegation mutation request and receipt frame vocabulary is verified through
-this PR (`agent/delegation-process-wire-v2`).
-
-The goal-mode process and terminal surface was re-verified through PR #384
-(`agent/goal-mode-runtime`).
-
-The commissioned-session request and receipt surface is verified against this PR
-(`agent/commissioned-dispatch-fence`).
-
-The repository-watch operator-status process and terminal surface was verified
-against PR #861 (`agent/operator-status-command`).
-
-The descendant-termination command scope was re-verified through this PR
-(`agent/delegation-command-scope`).
-
-The model/session-settings wire vocabulary was verified through PR #439
-(`agent/model-settings-protocol`), and its transcript-turn settings snapshot was
-verified through this PR (`agent/model-settings-persistence`).
-
-The tool-approval decision event surface is verified against this implementing
-change.
-
-The session-lifecycle sections of the operator-status snapshot are verified
-against this PR (`agent/lifecycle-t3-metrics`). The lifecycle creation-request
-contract is re-verified through this PR (`agent/lifecycle-t5-commands`).
-
-The session-delegation terminal and client surface was re-verified through PR
-#459 (`agent/delegation-client-verbs-v2`), and its daemon await/message
-execution through PR #462 (`agent/delegation-runtime-daemon-v2`).
-
-Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
-the closed provider-failure/native transcript projections in PR #330
-(`agent/audit-verified-fixes`), and the review-orchestration wire and terminal
-surface in PR #349 (`agent/review-orchestrator-wiring`), and the conversation
-import transport in PR #401 (`agent/import-chunks-protocol`), and the typed
-delegation session-follow events, queued task-origin projection, recipient
-routing, wake exclusion, delivered delegation transcript entries, and typed
-parent-terminated turn projection against this PR
-(`agent/delegation-persistence-schema`). This page is the normative boundary
-between a local client process and `signalboxd`; domain values, PostgreSQL
-records, and wire messages remain distinct representations. The path-scoped
-session-placement wire and terminal-client surface were verified through PR #400
-(`agent/scoped-visibility-wiring`).
-
-The session-metadata last-writer actor inventory, its native and terminal-client
-projections, and the totality of the daemon projection that produces it are
-verified against this PR (`fix/review-read-snapshot-permit`).
-
-The blob upload lifecycle messages below are verified against this implementing
-change (`agent/blob-storage-upload`). The blob read messages are verified
-against this implementing change (`agent/blob-storage-read-wire`). Multipart
-content arrays remain the foundation proposal from PR #553
-(`agent/blob-storage-foundation`) and become verified with their implementing
-child.
-
-The terminal blob-upload command and its bounded, open-once source handling are
-verified against this implementing change
-(`agent/blob-storage-upload-terminal`).
-
-The coherent review-orchestration snapshot's single-transaction construction,
-the pool capacity it draws, and the writer independence that follows from both
-are verified against this PR (`agent/review-snapshot-mvcc`).
-
-The snapshot-reader effective ceiling and minimum non-snapshot pool reservation
-are verified against this PR (`agent/hub-pool-active-capacity`).
+Multipart content arrays remain a foundation proposal.
 
 Signalbox admits one process-protocol version, integer `1`. Its closed
 vocabulary contains every request, response, event, and required field
 implemented in this tree. The version field remains required on every frame and
 exact-version admission remains fail closed, so the mechanism can begin counting
 again without being rebuilt.
-
-The former per-feature sequence existed to support mixed client and daemon
-builds. Signalbox has none: one user builds the daemon and every client from one
-tree, and no client is durably deployed. In one development night that unused
-compatibility vocabulary caused four retroactive-widening hazards, retired one
-number after an out-of-order merge, left stale test or prose references after
-three renumberings, and made this specification name the wrong version twice.
-The protocol therefore follows the same pre-deployment discipline as schema
-baselines: make the correct current shape in place and squash vocabulary history
-at maintainer checkpoints.
 
 **Freeze condition.** In-place protocol editing ends at the first durable
 deployment: the first client that cannot be rebuilt at will. In practice, that
@@ -124,8 +23,7 @@ protocol changes modify version `1` in place.
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
 [persistence-protocol](persistence-protocol.md). Runner-bearing process shapes
-are a foundation proposal at the bottom of their implementation stack and become
-verified only with those child pull requests.
+are a foundation proposal at the bottom of their implementation stack.
 
 ## Transport and trust boundary
 
@@ -977,9 +875,6 @@ applies that boundary before application construction or mutation and returns
 `invalid_request` when it is exceeded. This leaves enough space for worst-case
 JSON escaping when the same accepted content is projected in a queued turn or
 durable update event. This section owns the exact text capacity.
-
-The conversation-import transport in this section was verified against PR #401
-(`agent/import-chunks-protocol`) and PR #402 (`agent/import-chunks`).
 
 An import source is an exact byte sequence encoded with RFC 4648
 standard-alphabet padded base64. A noncanonical spelling is a malformed frame.

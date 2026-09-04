@@ -1,11 +1,9 @@
 # Web egress threat model
 
-This page specifies the implemented security boundary for web-tool output,
-verified against PR #403 (`agent/web-search-core`; via PR #365
-`agent/web-search`). The daemon composition and approval defaults are verified
-against PR #433 (`agent/web-search-wiring`). It covers provider response parsing
-and evidence construction in `crates/tools-web`, together with the
-defense-in-depth approval boundary for web egress.
+This page specifies the implemented security boundary for web-tool output. It
+covers provider response parsing and evidence construction in
+`crates/tools-web`, together with the defense-in-depth approval boundary for web
+egress.
 
 ## Structural output boundary
 
