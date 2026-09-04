@@ -48,9 +48,8 @@ healthy `enroll` below, are version-one artifacts that lift when multi-runner
 enrollment lands; they are not a statement that a deployment has one runner.
 Every runner-scoped fact — identity, enrollment, registration revision,
 connection and loss state, advertisement, workspace root — is therefore per
-runner rather than per deployment, and a contract that reads "the runner" as a
-deployment-wide singleton is a defect. Why: deployment-scoped meaning attached
-to a runner-scoped fact has to be found and undone before a second runner can
+runner rather than per deployment. Why: deployment-scoped meaning attached to a
+runner-scoped fact has to be found and undone before a second runner can
 connect.
 
 ### Committed functionality beyond version one
@@ -345,7 +344,7 @@ encoding fails with a stated cause instead of surfacing as a bare hash mismatch
 on the first acknowledgement.
 
 A runner that cannot perform an admitted operation reports it rather than
-falling silent. `operation_failed` carries the exact correlation of the refused
+sending nothing. `operation_failed` carries the exact correlation of the refused
 operation — provisioning authorization, release, or lease offer before
 `lease_claim` — and two layers. The first is one closed daemon-actionable
 category: `credential_unavailable`, `repository_unavailable`,
@@ -373,7 +372,7 @@ release's retirement would leave the reporting runner holding the journal and
 its one workspace-operation slot forever — the exact outcome this category
 exists to prevent. The undeleted placement then appears in the next startup
 report as a `cleanup_failed` leak, which is the version-one response to
-unreclaimed disk. Daemon logic keys off that category alone, so the set stays
+unreclaimed disk. Daemon logic branches on that category alone, so the set stays
 small and every member names a decision the daemon can make. The second is one
 runner-authored detail: a runner-specific code, a message, and a structured
 payload, all carried as data. The daemon retains the detail as operator evidence
@@ -1031,8 +1030,7 @@ repository is advertised only to a session that has one; a workspace-free
 session advertises exactly the tools that can run in it
 ([model-call execution](model-call-execution.md#frontier-rendering) owns the
 snapshot, and [tool loop](tool-loop.md#registry-placement-and-effect-metadata)
-owns the declarations). No combination is rejected for being workspace-free, and
-no contract on this page may assume that a repository exists.
+owns the declarations). No combination is rejected for being workspace-free.
 
 Why: treating a session as a repository clone on the one runner produces a
 defect wherever that assumption surfaces — a credential inferred for a
@@ -1525,9 +1523,9 @@ described by
 [configuration and credentials](configuration-and-credentials.md#runner-credential-lifecycle)
 for a Git tool reaching a remote under a granted profile, the per-provisioning
 broker helper during provisioning, and no helper at all for an invocation that
-reaches no remote. Command-line configuration outranks the model-writable
-repository configuration, so no repository setting can move the effective
-transport off HTTPS, and a re-enabled external helper or a hook cannot
+reaches no remote. Command-line configuration takes precedence over the
+model-writable repository configuration, so no repository setting can move the
+effective transport off HTTPS, and a re-enabled external helper or a hook cannot
 substitute an executable for a fetch. Why: a repository-local
 `credential.helper` whose value begins with `!` is a shell snippet Git runs, so
 leaving the helper list unemptied would let an auto-approved, retry-classified
@@ -1554,9 +1552,9 @@ HTTPS: the rewritten URL is HTTPS, so `protocol.allow=never` with
 untouched, so a check that reads it sees the canonical value; the substitute's
 hostname can stay inside the admitted transport set, so the restricted broker's
 hostname and SNI checks pass; and a public substitute needs no credential helper
-at all. Passing an explicit URL rather than a remote name closes none of it, and
-the rewrite table cannot be emptied the way the protocol and helper keys are:
-`insteadOf` is an unbounded keyspace whose bases the writer chooses, so
+at all. Passing an explicit URL rather than a remote name prevents none of it,
+and the rewrite table cannot be emptied the way the protocol and helper keys
+are: `insteadOf` is an unbounded keyspace whose bases the writer chooses, so
 command-line configuration can add entries to it but can never subtract them,
 and no highest-priority value clears it.
 
