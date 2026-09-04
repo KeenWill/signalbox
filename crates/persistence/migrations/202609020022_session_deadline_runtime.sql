@@ -243,6 +243,48 @@ BEGIN
 END;
 $$;
 
+-- Rule retirement settles parked obligations. Lock their projected subjects
+-- before the deactivation row takes its activation reference and before the
+-- settlement trigger locks each obligation, preserving lifecycle-before-
+-- obligation order against concurrent goal termination.
+CREATE FUNCTION lock_repo_watch_deactivation_session_lifecycles()
+RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    PERFORM lifecycle.session_id
+      FROM session_lifecycle AS lifecycle
+      JOIN (
+            SELECT obligation.external_blocking_session_id AS session_id
+              FROM repo_watch_dispatch_obligation AS obligation
+             WHERE obligation.repository = NEW.repository
+               AND obligation.rule_id = NEW.rule_id
+               AND obligation.rule_version = NEW.rule_version
+               AND obligation.settled_kind IS NULL
+               AND obligation.parked_at IS NOT NULL
+               AND obligation.external_blocking_session_id IS NOT NULL
+            UNION
+            SELECT action.session_id
+              FROM repo_watch_dispatch_obligation AS obligation
+              JOIN repo_watch_dispatch_action AS action
+                ON action.dispatch_id = obligation.blocking_dispatch_id
+             WHERE obligation.repository = NEW.repository
+               AND obligation.rule_id = NEW.rule_id
+               AND obligation.rule_version = NEW.rule_version
+               AND obligation.settled_kind IS NULL
+               AND obligation.parked_at IS NOT NULL
+      ) AS subject USING (session_id)
+     ORDER BY lifecycle.session_id
+       FOR UPDATE OF lifecycle;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER repo_watch_deactivation_locks_core_sessions
+    BEFORE INSERT ON repo_watch_rule_deactivation
+    FOR EACH ROW
+    EXECUTE FUNCTION lock_repo_watch_deactivation_session_lifecycles();
+
 -- A module obligation that directly names or wraps a live session projects
 -- that park into the core lifecycle queue.
 CREATE FUNCTION park_repo_watch_obligation_sessions() RETURNS trigger
@@ -252,22 +294,10 @@ DECLARE
     subject uuid;
     restored_state text;
 BEGIN
-    IF NEW.parked_at IS NULL THEN
-        RETURN NULL;
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1
-          FROM repo_watch_dispatch_obligation
-         WHERE obligation_id = NEW.obligation_id
-           AND parked_at IS NOT NULL
-    ) THEN
-        RETURN NULL;
-    END IF;
-
-    -- A parked obligation may be refreshed with a different blocker. Restore
-    -- subjects it no longer wraps before projecting the replacement, unless a
-    -- different parked obligation still names that subject.
-    IF OLD.parked_at IS NOT NULL THEN
+    -- A parked obligation may be refreshed with a different blocker, released,
+    -- or settled. Restore subjects it no longer wraps before projecting any
+    -- replacement, unless a different parked obligation still names them.
+    IF OLD.parked_at IS NOT NULL AND OLD.settled_kind IS NULL THEN
         FOR subject IN
             (
                 SELECT OLD.external_blocking_session_id
@@ -280,11 +310,15 @@ BEGIN
             EXCEPT
             (
                 SELECT NEW.external_blocking_session_id
-                 WHERE NEW.external_blocking_session_id IS NOT NULL
+                 WHERE NEW.parked_at IS NOT NULL
+                   AND NEW.settled_kind IS NULL
+                   AND NEW.external_blocking_session_id IS NOT NULL
                 UNION
                 SELECT action.session_id
                   FROM repo_watch_dispatch_action AS action
-                 WHERE action.dispatch_id = NEW.blocking_dispatch_id
+                 WHERE NEW.parked_at IS NOT NULL
+                   AND NEW.settled_kind IS NULL
+                   AND action.dispatch_id = NEW.blocking_dispatch_id
             )
         LOOP
             IF EXISTS (
@@ -357,43 +391,53 @@ BEGIN
         END LOOP;
     END IF;
 
-    FOR subject IN
-        SELECT NEW.external_blocking_session_id
-         WHERE NEW.external_blocking_session_id IS NOT NULL
-        UNION
-        SELECT action.session_id
-          FROM repo_watch_dispatch_action AS action
-         WHERE action.dispatch_id = NEW.blocking_dispatch_id
-    LOOP
-        UPDATE session_lifecycle
-           SET state_kind = 'parked',
-               state_entered_at = statement_timestamp(),
-               actor_kind = 'module',
-               actor_module = 'repo_watch',
-               actor_turn_id = NULL,
-               actor_tool_request_id = NULL,
-               waiting_kind = NULL,
-               waiting_waker = NULL,
-               waiting_subject_session_id = NULL,
-               recovering_op = NULL,
-               blocked_reason = NULL,
-               blocked_cycle = NULL,
-               parked_cause = 'module_park',
-               parked_responder = 'repo_watch',
-               parked_since = statement_timestamp(),
-               parked_standing_cause_kind = NULL
-         WHERE session_id = subject
-           AND owned
-           AND state_kind IN (
-                'created', 'dispatched', 'active', 'waiting', 'recovering', 'blocked'
-           )
-           AND pending_terminal_outcome_kind IS NULL;
-    END LOOP;
+    IF NEW.parked_at IS NOT NULL AND NEW.settled_kind IS NULL THEN
+        FOR subject IN
+            SELECT NEW.external_blocking_session_id
+             WHERE NEW.external_blocking_session_id IS NOT NULL
+            UNION
+            SELECT action.session_id
+              FROM repo_watch_dispatch_action AS action
+             WHERE action.dispatch_id = NEW.blocking_dispatch_id
+        LOOP
+            UPDATE session_lifecycle
+               SET state_kind = 'parked',
+                   state_entered_at = statement_timestamp(),
+                   actor_kind = 'module',
+                   actor_module = 'repo_watch',
+                   actor_turn_id = NULL,
+                   actor_tool_request_id = NULL,
+                   waiting_kind = NULL,
+                   waiting_waker = NULL,
+                   waiting_subject_session_id = NULL,
+                   recovering_op = NULL,
+                   blocked_reason = NULL,
+                   blocked_cycle = NULL,
+                   parked_cause = 'module_park',
+                   parked_responder = 'repo_watch',
+                   parked_since = statement_timestamp(),
+                   parked_standing_cause_kind = NULL
+             WHERE session_id = subject
+               AND owned
+               AND state_kind IN (
+                    'created', 'dispatched', 'active', 'waiting', 'recovering', 'blocked'
+               )
+               AND pending_terminal_outcome_kind IS NULL;
+        END LOOP;
+    END IF;
     RETURN NULL;
 END;
 $$;
 
 CREATE CONSTRAINT TRIGGER repo_watch_obligation_parks_core_session
-    AFTER UPDATE ON repo_watch_dispatch_obligation
+    AFTER UPDATE OF parked_at, blocking_dispatch_id,
+                    external_blocking_session_id, settled_kind
+    ON repo_watch_dispatch_obligation
     DEFERRABLE INITIALLY DEFERRED
-    FOR EACH ROW EXECUTE FUNCTION park_repo_watch_obligation_sessions();
+    FOR EACH ROW
+    WHEN (OLD.parked_at IS DISTINCT FROM NEW.parked_at
+          OR OLD.blocking_dispatch_id IS DISTINCT FROM NEW.blocking_dispatch_id
+          OR OLD.external_blocking_session_id
+                IS DISTINCT FROM NEW.external_blocking_session_id
+          OR OLD.settled_kind IS DISTINCT FROM NEW.settled_kind)
+    EXECUTE FUNCTION park_repo_watch_obligation_sessions();

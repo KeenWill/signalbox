@@ -115,7 +115,7 @@ pub enum SessionLifecycleOperation {
         /// or `failed_unknown` when it holds none.
         cause: Option<SessionFailureCause>,
     },
-    /// Return a parked goal-less session to its mapped state.
+    /// Return a parked session whose goal is not blocked to its mapped state.
     Resume,
     /// Take the liveness obligation, declaring the finish condition the
     /// session owes when it carries none.

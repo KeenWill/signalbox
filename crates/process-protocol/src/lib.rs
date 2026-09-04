@@ -3689,7 +3689,7 @@ pub enum ClientRequest {
         #[serde(deserialize_with = "deserialize_required_nullable")]
         cause: Option<SessionFailureCause>,
     },
-    /// Return a parked goal-less session to its mapped state.
+    /// Return a parked session whose goal is not blocked to its mapped state.
     ResumeSession {
         command_id: CommandId,
         session_id: CanonicalUuid,

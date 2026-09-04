@@ -7966,6 +7966,27 @@ async fn rule_deactivation_settles_its_outstanding_dispatch_obligation()
 -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture().await?;
     let _outcome = evaluate_second_conflict(&fixture).await?;
+    let obligation_id: Uuid = sqlx::query_scalar(
+        "UPDATE repo_watch_dispatch_obligation
+            SET failed_attempts = repo_watch_dispatch_attempt_budget(),
+                last_failed_attempt_at = clock_timestamp()
+          WHERE settled_kind IS NULL
+      RETURNING obligation_id",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    sqlx::query("SELECT repo_watch_park_exhausted_dispatch_obligation($1)")
+        .bind(obligation_id)
+        .execute(&fixture.pool)
+        .await?;
+    assert!(
+        SessionLifecycleRepository::new(fixture.pool.clone())
+            .load(fixture.session(0))
+            .await?
+            .expect("the dispatched session retains its lifecycle")
+            .state()
+            .is_parked()
+    );
     fixture
         .store
         .reconcile_rules(&fixture.repository, &[])
@@ -7994,6 +8015,14 @@ async fn rule_deactivation_settles_its_outstanding_dispatch_obligation()
     assert_eq!(outstanding, 0);
     assert_eq!(settlement, "deactivated");
     assert!(!projected);
+    assert!(
+        !SessionLifecycleRepository::new(fixture.pool.clone())
+            .load(fixture.session(0))
+            .await?
+            .expect("the deactivated obligation's subject retains its lifecycle")
+            .state()
+            .is_parked()
+    );
     Ok(())
 }
 
@@ -8676,6 +8705,29 @@ async fn repository_watch_observes_operator_commission_target_ownership()
         )
     );
 
+    // Obligation bookkeeping that cannot change the module park must not
+    // enqueue the deferred lifecycle projector. A concurrent lifecycle owner
+    // can therefore keep its row while the bookkeeping transaction commits.
+    let mut lifecycle_owner = fixture.pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session_lifecycle WHERE session_id = $1 FOR UPDATE")
+        .bind(fixture.session.into_uuid())
+        .execute(&mut *lifecycle_owner)
+        .await?;
+    let mut bookkeeping = fixture.pool.begin().await?;
+    sqlx::query("SET LOCAL lock_timeout = '500ms'")
+        .execute(&mut *bookkeeping)
+        .await?;
+    sqlx::query(
+        "UPDATE repo_watch_dispatch_obligation
+            SET latest_match_at = clock_timestamp()
+          WHERE obligation_id = $1",
+    )
+    .bind(obligation.0)
+    .execute(&mut *bookkeeping)
+    .await?;
+    bookkeeping.commit().await?;
+    lifecycle_owner.rollback().await?;
+
     let replacement_session = SessionId::from_uuid(Uuid::from_u128(0x60_252));
     let (template, defaults) = commissioned_template();
     let replacement_creation = CreateSession::new_from_template(
@@ -8759,9 +8811,14 @@ async fn repository_watch_observes_operator_commission_target_ownership()
             .await?,
         RepoWatchObligationParkRelease::Released
     );
-    SessionLifecycleRepository::new(fixture.pool.clone())
-        .resume(fixture.session)
-        .await?;
+    assert!(
+        !SessionLifecycleRepository::new(fixture.pool.clone())
+            .load(fixture.session)
+            .await?
+            .expect("the released blocker retains its lifecycle row")
+            .state()
+            .is_parked()
+    );
 
     let cursor = event_store
         .load_cursor(&repository)
