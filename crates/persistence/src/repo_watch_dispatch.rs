@@ -331,6 +331,16 @@ impl PostgresRepoWatchDispatchStore {
                 AND lifecycle.actor_module = 'repo_watch'
                 AND lifecycle.owned
                 AND lifecycle.pending_terminal_outcome_kind IS NULL
+                AND (
+                    lifecycle.state_kind = 'dispatched'
+                    OR NOT EXISTS (
+                        SELECT 1
+                          FROM turn_lifecycle AS live
+                         WHERE live.session_id = lifecycle.session_id
+                           AND live.state_kind = 'active'
+                           AND NOT live.delegation_runtime_terminal
+                    )
+                )
                 AND EXISTS (
                     SELECT 1
                       FROM turn_lifecycle AS turn

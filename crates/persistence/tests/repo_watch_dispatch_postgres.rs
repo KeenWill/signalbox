@@ -9287,7 +9287,7 @@ async fn stopped_never_started_blocker_restores_dispatched_admission() -> Result
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn restored_session_nudge_page_includes_an_active_turn_with_a_queued_successor()
+async fn restored_session_nudge_page_skips_an_active_turn_with_a_queued_successor()
 -> Result<(), Box<dyn Error>> {
     let fixture = commissioned_fixture().await?;
     let mut activation = StartEligibleTurnService::new(
@@ -9331,7 +9331,7 @@ async fn restored_session_nudge_page_includes_an_active_turn_with_a_queued_succe
         .load_restored_module_sessions()
         .await?;
 
-    assert_eq!(restored, vec![fixture.session]);
+    assert!(restored.is_empty());
     Ok(())
 }
 
