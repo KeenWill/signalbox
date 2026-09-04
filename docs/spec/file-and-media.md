@@ -31,13 +31,13 @@ bounded as a canonical JSON object before it reaches a tool result.
 
 The common output vocabulary is closed as text, structure, image, audio, or
 general file. The provider-neutral core admits only text and structured views;
-rich view registration remains unavailable until the durable media-reference
-result path lands. View names and meanings remain provider-owned. Every view
-declares an object options schema, streaming or finite-range access posture,
-cumulative source work, and output-specific finite bounds. Text and structured
-views bound body bytes; structure also bounds depth, nodes, and strings. Image,
-audio, and general-file views carry the corresponding dimension, pixel, channel,
-sample, duration, and byte bounds.
+rich view registration is unavailable until a durable media-reference result
+path exists. View names and meanings remain provider-owned. Every view declares
+an object options schema, streaming or finite-range access posture, cumulative
+source work, and output-specific finite bounds. Text and structured views bound
+body bytes; structure also bounds depth, nodes, and strings. Image, audio, and
+general-file views carry the corresponding dimension, pixel, channel, sample,
+duration, and byte bounds.
 
 ## Registry and adapter boundary
 
@@ -57,8 +57,8 @@ any effective ceiling above the compiled version-one value. An empty registry is
 valid. Configuration can therefore disable providers or lower bounds but cannot
 add a media-type mapping, alias, executable, or precedence rule.
 
-An adapter author supplies one provider declaration with exact owned canonical
-types, probe budget, validation source-byte and range envelope, view schemas and
+Each adapter supplies one provider declaration with exact owned canonical types,
+probe budget, validation source-byte and range envelope, view schemas and
 resource envelopes, registered sanitized reason codes, and immutable reader
 revision. The daemon clamps each validation request and its source broker to
 both the effective deployment ceilings and the reader-declared validation
@@ -86,13 +86,11 @@ their sole type and reader and require strong-signature validation. With no
 strong claim, a sole compatible structural or provisional structural candidate
 receives structural validation. A provisional structural candidate records a
 complete value at the end of a bounded prefix whose source continues, so full
-validation may disprove it and resume declaration or text fallback. This
-ordering is the simplest interpretation of the accepted design's otherwise
-unplaced `StructuralCandidate` strength. With neither, a syntactically canonical
-declaration may nominate its exact reader for independent structural validation.
-Finally, the sole registered text fallback may claim only through complete
-streaming validation. No successful path returns an ordinary declaration as
-evidence.
+validation may disprove it and resume declaration or text fallback. With
+neither, a syntactically canonical declaration may nominate its exact reader for
+independent structural validation. Finally, the sole registered text fallback
+may claim only through complete streaming validation. No successful path returns
+an ordinary declaration as evidence.
 
 A recognized-malformed probe is terminal; incompatible recognized types are
 ambiguous. Strong or ordinary structural validation cannot quietly return
@@ -134,12 +132,12 @@ instead of initial view options through the same checked service and processor
 request contracts.
 
 **Committed unimplemented functionality.** No present daemon catalog composes
-these tools because the concrete rendered-frontier attachment resolver is not
-yet on `main`; the empty daemon registry recognizes no format. Dedicated adapter
-workers may register compiled providers with their worker catalogs, but the
-compatibility constraint is that future daemon composition supplies the existing
-visibility proof to `FileUseResolver`, not a weaker catalog-presence check.
-Format adapters add no MIME branch to the executor, bridge, or daemon.
+these tools because no concrete rendered-frontier attachment resolver exists;
+the empty daemon registry recognizes no format. Dedicated adapter workers may
+register compiled providers with their worker catalogs, but the compatibility
+constraint is that future daemon composition supplies the existing visibility
+proof to `FileUseResolver`, not a weaker catalog-presence check. Format adapters
+add no MIME branch to the executor, bridge, or daemon.
 
 ## Adapter coverage
 
@@ -220,9 +218,9 @@ A worker result is eligible for the existing durable tool-result commit path
 only after one matching final frame, exact EOF with no trailing byte, successful
 worker exit, and complete bounded stderr drain. EOF before a final frame, crash,
 signal, timeout, cancellation, malformed or oversized framing, extra output,
-source failure, or limit excess discards the whole result. Thus the isolation
-slice can leave neither a partial durable result nor parser output that bypasses
-the registry sanitizer (INV-081 through INV-086). Authoritative cancellation
+source failure, or limit excess discards the whole result. Thus the processor
+can leave neither a partial durable result nor parser output that bypasses the
+registry sanitizer (INV-081 through INV-086). Authoritative cancellation
 terminates the in-flight worker and admits no result (INV-087).
 
 The version-one compiled ceilings are:
@@ -264,13 +262,12 @@ blob.
 
 **Committed unimplemented functionality.** No worker is composed into
 `signalboxd` because no concrete rendered-frontier resolver is present. No
-image, audio, or general-file producer exists, so this slice adds no rich
-`BlobReference` result arm: the accepted design forbids that arm until one
-producer-to-provider path proves publication, registration, preparation, and
-failure behavior. When such an adapter lands, generated bytes must publish and
-verify before catalog registration, and registration must precede durable result
-commit; a failed path may leave an unreferenced orphan but never a dangling
-result.
+image, audio, or general-file producer exists, so no rich `BlobReference` result
+arm exists; that arm is forbidden until one producer-to-provider path proves
+publication, registration, preparation, and failure behavior. When such an
+adapter exists, generated bytes must publish and verify before catalog
+registration, and registration must precede durable result commit; a failed path
+may leave an unreferenced orphan but never a dangling result.
 
 No classification cache exists. Earlier durable tool results preserve what a
 model saw while a later request may use a newer immutable reader revision. OCR
