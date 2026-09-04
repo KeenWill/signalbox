@@ -441,3 +441,122 @@ CREATE CONSTRAINT TRIGGER repo_watch_obligation_parks_core_session
                 IS DISTINCT FROM NEW.external_blocking_session_id
           OR OLD.settled_kind IS DISTINCT FROM NEW.settled_kind)
     EXECUTE FUNCTION park_repo_watch_obligation_sessions();
+
+-- Park release restores the projected lifecycle subject. Acquire that subject
+-- before the obligation row so lifecycle commands that settle obligations use
+-- the same lifecycle-before-obligation order.
+CREATE OR REPLACE FUNCTION repo_watch_release_dispatch_obligation_park_for_progress(
+    parked_obligation_id uuid,
+    progress_event_id uuid
+) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    parked_attempts bigint;
+BEGIN
+    PERFORM lifecycle.session_id
+      FROM session_lifecycle AS lifecycle
+      JOIN (
+            SELECT obligation.external_blocking_session_id AS session_id
+              FROM repo_watch_dispatch_obligation AS obligation
+             WHERE obligation.obligation_id = parked_obligation_id
+               AND obligation.external_blocking_session_id IS NOT NULL
+            UNION
+            SELECT action.session_id
+              FROM repo_watch_dispatch_obligation AS obligation
+              JOIN repo_watch_dispatch_action AS action
+                ON action.dispatch_id = obligation.blocking_dispatch_id
+             WHERE obligation.obligation_id = parked_obligation_id
+      ) AS subject USING (session_id)
+     ORDER BY lifecycle.session_id
+       FOR UPDATE OF lifecycle;
+
+    SELECT obligation.failed_attempts
+      INTO parked_attempts
+      FROM repo_watch_dispatch_obligation AS obligation
+     WHERE obligation.obligation_id = parked_obligation_id
+       AND obligation.settled_kind IS NULL
+       AND obligation.parked_at IS NOT NULL
+       FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+
+    PERFORM repo_watch_record_dispatch_obligation_park_transition(
+        parked_obligation_id,
+        'released',
+        parked_attempts,
+        'pull_request_progress',
+        progress_event_id,
+        NULL::text
+    );
+
+    UPDATE repo_watch_dispatch_obligation
+       SET parked_at = NULL,
+           parked_state_event_id = NULL,
+           failed_attempts = 0,
+           last_failed_attempt_at = NULL
+     WHERE obligation_id = parked_obligation_id;
+
+    RETURN true;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION repo_watch_release_parked_dispatch_obligation(
+    parked_obligation_id uuid,
+    releasing_actor text
+) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    parked_attempts bigint;
+BEGIN
+    PERFORM lifecycle.session_id
+      FROM session_lifecycle AS lifecycle
+      JOIN (
+            SELECT obligation.external_blocking_session_id AS session_id
+              FROM repo_watch_dispatch_obligation AS obligation
+             WHERE obligation.obligation_id = parked_obligation_id
+               AND obligation.external_blocking_session_id IS NOT NULL
+            UNION
+            SELECT action.session_id
+              FROM repo_watch_dispatch_obligation AS obligation
+              JOIN repo_watch_dispatch_action AS action
+                ON action.dispatch_id = obligation.blocking_dispatch_id
+             WHERE obligation.obligation_id = parked_obligation_id
+      ) AS subject USING (session_id)
+     ORDER BY lifecycle.session_id
+       FOR UPDATE OF lifecycle;
+
+    SELECT obligation.failed_attempts
+      INTO parked_attempts
+      FROM repo_watch_dispatch_obligation AS obligation
+     WHERE obligation.obligation_id = parked_obligation_id
+       AND obligation.settled_kind IS NULL
+       AND obligation.parked_at IS NOT NULL
+       FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+
+    PERFORM repo_watch_record_dispatch_obligation_park_transition(
+        parked_obligation_id,
+        'released',
+        parked_attempts,
+        'operator',
+        NULL,
+        releasing_actor
+    );
+
+    UPDATE repo_watch_dispatch_obligation
+       SET parked_at = NULL,
+           parked_state_event_id = NULL,
+           failed_attempts = 0,
+           last_failed_attempt_at = NULL
+     WHERE obligation_id = parked_obligation_id;
+
+    RETURN true;
+END;
+$$;

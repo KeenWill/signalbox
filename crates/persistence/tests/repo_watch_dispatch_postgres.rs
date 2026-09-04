@@ -8944,6 +8944,56 @@ async fn repository_watch_observes_operator_commission_target_ownership()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn restored_session_nudge_page_skips_an_active_turn_with_a_queued_successor()
+-> Result<(), Box<dyn Error>> {
+    let fixture = commissioned_fixture().await?;
+    let mut activation = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(fixture.pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(activated) =
+        activation.execute(fixture.session).await?
+    else {
+        panic!("the commissioned turn activates")
+    };
+    drop(activated);
+    assert_applied_goal_command(
+        GoalRepository::new(fixture.pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(0x60_270)),
+                    fixture.session,
+                    GoalUserAction::Supersede(GoalStatement::try_new(String::from(
+                        "continue after the active turn",
+                    ))?),
+                ),
+                Some(GoalTurnCandidates::new(
+                    AcceptedInputId::from_uuid(Uuid::from_u128(0x60_271)),
+                    TurnId::from_uuid(Uuid::from_u128(0x60_272)),
+                )),
+                |_| None,
+            )
+            .await?,
+    );
+    sqlx::query(
+        "UPDATE session_lifecycle
+            SET actor_kind = 'module', actor_module = 'repo_watch'
+          WHERE session_id = $1",
+    )
+    .bind(fixture.session.into_uuid())
+    .execute(&fixture.pool)
+    .await?;
+
+    let restored = PostgresRepoWatchDispatchStore::new(fixture.pool, credential_pin())
+        .load_restored_module_sessions()
+        .await?;
+
+    assert!(restored.is_empty());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn repository_watch_siblings_do_not_block_each_others_pursuit_commands()
 -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture().await?;
