@@ -1,7 +1,7 @@
 # Credential availability
 
-This page owns what a credential-pool selection attempt can end as, and every
-projection of each ending. The pool grammar, membership ranking, trigger
+This page owns what a credential-pool selection attempt can end as, and what
+every other page states about each ending. The pool grammar, membership ranking, trigger
 vocabulary, and admission rules are owned by
 [credential pools and selection](configuration-and-credentials.md#credential-pools-and-selection);
 the successor call's own mechanics by
