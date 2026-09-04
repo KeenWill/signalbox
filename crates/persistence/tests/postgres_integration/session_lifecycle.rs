@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use crate::*;
 use signalbox_domain::{
-    CoreAgency, DescendantTerminationScope, GoalEventOrdinal, GoalStatement, GoalUserAction,
-    GoalUserCommand, LifecycleActor, ModuleDispatch, RepoWatchDispatchId,
+    CoreAgency, DescendantTerminationScope, DispatchingModule, GoalEventOrdinal, GoalStatement,
+    GoalUserAction, GoalUserCommand, LifecycleActor, ModuleDispatch, RepoWatchDispatchId,
     SessionCreationProvenance, SessionFailureCause, SessionLifecycleState, SessionOwnership,
     SessionParkCause, SessionParkResponder, SessionRetirementCause, SessionRetryableCause,
     SessionStructuralCause, SessionTerminalOutcome, StopStickiness,
@@ -595,6 +595,56 @@ async fn leaving_a_park_re_enters_the_mapped_state() -> Result<(), Box<dyn Error
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn retired_unactivated_turn_does_not_make_a_park_resume_active() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    let session = creation_session(30);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(30))
+        .await?;
+    attach_goal(&pool, session, 30).await?;
+    repository
+        .park(
+            session,
+            SessionParkCause::ModulePark,
+            SessionParkResponder::Module {
+                module: DispatchingModule::RepositoryWatch,
+            },
+            None,
+            LifecycleActor::Module {
+                module: DispatchingModule::RepositoryWatch,
+            },
+        )
+        .await?;
+    GoalRepository::new(pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 0x30d0)),
+                session,
+                GoalUserAction::Supersede(
+                    GoalStatement::try_new(String::from("continue with the replacement"))
+                        .expect("the replacement statement is admitted"),
+                ),
+            ),
+            Some(GoalTurnCandidates::new(
+                AcceptedInputId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 0x30e0)),
+                TurnId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + 0x30f0)),
+            )),
+            |_| None,
+        )
+        .await?;
+
+    let resumed = repository.resume(session).await?;
+
+    assert_eq!(resumed, SessionLifecycleState::Dispatched);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// §1/§2: no terminal session leaves a non-terminal turn behind. A closure
 /// issued over a live turn is refused rather than committing a terminal
 /// session whose turn is still running.
@@ -870,7 +920,7 @@ async fn a_terminal_session_admits_no_further_transition() -> Result<(), Box<dyn
         .close(
             session,
             SessionTerminalOutcome::Retired {
-                cause: SessionRetirementCause::StartGateDeadlineExpired,
+                cause: SessionRetirementCause::AdmissionDeadlineExpired,
             },
             LifecycleActor::Watchdog,
         )
@@ -1558,7 +1608,7 @@ async fn a_terminal_session_admits_no_later_queued_turn() -> Result<(), Box<dyn 
         .close(
             session,
             SessionTerminalOutcome::Retired {
-                cause: SessionRetirementCause::StartGateDeadlineExpired,
+                cause: SessionRetirementCause::AdmissionDeadlineExpired,
             },
             LifecycleActor::Watchdog,
         )

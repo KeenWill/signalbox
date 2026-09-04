@@ -22,10 +22,16 @@
 //! projects a new session state already holds the satellite when the
 //! projection runs.
 //!
-//! Two paths acquire the satellite outside a scheduler statement, both without
-//! a scheduler row in the same transaction: session creation, which inserts it,
-//! and the lifecycle store's own park, closure, and ownership writes, which
-//! take the `session` row first.
+//! Paths that acquire the satellite outside a scheduler statement hold no
+//! scheduler row in the same transaction. Session creation inserts it. The
+//! lifecycle store's own park, closure, and ownership writes take the `session`
+//! row first. Repository-watch terminal goal commands lock the complete
+//! unreleased dispatch cohort in session-identity order before taking their
+//! triggering session's scheduler/lifecycle lock; other terminal goal
+//! projections take the same ordered cohort in the projection trigger.
+//! Blocker replacement and park release serialize on the stable obligation
+//! identity, then take the projected subjects in session-identity order before
+//! changing the obligation row.
 
 use signalbox_domain::SessionId;
 
@@ -53,17 +59,49 @@ pub(crate) const REPO_WATCH_DISPATCH_OBLIGATION: &str =
       WHERE obligation_id = $1
       FOR UPDATE";
 
-pub(crate) const REPO_WATCH_ACTIVE_DISPATCH_OBLIGATION: &str = "SELECT obligation.obligation_id
-           FROM repo_watch_dispatch_obligation AS obligation
-          WHERE obligation.rule_id = $1
-            AND obligation.rule_version = $2
-            AND obligation.singleton_scope = $3
-            AND obligation.singleton_repository IS NOT DISTINCT FROM $4
-            AND obligation.singleton_pull_request_number IS NOT DISTINCT FROM $5
-            AND obligation.singleton_stack_root_pull_request_number
-                 IS NOT DISTINCT FROM $6
-            AND obligation.settled_kind IS NULL
-            FOR UPDATE";
+pub(crate) const REPO_WATCH_DISPATCH_OBLIGATION_IDENTITY: &str = "SELECT pg_advisory_xact_lock(
+                hashtextextended(repo_watch_dispatch_obligation_lock_key($1), 0)
+            )";
+
+pub(crate) const REPO_WATCH_TERMINAL_GOAL_COHORT: &str = "SELECT lifecycle.session_id
+       FROM session_lifecycle AS lifecycle
+       JOIN (
+            SELECT cohort.session_id
+              FROM repo_watch_dispatch_action AS subject
+              JOIN repo_watch_dispatch_action AS cohort
+                ON cohort.dispatch_id = subject.dispatch_id
+             WHERE subject.session_id = $1
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_dispatch_release AS released
+                     WHERE released.dispatch_id = subject.dispatch_id
+               )
+       ) AS dispatch_subject USING (session_id)
+      ORDER BY lifecycle.session_id
+        FOR UPDATE OF lifecycle";
+
+pub(crate) const REPO_WATCH_OBLIGATION_BLOCKER_SUBJECTS: &str = "SELECT lifecycle.session_id
+       FROM session_lifecycle AS lifecycle
+       JOIN (
+            SELECT current.external_blocking_session_id AS session_id
+              FROM repo_watch_dispatch_obligation AS current
+             WHERE current.obligation_id = $1
+               AND current.external_blocking_session_id IS NOT NULL
+            UNION
+            SELECT action.session_id
+              FROM repo_watch_dispatch_obligation AS current
+              JOIN repo_watch_dispatch_action AS action
+                ON action.dispatch_id = current.blocking_dispatch_id
+             WHERE current.obligation_id = $1
+            UNION
+            SELECT $2::uuid WHERE $2::uuid IS NOT NULL
+            UNION
+            SELECT action.session_id
+              FROM repo_watch_dispatch_action AS action
+             WHERE action.dispatch_id = $3
+       ) AS subject USING (session_id)
+      ORDER BY lifecycle.session_id
+        FOR UPDATE OF lifecycle";
 
 pub(crate) const REPO_WATCH_TERMINAL_TARGET_OBLIGATIONS: &str = "SELECT obligation.obligation_id
            FROM repo_watch_dispatch_obligation AS obligation

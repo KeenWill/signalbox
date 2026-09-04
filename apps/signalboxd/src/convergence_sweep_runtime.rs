@@ -309,7 +309,12 @@ impl ConvergenceSweepRuntime {
                                 .reenroll_target(&target.repository, target.pull_request)
                                 .await
                             {
-                                Ok(()) => reenrolled = true,
+                                Ok(restored) => {
+                                    if let Some(session) = restored {
+                                        let _ = runtime.eligibility_nudge.nudge(session);
+                                    }
+                                    reenrolled = true;
+                                }
                                 Err(error) => {
                                     tracing::error!(
                                         repository = %target.repository.as_str(),

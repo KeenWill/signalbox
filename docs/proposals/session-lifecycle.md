@@ -65,9 +65,11 @@ ACTIVE ─┬─→ WAITING{kind, deadline, waker}   → ACTIVE | PARKED (deadli
         ├─→ BLOCKED{reason, cycle}           → ACTIVE | PARKED
         └─→ TERMINAL{outcome}
 PARKED{cause, owner, since} → ACTIVE | WAITING | RECOVERING
+                              | CREATED | DISPATCHED
                               (operator/coordinator action; the suspended phase's state, §1)
                             | TERMINAL{abandoned | failed_retryable | failed_structural
                                        | failed_unknown | superseded}
+any non-terminal state → PARKED{module_park}       (module target parks, §1)
 any non-terminal state → TERMINAL{superseded | stopped}
 ```
 
@@ -371,8 +373,9 @@ failed with its standing cause — `failed_retryable`, `failed_structural`, or
 `failed_unknown` (§2); and `resume`, the operator or coordinator transition of a
 parked session back to the state §1's mapping derives from its suspended turn's
 phase — `active`, `waiting`, or `recovering`; `active` when no turn was
-suspended — where no goal applies. A parked goal session resumes through
-`goal{resume_with_guidance}` (§9).
+suspended — where no blocked goal applies. A parked session with a blocked goal
+resumes through `goal{resume_with_guidance}` (§9); one with a pursuing goal may
+use `resume`.
 
 **Proposed behavior.** The existing goal-command operation named `supersede` —
 new goal generation within the same session — is unrelated to the session
@@ -394,10 +397,11 @@ record nothing.
 
 **Proposed behavior.** `start_gate` is a core concept; the module-owned
 dispatch-lease tables — `repo_watch_dispatch_start_lease` with its `_expiration`
-and `_quarantine` companions — die. The scheduler's four-table reach-around dies
-with them. A session created with a held start gate stays in `created` until
-`release_start` or, on an owned session, admission expiry, which retires it
-(§10); an unmonitored held gate carries no deadline (§6).
+and `_quarantine` companions — remain while current dispatch paths read them. A
+session created with a held start gate stays in `created` until `release_start`
+or, on an owned session, admission expiry, which retires it (§10); releasing its
+ownership opens the held gate in the same transaction, and an unmonitored held
+gate carries no deadline (§6).
 
 **Proposed behavior.** Ownership is advisory: an owner module observes events
 and issues commands like any other client; it never sits between core and the

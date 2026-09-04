@@ -456,7 +456,13 @@ impl GoalRepository {
             GoalCommandResult::Rejected(_) => false,
         };
         match &result {
-            GoalCommandResult::Applied(_) => {
+            GoalCommandResult::Applied(event) => {
+                lock_terminal_repo_watch_dispatch_cohort(
+                    &mut transaction,
+                    command.session(),
+                    event,
+                )
+                .await?;
                 lock_scheduler(&mut transaction, command.session()).await?;
             }
             GoalCommandResult::Rejected(_) => {}
@@ -1369,6 +1375,27 @@ fn event_may_retire_queued_turn(event: &GoalEvent) -> bool {
     }
 }
 
+async fn lock_terminal_repo_watch_dispatch_cohort(
+    connection: &mut PgConnection,
+    session: SessionId,
+    event: &GoalEvent,
+) -> Result<(), GoalRepositoryError> {
+    if !matches!(
+        event.kind(),
+        GoalEventKind::Blocked { .. }
+            | GoalEventKind::Achieved { .. }
+            | GoalEventKind::UserStopped { .. }
+            | GoalEventKind::SessionClosed { .. }
+    ) {
+        return Ok(());
+    }
+    sqlx::query(crate::lock_inventory::REPO_WATCH_TERMINAL_GOAL_COHORT)
+        .bind(session_id_to_uuid(session))
+        .execute(&mut *connection)
+        .await?;
+    Ok(())
+}
+
 fn scheduler_failure_rejection(
     failure: GoalTransitionFailure,
 ) -> Result<GoalTurnContinuationOutcome, GoalCorruption> {
@@ -1527,6 +1554,7 @@ pub(crate) async fn insert_repo_watch_composed_stop(
         )
         .into());
     };
+    lock_terminal_repo_watch_dispatch_cohort(connection, command.session(), event).await?;
     lock_scheduler(connection, command.session()).await?;
     insert_command(connection, &command, &result).await?;
     insert_event(connection, command.session(), event).await?;

@@ -219,6 +219,7 @@ fn oversized_frame_is_import_source(request: &ClientRequest) -> bool {
         | ClientRequest::ResumeSession { .. }
         | ClientRequest::AdoptSession { .. }
         | ClientRequest::ReleaseSession { .. }
+        | ClientRequest::ReleaseStart { .. }
         | ClientRequest::SupersedeGoal { .. }
         | ClientRequest::SubmitInput { .. }
         | ClientRequest::CompactSession { .. }

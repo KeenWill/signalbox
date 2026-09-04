@@ -28,6 +28,7 @@ mod outbox_dispatch_and_process_read;
 mod restart_recovery_and_submit;
 mod search;
 mod session_creation_and_submit;
+mod session_deadline;
 mod session_lifecycle;
 mod session_lifecycle_commands;
 mod session_live;

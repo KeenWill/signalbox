@@ -61,6 +61,7 @@ mod daemon_tools;
 mod fenced_database;
 mod goal_mode;
 mod imported_source_blobs;
+mod lifecycle_deadline_runtime;
 mod lifecycle_metrics_runtime;
 mod local_socket;
 pub mod model_adapter;
@@ -127,6 +128,7 @@ pub use goal_mode::{
     CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED, GoalModeNumericBounds, PostgresGoalPassDisposition,
     PostgresGoalPassDispositionError,
 };
+pub use lifecycle_deadline_runtime::LifecycleDeadlineRuntime;
 pub use lifecycle_metrics_runtime::LifecycleMetricsRuntime;
 pub use local_socket::{LocalProcessListener, LocalSocketError};
 pub use process_runtime::{

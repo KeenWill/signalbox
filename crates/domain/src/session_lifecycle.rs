@@ -339,10 +339,8 @@ pub enum SessionStructuralCause {
 /// Why a session that never did the work was retired.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SessionRetirementCause {
-    /// The dispatched session never reached `active`.
-    DispatchDeadlineExpired,
-    /// A held start gate was never released.
-    StartGateDeadlineExpired,
+    /// The session never reached its first activity before admission expired.
+    AdmissionDeadlineExpired,
     /// The one-time closure of a stranded queued-turn session.
     StrandedQueuedTurn,
 }
@@ -583,10 +581,19 @@ impl SessionLifecycleState {
     /// straight into recovery moves the session with it.
     pub const fn admits(&self, next: &Self) -> bool {
         match (self, next) {
+            (Self::Parked { .. }, Self::Created | Self::Dispatched) => true,
             (Self::Terminal { .. }, _) | (_, Self::Created) => false,
             (_, Self::Terminal { outcome }) => self.admits_outcome(outcome),
             (Self::Created, Self::Dispatched) => true,
+            (
+                Self::Created | Self::Dispatched,
+                Self::Parked {
+                    cause: SessionParkCause::ModulePark,
+                    ..
+                },
+            ) => true,
             (Self::Created, _) => false,
+            (Self::Dispatched, Self::Parked { .. }) => false,
             (Self::Dispatched | Self::Parked { .. }, _) => next.is_mapped(),
             (_, Self::Parked { .. }) => self.is_mapped(),
             _ => self.is_mapped() && next.is_mapped(),
@@ -596,21 +603,19 @@ impl SessionLifecycleState {
     /// Whether this state may close with `outcome`.
     ///
     /// `retired` says the session never did the work, so only the two
-    /// admission states reach it — and only with the cause that state's own
-    /// deadline could have fired, since the recorded cause is what §12 reports.
-    /// Every other outcome closes from any non-terminal state, and the
-    /// parked-only closures are commands (§7) rather than shapes this algebra
-    /// can distinguish.
+    /// admission states reach it, with either their shared admission expiry or
+    /// a dispatched queued-turn retirement. Every other outcome closes from
+    /// any non-terminal state, and the parked-only closures are commands (§7)
+    /// rather than shapes this algebra can distinguish.
     const fn admits_outcome(&self, outcome: &SessionTerminalOutcome) -> bool {
         match outcome {
             SessionTerminalOutcome::Retired { cause } => match (self, cause) {
-                (Self::Created, SessionRetirementCause::StartGateDeadlineExpired)
-                | (
-                    Self::Dispatched,
-                    SessionRetirementCause::DispatchDeadlineExpired
-                    | SessionRetirementCause::StrandedQueuedTurn,
-                ) => true,
-                (Self::Created | Self::Dispatched, _) => false,
+                (
+                    Self::Created | Self::Dispatched,
+                    SessionRetirementCause::AdmissionDeadlineExpired,
+                )
+                | (Self::Dispatched, SessionRetirementCause::StrandedQueuedTurn) => true,
+                (Self::Created, SessionRetirementCause::StrandedQueuedTurn) => false,
                 (
                     Self::Active
                     | Self::Waiting { .. }
@@ -773,6 +778,16 @@ mod tests {
         }
     }
 
+    fn module_parked() -> SessionLifecycleState {
+        SessionLifecycleState::Parked {
+            cause: SessionParkCause::ModulePark,
+            responder: SessionParkResponder::Module {
+                module: DispatchingModule::RepositoryWatch,
+            },
+            standing: None,
+        }
+    }
+
     fn stopped() -> SessionLifecycleState {
         SessionLifecycleState::Terminal {
             outcome: SessionTerminalOutcome::Stopped {
@@ -781,18 +796,10 @@ mod tests {
         }
     }
 
-    fn start_gate_retired() -> SessionLifecycleState {
-        SessionLifecycleState::Terminal {
-            outcome: SessionTerminalOutcome::Retired {
-                cause: SessionRetirementCause::StartGateDeadlineExpired,
-            },
-        }
-    }
-
     fn retired() -> SessionLifecycleState {
         SessionLifecycleState::Terminal {
             outcome: SessionTerminalOutcome::Retired {
-                cause: SessionRetirementCause::DispatchDeadlineExpired,
+                cause: SessionRetirementCause::AdmissionDeadlineExpired,
             },
         }
     }
@@ -874,9 +881,33 @@ mod tests {
     }
 
     #[test]
-    fn an_admission_state_never_parks() {
+    fn a_module_can_park_an_admission_state() {
+        assert_admits(SessionLifecycleState::Created, module_parked());
+        assert_admits(dispatched(), module_parked());
         assert_rejects(SessionLifecycleState::Created, parked());
         assert_rejects(dispatched(), parked());
+        assert_admits(module_parked(), SessionLifecycleState::Created);
+        assert_admits(module_parked(), dispatched());
+    }
+
+    #[test]
+    fn a_stranded_queued_turn_only_retires_a_dispatch() {
+        assert_admits(
+            dispatched(),
+            SessionLifecycleState::Terminal {
+                outcome: SessionTerminalOutcome::Retired {
+                    cause: SessionRetirementCause::StrandedQueuedTurn,
+                },
+            },
+        );
+        assert_rejects(
+            SessionLifecycleState::Created,
+            SessionLifecycleState::Terminal {
+                outcome: SessionTerminalOutcome::Retired {
+                    cause: SessionRetirementCause::StrandedQueuedTurn,
+                },
+            },
+        );
     }
 
     #[test]
@@ -896,16 +927,10 @@ mod tests {
 
     #[test]
     fn only_an_admission_state_retires() {
-        assert_admits(SessionLifecycleState::Created, start_gate_retired());
+        assert_admits(SessionLifecycleState::Created, retired());
         assert_admits(dispatched(), retired());
         assert_rejects(SessionLifecycleState::Active, retired());
         assert_rejects(parked(), retired());
-    }
-
-    #[test]
-    fn a_retirement_names_the_cause_its_own_state_could_fire() {
-        assert_rejects(SessionLifecycleState::Created, retired());
-        assert_rejects(dispatched(), start_gate_retired());
     }
 
     #[test]
@@ -1122,7 +1147,7 @@ mod tests {
         );
         assert_eq!(
             SessionTerminalOutcome::Retired {
-                cause: SessionRetirementCause::DispatchDeadlineExpired,
+                cause: SessionRetirementCause::AdmissionDeadlineExpired,
             }
             .closure_outcome(),
             Some(SessionClosureOutcome::Retired)

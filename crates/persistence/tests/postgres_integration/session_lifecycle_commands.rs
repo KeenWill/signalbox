@@ -6,12 +6,13 @@ use std::error::Error;
 
 use crate::*;
 use signalbox_domain::{
-    CommandPrincipal, DescendantTerminationScope, FinishCondition, FinishConditionStatement,
-    GoalCommandRejection, GoalCommandResult, GoalStatement, GoalUserAction, GoalUserCommand,
-    LifecycleActor, ModuleDispatch, ParentTerminationKind, RepoWatchDispatchId,
-    SessionCreationProvenance, SessionFailureCause, SessionLifecycleApplication,
-    SessionLifecycleCommand, SessionLifecycleCommandRejection, SessionLifecycleCommandResult,
-    SessionLifecycleOperation, SessionLifecycleState, SessionOwnership, SessionRetryableCause,
+    CommandPrincipal, DescendantTerminationScope, DispatchingModule, FinishCondition,
+    FinishConditionStatement, GoalCommandRejection, GoalCommandResult, GoalStatement,
+    GoalUserAction, GoalUserCommand, LifecycleActor, ModuleDispatch, ParentTerminationKind,
+    RepoWatchDispatchId, SessionCreationProvenance, SessionFailureCause,
+    SessionLifecycleApplication, SessionLifecycleCommand, SessionLifecycleCommandRejection,
+    SessionLifecycleCommandResult, SessionLifecycleOperation, SessionLifecycleState,
+    SessionOwnership, SessionParkCause, SessionParkResponder, SessionRetryableCause,
     SessionTerminalOutcome, StartGate, StopStickiness,
 };
 use signalbox_persistence::{
@@ -596,11 +597,67 @@ async fn a_resume_replays_its_recorded_state_after_the_session_closes() -> Resul
     assert_eq!(
         first,
         SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::Resumed {
-            state: SessionLifecycleState::Active,
+            state: SessionLifecycleState::Created,
         })
     );
     assert_eq!(replay, first);
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_module_parked_pursuing_goal_accepts_a_lifecycle_resume() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x43;
+    let session = creation_session(seed);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(seed))
+        .await?;
+    GoalRepository::new(pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(SEED + seed + 0xe00)),
+                session,
+                GoalUserAction::Attach(
+                    GoalStatement::try_new(String::from("continue after module intervention"))
+                        .expect("the fixture statement is admitted"),
+                ),
+            ),
+            Some(GoalTurnCandidates::new(
+                AcceptedInputId::from_uuid(Uuid::from_u128(SEED + seed + 0xe01)),
+                TurnId::from_uuid(Uuid::from_u128(SEED + seed + 0xe02)),
+            )),
+            |_| None,
+        )
+        .await?;
+    SessionLifecycleRepository::new(pool.clone())
+        .park(
+            session,
+            SessionParkCause::ModulePark,
+            SessionParkResponder::Module {
+                module: DispatchingModule::RepositoryWatch,
+            },
+            None,
+            LifecycleActor::Module {
+                module: DispatchingModule::RepositoryWatch,
+            },
+        )
+        .await?;
+
+    let resumed = recorded(
+        &pool,
+        lifecycle_command(seed, 1, session, SessionLifecycleOperation::Resume),
+    )
+    .await?;
+
+    assert!(matches!(
+        resumed,
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::Resumed { state })
+            if !state.is_parked()
+    ));
     pool.close().await;
     drop(container);
     Ok(())
@@ -1187,6 +1244,68 @@ async fn a_held_start_gate_keeps_the_session_created() -> Result<(), Box<dyn Err
         .await?
         .expect("the session keeps its lifecycle row");
     assert_eq!(lifecycle.state(), SessionLifecycleState::Created);
+
+    let release = lifecycle_command(10, 2, session, SessionLifecycleOperation::ReleaseStart);
+    let release_id = release.command_id();
+    assert_eq!(
+        recorded(&pool, release.clone()).await?,
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::StartReleased)
+    );
+    assert_eq!(
+        recorded(&pool, release).await?,
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::StartReleased)
+    );
+    assert_eq!(
+        settlement(&pool, release_id).await?,
+        (String::from("applied"), None)
+    );
+    let released: (String, bool) = sqlx::query_as(
+        "SELECT state_kind, start_gate_held FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(released, (String::from("dispatched"), false));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn releasing_ownership_also_settles_a_held_start_gate() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(11);
+    let creation = CreateSession::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(SEED + 11)),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
+        SessionConfigurationDefaults::new(direct(SEED + 11 + 0x200)),
+    )
+    .with_lifecycle(StartGate::Held, SessionOwnership::Owned, None)
+    .prepare(session)
+    .expect("the creation is preparable");
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(creation)
+        .await?;
+    queue_turn(&pool, session, 11, 1).await?;
+
+    assert_eq!(
+        recorded(
+            &pool,
+            lifecycle_command(11, 2, session, SessionLifecycleOperation::Release),
+        )
+        .await?,
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::OwnershipChanged)
+    );
+    let released: (String, bool, bool) = sqlx::query_as(
+        "SELECT state_kind, start_gate_held, owned
+           FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(released, (String::from("dispatched"), false, false));
 
     pool.close().await;
     drop(container);

@@ -45,11 +45,12 @@ use signalbox_domain::{
     RepoWatchRuleId, RepoWatchRuleIdentityField, RepoWatchRuleVersion, RepoWatchSingletonScope,
     RepoWatchWorkflowRunAttempt, RepositorySlug, ResolvedProviderTarget, SemanticTranscriptEntryId,
     SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
-    SessionRetryableCause, SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
-    SessionTemplateProvenance, SessionTerminalOutcome, SubmitInput, ToolCallProposal,
-    ToolDecisionRationale, ToolName, ToolRequestId, ToolResponsePartIdentity,
-    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId,
-    TurnId, UserContent, WorkflowName,
+    SessionLifecycleState, SessionOwnership, SessionRetryableCause, SessionSystemPrompt,
+    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
+    SessionTerminalOutcome, StartGate, SubmitInput, ToolCallProposal, ToolDecisionRationale,
+    ToolName, ToolRequestId, ToolResponsePartIdentity, ToolRoundModelCallIdentities,
+    ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
+    WorkflowName,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -154,6 +155,8 @@ const PARKED_TARGET_CUTOFF_COMMAND_ID: u128 = 0x58_801;
 const NONMATCHING_PROGRESS_EVENT_ID: u128 = 0x58_600;
 const SIBLING_COUNT_FIRST_STOP_COMMAND_ID: u128 = 0x58_700;
 const SIBLING_COUNT_SECOND_STOP_COMMAND_ID: u128 = 0x58_701;
+const SIBLING_PARK_FIRST_STOP_COMMAND_ID: u128 = 0x58_710;
+const SIBLING_PARK_SECOND_STOP_COMMAND_ID: u128 = 0x58_711;
 const CROSS_TARGET_CONFLICT_EVENT_ID: u128 = 0x58_501;
 const REPOSITORY_SCOPED_RULE: &str = "merge-forward-per-repository";
 const BATCH_DELAY_FIRST_STOP_COMMAND_ID: u128 = 0x58_400;
@@ -1321,6 +1324,26 @@ async fn wait_for_advisory_lock(pool: &PgPool) -> Result<(), Box<dyn Error>> {
             .fetch_one(pool)
             .await?;
             if waiting {
+                return Ok::<(), sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
+async fn wait_for_lock_waiters(pool: &PgPool, expected: i64) -> Result<(), Box<dyn Error>> {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*)
+                   FROM pg_stat_activity
+                  WHERE wait_event_type = 'Lock'",
+            )
+            .fetch_one(pool)
+            .await?;
+            if waiting >= expected {
                 return Ok::<(), sqlx::Error>(());
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -3670,6 +3693,75 @@ async fn an_operator_release_restores_the_whole_budget() -> Result<(), Box<dyn E
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn blocker_replacement_serializes_identity_before_operator_park_release()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let obligation = park_dispatch_obligation(&fixture, PARK_FIRST_STOP_COMMAND_ID).await?;
+    let replacement_session = SessionId::from_uuid(Uuid::from_u128(0x58_210));
+    let (template, defaults) = commissioned_template();
+    let replacement_creation = CreateSession::new_from_template(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x58_211)),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
+        template,
+        defaults,
+    )
+    .with_lifecycle(StartGate::Held, SessionOwnership::Owned, None)
+    .prepare(replacement_session)
+    .expect("the replacement blocker creation prepares");
+    assert!(matches!(
+        CreateSessionRepository::new(fixture.pool.clone(), credential_pin())
+            .handle(replacement_creation)
+            .await?,
+        CreateSessionHandlingOutcome::Applied(_)
+    ));
+
+    let mut replacement = fixture.pool.begin().await?;
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(
+                    hashtextextended(repo_watch_dispatch_obligation_lock_key($1), 0)
+                )",
+    )
+    .bind(obligation)
+    .execute(&mut *replacement)
+    .await?;
+    sqlx::query(
+        "UPDATE repo_watch_dispatch_obligation
+            SET blocking_dispatch_id = NULL,
+                external_blocking_session_id = $2
+          WHERE obligation_id = $1",
+    )
+    .bind(obligation)
+    .bind(replacement_session.into_uuid())
+    .execute(&mut *replacement)
+    .await?;
+
+    let release_store = fixture.store.clone();
+    let release = tokio::spawn(async move {
+        release_store
+            .release_parked_dispatch_obligation(obligation, PARK_RELEASE_ACTOR)
+            .await
+    });
+    wait_for_advisory_lock(&fixture.pool).await?;
+    replacement.commit().await?;
+
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), release).await???,
+        RepoWatchObligationParkRelease::Released
+    );
+    assert!(
+        !SessionLifecycleRepository::new(fixture.pool)
+            .load(replacement_session)
+            .await?
+            .expect("the replacement blocker retains its lifecycle row")
+            .state()
+            .is_parked(),
+        "release observes and restores the serialized replacement blocker"
+    );
+    Ok(())
+}
+
 /// An obligation that is not parked has nothing to release, and reporting that
 /// is not an error: an operator racing a release the pull request already
 /// earned must not read as storage failure.
@@ -3874,6 +3966,144 @@ async fn one_batch_counts_one_attempt_however_many_siblings_fail() -> Result<(),
 
     assert_eq!(after_first_sibling, 1);
     assert_eq!(outstanding_failed_attempts(&fixture.pool).await?, 1);
+    Ok(())
+}
+
+/// A terminal goal command locks its complete repository-watch dispatch cohort
+/// before its own lifecycle row. The insert gate holds the first command only
+/// after its scheduler lock point, proving the second command cannot reach the
+/// same point while retaining its sibling lifecycle row.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn concurrent_sibling_terminations_serialize_before_parking_their_dispatch()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(0),
+        SIBLING_COUNT_FIRST_STOP_COMMAND_ID,
+    )
+    .await?;
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(1),
+        SIBLING_COUNT_SECOND_STOP_COMMAND_ID,
+    )
+    .await?;
+    let obligation = load_next_obligation(&fixture)
+        .await?
+        .expect("the first failed batch leaves a dispatchable obligation");
+    let cursor = PostgresRepoWatchStore::new(fixture.pool.clone())
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+    let (successor_dispatch, successor_sessions) = dispatched(
+        evaluate_obligation(&fixture, obligation, cursor.candidate().observation()).await?,
+    );
+    sqlx::query(
+        "UPDATE repo_watch_dispatch_obligation
+            SET failed_attempts = repo_watch_dispatch_attempt_budget() - 1,
+                last_failed_attempt_at = clock_timestamp()
+          WHERE settled_dispatch_id = $1",
+    )
+    .bind(successor_dispatch.as_uuid())
+    .execute(&fixture.pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE FUNCTION wait_before_terminal_goal_insert() RETURNS trigger
+             LANGUAGE plpgsql
+             AS $$
+         BEGIN
+             IF NEW.event_kind = 'user_stopped' THEN
+                 PERFORM pg_advisory_xact_lock(
+                     hashtextextended('terminal-goal-insert-test-gate', 0)
+                 );
+             END IF;
+             RETURN NEW;
+         END;
+         $$",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "CREATE TRIGGER wait_before_terminal_goal_insert
+         BEFORE INSERT ON goal_event
+         FOR EACH ROW
+         EXECUTE FUNCTION wait_before_terminal_goal_insert()",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let mut insert_gate = fixture.pool.begin().await?;
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(
+                    hashtextextended('terminal-goal-insert-test-gate', 0)
+                )",
+    )
+    .execute(&mut *insert_gate)
+    .await?;
+    let first_pool = fixture.pool.clone();
+    let first_session = successor_sessions[0];
+    let first = tokio::spawn(async move {
+        GoalRepository::new(first_pool)
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(
+                        SIBLING_PARK_FIRST_STOP_COMMAND_ID,
+                    )),
+                    first_session,
+                    GoalUserAction::Stop {
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    },
+                ),
+                None,
+                |_| None,
+            )
+            .await
+    });
+    wait_for_advisory_lock(&fixture.pool).await?;
+    let second_pool = fixture.pool.clone();
+    let second_session = successor_sessions[1];
+    let second = tokio::spawn(async move {
+        GoalRepository::new(second_pool)
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(
+                        SIBLING_PARK_SECOND_STOP_COMMAND_ID,
+                    )),
+                    second_session,
+                    GoalUserAction::Stop {
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    },
+                ),
+                None,
+                |_| None,
+            )
+            .await
+    });
+    wait_for_lock_waiters(&fixture.pool, 2).await?;
+    insert_gate.commit().await?;
+
+    assert_applied_goal_command(tokio::time::timeout(Duration::from_secs(3), first).await???);
+    assert_applied_goal_command(tokio::time::timeout(Duration::from_secs(3), second).await???);
+    let parked_sessions: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM session_lifecycle
+          WHERE session_id = ANY($1)
+            AND state_kind = 'parked'
+            AND parked_cause = 'module_park'
+            AND parked_responder = 'repo_watch'",
+    )
+    .bind(
+        successor_sessions
+            .iter()
+            .map(|session| session.into_uuid())
+            .collect::<Vec<_>>(),
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(parked_sessions, 2);
     Ok(())
 }
 
@@ -7965,6 +8195,27 @@ async fn rule_deactivation_settles_its_outstanding_dispatch_obligation()
 -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture().await?;
     let _outcome = evaluate_second_conflict(&fixture).await?;
+    let obligation_id: Uuid = sqlx::query_scalar(
+        "UPDATE repo_watch_dispatch_obligation
+            SET failed_attempts = repo_watch_dispatch_attempt_budget(),
+                last_failed_attempt_at = clock_timestamp()
+          WHERE settled_kind IS NULL
+      RETURNING obligation_id",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    sqlx::query("SELECT repo_watch_park_exhausted_dispatch_obligation($1)")
+        .bind(obligation_id)
+        .execute(&fixture.pool)
+        .await?;
+    assert!(
+        SessionLifecycleRepository::new(fixture.pool.clone())
+            .load(fixture.session(0))
+            .await?
+            .expect("the dispatched session retains its lifecycle")
+            .state()
+            .is_parked()
+    );
     fixture
         .store
         .reconcile_rules(&fixture.repository, &[])
@@ -7993,6 +8244,14 @@ async fn rule_deactivation_settles_its_outstanding_dispatch_obligation()
     assert_eq!(outstanding, 0);
     assert_eq!(settlement, "deactivated");
     assert!(!projected);
+    assert!(
+        !SessionLifecycleRepository::new(fixture.pool.clone())
+            .load(fixture.session(0))
+            .await?
+            .expect("the deactivated obligation's subject retains its lifecycle")
+            .state()
+            .is_parked()
+    );
     Ok(())
 }
 
@@ -8594,17 +8853,18 @@ async fn repository_watch_observes_operator_commission_target_ownership()
             )
             .await?;
 
-    let obligation: (Uuid, Vec<Uuid>, bool) = sqlx::query_as(
-        "SELECT external_blocking_session_id, occupying_session_ids, ready
+    let obligation: (Uuid, Uuid, Vec<Uuid>, bool) = sqlx::query_as(
+        "SELECT obligation_id, external_blocking_session_id,
+                occupying_session_ids, ready
            FROM repo_watch_outstanding_dispatch_obligation",
     )
     .fetch_one(&fixture.pool)
     .await?;
 
     assert_eq!(outcome, RepoWatchRuleEvaluationOutcome::Occupied);
-    assert_eq!(obligation.0, fixture.session.into_uuid());
-    assert_eq!(obligation.1, vec![fixture.session.into_uuid()]);
-    assert!(!obligation.2);
+    assert_eq!(obligation.1, fixture.session.into_uuid());
+    assert_eq!(obligation.2, vec![fixture.session.into_uuid()]);
+    assert!(!obligation.3);
     assert!(
         dispatch_store
             .load_next_dispatch_obligation(
@@ -8642,6 +8902,204 @@ async fn repository_watch_observes_operator_commission_target_ownership()
         }],
         "the operator read names the live external session holding the obligation"
     );
+
+    sqlx::query(
+        "UPDATE repo_watch_dispatch_obligation
+            SET failed_attempts = repo_watch_dispatch_attempt_budget(),
+                last_failed_attempt_at = clock_timestamp()
+          WHERE obligation_id = $1",
+    )
+    .bind(obligation.0)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query("SELECT repo_watch_park_exhausted_dispatch_obligation($1)")
+        .bind(obligation.0)
+        .execute(&fixture.pool)
+        .await?;
+    let core_park: (String, String, String, String) = sqlx::query_as(
+        "SELECT state_kind, parked_cause, parked_responder, actor_module
+           FROM session_lifecycle
+          WHERE session_id = $1",
+    )
+    .bind(fixture.session.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        core_park,
+        (
+            String::from("parked"),
+            String::from("module_park"),
+            String::from("repo_watch"),
+            String::from("repo_watch"),
+        )
+    );
+
+    // Obligation bookkeeping that cannot change the module park must not
+    // enqueue the deferred lifecycle projector. A concurrent lifecycle owner
+    // can therefore keep its row while the bookkeeping transaction commits.
+    let mut lifecycle_owner = fixture.pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session_lifecycle WHERE session_id = $1 FOR UPDATE")
+        .bind(fixture.session.into_uuid())
+        .execute(&mut *lifecycle_owner)
+        .await?;
+    let mut bookkeeping = fixture.pool.begin().await?;
+    sqlx::query("SET LOCAL lock_timeout = '500ms'")
+        .execute(&mut *bookkeeping)
+        .await?;
+    sqlx::query(
+        "UPDATE repo_watch_dispatch_obligation
+            SET latest_match_at = clock_timestamp()
+          WHERE obligation_id = $1",
+    )
+    .bind(obligation.0)
+    .execute(&mut *bookkeeping)
+    .await?;
+    bookkeeping.commit().await?;
+    lifecycle_owner.rollback().await?;
+
+    let replacement_session = SessionId::from_uuid(Uuid::from_u128(0x60_252));
+    let (template, defaults) = commissioned_template();
+    let replacement_creation = CreateSession::new_from_template(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x60_251)),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
+        template,
+        defaults,
+    )
+    .with_lifecycle(StartGate::Held, SessionOwnership::Owned, None)
+    .prepare(replacement_session)
+    .expect("the replacement blocker creation prepares");
+    assert!(matches!(
+        CreateSessionRepository::new(fixture.pool.clone(), credential_pin())
+            .handle(replacement_creation)
+            .await?,
+        CreateSessionHandlingOutcome::Applied(_)
+    ));
+    sqlx::query(
+        "UPDATE repo_watch_dispatch_obligation
+            SET blocking_dispatch_id = NULL,
+                external_blocking_session_id = $2
+          WHERE obligation_id = $1",
+    )
+    .bind(obligation.0)
+    .bind(replacement_session.into_uuid())
+    .execute(&fixture.pool)
+    .await?;
+    let lifecycle_repository = SessionLifecycleRepository::new(fixture.pool.clone());
+    assert!(
+        !lifecycle_repository
+            .load(fixture.session)
+            .await?
+            .expect("the previous blocker keeps its lifecycle row")
+            .state()
+            .is_parked()
+    );
+    assert!(
+        lifecycle_repository
+            .load(replacement_session)
+            .await?
+            .expect("the replacement blocker keeps its lifecycle row")
+            .state()
+            .is_parked()
+    );
+
+    sqlx::query(
+        "UPDATE repo_watch_dispatch_obligation
+            SET external_blocking_session_id = $2
+          WHERE obligation_id = $1",
+    )
+    .bind(obligation.0)
+    .bind(fixture.session.into_uuid())
+    .execute(&fixture.pool)
+    .await?;
+    assert!(
+        lifecycle_repository
+            .load(fixture.session)
+            .await?
+            .expect("the restored blocker keeps its lifecycle row")
+            .state()
+            .is_parked()
+    );
+    assert_eq!(
+        lifecycle_repository
+            .load(replacement_session)
+            .await?
+            .expect("the replaced blocker keeps its lifecycle row")
+            .state(),
+        SessionLifecycleState::Created
+    );
+    let restored_deadline: String =
+        sqlx::query_scalar("SELECT deadline_kind FROM session_deadline WHERE session_id = $1")
+            .bind(replacement_session.into_uuid())
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert_eq!(restored_deadline, "admission");
+
+    assert_eq!(
+        dispatch_store
+            .release_parked_dispatch_obligation(obligation.0, PARK_RELEASE_ACTOR)
+            .await?,
+        RepoWatchObligationParkRelease::Released
+    );
+    assert!(
+        !SessionLifecycleRepository::new(fixture.pool.clone())
+            .load(fixture.session)
+            .await?
+            .expect("the released blocker retains its lifecycle row")
+            .state()
+            .is_parked()
+    );
+    assert_eq!(
+        dispatch_store.load_restored_module_sessions().await?,
+        vec![fixture.session]
+    );
+
+    let cursor = event_store
+        .load_cursor(&repository)
+        .await?
+        .expect("the repository-watch cursor remains current");
+    event_store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                Some(cursor.generation()),
+                RepoWatchCursorCandidate::new(observation(context(SECOND_HEAD)?)?),
+                vec![identified_event(head_changed_event(
+                    0x60_250,
+                    context(SECOND_HEAD)?,
+                    FIRST_HEAD,
+                )?)],
+            ),
+        )
+        .await?;
+    sqlx::query(
+        "UPDATE repo_watch_dispatch_obligation
+            SET failed_attempts = repo_watch_dispatch_attempt_budget(),
+                last_failed_attempt_at = clock_timestamp()
+          WHERE obligation_id = $1",
+    )
+    .bind(obligation.0)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query("SELECT repo_watch_park_exhausted_dispatch_obligation($1)")
+        .bind(obligation.0)
+        .execute(&fixture.pool)
+        .await?;
+    let core_after_immediate_release = SessionLifecycleRepository::new(fixture.pool.clone())
+        .load(fixture.session)
+        .await?
+        .expect("the external blocker retains its lifecycle row");
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM repo_watch_parked_dispatch_obligation
+              WHERE obligation_id = $1",
+        )
+        .bind(obligation.0)
+        .fetch_one(&fixture.pool)
+        .await?,
+        0
+    );
+    assert!(!core_after_immediate_release.state().is_parked());
 
     let stopped = GoalRepository::new(fixture.pool.clone())
         .handle_user_command(
@@ -8710,6 +9168,170 @@ async fn repository_watch_observes_operator_commission_target_ownership()
     assert_applied_goal_command(stopped);
     assert_eq!(redispatch, RepoWatchRuleEvaluationOutcome::Occupied);
     assert_eq!(refreshed_blocker, replacement_session.into_uuid());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn stopped_never_started_blocker_restores_dispatched_admission() -> Result<(), Box<dyn Error>>
+{
+    let fixture = commissioned_fixture().await?;
+    let repository = repository()?;
+    let rule = one_action_rule(Duration::ZERO)?;
+    let event_store = PostgresRepoWatchStore::new(fixture.pool.clone());
+    let dispatch_store =
+        PostgresRepoWatchDispatchStore::new(fixture.pool.clone(), credential_pin());
+    let initial = observation(context(INITIAL_HEAD)?)?;
+    let first_generation = generation(
+        event_store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    None,
+                    RepoWatchCursorCandidate::new(initial),
+                    vec![identified_event(opened_event(0x60_280, INITIAL_HEAD)?)],
+                ),
+            )
+            .await?,
+    );
+    dispatch_store
+        .reconcile_rules(&repository, std::slice::from_ref(&rule))
+        .await?;
+    let observed = observation(context(FIRST_HEAD)?)?;
+    event_store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                Some(first_generation),
+                RepoWatchCursorCandidate::new(observed.clone()),
+                vec![identified_event(conflict_event(0x60_281, FIRST_HEAD)?)],
+            ),
+        )
+        .await?;
+    let loaded = dispatch_store
+        .load_next_event(&repository, rule.id(), rule.version())
+        .await?
+        .expect("the activated rule sees the conflict event");
+    assert_eq!(
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store.clone())
+            .evaluate(
+                loaded,
+                &rule,
+                &observed,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?,
+        RepoWatchRuleEvaluationOutcome::Occupied
+    );
+    let obligation: Uuid = sqlx::query_scalar(
+        "UPDATE repo_watch_dispatch_obligation
+            SET failed_attempts = repo_watch_dispatch_attempt_budget(),
+                last_failed_attempt_at = clock_timestamp()
+          WHERE settled_kind IS NULL
+      RETURNING obligation_id",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    sqlx::query("SELECT repo_watch_park_exhausted_dispatch_obligation($1)")
+        .bind(obligation)
+        .execute(&fixture.pool)
+        .await?;
+
+    assert_applied_goal_command(
+        GoalRepository::new(fixture.pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(0x60_282)),
+                    fixture.session,
+                    GoalUserAction::Stop {
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    },
+                ),
+                None,
+                |_| None,
+            )
+            .await?,
+    );
+    assert_eq!(
+        dispatch_store
+            .release_parked_dispatch_obligation(obligation, PARK_RELEASE_ACTOR)
+            .await?,
+        RepoWatchObligationParkRelease::Released
+    );
+    let lifecycle: (String, String) = sqlx::query_as(
+        "SELECT lifecycle.state_kind, deadline.deadline_kind
+           FROM session_lifecycle AS lifecycle
+           JOIN session_deadline AS deadline USING (session_id)
+          WHERE lifecycle.session_id = $1",
+    )
+    .bind(fixture.session.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let turn: (String, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, start_lineage_kind
+           FROM turn_lifecycle
+          WHERE session_id = $1",
+    )
+    .bind(fixture.session.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(
+        lifecycle,
+        (String::from("dispatched"), String::from("admission"))
+    );
+    assert_eq!(turn, (String::from("terminal"), None));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn restored_session_nudge_page_skips_an_active_turn_with_a_queued_successor()
+-> Result<(), Box<dyn Error>> {
+    let fixture = commissioned_fixture().await?;
+    let mut activation = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(fixture.pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(activated) =
+        activation.execute(fixture.session).await?
+    else {
+        panic!("the commissioned turn activates")
+    };
+    drop(activated);
+    assert_applied_goal_command(
+        GoalRepository::new(fixture.pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(0x60_270)),
+                    fixture.session,
+                    GoalUserAction::Supersede(GoalStatement::try_new(String::from(
+                        "continue after the active turn",
+                    ))?),
+                ),
+                Some(GoalTurnCandidates::new(
+                    AcceptedInputId::from_uuid(Uuid::from_u128(0x60_271)),
+                    TurnId::from_uuid(Uuid::from_u128(0x60_272)),
+                )),
+                |_| None,
+            )
+            .await?,
+    );
+    sqlx::query(
+        "UPDATE session_lifecycle
+            SET actor_kind = 'module', actor_module = 'repo_watch'
+          WHERE session_id = $1",
+    )
+    .bind(fixture.session.into_uuid())
+    .execute(&fixture.pool)
+    .await?;
+
+    let restored = PostgresRepoWatchDispatchStore::new(fixture.pool, credential_pin())
+        .load_restored_module_sessions()
+        .await?;
+
+    assert!(restored.is_empty());
     Ok(())
 }
 
