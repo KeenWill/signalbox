@@ -5,9 +5,8 @@ implemented. Normative paragraphs are marked **Proposed behavior** and describe
 what the daemon must do once this specification is ratified; unmarked prose is
 context.
 
-This specification changes when capabilities land, not which capabilities exist:
-no wanted feature is removed. Goal mode, custom compaction, and the API adapters
-all stay.
+This specification removes no wanted feature. Goal mode, custom compaction, and
+the API adapters all stay.
 
 ## Why
 
@@ -25,16 +24,15 @@ failing to reach their finish point, then 2–5%.
 Two rules apply to every section below.
 
 **Proposed behavior.** Lifecycle state, deadlines, budgets, and recovery live in
-daemon core. No module implements or re-implements any of them. If a module
-needs lifecycle behavior that core does not provide, it requests a core change.
+daemon core. No module implements or re-implements any of them. Lifecycle
+behavior a module needs and core does not provide is added to core.
 
 **Proposed behavior.** Every numeric bound in this specification — deadlines,
 watchdog bounds, retry backoffs — is defined in config, never hardcoded. Values
 named in this text are example defaults. Config may set any such bound to none,
 meaning unbounded. The only hardcoded limits permitted are guards against
 algorithmic explosion — unbounded loops, unbounded recursion, unbounded queue
-growth. A new lifecycle limit is a product decision; it is surfaced to the owner
-before it ships.
+growth. A new lifecycle limit is a product decision.
 
 ## 1. Session state machine
 
@@ -48,9 +46,8 @@ satellite. The satellite takes a declared place in the committed lock order — 
 the session-then-scheduler prefix, never acquired after the scheduler row. The
 states: `created`, `dispatched`, `active`, `waiting`, `recovering`, `blocked`,
 `parked`, `terminal`. Today no durable session state exists; the nearest thing
-is the web queue's derived `AttentionState` classifier. Once the column lands,
-the classifier becomes a projection of these states plus turn phase — never an
-independent machine.
+is the web queue's derived `AttentionState` classifier. The classifier becomes a
+projection of these states plus turn phase — never an independent machine.
 
 ```text
 CREATED ─┬─→ DISPATCHED ─→ ACTIVE
@@ -288,9 +285,9 @@ not part of the module-facing vocabulary, unavailable across the module seam —
 the process protocol's wire fan-out keeps decoding every one of them unchanged;
 clients lose nothing.
 
-**Proposed behavior.** If a module needs an event kind core does not emit, it
-requests the kind as a vocabulary change; modules never reconstruct events by
-joining core tables.
+**Proposed behavior.** An event kind a module needs and core does not emit is
+added to the core vocabulary; modules never reconstruct events by joining core
+tables.
 
 **Proposed behavior.** `command_settled` is the one kind that can settle without
 a session — a command against an unknown session. The outbox header's session
@@ -508,12 +505,13 @@ the single cause `context_compaction_input_does_not_fit`.
 
 **Proposed behavior.** Every compaction records whether it was vendor or custom,
 and on which adapter. This covers all four adapters — codex_cli, claude_code
-CLI, Anthropic API, OpenAI API — and is the scaffold for the compaction evals.
+CLI, Anthropic API, OpenAI API — and is the record the compaction evals are
+built on.
 
-**Proposed behavior.** Vendor compaction is the default path. The home-rolled
+**Proposed behavior.** Vendor compaction is the default path. The custom
 compactor stays as the eval baseline — never deleted, re-added per adapter once
 the eval system can reliably measure it. The re-enable gate itself is a product
-decision surfaced to the owner at that point, not shipped silently.
+decision.
 
 **Proposed behavior.** A compaction-wall event records the session's initial
 payload size alongside the wall (§15). Their handling is §2's park-and-respawn
@@ -542,7 +540,7 @@ proxies.
   the wall through real work almost always succeeds.
 - `wall_rate` — fraction of sessions dispatched in the calendar week recording
   cause `context_compaction_wall`. The rate counts walls of every kind, organic
-  growth included; the recorded initial payloads (§15) sit beside it.
+  growth included; the recorded initial payloads (§15) are read alongside it.
 - `cause_completeness` — terminal turns whose typed cause is usable — outside
   the catch-all set: `unrecognized`, absent, or a bare unknown bucket — over all
   terminal turns, and, for model calls, usable causes over the calls whose
@@ -613,7 +611,7 @@ was handed.
 alongside `wall_rate` (§12). Frequent walls mean the payload was too large to
 begin with — judge passes and fixup briefs handed too many comments or too much
 commit diff history — not organic context growth. Payload sizing is fixed first;
-the wall path is the backstop.
+the wall path is the fallback.
 
 **Proposed behavior.** Sessions that start around 10% full and hit the wall
 through real work almost always succeed; they count in the rate (§12), and the
@@ -621,7 +619,7 @@ recorded initial payloads are what separate dispatch-defect walls from those
 rare organic ones.
 
 **Proposed behavior.** When a wall still occurs, the session parks with cause
-`context_compaction_wall`. The backstop is respawn-fresh, which closes the park
+`context_compaction_wall`. The fallback is respawn-fresh, which closes the park
 as `superseded{by}`; a park closed as failed records
 `failed_structural{context_compaction_wall}` (§2, §9). Auto-resume into the same
 wall is forbidden. The codex goal path already suppresses automatic resumption
