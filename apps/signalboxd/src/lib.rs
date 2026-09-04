@@ -4276,10 +4276,9 @@ mod tests {
     /// compaction it stranded rather than reporting nothing.
     ///
     /// That window runs before activation, so the pass's turn observer has
-    /// recorded nothing and the expiry used to fall straight through to the
-    /// uncorrelated warning — leaving the dedicated compaction call in flight,
-    /// its command pending, and the session's compaction boundary busy until
-    /// the daemon restarted.
+    /// recorded nothing, and an uncorrelated warning would leave the dedicated
+    /// compaction call in flight, its command pending, and the session's
+    /// compaction boundary busy until the daemon restarted.
     #[tokio::test]
     async fn an_expiry_inside_the_compaction_window_names_the_stranded_compaction() {
         let session = SessionId::from_uuid(Uuid::from_u128(0x66_00));
@@ -4840,8 +4839,7 @@ mod tests {
     /// built through the same domain surface dispatch itself uses.
     ///
     /// Retyping the statement here would leave this file asserting against a
-    /// spelling the dispatch no longer produces, which is exactly what happened
-    /// when the rendered identifiers gained their delimiters.
+    /// spelling the dispatch does not produce.
     fn synthesized_dispatch_goal() -> signalbox_domain::GoalStatement {
         let context = signalbox_domain::PullRequestEventContext::new(
             signalbox_domain::PullRequestEventContextInput {

@@ -34,7 +34,7 @@ const GOAL_DECLARE_DESCRIPTION: &str = "Declares the current commissioned goal a
 /// Object-rooted advertisement of the internally tagged declaration.
 ///
 /// The transition property discriminates and its description carries what a
-/// root `oneOf` used to state, because a function tool's parameters must
+/// root `oneOf` would state, because a function tool's parameters must
 /// describe an object and no provider is obliged to accept a root
 /// combinator. `decode_goal_declaration` still refuses `achieved` with a
 /// reason and `blocked` without one.
