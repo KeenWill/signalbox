@@ -1,7 +1,6 @@
 # Blob storage
 
-This page is the foundation proposal introduced by PR #553
-(`agent/blob-storage-foundation`). Its implemented-behavior statements take
+This page is a foundation proposal. Its implemented-behavior statements take
 effect with the full stack. A paragraph that names itself unimplemented is
 committed unimplemented functionality and carries only its stated compatibility
 constraint.

@@ -3,9 +3,7 @@
 This page specifies the Layer-1 typed model-runtime boundary as implemented in
 `crates/model-runtime`, `crates/model-runtime-anthropic`,
 `crates/model-runtime-openai`, `crates/model-runtime-codex-cli`, and
-`crates/model-runtime-claude-cli`. The Codex CLI adapter stack comprises PR #264
-(`agent/codex-cli-wrap`) and PR #268 (`agent/codex-cli-pin-smoke`); its
-escalation closeout is PR #317 (`agent/escalation-closeout`). Its feature
+`crates/model-runtime-claude-cli`. The Codex CLI adapter's feature
 classification, ambient-skill catalog probe, and pinned version follow the
 version pinned in `tooling/codex-cli/package.json`. This page covers the
 provider-neutral operation, observation, and evidence vocabulary; SSE framing;

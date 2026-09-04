@@ -1,7 +1,6 @@
 # Model-call execution
 
-Multipart attachment rendering remains part of the foundation proposal from PR
-#553 (`agent/blob-storage-foundation`).
+Multipart attachment rendering remains part of a foundation proposal.
 
 This page describes the implemented model-call orchestration chain: rendering a
 context frontier into provider messages, the staged prepare / authorize-send /

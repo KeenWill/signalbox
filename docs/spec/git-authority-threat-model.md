@@ -1,10 +1,9 @@
 # Git authority threat model
 
-This page is the foundation proposal at the bottom of the implementing stack
-rooted at PR #409 (`agent/git-tools-authority`): the bottom slice establishes
-the Git authority and filesystem laws, and its child slices add local
-operations, their typed tool surface, and explicitly approved repair writes.
-Daemon catalog wiring is outside it.
+This page is the foundation proposal at the bottom of the implementing stack:
+the bottom slice establishes the Git authority and filesystem laws, and its
+child slices add local operations, their typed tool surface, and explicitly
+approved repair writes. Daemon catalog wiring is outside it.
 
 The scope of the authority — how many suites the daemon composes and which root
 each is constructed with — is not part of that stack. The remote destination

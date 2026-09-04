@@ -1,7 +1,7 @@
 # Identity, commands, and telemetry correlation
 
-The `SubmitInput` multipart storage-version boundary below is the foundation
-proposal from PR `#553` (`agent/blob-storage-foundation`).
+The `SubmitInput` multipart storage-version boundary below is a foundation
+proposal.
 
 This page describes the implemented identity, durable-command, and
 telemetry-correlation behavior of Signalbox, including the imported identity

@@ -4,24 +4,13 @@ This page is the normative boundary between a local client process and
 `signalboxd`; domain values, PostgreSQL records, and wire messages remain
 distinct representations.
 
-Multipart content arrays remain the foundation proposal from PR #553
-(`agent/blob-storage-foundation`).
+Multipart content arrays remain a foundation proposal.
 
 Signalbox admits one process-protocol version, integer `1`. Its closed
 vocabulary contains every request, response, event, and required field
 implemented in this tree. The version field remains required on every frame and
 exact-version admission remains fail closed, so the mechanism can begin counting
 again without being rebuilt.
-
-The former per-feature sequence existed to support mixed client and daemon
-builds. Signalbox has none: one user builds the daemon and every client from one
-tree, and no client is durably deployed. In one development night that unused
-compatibility vocabulary caused four retroactive-widening hazards, retired one
-number after an out-of-order merge, left stale test or prose references after
-three renumberings, and made this specification name the wrong version twice.
-The protocol therefore follows the same pre-deployment discipline as schema
-baselines: make the correct current shape in place and squash vocabulary history
-at maintainer checkpoints.
 
 **Freeze condition.** In-place protocol editing ends at the first durable
 deployment: the first client that cannot be rebuilt at will. In practice, that

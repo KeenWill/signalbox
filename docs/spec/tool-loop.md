@@ -1,12 +1,11 @@
 # Tool loop
 
-The daemon blob-read declarations below are the foundation proposal from PR #553
-(`agent/blob-storage-foundation`).
+The daemon blob-read declarations below are a foundation proposal.
 
 The workspace-instruction addition to the continuation transaction is committed
-unimplemented functionality from PR #796 (`agent/agent-docs-skills-spec`). No
-present tool can create an instruction admission, and the current transaction
-therefore still has the four implemented effects named below.
+unimplemented functionality. No present tool can create an instruction
+admission, and the current transaction therefore still has the four implemented
+effects named below.
 
 This page specifies the implemented daemon-owned tool subsystem. The runner
 executable stack rooted at this foundation proposal extends the same laws to the

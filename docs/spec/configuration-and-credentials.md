@@ -1,7 +1,6 @@
 # Configuration and credentials
 
-The blob catalog and input-modality grammar below are the foundation proposal
-from PR #553 (`agent/blob-storage-foundation`).
+The blob catalog and input-modality grammar below are a foundation proposal.
 
 This page describes the implemented configuration and credential behavior of
 Signalbox. This includes signalboxd configuration loading in

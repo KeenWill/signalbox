@@ -1,7 +1,7 @@
 # Persistence protocol
 
-The multipart accepted-input persistence paragraph below is the foundation
-proposal from PR `#553` (`agent/blob-storage-foundation`).
+The multipart accepted-input persistence paragraph below is a foundation
+proposal.
 
 This page covers the Postgres representation in `crates/persistence` (source and
 migrations), migration discipline, durable command storage and replay equality,

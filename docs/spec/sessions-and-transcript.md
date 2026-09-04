@@ -1,7 +1,6 @@
 # Sessions and the transcript
 
-The multipart user-content aggregate below is the foundation proposal from PR
-`#553` (`agent/blob-storage-foundation`).
+The multipart user-content aggregate below is a foundation proposal.
 
 This page specifies the implemented behavior of session creation and ancestry,
 creation from an imported frontier, session-level configuration defaults and
