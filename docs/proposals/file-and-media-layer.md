@@ -420,8 +420,8 @@ Runtime plugin loading would make configuration a source of executable code.
 
 No common tool schema, wire enum, or application branch changes when the
 provider uses existing output kinds. A model adapter changes only when its
-reviewed canonical-media-type inventory is intentionally widened; registering a
-reader does not imply that support.
+reviewed canonical-media-type inventory is widened; registering a reader does
+not imply that support.
 
 ## Processor isolation
 
@@ -450,7 +450,7 @@ descriptors, and output. Before spawning, it atomically reserves one slot and
 the declared memory limit from a process-wide pool of four workers and 2 GiB;
 unavailable capacity returns `ProcessorUnavailable` without spawning or reading
 the source. Reservations are released only after whole-process-tree termination.
-Worker reuse is deferred so compromise cannot cross requests.
+Workers are not reused, so compromise cannot cross requests.
 
 A control result is length-delimited and accepted only after clean worker exit.
 Before classification, validation, publication, or commit, the supervisor
@@ -676,20 +676,20 @@ reference; a known-failure completion transaction releases the reservation
 without registering a blob. Every crash-lost authorized `ExternalEffect` attempt
 remains ambiguous and keeps its reservation through the owning tool loop's
 reconciliation lifecycle; it cannot be retried. The tool loop must provide an
-explicit, durable reconciliation closure before this reservation mechanism can
-ship. A closure that proves success consumes the reservation while committing
-the exact result; one that proves known failure or records an operator's
-explicit terminal abandonment releases it. Abandonment is irreversible, records
-that no later result may be committed for the attempt, and is the only safe
-release when the external effect remains unknowable. Until one of those terminal
-closures commits, the reservation has no timeout and remains charged. This
-proposal adds no pre-effect checkpoint and does not treat daemon restart or
-elapsed time as closure. A publication or completion failure may leave an
-unreferenced orphan, never a dangling result, but capacity rejection registers
-nothing. Thus every committed reference is admissible to its mandatory
-continuation call, no transaction spans processor or store I/O, and crash
-recovery never erases an external effect. Equal output bytes converge by digest,
-and ambiguous publication cannot become tool success.
+explicit, durable reconciliation closure for this reservation mechanism. A
+closure that proves success consumes the reservation while committing the exact
+result; one that proves known failure or records an operator's explicit terminal
+abandonment releases it. Abandonment is irreversible, records that no later
+result may be committed for the attempt, and is the only safe release when the
+external effect remains unknowable. Until one of those terminal closures
+commits, the reservation has no timeout and remains charged. This proposal adds
+no pre-effect checkpoint and does not treat daemon restart or elapsed time as
+closure. A publication or completion failure may leave an unreferenced orphan,
+never a dangling result, but capacity rejection registers nothing. Thus every
+committed reference is admissible to its mandatory continuation call, no
+transaction spans processor or store I/O, and crash recovery never erases an
+external effect. Equal output bytes converge by digest, and ambiguous
+publication cannot become tool success.
 
 For a rich view that directly presents the verified source instead of producing
 binary output, the broker first requires the returned `media_type` to equal the
@@ -834,9 +834,8 @@ artifact aggregate, never the blob row.
 
 All source and embedded metadata is attacker-controlled tool content. Readers
 perform no network fetch, write no archive path, execute no active content, and
-do not recursively interpret embedded files in version one. Parser dependencies
-are adapter-confined, pinned, publicly sourced, and covered by malformed
-fixtures.
+do not recursively interpret embedded files. Parser dependencies are
+adapter-confined, pinned, publicly sourced, and covered by malformed fixtures.
 
 ## Conformance contract
 
@@ -942,9 +941,8 @@ than replaces fixed contract fixtures.
 2. **Isolation and inspection:** ruled sandbox, verified-source broker,
    supervision, `file_inspect`, and the scripted conformance provider; the
    production registry remains empty.
-3. **First ruled formats:** only after the owner selects the initial format
-   inventory, add the selected adapters and their matching bounded `file_read`
-   result paths, plus durable turn work accounting.
+3. **First ruled formats:** add the selected adapters and their matching bounded
+   `file_read` result paths, plus durable turn work accounting.
 4. **Image groundwork:** ruled adapters, pixel validation, region/fit view
    declarations, and conformance fixtures; this slice exposes no rich result.
 5. **Images and provider input:** generated previews, `BlobReference::Image`,
@@ -967,5 +965,3 @@ The unresolved inventory is in
 the isolation substrate, first formats, parser dependency budget, OCR and
 transcription, provider-native general files, encrypted-file credentials, turn
 budgets, and classification-cache questions. This proposal does not settle them.
-
-Acceptance settles only this common architecture.
