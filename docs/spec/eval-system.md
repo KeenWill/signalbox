@@ -1,15 +1,15 @@
 # Evaluation system
 
-**Foundation contract.** This page owns the evaluation semantics built on the
+This page owns the evaluation semantics built on the
 [program substrate](program-substrate.md): what an evaluation is, how its
 corpus, expectations, trials, and stages are recorded, and how evaluation
-traffic stays unmistakably separate from production traffic. The entire surface
-below other than the explicitly implemented standalone approval-judge surfaces
-is committed ahead of code as Stage 0. Execution, registration, journaling, and
-replay are owned by the substrate page and not restated here; model scoring is
-ordinary session traffic owned by
+traffic stays separate from production traffic. Execution, registration,
+journaling, and replay are owned by the substrate page and not restated here;
+model scoring is ordinary session traffic owned by
 [model-call execution](model-call-execution.md); the sandboxed process boundary
 for stage executors is owned by [tool loop](tool-loop.md)'s execution surface.
+Other than the implemented standalone approval-judge surfaces, everything below
+is committed unimplemented functionality.
 
 ## Evaluations are programs
 
@@ -29,16 +29,15 @@ convenience added later.
 **Committed unimplemented functionality.** No present surface separates
 evaluation provenance. Sessions created by evaluation programs carry the `eval`
 creation cause with run and trial identity. A session the model delegates from
-inside an evaluation-created session carries its ordinary delegated cause —
-delegation stays the model's autonomy — so the separating predicate is
-transitive, not single-column: evaluation traffic is every session whose
-creation-cause ancestry, followed through the recorded delegation lineage, roots
-in an `eval` cause, and the stored delegation linkage must keep that ancestry
-walkable for as long as evaluation rows are read. Evaluation model calls are
-metered with the same configured billing rates as all traffic. Evaluation
-verdicts gate nothing: every evaluation surface is report-only until repeats,
-baselines, and comparison views exist, and any future gating is a separate
-decision this page does not commit.
+inside an evaluation-created session carries its ordinary delegated cause, so
+the separating predicate is transitive, not single-column: evaluation traffic is
+every session whose creation-cause ancestry, followed through the recorded
+delegation lineage, roots in an `eval` cause, and the stored delegation linkage
+must keep that ancestry walkable for as long as evaluation rows are read.
+Evaluation model calls are metered with the same configured billing rates as all
+traffic. Evaluation verdicts gate nothing: every evaluation surface is
+report-only until repeats, baselines, and comparison views exist, and any future
+gating is a separate decision this page does not commit.
 
 ## Corpus and expectations
 
@@ -67,9 +66,8 @@ every request field, and the exact judge system prompt, absent optional fields
 serialized as null — and replay rejects a response whose fingerprint does not
 match the corpus case at its position, including after a case rename or a prompt
 revision. The checked-in seed manifest, corpus, and response file contain
-synthetic strings only. The existing `signalboxd` live-provider runner remains a
-separate explicitly operator-driven surface and is not part of this offline
-contract.
+synthetic strings only. The `signalboxd` live-provider runner is a separate,
+explicitly operator-driven surface and is not part of this offline contract.
 
 The standalone harness implements a pluggable corpus-store contract with
 enumeration and digest-verified load operations. Its disk store resolves a
@@ -94,7 +92,7 @@ SHA-256 digest and byte length plus an optional store binding. Integrity binds
 the logical corpus digest, each case's canonical-JSON digest, and for repository
 sources the exact source-file byte digest. Repository paths are not fetched: the
 operator supplies a checkout containing the manifest and source, so the recorded
-repository identity is provenance rather than ambient network authority.
+repository identity is provenance, not a location to fetch from.
 
 The corpus digest is storage-form-independent: SHA-256 in lowercase hexadecimal
 over the corpus's logical cases, each serialized to canonical JSON (object keys
@@ -104,21 +102,20 @@ and RFC 8785 section 3.2.2.3 ECMAScript number serialization are committed
 unimplemented functionality for any future numeric corpus surface. RFC 8785's
 string escaping rules govern all current JSON strings. Shared corpus admission
 rejects U+0000 in every case string because PostgreSQL JSONB cannot preserve it,
-keeping repository, disk, and database storage forms aligned. The versioned
-preimage below pins that algorithm for corpus format version one. The exact
-digest preimage is the UTF-8 bytes `signalbox-eval-corpus-v1` followed by one
-zero byte, the case count as an unsigned 64-bit big-endian integer, and then,
-for each case in that order, its canonical-JSON byte length as an unsigned
-64-bit big-endian integer followed by those bytes. Lengths count bytes, not
-characters. This aggregate framing is owned by this page rather than inferred
-from the program substrate's single-file preimages, so the same logical corpus
-computes the same identity whether loaded from repository files, an artifact, or
-rows, and a run verifies its corpus after the content moves between admitted
-storage forms. The checked-in corpus is only one manifest-backed fixture;
-neither the contract nor the database assumes that repository, one database, or
-one Signalbox instance. Per the [pre-alpha rule](../../AGENTS.md), no
-compatibility machinery attends any of this: corpus formats and storage may
-change freely until first durable deployment.
+keeping repository, disk, and database storage forms aligned. For corpus format
+version one, the exact digest preimage is the UTF-8 bytes
+`signalbox-eval-corpus-v1` followed by one zero byte, the case count as an
+unsigned 64-bit big-endian integer, and then, for each case in that order, its
+canonical-JSON byte length as an unsigned 64-bit big-endian integer followed by
+those bytes. Lengths count bytes, not characters. This aggregate framing is
+owned by this page rather than inferred from the program substrate's single-file
+preimages, so the same logical corpus computes the same identity whether loaded
+from repository files, an artifact, or rows, and a run verifies its corpus after
+the content moves between admitted storage forms. The checked-in corpus is only
+one manifest-backed fixture; neither the contract nor the database assumes that
+repository, one database, or one Signalbox instance. Per the
+[pre-alpha rule](../../AGENTS.md), there is no compatibility machinery: corpus
+formats and storage may change freely until first durable deployment.
 
 **Committed unimplemented functionality.** No present corpus store loads case
 content through a blob binding. The portable reference and database registration
@@ -138,7 +135,7 @@ check optional. A case with a missing reference degrades that check to
 `unmeasured` and never loses its row. A reference artifact is an immutable blob
 a case pins by digest under the contract [blob storage](blob-storage.md) owns;
 no named-artifact aggregate is required — mutable aliases, producer provenance,
-and ownership above a blob remain the open aggregate question recorded in
+and ownership above a blob are the open aggregate question recorded in
 [open-questions](../open-questions.md#general-purpose-artifacts), and nothing in
 this grammar depends on it.
 
@@ -168,18 +165,19 @@ after scoring has produced that row's measured value and verdict, or established
 target, and resolved expectation from the already digest-verified case. Thus no
 pre-scoring placeholder check-outcome row exists. A stage mixing measured and
 missing-reference checks is represented check by check, and its single stage
-status summarizes without substituting. Durable cost is recorded per model call
-with the model and rate window that priced that call — an evaluation may score
-with one model and judge with another, and the configured rate catalog dates
-each model's rates independently, so no single run-level rate window exists;
-run-level cost is an aggregation grouped by model and rate window, never a
-stored scalar that forgets its pricing. Stages order cheap to expensive, and a
-stage failure is recorded on its row without discarding the trial's other
-stages. Aggregation — accuracy by slice, stability across repeats, thresholded
-pass rates, run-versus-run comparison — is derived by SQL views over these rows,
-never stored as opaque summaries alone. Repeats are fresh-journal repeats, so
-verdict stability is measured against genuinely re-sampled nondeterminism, while
-an interrupted run resumes by replay without re-spending a model call.
+status summarizes those checks without replacing their per-check outcomes.
+Durable cost is recorded per model call with the model and rate window that
+priced that call — an evaluation may score with one model and judge with
+another, and the configured rate catalog dates each model's rates independently,
+so no single run-level rate window exists; run-level cost is an aggregation
+grouped by model and rate window, never a stored scalar that omits the model and
+rate window. Stages order cheap to expensive, and a stage failure is recorded on
+its row without discarding the trial's other stages. Aggregation — accuracy by
+slice, stability across repeats, thresholded pass rates, run-versus-run
+comparison — is derived by SQL views over these rows, never stored as opaque
+summaries alone. Repeats are fresh-journal repeats, so verdict stability is
+measured against re-sampled nondeterminism, while an interrupted run resumes by
+replay without re-issuing a model call.
 
 **Committed unimplemented functionality.** No present surface executes
 evaluation stage code. Heavyweight subject-under-test execution — building a
@@ -201,16 +199,16 @@ touch the database or hold credentials.
 
 The live-provider `signalboxd` approval-judge runner optionally records its
 printed scorecard and successful-call evidence in judge-specific PostgreSQL
-tables when the operator supplies a database URL. The scorecard remains the
-primary artifact, recording is append-only and transactionally sealed, and a run
-without the recording option writes nothing. This temporary surface carries
-synthetic evaluation provenance rather than claiming linkage to a live delegated
-request. It is superseded when the substrate's rows land: once judge evaluations
-run on the substrate, any such tables and their recorded data are dropped
-without migration — those recorded runs are reproducible measurements, not
-history that binds. Per the pre-alpha rule in `AGENTS.md`, this destruction is
-deliberate and carries no compatibility ceremony, and nothing may build on a
-judge-specific recording surface in a way that outlives it.
+tables when the operator supplies a database URL. The scorecard is the primary
+artifact, recording is append-only and transactionally sealed, and a run without
+the recording option writes nothing. This temporary surface carries synthetic
+evaluation provenance rather than claiming linkage to a live delegated request.
+It is superseded by the substrate: once judge evaluations run on the substrate,
+any such tables and their recorded data are dropped without migration — those
+recorded runs are reproducible measurements, not history that must be preserved.
+Per the pre-alpha rule in `AGENTS.md`, that drop carries no compatibility
+machinery, and nothing may build on a judge-specific recording surface in a way
+that outlives it.
 
 ## Open edges
 
