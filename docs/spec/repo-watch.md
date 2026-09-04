@@ -332,13 +332,12 @@ carried rather than discarded, and their identity is derived under a hash domain
 reserved for the migration itself and disjoint from the differ's: a carried row
 can never claim an identity a producer would also derive, and never matches one.
 
-The carry completes across two migrations, because the first was applied before
-its shape was settled and an applied migration is immutable. `202608150001`
-marked those rows content-identity version zero and admitted both versions;
-`202608170003` moves them to version one and narrows the durable constraint to
-version one alone. Exactly one content-identity version is readable once both
-have run. The durable constraint and the decoder admit version one alone, so no
-earlier event shape survives for a reader to accept.
+The carry completes across two migrations. `202608150001` marked those rows
+content-identity version zero and admitted both versions; `202608170003` moves
+them to version one and narrows the durable constraint to version one alone.
+Exactly one content-identity version is readable once both have run. The durable
+constraint and the decoder admit version one alone, so no earlier event shape
+survives for a reader to accept.
 
 **Committed unimplemented functionality.** Storage version three records the
 pull request owning each recurring stream, or null for a repository-global
@@ -387,10 +386,10 @@ cursor independently refuses more than 1,000,000 retained baseline subjects. The
 frontier's existing 1,000,000-stream safety ceiling continues to bound the
 recurring streams those subjects own.
 
-No lifecycle releases a stream, and none may be added without deciding which
-subject provably produces no further occurrence. A merged pull request is not
-one: labels change after merge, and a completed check run's conclusion can
-change under an unchanged run identity and completion generation, so both remain
+No lifecycle releases a stream; a release is valid only for a subject that
+provably produces no further occurrence. A merged pull request is not one:
+labels change after merge, and a completed check run's conclusion can change
+under an unchanged run identity and completion generation, so both remain
 recurring streams. A released counter restarts at one, and the identity it then
 mints collides with a durable one, which commit coalescing discards. The
 1,000,000-stream ceiling bounds the frontier.
@@ -509,8 +508,7 @@ lacks actor identity, normalization conservatively carries forward the prior
 retained reactions for that subject only when their reactors remain in the
 current signal-reviewer set, so identity loss cannot manufacture removals and a
 filter change cannot preserve an excluded reactor. Why: reviewer signals are
-actionable facts; the full ambient emoji stream is neither a rule input nor
-retained noise.
+actionable facts; reactions from every other actor are not.
 
 **Implemented behavior.** The cursor binds its filtered reaction projection to
 the exact canonical signal-reviewer login set. When that set changes, the next
@@ -894,17 +892,16 @@ against an unchanged pull request restores no attempts. Content identity keeps a
 restated observation from recording a second durable event, but it does not
 bound how often one durable event reaches this test: an event is tested once per
 active rule, and both evaluation paths run the test before checking whether that
-rule's evaluation of it was already recorded. The spent-event journal is what
-makes those repeated tests safe, and is a required guard rather than an
-optimization. Every park and every release appends a journal row naming the
-count at the transition and, for a release, its operator or the event that
-caused it; both releases are schema-owned, so the journal's vocabulary is
-defined only in the constraint that closes it. Readiness in
-`repo_watch_outstanding_dispatch_obligation` excludes a parked obligation and,
-independently, one whose count has reached the budget, so no ordering of parking
-against that read reports an exhausted obligation as ready. It does not model
-the delay between attempts, which the dispatch loader applies against bounds no
-projection can see.
+rule's evaluation of it was already recorded. The spent-event journal is a
+required guard: it is what makes those repeated tests safe. Every park and every
+release appends a journal row naming the count at the transition and, for a
+release, its operator or the event that caused it; both releases are
+schema-owned, so the journal's vocabulary is defined only in the constraint that
+closes it. Readiness in `repo_watch_outstanding_dispatch_obligation` excludes a
+parked obligation and, independently, one whose count has reached the budget, so
+no ordering of parking against that read reports an exhausted obligation as
+ready. It does not model the delay between attempts, which the dispatch loader
+applies against bounds no projection can see.
 
 **Implemented behavior.** A completed approval-judge escalation judged under
 dispatch authority, which the rule above binds to the generation that dispatch
@@ -980,8 +977,8 @@ stalled on as well as through its latest-event projection, since a collapsed
 singleton lets that projection follow another pull request; an obligation
 stalled on the cutoff event itself is preserved whatever has matched since,
 because it owes the close automation and an operator release is what lets it
-run; the admission recheck is the race-closing backstop. Either path settles
-stale nonterminal work as `target_closed` without creating a session. Cutoff
+run; the admission recheck closes the remaining race. Either path settles stale
+nonterminal work as `target_closed` without creating a session. Cutoff
 processing settles after it has stopped the goals it commissioned, so it takes
 session rows before obligation rows and cannot close a lock cycle against a
 dispatch session terminating into the same obligation, and it takes those
@@ -1060,28 +1057,28 @@ associated commit differs from the exact current head. The current convergence
 evidence must otherwise pass: zero unresolved threads, at least one gating check
 and zero non-green ones, a settled head, and nonconflicting mergeability. An
 unsettled head has not finished registering and completing its exact-head
-checks, so its empty non-green list is the absence of evidence rather than
-evidence of a green head; requiring settlement keeps a dismissal from racing
-checks that have yet to report. A head carrying no gating check at all presents
-that same empty non-green list, which is why the reference convergence rule
-counts it blocked and why clearance refuses it: the dismissed review would be
-the only gate that head ever had. Both the in-memory candidate rule and the
-durable eligibility query enforce that count, the settled head, and
-mergeability, so neither admits an intent the other would refuse. The durable
-query proves each term against the recorded assessment rather than against the
-watcher that raised the candidate, because the assessment it reads is whichever
-watcher recorded one last: a newer assessment appended for the unchanged cursor
-while this watcher reconciled must carry the predicate itself, or the intent
-would claim the review was the head's only blocker while the evidence it names
-records another. Settlement is recorded only for a mergeability GitHub has
-decided, so the query admits `mergeable` alone and refuses nothing the in-memory
-rule admits. Every effective blocking review must target a superseded head; one
-current-head blocker prevents every dismissal for that assessment. A
-current-head review is never dismissed automatically. Why: a new review is live
-judgment, while a stale aggregate decision whose complete thread inventory is
-resolved is forge state that alone prevents an otherwise finished head from
-converging. The following ordinary poll observes the dismissal and may then seal
-convergence; dismissal itself does not stop dispatch.
+checks, so its empty non-green list does not prove a green head; requiring
+settlement keeps a dismissal from racing checks that have yet to report. A head
+carrying no gating check at all presents that same empty non-green list, which
+is why the reference convergence rule counts it blocked and why clearance
+refuses it: the dismissed review would be the only gate that head ever had. Both
+the in-memory candidate rule and the durable eligibility query enforce that
+count, the settled head, and mergeability, so neither admits an intent the other
+would refuse. The durable query proves each term against the recorded assessment
+rather than against the watcher that raised the candidate, because the
+assessment it reads is whichever watcher recorded one last: a newer assessment
+appended for the unchanged cursor while this watcher reconciled must carry the
+predicate itself, or the intent would claim the review was the head's only
+blocker while the evidence it names records another. Settlement is recorded only
+for a mergeability GitHub has decided, so the query admits `mergeable` alone and
+refuses nothing the in-memory rule admits. Every effective blocking review must
+target a superseded head; one current-head blocker prevents every dismissal for
+that assessment. A current-head review is never dismissed automatically. Why: a
+new review is live judgment, while a stale aggregate decision whose complete
+thread inventory is resolved is provider state that alone prevents an otherwise
+finished head from converging. The following ordinary poll observes the
+dismissal and may then seal convergence; dismissal itself does not stop
+dispatch.
 
 **Implemented behavior.** Before sending GitHub's review-dismissal mutation, the
 daemon appends a unique intent naming the assessment, repository, pull request,
@@ -1500,10 +1497,10 @@ retry. A poll taken during a backoff window therefore commits a cursor that a
 delivery still pending does not reflect. The shadow baseline that delivery
 seeded is marked superseded but retained, because replacement waits for an empty
 pending page, so its retry projects against that baseline rather than reseeding
-from the advanced cursor — the accepted cost is that divergence, taken against
-an unbounded repetition of work already failing. An overdue retry is taken ahead
-of an overdue poll, and a full poll that outlasts its own interval schedules the
-next one a whole interval from completion; without both, a poll deadline that is
+from the advanced cursor — that divergence is accepted rather than an unbounded
+repetition of work already failing. An overdue retry is taken ahead of an
+overdue poll, and a full poll that outlasts its own interval schedules the next
+one a whole interval from completion; without both, a poll deadline that is
 always already elapsed would win every scheduling decision and starve durable
 webhook work for as long as polling kept failing. An independent per-repository
 observer checks durable pending work every thirty seconds, reading delivery
@@ -1579,7 +1576,7 @@ quarantined terminal disposition. A primary delivery — the one whose commit
 records the `webhook` producer — records committed in place of projected. A
 shadow-mode targeted refresh also advances the cursor, but it reconciles through
 the poller's own credential and its rows keep the `poll` producer, so it keeps
-recording projected: those rows are the poll side of the very measurement its
+recording projected: those rows are the poll side of the measurement its
 projections are compared against, and reading such a refresh as the repository's
 promotion would end that measurement in a deployment that never entered primary
 mode. No resulting cursor generation is added. The two-step durable handoff
