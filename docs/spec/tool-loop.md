@@ -45,8 +45,8 @@ adapter after that adapter applies its preparation-time credential scrub when
 JSON decoding fails. Undecodable text must also exclude U+0000, mirroring the
 result-content admission. Both arms must fit within 1 MiB before and after
 normalization. This preserves malformed arguments as bounded, identity-safe
-evidence without pretending they are JSON. An undecodable value, or valid JSON
-that does not decode against the selected tool's argument type, becomes a typed
+evidence without treating them as JSON. An undecodable value, or valid JSON that
+does not decode against the selected tool's argument type, becomes a typed
 execution error later.
 
 The same transaction that classifies the producing call `Completed` appends one
@@ -140,14 +140,13 @@ posture, the precedence below applies.
 
 An `AlwaysConfirm` permission narrows that rule for exactly one posture. The
 declaration exists so that no session blanket can silently approve the tool, so
-a configured `Auto` posture never satisfies it: automation there would erase the
-decision the declaration demands. A configured `Delegated` posture does satisfy
-it, because an approval judge is not a blanket but a distinct decider that can
-still deny the request or escalate it to the user; routing to that judge serves
-the declaration's purpose rather than evading it. A configured `Human` posture
-leaves the stricter `AlwaysConfirm` outcome unchanged, since both await the same
-user. With no posture configured, an `AlwaysConfirm` declaration parks for a
-human under either session-blanket posture.
+a configured `Auto` posture never satisfies it: automation there would remove
+the decision the declaration requires. A configured `Delegated` posture does
+satisfy it, because an approval judge is not a blanket but a distinct decider
+that can still deny the request or escalate it to the user. A configured `Human`
+posture leaves the stricter `AlwaysConfirm` outcome unchanged, since both await
+the same user. With no posture configured, an `AlwaysConfirm` declaration parks
+for a human under either session-blanket posture.
 
 Daemon-local execution therefore leaves an `AlwaysConfirm` declaration undecided
 unless an explicit `Delegated` posture is configured for it; the dangerous
@@ -240,9 +239,9 @@ attended: its exceptional block has no automatic resumption, so only an operator
 could have resumed it. Either turn keeps the attended park described above: its
 completed `EscalateToHuman` leaves the turn active and the request parked for
 that user, exactly as in a session no dispatch created, and no steer is
-reclassified or stranded by a terminalization it did not expect. Otherwise a
-completed `EscalateToHuman` closes every unresolved request in the active batch
-as `ToolClosed`, appends `TurnFailed`, terminalizes the turn with the completed
+reclassified or stranded by terminalization. Otherwise a completed
+`EscalateToHuman` closes every unresolved request in the active batch as
+`ToolClosed`, appends `TurnFailed`, terminalizes the turn with the completed
 judge escalation as its typed cause, and records an append-only audit row
 linking the judge call and rationale, request, dispatch action, terminal
 attempt, failure entry, and terminal frontier. Repository-watch work atomically
@@ -287,22 +286,21 @@ the parked wait records the typed
 intact.
 
 A judge denial the user disagrees with is reversed forward, never in place: the
-denial is terminal (INV-027), and the session naturally re-proposes after a
-denial because the denial reason reaches the model at the continuation boundary.
-The canonical `OverrideDeniedToolRequest` command — user-global
-`DurableCommandId`, the owning `SessionId`, and the exact denied
-`ToolRequestId`; equality excludes only the command identifier — records one
-one-shot pre-approval for that re-proposal. Recording verifies every conjunct of
-the override predicate against durable evidence, each with its own recorded
-rejection: the recorded approval is a delegate denial (a user denial or any
-approval admits no override), the denial is terminal (its denied-result entry is
-materialized, so a denial whose round is still resolving cannot be overridden),
-the request belongs to the command's session, and no override is already
-recorded for it — each denial admits at most one override ever. The session is
-part of the canonical payload, unlike `decide_tool_request`, because the
-recorded override is a session-scoped standing fact consumed by a later
-proposal. An applied command durably links the denied request, its denying judge
-call, and the override command.
+denial is terminal (INV-027), and the session may re-propose after a denial
+because the denial reason reaches the model at the continuation boundary. The
+canonical `OverrideDeniedToolRequest` command — user-global `DurableCommandId`,
+the owning `SessionId`, and the exact denied `ToolRequestId`; equality excludes
+only the command identifier — records one one-shot pre-approval for that
+re-proposal. Recording verifies every conjunct of the override predicate against
+durable evidence, each with its own recorded rejection: the recorded approval is
+a delegate denial (a user denial or any approval admits no override), the denial
+is terminal (its denied-result entry is materialized, so a denial whose round is
+still resolving cannot be overridden), the request belongs to the command's
+session, and no override is already recorded for it — each denial admits at most
+one override ever. The session is part of the canonical payload, unlike
+`decide_tool_request`, because the recorded override is a session-scoped
+standing fact consumed by a later proposal. An applied command durably links the
+denied request, its denying judge call, and the override command.
 
 Recorded overrides are frozen into each prepared model call in the same
 transaction as the dangerous blanket posture, so consumption has blanket-frozen
@@ -318,16 +316,16 @@ policy approval. The second is needed because the call that first carries a
 denial cannot hold that denial's override, so its re-proposal is decided without
 one, and an override left standing after that decision would pre-approve a
 repeat of a command the session has already let through. Ordering here is
-structural rather than clocked, because none of these append-only records
-carries a timestamp. Across turns the order is the acceptance position of the
-input that opened each turn; inside a turn each model call owns one turn attempt
-and attempts chain through their predecessor, so a proposal counts as later when
-its turn was accepted after the denial's or its attempt continues the denied
-proposal's. Both are needed, because the re-proposal an override exists for is
-normally made in the denial's own turn. The scope is required: the same command
-is routinely approved and executed earlier in a session, long before a later
-proposal of it is denied, and an unscoped rule would retire most overrides at
-the instant they were recorded.
+structural, because none of these append-only records carries a timestamp.
+Across turns the order is the acceptance position of the input that opened each
+turn; inside a turn each model call owns one turn attempt and attempts chain
+through their predecessor, so a proposal counts as later when its turn was
+accepted after the denial's or its attempt continues the denied proposal's. Both
+are needed, because the re-proposal an override exists for is normally made in
+the denial's own turn. The scope is required: the same command is routinely
+approved and executed earlier in a session, long before a later proposal of it
+is denied, and an unscoped rule would retire most overrides at the instant they
+were recorded.
 
 The continuation that first carries a denial to the model therefore never
 carries that denial's override. That continuation is checkpointed by the same
@@ -434,7 +432,7 @@ advertises — its name, description, schema, permission default, and effect cla
 one compiled value that is not is the local Git argument validator, which
 carries the pinned repository's object format. A session whose repository
 selects another format is therefore refused rather than validated against the
-configured root's width, and the refusal has two shapes because catalog
+configured root's object format, and the refusal has two shapes because catalog
 preflight runs before any session executor is resolved. An argument carrying a
 full object identifier in the session's own format is refused at preflight as
 invalid arguments, since the one compiled validator admits only the format it
@@ -668,9 +666,8 @@ oversized or null-bearing results. Completed and ambiguous observations emit
 nothing here; ambiguity is carried by the recovery wait above. Preflight
 failures that never reach admission — unknown names and argument-decode failures
 — are likewise silent, being model-authored rather than deployment facts.
-Telemetry field discipline is
-[identity-and-commands](identity-and-commands.md#durable-command-telemetry-correlation)
-scope.
+Telemetry field rules are owned by
+[identity-and-commands](identity-and-commands.md#durable-command-telemetry-correlation).
 
 An interrupt against a tool recovery wait does not reinterpret or erase the
 ambiguous attempt. It materializes exactly one reference-only result per request
@@ -1000,8 +997,8 @@ because its wire shape has no failure flag; Anthropic also receives the
 provider-neutral failure flag. Malformed proposal arguments remain exact after
 preparation-time credential scrubbing on the durable request but replay as the
 exact provider-neutral JSON object `{"signalbox_invalid_arguments":true}`,
-allowing the paired typed error result to reach either provider without
-pretending the placeholder is durable evidence.
+allowing the paired typed error result to reach either provider without treating
+the placeholder as durable evidence.
 
 `current_time` is a compiled tool:
 
@@ -1020,8 +1017,8 @@ An unknown time zone or wrong argument shape produces `InvalidArguments` error
 evidence. An injected instant outside the supported civil-time range produces
 known-failure evidence with detail
 `current time is outside the supported range`. IANA lookup and offset conversion
-use the focused `jiff` dependency; Signalbox owns only the port and result
-contract, not a time-zone database implementation.
+use the `jiff` dependency; Signalbox owns only the port and result contract, not
+a time-zone database implementation.
 
 The same process-lifetime compiled catalog also declares these daemon tools:
 
@@ -1179,30 +1176,29 @@ The declarations and compact result objects are:
   ranged inspection classifies a NUL-bearing or non-UTF-8 blob as binary even
   when those bytes lie outside the selected lines. A ranged content result can
   claim truncation only when the exact source bytes observed inside the selected
-  lines exceed the retained bytes; source bytes before the selection cannot
-  impersonate discarded selected content. `path_not_found`,
-  `revision_not_found`, `not_a_file` with the observed repository-object type,
-  and `binary_file` with source bytes are separate non-content outcomes; every
-  file outcome carries `truncated`. Before any Contents request, the GitHub
-  adapter requests the bounded SHA representation of `/commits/{revision}`.
-  Success must return the exact required revision; a different resolution,
-  including a forty-hex branch or tag name that resolves to another commit,
-  fails execution before repository content is read. An exact resolution pins
-  the Contents request to that commit, and a Contents 404 then means
-  `path_not_found`. A commit conflict proves an empty repository and returns
-  `revision_not_found` without a Contents request. A commit 422 whose bounded
-  JSON `message` is exactly `No commit found for SHA: {revision}` also proves
-  absence without a Contents request; any other 422 remains failed execution. A
-  commit 404 permits one Contents visibility probe pinned to the requested
-  revision: only a bounded 404 body that exactly names that revision as an
-  absent ref returns `revision_not_found`; a generic 404 remains failed
-  execution because metadata visibility alone cannot prove absence. A successful
-  text or binary file read therefore uses three requests (commit resolution,
-  Contents metadata, immutable blob), a directory result or path absence uses
-  two (commit resolution and Contents), and revision absence uses one or two.
-  Every request shares one 30-second transaction budget, and every request after
-  resolution names the resolved commit or immutable blob rather than a moving
-  reference.
+  lines exceed the retained bytes; source bytes before the selection cannot be
+  counted as discarded selected content. `path_not_found`, `revision_not_found`,
+  `not_a_file` with the observed repository-object type, and `binary_file` with
+  source bytes are separate non-content outcomes; every file outcome carries
+  `truncated`. Before any Contents request, the GitHub adapter requests the
+  bounded SHA representation of `/commits/{revision}`. Success must return the
+  exact required revision; a different resolution, including a forty-hex branch
+  or tag name that resolves to another commit, fails execution before repository
+  content is read. An exact resolution pins the Contents request to that commit,
+  and a Contents 404 then means `path_not_found`. A commit conflict proves an
+  empty repository and returns `revision_not_found` without a Contents request.
+  A commit 422 whose bounded JSON `message` is exactly
+  `No commit found for SHA: {revision}` also proves absence without a Contents
+  request; any other 422 remains failed execution. A commit 404 permits one
+  Contents visibility probe pinned to the requested revision: only a bounded 404
+  body that exactly names that revision as an absent ref returns
+  `revision_not_found`; a generic 404 remains failed execution because metadata
+  visibility alone cannot prove absence. A successful text or binary file read
+  therefore uses three requests (commit resolution, Contents metadata, immutable
+  blob), a directory result or path absence uses two (commit resolution and
+  Contents), and revision absence uses one or two. Every request shares one
+  30-second transaction budget, and every request after resolution names the
+  resolved commit or immutable blob rather than a moving reference.
 - `repository_list_directory` accepts `repository`, one repository-relative
   directory `path`, and the same required exact commit `revision`. An entries
   outcome retains at most 100 immediate children with path, repository-object
@@ -1420,7 +1416,7 @@ Persistence holds the three result-entry shapes and append-only `tool_request`,
 `tool_approval_decision`, and guarded `tool_attempt` tables. Deferred
 constraints assert complete call-response/request-entry batches, approval-wait
 evidence, result-entry materialization, and terminal closure. The session
-scheduler row remains the first explicit lock for every turn-side transaction.
+scheduler row is the first explicit lock for every turn-side transaction.
 Preparing a model operation collects all frontier-referenced tool requests,
 attempts, and approval decisions in one batched query per record family before
 reconstructing provider history in frontier order; it performs no per-entry
@@ -1442,7 +1438,7 @@ rather than applying one global version constant.
 ## Open edges
 
 - Replacing direct approval-judge recommendations with graded risk and brief
-  alignment remains recorded under
+  alignment is recorded under
   [Graded approval judging](../open-questions.md#graded-approval-judging).
 - Dynamic execution-strategy policy beyond the two named runner profiles,
   model-declared approval expiry and additional high-risk guardrails are
@@ -1458,12 +1454,12 @@ rather than applying one global version constant.
   [Tool safety](../open-questions.md#tool-safety).
 - Runner placement, local transport, workspace, profile, and lease law are owned
   by [runner protocol and placement](runner-protocol.md). Remote runner
-  transport and multiple-runner scheduling remain recorded under
+  transport and multiple-runner scheduling are recorded under
   [Scheduling and runners](../open-questions.md#scheduling-and-runners),
   [Protocols and persistence](../open-questions.md#protocols-and-persistence),
   and
   [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance).
 - Client approval presentation is recorded under
   [Client scope](../open-questions.md#client-scope).
-- Streaming tool deltas remain part of the model-streaming question in
+- Streaming tool deltas are part of the model-streaming question in
   [Protocols and persistence](../open-questions.md#protocols-and-persistence).
