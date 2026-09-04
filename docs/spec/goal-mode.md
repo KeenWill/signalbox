@@ -38,8 +38,8 @@ authoritative. The state algebra is:
 - `superseded { by_generation }` — terminal for the replaced generation, while
   its same event starts the successor; and
 - `session_closed { outcome }` — the session closed while the generation was
-  still open. Terminal in every direction: no resume, no supersession, no later
-  commission.
+  still open. Terminal with no outgoing transition: no resume, no supersession,
+  no later commission.
 
 **Implemented behavior.** The closed event vocabulary is `commissioned`,
 `blocked`, `resumed`, `achieved`, `user_stopped`, `superseded`, and
@@ -77,9 +77,9 @@ Repository-watch dispatch composes an attach for the session it is creating and
 commits it in that creation's own transaction, with its own durable command
 identity and the same receipt and event shapes any attach records; the goal
 statement is synthesized from the dispatch rather than supplied as text. Such a
-statement is system-authored in shape but not in every byte, because the
-identifiers it renders come from the watched repository, so a consumer placing
-it in a model prompt owes it exactly the quoting it owes any session text.
+statement's template is system-authored, but the identifiers it renders come
+from the watched repository, so a consumer placing it in a model prompt owes it
+exactly the quoting it owes any session text.
 
 **Implemented behavior.** A synthesized statement delimits every
 repository-supplied identifier it renders, because those identifiers are
@@ -239,7 +239,7 @@ permission, invalid-request, target, request-size, quota, and unrecognized
 provider failures remain chargeable because they do not prove a transient
 provider-availability condition. Typed records rather than a log line are the
 authority, so deploys, reconciliation deadlines, and transient provider
-availability cannot exhaust work the session did not fail.
+availability cannot charge the budget for work the session did not fail.
 
 That exemption bounds what the operator's budget may be charged, never how long
 a run may continue. A run whose every failure is exempt charges nothing, so the
@@ -326,7 +326,8 @@ alone. Block provenance cannot reach that conclusion: it says a turn failed,
 never that resuming it could progress. So the block a reconciled still-terminal
 turn appends, and the block an ambiguously acknowledged commit is read back to
 arm, carry the same operator-required need the direct path appends rather than
-resuming into the compaction their own durable evidence already refused.
+resuming into the compaction their own durable evidence already proved cannot
+fit.
 
 **Implemented behavior.** A periodic durable sweep includes a pursuing goal
 whose current goal turn is terminal and still owed continuation or blocking. The
