@@ -1,17 +1,5 @@
 # Workspace instructions and skills
 
-The comparative evidence and foundation-proposal boundary on this page were
-verified against PR #796 (`agent/agent-docs-skills-spec`). Bounded filesystem
-discovery, typed registration construction, and explicit-root configuration were
-verified against PR #798 (`agent/agent-docs-skills-foundation`). Durable
-registration, empty eligibility, turn-start evidence, and model-call correlation
-were verified against PR #810 (`agent/agent-docs-skills-model-call-followup`).
-Directory exclusions and limit-set version two were verified against PR #1488
-(`agent/workspace-instruction-exclusions`); regular-file `.git` markers were
-verified against this PR (`agent/discovery-worktree-roots`). The
-incomplete-discovery operator event is verified against this PR
-(`agent/t1-migration-backfill`).
-
 This page is the foundation proposal at the bottom of the workspace-instruction
 implementation stack. It specifies daemon-owned discovery, registration,
 eligibility, admission, model-input projection, and per-turn provenance for
@@ -984,9 +972,8 @@ like every other byte — so the 524,288-byte bound cuts a page at the same item
 and the next cursor names the same ordinal.
 
 **Committed unimplemented functionality — model-facing operations.** No present
-tool supplies list, preview, or read unless an implementing child explicitly
-advances this section's verified reference, and no present registry entry
-carries the permission defaults, approval posture, argument schemas, or crash
+tool supplies list, preview, or read, and no present registry entry carries the
+permission defaults, approval posture, argument schemas, or crash
 classifications just stated. Unloading is not implemented in the first slice.
 The same holds for everything the rest of this page builds on those operations:
 the durable admission transition, the projection and its region bytes, the

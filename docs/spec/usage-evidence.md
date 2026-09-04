@@ -1,8 +1,5 @@
 # Usage evidence
 
-This contract is verified against PR #1138 (`agent/web-usage-http`; via PR #1137
-`agent/web-usage-cost`).
-
 ## Canonical evidence
 
 Usage reads project terminal physical model calls without materializing the

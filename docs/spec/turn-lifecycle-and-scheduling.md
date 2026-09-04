@@ -1,125 +1,22 @@
 # Turn lifecycle and scheduling
 
-The injection contract — steering accepted while stopping, watchdog
-reclassification, closure at a committed session terminal, and settlement
-receipts — is verified against PR #1483 (`agent/lifecycle-t7-injection`).
-Durable watchdog observations and the non-advancing first post-restart scan are
-verified against this PR (`agent/lifecycle-t9-watchdog`).
-
-The scheduler occupancy ceiling and metrics, daemon-owned ambiguous-call
-reconciliation, and outer slot-held watchdog coverage were verified against this
-PR (`agent/turn-lifecycle-hardening`). Automatic reconciliation of ambiguous
-tool attempts is verified against this PR
-(`agent/daemon-live-tool-recovery-reconcile`). The watchdog recovery transaction
-ceiling was re-verified against this PR
-(`agent/daemon-live-reconciliation-attempt-bound`). Just-in-time recovery
-claiming and shutdown-preemptible watchdog batches are verified against this PR
-(`agent/daemon-live-restart-recovery-accounting`). Signal-driven scheduler
-draining is verified against this PR
-(`agent/daemon-live-graceful-shutdown-drain`). Suspension of admitted-pass
-occupancy deadlines during that bounded drain is verified against this PR
-(`agent/daemon-live-shutdown-pass-drain`). The sixty-minute occupancy ceiling
-and model-exchange-derived shutdown drain are verified against this PR
-(`agent/daemon-live-runtime-bounds`). Operation-boundary shutdown checkpointing
-is verified against this PR (`agent/daemon-live-shutdown-checkpoint`) and
-re-verified, for every committed stage boundary the tool loop reaches, against
-this PR (`agent/fix-liveness-shutdown-recovery`). Shutdown preemption of the
-ambiguous-operation batch, the separated slot-held and reconciliation attempt
-ceilings, the recovery transaction's write-lock budget, the handoff's bounded
-attempts across correlating and recovering, and expiry recovery for the
-pre-activation compaction window are verified against the same PR.
-
-Mandatory typed cause classification on turn terminalization is verified against
-this PR (`agent/lifecycle-t1-measurement`).
-
-The expired-pass recovery lock classification and retry budgets were re-verified
-against this PR (`agent/daemon-live-reconciliation-lock-cadence`). Exact
-resumed-turn correlation and the scheduler-expiry handoff were re-verified
-against this PR (`agent/daemon-live-occupancy-expiry-handoff`).
-
-The runner-recovery active-phase algebra, checked persistence reconstitution,
-and preserved interrupt/stop authority were verified against this PR
-(`agent/runner-awaiting-recovery-persistence`). The atomic persistence
-transition into runner recovery was verified against this PR
-(`agent/runner-loss-session-transaction`). Daemon invocation and startup
-resumption of that transition were verified against this PR
-(`agent/runner-loss-daemon-propagation`).
-
-The active-tail predecessor-steering correction was verified against PR #826
-(`agent/daemon-ops-overnight`).
-
-The cancelled-turn outbox projection for stopped tool responses with completed
-producing calls was re-verified against this PR
-(`agent/cancelled-outbox-completed-call`).
-
-The deployment-owned scheduler pass limit is verified against this PR
-(`agent/scheduler-pass-pause`). Deployment-owned scheduler and liveness bounds
-are verified against this PR (`agent/bounds-required-config-protocol`).
-
-Repository-watch dispatch-start admission, nudge coalescing, and its reserved
-capacity within the unchanged scheduler ceiling are verified against this PR
-(`agent/dispatch-start-lease`).
-
-Tool-attempt reconciliation predecessor replay was verified against this PR
-(`agent/tool-reconciliation-origin-replay`).
-
-The turn-liveness watchdog — its quiescent predicate, repeated-observation
-staleness, drained rotation, and reuse of the failed-turn transition — was
-verified against this PR (`agent/turn-liveness-watchdog`).
-
-The user-vocabulary surface on this page was re-verified through PR #378
-(`agent/user-vocabulary`).
-
-Prepared-call sweep eligibility and startup resumption of an unsent prepared
-call are verified against this implementing change
-(`agent/blob-storage-attachment-preparation`).
-
 This page specifies the implemented behavior of turns, turn attempts,
-eligibility derivation, the scheduler, and startup recovery, as verified against
-the implementing stack through PR #230 (`agent/frontier-scaling`); the
-parked-approval interrupt delivery outcome was verified through PR #254
-(`agent/fix-parked-approval-interrupt`), model-identity turn-start boundaries
-were verified through PR #272 (`agent/mid-session-model`), the tool-round
-continuation reconstitution and terminal shapes were verified through PR #292
-(`agent/continuation-reconstitution`), and the steering-free continuation shapes
-at the refused, reconciliation-required, and model-call recovery gates were
-verified through PR #296 (`agent/continuation-reconstitution-siblings`); the
-input-delivery surface, queued restart behavior, and protocol-driven
-continuation steering were verified through PR #302 (`agent/mid-turn-steering`);
-the template-specific home requirement and template-catalog startup order were
-verified through PR #311 (`agent/session-templates-spec`); exact start-frontier
-reconstitution across a validated compaction boundary was verified through PR
-`#312` (`agent/context-compaction-core`); and the corresponding persistent
-final-state gate was verified through PR #314
-(`agent/context-compaction-protocol`); the delegated foreground-wait termination
-path and descendant-cascade ordering were verified through this PR
-(`agent/delegation`). Code homes:
+eligibility derivation, the scheduler, and startup recovery. Code homes:
 `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
 `crates/persistence/src/{start_eligible_turn,startup,scheduler,turn_liveness,`
 `model_call_reconciliation,lock_inventory}.rs` and its migrations, and
 `apps/signalboxd/src/{main,process_runtime,turn_liveness_runtime,telemetry}.rs`.
-The `signalboxd` composition-root name and that `apps/signalboxd` code home were
-verified through PR #258 (`agent/signalboxd-rename`); the additional daemon-held
-code-host credential path is verified through PR #270
-(`agent/tool-batch-tier1`), and the Brave Search credential path is verified
-through PR #433 (`agent/web-search-wiring`); the user reconciliation decision
-that releases an ambiguity wait, together with the startup scan's separate
-report of sessions holding their slot for that decision, were verified through
-PR #281 (`agent/turn-reconciliation-recovery`). The finite startup scan and
-removal of the superseded steering blocker were verified through PR #291
-(`agent/turn-control-verbs`). INV-tagged tests are the enforcement of record;
-tags below resolve through the generated
-[invariant test index](../invariants.md). Designed lifecycle behavior that has
-no committed code path appears only under [Open edges](#open-edges). The
-registration-only runner-socket startup and supervision are verified by PR #376
-(`agent/runner-daemon`). Runner-loss recovery and recovery-only startup remain
-committed unimplemented functionality as labeled below. Sibling pages named in
-scope deferrals below (identity-and-commands, sessions-and-transcript,
-persistence-protocol, model-call-execution, configuration-and-credentials,
-runtime-substrate) are companion pages of this spec set; each deferral names the
-owning page rather than restating its material.
+INV-tagged tests are the enforcement of record; tags below resolve through the
+generated [invariant test index](../invariants.md). Designed lifecycle behavior
+that has no committed code path appears only under [Open edges](#open-edges).
+Runner-loss recovery and recovery-only startup remain committed unimplemented
+functionality as labeled below. Sibling pages named in scope deferrals below
+(identity-and-commands, sessions-and-transcript, persistence-protocol,
+model-call-execution, configuration-and-credentials, runtime-substrate) are
+companion pages of this spec set; each deferral names the owning page rather
+than restating its material.
 
 ## Turns, states, and the single active slot
 
@@ -858,9 +755,8 @@ Neither budget can leave a commit's outcome unknown, which is what rules out
 bounding the attempt by a statement timeout or by cancelling its future instead.
 A lock wait refused during the commit — this schema defers foreign-key checks,
 so one can be — is a server-side error, and a server-side error at commit is a
-rollback: verified against PostgreSQL 18.4, where a deferred check tripping the
-budget leaves nothing committed. The pass therefore learns that the turn did not
-end, rather than learning nothing.
+rollback; a deferred check tripping the budget leaves nothing committed. The
+pass therefore learns that the turn did not end, rather than learning nothing.
 
 The complete candidate predicate is re-decided under that lock against rows no
 concurrent pass can be changing, and the ordinary
@@ -1493,11 +1389,10 @@ no shared locked service instance exists.
 
 ## Delegated waits, messages, and wake turns
 
-This section is the session-delegation foundation proposal and becomes verified
-only with its implementing child pull requests. A spawned child's first turn has
-a closed delegated-task origin naming the exact spawning request; its starting
-frontier contains the checked `DelegatedTask` entry and contains no synthetic
-accepted input. Every later turn uses the ordinary accepted-input or
+This section is the session-delegation foundation proposal. A spawned child's
+first turn has a closed delegated-task origin naming the exact spawning request;
+its starting frontier contains the checked `DelegatedTask` entry and contains no
+synthetic accepted input. Every later turn uses the ordinary accepted-input or
 delegation-wake origin appropriate to the work that queued it.
 
 `AwaitingChild { wait }` is an active phase with no current attempt. Its wait
