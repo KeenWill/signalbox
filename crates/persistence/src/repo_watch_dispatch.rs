@@ -320,28 +320,17 @@ impl PostgresRepoWatchDispatchStore {
             .collect::<Vec<_>>())
     }
 
-    /// Loads module-unparked sessions whose queued turn needs a fresh hint.
+    /// Loads repository-watch lifecycle subjects whose queued turn needs a fresh hint.
     pub async fn load_restored_module_sessions(
         &self,
     ) -> Result<Vec<SessionId>, RepoWatchDispatchRepositoryError> {
         let sessions = sqlx::query_scalar::<_, Uuid>(
             "SELECT lifecycle.session_id
                FROM session_lifecycle AS lifecycle
-              WHERE lifecycle.state_kind IN ('dispatched', 'active')
-                AND lifecycle.actor_kind = 'module'
+              WHERE lifecycle.actor_kind = 'module'
                 AND lifecycle.actor_module = 'repo_watch'
                 AND lifecycle.owned
                 AND lifecycle.pending_terminal_outcome_kind IS NULL
-                AND (
-                    lifecycle.state_kind = 'dispatched'
-                    OR NOT EXISTS (
-                        SELECT 1
-                          FROM turn_lifecycle AS live
-                         WHERE live.session_id = lifecycle.session_id
-                           AND live.state_kind = 'active'
-                           AND NOT live.delegation_runtime_terminal
-                    )
-                )
                 AND EXISTS (
                     SELECT 1
                       FROM turn_lifecycle AS turn
