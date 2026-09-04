@@ -50,6 +50,7 @@ impl LifecycleDeadlineRuntime {
                     loop {
                         match self.repository.expire_next().await {
                             Ok(SessionDeadlinePassOutcome::Idle) => break,
+                            Ok(SessionDeadlinePassOutcome::Armed { .. }) => {}
                             Ok(SessionDeadlinePassOutcome::Retired { session }) => {
                                 tracing::info!(session_id = %session.into_uuid(),
                                     "session admission deadline retired the session");

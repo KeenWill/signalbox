@@ -13,10 +13,11 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     BranchName, CommitSha, DangerousToolAutoApproval, DescendantTerminationScope,
-    DirectModelSelection, DurableCommandId, GoalCommandResult, GoalStatement, GoalUserAction,
-    GoalUserCommand, ModelSelectionRequest, PullRequestNumber, RepositorySlug,
-    SessionConfigurationDefaults, SessionId, SessionSystemPrompt, SessionTemplateContentDigest,
-    SessionTemplateName, SessionTemplateProvenance, UserContent,
+    DirectModelSelection, DispatchingModule, DurableCommandId, GoalCommandResult, GoalStatement,
+    GoalUserAction, GoalUserCommand, ModelSelectionRequest, PullRequestNumber, RepositorySlug,
+    SessionConfigurationDefaults, SessionId, SessionLifecycleState, SessionParkCause,
+    SessionParkResponder, SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
+    SessionTemplateProvenance, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -26,6 +27,7 @@ use signalbox_persistence::{
         ConvergenceSweepObservation, ConvergenceSweepRetryPolicy, PostgresConvergenceSweepStore,
     },
     goal::{GoalCommandHandlingOutcome, GoalRepository},
+    session_lifecycle::SessionLifecycleRepository,
 };
 use sqlx::types::Uuid;
 
@@ -1031,6 +1033,20 @@ async fn live_session_without_model_activity_is_parked() -> Result<(), Box<dyn E
             .await?
             .is_some_and(|state| state.is_parked())
     );
+    assert!(matches!(
+        SessionLifecycleRepository::new(pool)
+            .load(session)
+            .await?
+            .expect("the parked session retains its lifecycle row")
+            .state(),
+        SessionLifecycleState::Parked {
+            cause: SessionParkCause::ModulePark,
+            responder: SessionParkResponder::Module {
+                module: DispatchingModule::CommissionedDispatch,
+            },
+            standing: None,
+        }
+    ));
     Ok(())
 }
 

@@ -1,4 +1,4 @@
--- Core start-gate release, lifecycle expiry emission, and module park projection.
+-- Core start-gate release, lifecycle deadline transitions, and module park projection.
 
 ALTER TABLE session_lifecycle_command
     DROP CONSTRAINT session_lifecycle_command_operation_closed,
@@ -64,6 +64,7 @@ DECLARE
     rewritten text;
 BEGIN
     FOREACH constraint_name IN ARRAY ARRAY[
+        'session_lifecycle_terminal_cause_closed',
         'session_lifecycle_terminal_shape',
         'session_lifecycle_pending_terminal_shape'
     ]
@@ -94,42 +95,6 @@ BEGIN
     END LOOP;
 END
 $rewrite_retirement_cause$;
-
--- Every nonterminal state transition has one transactional outbox snapshot.
-CREATE FUNCTION append_session_state_changed_outbox_event() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-    allocated numeric(20, 0);
-BEGIN
-    INSERT INTO outbox_event (event_kind, storage_version, session_id)
-    VALUES ('session_state_changed', 1, NEW.session_id)
-    RETURNING event_sequence INTO allocated;
-
-    INSERT INTO session_state_changed_outbox_event
-        (event_sequence, event_kind, storage_version, session_id,
-         prior_state_kind, state_kind, state_entered_at, actor_kind,
-         actor_module, actor_turn_id, actor_tool_request_id, waiting_kind,
-         waiting_waker, waiting_subject_session_id, recovering_op,
-         blocked_reason, blocked_cycle, parked_cause, parked_responder,
-         parked_since, parked_standing_cause_kind)
-    VALUES
-        (allocated, 'session_state_changed', 1, NEW.session_id,
-         OLD.state_kind, NEW.state_kind, NEW.state_entered_at, NEW.actor_kind,
-         NEW.actor_module, NEW.actor_turn_id, NEW.actor_tool_request_id,
-         NEW.waiting_kind, NEW.waiting_waker, NEW.waiting_subject_session_id,
-         NEW.recovering_op, NEW.blocked_reason, NEW.blocked_cycle,
-         NEW.parked_cause, NEW.parked_responder, NEW.parked_since,
-         NEW.parked_standing_cause_kind);
-    RETURN NULL;
-END;
-$$;
-
-CREATE TRIGGER session_lifecycle_appends_state_changed_outbox_event
-    AFTER UPDATE OF state_kind ON session_lifecycle
-    FOR EACH ROW
-    WHEN (NEW.state_kind <> OLD.state_kind AND NEW.state_kind <> 'terminal'::text)
-    EXECUTE FUNCTION append_session_state_changed_outbox_event();
 
 -- A module obligation that directly names or wraps a live session projects
 -- that park into the core lifecycle queue.
@@ -170,7 +135,9 @@ BEGIN
                parked_standing_cause_kind = NULL
          WHERE session_id = subject
            AND owned
-           AND state_kind IN ('active', 'waiting', 'recovering', 'blocked')
+           AND state_kind IN (
+                'created', 'dispatched', 'active', 'waiting', 'recovering', 'blocked'
+           )
            AND pending_terminal_outcome_kind IS NULL;
     END LOOP;
     RETURN NULL;

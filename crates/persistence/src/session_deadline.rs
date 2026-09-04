@@ -6,7 +6,7 @@ use signalbox_domain::{
     LifecycleActor, SessionId, SessionLifecycleState, SessionParkCause, SessionParkResponder,
     SessionRetirementCause, SessionTerminalOutcome,
 };
-use sqlx::{PgConnection, PgPool, Row, types::Uuid};
+use sqlx::{PgPool, Row, types::Uuid};
 
 use crate::{
     mapping::session_id_from_uuid,
@@ -33,6 +33,8 @@ impl SessionDeadlineBounds {
 pub enum SessionDeadlinePassOutcome {
     /// No supported deadline is currently due.
     Idle,
+    /// One supported deadline materialized its configured expiry.
+    Armed { session: SessionId },
     /// Admission expired and the session retired.
     Retired { session: SessionId },
     /// A waiting deadline expired and the live turn was suspended in place.
@@ -104,15 +106,33 @@ impl PostgresSessionDeadlineRepository {
         let admission_millis = stored_millis(self.bounds.admission)?;
         let waiting_millis = stored_millis(self.bounds.waiting)?;
         let mut transaction = self.pool.begin().await?;
-        materialize_expiries(&mut transaction, admission_millis, waiting_millis).await?;
         let candidate: Option<Uuid> = sqlx::query_scalar(
             "SELECT session_id
                FROM session_deadline
-              WHERE deadline_kind IN ('admission', 'waiting')
-                AND expires_at <= clock_timestamp()
-              ORDER BY expires_at, session_id
+              WHERE (deadline_kind = 'admission'
+                     AND (expires_at IS DISTINCT FROM CASE
+                              WHEN $1::BIGINT IS NULL THEN NULL
+                              ELSE armed_at + $1 * INTERVAL '1 millisecond'
+                          END
+                          OR expires_at <= clock_timestamp()))
+                 OR (deadline_kind = 'waiting'
+                     AND (expires_at IS DISTINCT FROM CASE
+                              WHEN $2::BIGINT IS NULL THEN NULL
+                              ELSE armed_at + $2 * INTERVAL '1 millisecond'
+                          END
+                          OR expires_at <= clock_timestamp()))
+              ORDER BY COALESCE(
+                           expires_at,
+                           CASE deadline_kind
+                               WHEN 'admission' THEN armed_at + $1 * INTERVAL '1 millisecond'
+                               WHEN 'waiting' THEN armed_at + $2 * INTERVAL '1 millisecond'
+                           END
+                       ),
+                       session_id
               LIMIT 1",
         )
+        .bind(admission_millis)
+        .bind(waiting_millis)
         .fetch_optional(&mut *transaction)
         .await?;
         let Some(candidate) = candidate else {
@@ -122,12 +142,18 @@ impl PostgresSessionDeadlineRepository {
         let session = session_id_from_uuid(candidate);
         let held = session_lifecycle::load_locked(&mut transaction, session).await?;
         let deadline = sqlx::query(
-            "SELECT deadline_kind, expires_at <= clock_timestamp() AS due
-               FROM session_deadline
-              WHERE session_id = $1
-              FOR UPDATE",
+            "UPDATE session_deadline
+                SET expires_at = CASE deadline_kind
+                    WHEN 'admission' THEN armed_at + $2 * INTERVAL '1 millisecond'
+                    WHEN 'waiting' THEN armed_at + $3 * INTERVAL '1 millisecond'
+                END
+             WHERE session_id = $1
+         RETURNING session_deadline.deadline_kind,
+                   session_deadline.expires_at <= clock_timestamp() AS due",
         )
         .bind(candidate)
+        .bind(admission_millis)
+        .bind(waiting_millis)
         .fetch_optional(&mut *transaction)
         .await?;
         let Some(deadline) = deadline else {
@@ -137,8 +163,8 @@ impl PostgresSessionDeadlineRepository {
         let kind: String = deadline.try_get("deadline_kind")?;
         let due: Option<bool> = deadline.try_get("due")?;
         if due != Some(true) {
-            transaction.rollback().await?;
-            return Ok(SessionDeadlinePassOutcome::Idle);
+            transaction.commit().await?;
+            return Ok(SessionDeadlinePassOutcome::Armed { session });
         }
         let outcome = match (kind.as_str(), held.state()) {
             ("admission", SessionLifecycleState::Created | SessionLifecycleState::Dispatched) => {
@@ -191,30 +217,4 @@ fn stored_millis(bound: Option<Duration>) -> Result<Option<i64>, SessionDeadline
                 .map_err(|_| SessionDeadlineRepositoryError::BoundExceedsStorage)
         })
         .transpose()
-}
-
-async fn materialize_expiries(
-    connection: &mut PgConnection,
-    admission_millis: Option<i64>,
-    waiting_millis: Option<i64>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "UPDATE session_deadline
-            SET expires_at = armed_at + CASE deadline_kind
-                WHEN 'admission' THEN $1 * INTERVAL '1 millisecond'
-                WHEN 'waiting' THEN $2 * INTERVAL '1 millisecond'
-                ELSE NULL
-            END
-          WHERE deadline_kind IN ('admission', 'waiting')
-            AND expires_at IS DISTINCT FROM armed_at + CASE deadline_kind
-                WHEN 'admission' THEN $1 * INTERVAL '1 millisecond'
-                WHEN 'waiting' THEN $2 * INTERVAL '1 millisecond'
-                ELSE NULL
-            END",
-    )
-    .bind(admission_millis)
-    .bind(waiting_millis)
-    .execute(connection)
-    .await?;
-    Ok(())
 }

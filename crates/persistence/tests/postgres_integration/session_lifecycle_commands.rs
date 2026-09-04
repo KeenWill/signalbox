@@ -596,7 +596,7 @@ async fn a_resume_replays_its_recorded_state_after_the_session_closes() -> Resul
     assert_eq!(
         first,
         SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::Resumed {
-            state: SessionLifecycleState::Active,
+            state: SessionLifecycleState::Created,
         })
     );
     assert_eq!(replay, first);
@@ -1187,6 +1187,68 @@ async fn a_held_start_gate_keeps_the_session_created() -> Result<(), Box<dyn Err
         .await?
         .expect("the session keeps its lifecycle row");
     assert_eq!(lifecycle.state(), SessionLifecycleState::Created);
+
+    let release = lifecycle_command(10, 2, session, SessionLifecycleOperation::ReleaseStart);
+    let release_id = release.command_id();
+    assert_eq!(
+        recorded(&pool, release.clone()).await?,
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::StartReleased)
+    );
+    assert_eq!(
+        recorded(&pool, release).await?,
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::StartReleased)
+    );
+    assert_eq!(
+        settlement(&pool, release_id).await?,
+        (String::from("applied"), None)
+    );
+    let released: (String, bool) = sqlx::query_as(
+        "SELECT state_kind, start_gate_held FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(released, (String::from("dispatched"), false));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn releasing_ownership_also_settles_a_held_start_gate() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(11);
+    let creation = CreateSession::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(SEED + 11)),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
+        SessionConfigurationDefaults::new(direct(SEED + 11 + 0x200)),
+    )
+    .with_lifecycle(StartGate::Held, SessionOwnership::Owned, None)
+    .prepare(session)
+    .expect("the creation is preparable");
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(creation)
+        .await?;
+    queue_turn(&pool, session, 11, 1).await?;
+
+    assert_eq!(
+        recorded(
+            &pool,
+            lifecycle_command(11, 2, session, SessionLifecycleOperation::Release),
+        )
+        .await?,
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::OwnershipChanged)
+    );
+    let released: (String, bool, bool) = sqlx::query_as(
+        "SELECT state_kind, start_gate_held, owned
+           FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(released, (String::from("dispatched"), false, false));
 
     pool.close().await;
     drop(container);

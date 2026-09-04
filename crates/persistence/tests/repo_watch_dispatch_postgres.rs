@@ -8594,17 +8594,18 @@ async fn repository_watch_observes_operator_commission_target_ownership()
             )
             .await?;
 
-    let obligation: (Uuid, Vec<Uuid>, bool) = sqlx::query_as(
-        "SELECT external_blocking_session_id, occupying_session_ids, ready
+    let obligation: (Uuid, Uuid, Vec<Uuid>, bool) = sqlx::query_as(
+        "SELECT obligation_id, external_blocking_session_id,
+                occupying_session_ids, ready
            FROM repo_watch_outstanding_dispatch_obligation",
     )
     .fetch_one(&fixture.pool)
     .await?;
 
     assert_eq!(outcome, RepoWatchRuleEvaluationOutcome::Occupied);
-    assert_eq!(obligation.0, fixture.session.into_uuid());
-    assert_eq!(obligation.1, vec![fixture.session.into_uuid()]);
-    assert!(!obligation.2);
+    assert_eq!(obligation.1, fixture.session.into_uuid());
+    assert_eq!(obligation.2, vec![fixture.session.into_uuid()]);
+    assert!(!obligation.3);
     assert!(
         dispatch_store
             .load_next_dispatch_obligation(
@@ -8642,6 +8643,46 @@ async fn repository_watch_observes_operator_commission_target_ownership()
         }],
         "the operator read names the live external session holding the obligation"
     );
+
+    sqlx::query(
+        "UPDATE repo_watch_dispatch_obligation
+            SET failed_attempts = repo_watch_dispatch_attempt_budget(),
+                last_failed_attempt_at = clock_timestamp()
+          WHERE obligation_id = $1",
+    )
+    .bind(obligation.0)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query("SELECT repo_watch_park_exhausted_dispatch_obligation($1)")
+        .bind(obligation.0)
+        .execute(&fixture.pool)
+        .await?;
+    let core_park: (String, String, String, String) = sqlx::query_as(
+        "SELECT state_kind, parked_cause, parked_responder, actor_module
+           FROM session_lifecycle
+          WHERE session_id = $1",
+    )
+    .bind(fixture.session.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        core_park,
+        (
+            String::from("parked"),
+            String::from("module_park"),
+            String::from("repo_watch"),
+            String::from("repo_watch"),
+        )
+    );
+    assert_eq!(
+        dispatch_store
+            .release_parked_dispatch_obligation(obligation.0, PARK_RELEASE_ACTOR)
+            .await?,
+        RepoWatchObligationParkRelease::Released
+    );
+    SessionLifecycleRepository::new(fixture.pool.clone())
+        .resume(fixture.session)
+        .await?;
 
     let stopped = GoalRepository::new(fixture.pool.clone())
         .handle_user_command(

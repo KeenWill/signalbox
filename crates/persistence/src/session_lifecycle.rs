@@ -519,7 +519,36 @@ pub(crate) async fn resume_in_transaction(
             SessionLifecycleRejection::TransitionNotAdmitted,
         ));
     }
-    write_state(connection, &held, SessionLifecycleState::Active, actor).await?;
+    let admission_state: Option<String> = sqlx::query_scalar(
+        "SELECT CASE
+            WHEN NOT EXISTS (
+                SELECT 1 FROM turn_lifecycle WHERE session_id = $1
+            ) THEN 'created'
+            WHEN EXISTS (
+                SELECT 1 FROM turn_lifecycle
+                 WHERE session_id = $1 AND state_kind = 'queued'
+            ) AND NOT EXISTS (
+                SELECT 1 FROM turn_lifecycle
+                 WHERE session_id = $1 AND state_kind <> 'queued'
+            ) THEN 'dispatched'
+            ELSE NULL
+        END",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_one(&mut *connection)
+    .await?;
+    let resumed = match admission_state.as_deref() {
+        Some("created") => SessionLifecycleState::Created,
+        Some("dispatched") => SessionLifecycleState::Dispatched,
+        _ => SessionLifecycleState::Active,
+    };
+    write_state(connection, &held, resumed, actor).await?;
+    if matches!(
+        resumed,
+        SessionLifecycleState::Created | SessionLifecycleState::Dispatched
+    ) {
+        return Ok(resumed);
+    }
     let (actor_kind, actor_module, _, _) = encode_actor(actor);
     sqlx::query("SELECT project_session_lifecycle($1, true, $2, $3)")
         .bind(session_id_to_uuid(session))

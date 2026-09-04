@@ -1056,10 +1056,10 @@ request, or blob-upload transport request — `create_session`,
 `create_session_from_template`, `commission_session`,
 `create_session_from_imported_frontier`, `stop_session`, `supersede_session`,
 `abandon_session`, `close_session_failed`, `resume_session`, `adopt_session`,
-`release_session`, `submit_input`, `reconcile_turn`, `stop_turn`,
-`decide_tool_request`, `replace_session_metadata`, `replace_session_defaults`,
-`compact_session`, `cancel_program_run`, `update_session_placement`,
-`import_conversation`, `begin_conversation_import`,
+`release_session`, `release_start`, `submit_input`, `reconcile_turn`,
+`stop_turn`, `decide_tool_request`, `replace_session_metadata`,
+`replace_session_defaults`, `compact_session`, `cancel_program_run`,
+`update_session_placement`, `import_conversation`, `begin_conversation_import`,
 `append_conversation_import`, `commit_conversation_import`,
 `abort_conversation_import`, `begin_blob_upload`, `append_blob_upload`,
 `commit_blob_upload`, `abort_blob_upload`, `spawn_session`, `await_session`,
@@ -1068,9 +1068,9 @@ request, or blob-upload transport request — `create_session`,
 
 - `session_created` with `session_id` and the complete installed
   `model_settings` snapshot;
-- `session_lifecycle_command_applied` with `session_id` and `effect` (`closed`,
-  `closure_pending { live_turn_id }`, `resumed`, `ownership_changed`); a
-  recorded rejection is `rejected` with
+- `session_lifecycle_command_applied` with `session_id` and `effect`
+  (`start_released`, `closed`, `closure_pending { live_turn_id }`, `resumed`,
+  `ownership_changed`); a recorded rejection is `rejected` with
   `session_lifecycle_command_rejected { session_id, reason }`;
 - `session_commissioned` with the created `session_id` and the `dispatch_id` of
   the append-only recorded fence; an equal replay of the same command identity

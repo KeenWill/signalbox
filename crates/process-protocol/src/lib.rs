@@ -11834,6 +11834,14 @@ mod tests {
         )?;
         assert_client_request_round_trip(
             request(9)?,
+            ClientRequest::ReleaseStart {
+                command_id: command(14)?,
+                session_id: uuid(3),
+            },
+            r#"{"type":"release_start","command_id":"00000000-0000-0000-0000-00000000000e","session_id":"00000000-0000-0000-0000-000000000003"}"#,
+        )?;
+        assert_client_request_round_trip(
+            request(9)?,
             ClientRequest::CloseSessionFailed {
                 command_id: command(11)?,
                 session_id: uuid(3),
@@ -11860,6 +11868,14 @@ mod tests {
                 finish_condition: Some(super::FinishCondition::ExternalGate),
             },
             r#"{"type":"adopt_session","command_id":"00000000-0000-0000-0000-00000000000d","session_id":"00000000-0000-0000-0000-000000000003","finish_condition":{"kind":"external_gate"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(9)?,
+            ServerMessage::SessionLifecycleCommandApplied {
+                session_id: uuid(3),
+                effect: SessionLifecycleEffect::StartReleased {},
+            },
+            r#"{"type":"session_lifecycle_command_applied","session_id":"00000000-0000-0000-0000-000000000003","effect":{"type":"start_released"}}"#,
         )?;
         assert_server_message_round_trip(
             request(9)?,
