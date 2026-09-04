@@ -1,14 +1,11 @@
 # Tool loop
 
-The daemon blob-read declarations below are a foundation proposal.
-
-The workspace-instruction addition to the continuation transaction is committed
+The workspace-instruction effect of the continuation transaction is committed
 unimplemented functionality. No present tool can create an instruction
-admission, and the current transaction therefore still has the four implemented
-effects named below.
+admission, and the transaction therefore has the four implemented effects named
+below.
 
-This page specifies the implemented daemon-owned tool subsystem. The runner
-executable stack rooted at this foundation proposal extends the same laws to the
+This page specifies the daemon-owned tool subsystem. The same laws extend to the
 runner locus. This page owns logical tool requests, approval policy and
 decisions, physical tool attempts, result admission, intra-turn continuation,
 crash classification, the compiled registry, and the daemon-local catalog. Turn
@@ -19,22 +16,19 @@ model-call staging and provider translation in
 [model-call-execution](model-call-execution.md); durable-command identity in
 [identity-and-commands](identity-and-commands.md); and relational mechanics in
 [persistence-protocol](persistence-protocol.md). Invariant tags cite
-[the invariant test index](../invariants.md). The runner-locus paragraphs in
-this page are the foundation proposal at the bottom of their implementing stack.
-The approval-delegation stack rooted at this foundation proposal adds frozen
-per-tool postures, recorded judge calls, and typed decision provenance.
+[the invariant test index](../invariants.md).
 
 ## Intra-turn rounds and request batches
 
 One turn spans the complete propose → decide → execute → result → continue loop.
 A model call is one physical round inside that turn. A completed response with
-no tool request appends `TurnCompleted` and terminalizes the turn exactly as
-before. A completed response containing one or more tool requests never
-terminalizes the turn: it ends the current turn attempt as a tool-round yield
-and keeps the active slot while the batch is resolved. A later model call uses a
-fresh turn attempt in the same turn. Why: a turn is the logical conversational
-outcome, while a model call and a turn attempt are physical tenures that may
-repeat without changing that logical identity (INV-004, INV-006).
+no tool request appends `TurnCompleted` and terminalizes the turn. A completed
+response containing one or more tool requests never terminalizes the turn: it
+ends the current turn attempt as a tool-round yield and keeps the active slot
+while the batch is resolved. A later model call uses a fresh turn attempt in the
+same turn. Why: a turn is the logical conversational outcome, while a model call
+and a turn attempt are physical tenures that may repeat without changing that
+logical identity (INV-004, INV-006).
 
 A completed response carries ordered assistant text and tool proposals. For each
 proposal the application supplies one fresh UUIDv7 `ToolRequestId`; the domain
@@ -139,7 +133,7 @@ or `Human`. The selected posture is frozen into every resulting request. For
 every definition, an explicit posture is authoritative: `Auto` records
 `PolicyAuto`, `Delegated` parks for a judge, and `Human` parks for the user even
 when the session blanket would otherwise approve. When the mapping omits the
-posture, the existing precedence below is unchanged.
+posture, the precedence below applies.
 
 An `AlwaysConfirm` permission narrows that rule for exactly one posture. The
 declaration exists so that no session blanket can silently approve the tool, so
@@ -177,7 +171,7 @@ may exist after an earlier confirmation wait without bypassing it; only explicit
 user or delegate decisions must form a proposal-order prefix. After each user
 command, the earliest remaining undecided confirmation is the next wait, while
 already frozen automatic decisions require no later command. Why: recording the
-selected source makes unattended operation inspectable without laundering policy
+selected source makes unattended operation inspectable without presenting policy
 as human consent.
 
 The blanket is a field of each immutable `VersionedSessionConfigurationDefaults`
@@ -317,31 +311,30 @@ Only a still-effective override is frozen, and two things retire one: the
 consuming `UserOverride` approval that names it, and an approval of the
 identical command recorded by any other authority after the denial — the judge
 approving a re-proposal it once denied, a user decision after escalation, or a
-policy approval. The second is what keeps the boundary below from leaking. The
-call that first carries a denial cannot hold that denial's override, so its
-re-proposal is decided without one, and an override left standing after that
-decision would pre-approve a repeat of a command the session has already let
-through. Ordering here is structural rather than clocked, because none of these
-append-only records carries a timestamp. Across turns the order is the
-acceptance position of the input that opened each turn; inside a turn each model
-call owns one turn attempt and attempts chain through their predecessor, so a
-proposal counts as later when its turn was accepted after the denial's or its
-attempt continues the denied proposal's. Both are needed, because the
-re-proposal an override exists for is normally made in the denial's own turn.
-The scope is required rather than decorative — the same command is routinely
-approved and executed earlier in a session, long before a later proposal of it
-is denied, and an unscoped rule would retire most overrides at the instant they
-were recorded.
+policy approval. The second is needed because the call that first carries a
+denial cannot hold that denial's override, so its re-proposal is decided without
+one, and an override left standing after that decision would pre-approve a
+repeat of a command the session has already let through. Ordering here is
+structural rather than clocked, because none of these append-only records
+carries a timestamp. Across turns the order is the acceptance position of the
+input that opened each turn; inside a turn each model call owns one turn attempt
+and attempts chain through their predecessor, so a proposal counts as later when
+its turn was accepted after the denial's or its attempt continues the denied
+proposal's. Both are needed, because the re-proposal an override exists for is
+normally made in the denial's own turn. The scope is required: the same command
+is routinely approved and executed earlier in a session, long before a later
+proposal of it is denied, and an unscoped rule would retire most overrides at
+the instant they were recorded.
 
-The continuation that first carries a denial to the model is therefore out of
-reach by design, and this is the boundary of the feature rather than a gap in
-it. That continuation is checkpointed by the same transaction that projects the
-denied result, so at the instant its override inventory freezes no override for
-the denial can exist — the user has not yet been shown the denial to disagree
-with. The user overrides it, the model re-proposes on the following call, and
-that call's frozen inventory carries the override. The accepted cost is one
-extra round; the gain is that a prepared call's approval inputs are fixed at
-checkpoint and no concurrent command can race them.
+The continuation that first carries a denial to the model therefore never
+carries that denial's override. That continuation is checkpointed by the same
+transaction that projects the denied result, so at the instant its override
+inventory freezes no override for the denial can exist — the user has not yet
+been shown the denial to disagree with. The user overrides it, the model
+re-proposes on the following call, and that call's frozen inventory carries the
+override. The accepted cost is one extra round; the gain is that a prepared
+call's approval inputs are fixed at checkpoint and no concurrent command can
+race them.
 
 When the completing call proposes a command whose initial selection would park
 for the judge (`Delegated`) and an unconsumed recorded override matches the
@@ -365,9 +358,9 @@ permission default (`Auto`, `Confirm`, or `AlwaysConfirm`), optional approval
 posture (`Auto`, `Delegated`, or `Human`), and the stored two-class crash
 classification used by the implemented local attempt machinery.
 
-The runner foundation adds one immutable daemon-owned `RunnerToolDeclaration`
-per runner-advertisable name. It carries a required checked model-facing
-description and canonical JSON-object argument schema, the required three-way
+Each runner-advertisable name has one immutable daemon-owned
+`RunnerToolDeclaration`. It carries a required checked model-facing description
+and canonical JSON-object argument schema, the required three-way
 `RunnerToolEffectClass` (`Pure`, `Idempotent`, or `SideEffecting`), one nonempty
 `ToolAdmissibleLoci` value (`DaemonOnly`, `RunnerOnly { selector }`, or
 `DaemonOrRunner { selector }`), and the session capability its execution
@@ -379,18 +372,17 @@ therefore still has one authoritative definition for model advertisement and
 argument validation. The typed placement and runner-dispatch law is owned by
 [runner protocol and placement](runner-protocol.md).
 
-The current daemon-local application catalog remains one process-lifetime
-immutable compiled value. Its existing `EffectFree` declaration maps to
-`RunnerToolEffectClass::Pure`, and `ExternalEffect` maps to
-`RunnerToolEffectClass::SideEffecting`; no current local declaration can project
-`Idempotent`. Before a shared name can use a daemon locus, the application
-adapter validates exact model-facing description and schema, permission
-equality, and this effect mapping against the authoritative runner declaration;
-it also compiles the schema into the executable validator used before dispatch.
-A mismatch is unavailable, never a choice between two policies. The runner
-authority child stack persists the consolidated placement and policy snapshot.
-Catalog lookup and iteration remain ports rather than a static global, but
-runtime rebinding and deployment compatibility for outstanding requests are not
+The daemon-local application catalog is one process-lifetime immutable compiled
+value. Its `EffectFree` declaration maps to `RunnerToolEffectClass::Pure`, and
+`ExternalEffect` maps to `RunnerToolEffectClass::SideEffecting`; no local
+declaration can project `Idempotent`. Before a shared name can use a daemon
+locus, the application adapter validates exact model-facing description and
+schema, permission equality, and this effect mapping against the authoritative
+runner declaration; it also compiles the schema into the executable validator
+used before dispatch. A mismatch is unavailable, never a choice between two
+policies. The consolidated placement and policy snapshot is persisted. Catalog
+lookup and iteration remain ports rather than a static global, but runtime
+rebinding and deployment compatibility for outstanding requests are not
 implemented; they require the durable definition-revision decision recorded
 under Open edges.
 
@@ -430,23 +422,23 @@ mutation and Git families rather than one process-wide domain. One session takes
 exactly one such domain at a time: a retained set a request still holds is never
 released, so a second set is never composed beside one already mutating that
 session's tree. Sessions with no derived directory share the configured root's
-own composition, which is what every session bound before the derivation
-existed.
+own composition.
 
-The catalog stays one process-lifetime immutable compiled value across that
-change. Every declaration a workspace-root-bound family advertises — its name,
-description, schema, permission default, and effect class — is a property of the
-family's code rather than of the repository it binds. The one compiled value
-that is not is the local Git argument validator, which carries the pinned
-repository's object format. A session whose repository selects another format is
-therefore refused rather than validated against the configured root's width, and
-the refusal has two shapes because catalog preflight runs before any session
-executor is resolved. An argument carrying a full object identifier in the
-session's own format is refused at preflight as invalid arguments, since the one
-compiled validator admits only the format it was compiled with. Every other
-argument reaches composition, which rejects the disagreeing repository and
-closes the request as a known tool failure whose sanitized detail names the
-closed reason. Neither shape redirects the request to another session's root.
+The catalog stays one process-lifetime immutable compiled value across
+per-session root binding. Every declaration a workspace-root-bound family
+advertises — its name, description, schema, permission default, and effect class
+— is a property of the family's code rather than of the repository it binds. The
+one compiled value that is not is the local Git argument validator, which
+carries the pinned repository's object format. A session whose repository
+selects another format is therefore refused rather than validated against the
+configured root's width, and the refusal has two shapes because catalog
+preflight runs before any session executor is resolved. An argument carrying a
+full object identifier in the session's own format is refused at preflight as
+invalid arguments, since the one compiled validator admits only the format it
+was compiled with. Every other argument reaches composition, which rejects the
+disagreeing repository and closes the request as a known tool failure whose
+sanitized detail names the closed reason. Neither shape redirects the request to
+another session's root.
 
 Every advertised argument schema declares an object at its root and carries no
 root keyword outside that object declaration (INV-055). One request carries the
@@ -456,8 +448,7 @@ internally tagged argument type is therefore advertised as one object whose tag
 property holds the variant vocabulary and names what each variant requires,
 while its Rust type still decodes the tagged form unchanged; the advertised
 schema alone widens, and each family's own argument validation still refuses
-what the declaration excludes. The composed catalog is swept for this property
-offline.
+what the declaration excludes.
 
 The exact required inputs and fail-closed startup validation are owned by
 [configuration and credentials](configuration-and-credentials.md#daemon-tool-mapping-registry).
@@ -505,16 +496,15 @@ or removed after the request was recorded does not rewrite its name or
 arguments.
 
 Effect class controls crash classification, not permission identity. In the
-current daemon-local executor, a crash-lost prepared attempt, or an in-flight
-attempt declared `EffectFree`, closes `KnownFailed` and fails the current turn
-honestly; version one performs no automatic local retry. A crash-lost in-flight
-attempt declared `ExternalEffect` closes `Ambiguous`, ends the abandoned turn
-attempt `Lost`, and parks the turn in `AwaitingRecoveryDecision` naming that
-exact tool attempt (INV-025, INV-026, INV-034). Runner lease loss uses the
-separate re-lease law in
+daemon-local executor, a crash-lost prepared attempt, or an in-flight attempt
+declared `EffectFree`, closes `KnownFailed` and fails the current turn; version
+one performs no automatic local retry. A crash-lost in-flight attempt declared
+`ExternalEffect` closes `Ambiguous`, ends the abandoned turn attempt `Lost`, and
+parks the turn in `AwaitingRecoveryDecision` naming that exact tool attempt
+(INV-025, INV-026, INV-034). Runner lease loss uses the separate re-lease law in
 [runner protocol and placement](runner-protocol.md#effect-classes-and-runner-leases);
-re-leasing one fenced runner attempt is not the current local executor
-fabricating a new physical attempt.
+re-leasing one fenced runner attempt is not the local executor fabricating a new
+physical attempt.
 
 ## Serialized staged execution
 
@@ -582,17 +572,18 @@ commits the terminal typed failure as this attempt's result and leaves the
 admitted-set head and every existing admission untouched. Rolling both back
 would discard a completed executor result and strand the attempt `InFlight`,
 which contradicts the monotonic terminal transition required above and would
-wedge the serialized batch behind an attempt that can never close. The
+block the serialized batch behind an attempt that can never close. The
 distinction is that the executor work already happened outside any transaction;
 what this transaction decides is whether its evidence becomes an admission, and
-"no" is a result to record rather than a reason to forget the attempt. Replay of
-an already committed request returns the recorded receipt and admission link
-without appending either again; a conflicting receipt or link is corruption.
-That head lock's position in the repository-wide order and its mode belong to
-the [persistence lock protocol](persistence-protocol.md#lock-protocol), which
+a rejected admission is a recorded result, not grounds to roll back the attempt.
+Replay of an already committed request returns the recorded receipt and
+admission link without appending either again; a conflicting receipt or link is
+corruption. That head lock's position in the repository-wide order and its mode
+belong to the
+[persistence lock protocol](persistence-protocol.md#lock-protocol), which
 carries it in the same inventory as this transaction's scheduler lock; this page
 states that the lock is taken, never where or how. No present tool supplies this
-effect until an implementing child advances the owning workspace contract.
+effect.
 
 The runner durably spools a terminal evidence envelope until `result_recorded`.
 A process exit, timeout, supervisor loss, or channel loss after claim is not a
@@ -664,17 +655,17 @@ request and are visible to the next model round; they do not by themselves fail
 the turn. Physical ambiguity remains a turn-level recovery wait and does not
 become an ordinary error result.
 
-Because a resolved request is otherwise a conversation between the daemon and
-the model, admitting a `KnownFailed` observation also emits one operator
-telemetry event carrying the dispatched catalog name, the closed error kind, and
-the session and turn identities — never the bounded error detail, tool
-arguments, or any response content. Admission is the single site: it covers
-every executor behind the one dispatch trait and the failures admission itself
-substitutes for oversized or null-bearing results. Completed and ambiguous
-observations emit nothing here; ambiguity is carried by the recovery wait above.
-Preflight failures that never reach admission — unknown names and
-argument-decode failures — are likewise silent, being model-authored rather than
-deployment facts. Telemetry field discipline is
+Because a resolved request is otherwise visible only to the daemon and the
+model, admitting a `KnownFailed` observation also emits one operator telemetry
+event carrying the dispatched catalog name, the closed error kind, and the
+session and turn identities — never the bounded error detail, tool arguments, or
+any response content. Admission is the single site: it covers every executor
+behind the one dispatch trait and the failures admission itself substitutes for
+oversized or null-bearing results. Completed and ambiguous observations emit
+nothing here; ambiguity is carried by the recovery wait above. Preflight
+failures that never reach admission — unknown names and argument-decode failures
+— are likewise silent, being model-authored rather than deployment facts.
+Telemetry field discipline is
 [identity-and-commands](identity-and-commands.md#durable-command-telemetry-correlation)
 scope.
 
@@ -794,25 +785,25 @@ carries `ToolRoundLimitReached`. The terminal event consequently uses
 
 The round ceiling bounds latency and provider spend; it does not bound retained
 memory, because it multiplies against the 32-request batch bound and the 1 MiB
-argument and result bounds. Retained content is therefore bounded on its own
-terms: at most 256 MiB of projected frontier content may be rendered into one
-call's provider messages. The bound counts every kind of content the render
-clones, not tool evidence alone — request arguments, result text, error detail,
-and denial reasons, plus assistant text, context summaries, delegated task and
-peer-message content, delivered delegation-outcome content, origin and steering
-user content, and attested imported text. Assistant text carries no length bound
-of its own beyond the transport cap on a single response, so a ceiling counting
-only tool evidence would leave the same round multiplication unbounded through
-the entries it clones without counting. The bound is enforced once the frontier
-projection names its entries and before any of that content is cloned into
-messages — the projection reads the durable frontier by reference for exactly
-that reason — so an over-bound frontier is refused rather than materialized.
-Exceeding it closes the checkpoint through the same pre-send contract as round
-saturation, emitting a warning carrying the ceiling and the observed byte count
-and terminalizing as `tool_round_limit_reached` (INV-071). Because one maximal
-round retains at most 64 MiB of tool evidence, the ceiling admits four maximal
-rounds and leaves the round ceiling operative for the kilobyte-scale results
-executors return in practice.
+argument and result bounds. Retained content is therefore bounded separately: at
+most 256 MiB of projected frontier content may be rendered into one call's
+provider messages. The bound counts every kind of content the render clones, not
+tool evidence alone — request arguments, result text, error detail, and denial
+reasons, plus assistant text, context summaries, delegated task and peer-message
+content, delivered delegation-outcome content, origin and steering user content,
+and attested imported text. Assistant text carries no length bound of its own
+beyond the transport cap on a single response, so a ceiling counting only tool
+evidence would leave the same round multiplication unbounded through the entries
+it clones without counting. The bound is enforced once the frontier projection
+names its entries and before any of that content is cloned into messages — the
+projection reads the durable frontier by reference for exactly that reason — so
+an over-bound frontier is refused rather than materialized. Exceeding it closes
+the checkpoint through the same pre-send contract as round saturation, emitting
+a warning carrying the ceiling and the observed byte count and terminalizing as
+`tool_round_limit_reached` (INV-071). Because one maximal round retains at most
+64 MiB of tool evidence, the ceiling admits four maximal rounds and leaves the
+round ceiling operative for the kilobyte-scale results executors return in
+practice.
 
 These durable-content bounds avoid wall-clock policy and ensure one
 model-controlled response or chain cannot retain the progressing slot
@@ -836,9 +827,9 @@ logical dependency behind a terminal turn (INV-006).
 `closed_inadmissible` is never reclassified by any of these paths. It has a
 durable resolution and a typed reason before the interrupt or crash arrives, and
 because it deliberately has no attempt it would otherwise fall into the
-`ToolClosed` fallback and lose both — reporting a request that was refused on
-its own terms as one the turn ran out of time for. Its result entry is
-`ToolInadmissible` wherever these algorithms name a materialization.
+`ToolClosed` fallback and lose both, reporting a request refused before approval
+as one closed by turn end. Its result entry is `ToolInadmissible` wherever these
+algorithms name a materialization.
 
 ## Approval waits and restart
 
@@ -876,8 +867,7 @@ the current continuation attempt to disappear.
 
 ## Session-delegation tool family
 
-This section is the foundation proposal at the bottom of the delegation stack.
-The daemon catalog adds three automatic, daemon-local tools. Their invoking
+The daemon catalog contains three automatic, daemon-local tools. Their invoking
 session, turn, and request always come from trusted dispatch correlation and
 never from model arguments.
 
@@ -886,13 +876,13 @@ never from model arguments.
   and `on_parent_cancelled` actions (`keep_running`, `stop`, or `cancel`).
   **Committed unimplemented functionality.** No present tool or process
   execution surface creates the child; the daemon rejects execution until the
-  placement-owned creation transaction implements the decided parent-directory
-  default. That transaction must atomically create one delegated, no-ancestry
-  child and its initial task work, close the spawning physical attempt with its
-  matching receipt in that same transaction, then return the child session
-  identity as a durable completion. Equal physical replay must return that
-  child; a second child cannot attach to the request. Version one imposes no
-  fixed active-child-count limit; admission must check the complete locked
+  placement-owned creation transaction implements the parent-directory default.
+  That transaction must atomically create one delegated, no-ancestry child and
+  its initial task work, close the spawning physical attempt with its matching
+  receipt in that same transaction, then return the child session identity as a
+  durable completion. Equal physical replay must return that child; a second
+  child cannot attach to the request. Version one imposes no fixed
+  active-child-count limit; admission must check the complete locked
   relationship inventory for request and child uniqueness.
 
 - `await_session` takes the related child identity and `foreground` or
@@ -996,7 +986,7 @@ detail, denial selects `denied` and its reason, and terminal closure selects
 whose failures do not fit it maps into it rather than extending it, and may fix
 `D` to its own closed token vocabulary so the projection stays machine-readable.
 **Committed unimplemented functionality.** The instruction family is the one
-such mapping so far, fixed by
+such mapping, fixed by
 [workspace instructions](workspace-instructions.md#enumeration-preview-and-admission):
 its four execution-stage failures select `execution_failed` with `D` set to
 exactly one closed reason token and no other text, while its two pre-approval
@@ -1010,7 +1000,7 @@ exact provider-neutral JSON object `{"signalbox_invalid_arguments":true}`,
 allowing the paired typed error result to reach either provider without
 pretending the placeholder is durable evidence.
 
-The first compiled tool is `current_time`:
+`current_time` is a compiled tool:
 
 - optional argument `timezone` is an IANA time-zone name; absence selects `UTC`;
 - permission default is `Auto`;
@@ -1030,8 +1020,7 @@ known-failure evidence with detail
 use the focused `jiff` dependency; Signalbox owns only the port and result
 contract, not a time-zone database implementation.
 
-The same process-lifetime compiled catalog also declares the Tier 0 daemon
-tools:
+The same process-lifetime compiled catalog also declares these daemon tools:
 
 - `echo` requires exactly one `text` string and returns the same canonical
   compact `{"text": ...}` object. Its permission default is `Auto` and its
@@ -1424,8 +1413,7 @@ advertised catalog and executor is classified as a daemon defect.
 
 ## Persistence boundaries
 
-One migration removes `semantic_transcript_entry_tool_use_unavailable`, adds the
-three result-entry shapes, and introduces append-only `tool_request`,
+Persistence holds the three result-entry shapes and append-only `tool_request`,
 `tool_approval_decision`, and guarded `tool_attempt` tables. Deferred
 constraints assert complete call-response/request-entry batches, approval-wait
 evidence, result-entry materialization, and terminal closure. The session
@@ -1440,11 +1428,9 @@ typed record family, and `OverrideDeniedToolRequest` likewise; the recorded
 override row, its recording and consumption triggers, and the UNIQUE consumption
 column are owned by
 [persistence protocol](persistence-protocol.md#relational-representation).
-Adding the dangerous posture originally advanced each defaults-bearing command
-family to kind-scoped storage version 2; version-1 records reconstitute with
-`DangerousToolAutoApproval::Disabled`. Later system-prompt and template
-provenance migrations advance the affected families independently. The current
-kind-scoped versions and their compatibility gates are owned by
+Defaults-bearing command records at kind-scoped storage version 1 reconstitute
+with `DangerousToolAutoApproval::Disabled`. The current kind-scoped versions and
+their compatibility gates are owned by
 [identity and commands](identity-and-commands.md#durable-command-records) and
 [persistence protocol](persistence-protocol.md#relational-representation).
 Registry inspection validates the supported version set for the selected kind
