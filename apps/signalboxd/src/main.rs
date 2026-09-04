@@ -21,10 +21,10 @@ use std::{
 };
 
 use signalbox_application::{
-    ClassifyOperatorFailure, GoalAwareEligibilityPass, InProcessAttemptDispatchGate,
-    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
-    OperatorFailureClass, ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit,
-    SchedulerPassOccupancyBound, StaleActiveTurnBound, StartEligibleTurnService,
+    ClassifyOperatorFailure, EligibilityNudge, GoalAwareEligibilityPass,
+    InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
+    ModelCallCredentialReference, OperatorFailureClass, ReconciliationSweepInterval, SchedulerLoop,
+    SchedulerLoopExit, SchedulerPassOccupancyBound, StaleActiveTurnBound, StartEligibleTurnService,
     StartupScanService, TurnLivenessScanInterval, UuidV7StartEligibleTurnIdGenerator,
     UuidV7StartupScanIdGenerator,
 };
@@ -2290,7 +2290,11 @@ async fn run_hub(
     let convergence_target_admission =
         convergence_sweep_store.reconcile_configured_targets(&configured_convergence_targets);
     match await_while_guarded(&mut database, convergence_target_admission).await {
-        GuardedAwait::Completed(Ok(())) => {}
+        GuardedAwait::Completed(Ok(restored)) => {
+            for session in restored {
+                let _ = eligibility_nudge.nudge(session);
+            }
+        }
         GuardedAwait::Completed(Err(_)) => {
             let failure = erase_startup_cause(
                 RuntimePhase::StartupScan,

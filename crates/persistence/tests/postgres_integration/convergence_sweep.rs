@@ -108,6 +108,50 @@ async fn record_zero_delay_facts_failure(
     Ok(())
 }
 
+async fn park_commissioned_session(
+    pool: &sqlx::PgPool,
+    store: &PostgresConvergenceSweepStore,
+    repository: &RepositorySlug,
+    observation: &ConvergenceSweepObservation,
+    commission_id: u128,
+    decision_event_id: u128,
+    failure_event_id: u128,
+) -> Result<SessionId, Box<dyn Error>> {
+    let commissioned = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
+    let (dispatch, session) = dispatched(
+        commissioned
+            .commission(
+                prepared_commission(commission_id)?,
+                &mut UuidV7SubmitInputIdGenerator,
+                |_| None,
+            )
+            .await?,
+    );
+    store
+        .record_dispatch_decision(
+            Uuid::from_u128(decision_event_id),
+            repository,
+            pull_request(),
+            observation,
+            (dispatch, session),
+            ConvergenceSweepDecision::LiveSession,
+        )
+        .await?;
+    assert_eq!(
+        store
+            .record_no_model_activity_failure(
+                Uuid::from_u128(failure_event_id),
+                repository,
+                pull_request(),
+                observation,
+                session,
+            )
+            .await?,
+        ConvergenceSweepFailureDisposition::Parked
+    );
+    Ok(session)
+}
+
 /// Records one facts-fetch failure under the capped retry policy and returns
 /// the disposition the store chose for it.
 ///
@@ -959,6 +1003,36 @@ async fn configured_target_reenrollment_clears_a_durable_park() -> Result<(), Bo
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn target_reenrollment_restores_its_commissioned_session_park() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let store = PostgresConvergenceSweepStore::new(pool.clone());
+    let repository = repository()?;
+    let observation = observation()?;
+    let session = park_commissioned_session(
+        &pool,
+        &store,
+        &repository,
+        &observation,
+        0x89_260,
+        0x89_261,
+        0x89_262,
+    )
+    .await?;
+
+    let restored = store.reenroll_target(&repository, pull_request()).await?;
+    let lifecycle = SessionLifecycleRepository::new(pool)
+        .load(session)
+        .await?
+        .expect("the restored session retains its lifecycle row");
+
+    assert_eq!(restored, Some(session));
+    assert!(!lifecycle.state().is_parked());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn live_session_without_model_activity_is_parked() -> Result<(), Box<dyn Error>> {
     let (_container, pool, _database_url) = migrated_postgres().await?;
     let commissioned = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
@@ -1279,6 +1353,35 @@ async fn removed_targets_leave_the_parked_operator_view() -> Result<(), Box<dyn 
 
     assert_eq!(parked, 0);
     assert_eq!(retained_events, i64::from(RETRY_BUDGET));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn target_removal_restores_its_commissioned_session_park() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let store = PostgresConvergenceSweepStore::new(pool.clone());
+    let repository = repository()?;
+    let observation = observation()?;
+    let session = park_commissioned_session(
+        &pool,
+        &store,
+        &repository,
+        &observation,
+        0x89_263,
+        0x89_264,
+        0x89_265,
+    )
+    .await?;
+
+    let restored = store.reconcile_configured_targets(&[]).await?;
+    let lifecycle = SessionLifecycleRepository::new(pool)
+        .load(session)
+        .await?
+        .expect("the restored session retains its lifecycle row");
+
+    assert_eq!(restored, vec![session]);
+    assert!(!lifecycle.state().is_parked());
     Ok(())
 }
 

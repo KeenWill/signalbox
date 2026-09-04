@@ -21,8 +21,8 @@
 use std::{error::Error, fmt};
 
 use signalbox_domain::{
-    CoreAgency, DurableCommandId, FinishCondition, Goal, GoalState, LifecycleActor,
-    SessionClosureOutcome, SessionCreationCause, SessionFailureCause, SessionId,
+    CoreAgency, DispatchingModule, DurableCommandId, FinishCondition, Goal, GoalState,
+    LifecycleActor, SessionClosureOutcome, SessionCreationCause, SessionFailureCause, SessionId,
     SessionLifecycleState, SessionOwnership, SessionOwnershipTransition, SessionParkCause,
     SessionParkResponder, SessionTerminalOutcome, SessionWait, SessionWaitKind, StartGate,
     StopStickiness,
@@ -500,7 +500,45 @@ pub(crate) async fn resume_in_transaction(
     session: SessionId,
     actor: LifecycleActor,
 ) -> Result<SessionLifecycleState, SessionLifecycleRepositoryError> {
+    lift_park_in_transaction(connection, session, actor, false).await
+}
+
+/// Lifts a park owned by one module after that module's authority is cleared.
+pub(crate) async fn restore_module_park_in_transaction(
+    connection: &mut PgConnection,
+    session: SessionId,
+    module: DispatchingModule,
+) -> Result<bool, SessionLifecycleRepositoryError> {
     let held = load_locked(connection, session).await?;
+    if held.state
+        != (SessionLifecycleState::Parked {
+            cause: SessionParkCause::ModulePark,
+            responder: SessionParkResponder::Module { module },
+            standing: None,
+        })
+    {
+        return Ok(false);
+    }
+    lift_park_from_held(connection, held, LifecycleActor::Module { module }, true).await?;
+    Ok(true)
+}
+
+async fn lift_park_in_transaction(
+    connection: &mut PgConnection,
+    session: SessionId,
+    actor: LifecycleActor,
+    project_blocked_goal: bool,
+) -> Result<SessionLifecycleState, SessionLifecycleRepositoryError> {
+    let held = load_locked(connection, session).await?;
+    lift_park_from_held(connection, held, actor, project_blocked_goal).await
+}
+
+async fn lift_park_from_held(
+    connection: &mut PgConnection,
+    held: SessionLifecycleRecord,
+    actor: LifecycleActor,
+    project_blocked_goal: bool,
+) -> Result<SessionLifecycleState, SessionLifecycleRepositoryError> {
     if !held.state.is_parked() {
         return Err(SessionLifecycleRepositoryError::Rejected(
             SessionLifecycleRejection::TransitionNotAdmitted,
@@ -511,9 +549,10 @@ pub(crate) async fn resume_in_transaction(
             SessionLifecycleRejection::PendingTerminalConflict,
         ));
     }
-    if goal::load_goal_from_connection(connection, session)
-        .await?
-        .is_some_and(|goal| matches!(goal.current().state(), GoalState::Blocked { .. }))
+    if !project_blocked_goal
+        && goal::load_goal_from_connection(connection, held.session)
+            .await?
+            .is_some_and(|goal| matches!(goal.current().state(), GoalState::Blocked { .. }))
     {
         return Err(SessionLifecycleRepositoryError::Rejected(
             SessionLifecycleRejection::TransitionNotAdmitted,
@@ -537,7 +576,7 @@ pub(crate) async fn resume_in_transaction(
             ELSE NULL
         END",
     )
-    .bind(session_id_to_uuid(session))
+    .bind(session_id_to_uuid(held.session))
     .fetch_one(&mut *connection)
     .await?;
     let resumed = match admission_state.as_deref() {
@@ -554,12 +593,12 @@ pub(crate) async fn resume_in_transaction(
     }
     let (actor_kind, actor_module, _, _) = encode_actor(actor);
     sqlx::query("SELECT project_session_lifecycle($1, true, $2, $3)")
-        .bind(session_id_to_uuid(session))
+        .bind(session_id_to_uuid(held.session))
         .bind(actor_kind)
         .bind(actor_module)
         .execute(&mut *connection)
         .await?;
-    Ok(load_locked(connection, session).await?.state)
+    Ok(load_locked(connection, held.session).await?.state)
 }
 
 /// Commits a session to an outcome inside the caller's transaction.

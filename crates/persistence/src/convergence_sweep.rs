@@ -370,10 +370,12 @@ impl PostgresConvergenceSweepStore {
     }
 
     /// Reconciles durable operator-visible membership with configured targets.
+    ///
+    /// Returns sessions restored after their removed target stopped owning a park.
     pub async fn reconcile_configured_targets(
         &self,
         configured: &[(RepositorySlug, PullRequestNumber)],
-    ) -> Result<(), ConvergenceSweepStoreError> {
+    ) -> Result<Vec<SessionId>, ConvergenceSweepStoreError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query("UPDATE convergence_sweep_target SET enrolled = false")
             .execute(&mut *transaction)
@@ -381,18 +383,47 @@ impl PostgresConvergenceSweepStore {
         for (repository, pull_request) in configured {
             ensure_target(&mut transaction, repository, *pull_request).await?;
         }
+        let parked_sessions: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT DISTINCT parked_session_id
+               FROM convergence_sweep_target
+              WHERE NOT enrolled AND parked_session_id IS NOT NULL
+              ORDER BY parked_session_id",
+        )
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut restored = Vec::with_capacity(parked_sessions.len());
+        for parked_session in parked_sessions {
+            if restore_commissioned_dispatch_park(&mut transaction, parked_session).await? {
+                restored.push(SessionId::from_uuid(parked_session));
+            }
+        }
         transaction.commit().await?;
-        Ok(())
+        Ok(restored)
     }
 
     /// Re-enrolls one configured target, making daemon restart its explicit recovery path.
+    ///
+    /// Returns the session restored when re-enrollment clears a commissioned park.
     pub async fn reenroll_target(
         &self,
         repository: &RepositorySlug,
         pull_request: PullRequestNumber,
-    ) -> Result<(), ConvergenceSweepStoreError> {
+    ) -> Result<Option<SessionId>, ConvergenceSweepStoreError> {
         let mut transaction = self.pool.begin().await?;
         ensure_target(&mut transaction, repository, pull_request).await?;
+        let parked_session: Option<Uuid> = sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT parked_session_id
+               FROM convergence_sweep_target
+              WHERE repository = $1 AND pull_request_number = $2
+                AND state_kind = $3",
+        )
+        .bind(repository.as_str())
+        .bind(Decimal::from(pull_request.get()))
+        .bind(convergence_sweep_state_to_str(
+            ConvergenceSweepStateStorageKind::Parked,
+        ))
+        .fetch_one(&mut *transaction)
+        .await?;
         sqlx::query(
             "UPDATE convergence_sweep_target
                 SET state_kind = $3, failure_kind = NULL,
@@ -413,8 +444,15 @@ impl PostgresConvergenceSweepStore {
         ))
         .execute(&mut *transaction)
         .await?;
+        let restored = if let Some(parked_session) = parked_session {
+            restore_commissioned_dispatch_park(&mut transaction, parked_session)
+                .await?
+                .then_some(SessionId::from_uuid(parked_session))
+        } else {
+            None
+        };
         transaction.commit().await?;
-        Ok(())
+        Ok(restored)
     }
 
     /// Loads retry/park state and the latest globally commissioned session.
@@ -972,9 +1010,20 @@ impl PostgresConvergenceSweepStore {
             .bind(Decimal::from(pull_request.get()))
             .fetch_all(&mut *transaction)
             .await?;
+            let cohort_sessions = cohort_sessions
+                .into_iter()
+                .map(SessionId::from_uuid)
+                .collect::<Vec<_>>();
+            // Model-call preparation locks lifecycle before its activity fence.
+            // Take every lifecycle lock first so this path cannot invert that
+            // order while waiting on another cohort member.
+            for cohort_session in &cohort_sessions {
+                crate::session_lifecycle::load_locked(&mut transaction, *cohort_session)
+                    .await
+                    .map_err(|error| ConvergenceSweepStoreError::Lifecycle(Box::new(error)))?;
+            }
             for cohort_session in cohort_sessions {
-                lock_model_activity_fence(&mut transaction, SessionId::from_uuid(cohort_session))
-                    .await?;
+                lock_model_activity_fence(&mut transaction, cohort_session).await?;
             }
         }
         let budget: i16 = sqlx::query_scalar("SELECT convergence_sweep_retry_budget()")
@@ -1232,6 +1281,19 @@ pub(crate) async fn lock_model_activity_fence(
         .execute(connection)
         .await?;
     Ok(())
+}
+
+async fn restore_commissioned_dispatch_park(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    parked_session: Uuid,
+) -> Result<bool, ConvergenceSweepStoreError> {
+    crate::session_lifecycle::restore_module_park_in_transaction(
+        transaction,
+        SessionId::from_uuid(parked_session),
+        DispatchingModule::CommissionedDispatch,
+    )
+    .await
+    .map_err(|error| ConvergenceSweepStoreError::Lifecycle(Box::new(error)))
 }
 
 async fn ensure_target(
