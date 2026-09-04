@@ -4,6 +4,8 @@ This page is the normative boundary between a local client process and
 `signalboxd`; domain values, PostgreSQL records, and wire messages remain
 distinct representations.
 
+Multipart content arrays are proposed and not implemented.
+
 Signalbox admits one process-protocol version, integer `1`. Its closed
 vocabulary contains every request, response, event, and required field
 implemented in this tree. The version field is required on every frame and
@@ -20,8 +22,7 @@ protocol changes modify version `1` in place.
 
 Invariants are defined in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
-[persistence-protocol](persistence-protocol.md). Runner-bearing process shapes
-marked proposed below are unimplemented.
+[persistence-protocol](persistence-protocol.md).
 
 ## Transport and trust boundary
 
