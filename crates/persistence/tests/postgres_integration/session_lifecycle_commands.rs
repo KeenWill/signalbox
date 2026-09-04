@@ -760,6 +760,164 @@ async fn a_deferred_lifecycle_stop_materializes_its_descendant_cascade()
     Ok(())
 }
 
+/// A synthetic closure interrupt owns the descendant cascade it materializes;
+/// deferred lifecycle settlement recognizes that proof instead of rebuilding
+/// the same bound-child terminal frontier under the lifecycle command.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_interrupt_settled_stop_does_not_rematerialize_its_descendant_cascade()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x12fe_2000;
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 1));
+    let child = SessionId::from_uuid(Uuid::from_u128(seed + 2));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(
+            seed + 3,
+            seed + 2,
+            ModelSelectionRequest::Direct(selection),
+        ))
+        .await?;
+    let child_turn = queue_turn(&pool, child, seed + 0x100, 1).await?;
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET origin_kind = 'delegation', origin_accepted_input_id = NULL
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(child.into_uuid())
+    .bind(child_turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let (parent, spawning_request) =
+        attach_delegation_relationship_fixture(&pool, child, child_turn, selection, seed + 0x200)
+            .await?;
+    sqlx::query(
+        "ALTER TABLE session_delegation
+         DISABLE TRIGGER session_delegation_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE session_delegation
+            SET policy_kind = 'bound',
+                on_parent_stopped = 'stop',
+                on_parent_cancelled = 'cancel'
+          WHERE spawning_tool_request_id = $1",
+    )
+    .bind(spawning_request.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_delegation
+         ENABLE TRIGGER session_delegation_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    let live = queue_turn(&pool, parent, seed, 1).await?;
+    activate_turn(&pool, parent, seed).await?;
+    let stop = lifecycle_command(
+        seed,
+        1,
+        parent,
+        SessionLifecycleOperation::Stop {
+            sticky: StopStickiness::Sticky,
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+        },
+    );
+    let committed = recorded(&pool, stop).await?;
+    let interrupt_command = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x300));
+    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 0x301));
+
+    let interrupted = SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates_alias_resolver_as(
+            SubmitInput::new_core_interrupt(
+                interrupt_command,
+                parent,
+                UserContent::try_text(String::from("settle the descendant-scoped closure"))
+                    .expect("fixture content is admitted"),
+                live,
+                DescendantTerminationScope::ParentAndDescendants,
+                input_choices(1, ModelSelectionOverride::UseSessionDefault),
+            ),
+            CommandPrincipal::Core,
+            ParentTerminationKind::Stopped,
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x302)),
+            Some(successor),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x303)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x304)),
+            ),
+            |_| successor,
+            |_| {
+                (
+                    Vec::new(),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x305)),
+                )
+            },
+            || panic!("the fixture has no approval wait"),
+            || panic!("the fixture has no approval wait"),
+            |_| None,
+        )
+        .await?;
+
+    assert_eq!(
+        committed,
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::ClosurePending {
+            outcome: SessionTerminalOutcome::Stopped {
+                sticky: StopStickiness::Sticky,
+            },
+            live_turn: live,
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
+        })
+    );
+    assert!(matches!(
+        interrupted,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
+    ));
+    let cascades: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT root_command_id, root_source_kind
+           FROM session_delegation_termination_cascade
+          WHERE root_session_id = $1 AND termination_kind = 'stopped'",
+    )
+    .bind(parent.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        cascades,
+        vec![(interrupt_command.into_uuid(), String::from("turn_command"))]
+    );
+    let logical_terminal_root: Uuid = sqlx::query_scalar(
+        "SELECT root_command_id FROM session_delegation_logical_terminal
+          WHERE spawning_tool_request_id = $1",
+    )
+    .bind(spawning_request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(logical_terminal_root, interrupt_command.into_uuid());
+    let settled = SessionLifecycleRepository::new(pool.clone())
+        .load(parent)
+        .await?
+        .expect("the parent keeps its lifecycle row");
+    assert_eq!(
+        settled.state(),
+        SessionLifecycleState::Terminal {
+            outcome: SessionTerminalOutcome::Stopped {
+                sticky: StopStickiness::Sticky,
+            },
+        }
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// The typed command record admits only the effect its operation can produce.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]

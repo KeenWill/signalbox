@@ -684,6 +684,9 @@ async fn flip_ownership_in_transaction(
         .bind(transition.ownership().is_owned())
         .execute(&mut *connection)
         .await?;
+    if transition == SessionOwnershipTransition::Released {
+        crate::goal_turn::retire_ineligible_queued_goal_turn(connection, session).await?;
+    }
     journal_ownership(connection, session, transition, actor).await?;
     Ok(())
 }

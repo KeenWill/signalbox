@@ -2265,7 +2265,16 @@ BEGIN
        AND command.applied_effect_kind = 'closure_pending'
      ORDER BY durable.claimed_at, command.command_id
      LIMIT 1;
-    IF cascade_command IS NOT NULL THEN
+    IF cascade_command IS NOT NULL AND NOT EXISTS (
+        SELECT 1
+          FROM session_delegation_termination_cascade AS cascade
+          JOIN session_lifecycle_command AS command
+            ON command.command_id = cascade_command
+         WHERE cascade.root_session_id = subject
+           AND cascade.root_source_kind = 'turn_command'
+           AND cascade.root_turn_id = command.live_turn_id
+           AND cascade.termination_kind = 'stopped'
+    ) THEN
         PERFORM materialize_session_delegation_termination_cascade(
             cascade_command, 'stopped'
         );

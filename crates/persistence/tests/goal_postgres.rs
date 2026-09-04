@@ -870,6 +870,74 @@ async fn a_released_session_does_not_continue_its_completed_goal_turn() -> Resul
     Ok(())
 }
 
+/// A release serialized after goal reconciliation retires the successor that
+/// was already queued, so unmonitored goal work cannot later activate.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn release_retires_an_already_queued_goal_successor() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let attached = turn_candidates(0xb5a);
+    let successor = turn_candidates(0xb5b);
+    completed_goal_with_successor(&pool, attached, successor).await?;
+    let queued: String = sqlx::query_scalar(
+        "SELECT state_kind FROM turn_lifecycle WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind(successor.turn().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(queued, "queued");
+
+    assert_eq!(
+        SessionLifecycleCommandRepository::new(pool.clone())
+            .handle(
+                SessionLifecycleCommand::new(
+                    command(0x95a),
+                    session(SESSION),
+                    SessionLifecycleOperation::Release,
+                ),
+                CommandPrincipal::Operator,
+            )
+            .await?,
+        SessionLifecycleCommandHandlingOutcome::Recorded(SessionLifecycleCommandResult::Applied(
+            SessionLifecycleApplication::OwnershipChanged
+        ))
+    );
+
+    let retired: (String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind, terminal_cause_kind
+           FROM turn_lifecycle WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind(successor.turn().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        retired,
+        (
+            String::from("terminal"),
+            Some(String::from("retired")),
+            Some(String::from("goal_turn_ineligible")),
+        )
+    );
+    let retired_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM turn_terminal_outbox_event
+          WHERE session_id = $1 AND turn_id = $2 AND disposition_kind = 'retired'",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind(successor.turn().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(retired_events, 1);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 async fn mark_completed_goal_turn_failed(
     pool: &PgPool,
     turn: TurnId,
