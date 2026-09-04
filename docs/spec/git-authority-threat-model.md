@@ -134,7 +134,7 @@ different authority:
    them to decide a binding.
 3. **Session-facing minting is future work.** A session cannot mint a workspace
    or a destination. If it is ever admitted it will be a posture-gated tool
-   under [tool safety](../open-questions.md#tool-safety), decided separately.
+   under [tool safety](../open-questions.md#tool-safety).
 
 Retiring a destination is a new durable fact rather than an edit, because the
 minting tables are append-only. A withdrawal retires exactly one mint and frees
@@ -162,8 +162,8 @@ transaction.
   not partially trusted. Nonempty shallow state and non-UTF-8 reference names
   reject because the current private repository and typed string surface cannot
   preserve their semantics. Linked worktrees, repository discovery, alternate
-  object databases, replacement-object configuration, and other rejected
-  extension surfaces require a separate user-approved contract before support.
+  object databases, replacement-object configuration, and other extension
+  surfaces are rejected.
 - Remote authentication, transport security, server-side authorization, and
   remote repository behavior are not properties of the local authority. Egress
   is separately constrained to a minted remote, and push requires
