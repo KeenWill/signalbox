@@ -1,8 +1,8 @@
 # Pull-request convergence reconciliation
 
-The daemon-native convergence sweep, predicate, fenced commission, durable retry
-and park records, and explicit configuration throttle are its implementation
-scope.
+This page owns the daemon-native convergence sweep, its convergence predicate,
+fenced commission, durable retry and park records, and the configuration
+throttle.
 
 ## Authority and target selection
 
@@ -11,7 +11,7 @@ scope.
 commissions work; it never merges a pull request, replies to or resolves a
 review thread, or mutates Git. Repository watch continues to own event-driven
 dispatch. This periodic pass supplies the missing liveness source for watched
-pull requests whose relevant provider state has gone quiet.
+pull requests for which relevant provider events have stopped arriving.
 
 The sweep is opt-in twice: `[repository_watch.convergence_sweep]` supplies one
 review-response session template and timing policy, and each watched repository
@@ -23,8 +23,9 @@ pull requests may be enrolled in one daemon configuration.
 The interval and per-pull-request dispatch cool-off are positive whole seconds.
 Configuration can lower, never raise, their hard ceilings of 300 seconds and
 1,800 seconds respectively. Five minutes bounds the period for rediscovering
-quiet work while avoiding provider churn; thirty minutes gives a commissioned
-session time to make durable progress before another dispatch attempt.
+unconverged work while limiting provider request volume; thirty minutes gives a
+commissioned session time to make durable progress before another dispatch
+attempt.
 
 ## Census and convergence
 
@@ -77,9 +78,9 @@ consecutive-failure lineage. Automatic retry uses exponential delays from a
 the target and exposes an operator need through
 `convergence_sweep_parked_target`; a successful observation resets a transient
 lineage. A storage outage that also prevents the failure record is logged and
-retried at the next census because no system can durably record through an
-unavailable durable authority. The target row is a mutable scheduler projection,
-while its event rows are append-only audit facts.
+retried at the next census because the failure record cannot be written while
+storage is unavailable. The target row is a mutable scheduler projection, while
+its event rows are append-only audit facts.
 
 A live commissioned session suppresses another commission. Once the latest
 commissioned session's cool-off has elapsed, repeated sweeps with unchanged head
@@ -94,5 +95,5 @@ events rather than silently re-entering the queue.
 
 - Porting this deliberately shallow daemon loop to the program substrate is a
   follow-on; the current module creates no reusable program primitive.
-- Richer prioritization and scheduling are deferred. Fleet-wide projections
-  belong to issue #992; the present operator surface is the parked-target view.
+- Richer prioritization and scheduling are deferred. Fleet-wide projections are
+  deferred; the present operator surface is the parked-target view.
