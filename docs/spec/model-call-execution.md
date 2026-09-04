@@ -775,13 +775,14 @@ remains absent. When implemented, it carries the complete nonempty evidence list
 in policy-member order, including exclusion generation or predecessor
 correlation and optional reset, without changing the typed domain cause above.
 
-When implemented, every pool-selected `Prepared` call pins the selecting
-immutable pool-policy identity as an insert-only authorization fact beside its
-credential reference, reconstitution requires that policy to contain the pinned
-profile with the expected target adapter and delivery kind, and every
-observation-derived trigger action reloads this call-pinned revision, so an
-explicit session credential update that commits while the provider interaction
-is in flight cannot change the action applied to its result.
+Every pool-selected `Prepared` call pins the selecting immutable pool-policy
+identity as an insert-only authorization fact beside its credential reference,
+and every observation-derived trigger action reloads this call-pinned revision,
+so an explicit session credential update that commits while the provider
+interaction is in flight cannot change the action applied to its result. The
+reconstitution check that the pinned policy contains the pinned profile with the
+expected target adapter and delivery kind is committed unimplemented
+functionality: the durable policy carries no adapter or delivery-kind fields.
 
 Each successor durably records the predecessor call it follows and the cause
 that authorized it, so a chain is recorded as evidence rather than as two calls
