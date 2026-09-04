@@ -1,24 +1,19 @@
 # Blob storage
 
-This page is a foundation proposal. Its implemented-behavior statements take
-effect with the full stack. A paragraph that names itself unimplemented is
-committed unimplemented functionality and carries only its stated compatibility
-constraint.
-
-It owns one thing: how Signalbox stores, identifies, references, and reads
-immutable binary content — blob identity, the durable replica catalog, store
-configuration and routing, the ingest and read lifecycle, the blob wire
-vocabulary, multipart user content with attachment parts, and what a model is
-shown when accepted content carries an attachment. The session aggregate and
-transcript projections are owned by
-[sessions-and-transcript](sessions-and-transcript.md); command payload storage
-and replay equality by [identity-and-commands](identity-and-commands.md); the
-relational baseline and migration discipline by
-[persistence-protocol](persistence-protocol.md); framing and the client request
-vocabulary by [process-protocol](process-protocol.md); the Layer-1 runtime
-boundary by [runtime-substrate](runtime-substrate.md); model-call preparation
-and authorization by [model-call-execution](model-call-execution.md); the
-configuration catalog and credential delivery by
+This page owns how Signalbox stores, identifies, references, and reads immutable
+binary content — blob identity, the durable replica catalog, store configuration
+and routing, the ingest and read lifecycle, the blob wire vocabulary, multipart
+user content with attachment parts, and what a model is shown when accepted
+content carries an attachment. The session aggregate and transcript projections
+are owned by [sessions-and-transcript](sessions-and-transcript.md); command
+payload storage and replay equality by
+[identity-and-commands](identity-and-commands.md); the relational baseline and
+migration discipline by [persistence-protocol](persistence-protocol.md); framing
+and the client request vocabulary by [process-protocol](process-protocol.md);
+the Layer-1 runtime boundary by [runtime-substrate](runtime-substrate.md);
+model-call preparation and authorization by
+[model-call-execution](model-call-execution.md); the configuration catalog and
+credential delivery by
 [configuration-and-credentials](configuration-and-credentials.md); imported
 source records by [conversation-import](conversation-import.md); tool result
 authority by [tool-loop](tool-loop.md).
@@ -27,10 +22,11 @@ authority by [tool-loop](tool-loop.md).
 
 A blob is an immutable, nonempty byte sequence identified by the SHA-256 of
 exactly those bytes. The domain value is a 32-byte digest newtype in the shape
-of the existing digest family (`ImportedRawRecordHash` and kin); the external
-spelling is `sha256:` followed by 64 lowercase hexadecimal characters. Why: the
-tag lives in the spelling, where format evolution actually happens, while the
-domain algebra stays as small as every other digest the repository carries.
+of the existing digest family (`ImportedRawRecordHash` and the other digest
+newtypes); the external spelling is `sha256:` followed by 64 lowercase
+hexadecimal characters. Why: the tag lives in the spelling, where format
+evolution happens, while the domain algebra stays as small as every other digest
+the repository carries.
 
 The digest covers raw bytes only. Filename, declared media type, purpose,
 producing session, and storage placement are properties of a use of the blob —
@@ -52,8 +48,8 @@ live. A `blob` row records the digest, its byte length, and creation time; a
 `blob_replica` row records that one named store durably holds one verified
 object for that digest under one recorded object key, and is inserted only after
 that store's publication has been verified. Deleting a blob row that a replica
-references is rejected, and no surface in this stack deletes either row: the
-catalog is append-only.
+references is rejected, and no present surface deletes either row: the catalog
+is append-only.
 
 The blob digest is the `blob` primary key. A `blob_store_binding` row records
 one store name and its deployment-supplied canonical UUID `namespace_id`; both
@@ -83,7 +79,7 @@ store's key layout can evolve without reinterpreting history.
 
 ## Stores, routing, and configuration
 
-The daemon configuration catalog gains an optional `[blob_storage]` table. Its
+The daemon configuration catalog has an optional `[blob_storage]` table. Its
 absence preserves startup compatibility only while the blob catalog is empty;
 blob and conversation-import operations are then unavailable rather than
 inventing a storage location. Once the catalog is nonempty, omission is a
@@ -198,10 +194,10 @@ frame payloads. The closed routing-class vocabulary gains one `program_journal`
 class for over-threshold journal payloads written by the
 [program substrate](program-substrate.md)'s host: derived by the daemon from the
 writing surface exactly as every class is, never operation-selected, and added
-to the routes table's required set when the substrate lands. This constrains
-present change: the class vocabulary and route-validation surface must stay
-extensible to that addition without loosening the closed-set rejection of
-unknown classes.
+to the routes table's required set when that substrate is implemented. The
+compatibility constraint is that the class vocabulary and route-validation
+surface must stay extensible to that addition without loosening the closed-set
+rejection of unknown classes.
 
 Blobs are large: the substrate supports multi-gigabyte objects, so every daemon
 path — ingest, verification, replica copy, read — streams and none materializes
@@ -301,7 +297,7 @@ then records `blob` and `blob_replica` rows in one PostgreSQL transaction. No
 database transaction is ever open across store input/output. A crash between
 publication and registration leaves an unregistered orphan object. That failure
 is catalog-safe — it never creates a dangling reference — but it is not
-capacity-free: no surface in this stack inventories or removes the orphan, and
+capacity-free: no present surface inventories or removes the orphan, and
 retention and garbage collection remain outside this contract. Re-ingest
 rediscovers the object; an acknowledged reference always has verified durable
 bytes behind it. Because the key is the digest, retrying an ambiguous store
@@ -376,8 +372,7 @@ URL, exact response media type, and canonical-decimal byte length. The browser
 selects renderers from the kind; it never derives a capability from the media
 type. **Committed unimplemented functionality.** Present transcript DTOs do not
 yet carry blob descriptors or URLs. Their compatibility constraint is that the
-future transcript projection carries descriptors and URLs, never embedded bytes,
-in accordance with the [web campaign laws](../agents/web-campaign.md).
+future transcript projection carries descriptors and URLs, never embedded bytes.
 
 Every descriptor carries metadata and an ordinary-download view. The download
 response uses `attachment` disposition and keeps caller filename bytes in an RFC
@@ -434,10 +429,10 @@ catalog registration precede the derivation append.
 
 ## Multipart user content
 
-`UserContent` becomes an ordered, nonempty sequence of parts, each either exact
-text (the existing checked text value) or an attachment: a blob digest plus a
-closed attachment kind (`image`, `document`, `file`), a declared media type, and
-an optional bounded display filename admitted as a basename and redacted in logs
+`UserContent` is an ordered, nonempty sequence of parts, each either exact text
+(the existing checked text value) or an attachment: a blob digest plus a closed
+attachment kind (`image`, `document`, `file`), a declared media type, and an
+optional bounded display filename admitted as a basename and redacted in logs
 like other content-bearing values. Construction admits at most 256 parts,
 rejects adjacent text parts, bounds the aggregate UTF-8 bytes of all text parts
 at 1,048,576, bounds each declared media type at 255 visible ASCII bytes, and
@@ -470,10 +465,8 @@ payload and terminal rejection with no accepted-input effect. Equal replay
 returns that rejection and corrected content uses a new command identity.
 Command and accepted-input rows carry mirrored ordered content-part satellites
 under the existing command/effect correlation discipline, and the wire
-`submit_input`, `reconcile_turn`, and `stop_turn` content fields all become the
-same ordered parts array. The process protocol's version-one in-place editing
-window is why this lands as the canonical shape rather than a compatibility
-variant beside the string form.
+`submit_input`, `reconcile_turn`, and `stop_turn` content fields all carry the
+same ordered parts array.
 
 An input and prospective rendered frontier containing no attachment digest have
 both attachment sums equal to zero and bypass blob configuration, catalog, and
@@ -519,10 +512,10 @@ window, and silently replaying large media into every subsequent call converts
 one upload into an unbounded per-turn cost.
 
 Models reach attachment content the same way they reach every other effect:
-through tools, explicitly, within declared bounds. This stack ships a
-daemon-registered blob-read tool family over the catalog. `blob_metadata`
-accepts exactly `{ digest }` and returns text containing compact JSON with
-`digest`, canonical-decimal-string `byte_length`, and canonical-decimal-string
+through tools, explicitly, within declared bounds. The daemon registers a
+blob-read tool family over the catalog. `blob_metadata` accepts exactly
+`{ digest }` and returns text containing compact JSON with `digest`,
+canonical-decimal-string `byte_length`, and canonical-decimal-string
 `replica_count`. `blob_read` accepts exactly
 `{ digest, offset_bytes, length_bytes }`, with both numeric values expressed as
 canonical decimal-u64 strings, and returns text containing compact JSON with
@@ -540,17 +533,16 @@ rendered frontier; a catalogued digest outside that set is unauthorized. Results
 use the existing text-only tool-result arm and never enter a provider message as
 image or document media.
 
-The provider-neutral reader model, stable typed-read contracts, and decided
-processor boundary are owned by
-[file and media interpretation](file-and-media.md). Attachment stubs and the
-generic read family remain the visibility and unknown-format substrate for that
-layer.
+The provider-neutral reader model, stable typed-read contracts, and processor
+boundary are owned by [file and media interpretation](file-and-media.md).
+Attachment stubs and the generic read family remain the visibility and
+unknown-format substrate for that layer.
 
 The image derivative worker above is the first content-interpreting processor.
 Every future content-interpreting reader likewise executes inside strong process
 isolation and treats input validation as defense in depth. Why: parser hardening
-is an unending surface — a malicious payload exploiting a decoder defect must be
-contained by isolation rather than entrusted to an ever-growing validator.
+is never complete — a malicious payload exploiting a decoder defect must be
+contained by isolation rather than by validation alone.
 
 ## Model-call preparation and modalities
 
@@ -588,27 +580,25 @@ The model and serving-target modality grammar, defaults, effective selection,
 and client projection are owned by
 [configuration and credentials](configuration-and-credentials.md#the-static-model-alias-and-web-fetch-catalog).
 The attachment-specific compatibility constraint is that version-one rendered
-messages in this stack carry only text, attachment stubs, and text-only
-blob-read results; no present surface materializes attachment bytes into a
-prepared call.
+messages carry only text, attachment stubs, and text-only blob-read results; no
+present surface materializes attachment bytes into a prepared call.
 
 Modality-unsupported preparation failure is committed unimplemented
 functionality: no present surface can trigger it because the current request
 contains only text, attachment stubs, and text-only blob-read results. The
 compatibility constraint is that a future typed media result fails preparation
 before durable authorization when its target lacks that modality; media must
-never be silently dropped. Rich image/file result arms and their carrier remain
-outside this stack. Missing and corrupt attachment failures are implemented by
-the preceding verification boundary and are not deferred with media carriers.
+never be silently dropped. No present surface provides rich image/file result
+arms or their carrier. Missing and corrupt attachment failures are implemented
+by the preceding verification boundary.
 
 ## Import convergence
 
-Imported raw source records are the substrate's proof producer: their existing
-global SHA-256 deduplication converges onto the blob catalog, with the import
-satellite's content hash becoming an ordinary blob reference and the stored
-bytes living in a routed store rather than a relational column. Import semantics
-— record identity, conversion digests, snapshot immutability — are unchanged and
-remain owned by [conversation-import](conversation-import.md).
+Imported raw source records' global SHA-256 deduplication converges onto the
+blob catalog: the import satellite's content hash is an ordinary blob reference
+and the stored bytes live in a routed store rather than a relational column.
+Import semantics — record identity, conversion digests, snapshot immutability —
+are owned by [conversation-import](conversation-import.md).
 
 The one-time storage-layer SQL migration produces the final blob-reference-only
 `imported_raw_source_record` schema. Runtime code accepts only that shape, and
