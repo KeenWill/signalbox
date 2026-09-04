@@ -9,9 +9,9 @@ throttle.
 **Implemented behavior.** Convergence reconciliation is an independent
 `signalboxd` module composed beside repository watch. It observes GitHub and
 commissions work; it never merges a pull request, replies to or resolves a
-review thread, or mutates Git. Repository watch continues to own event-driven
-dispatch. This periodic pass supplies the missing liveness source for watched
-pull requests for which relevant provider events have stopped arriving.
+review thread, or mutates Git. Repository watch owns event-driven dispatch. This
+periodic pass supplies the missing liveness source for watched pull requests for
+which relevant provider events have stopped arriving.
 
 The sweep is opt-in twice: `[repository_watch.convergence_sweep]` supplies one
 review-response session template and timing policy, and each watched repository
@@ -94,6 +94,6 @@ events rather than silently re-entering the queue.
 ## Open edges
 
 - Porting this deliberately shallow daemon loop to the program substrate is a
-  follow-on; the current module creates no reusable program primitive.
+  follow-on; the module creates no reusable program primitive.
 - Richer prioritization and scheduling are deferred. Fleet-wide projections are
-  deferred; the present operator surface is the parked-target view.
+  deferred; the operator surface is the parked-target view.
