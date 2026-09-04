@@ -1,5 +1,8 @@
 # Configuration and credentials
 
+The blob catalog and input-modality grammar below are proposed and not
+implemented.
+
 This page describes the implemented configuration and credential behavior of
 Signalbox. This includes signalboxd configuration loading in
 `apps/signalboxd/src/configuration.rs` and `apps/signalboxd/src/main.rs`, the
