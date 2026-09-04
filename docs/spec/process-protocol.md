@@ -4,8 +4,6 @@ This page is the normative boundary between a local client process and
 `signalboxd`; domain values, PostgreSQL records, and wire messages remain
 distinct representations.
 
-Multipart content arrays remain a foundation proposal.
-
 Signalbox admits one process-protocol version, integer `1`. Its closed
 vocabulary contains every request, response, event, and required field
 implemented in this tree. The version field remains required on every frame and
@@ -23,7 +21,7 @@ protocol changes modify version `1` in place.
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
 [persistence-protocol](persistence-protocol.md). Runner-bearing process shapes
-are a foundation proposal at the bottom of their implementation stack.
+marked proposed below are unimplemented.
 
 ## Transport and trust boundary
 
@@ -126,14 +124,14 @@ is at most the larger of `max_blob_bytes` and
 filesystem publication, its store-local temporary file may coexist with the
 completed staging spool, so the maximum transient blob disk footprint is twice
 `max_blob_bytes` plus one bounded inbound chunk; each file is independently
-limited to `max_blob_bytes`. Import commit runs the existing whole-source
-conversion on the blocking pool so synchronous conversion does not occupy an
-asynchronous runtime worker. Commit, abort, terminal size or conversion
-rejection, or disconnect drops the assembly and releases the permit before
-response output. An `already_in_progress` refusal is nonterminal and leaves the
-existing assembly available for append, commit, or explicit abort. A peer that
-stops reading a terminal response therefore cannot retain rejected input or
-completed import content.
+limited to `max_blob_bytes`. Import commit runs the whole-source conversion on
+the blocking pool so synchronous conversion does not occupy an asynchronous
+runtime worker. Commit, abort, terminal size or conversion rejection, or
+disconnect drops the assembly and releases the permit before response output. An
+`already_in_progress` refusal is nonterminal and leaves the existing assembly
+available for append, commit, or explicit abort. A peer that stops reading a
+terminal response therefore cannot retain rejected input or completed import
+content.
 
 An admitted chunked conversation import or blob upload has a five-minute
 monotonic inactivity deadline while awaiting its next append, commit, or abort
@@ -339,7 +337,7 @@ bytes.
 **Committed unimplemented functionality.** No present process request, server
 message, application command, or repository operation supplies this
 administrative surface; the implemented request inventory above remains closed
-and rejects it. The implementing stack must add an authorized
+and rejects it. That surface must be an authorized
 `list_credential_exclusions { page_size, after }` read and one
 `clear_credential_exclusion` mutation carrying a user-global `command_id` and
 one closed `target` object:
@@ -367,15 +365,12 @@ observable even while another pool member remains usable. The filter is the
 mutation's own, stated once below and turning on the exclusion's **origin**: it
 omits exactly the delivery-origin quarantines that cannot be cleared and lists
 every other record, including every throttling exclusion attached to an `oauth`
-profile. Filtering by delivery instead would hide a rate-limited `oauth`
-member's record while the mutation stood ready to clear it, leaving an operator
-unable to construct a request the daemon would have accepted — the read and the
-mutation must not disagree about what is clearable. `page_size` is a canonical
-decimal string from 1 through 100. `after` is either null or one complete target
-object and is an exclusive keyset cursor. Results sort first by the closed
-target tags in the order above, then by each tagged target field's owned
-canonical order — UTF-8 bytes for configured names, UUID bytes for durable
-identities, and unsigned numeric order for generations.
+profile. The read and the mutation must not disagree about what is clearable.
+`page_size` is a canonical decimal string from 1 through 100. `after` is either
+null or one complete target object and is an exclusive keyset cursor. Results
+sort first by the closed target tags in the order above, then by each tagged
+target field's owned canonical order — UTF-8 bytes for configured names, UUID
+bytes for durable identities, and unsigned numeric order for generations.
 `credential_exclusion_page { exclusions, next_after }` returns no more than the
 requested count and uses null `next_after` only at the end. Clearing or creating
 an exclusion between page requests may change a traversal, so an operator
@@ -386,16 +381,14 @@ Both operations are authorized exactly as every other request on this transport
 is: reaching the owner-private socket is the authority. The process protocol has
 no authentication or authorization exchange, and socket filesystem access is the
 deployment boundary, so a connected client may enumerate and clear credential
-exclusions. Saying so explicitly is the point — an implementer must not read
-these operations as gated by an authority no contract defines, and a deployment
-must not read them as safer than the socket. No response code is reserved for a
+exclusions. These operations must not be treated as gated by an authority no
+contract defines or as safer than the socket. No response code is reserved for a
 future authorization failure: client identity, authentication, authorization,
 and revocation are undecided
 ([open questions](../open-questions.md#identity-credentials-and-resource-governance)),
-and preallocating one error's semantics would constrain that decision toward a
-trust boundary nobody has chosen. The slice that introduces an authorizing
-principal introduces its own denial response and its own existence-hiding rule
-with it.
+and preallocating one error's semantics would constrain that decision. An
+authorizing principal, when introduced, carries its own denial response and its
+own existence-hiding rule.
 
 Every identity is a nonempty bounded configuration or durable identity already
 owned by the credential contract. `pool_policy_id` is the canonical lowercase,
@@ -435,13 +428,13 @@ that does exactly that. A `codex_home` identity walk that failed instead
 the store is external, an operator repairs it outside the daemon, and rejecting
 the clear would leave that quarantine with no transition out at all — the
 profile is no longer selected, so no preparation reruns the walk that would
-clear it. Accepting the clear costs nothing, because the walk runs at every
-preparation and re-quarantines immediately if the home is still broken; the
-operator's clear asserts only that it is worth walking again. The rejection
-therefore turns on the quarantine's origin and never on the profile's delivery.
-Rejecting by delivery would conflate the two and leave a rate-limited `oauth`
-member with no clearing path at all where its adapter offers no zero-cost probe,
-which is the one case the operator command exists for.
+clear it. Accepting the clear is safe because the walk runs at every preparation
+and re-quarantines immediately if the home is still broken; the operator's clear
+asserts only that the walk should run again. The rejection therefore turns on
+the quarantine's origin and never on the profile's delivery. Rejecting by
+delivery would conflate the two and leave a rate-limited `oauth` member with no
+clearing path at all where its adapter offers no zero-cost probe, which is the
+one case the operator command exists for.
 
 Success returns `credential_exclusion_cleared { target, outcome }`, where
 `outcome` is `cleared` for the winning transition or `already_cleared` when a
@@ -507,9 +500,9 @@ required and nullable: `blocked_with_reason` requires JSON null because its pass
 is blocked, while every other finding event requires the successful output
 frontier. Reasons are nonempty exact text, reject U+0000, and carry at most
 65,536 UTF-8 bytes. Duplicate and superseded references cannot name the finding
-receiving the event. `posted` is deliberately absent from this request:
-publication remains the reservation-then-attachment operation, whose successful
-attachment appends the posted event.
+receiving the event. `posted` is absent from this request: publication is the
+reservation-then-attachment operation, whose successful attachment appends the
+posted event.
 
 An orchestration start carries one through 32 ordered `{ key, template_name }`
 concern objects. Keys and template names are nonempty, each inventory is unique
@@ -651,8 +644,8 @@ wire posture keeps every client-recorded denial explainable to the model.
 Canonical UUID strings are lowercase hyphenated values. Nil and all-ones command
 identities fail request validation before application construction. The server
 does not generate mutation command identities on a client's behalf. Equal
-command retransmission therefore reaches the existing durable replay boundary; a
-new request identity does not change command meaning (INV-012). The expected
+command retransmission therefore reaches the durable replay boundary; a new
+request identity does not change command meaning (INV-012). The expected
 defaults version is part of the canonical submit payload. A caller retries an
 ambiguous submission with the same command identity, session, content, expected
 version, and treatment; changing any of them is a conflicting reuse, not
@@ -689,11 +682,10 @@ state. A recorded receipt is inspected before mutable aggregate-state
 preconditions. A semantically equal start similarly preserves
 `review_orchestration_started`; a different frozen attempt fails closed. Fresh
 run admission creates its run and sole pass in one transaction; recovery also
-recognizes and completes a matching run-only intermediate committed by the
-earlier multi-transaction implementation. Reusing a command identity for a
-different digest, operation kind, aggregate payload, complete inventory, event,
-or attachment fails closed. This representation is the durable review-command
-contract.
+recognizes and completes a matching committed run-only intermediate. Reusing a
+command identity for a different digest, operation kind, aggregate payload,
+complete inventory, event, or attachment fails closed. This representation is
+the durable review-command contract.
 
 The daemon admits one review mutation at a time and retains that admission
 through claim inspection, aggregate effect recovery, and receipt recording. A
@@ -754,20 +746,16 @@ configured page per request, with no silent truncation. It is a plain keyset
 read over the authoritative session, current-defaults, metadata, and
 imported-conversation tables in one repeatable-read, read-only transaction — no
 materialized view, cache, or analytical artifact stands between the caller and
-committed state, so every listed row is transactionally fresh. If measured read
-cost requires a different physical shape, the first upgrade is
-write-time-maintained projection tables updated atomically with the
-authoritative writes, not a materialized, periodically refreshed, cached, or
-otherwise lagging product read. The unified order is by conversation identity
-UUID value, with a native session ordered before an imported conversation
-carrying a theoretical equal identity value. A cursor object has exactly
-`origin` (`native_session` or `imported_conversation`) and `conversation_id`
-(canonical UUID string); `after` is the exclusive keyset cursor at that total
-position, so no row can be skipped at a page boundary. A present
-`title_contains` is nonempty, rejects U+0000, carries at most 262,144 UTF-8
-bytes, and applies the same exact case-sensitive substring filter to a present
-native metadata title or imported display title; an absent title matches no
-title query, and a transitional pending imported title survives every title
+committed state, so every listed row is transactionally fresh. The unified order
+is by conversation identity UUID value, with a native session ordered before an
+imported conversation carrying a theoretical equal identity value. A cursor
+object has exactly `origin` (`native_session` or `imported_conversation`) and
+`conversation_id` (canonical UUID string); `after` is the exclusive keyset
+cursor at that total position, so no row can be skipped at a page boundary. A
+present `title_contains` is nonempty, rejects U+0000, carries at most 262,144
+UTF-8 bytes, and applies the same exact case-sensitive substring filter to a
+present native metadata title or imported display title; an absent title matches
+no title query, and a transitional pending imported title survives every title
 filter so the read fails closed on it
 ([conversation-import](conversation-import.md#derived-display-titles)) rather
 than silently omitting an unresolved row. `origin` selects native rows, imported
@@ -783,17 +771,17 @@ The daemon maps the client-selected delivery object without reinterpretation:
 default. The protocol therefore never guesses an interrupt, steering, or queued
 treatment; the client must select one explicitly.
 
-`reconcile_turn` is the one request that names a treatment explicitly, and it is
-narrow by construction. The daemon reads whether the named turn is the session's
-active turn parked in the `awaiting_model_call_recovery` phase and refuses
-anything else with `rejected` and a `turn_not_awaiting_reconciliation` detail,
-before any durable command is recorded. That precondition is skipped in exactly
-the two cases the durable boundary owns the answer to: a command identity that
-already names durable intent replays its recorded result unconditionally
-(INV-012), because the first handling already released the wait it would now be
-refused for; and an absent session is left to the transaction's recorded
-`session_not_found`. Every other request reaches the authoritative transaction,
-which applies the accepted `Interrupt` delivery in
+`reconcile_turn` is the one request that names a treatment explicitly. The
+daemon reads whether the named turn is the session's active turn parked in the
+`awaiting_model_call_recovery` phase and refuses anything else with `rejected`
+and a `turn_not_awaiting_reconciliation` detail, before any durable command is
+recorded. That precondition is skipped in exactly the two cases the durable
+boundary owns the answer to: a command identity that already names durable
+intent replays its recorded result unconditionally (INV-012), because the first
+handling already released the wait it would now be refused for; and an absent
+session is left to the transaction's recorded `session_not_found`. Every other
+request reaches the authoritative transaction, which applies the accepted
+`Interrupt` delivery in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md#occupied-slot-input-handling)
 and revalidates the expected active turn under the scheduler lock. A caller that
 loses a race there receives `active_turn_mismatch` when another turn took the
@@ -805,11 +793,11 @@ terminal already requires and never becomes a standalone active-turn stop.
 `imported_conversation_id` plus its positive inclusive `through_position`. For
 an unclaimed command, the daemon loads the immutable imported aggregate and
 resolves that position to the canonical entry identity and frontier before
-invoking the existing application service. For a claimed command, it first
-compares the recorded canonical frontier, relationship, and defaults and returns
-equal replay or conflicting reuse without resolving the wire address again. An
-absent conversation or position returns `not_found` without claiming the
-command. Resume and fork are explicit and have the semantics owned by
+invoking the application service. For a claimed command, it first compares the
+recorded canonical frontier, relationship, and defaults and returns equal replay
+or conflicting reuse without resolving the wire address again. An absent
+conversation or position returns `not_found` without claiming the command.
+Resume and fork are explicit and have the semantics owned by
 [sessions-and-transcript](sessions-and-transcript.md#create-from-an-imported-frontier).
 
 `stop_turn` is the explicit stop verb, and it is the accepted `Interrupt`
@@ -819,18 +807,18 @@ on the wire — no standalone active-turn cancellation command exists (INV-029).
 The request names the exact turn the caller observed active and carries the
 successor content the interrupt algebra requires: an applied interrupt is the
 only cancellation authority, and it binds an immediate-successor origin in the
-same transaction. Terminalization flows through the existing lifecycle — a
-running turn with no prepared call, or a prepared call, cancels directly, while
-an issued call first enters its durable `cancellation_requested` state and the
-turn terminalizes when physical cancellation resolves. The authoritative
-transaction validates the expected active turn under the session lock and
-records every refusal as a typed rejection: `no_active_turn` when no turn holds
-the slot, `active_turn_mismatch` for a stale expected turn,
-`interrupt_already_applied` when a distinct earlier stop already carries the
-proof, and `interrupt_unavailable_while_awaiting_approval` when the active turn
-is parked on a tool-approval wait, which a stop can neither decide nor bypass —
-the caller denies the pending request through `decide_tool_request` first, then
-stops ([tool-loop](tool-loop.md#approval-policy-and-decision-sources) owns the
+same transaction. Terminalization flows through the lifecycle — a running turn
+with no prepared call, or a prepared call, cancels directly, while an issued
+call first enters its durable `cancellation_requested` state and the turn
+terminalizes when physical cancellation resolves. The authoritative transaction
+validates the expected active turn under the session lock and records every
+refusal as a typed rejection: `no_active_turn` when no turn holds the slot,
+`active_turn_mismatch` for a stale expected turn, `interrupt_already_applied`
+when a distinct earlier stop already carries the proof, and
+`interrupt_unavailable_while_awaiting_approval` when the active turn is parked
+on a tool-approval wait, which a stop can neither decide nor bypass — the caller
+denies the pending request through `decide_tool_request` first, then stops
+([tool-loop](tool-loop.md#approval-policy-and-decision-sources) owns the
 deny-first caller protocol).
 
 `decide_tool_request` carries the canonical user decision command for one
@@ -866,9 +854,8 @@ vocabulary. The closed-enum decoder rejects any unknown request, response,
 event, or nested tagged member rather than interpreting it as an older shape.
 Because every durable representation implemented in this tree is expressible at
 version `1`, selecting a session never requires a feature-specific version gate.
-The proposed runner requests remain outside the implemented vocabulary until
-their implementing stack lands. The runner-bearing projections named above are
-implemented at version `1`.
+The proposed runner requests are outside the implemented vocabulary. The
+runner-bearing projections named above are implemented at version `1`.
 
 Submitted content carries at most 1 MiB of aggregate text UTF-8. The daemon
 applies that boundary before application construction or mutation and returns
@@ -879,23 +866,23 @@ durable update event. This section owns the exact text capacity.
 An import source is an exact byte sequence encoded with RFC 4648
 standard-alphabet padded base64. A noncanonical spelling is a malformed frame.
 The server validates canonical padding and trailing bits in the same decode that
-constructs source bytes under the existing inbound-frame permit; validation does
-not construct a second full-size canonical encoding. `MAX_FRAME_BYTES` remains 8
-MiB including the newline for every request. A single-shot `import_conversation`
+constructs source bytes under the inbound-frame permit; validation does not
+construct a second full-size canonical encoding. `MAX_FRAME_BYTES` is 8 MiB
+including the newline for every request. A single-shot `import_conversation`
 carries the complete source when its exact encoded frame fits. Otherwise the
 terminal uses one connection for `begin_conversation_import`, one or more
 `append_conversation_import` requests, and `commit_conversation_import`. Each
 append carries at most 4 MiB decoded bytes, leaving base64 and maximum-envelope
-headroom inside the unchanged frame bound.
+headroom inside the frame bound.
 
 Begin declares the format and exact total byte count. The daemon admits at most
 one in-progress import per connection and rejects the declaration before
 assembly when it exceeds `conversation_import.max_source_bytes`. Append accepts
 only a nonempty chunk and acknowledges the resulting assembled byte count.
 Commit rechecks the configured bound and requires the actual assembled count to
-equal the declared count before passing the complete bytes to the unchanged
-converter seam. Abort or disconnect discards partial per-connection state. The
-source path remains client-local and never appears in a request.
+equal the declared count before passing the complete bytes to the converter.
+Abort or disconnect discards partial per-connection state. The source path
+remains client-local and never appears in a request.
 
 Blob digest strings are exactly `sha256:` followed by 64 lowercase hexadecimal
 characters. Blob upload admits at most one in-progress upload per connection and
@@ -932,14 +919,13 @@ unavailable candidate prevents a definitive integrity conclusion.
 ### Configuration reload
 
 **Committed unimplemented functionality.** The implemented request inventory
-above remains closed and rejects it. The implementing stack must add one
-authorized `reload_configuration` request carrying no members and no
-`command_id`: the swap changes process memory alone, so a repeat simply re-reads
-and re-validates. Success returns
-`configuration_reloaded { reloaded_sections }`, an array of the closed values
-`model_catalog`, `session_templates`, and `repository_watch`. Failure returns
-`configuration_reload_failed { phase, reason }`, sanitized exactly as startup
-logs are, and leaves the running configuration unchanged.
+above remains closed and rejects it. The reload surface must be one authorized
+`reload_configuration` request carrying no members and no `command_id`: the swap
+changes process memory alone, so a repeat re-reads and re-validates. Success
+returns `configuration_reloaded { reloaded_sections }`, an array of the closed
+values `model_catalog`, `session_templates`, and `repository_watch`. Failure
+returns `configuration_reload_failed { phase, reason }`, sanitized exactly as
+startup logs are, and leaves the running configuration unchanged.
 [Configuration and credentials](configuration-and-credentials.md#configuration-reload)
 owns which sections are reloadable and the validate-then-swap rule.
 
