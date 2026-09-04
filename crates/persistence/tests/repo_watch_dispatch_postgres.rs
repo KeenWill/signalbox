@@ -45,11 +45,12 @@ use signalbox_domain::{
     RepoWatchRuleId, RepoWatchRuleIdentityField, RepoWatchRuleVersion, RepoWatchSingletonScope,
     RepoWatchWorkflowRunAttempt, RepositorySlug, ResolvedProviderTarget, SemanticTranscriptEntryId,
     SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
-    SessionRetryableCause, SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
-    SessionTemplateProvenance, SessionTerminalOutcome, SubmitInput, ToolCallProposal,
-    ToolDecisionRationale, ToolName, ToolRequestId, ToolResponsePartIdentity,
-    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId,
-    TurnId, UserContent, WorkflowName,
+    SessionLifecycleState, SessionOwnership, SessionRetryableCause, SessionSystemPrompt,
+    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
+    SessionTerminalOutcome, StartGate, SubmitInput, ToolCallProposal, ToolDecisionRationale,
+    ToolName, ToolRequestId, ToolResponsePartIdentity, ToolRoundModelCallIdentities,
+    ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
+    WorkflowName,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -8683,6 +8684,7 @@ async fn repository_watch_observes_operator_commission_target_ownership()
         template,
         defaults,
     )
+    .with_lifecycle(StartGate::Held, SessionOwnership::Owned, None)
     .prepare(replacement_session)
     .expect("the replacement blocker creation prepares");
     assert!(matches!(
@@ -8691,9 +8693,6 @@ async fn repository_watch_observes_operator_commission_target_ownership()
             .await?,
         CreateSessionHandlingOutcome::Applied(_)
     ));
-    SessionLifecycleRepository::new(fixture.pool.clone())
-        .adopt(replacement_session, LifecycleActor::Operator)
-        .await?;
     sqlx::query(
         "UPDATE repo_watch_dispatch_obligation
             SET blocking_dispatch_id = NULL,
@@ -8739,14 +8738,20 @@ async fn repository_watch_observes_operator_commission_target_ownership()
             .state()
             .is_parked()
     );
-    assert!(
-        !lifecycle_repository
+    assert_eq!(
+        lifecycle_repository
             .load(replacement_session)
             .await?
             .expect("the replaced blocker keeps its lifecycle row")
-            .state()
-            .is_parked()
+            .state(),
+        SessionLifecycleState::Created
     );
+    let restored_deadline: String =
+        sqlx::query_scalar("SELECT deadline_kind FROM session_deadline WHERE session_id = $1")
+            .bind(replacement_session.into_uuid())
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert_eq!(restored_deadline, "admission");
 
     assert_eq!(
         dispatch_store

@@ -250,6 +250,7 @@ CREATE FUNCTION park_repo_watch_obligation_sessions() RETURNS trigger
     AS $$
 DECLARE
     subject uuid;
+    restored_state text;
 BEGIN
     IF NEW.parked_at IS NULL THEN
         RETURN NULL;
@@ -309,9 +310,49 @@ BEGIN
                         )
                    )
             ) THEN
-                PERFORM project_session_lifecycle(
-                    subject, true, 'module', 'repo_watch'
-                );
+                UPDATE session_lifecycle AS lifecycle
+                   SET state_kind = CASE
+                           WHEN lifecycle.start_gate_held THEN 'created'
+                           WHEN NOT EXISTS (
+                               SELECT 1
+                                 FROM turn_lifecycle
+                                WHERE session_id = subject
+                           ) THEN 'created'
+                           WHEN EXISTS (
+                               SELECT 1
+                                 FROM turn_lifecycle
+                                WHERE session_id = subject
+                                  AND state_kind = 'queued'
+                           ) AND NOT EXISTS (
+                               SELECT 1
+                                 FROM turn_lifecycle
+                                WHERE session_id = subject
+                                  AND start_lineage_kind IS NOT NULL
+                           ) THEN 'dispatched'
+                           ELSE 'active'
+                       END,
+                       state_entered_at = statement_timestamp(),
+                       actor_kind = 'module',
+                       actor_module = 'repo_watch',
+                       actor_turn_id = NULL,
+                       actor_tool_request_id = NULL,
+                       waiting_kind = NULL,
+                       waiting_waker = NULL,
+                       waiting_subject_session_id = NULL,
+                       recovering_op = NULL,
+                       blocked_reason = NULL,
+                       blocked_cycle = NULL,
+                       parked_cause = NULL,
+                       parked_responder = NULL,
+                       parked_since = NULL,
+                       parked_standing_cause_kind = NULL
+                 WHERE lifecycle.session_id = subject
+             RETURNING lifecycle.state_kind INTO restored_state;
+                IF restored_state = 'active' THEN
+                    PERFORM project_session_lifecycle(
+                        subject, false, 'module', 'repo_watch'
+                    );
+                END IF;
             END IF;
         END LOOP;
     END IF;
