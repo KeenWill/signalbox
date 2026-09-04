@@ -841,7 +841,9 @@ async fn a_released_session_does_not_continue_its_completed_goal_turn() -> Resul
             )
             .await?,
         SessionLifecycleCommandHandlingOutcome::Recorded(SessionLifecycleCommandResult::Applied(
-            SessionLifecycleApplication::OwnershipChanged
+            SessionLifecycleApplication::OwnershipChanged {
+                start_released: false,
+            }
         ))
     );
 
@@ -903,7 +905,9 @@ async fn release_retires_an_already_queued_goal_successor() -> Result<(), Box<dy
             )
             .await?,
         SessionLifecycleCommandHandlingOutcome::Recorded(SessionLifecycleCommandResult::Applied(
-            SessionLifecycleApplication::OwnershipChanged
+            SessionLifecycleApplication::OwnershipChanged {
+                start_released: false,
+            }
         ))
     );
 

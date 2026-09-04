@@ -6280,7 +6280,7 @@ pub enum SessionLifecycleApplication {
         defaults_version: SessionConfigurationDefaultsVersion,
     },
     Resumed { state: SessionLifecycleState },
-    OwnershipChanged,
+    OwnershipChanged { start_released: bool },
 }
 
 pub enum SessionLifecycleCommandResult {

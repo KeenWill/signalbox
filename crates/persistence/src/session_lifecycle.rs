@@ -719,7 +719,7 @@ pub(crate) async fn release_in_transaction(
     connection: &mut PgConnection,
     session: SessionId,
     actor: LifecycleActor,
-) -> Result<(), SessionLifecycleRepositoryError> {
+) -> Result<bool, SessionLifecycleRepositoryError> {
     let held = load_locked(connection, session).await?;
     if held.state.is_terminal() {
         return Err(SessionLifecycleRepositoryError::Rejected(
@@ -736,14 +736,15 @@ pub(crate) async fn release_in_transaction(
             SessionLifecycleRejection::ReleaseWhileParked,
         ));
     }
-    release_start_if_held(connection, session, actor).await?;
+    let start_released = release_start_if_held(connection, session, actor).await?;
     flip_ownership_in_transaction(
         connection,
         session,
         SessionOwnershipTransition::Released,
         actor,
     )
-    .await
+    .await?;
+    Ok(start_released)
 }
 
 /// Opens a held start gate inside the caller's transaction.
@@ -781,7 +782,7 @@ async fn release_start_if_held(
     connection: &mut PgConnection,
     session: SessionId,
     actor: LifecycleActor,
-) -> Result<(), SessionLifecycleRepositoryError> {
+) -> Result<bool, SessionLifecycleRepositoryError> {
     let start_gate_held: bool =
         sqlx::query_scalar("SELECT start_gate_held FROM session_lifecycle WHERE session_id = $1")
             .bind(session_id_to_uuid(session))
@@ -790,7 +791,7 @@ async fn release_start_if_held(
     if start_gate_held {
         release_start_in_transaction(connection, session, actor).await?;
     }
-    Ok(())
+    Ok(start_gate_held)
 }
 
 /// Attaching a goal confers ownership (§6): an unmonitored session becomes

@@ -268,7 +268,7 @@ async fn held_start_gate_survives_a_module_park_and_resume() -> Result<(), Box<d
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation)
         .await?;
-    queue_turn(&pool, session, 5).await?;
+    let turn = queue_turn(&pool, session, 5).await?;
 
     let repository = SessionLifecycleRepository::new(pool.clone());
     let parked = repository
@@ -303,6 +303,36 @@ async fn held_start_gate_survives_a_module_park_and_resume() -> Result<(), Box<d
     .fetch_one(&pool)
     .await?;
     assert_eq!(resumed, (String::from("created"), true));
+
+    let activation_identities = AcceptedInputTurnActivationIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(SEED + 0x5700)),
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(SEED + 0x5701)),
+        ContextFrontierId::from_uuid(Uuid::from_u128(SEED + 0x5800)),
+        TurnAttemptId::from_uuid(Uuid::from_u128(SEED + 0x5900)),
+    );
+    let activation = StartEligibleTurnRepository::new(pool.clone());
+    assert_eq!(
+        activation.handle(session, activation_identities).await?,
+        StartEligibleTurnOutcome::NoEligibleTurn
+    );
+
+    let release = SessionLifecycleCommand::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(SEED + 0x5a00)),
+        session,
+        SessionLifecycleOperation::ReleaseStart,
+    );
+    assert_eq!(
+        SessionLifecycleCommandRepository::new(pool.clone())
+            .handle(release, CommandPrincipal::Operator)
+            .await?,
+        SessionLifecycleCommandHandlingOutcome::Recorded(SessionLifecycleCommandResult::Applied(
+            SessionLifecycleApplication::StartReleased
+        ),)
+    );
+    assert!(matches!(
+        activation.handle(session, activation_identities).await?,
+        StartEligibleTurnOutcome::Activated(started) if started.turn() == turn
+    ));
     pool.close().await;
     drop(container);
     Ok(())

@@ -237,7 +237,10 @@ pub enum SessionLifecycleApplication {
         state: SessionLifecycleState,
     },
     /// The ownership bit flipped.
-    OwnershipChanged,
+    OwnershipChanged {
+        /// Whether releasing ownership also opened a held start gate.
+        start_released: bool,
+    },
 }
 
 /// The recorded result of one claimed lifecycle command.

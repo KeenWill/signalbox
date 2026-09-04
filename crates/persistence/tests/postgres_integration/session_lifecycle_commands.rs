@@ -1290,14 +1290,13 @@ async fn releasing_ownership_also_settles_a_held_start_gate() -> Result<(), Box<
         .await?;
     queue_turn(&pool, session, 11, 1).await?;
 
-    assert_eq!(
-        recorded(
-            &pool,
-            lifecycle_command(11, 2, session, SessionLifecycleOperation::Release),
-        )
-        .await?,
-        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::OwnershipChanged)
-    );
+    let release = lifecycle_command(11, 2, session, SessionLifecycleOperation::Release);
+    let expected =
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::OwnershipChanged {
+            start_released: true,
+        });
+    assert_eq!(recorded(&pool, release.clone()).await?, expected);
+    assert_eq!(recorded(&pool, release).await?, expected);
     let released: (String, bool, bool) = sqlx::query_as(
         "SELECT state_kind, start_gate_held, owned
            FROM session_lifecycle WHERE session_id = $1",
@@ -1361,7 +1360,9 @@ async fn adopt_takes_an_unmonitored_session_with_or_without_a_condition()
 
     assert_eq!(
         bare,
-        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::OwnershipChanged)
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::OwnershipChanged {
+            start_released: false,
+        })
     );
     assert_eq!(
         declared_adopt,
@@ -1383,7 +1384,9 @@ async fn adopt_takes_an_unmonitored_session_with_or_without_a_condition()
     );
     assert_eq!(
         readopted,
-        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::OwnershipChanged)
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::OwnershipChanged {
+            start_released: false,
+        })
     );
     let lifecycle = SessionLifecycleRepository::new(pool.clone())
         .load(conversation)

@@ -397,11 +397,14 @@ async fn apply(
                 actor,
             )
             .await?;
-            Ok(SessionLifecycleApplication::OwnershipChanged)
+            Ok(SessionLifecycleApplication::OwnershipChanged {
+                start_released: false,
+            })
         }
         SessionLifecycleOperation::Release => {
-            session_lifecycle::release_in_transaction(connection, session, actor).await?;
-            Ok(SessionLifecycleApplication::OwnershipChanged)
+            let start_released =
+                session_lifecycle::release_in_transaction(connection, session, actor).await?;
+            Ok(SessionLifecycleApplication::OwnershipChanged { start_released })
         }
     }
 }
@@ -582,9 +585,16 @@ async fn insert_command_record(
         SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::Resumed { .. }) => {
             (Some("resumed"), None)
         }
-        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::OwnershipChanged) => {
-            (Some("ownership_changed"), None)
-        }
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::OwnershipChanged {
+            start_released,
+        }) => (
+            Some(if start_released {
+                "start_released"
+            } else {
+                "ownership_changed"
+            }),
+            None,
+        ),
         SessionLifecycleCommandResult::Rejected(_) => (None, None),
     };
     sqlx::query(
@@ -695,7 +705,15 @@ async fn replayed_application(
         )),
     };
     Ok(match effect {
-        RecordedEffect::StartReleased => SessionLifecycleApplication::StartReleased,
+        RecordedEffect::StartReleased => {
+            if matches!(command.operation(), SessionLifecycleOperation::Release) {
+                SessionLifecycleApplication::OwnershipChanged {
+                    start_released: true,
+                }
+            } else {
+                SessionLifecycleApplication::StartReleased
+            }
+        }
         RecordedEffect::Closed => SessionLifecycleApplication::Closed {
             outcome: outcome()?,
         },
@@ -716,7 +734,9 @@ async fn replayed_application(
             }
         }
         RecordedEffect::Resumed { state } => SessionLifecycleApplication::Resumed { state },
-        RecordedEffect::OwnershipChanged => SessionLifecycleApplication::OwnershipChanged,
+        RecordedEffect::OwnershipChanged => SessionLifecycleApplication::OwnershipChanged {
+            start_released: false,
+        },
     })
 }
 

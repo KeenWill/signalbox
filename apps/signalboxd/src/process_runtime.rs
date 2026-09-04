@@ -15685,7 +15685,7 @@ where
         Ok(SessionLifecycleCommandHandlingOutcome::Recorded(
             SessionLifecycleCommandResult::Applied(application),
         )) => {
-            if lifecycle_command_needs_eligibility_nudge(&application, command.operation()) {
+            if lifecycle_command_needs_eligibility_nudge(&application) {
                 let _ = services.eligibility_nudge.nudge(session);
             }
             if matches!(command.operation(), SessionLifecycleOperation::Adopt { .. })
@@ -15783,15 +15783,15 @@ where
     }
 }
 
-fn lifecycle_command_needs_eligibility_nudge(
-    application: &SessionLifecycleApplication,
-    operation: &SessionLifecycleOperation,
-) -> bool {
-    *application == SessionLifecycleApplication::StartReleased
-        || matches!(
-            operation,
-            SessionLifecycleOperation::Release | SessionLifecycleOperation::Resume
-        )
+fn lifecycle_command_needs_eligibility_nudge(application: &SessionLifecycleApplication) -> bool {
+    matches!(
+        application,
+        SessionLifecycleApplication::StartReleased
+            | SessionLifecycleApplication::Resumed { .. }
+            | SessionLifecycleApplication::OwnershipChanged {
+                start_released: true,
+            }
+    )
 }
 
 /// Hands a committed closure's live turn to the committed interrupt
@@ -15905,7 +15905,7 @@ const fn wire_lifecycle_effect(value: SessionLifecycleApplication) -> SessionLif
             }
         }
         SessionLifecycleApplication::Resumed { .. } => SessionLifecycleEffect::Resumed {},
-        SessionLifecycleApplication::OwnershipChanged => {
+        SessionLifecycleApplication::OwnershipChanged { .. } => {
             SessionLifecycleEffect::OwnershipChanged {}
         }
     }
@@ -17230,11 +17230,10 @@ mod tests {
         ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTargetId,
         ReviewWorkflowKind, RunnerGeneration, RunnerId, RunnerWorkingDirectory,
         SemanticTranscriptEntryId, SessionConfigurationDefaultsVersion, SessionId,
-        SessionInputPosition, SessionLifecycleApplication, SessionLifecycleOperation,
-        SessionLifecycleState, SessionMetadataLastWriter, SessionMetadataUpdatedAt,
-        SessionModelSettingsChanged, SettingOverlay, SubmitInputRejectedResult,
-        ToolApprovalDecision, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
-        TurnModelSettingsResolved, ValidatedModelSettings,
+        SessionInputPosition, SessionLifecycleApplication, SessionLifecycleState,
+        SessionMetadataLastWriter, SessionMetadataUpdatedAt, SessionModelSettingsChanged,
+        SettingOverlay, SubmitInputRejectedResult, ToolApprovalDecision, ToolAttemptId,
+        ToolRequestId, TurnAttemptId, TurnId, TurnModelSettingsResolved, ValidatedModelSettings,
     };
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportRejectionClass,
@@ -17329,7 +17328,6 @@ mod tests {
             &SessionLifecycleApplication::Resumed {
                 state: SessionLifecycleState::Created,
             },
-            &SessionLifecycleOperation::Resume,
         ));
     }
 
@@ -17337,7 +17335,20 @@ mod tests {
     fn a_released_start_requests_an_eligibility_pass() {
         assert!(lifecycle_command_needs_eligibility_nudge(
             &SessionLifecycleApplication::StartReleased,
-            &SessionLifecycleOperation::ReleaseStart,
+        ));
+    }
+
+    #[test]
+    fn an_ownership_release_that_opens_the_start_gate_requests_an_eligibility_pass() {
+        assert!(lifecycle_command_needs_eligibility_nudge(
+            &SessionLifecycleApplication::OwnershipChanged {
+                start_released: true,
+            },
+        ));
+        assert!(!lifecycle_command_needs_eligibility_nudge(
+            &SessionLifecycleApplication::OwnershipChanged {
+                start_released: false,
+            },
         ));
     }
 
