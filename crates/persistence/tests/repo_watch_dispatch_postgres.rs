@@ -3969,10 +3969,10 @@ async fn one_batch_counts_one_attempt_however_many_siblings_fail() -> Result<(),
     Ok(())
 }
 
-/// A terminal goal projects its complete repository-watch dispatch cohort
-/// before its own lifecycle row. Concurrent siblings therefore serialize
-/// before an exhausted obligation parks the batch, instead of each retaining
-/// one lifecycle row while the module park waits for the other.
+/// A terminal goal command locks its complete repository-watch dispatch cohort
+/// before its own lifecycle row. The insert gate holds the first command only
+/// after its scheduler lock point, proving the second command cannot reach the
+/// same point while retaining its sibling lifecycle row.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn concurrent_sibling_terminations_serialize_before_parking_their_dispatch()
@@ -4010,7 +4010,38 @@ async fn concurrent_sibling_terminations_serialize_before_parking_their_dispatch
     .execute(&fixture.pool)
     .await?;
 
-    let singleton_holder = hold_singleton_advisory_key(&fixture).await?;
+    sqlx::query(
+        "CREATE FUNCTION wait_before_terminal_goal_insert() RETURNS trigger
+             LANGUAGE plpgsql
+             AS $$
+         BEGIN
+             IF NEW.event_kind = 'user_stopped' THEN
+                 PERFORM pg_advisory_xact_lock(
+                     hashtextextended('terminal-goal-insert-test-gate', 0)
+                 );
+             END IF;
+             RETURN NEW;
+         END;
+         $$",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "CREATE TRIGGER wait_before_terminal_goal_insert
+         BEFORE INSERT ON goal_event
+         FOR EACH ROW
+         EXECUTE FUNCTION wait_before_terminal_goal_insert()",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let mut insert_gate = fixture.pool.begin().await?;
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(
+                    hashtextextended('terminal-goal-insert-test-gate', 0)
+                )",
+    )
+    .execute(&mut *insert_gate)
+    .await?;
     let first_pool = fixture.pool.clone();
     let first_session = successor_sessions[0];
     let first = tokio::spawn(async move {
@@ -4051,7 +4082,7 @@ async fn concurrent_sibling_terminations_serialize_before_parking_their_dispatch
             .await
     });
     wait_for_lock_waiters(&fixture.pool, 2).await?;
-    singleton_holder.commit().await?;
+    insert_gate.commit().await?;
 
     assert_applied_goal_command(tokio::time::timeout(Duration::from_secs(3), first).await???);
     assert_applied_goal_command(tokio::time::timeout(Duration::from_secs(3), second).await???);
