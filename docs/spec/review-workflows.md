@@ -672,9 +672,9 @@ admission check uses only `is_real_confidence` and the immutable target head; a
 moved change request is another target and does not authorize posting results
 produced against the earlier head.
 
-Post-publication external-context import is committed but unimplemented by the
-present application service. A future continuation must use the import pass and
-no-change evidence rather than inferring external state.
+Post-publication external-context import is committed but unimplemented. A
+future continuation must use the import pass and no-change evidence rather than
+inferring external state.
 
 An incomplete concern barrier, invalid import or judgment evidence, durable seal
 conflict, invalid downstream inventory, or incomplete judgment, repair, or
@@ -803,13 +803,14 @@ derived from the submitted outcome and completed barrier facts, then stored in
 an append-only recovery record before the intent is atomically replaced by the
 typed receipt.
 
-Exclusive admission prevents overlap while the process lives; the durable intent
-covers a stop after the effect and before recovery. An exact retry authenticates
-the equal durable effect independently of later aggregate stage, reconstructs
-the original operation-stage answer without later facts, and completes recovery.
-A fresh stale command remains rejected. A lost receipt is materialized from its
-recovery record. Recorded receipts are inspected before mutable aggregate-state
-validation; distinct command-identity reuse fails closed.
+Exclusive admission prevents overlap while the process is running; the durable
+intent covers a stop after the effect and before recovery. An exact retry
+authenticates the equal durable effect independently of later aggregate stage,
+reconstructs the original operation-stage answer without later facts, and
+completes recovery. A fresh stale command remains rejected. A lost receipt is
+materialized from its recovery record. Recorded receipts are inspected before
+mutable aggregate-state validation; distinct command-identity reuse fails
+closed.
 
 The terminal client exposes target creation, run admission and activation,
 single-finding read-only completion, finding listing, target, run, and finding
