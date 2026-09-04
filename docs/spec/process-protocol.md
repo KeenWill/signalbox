@@ -2076,8 +2076,8 @@ the 1 MiB ceiling is exact only for standalone returned-result content.
 `task` and the closed relationship object and is reserved to return
 `session_spawned { tool_request_id, child_session_id, relationship }`, but no
 present process execution surface creates the child. Until the placement-owned
-creation transaction implements the decided parent-directory default, the daemon
-rejects this request without mutation. That future transaction must preserve the
+creation transaction implements the parent-directory default, the daemon rejects
+this request without mutation. That future transaction must preserve the
 exact-request and authority rules above. Its task string must fit both the
 delegation-content ceiling and its complete normalized JSON argument envelope.
 
@@ -2139,7 +2139,7 @@ background-result deliveries. The result-availability `child_result` update is
 not an inbox delivery and carries no sequence. Relationship-local `ordinal`
 never breaks a cross-relationship tie.
 
-The internal `delegation_wake` outbox event is a scheduler nudge, not a
+The internal `delegation_wake` outbox event is a scheduler signal, not a
 session-follow update. Clients observe the durable result or message update that
 caused it, never the wake itself. Wake emission cardinality and transaction
 ownership belong to the
@@ -2150,8 +2150,8 @@ cancelled `child_lifecycle_disposition` caused by a parent cascade, which is
 emitted on both the parent and child streams. Spawn, waiting, other lifecycle,
 and result updates go to the parent; messages go to their payload recipient.
 Each event's own `session_id` identifies that stream. Cursor ordering,
-snapshot-first follow, deduplication, and resync rules are unchanged. No event
-embeds or links the child transcript.
+snapshot-first follow, deduplication, and resync rules apply to these events as
+to every other session event. No event embeds or links the child transcript.
 
 `descendant_scope` is required on both `stop_goal` and `stop_turn`. The terminal
 client spells omission as `parent_alone` and `--descendants` as
@@ -2199,11 +2199,8 @@ a non-cloneable capability borrowing the still-live fence session; the copyable
 generation value is observational and cannot construct work after guard release.
 The first migration creates and initializes the row for a database that cannot
 have a prior fenced daemon; later startups fence before running any newer
-migration. This fence migration belongs to Signalbox's initial deployment: the
-maintainer confirms that no deployed database or daemon predates it, so there is
-no legacy unfenced writer to drain during the first installation. Importing or
-upgrading a pre-fence database is unsupported. Exhaustion or corruption fails
-startup rather than wrapping.
+migration. Importing or upgrading a pre-fence database is unsupported.
+Exhaustion or corruption fails startup rather than wrapping.
 
 Together these guards enforce one active daemon process—and therefore one
 dispatcher and its process-local fan-outs—for a database, while preventing a
@@ -2307,8 +2304,7 @@ missed heartbeat. `connected` is emitted when a later acknowledgement clears
 that same suspect epoch before durable loss and when a newly established epoch
 supersedes a suspect predecessor. `replaced` and `working_directory_changed` are
 the relocation states, and this family is the only surface on which a follower
-learns that its session lost, changed, or moved on its runner — a client that
-cannot hear loss and replacement here cannot hear them at all. The family is
+learns that its session lost, changed, or moved on its runner. The family is
 also the extension point for later runner facts: a further relocation shape, or
 runner metadata and attributes, adds a state and its members to this one event
 kind rather than a second kind. The event carries no runner-discovered host
@@ -2355,19 +2351,18 @@ Followers forward durable transition events and additionally forward a correctly
 correlated `TextDelta` emitted while the selected session turn is active. The
 HTTP adapter has already applied the credential-redaction boundary before that
 fact leaves the runtime (INV-035); the bridge and daemon copy its text unchanged
-and do not re-invent redaction. Deltas remain ephemeral process-incarnation
-presentation events: they are not appended to the transactional outbox, do not
-advance the follow cursor, do not enter the transcript, and do not alter the
-observation or terminal-evidence paths. The durable transcript remains the sole
-reply truth.
+and do not apply their own redaction. Deltas remain ephemeral
+process-incarnation presentation events: they are not appended to the
+transactional outbox, do not advance the follow cursor, do not enter the
+transcript, and do not alter the observation or terminal-evidence paths. The
+durable transcript remains the sole reply truth.
 
-An overrun of the selected composite fan-out produces the existing
-`resync_required`. A lagging or reconnecting delta-admitting follower loses any
-unreceived deltas; it reads the new authoritative snapshot and continues from
-that snapshot's durable cursor. Deltas are never replayed from storage. This is
-intentional: resynchronization replaces transient presentation state with the
-complete durable transcript rather than making token delivery another source of
-authority (INV-032).
+An overrun of the selected composite fan-out produces `resync_required`. A
+lagging or reconnecting delta-admitting follower loses any unreceived deltas; it
+reads the new authoritative snapshot and continues from that snapshot's durable
+cursor. Deltas are never replayed from storage. Resynchronization replaces
+transient presentation state with the complete durable transcript rather than
+making token delivery another source of authority (INV-032).
 
 A delivery-admitting `send --queue` follows the exact origin turn returned by
 `input_submitted`; it waits while any active-slot holder blocks activation and
@@ -2456,7 +2451,7 @@ nameable on the wire.
 ## Terminal client
 
 The `signalbox` binary uses the single admitted version. Single-session metadata
-read and replacement remain core protocol and daemon capabilities without
+read and replacement are core protocol and daemon capabilities without
 terminal-client UX, while the paginated metadata list is the `search` verb
 below. The client accepts a global `--socket <path>` override or reads
 `SIGNALBOX_SOCKET_PATH`, and provides:
@@ -2539,8 +2534,8 @@ message receipts.
 opens one long-lived `follow_session` connection before accepting input and
 keeps that connection dedicated to ordered snapshots, provider-text deltas, and
 durable events. Submissions and in-loop control operations use a second
-connection, opened through the existing one-request connection path; the client
-does not multiplex requests onto the follow connection. The initial and every
+connection, opened through the one-request connection path; the client does not
+multiplex requests onto the follow connection. The initial and every
 resynchronized follow snapshot replace transient display state with the durable
 transcript, and later provider-text deltas remain ephemeral presentation exactly
 as they do for `follow`. Snapshot reconciliation selects the active turn or,
@@ -2556,23 +2551,22 @@ active-turn controls and changes the displayed state to streaming. The closed
 in-loop command set is `:part JSON`, `:send`, `:clear`, `:stop TEXT`,
 `:steer TEXT`, `:approve ID`, `:deny ID REASON`, `:transcript`,
 `:model ALIAS-UUID`, and `:quit`. Multipart commands map to one start-when-idle
-`submit_input`; the remaining commands map to the existing `stop_turn`,
-configuration-free steering `submit_input`, `decide_tool_request`,
-`read_transcript`, and `replace_session_defaults` requests, or local exit;
-ordinary input maps to start-when-idle `submit_input`. `:stop` requires
-successor text because the interrupt request cannot represent a standalone
-cancellation. `:deny` applies the existing denial contract's POSIX
-edge-whitespace rule without rejecting other Unicode whitespace. `:steer`
-requires an active turn, binds the exact turn currently observed by the loop,
-and prints the existing typed steering receipt without waiting for a successor
-turn. `:model` changes only the alias selection and copies the observed
-dangerous-tool posture and system prompt into the forward-only successor
-defaults epoch. Tool proposals and projected results are reread and presented at
-their durable transition, and an approval wait prints its exact request
-identity. Each successful decision rereads authoritative state and immediately
-announces the next approval identity when the batch has one. All process-derived
-text, including live deltas and tool content, uses the same terminal-safe
-escaping as the other client verbs unless the invocation selected
+`submit_input`; the remaining commands map to `stop_turn`, configuration-free
+steering `submit_input`, `decide_tool_request`, `read_transcript`, and
+`replace_session_defaults` requests, or local exit; ordinary input maps to
+start-when-idle `submit_input`. `:stop` requires successor text because the
+interrupt request cannot represent a standalone cancellation. `:deny` applies
+the denial contract's POSIX edge-whitespace rule without rejecting other Unicode
+whitespace. `:steer` requires an active turn, binds the exact turn currently
+observed by the loop, and prints the typed steering receipt without waiting for
+a successor turn. `:model` changes only the alias selection and copies the
+observed dangerous-tool posture and system prompt into the forward-only
+successor defaults epoch. Tool proposals and projected results are reread and
+presented at their durable transition, and an approval wait prints its exact
+request identity. Each successful decision rereads authoritative state and
+immediately announces the next approval identity when the batch has one. All
+process-derived text, including live deltas and tool content, uses the same
+terminal-safe escaping as the other client verbs unless the invocation selected
 `--raw-output`.
 
 While a stoppable turn is active, the first Ctrl-C leaves the daemon turn
@@ -2587,12 +2581,11 @@ its potentially ambiguous outcome and terminates the loop, so the loop cannot
 retry with a fresh command identity; the printed recovery values remain the
 standalone exact-retry path.
 
-`:quit` and standard-input EOF use the same honest exit report. While a turn is
-queued, Ctrl-C, `:quit`, or standard-input EOF exits immediately and reports
-that the turn remains queued; active-only `:stop` and `:steer` remain
-unavailable until activation. Once the followed turn terminalizes, the client
-presents its exact durable terminal material and accepts another ordinary input
-line.
+`:quit` and standard-input EOF use the same exit report. While a turn is queued,
+Ctrl-C, `:quit`, or standard-input EOF exits immediately and reports that the
+turn remains queued; active-only `:stop` and `:steer` remain unavailable until
+activation. Once the followed turn terminalizes, the client presents its exact
+durable terminal material and accepts another ordinary input line.
 
 `status` sends exactly one `read_operator_status` request through the configured
 owner-only daemon socket; it never opens the database itself. It validates the
@@ -2616,36 +2609,35 @@ terminal-safe field escaping unless `--raw-output` is selected. The final
 model usage crosses this protocol only inside each complete session transcript,
 and `status` does not issue one transcript read per session.
 
-`list` remains the complete unfiltered summary sequence. `search` is the
-separate verb for `list_session_metadata`, whose filters, bounded page, and
-keyset cursor are distinct: each invocation sends exactly one request and prints
-exactly one page. `--title` is the exact case-sensitive substring query, each
-`--tag` adds one required tag to the exact AND-filter, `--include-archived`
-selects the archived-inclusive view, `--limit` is the page size and defaults to
-50, and `--after` is the exclusive session-identity cursor. Empty filter text,
-filter text carrying U+0000, a repeated `--tag` value, a limit outside one
-through 100, more than 256 required tags, a tag beyond 1,024 UTF-8 bytes, and a
-title query plus tags beyond 262,144 aggregate UTF-8 bytes are all rejected as
-usage errors before socket I/O, so every metadata-filter bound this page states
-reaches the user as a named diagnostic rather than a generic local encode
-failure. Each result is one line carrying the summary's session identity,
-archive state, defaults version, model selection, dangerous-tool posture,
-last-writer actor and timestamp, sorted comma-joined tags, and title. The actor
-prints as its wire kind — `user`, `core`, `model`, `recovery`, or `tool` —
-without the reference the kind carries, which the line has no field for. An
-unwritten metadata snapshot prints `last_writer=none`,
-`updated_at_unix_micros=none`, and empty tag and title values, which a present
-tag or title never is. A tag may itself contain the space that ends its field,
-the comma that separates it from a sibling, or the backslash that introduces an
-escape, so all three are escaped inside a tag exactly as a control code point
-is; every backslash in the tag field therefore opens an escape the client wrote,
-and the field decodes back to the exact tag set. The title is the line's last
-field, keeps its spaces, and is rendered to be read rather than decoded. When
-the page end names a continuation cursor, the client prints
-`next_after_session_id=<uuid>` to standard error after the results; a page is
-therefore never silently truncated, and that value is the next invocation's
-`--after`. The client also validates that a page never exceeds its requested
-limit.
+`list` is the complete unfiltered summary sequence. `search` is the separate
+verb for `list_session_metadata`, whose filters, bounded page, and keyset cursor
+are distinct: each invocation sends exactly one request and prints exactly one
+page. `--title` is the exact case-sensitive substring query, each `--tag` adds
+one required tag to the exact AND-filter, `--include-archived` selects the
+archived-inclusive view, `--limit` is the page size and defaults to 50, and
+`--after` is the exclusive session-identity cursor. Empty filter text, filter
+text carrying U+0000, a repeated `--tag` value, a limit outside one through 100,
+more than 256 required tags, a tag beyond 1,024 UTF-8 bytes, and a title query
+plus tags beyond 262,144 aggregate UTF-8 bytes are all rejected as usage errors
+before socket I/O, so every metadata-filter bound this page states reaches the
+user as a named diagnostic rather than a generic local encode failure. Each
+result is one line carrying the summary's session identity, archive state,
+defaults version, model selection, dangerous-tool posture, last-writer actor and
+timestamp, sorted comma-joined tags, and title. The actor prints as its wire
+kind — `user`, `core`, `model`, `recovery`, or `tool` — without the reference
+the kind carries, which the line has no field for. An unwritten metadata
+snapshot prints `last_writer=none`, `updated_at_unix_micros=none`, and empty tag
+and title values, which a present tag or title never is. A tag may itself
+contain the space that ends its field, the comma that separates it from a
+sibling, or the backslash that introduces an escape, so all three are escaped
+inside a tag exactly as a control code point is; every backslash in the tag
+field therefore opens an escape the client wrote, and the field decodes back to
+the exact tag set. The title is the line's last field, keeps its spaces, and is
+rendered to be read rather than decoded. When the page end names a continuation
+cursor, the client prints `next_after_session_id=<uuid>` to standard error after
+the results; a page is therefore never silently truncated, and that value is the
+next invocation's `--after`. The client also validates that a page never exceeds
+its requested limit.
 
 `conversations` is the separate verb for `list_conversations` and follows the
 same one-request, one-page discipline as `search`. `--title` is the exact
@@ -2758,15 +2750,15 @@ Abandon creates no successor input.
 through EOF; with `--parts-file` it reads only that file's ordered part array
 and does not read standard input. Neither form accepts conversation content in
 process arguments. Empty or oversized input fails before socket I/O. Without
-`--queue` it retains start-when-idle behavior. With `--queue`, a fresh
-invocation reads the authoritative transcript, names the active turn, submits
-`queue`, and follows the returned origin turn through its own terminal outcome;
-it therefore waits while the predecessor finishes and while the queued turn
-runs. Exact queued-send recovery supplies command identity, defaults version,
-and expected turn together. While the returned turn is still queued, a
-model-call or tool recovery wait on the turn currently holding the active slot
-and blocking its activation returns the existing recovery-required diagnostic
-instead of waiting for successor activation.
+`--queue` it uses start-when-idle behavior. With `--queue`, a fresh invocation
+reads the authoritative transcript, names the active turn, submits `queue`, and
+follows the returned origin turn through its own terminal outcome; it therefore
+waits while the predecessor finishes and while the queued turn runs. Exact
+queued-send recovery supplies command identity, defaults version, and expected
+turn together. While the returned turn is still queued, a model-call or tool
+recovery wait on the turn currently holding the active slot and blocking its
+activation returns the existing recovery-required diagnostic instead of waiting
+for successor activation.
 
 `steer` reads content the same way. A fresh invocation observes and prints the
 active turn, submits configuration-free `steer`, validates the typed receipt,
@@ -2787,10 +2779,10 @@ Without it, creation sends the pathless compatibility value. Clap rejects
 combining it with `--model`, `--alias`, or `--system-prompt-file` before socket
 I/O; explicit flags never override template values. The choice keeps one
 invocation's complete creation defaults under either client control or daemon
-configuration, not both. The runner flags are deliberately outside that
-alternative and remain admissible with `--template`, because a template supplies
-defaults and neither placement axis: the choices compose, and a selected session
-path or runner placement is carried into the request rather than dropped. The
+configuration, not both. The runner flags are outside that alternative and
+remain admissible with `--template`, because a template supplies defaults and
+neither placement axis: the choices compose, and a selected session path or
+runner placement is carried into the request rather than dropped. The
 `templates` verb sends one `list_templates` request, validates strict name order
 and the terminal count, and prints one `name=<name> version=<decimal>` line per
 summary. Template prompt text, model selection, approval posture, and digest do
@@ -2799,7 +2791,7 @@ not cross this listing surface.
 `place` sends the exact caller-observed positive placement version and one
 complete replacement. Its receipt prints the successor version and replacement;
 `list` prints those same current facts for every session. `--pathless` restores
-legacy unrestricted reads explicitly. Root placement again requires the loud
+legacy unrestricted reads explicitly. Root placement again requires the explicit
 `--root-global-read` acknowledgement, so no client syntax can silently turn a
 one-segment path into global read.
 
@@ -2824,7 +2816,7 @@ before socket I/O and validate the applied event ordinal and generation receipt.
 `goal show` validates and spools the complete history before printing the
 current projection and every event with terminal-safe statement, need, guidance,
 and report text. Guidance that does not replace scope remains a resume or the
-existing `steer` verb; no edit-in-place command exists.
+`steer` verb; no edit-in-place command exists.
 
 `reconcile` reads its successor content the same way and names the parked turn
 the operator observed in the session transcript. It prints the same command and
@@ -2881,33 +2873,33 @@ dangerous-tool posture, and — when no prompt option was given — the exact
 current system prompt, prints the version and posture, and changes only the
 requested fields. Thus every client-generated or server-discovered scalar
 recovery value is visible before its commit can become ambiguous; the
-content-sized prompt is deliberately never echoed. Exact replay also requires
-the original selection, template name, imported-conversation, or session
-arguments and, for `send`, `steer`, `reconcile`, and `stop`, the exact
-standard-input content; the client does not echo that potentially sensitive
-input or synthesize a shell command. Template recovery deliberately needs no
-digest or copied values: equal replay uses the original command and name. Its
-ambiguity diagnostic directs the user to retry the original command with those
-arguments and input plus any printed recovery values. For recovery, the user
-supplies the printed command identity. An ordinary `send` and `reconcile` also
-require the exact `--defaults-version`; `send --queue` requires defaults version
-and the exact expected `--turn`; `steer` requires that turn but no defaults
-version; and `stop` requires command identity, defaults version, and the exact
-expected `--turn`, because a stopped turn cannot be rediscovered once the first
-handling terminalizes it. `model` instead requires all three printed facts —
-command identity, defaults version, and dangerous-tool posture — plus the
-original prompt option: a re-supplied `--system-prompt-file` or
-`--clear-system-prompt` is re-read or re-applied exactly, while a copied-forward
-prompt is re-read from the immutable epoch the printed defaults version names,
-so the retried payload is byte-exact under concurrent replacements without
-printing megabyte content. Each recovery set is all-or-none. The client never
-silently substitutes a new command identity for an ambiguous attempt. It uses a
-fresh nonzero request identity per connection, validates that a defaults receipt
-is the exact successor carrying the requested selection, copied posture, and
-exact replacement prompt, validates that a decision receipt echoes the exact
-request and decision it sent, renders only known messages, and exits nonzero on
-protocol or application errors other than the follow-specific `resync_required`
-control case, which reconnects for a fresh snapshot.
+content-sized prompt is never echoed. Exact replay also requires the original
+selection, template name, imported-conversation, or session arguments and, for
+`send`, `steer`, `reconcile`, and `stop`, the exact standard-input content; the
+client does not echo that potentially sensitive input or synthesize a shell
+command. Template recovery needs no digest or copied values: equal replay uses
+the original command and name. Its ambiguity diagnostic directs the user to
+retry the original command with those arguments and input plus any printed
+recovery values. For recovery, the user supplies the printed command identity.
+An ordinary `send` and `reconcile` also require the exact `--defaults-version`;
+`send --queue` requires defaults version and the exact expected `--turn`;
+`steer` requires that turn but no defaults version; and `stop` requires command
+identity, defaults version, and the exact expected `--turn`, because a stopped
+turn cannot be rediscovered once the first handling terminalizes it. `model`
+instead requires all three printed facts — command identity, defaults version,
+and dangerous-tool posture — plus the original prompt option: a re-supplied
+`--system-prompt-file` or `--clear-system-prompt` is re-read or re-applied
+exactly, while a copied-forward prompt is re-read from the immutable epoch the
+printed defaults version names, so the retried payload is byte-exact under
+concurrent replacements without printing megabyte content. Each recovery set is
+all-or-none. The client never silently substitutes a new command identity for an
+ambiguous attempt. It uses a fresh nonzero request identity per connection,
+validates that a defaults receipt is the exact successor carrying the requested
+selection, copied posture, and exact replacement prompt, validates that a
+decision receipt echoes the exact request and decision it sent, renders only
+known messages, and exits nonzero on protocol or application errors other than
+the follow-specific `resync_required` control case, which reconnects for a fresh
+snapshot.
 
 Review mutations print a generated command identity before socket I/O and an
 ambiguous diagnostic directs the operator to repeat the same verb, identifiers,
@@ -2934,14 +2926,14 @@ progress projection.
 The client validates each complete snapshot and its terminal counts into an
 owner-private anonymous temporary-file spool before replay or presentation.
 Turn, model-call, and source-qualified entry identity indexes are disk-backed
-too, so the wire's intentionally unbounded aggregate snapshot size does not
-become unbounded client memory. Before adopting an initial or resynchronized
-snapshot cursor, `follow` presents its acceptance-ordered turn projections,
-including queued user content, active attempt and current-call state, recovery
-waits, and terminal state. It validates but does not print the snapshot's usage
-section; follow updates remain durable transitions rather than provider
-evidence. A transition committed at or below that cursor therefore remains
-visible even when it has not added a semantic transcript entry.
+too, so the wire's unbounded aggregate snapshot size does not become unbounded
+client memory. Before adopting an initial or resynchronized snapshot cursor,
+`follow` presents its acceptance-ordered turn projections, including queued user
+content, active attempt and current-call state, recovery waits, and terminal
+state. It validates but does not print the snapshot's usage section; follow
+updates remain durable transitions rather than provider evidence. A transition
+committed at or below that cursor therefore remains visible even when it has not
+added a semantic transcript entry.
 
 `transcript` replays the validated usage rows after ordinary turn and frontier
 output. It prints separate `reported` and `estimated` token subtotals per turn
@@ -2976,7 +2968,7 @@ typed diagnostic and a nonzero exit without reply text; when a failed terminal
 call carries a provider cause, both CLI and native client render the closed
 classification (for example, credential rejection versus retry-later overload)
 without provider prose. Cancelled and reconciliation-required turns use their
-distinct typed diagnostics. The native synchronization surface reports a truly
+distinct typed diagnostics. The native synchronization surface reports an
 unrecognized frame as a nonfatal decoding diagnostic, while a known frame that
 fails its closed shape is named as a malformed-known protocol violation.
 `follow` prints the initial transcript, ephemeral provider-text deltas, and
@@ -3006,8 +2998,7 @@ choice covers assistant text, typed diagnostics, and durable updates. Each
 complete raw text value is flushed before the client awaits another frame,
 without adding a delimiter.
 
-The existing `signalbox-debug` binary is unchanged and remains a development
-harness, not a protocol client.
+The `signalbox-debug` binary is a development harness, not a protocol client.
 
 ### Credential-pool preparation failure
 
@@ -3016,7 +3007,7 @@ admits this shape. This section is the wire-projection column of
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine)
 for its `pre-call fail` and `wait-transition fail (no call)` endings, which
 share one wire projection; that table states which endings project to a terminal
-state and which to an active one. The implementing wire slice must add
+state and which to an active one. The wire projection must add
 `failed_credential_pool_exhausted { terminal_frontier_id, terminal_attempt_id, failure_entry_id, pool_policy_id, policy_members, members }`
 as a distinct `transcript_turn.state` variant and
 `turn_credential_pool_exhausted { turn_id, terminal_attempt_id, failure_entry_id, terminal_frontier_id, pool_policy_id, policy_members, members }`
@@ -3052,8 +3043,8 @@ them; any exclusion with no reset, and any whose kind clears by something other
 than time passing, makes it null. Reporting a reset is not sufficient, by the
 same rule and for the same reason the wait deadline uses
 ([credential availability](credential-availability.md#the-credential-availability-machine))
-— publishing a time no wake honors would promise a client a recovery moment that
-never arrives. A wake can consequently never be scheduled while an indefinite
+— publishing a time no wake honors would name a recovery moment that never
+arrives. A wake can consequently never be scheduled while an indefinite
 condition still bars the member. The narrower correlations the selected item
 omits are not lost: each remains an active durable record that
 [credential-exclusion administration](#credential-exclusion-administration)
@@ -3072,8 +3063,8 @@ live follow project the same typed cause rather than a generic failed turn.
 Configuration admission limits each profile and pool name to 256 UTF-8 bytes and
 each pool to 1,024 members, reserving enough of the 8 MiB frame for the complete
 duplicated failure evidence under worst-case JSON escaping; this projection is
-never paginated or truncated. Until the coordinated daemon-and-client slice
-lands, version one rejects both new variants and the policy read, and no present
+never paginated or truncated. Version one rejects both new variants and the
+policy read until the daemon and client implement them together, and no present
 producer may terminalize a turn for this pre-call cause.
 
 **Committed unimplemented functionality — credential-availability projection.**
@@ -3084,21 +3075,18 @@ exposes an availability-successor chain or credential-availability wait — the
 whose wire-projection column this section owns. The predecessor, authorizing
 cause, selected profile, and wait evidence are themselves committed future
 storage — no present migration, repository operation, or reconstitution path
-supplies them — so a wire slice cannot project them until that storage child
-lands, and must then add a version-one shape together with its daemon and client
-consumers. That future slice must project a wait as an active state retaining
-the same turn and session slot. It commits nothing about a client-visible
-successor relation: whether the predecessor, cause, and successor chain are
-exposed, and how, is the open question at
-[model fallback and provenance](../open-questions.md#model-fallback-and-provenance),
-and this section states the wait compatibility constraint only. Requiring the
-chain here would close that question by implication rather than by the explicit
-decision that closing it requires. The runtime-and-storage child that first
-makes either wait reachable must include this coordinated wire slice; admitting
+supplies them — so the wire cannot project them until that storage exists, and
+must then add a version-one shape together with its daemon and client consumers.
+The wait must be projected as an active state retaining the same turn and
+session slot. Nothing is committed about a client-visible successor relation:
+whether the predecessor, cause, and successor chain are exposed, and how, is the
+open question at
+[model fallback and provenance](../open-questions.md#model-fallback-and-provenance);
+this section states the wait compatibility constraint only. Whatever first makes
+either wait reachable must include this coordinated wire projection; admitting
 `park` in static configuration alone does not make the state reachable. Until
-then, transcript snapshots continue to expose the existing per-call usage rows
-and final turn state only; no current client-visible claim is made for the
-committed storage evidence.
+then, transcript snapshots expose per-call usage rows and final turn state only;
+no client-visible claim is made for the committed storage evidence.
 
 ## Open edges
 
@@ -3109,6 +3097,5 @@ later client-form choices are cataloged under
 [Client scope](../open-questions.md#client-scope). Richer metadata query
 language and creation-derived visibility are cataloged under
 [Session organization, visibility, and retention](../open-questions.md#session-organization-visibility-and-retention).
-Wire and projection data for future graded approval judgments require acceptance
-through the foundation-decision process tracked under
-[Graded approval judging](../open-questions.md#graded-approval-judging).
+Wire and projection data for future graded approval judgments are cataloged
+under [Graded approval judging](../open-questions.md#graded-approval-judging).
