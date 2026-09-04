@@ -655,7 +655,7 @@ fn query_after_the_evidence_horizon_is_unknown() {
         .resolve(
             Provider::Openai,
             "gpt-5.6-sol",
-            "9999-12-31",
+            "2026-09-04",
             CommercialChannel::Api,
         )
         .unwrap();
@@ -823,7 +823,7 @@ fn source_ownership_uses_the_canonicalized_url_path() {
         .as_array_mut()
         .unwrap()
         .iter_mut()
-        .find(|source| source["id"] == "oai-codex-model-catalog-2026-08-24")
+        .find(|source| source["id"] == "oai-codex-model-catalog-2026-09-03")
         .unwrap();
     source["url"] = Value::String(String::from("https://github.com/openai/../attacker/repo"));
 

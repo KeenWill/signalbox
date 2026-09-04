@@ -18,8 +18,8 @@ typed rate-limit and overload evidence, provider-directed retry delay, and
 pre-stream non-acceptance proof are verified against this PR
 (`agent/multi-account-pools`). The Codex CLI compatibility-smoke automation was
 verified through PR #333 (`agent/ci-tells-truth`); its feature classification,
-ambient-skill catalog probe, and pinned version were verified against the
-`0.150.0` executable through this PR (`agent/fixup-codex-cli-pin-contract`). Its
+ambient-skill catalog probe, and pinned version are verified against the
+`0.153.1` executable through this PR (`agent/gpt6-astra-catalog`). Its
 twice-daily schedule and workflow-self-change trigger were verified through PR
 `#471` (`agent/codex-smoke-schedule`). The Codex CLI adapter's prompt
 tool-authority preamble is verified against this PR
