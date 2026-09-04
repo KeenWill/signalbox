@@ -1984,15 +1984,15 @@ restore.
 
 This build maps a model family to exactly one credential pool. Each implemented
 `[[adapter_mappings]]` entry accepts exactly `model_family`, `adapter`, and
-`credential_pool`; the committed workspace-instruction slice also accepts
-exactly the all-or-none transport and byte-capacity pair defined in
+`credential_pool`; committed unimplemented workspace-instruction admission also
+accepts exactly the all-or-none transport and byte-capacity pair defined in
 [model capability configuration](#model-selection-validation). Every other key
 is rejected (`apps/signalboxd/src/configuration.rs:706`). The pool must name one
 declared `[[credential_pools]]` entry whose adapter agrees with the mapping's.
 
 Selection happens for each model-call availability chain. Configuration parsing
-still derives the session's initial preferred reference, while preparation loads
-the target's admitted pool and skips durable chain exclusions, pending next-turn
+derives the session's initial preferred reference, while preparation loads the
+target's admitted pool and skips durable chain exclusions, pending next-turn
 displacements, membership exclusions, and global quarantines. A `switch_now`
 failure starts after the failed member and cannot select any member already
 tried in that chain. The settings whose effect this build cannot supply are
@@ -2092,18 +2092,16 @@ The observation-commit transaction atomically stores the terminal observation
 and any profile quarantine, pending displacement, or membership exclusion it
 causes. The correlation runs one way only: an action record names the
 observation that caused it and cannot exist without it. It does not run the
-other way, and this is stated explicitly because reading it as symmetric breaks
-the most common configuration there is. `stay` is the action every omitted
-trigger key selects, and it creates no quarantine, no displacement, no
-membership exclusion, and no chain exclusion — that is what `stay` means. An
-action that creates no durable state writes no record, and the observation
-commits alone; requiring a record from it would make the default configuration
-unable to commit a terminal observation at all, so no turn under it could ever
-terminalize. No generic applied-action row exists for that case either, because
-a row recording that nothing happened would be written on every ordinary failure
-and read by nothing. Delivery-layer quarantine that occurs before a provider
-request instead names its own typed refresh or credential-home failure and
-commits that evidence atomically with quarantine.
+other way. `stay` is the action every omitted trigger key selects, and it
+creates no quarantine, no displacement, no membership exclusion, and no chain
+exclusion. An action that creates no durable state writes no record, and the
+observation commits alone; requiring a record from it would make the default
+configuration unable to commit a terminal observation at all, so no turn under
+it could ever terminalize. No generic applied-action row exists for that case
+either, because a row recording that nothing happened would be written on every
+ordinary failure and read by nothing. Delivery-layer quarantine that occurs
+before a provider request instead names its own typed refresh or credential-home
+failure and commits that evidence atomically with quarantine.
 
 Two sessions can observe the same trigger for one profile at the same moment,
 and their session-scheduler locks do not serialize that. Every transaction that
@@ -2126,11 +2124,11 @@ because they are not uniform across members: a preparation writes the exclusion
 state of any member whose pending displacement it consumes, and reads the rest.
 The share and exclusive modes conflict, so one of the two transactions waits: a
 call is either prepared before the exclusion commits or prepared against a
-member it has already observed as excluded. This is stated rather than left
-implied because selection otherwise takes no lock the exclusion writer takes —
-an unbounded `first_listed` member acquires neither a capacity row nor a cursor
-row — and a preparation that read a member as admissible could then dispatch a
-provider request on a credential quarantined in the interval.
+member it has already observed as excluded. Without this rule selection takes no
+lock the exclusion writer takes — an unbounded `first_listed` member acquires
+neither a capacity row nor a cursor row — and a preparation that read a member
+as admissible could then dispatch a provider request on a credential quarantined
+in the interval.
 
 `switch_now` is admitted only for `on_quota_exhausted`, `on_rate_limited`, and
 `on_overloaded`, because only those causes carry proof that the request was not
@@ -2153,46 +2151,43 @@ configured `on_credential_rejected`, and a deployment that wants a refresh race
 to quarantine configures `quarantine` there. Splitting the branch on evidence
 the adapter cannot produce would force an implementation to either quarantine
 ordinary rejections against `stay` or miss the race entirely. A future typed
-refresh-failure variant from that adapter is what would let the delivery-layer
-bypass apply here too; until it exists, this contract does not pretend the
-distinction is observable.
+refresh-failure variant from that adapter would let the delivery-layer bypass
+apply here too.
 
 `switch_now` is further admitted only where the pool's adapter can supply the
 typed non-acceptance proof for that exact trigger's cause. Every pool's members
 already agree on one adapter, so the check is per adapter *and* per trigger, not
 once per adapter.
 
-Two conditions make a response carry that proof, and both are stated here rather
-than by reference, because a successor authorized without either is a second
-paid call for a request the provider may already have performed. First, the
-adapter must have decoded its own documented error envelope and the decoded
-native token must name that cause in the adapter's exhaustive mapping; a
-status-derived fallback carries no proof. Second — and this is what the token
-alone does not establish — the response must be a *pre-stream error response*:
-an error-status exchange whose body is that envelope, decoded before any stream
-began. **An SSE error record never carries the proof, whatever native token it
-holds.** Both in-repository stream decoders classify a mid-stream `error` record
-through the same native-token mapping they use for an error response, so the
-token is identical; what differs is that by the time such a record arrives,
-`message_start`, content, reported usage, or a finish token has already been
-observed, and the provider has demonstrably accepted and begun processing the
-request. Non-acceptance is exactly what that disproves. A mid-stream or
-post-finish availability failure therefore stays an ordinary terminal known
-failure and authorizes no successor. For HTTP adapters this admits exactly
-`on_rate_limited` and `on_overloaded` for an `anthropic` pool, and
-`on_rate_limited` and `on_quota_exhausted` for an `openai` pool.
-`on_quota_exhausted` under `anthropic` and `on_overloaded` under `openai` are
-typed startup failures because those adapters' mappings carry no native token
-for those causes and can reach them only by status-derived fallback, which
-carries no proof. Claude Code exposes no machine-readable terminal envelope, so
-`switch_now` on a `claude_cli` pool is rejected for all three triggers. Codex is
-different: rendered failure text supplies the narrower cause, but the JSONL
-`turn.failed` lifecycle envelope independently proves the request ended without
-a successful stream. The Codex adapter therefore admits all three availability
-triggers and never authorizes a successor from a malformed, incomplete, or
-contradictory event stream. Why reject an unprovable pair rather than accept and
-ignore it: a configured `switch_now` that can never fire reads as failover the
-deployment does not have.
+Two conditions make a response carry that proof; a successor authorized without
+either is a second paid call for a request the provider may already have
+performed. First, the adapter must have decoded its own documented error
+envelope and the decoded native token must name that cause in the adapter's
+exhaustive mapping; a status-derived fallback carries no proof. Second, the
+response must be a *pre-stream error response*: an error-status exchange whose
+body is that envelope, decoded before any stream began. **An SSE error record
+never carries the proof, whatever native token it holds.** Both in-repository
+stream decoders classify a mid-stream `error` record through the same
+native-token mapping they use for an error response, so the token is identical;
+what differs is that by the time such a record arrives, `message_start`,
+content, reported usage, or a finish token has already been observed, and the
+provider has demonstrably accepted and begun processing the request.
+Non-acceptance is exactly what that disproves. A mid-stream or post-finish
+availability failure therefore stays an ordinary terminal known failure and
+authorizes no successor. For HTTP adapters this admits exactly `on_rate_limited`
+and `on_overloaded` for an `anthropic` pool, and `on_rate_limited` and
+`on_quota_exhausted` for an `openai` pool. `on_quota_exhausted` under
+`anthropic` and `on_overloaded` under `openai` are typed startup failures
+because those adapters' mappings carry no native token for those causes and can
+reach them only by status-derived fallback, which carries no proof. Claude Code
+exposes no machine-readable terminal envelope, so `switch_now` on a `claude_cli`
+pool is rejected for all three triggers. Codex is different: rendered failure
+text supplies the narrower cause, but the JSONL `turn.failed` lifecycle envelope
+independently proves the request ended without a successful stream. The Codex
+adapter therefore admits all three availability triggers and never authorizes a
+successor from a malformed, incomplete, or contradictory event stream. Why
+reject an unprovable pair rather than accept and ignore it: a configured
+`switch_now` that can never fire reads as failover the deployment does not have.
 
 #### Pool-based preparation
 
@@ -2201,8 +2196,8 @@ starts immediately after its failed predecessor in policy order. Each call
 stores the policy and member it used; every chain exclusion, delayed successor,
 next-turn displacement, membership exclusion, and quarantine survives restart.
 Capacity reservations, `round_robin`, `least_used`, and parking remain committed
-unimplemented functionality; admission continues to reject capacity-dependent
-choices this build cannot observe.
+unimplemented functionality; admission rejects capacity-dependent choices this
+build cannot observe.
 
 Selection happens at model-call preparation, never at session creation. For the
 resolved target's family, preparation reads the session's current immutable
@@ -2240,38 +2235,35 @@ tie-break and do not advance it. Stickiness needs no separate durable state:
 preparation prefers the member the session's most recent `Prepared` call on that
 pool pinned, including a call that later failed under `stay`, so a session stays
 on one account until a trigger displaces it. When the pool admits no member,
-which ending the attempt reaches — and what every page must then say about it —
-is owned by
-[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
-and this section restates none of it. Quarantine is durable and scoped to the
-profile rather than to the pool that observed it, because a rejected credential
-is a property of the account: a profile ranked in two pools is excluded from
-both. It is cleared only by an explicit operator command, or by a probe that
-costs nothing and calls no model where the adapter offers one — never by a
-timer, since a revoked credential does not heal on a schedule, and never by a
-restart. Why an operator command rather than rediscovery: for a `codex_home` or
-`oauth` profile the repair is an interactive re-authorization the operator
-performs, so the operator knows the moment it is fixed, and rediscovering it
-instead would spend a real model call to learn what they could have said.
-Reading a quarantine record is never on the recovery path for acknowledged work,
-so INV-034 is unaffected.
+which ending the attempt reaches is owned by
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine).
+Quarantine is durable and scoped to the profile rather than to the pool that
+observed it, because a rejected credential is a property of the account: a
+profile ranked in two pools is excluded from both. It is cleared only by an
+explicit operator command, or by a probe that costs nothing and calls no model
+where the adapter offers one — never by a timer, since a revoked credential does
+not heal on a schedule, and never by a restart. Why an operator command rather
+than rediscovery: for a `codex_home` or `oauth` profile the repair is an
+interactive re-authorization the operator performs, so the operator knows the
+moment it is fixed, and rediscovering it instead would spend a real model call
+to learn what they could have said. Reading a quarantine record is never on the
+recovery path for acknowledged work, so INV-034 is unaffected.
 
 The exact future operator-clear request, target correlations, replay behavior,
 and receipt are owned by
 [credential-exclusion administration](process-protocol.md#credential-exclusion-administration).
 No present process or application surface implements that request, so every
-explicit-clear path above remains committed unimplemented functionality; the
-parser slice does not claim that an indefinite wait can presently be released.
+explicit-clear path above remains committed unimplemented functionality and no
+indefinite wait can presently be released.
 
-The durable record is unchanged in kind. A session's credential history event
-carries a complete family-to-pool-policy snapshot where it previously carried a
-family-to-reference snapshot. Each immutable policy includes the pool name,
-ordered members, every member's expected adapter and delivery kind, their
-membership settings, tie-break and exhaustion rules, and all trigger actions;
-preparation never resolves that snapshot through the current document's pool
-table. Before credential resolution, preparation requires the selected member's
-frozen adapter to equal the resolved target's adapter and requires the current
-profile registration to retain both that adapter and delivery kind. Absence or a
+A session's credential history event carries a complete family-to-pool-policy
+snapshot. Each immutable policy includes the pool name, ordered members, every
+member's expected adapter and delivery kind, their membership settings,
+tie-break and exhaustion rules, and all trigger actions; preparation never
+resolves that snapshot through the current document's pool table. Before
+credential resolution, preparation requires the selected member's frozen adapter
+to equal the resolved target's adapter and requires the current profile
+registration to retain both that adapter and delivery kind. Absence or a
 mismatch is a typed pre-send credential-configuration failure, so reusing a
 profile name cannot route another adapter's or delivery's credential through an
 old policy. Each model call pins both the exact profile that authenticated it in
@@ -2283,27 +2275,26 @@ the reference the call itself pinned, whatever selection chose it, and a pool
 edited across a restart can neither broaden an existing session's admitted
 credentials nor relabel a stored call.
 
-What this build presently delivers differs from that record in one way worth
-stating. Preparation selects among the admitted members and a qualifying failure
-rotates the chain, so a multi-member pool no longer behaves as its preferred
-member alone. What is still missing is the interned immutable policy identity: a
-session's credential history event stores the preferred reference rather than
-the complete policy, so only an intra-chain successor reloads its predecessor
-call's frozen policy while a fresh availability chain resolves the pool from the
-current document. A pool edited across a restart can therefore still change
-which members an existing session admits, and call-free exhaustion records the
-pool name rather than the exact per-member evidence that proved it. Both gaps
-close with the `pool_policy_id` record described above and remain committed
-unimplemented functionality until then.
+What this build presently delivers differs from that record in one way.
+Preparation selects among the admitted members and a qualifying failure rotates
+the chain, so a multi-member pool does not behave as its preferred member alone.
+What is missing is the interned immutable policy identity: a session's
+credential history event stores the preferred reference rather than the complete
+policy, so only an intra-chain successor reloads its predecessor call's frozen
+policy while a fresh availability chain resolves the pool from the current
+document. A pool edited across a restart can therefore change which members an
+existing session admits, and call-free exhaustion records the pool name rather
+than the exact per-member evidence that proved it. Both gaps close with the
+`pool_policy_id` record described above and remain committed unimplemented
+functionality until then.
 
 Two families of one adapter may prefer different profiles wherever that adapter
 resolves the session-pinned reference from a complete adapter-scoped catalog —
-both direct HTTP adapters and `claude_cli` do. Only `codex_cli` still carries a
-single reference into its runtime, so two `codex_cli` families resolving to
-different profiles is a typed startup failure rather than a silent pin of
-whichever parsed last. A profile declared for another adapter is unmapped in
-every case, even if a later configuration routes the same model family through
-this adapter.
+both direct HTTP adapters and `claude_cli` do. Only `codex_cli` carries a single
+reference into its runtime, so two `codex_cli` families resolving to different
+profiles is a typed startup failure rather than a silent pin of whichever parsed
+last. A profile declared for another adapter is unmapped in every case, even if
+a later configuration routes the same model family through this adapter.
 
 Admission is fail-closed. Startup rejects a pool with no members, a duplicate
 member profile, a member naming an undeclared profile, a mapping naming an
@@ -2317,14 +2308,13 @@ adapter-and-trigger pair whose adapter cannot prove non-acceptance for that
 cause — every trigger under `claude_cli`, `on_quota_exhausted` under
 `anthropic`, and `on_overloaded` under `openai`. The admission gate is the
 capacity report alone, so an adapter that reports capacity admits `least_used`
-and a headroom reserve with no further parser change; the adapter contract that
-flips that answer therefore owes the normalized quantity, observation lifetime,
-and deterministic secondary tie-break in the same change, because this page
-cannot enforce it. Why it is owed: a configured reserve or selection rule that
-silently never fires — or whose metric varies by implementation — would read as
-protection the deployment does not have. The keys are admitted by the grammar so
-that supplying that later contract needs no configuration grammar change; the
-observation itself is routed through
+and a headroom reserve with no further parser change; an adapter that reports
+capacity must therefore also define the normalized quantity, observation
+lifetime, and deterministic secondary tie-break. Why: a configured reserve or
+selection rule that silently never fires — or whose metric varies by
+implementation — would read as protection the deployment does not have. The keys
+are admitted by the grammar so that supplying that later contract needs no
+configuration grammar change; the observation itself is routed through
 [model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
 
 A one-member pool is the ordinary single-account deployment and requires no
@@ -2338,9 +2328,7 @@ observation — pool, member, action kind, the observing session, turn, and mode
 call, and the classified cause — and the only row it ever updates is a
 `switch_next_turn` displacement that a later prepared call on that pool
 consumes. The four topics below state the lifecycle that record is meant to
-carry. They sit here rather than among the durable trigger effects above so that
-a reader can take a paragraph's position for its tier; none of them describes
-behavior available from this build.
+carry; none of them describes behavior available from this build.
 
 - **Reset-aware exclusion expiry.** A membership exclusion is reset-aware: a
   reported reset time clears it when that time passes, and only an exclusion
@@ -2363,10 +2351,9 @@ behavior available from this build.
   probe that costs nothing and calls no model, or another durable availability
   update ends an indefinite generation. The clear request itself is owned by
   [credential-exclusion administration](process-protocol.md#credential-exclusion-administration)
-  and stated once under [pool-based preparation](#pool-based-preparation), so it
-  is not restated here; no present process or application surface implements it
-  and no composed adapter exposes such a probe, so no exclusion this build
-  writes is ever cleared.
+  and described under [pool-based preparation](#pool-based-preparation); no
+  present process or application surface implements it and no composed adapter
+  exposes such a probe, so no exclusion this build writes is ever cleared.
 
 - **Action-head generations and correlation coalescing.** Each profile carries a
   durable action head, and every transaction that mints, activates, or clears an
@@ -2454,18 +2441,17 @@ Each template table carries exactly:
 - `dangerous_tool_auto_approval` — the required Boolean encoding of the complete
   `Disabled`/`ApproveAll` blanket.
 
-**Committed unimplemented functionality — template instruction selectors.** The
-eligibility-control child extends an ordinary template with one optional
-`instruction_selectors` array containing at most 256 inline tables. Each table
-has exactly `root`, `source_path`, `kind`, and `source_sha256`, plus
-`configured_root_id` exactly when `root = "configured"`. `root` is `"workspace"`
-or `"configured"`; the configured identity and source hash are 64 lowercase
-hexadecimal characters encoding 32 bytes; `kind` is `"agent_document"` or
-`"agent_skill"`; and `source_path` is 1 through 4,096 UTF-8 bytes of nonempty
-normal components separated by single `/` characters, with no leading or
-trailing slash or U+0000. The configured identity is the path-derived
-`ConfiguredInstructionRootId` above. An absent or empty array means no selector
-and therefore no eligible bundle.
+**Committed unimplemented functionality — template instruction selectors.** An
+ordinary template accepts one optional `instruction_selectors` array containing
+at most 256 inline tables. Each table has exactly `root`, `source_path`, `kind`,
+and `source_sha256`, plus `configured_root_id` exactly when
+`root = "configured"`. `root` is `"workspace"` or `"configured"`; the configured
+identity and source hash are 64 lowercase hexadecimal characters encoding 32
+bytes; `kind` is `"agent_document"` or `"agent_skill"`; and `source_path` is 1
+through 4,096 UTF-8 bytes of nonempty normal components separated by single `/`
+characters, with no leading or trailing slash or U+0000. The configured identity
+is the path-derived `ConfiguredInstructionRootId` above. An absent or empty
+array means no selector and therefore no eligible bundle.
 
 The loader rejects duplicate selectors and canonicalizes them by root
 (`workspace` first), configured-root digest bytes when present, raw UTF-8 source
@@ -2480,11 +2466,9 @@ array is explicitly empty, in which case it writes a selector count of zero and
 no records. A template with no `instruction_selectors` key keeps version two
 unchanged, which is what stops every existing selector-free template from
 changing digest. Generated review templates carry no such key and therefore stay
-on version two; their earlier description as carrying an empty sequence
-described the resolved bundle, not the digest input. Absent and explicitly empty
-are thus deliberately different digests for the same effective eligibility,
-because the digest authenticates what the template document said rather than
-what it amounted to.
+on version two. Absent and explicitly empty are deliberately different digests
+for the same effective eligibility, because the digest authenticates what the
+template document said rather than what it amounted to.
 
 Version three retains the version-two frames below except that its first frame
 is `signalbox/session-template/content-digest/v3`; after the model-settings
@@ -2501,9 +2485,8 @@ concatenation is not an admissible reading of any of the three variable-length
 fields. Thus templates that differ only in selectors have different provenance.
 Generated review templates carry the empty resolved sequence and no
 `instruction_selectors` key, so they keep the version-two digest. No present
-parser admits `instruction_selectors`, no resolved bundle retains it, and the
-implemented version-two digest and stable vector below remain unchanged until
-that child lands.
+parser admits `instruction_selectors` and no resolved bundle retains it; the
+implemented digest is version two, with the stable vector below.
 
 An inline prompt is the exact TOML string value. A prompt-file reference is
 either a relative path resolved from the template document's parent directory,
@@ -2607,12 +2590,10 @@ credential presence is never consulted (INV-008):
   **Committed unimplemented functionality — retained-region acceptance check.**
   No present surface admits a workspace-instruction region, so no present
   acceptance transaction performs the check described in the rest of this
-  bullet; it is recorded because it constrains what the implementing child may
-  do, and the paragraph below states a requirement on that child rather than
-  current behavior. Once workspace-instruction admission exists, every
-  origin-creating acceptance transaction resolves the frozen selection against
-  the live immutable catalog and rejects the origin before freezing it when the
-  target that will actually serve the turn lacks typed-system transport or byte
+  bullet. Once workspace-instruction admission exists, every origin-creating
+  acceptance transaction resolves the frozen selection against the live
+  immutable catalog and rejects the origin before freezing it when the target
+  that will actually serve the turn lacks typed-system transport or byte
   capacity for the session's complete retained region. The check belongs to
   origin acceptance as such, not to `SubmitInput`: goal attach, goal resume, and
   scheduler continuation mint accepted origins without a `SubmitInput` call, and
@@ -2620,20 +2601,20 @@ credential presence is never consulted (INV-008):
   fail before provider spawn — precisely the restart-after-retargeting case this
   check exists to prevent. That is also what
   [sessions-and-transcript](sessions-and-transcript.md#session-defaults-and-replacement)
-  already promises for every later origin, and the two now agree. The subject of
-  that check is the effective serving record the frozen settings select, not the
-  named direct model: when the frozen overlay enables fast mode on a model whose
-  `fast_mode` is `alternate_target`, the check is applied to the
-  `fast_target_id` serving record that execution will pin, and to its adapter
-  mapping. Each serving target declares transport and capacity independently, so
-  validating only the direct target would admit an input that fails later,
-  before provider spawn. Where the frozen settings leave the effective record
-  undetermined at acceptance, every record the frozen selection may still pin
-  must satisfy the check. This check runs even when no defaults replacement
-  occurred, so restart or configuration retargeting cannot strand an admitted
-  session. A direct selection receives the same check against the serving record
-  its own frozen settings select. The typed rejection accepts no input, creates
-  no turn, and changes neither defaults nor admissions.
+  promises for every later origin. The subject of that check is the effective
+  serving record the frozen settings select, not the named direct model: when
+  the frozen overlay enables fast mode on a model whose `fast_mode` is
+  `alternate_target`, the check is applied to the `fast_target_id` serving
+  record that execution will pin, and to its adapter mapping. Each serving
+  target declares transport and capacity independently, so validating only the
+  direct target would admit an input that fails later, before provider spawn.
+  Where the frozen settings leave the effective record undetermined at
+  acceptance, every record the frozen selection may still pin must satisfy the
+  check. This check runs even when no defaults replacement occurred, so restart
+  or configuration retargeting cannot strand an admitted session. A direct
+  selection receives the same check against the serving record its own frozen
+  settings select. The typed rejection accepts no input, creates no turn, and
+  changes neither defaults nor admissions.
 - **At execution.** When the attempt pins its target, the frozen selection is
   resolved against the `ModelTargetCatalog`. An unresolvable selection fails the
   turn as a known failure before any model call exists; a credential or send
@@ -2696,7 +2677,7 @@ deployment-side rules that code cannot enforce are stated in
   rather than a profile, no build-provided constant is compared against any
   model-provider name, so an `anthropic` or `openai` profile may be called
   whatever the deployment calls its account. `codex-subscription-primary` and
-  `claude-subscription-primary` remain the defaults a CLI runtime falls back to
+  `claude-subscription-primary` are the defaults a CLI runtime falls back to
   when its mapping names nothing else, and are not enforced.
 
 - **File-based supply, reread per preparation.** Each `FileCredentialAccess`
@@ -2727,9 +2708,9 @@ deployment-side rules that code cannot enforce are stated in
   reference only. An `oauth` profile is validated and then rejected before
   anything about it is retained, so what that channel would require of the
   daemon is stated under
-  [committed unimplemented functionality](#committed-unimplemented-functionality--credential-lifecycle)
-  below rather than here. Whether two profiles denote two independent logins is
-  neither promised nor assumed by this inventory: it is
+  [committed unimplemented functionality](#committed-unimplemented-functionality--credential-lifecycle).
+  Whether two profiles denote two independent logins is neither promised nor
+  assumed by this inventory: it is
   [one property with a per-delivery disposition](#distinct-members-are-distinct-authorizations),
   established for some deliveries and required of the deployment for others. The
   adapter invents no credential-value shape of its own. The profile's configured
@@ -2740,8 +2721,8 @@ deployment-side rules that code cannot enforce are stated in
   including leading and interior whitespace. Why: the tools that write a
   credential file — `gh auth token`, `op read`, `pass`, a shell redirect —
   terminate the line they print, so the terminator is how the file ends rather
-  than part of the secret; without this, a routine deployment step produced a
-  value no HTTP header could carry. The narrowing happens once, at the file
+  than part of the secret; without this, a routine deployment step would produce
+  a value no HTTP header could carry. The narrowing happens once, at the file
   channel, so every adapter and the redaction scrub all see the same value. A
   file holding nothing but termination narrows to an empty value, which the
   adapter boundary then refuses exactly as it already refuses an empty file;
@@ -2759,25 +2740,22 @@ deployment-side rules that code cannot enforce are stated in
 - **Session credential history.** First handling of every native or imported
   session-creation command appends event ordinal 1 to that session's credential
   history in the same transaction as the session. In this build that event
-  carries the complete, nonempty family-to-*reference* snapshot it has always
-  carried, copied from the validated mapping table. Record and entry rows are
-  append-only; a guarded head names the current event, and model-call
-  preparation reads the latest entry for the resolved target's family. Equal
-  command replay returns the recorded session without consulting the current
-  table, so a configuration edit never silently re-resolves an existing
-  session's credentials.
+  carries a complete, nonempty family-to-*reference* snapshot copied from the
+  validated mapping table. Record and entry rows are append-only; a guarded head
+  names the current event, and model-call preparation reads the latest entry for
+  the resolved target's family. Equal command replay returns the recorded
+  session without consulting the current table, so a configuration edit never
+  silently re-resolves an existing session's credentials.
 
-- **Legacy migration fallback, still live.** Sessions that predate this history
-  carry a `migration_backfill` creation event holding the single previously
-  composed `anthropic` / `anthropic-primary` pair, seeded by the migration that
+- **Legacy migration fallback.** Sessions that predate this history carry a
+  `migration_backfill` creation event holding the single previously composed
+  `anthropic` / `anthropic-primary` pair, seeded by the migration that
   introduced the feature. While that event remains a session's current one, an
   Anthropic route may resolve through that durable legacy entry even when the
-  configured family is named differently; a Codex route never may. The daemon
-  performs this today — preparation falls back to the migrated entry when the
-  resolved family has no entry of its own — so it is described here rather than
-  left to be rediscovered from the code. A later explicit credential event ends
-  the aliasing for that session, because resolution then uses only the complete
-  latest snapshot.
+  configured family is named differently; a Codex route never may. Preparation
+  falls back to the migrated entry when the resolved family has no entry of its
+  own. A later explicit credential event ends the aliasing for that session,
+  because resolution then uses only the complete latest snapshot.
 
 - **Resolution timing.** Each direct HTTP adapter resolves the durably pinned
   reference during send preparation — after the durable `Prepared` record,
@@ -2826,29 +2804,27 @@ deployment-side rules that code cannot enforce are stated in
 
 ### Committed unimplemented functionality — credential lifecycle
 
-No present composition supplies any of the three topics below; each names the
-child that owes it. They sit here rather than among the entries above so that a
-reader can take an entry's position for its tier.
+No present composition supplies any of the topics below.
 
 - **Pool-policy credential history.** No present repository stores a
   family-to-pool-policy snapshot or migrates an existing family-to-reference
-  entry; the reference behavior above is what this build does. Its implementing
-  child replaces that snapshot with the complete immutable policy and owns the
-  one-time backfill of existing entries. Because a stored policy names members
-  by profile reference, that child must also freeze each member's adapter and
-  delivery kind in the snapshot and compare them against the current profile
-  registration before credential resolution: without it, editing a profile's
-  `adapter` or `delivery` would silently re-point a historical session's stored
-  member at a different contract, which is exactly what the replay rule above
-  promises cannot happen. A disagreeing or absent registration must block
-  scheduling the same way a missing historical registration does.
+  entry; the reference behavior above is what this build does. The pool-policy
+  history replaces that snapshot with the complete immutable policy and includes
+  a one-time backfill of existing entries. Because a stored policy names members
+  by profile reference, the snapshot must also freeze each member's adapter and
+  delivery kind and compare them against the current profile registration before
+  credential resolution: without it, editing a profile's `adapter` or `delivery`
+  would silently re-point a historical session's stored member at a different
+  contract, which is exactly what the replay rule above promises cannot happen.
+  A disagreeing or absent registration must block scheduling the same way a
+  missing historical registration does.
 
-  That child also owes a deterministic migration for the family-to-reference
-  history this build has already written, and the replay guarantee above fixes
-  what it must be: an upgrade may not change which credential an existing
-  session resolves. Each existing entry therefore becomes a **singleton policy
-  retaining exactly the stored reference** — one member at priority 1, no
-  headroom reserve, `first_listed`,
+  The migration of the family-to-reference history this build has already
+  written is deterministic, and the replay guarantee above fixes what it must
+  be: an upgrade may not change which credential an existing session resolves.
+  Each existing entry therefore becomes a **singleton policy retaining exactly
+  the stored reference** — one member at priority 1, no headroom reserve,
+  `first_listed`,
   [`on_pool_exhausted = "fail"`](credential-availability.md#the-credential-availability-machine),
   and `stay` for every trigger — which reproduces the one-account, no-failover
   behavior that entry already had. Expanding the entry to whatever pool the
@@ -2864,29 +2840,27 @@ reader can take an entry's position for its tier.
   be migrated, and blocks scheduling rather than being guessed at or dropped —
   the same failure the freeze rule above produces, for the same reason.
 
-- **CLI login channels.** `oauth` remains reserved and is rejected as
-  `UndeliveredCredentialDelivery`. `codex_home` is no longer reserved: the child
-  receives a validated path reference through a per-process `CODEX_HOME`, with
-  the daemon still never reading, copying, or logging the authentication
-  material beneath it. The child that admits `oauth` must invert the home-owned
-  boundary: it must hold the rotating authorization itself and hand each process
-  a scratch home carrying everything that home requires except the refresh
-  token, which is the one value it must never place there. The complete contents
-  are stated once by [the `oauth` delivery](#the-oauth-delivery) and are not
-  enumerated again here.
+- **CLI login channels.** `oauth` is reserved and is rejected as
+  `UndeliveredCredentialDelivery`. `codex_home` is not reserved: the child
+  process receives a validated path reference through a per-process
+  `CODEX_HOME`, and the daemon never reads, copies, or logs the authentication
+  material beneath it. Admitting `oauth` must invert the home-owned boundary:
+  the daemon must hold the rotating authorization itself and hand each process a
+  scratch home carrying everything that home requires except the refresh token,
+  which is the one value it must never place there. The complete contents are
+  stated by [the `oauth` delivery](#the-oauth-delivery).
 
 - **Codex file resolution.** No present composition or runtime delivers a Codex
   `file` profile; the parser validates its fields and then rejects it at
-  startup. The child that delivers it resolves the pinned reference during
-  capability preparation and, after the common trailing-termination narrowing,
-  admits exactly a nonempty NUL-free UTF-8 value of at most 65,536 bytes. Empty,
-  non-UTF-8, NUL-containing, or oversized content must fail preparation as typed
+  startup. Delivery resolves the pinned reference during capability preparation
+  and, after the common trailing-termination narrowing, admits exactly a
+  nonempty NUL-free UTF-8 value of at most 65,536 bytes. Empty, non-UTF-8,
+  NUL-containing, or oversized content must fail preparation as typed
   `CredentialUnusable`; no child may be spawned. Leading and interior whitespace
   remain credential bytes.
 
-- **Stored OAuth material.** The one admitted exception to the rule above
-  arrives with the `oauth` delivery in
-  [credential deliveries](#credential-deliveries), whose implementing child
+- **Stored OAuth material.** The one admitted exception to the rule above is the
+  `oauth` delivery in [credential deliveries](#credential-deliveries), which
   stores a credential value precisely where that credential rotates and the
   daemon alone refreshes it, and nowhere else. No present migration or
   repository stores daemon-owned OAuth material, so the reference-only rule
@@ -3025,14 +2999,12 @@ Enforcement as implemented:
   and thinking deltas, tool-argument JSON, tool proposals, native error bodies,
   provider request ids, reported model identity, stop-sequence and finish
   tokens, transport detail — is scrubbed with the exact preparation-time
-  credential value before crossing the boundary. Which value seeds that scrub is
-  this contract's to say; how the adapter applies it — the representations it
-  covers, its behaviour across provider chunk boundaries, where it sits relative
-  to truncation and parsing, and the limit that bounds the guarantee — is owned
-  by
-  [the credential-access boundary](runtime-substrate.md#credential-access-boundary)
-  and is not restated here. INV-035-tagged tests in
-  `crates/model-runtime/src/credential.rs`,
+  credential value before crossing the boundary. This contract fixes which value
+  seeds that scrub; how the adapter applies it — the representations it covers,
+  its behaviour across provider chunk boundaries, where it sits relative to
+  truncation and parsing, and the limit that bounds the guarantee — is owned by
+  [the credential-access boundary](runtime-substrate.md#credential-access-boundary).
+  INV-035-tagged tests in `crates/model-runtime/src/credential.rs`,
   `crates/model-runtime-anthropic/tests/loopback.rs`, and
   `apps/signalboxd/src/configuration.rs` enforce this boundary.
 - Every checked string in a successful code-host result is scrubbed of the exact
@@ -3045,8 +3017,7 @@ Enforcement as implemented:
 
 ## Credential operations policy
 
-Operational rules the daemon deployment must honor; code cannot enforce them
-(retained here because the surviving daemon-side mechanics depend on them).
+Operational rules the daemon deployment must honor; code cannot enforce them.
 Runner credential files instead follow the same-host `0600` contract above and
 are outside this cluster-delivery policy:
 
@@ -3097,8 +3068,8 @@ are outside this cluster-delivery policy:
 - **Revoke-last rotation.** Install the new value at the source of truth, wait
   out the propagation bound plus the longest expected in-flight provider call,
   then revoke the old value at the provider. Where a provider allows only one
-  active key, rotation has an honest known-failure window; the mitigation is
-  narrower propagation configuration, never silent retry.
+  active key, rotation has a known-failure window; the mitigation is narrower
+  propagation configuration, never silent retry.
 
 ## Open edges
 
@@ -3127,7 +3098,7 @@ are outside this cluster-delivery policy:
   itself is routed through
   [Model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
 - **Committed unimplemented functionality — quarantine clearing.** This build
-  stores no quarantine, so neither clearing path exists yet. The implementing
-  child adds the operator command; the automatic path additionally needs an
-  adapter offering a zero-cost liveness probe, and no adapter in this build
-  offers one.
+  stores no quarantine, so neither clearing path exists yet. The operator
+  command is committed unimplemented functionality; the automatic path
+  additionally needs an adapter offering a zero-cost liveness probe, and no
+  adapter in this build offers one.
