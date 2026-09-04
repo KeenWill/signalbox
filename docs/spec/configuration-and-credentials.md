@@ -712,7 +712,7 @@ excess entry, and unknown field are typed configuration failures.
 Configuration validation does not require a registered root to exist or be
 readable. Discovery reports a typed root-unavailable finding instead, so an
 operator can provision the path after validating the static file without an
-unavailable directory masquerading as an empty successful scan. The catalog is
+unavailable directory being reported as an empty successful scan. The catalog is
 read once at daemon startup; changing it requires a restart and never rewrites
 an earlier discovery snapshot.
 
@@ -1267,7 +1267,7 @@ supplies them:
   identifier among it — that no workspace bind governs, so the readable surface
   is wider than the bound paths alone.
 - `HOME` is the workspace root, so home-relative configuration discovery —
-  `~/.config` and anything else a program resolves that way — lands inside the
+  `~/.config` and anything else a program resolves that way — is inside the
   writable workspace rather than at a host location. Cargo alone uses the
   private `/cargo-home` when an explicit registry cache is configured; its
   registry is read-only while its lock and other transient state remain private
@@ -1462,8 +1462,6 @@ contract here says how the secret would reach that provider: `ambient`,
 separate questions — the deliveries refused despite being defined are enumerated
 below.
 
-Each delivery's section below states only the route its secret takes, never a
-restatement of which adapters admit it — that question is settled once above.
 Each `[[credential_profiles]]` entry is one flat TOML table: `delivery` is a
 required TOML string discriminant, common fields are exactly `name`, `adapter`,
 `billing_kind`, and `delivery`, and the selected variant admits only its fields
@@ -1509,11 +1507,11 @@ cannot; this contract says which for every delivery, and there is no third case.
   `ambient`/`codex_home` case is rejected directly when the home is admitted.
 - `file` — *required.* The daemon rejects only equal lexically normalized paths.
   An ordinary copy of the key file is admissible and indistinguishable from a
-  second credential. This is an accepted limit rather than an oversight, and its
-  reason is the provider/integration no-startup-preflight rule: a `file` profile
-  credential is never opened before preparation, so no filesystem identity
-  exists at admission, and buying one would trade that rule away for a guarantee
-  an ordinary `cp` defeats anyway.
+  second credential. This is an accepted limit, and its reason is the
+  provider/integration no-startup-preflight rule: a `file` profile credential is
+  never opened before preparation, so no filesystem identity exists at
+  admission, and obtaining one would give up that rule for a guarantee an
+  ordinary `cp` defeats anyway.
 - `codex_home` — *admitted by normalized path.* Two profiles may not name the
   same normalized directory. Independence of the token families inside distinct
   directories remains a deployment assertion, because the daemon never reads the
@@ -1531,8 +1529,8 @@ cannot; this contract says which for every delivery, and there is no third case.
   client, endpoints, and scopes have identical tuples and are nonetheless
   independent, while two grants for one account obtained under different clients
   or scopes have different tuples and are nonetheless one authorization. The
-  tuple keeps its own separate job — binding a stored token to the configuration
-  it was minted under, so an edited endpoint cannot receive a token issued for
+  tuple has a separate purpose — binding a stored token to the configuration it
+  was minted under, so an edited endpoint cannot receive a token issued for
   another — and for that job it is compared as parsed canonical components:
   scheme, lowercased host, effective port, path, and query, never configured
   bytes, with fragments and user information rejected at admission because
@@ -1721,7 +1719,7 @@ component of that comparison at all, so silently discarding them would accept a
 document whose text states something the daemon does not do. User information
 carries a second objection of its own: a URL is logged, persisted in the
 provisioning tuple, and echoed in diagnostics, so a password embedded there is a
-credential smuggled outside the daemon-owned boundary this delivery exists to
+credential carried outside the daemon-owned boundary this delivery exists to
 establish — and on an HTTP stack that does honor it, it becomes an undeclared
 authentication credential the contract never admitted. Startup rejects every
 other scheme and provides no plaintext or local-host exception.
@@ -1804,19 +1802,19 @@ account header the CLI requires is not usable for this delivery, and failing at
 provisioning is where an operator can still act on it. It is bearer material for
 the same account, so it is never written anywhere the refresh token would not
 be, and it seeds the redactor with every other value placed in the scratch home.
-No scratch credential home is involved, because no child runs: the CLI enters
-the picture only at dispatch, when it is handed a minted access token.
-Provisioning depends on no other login for that account: it authorizes through
-its own configured client and stores what it harvests, reading nothing an
-operator's CLI already holds. Whether it *disturbs* one is the authorization
-server's to decide and not something this contract can promise — a server that
-issues one grant per client and account, or that revokes an earlier grant on a
-new authorization, will invalidate an operator's existing login, and the
-exchange gives the daemon no way to detect or prevent that. Deleting the
-profile's stored authorization likewise ends the daemon's own grant and whatever
-else that server ties to it. Where grant independence matters, it is a property
-of the configured authorization server that the operator must establish, not one
-this delivery provides.
+No scratch credential home is involved, because no child runs: the CLI is
+involved only at dispatch, when it is handed a minted access token. Provisioning
+depends on no other login for that account: it authorizes through its own
+configured client and stores what it harvests, reading nothing an operator's CLI
+already holds. Whether it *disturbs* one is the authorization server's to decide
+and not something this contract can promise — a server that issues one grant per
+client and account, or that revokes an earlier grant on a new authorization,
+will invalidate an operator's existing login, and the exchange gives the daemon
+no way to detect or prevent that. Deleting the profile's stored authorization
+likewise ends the daemon's own grant and whatever else that server ties to it.
+Where grant independence matters, it is a property of the configured
+authorization server that the operator must establish, not one this delivery
+provides.
 
 A stored authorization is bound to the tuple it was minted under. Provisioning
 persists, in the same transaction as the token generation, the exact
@@ -1958,8 +1956,8 @@ a fresh token; it does not quarantine the profile. It does not automatically
 retry the failed call, because token expiry does not by itself prove whether the
 provider accepted that call. Why the distinction is stated rather than left to
 classification: treating a mid-run lapse as a rejected credential would
-quarantine a healthy account for the offence of being given a long task, and
-automatic repetition could duplicate an accepted request.
+quarantine a healthy account because it was given a long task, and automatic
+repetition could duplicate an accepted request.
 
 The daemon supplies `file` for the `anthropic` and `openai` direct-HTTP adapters
 and for `claude_cli`; it supplies `ambient` for the `claude_cli` and `codex_cli`
@@ -2673,7 +2671,7 @@ deployment-side rules that code cannot enforce are stated in
   at the adapter boundary. Why: value rotation preserves the stable name so no
   record or log ever needs the secret (INV-035). The two integration constants
   are `brave-search-primary` and `github-primary`. Every model-provider
-  reference is an operator-chosen profile name: once a mapping names a pool
+  reference is an operator-chosen profile name: because a mapping names a pool
   rather than a profile, no build-provided constant is compared against any
   model-provider name, so an `anthropic` or `openai` profile may be called
   whatever the deployment calls its account. `codex-subscription-primary` and
@@ -2749,13 +2747,12 @@ deployment-side rules that code cannot enforce are stated in
 
 - **Legacy migration fallback.** Sessions that predate this history carry a
   `migration_backfill` creation event holding the single previously composed
-  `anthropic` / `anthropic-primary` pair, seeded by the migration that
-  introduced the feature. While that event remains a session's current one, an
-  Anthropic route may resolve through that durable legacy entry even when the
-  configured family is named differently; a Codex route never may. Preparation
-  falls back to the migrated entry when the resolved family has no entry of its
-  own. A later explicit credential event ends the aliasing for that session,
-  because resolution then uses only the complete latest snapshot.
+  `anthropic` / `anthropic-primary` pair. While that event remains a session's
+  current one, an Anthropic route may resolve through that durable legacy entry
+  even when the configured family is named differently; a Codex route never may.
+  Preparation falls back to the migrated entry when the resolved family has no
+  entry of its own. A later explicit credential event ends the aliasing for that
+  session, because resolution then uses only the complete latest snapshot.
 
 - **Resolution timing.** Each direct HTTP adapter resolves the durably pinned
   reference during send preparation — after the durable `Prepared` record,
