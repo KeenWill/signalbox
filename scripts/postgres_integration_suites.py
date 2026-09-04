@@ -13,13 +13,9 @@ reader of it, and it serves two consumers that must never disagree:
   checker which `#[ignore]`d tests authoritative CI executes, which is what
   `docs/invariants.md` indexes as enforcement.
 
-The checker previously recovered that set by regex-parsing the workflow's
-folded `command: >-` shell scalars. Moving CI to `cargo nextest` made those
-scalars vanish, and the parser reported zero ignored-test runs without
-complaint — an index regeneration would then have silently dropped every
-PostgreSQL invariant while asserting CI still enforced it. A manifest both
-sides read removes that failure mode, and `check_docs_consistency.py` gates the
-agreement so the manifest itself cannot drift from either side.
+A manifest both sides read turns ordinary drift into a check failure, and
+`check_docs_consistency.py` gates the agreement so the manifest itself cannot
+drift from either side.
 
 Run directly with `--matrix`, `--archive-plan`, or `--check` (validate the
 manifest alone and print a summary). Exits nonzero with a stable message on a

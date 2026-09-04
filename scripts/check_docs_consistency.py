@@ -2484,21 +2484,16 @@ def workflow_ignored_test_runs(root: Path) -> list[IgnoredTestRun]:
     Ground truth is `.github/postgres-integration-suites.toml`, not the
     workflow: a suite's package, features, and skips live in the manifest that
     the workflow's own jobs derive their archive plan and shard matrix from.
-    Recovering this by parsing the workflow's shell commands was a coupling to
-    one particular spelling of one particular runner, and it broke silently —
-    reporting no ignored-test runs at all — the moment CI moved from `cargo
-    test` to `cargo nextest`. `check_suite_manifest` gates the two sides
-    against each other so the manifest cannot drift from what CI runs.
+    `check_suite_manifest` gates the two sides against each other so the
+    manifest cannot drift from what CI runs.
 
     Each suite archives its package and the run filter selects the manifest's
     included targets, removes its excluded targets, then removes its skipped
-    test names. With no binary fields this is the whole package, matching the
-    prior `--tests` selection.
+    test names. With no binary fields this is the whole package.
 
-    A repository with no manifest runs no ignored tests in CI, which is the
-    same answer the workflow-parsing predecessor gave for a repository with no
-    workflow. `check_suite_manifest` is what rejects a manifest that has gone
-    missing from a repository whose CI still expects one.
+    A repository with no manifest runs no ignored tests in CI.
+    `check_suite_manifest` rejects a manifest that has gone missing from a
+    repository whose CI still expects one.
     """
     if not (root / postgres_integration_suites.MANIFEST).is_file():
         return []
@@ -3252,7 +3247,7 @@ def check_suite_manifest(root: Path) -> list[Violation]:
     and its shard matrix from the manifest, must publish exactly one archive
     artifact per declared suite, and must run no ignored tests through a
     `cargo test` command of its own. Nothing here reconstructs a Cargo
-    invocation out of YAML — the point of the manifest was to stop doing that.
+    invocation out of YAML.
 
     *Manifest and documentation.* Prose that teaches a reader to run a suite
     locally names the same package and features CI archives. Drift there is
