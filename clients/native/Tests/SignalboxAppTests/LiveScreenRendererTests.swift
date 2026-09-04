@@ -120,13 +120,10 @@ private struct ContinuouslyChangingView: View {
 ///
 /// Every hold is deliberately below the floor. A hold that outlasted the floor
 /// would be a settled state, and a correct renderer returning it would fail
-/// this test for being right — which is what an earlier version of this fixture
-/// did, holding its first colour for 1.2s against a 1s floor and passing only
-/// because sampling lags wall-clock time on the machine it ran on. Each hold
-/// here is long enough to span consecutive samples, which is all the behaviour
-/// under test needs: a gate reading total elapsed time finds two matching
-/// renderings mid-motion and returns one, and a gate measuring from the last
-/// change cannot, because the bar keeps moving.
+/// this test for being right. Each hold here is long enough to span consecutive
+/// samples, which is all the behaviour under test needs: a gate reading total
+/// elapsed time finds two matching renderings mid-motion and returns one, and a
+/// gate measuring from the last change cannot, because the bar keeps moving.
 private struct SteppingThenRestingView: View {
     static let restingOffset = 15
     @State private var tick = 0

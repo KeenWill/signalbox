@@ -148,13 +148,14 @@ impl ToolDefinition {
         self.permission_default
     }
 
-    /// Overrides legacy blanket/registry policy for this exact tool.
+    /// Overrides the registry's blanket policy for this exact tool.
     pub const fn with_approval_posture(mut self, posture: ToolApprovalPosture) -> Self {
         self.approval_posture = Some(posture);
         self
     }
 
-    /// Returns the configured per-tool posture, absent for legacy behavior.
+    /// Returns the configured per-tool posture, absent when no explicit
+    /// per-tool posture is configured.
     pub const fn approval_posture(&self) -> Option<ToolApprovalPosture> {
         self.approval_posture
     }

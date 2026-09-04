@@ -122,8 +122,8 @@ mkdir -p "$(dirname "$RESULT_BUNDLE_PATH")"
 #
 # Only that failure is tolerated. 65 is the status xcodebuild reports for a test
 # failure; a simulator that will not boot, a bundle that cannot launch, or a
-# host failure reports something else, and each of those used to leave the
-# script announcing goldens it had not written.
+# host failure reports something else, and none of those may leave the script
+# announcing goldens it did not write.
 set +e
 "${TEST_CMD[@]}"
 test_status=$?
