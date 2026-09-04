@@ -8819,6 +8819,10 @@ async fn repository_watch_observes_operator_commission_target_ownership()
             .state()
             .is_parked()
     );
+    assert_eq!(
+        dispatch_store.load_restored_module_sessions().await?,
+        vec![fixture.session]
+    );
 
     let cursor = event_store
         .load_cursor(&repository)

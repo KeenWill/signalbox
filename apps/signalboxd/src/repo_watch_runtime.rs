@@ -3707,6 +3707,7 @@ impl RepositoryWatchTask {
     }
 
     async fn process_dispatches(&mut self) -> Result<(), RepositoryWatchAttemptError> {
+        self.nudge_restored_module_sessions().await?;
         let unstarted = self
             .dispatch_store
             .load_unstarted_dispatch_sessions(&self.repository)
@@ -3750,6 +3751,7 @@ impl RepositoryWatchTask {
                     .await
                     .map_err(|_| RepositoryWatchAttemptError::Dispatch)?;
                 self.nudge_dispatched_sessions(&outcome);
+                self.nudge_restored_module_sessions().await?;
                 processed = processed.saturating_add(1);
                 if self.yield_after_reconciliation_quantum("rule_evaluation", processed) {
                     return Ok(());
@@ -3797,11 +3799,24 @@ impl RepositoryWatchTask {
                     .await
                     .map_err(|_| RepositoryWatchAttemptError::Dispatch)?;
                 self.nudge_dispatched_sessions(&outcome);
+                self.nudge_restored_module_sessions().await?;
                 processed = processed.saturating_add(1);
                 if self.yield_after_reconciliation_quantum("dispatch_obligation", processed) {
                     return Ok(());
                 }
             }
+        }
+        Ok(())
+    }
+
+    async fn nudge_restored_module_sessions(&self) -> Result<(), RepositoryWatchAttemptError> {
+        let restored = self
+            .dispatch_store
+            .load_restored_module_sessions()
+            .await
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+        for session in restored {
+            let _ = self.eligibility_nudge.nudge(session);
         }
         Ok(())
     }

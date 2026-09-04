@@ -320,6 +320,37 @@ impl PostgresRepoWatchDispatchStore {
             .collect::<Vec<_>>())
     }
 
+    /// Loads module-unparked sessions whose queued turn needs a fresh hint.
+    pub async fn load_restored_module_sessions(
+        &self,
+    ) -> Result<Vec<SessionId>, RepoWatchDispatchRepositoryError> {
+        let sessions = sqlx::query_scalar::<_, Uuid>(
+            "SELECT lifecycle.session_id
+               FROM session_lifecycle AS lifecycle
+              WHERE lifecycle.state_kind = 'dispatched'
+                AND lifecycle.actor_kind = 'module'
+                AND lifecycle.actor_module = 'repo_watch'
+                AND lifecycle.owned
+                AND lifecycle.pending_terminal_outcome_kind IS NULL
+                AND EXISTS (
+                    SELECT 1
+                      FROM turn_lifecycle AS turn
+                     WHERE turn.session_id = lifecycle.session_id
+                       AND turn.state_kind = 'queued'
+                       AND turn.start_lineage_kind IS NULL
+                )
+              ORDER BY lifecycle.state_entered_at, lifecycle.session_id
+              LIMIT $1",
+        )
+        .bind(UNSTARTED_DISPATCH_NUDGE_BATCH_SIZE)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(sessions
+            .into_iter()
+            .map(SessionId::from_uuid)
+            .collect::<Vec<_>>())
+    }
+
     /// Retires one expired evidence-free dispatch through ordinary goal authority.
     pub async fn process_next_expired_start_lease<NextCommandId>(
         &self,
