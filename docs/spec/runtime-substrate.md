@@ -20,13 +20,12 @@ companion pages. This page also owns the shared
 
 ## Boundary and crate layout
 
-The runtime layer is five hand-rolled library crates: one provider-neutral core
-crate plus separately named provider adapters, with SerdesAI as a design
-reference only. `signalbox-model-runtime` is the shared vocabulary; the
-Anthropic and OpenAI adapters additionally own their HTTP, TLS, and serde
-dependencies, while the CLI adapters own only focused subprocess,
-temporary-file, signal, and serde dependencies. Test helpers ship in no built
-library artifact. `crates/domain`, `crates/application`, and
+The runtime layer is five hand-written library crates: one provider-neutral core
+crate plus separately named provider adapters. `signalbox-model-runtime` is the
+shared vocabulary; the Anthropic and OpenAI adapters additionally own their
+HTTP, TLS, and serde dependencies, while the CLI adapters own only focused
+subprocess, temporary-file, signal, and serde dependencies. Test helpers ship in
+no built library artifact. `crates/domain`, `crates/application`, and
 `crates/persistence` declare no dependency on any runtime crate, and no runtime
 type appears in a domain or application signature (INV-002, INV-005); the
 approved runtime consumers are the adapter crates, the
@@ -61,7 +60,7 @@ advisory exception; an adapter never silently presents prompt instructions as
 hard transport controls.
 
 **Committed unimplemented functionality — workspace-instruction transport.** The
-instruction-admission slice adds
+operation will carry
 `workspace_instructions: Option<WorkspaceInstructionRegion>` beside `system` and
 conversation history. The region is a validated nonempty exact UTF-8 byte value
 bounded by the selected target's declared workspace-instruction byte capacity;
@@ -72,7 +71,7 @@ the field only to its provider's instruction/system transport, after the system
 prompt and before conversation messages, and fails before send when that mapping
 cannot preserve the boundary. It may not concatenate the region into ordinary
 system text, emit a user/tool message, or enable a native project-file loader.
-No present runtime operation carries this field until that slice lands.
+No present runtime operation carries this field.
 
 The `RuntimeModelCallProvider` bridge sets every operation it prepares to
 `Streamed`. Both HTTP adapters honor that mode by setting the provider-native
@@ -122,9 +121,8 @@ bounded by
 
 ## Two-stage execution
 
-`ModelRuntime<C>` has two stages, conforming to the accepted
-provider-interaction boundary whose caller side is
-[model-call-execution](model-call-execution.md) scope:
+`ModelRuntime<C>` has two stages; the caller side of the provider-interaction
+boundary is [model-call-execution](model-call-execution.md) scope:
 
 - `prepare(operation, cancellation)` performs all validation, translation,
   serialization, credential access, and request construction with no provider
@@ -235,11 +233,11 @@ this fact the distinction is reachable only by reading a rendered violation
 detail, which the terminal-evidence rule above forbids. Like `finish_reported`,
 it reports the decoded prefix and nothing beyond it: none opened says no tool
 call opened in what the adapter decoded, never that the provider sent none.
-`Unobserved` is the honest answer where an adapter is not positioned to know — a
-body that never parsed, a decode abandoned with content blocks unexamined, a
-streamed record or CLI event that failed its framing, JSON-bound, or typed-event
-decode, a stream whose framing ended inside an incomplete record, material the
-runner read off the transport but never delivered to a decoder — a framed record
+`Unobserved` is reported where an adapter is not positioned to know — a body
+that never parsed, a decode abandoned with content blocks unexamined, a streamed
+record or CLI event that failed its framing, JSON-bound, or typed-event decode,
+a stream whose framing ended inside an incomplete record, material the runner
+read off the transport but never delivered to a decoder — a framed record
 dropped when cancellation lands mid-chunk, a CLI line past the event bound, a
 partial line lost when a deadline drops the reader — a loss raised by a layer
 that reads no response material, and every Codex CLI loss raised before the
@@ -272,19 +270,19 @@ the proof without deriving it from `ProviderErrorKind`, status retryability, or
 native prose. Classification alone remains insufficient, and absence of the
 proof keeps the known failure terminal.
 
-The admitting condition is fixed here rather than left to that child, because
-the two readings differ in whether another provider call happens. A proof is
-admitted only when the adapter decoded its own documented error envelope and the
-decoded native token names one of the three causes in that adapter's exhaustive
-mapping — `rate_limit_error` or `overloaded_error` for Anthropic, and
-`rate_limit_exceeded`, `rate_limit_error`, or `insufficient_quota` for OpenAI.
-Codex additionally admits a classified availability cause only when its JSONL
-lifecycle reaches the exact, noncontradictory `turn.failed` closure. Every
-status-derived fallback carries no proof: a response whose body is absent,
-undecodable, or names a token the mapping does not cover keeps its
-status-classified kind and stays an ordinary terminal known failure. A native
-token that contradicts its status carries none either, and the existing
-credential-rejection precedence over a contradictory body is unchanged.
+The admitting condition is fixed here because the two readings differ in whether
+another provider call happens. A proof is admitted only when the adapter decoded
+its own documented error envelope and the decoded native token names one of the
+three causes in that adapter's exhaustive mapping — `rate_limit_error` or
+`overloaded_error` for Anthropic, and `rate_limit_exceeded`, `rate_limit_error`,
+or `insufficient_quota` for OpenAI. Codex additionally admits a classified
+availability cause only when its JSONL lifecycle reaches the exact,
+noncontradictory `turn.failed` closure. Every status-derived fallback carries no
+proof: a response whose body is absent, undecodable, or names a token the
+mapping does not cover keeps its status-classified kind and stays an ordinary
+terminal known failure. A native token that contradicts its status carries none
+either, and the credential-rejection precedence over a contradictory body
+applies.
 
 The proof is further restricted to an error *response* — an error-status
 exchange whose body is that documented envelope, decoded before any stream
@@ -306,10 +304,10 @@ same rendered prose, but its JSONL lifecycle carries the machine-readable
 closure this contract demands, so it does supply the proof — under the exact,
 noncontradictory `turn.failed` closure stated above and never from the prose
 alone. A trailer that contradicts the recorded stream error fails closed and
-carries nothing. The asymmetry is deliberate. An under-decoded rejection loses a
-substitution the deployment had configured, which costs one turn; a status-only
-or prose-derived inference that the provider did not act would authorize a
-second paid call on evidence the provider never gave.
+carries nothing. An under-decoded rejection loses a substitution the deployment
+had configured, which costs one turn; a status-only or prose-derived inference
+that the provider did not act would authorize a second paid call on evidence the
+provider never gave.
 
 A success-status response whose body is not valid completion material is
 boundary loss, never completion. An unrecognized finish token is boundary loss
@@ -329,11 +327,11 @@ Post-finish error records (Anthropic adapter): once its stream has reported why
 generation stopped, a later error record that classifies as `Unrecognized` is a
 protocol violation rather than definitive provider evidence. Why: it supersedes
 the reported finish with no classifiable failure, and it would otherwise reach
-the caller wearing exactly the shape the refusal downgrade above produces — an
-HTTP 200 exchange, `Unrecognized`, and the same absent or fabricated native
-material — leaving a genuine failure indistinguishable from a decoded refusal.
-An error record that *does* classify still outranks the reported finish, because
-it carries information the finish does not.
+the caller in exactly the shape the refusal downgrade above produces — an HTTP
+200 exchange, `Unrecognized`, and the same absent or fabricated native material
+— leaving a genuine failure indistinguishable from a decoded refusal. An error
+record that *does* classify still outranks the reported finish, because it
+carries information the finish does not.
 
 Unrecognized finish reasons (OpenAI adapter) record their verdict but defer it
 to `[DONE]`, so records arriving after that finish are still examined and a
@@ -345,9 +343,9 @@ role established and model identity reported — still run at the finish rather
 than at `[DONE]`, and a stream failing either reports the envelope defect and
 carries no `finish_reported`, because a caller cannot otherwise distinguish a
 well-formed response that stopped at an output bound from an envelope that was
-never valid and also reported one. Accumulated tool content is deliberately not
-among those checks: a tool-bearing request can legitimately exhaust the output
-ceiling partway through a call, so the token is an observed fact rather than a
+never valid and also reported one. Accumulated tool content is not among those
+checks: a tool-bearing request can legitimately exhaust the output ceiling
+partway through a call, so the token is an observed fact rather than a
 contradiction, and the buffered decoder retains it in exactly that case — the
 two decoders must not disagree about the same response.
 
@@ -355,13 +353,12 @@ Post-finish error records (OpenAI adapter): once its stream has reported why
 generation stopped, a later error record carrying no native material at all is a
 protocol violation rather than definitive provider evidence. Why: it supersedes
 the reported finish with nothing a caller could act on, and it would otherwise
-reach the caller wearing exactly the shape the refusal downgrade above produces
-— an HTTP 200 exchange, `Unrecognized`, and empty native facts — leaving a
-genuine failure indistinguishable from a decoded refusal. An error record
-carrying any native material still outranks the reported finish, even when its
-type or code is unfamiliar and it therefore classifies as `Unrecognized`: it
-carries diagnostics the finish does not, and cannot be mistaken for the
-downgrade.
+reach the caller in exactly the shape the refusal downgrade above produces — an
+HTTP 200 exchange, `Unrecognized`, and empty native facts — leaving a genuine
+failure indistinguishable from a decoded refusal. An error record carrying any
+native material still outranks the reported finish, even when its type or code
+is unfamiliar and it therefore classifies as `Unrecognized`: it carries
+diagnostics the finish does not, and cannot be mistaken for the downgrade.
 
 ## SSE framing
 
@@ -400,8 +397,8 @@ to satisfy an outer response schema whose one contract-named proposal carries
 the value. In every case that is a request constraint, not a response guarantee:
 a nonconforming or malformed response can still carry zero or several proposals,
 and the provider-independent decode below is what enforces the exactly-one
-contract. Why: one decode path across adapters beats provider-specific output
-values that require caller-side transformation.
+contract. Why: one decode path across adapters is preferred over
+provider-specific output values that require caller-side transformation.
 
 `decode_structured` and `decode_structured_json` are pure functions over
 already-delivered response parts: exactly one proposal under the contract name
@@ -449,7 +446,7 @@ is inferred from timing; scripted evidence is declared, never simulated.
 The Anthropic and OpenAI adapters implement the same shape: at most one `POST`
 per operation (`/v1/messages` for Anthropic with `x-api-key` and
 `anthropic-version` headers; `/v1/chat/completions` for OpenAI with a bearer
-`Authorization` header), hand-rolled serde wire types with no provider SDK
+`Authorization` header), hand-written serde wire types with no provider SDK
 dependency, and typed evidence out. Construction validates configuration: the
 base URL must be absolute HTTPS, except that plain HTTP is admitted for an
 IP-literal loopback host used by deterministic tests; user information, a query,
@@ -493,7 +490,7 @@ recognized error-envelope `type` token refines the classification, and an
 unrecognized or absent token falls back to the HTTP-status table, so
 `Unrecognized` is reached only when token and status are both unmapped. OpenAI:
 401 always credential-rejected, then recognized native code, then recognized
-type, then status. Unknown material lands in `Unrecognized` with the native
+type, then status. Unknown material classifies as `Unrecognized` with the native
 facts retained rather than guessed at.
 
 All provider-controlled response input is bounded before it can accumulate into
@@ -606,7 +603,7 @@ status, and those two further facts are what a genuine streamed failure cannot
 present. Either accepted shape must carry provider-reported input usage present
 *and positive* (a request that reached the model always billed at least one
 input token). Neither smoke asserts anything about answer quality. Output usage
-is held to a looser bar: present, not positive. A valid `Completed` response can
+is only required to be present, not positive. A valid `Completed` response can
 legitimately report zero output tokens, and a downgraded refusal can be blocked
 before any completion token is produced, so both accepted shapes share one
 output usage-presence check without demanding it be nonzero.
@@ -614,7 +611,7 @@ output usage-presence check without demanding it be nonzero.
 The OpenAI smoke also accepts one loss shape: the exchange that stopped at its
 own output ceiling. Chat Completions reports that as `finish_reason: "length"`,
 which this adapter deliberately leaves unmapped, so the decoder ends the stream
-as `BoundaryLoss` carrying the token verbatim. That is a truthful report about
+as `BoundaryLoss` carrying the token verbatim. That is an accurate report about
 answer length, not a protocol break — the request was accepted and the body
 framed and decoded — so failing the smoke on it would assert something about
 answer quality, which this smoke does not do. The acceptance is keyed to that
@@ -652,14 +649,11 @@ one-word prompt already bounds, and the exchange cannot truncate into a
 break.
 
 This smoke's required aggregate is merge-gating for a pull request that changes
-the adapter crate or the workflow itself — an explicit exception to
-`CONTRIBUTING.md`'s general testing-strategy default that a credentialed
-live-provider smoke is never the merge gate, extending the same accepted
-tradeoff already commissioned for the Codex CLI smoke's required check. Provider
-unavailability, rate limiting, or a misconfigured credential therefore reports
-as a temporary red rather than a verdict on the change's correctness; the
-accepted remedy is rerunning the smoke once the provider or environment
-recovers, not weakening the gate.
+the adapter crate or the workflow itself — an exception to `CONTRIBUTING.md`'s
+general testing-strategy default that a credentialed live-provider smoke is
+never the merge gate. Provider unavailability, rate limiting, or a misconfigured
+credential therefore reports as a temporary red rather than a verdict on the
+change's correctness.
 
 The workflow reports on every pull request without a path filter. GitHub
 independently withholds secrets from ordinary fork `pull_request` runs
@@ -703,10 +697,9 @@ superseded runs, for a manual dispatch on any other ref), so a slot is released
 only when the same ref is superseded: a pull-request run by a newer update to
 its pull request, a non-main dispatch by a newer dispatch on that ref — never a
 push to `main`, which keeps every run. The Codex smoke's own workflow-level
-group behaves identically. There is deliberately no additional job-level group
-serializing the live exchange itself: a fixed inner group shared across every
-ref — which an earlier revision of this workflow carried — lets an unrelated
-smoke-required run evict this job's queued slot even though
+group behaves identically. There is no additional job-level group serializing
+the live exchange itself: a fixed inner group shared across every ref would let
+an unrelated smoke-required run evict this job's queued slot even though
 `cancel-in-progress: false` does not protect it, because GitHub keeps at most
 one running and one pending member per concurrency group and replaces the
 pending one when a third arrives. That would fail a required check that never
@@ -723,18 +716,19 @@ runs while the key is readable.
 
 ## Codex CLI provider adapter
 
-`signalbox-model-runtime-codex-cli` wraps the locally installed Codex CLI event
-protocol captured by the offline fixture corpus at version `0.146.0`; its
-exported version constant is the contract a later composition must pin before
-wiring the adapter. The daemon composition runs a bounded, credential-free
-version probe before opening its socket; model dispatch performs no separate
-version probe. Preparation validates and renders the complete operation, writes
-the non-secret response-envelope schema to a private temporary file, and returns
-a one-shot capability without starting a process. Admitted schemas and replayed
-tool arguments remain raw JSON through prompt serialization; a shallow raw
-member scan still requires each schema to declare an object root. Execution
-consumes the capability as exactly one `codex exec --json --ephemeral` spawn on
-Unix, passes the full rendered frontier on stdin, requires absolute configured
+`signalbox-model-runtime-codex-cli` wraps the Codex CLI event protocol as the
+offline fixture corpus records it; that recorded version is distinct from the
+installation pin in `tooling/codex-cli/package.json`, and the adapter's exported
+version constant is the contract a later composition must pin before wiring the
+adapter. The daemon composition runs a bounded, credential-free version probe
+before opening its socket; model dispatch performs no separate version probe.
+Preparation validates and renders the complete operation, writes the non-secret
+response-envelope schema to a private temporary file, and returns a one-shot
+capability without starting a process. Admitted schemas and replayed tool
+arguments remain raw JSON through prompt serialization; a shallow raw member
+scan still requires each schema to declare an object root. Execution consumes
+the capability as exactly one `codex exec --json --ephemeral` spawn on Unix,
+passes the full rendered frontier on stdin, requires absolute configured
 executable and working-root paths, selects the exact resolved model, ignores
 user configuration and rule files, and explicitly disables every feature in the
 pinned CLI inventory that can add a model-visible tool, external interaction,
@@ -771,41 +765,41 @@ specifically the runner sandbox in build-out — and is not an adapter claim.
 The rendered prompt opens with a preamble whose tool-authority statement is
 singular and positionally first: the serialized `tools` array is named the
 single authority on which tools exist, `tool_choice` and `structured_output` are
-carved out as the only statements that narrow or add to what may be proposed,
-the harness's own disabled facilities are distinguished from the declared tools,
-and the preamble states no categorical tool prohibition. Why: an earlier
-preamble opened with "Do not use shell, file, web, MCP, or collaboration tools"
-— aimed at the wrapped CLI's native facilities — and the prohibited categories
-are exactly the categories a caller's tool catalog populates, so the prompt
-carried two competing authority statements and a model could obey the wrong one,
-refusing work its declared tools authorized. The native facilities need no
-prompt-level prohibition because the invocation disables them mechanically, and
-prompt text is never a capability boundary. The residual the adapter cannot
-remove: the pinned CLI injects its own agent-identity instructions around the
-stdin prompt at runtime, so the preamble's authority statement is the first tool
-statement the adapter controls rather than the first text the model sees. The
-translation unit test pins the rendered prompt — no categorical prohibition,
-exactly one authority statement, positioned before the serialized request.
+named as the only statements that narrow or add to what may be proposed, the
+harness's own disabled facilities are distinguished from the declared tools, and
+the preamble states no categorical tool prohibition. Why: a categorical
+prohibition such as "Do not use shell, file, web, MCP, or collaboration tools" —
+aimed at the wrapped CLI's native facilities — names exactly the categories a
+caller's tool catalog populates, so the prompt would carry two competing
+authority statements and a model could obey the wrong one, refusing work its
+declared tools authorized. The native facilities need no prompt-level
+prohibition because the invocation disables them mechanically, and prompt text
+is never a capability boundary. The residual the adapter cannot remove: the
+pinned CLI injects its own agent-identity instructions around the stdin prompt
+at runtime, so the preamble's authority statement is the first tool statement
+the adapter controls rather than the first text the model sees. The translation
+unit test pins the rendered prompt — no categorical prohibition, exactly one
+authority statement, positioned before the serialized request.
 
 **Committed unimplemented functionality — Codex file delivery.** The present
 adapter supports only its ambient credential home and keeps `OPENAI_API_KEY` and
 every other direct credential value outside the cleared child environment. The
 configuration grammar admits `file`, but the present composition rejects it as
-undelivered. Its implementing child must resolve the selected profile during
-preparation. The adapter admits only the exact `OPENAI_API_KEY` `env_key`; every
-forwarded or process-control name is invalid configuration. It adds the selected
-value as an operation-scoped child override after clearing the parent
-environment. The value must be absent from argv, logs, debug output, retained
-evidence, and every later spawn, and must seed the adapter's exact-value
-redaction before any provider-controlled output leaves the crate. This future
-override does not weaken ambient mode's existing exclusion test.
+undelivered. File delivery must resolve the selected profile during preparation.
+The adapter admits only the exact `OPENAI_API_KEY` `env_key`; every forwarded or
+process-control name is invalid configuration. It adds the selected value as an
+operation-scoped child override after clearing the parent environment. The value
+must be absent from argv, logs, debug output, retained evidence, and every later
+spawn, and must seed the adapter's exact-value redaction before any
+provider-controlled output leaves the crate. This override does not weaken
+ambient mode's credential exclusion.
 
 **Committed unimplemented functionality — Codex OAuth redaction.** OAuth
 delivery gives the adapter a daemon-minted access token, the identity token
 issued with it, and the account metadata in a scratch credential home rather
 than through the child environment. Before anything is written or the child
-starts, its implementing slice must seed the exact-value redaction boundary with
-every value that
+starts, the adapter must seed the exact-value redaction boundary with every
+value that
 [the `oauth` delivery](configuration-and-credentials.md#the-oauth-delivery)
 requires the redactor to be seeded with. That contract decides *which* values
 those are and why; this page owns *how* the adapter installs and applies the
@@ -954,8 +948,7 @@ the group, so it stays distinguishable from a cleanup kill, while a leader
 cleanup itself must kill remains typed timeout loss. On every ordinary exit it
 likewise keeps the leader waitable until it has killed remaining group
 descendants, then reaps the leader, so cleanup never signals through a reusable
-process identity. The offline test binary exercises all process and evidence
-paths without a live CLI or network.
+process identity.
 
 ### Version pin and compatibility smoke
 
@@ -982,7 +975,6 @@ both verify that the installed executable reports the derived version; the
 composition refuses startup before socket admission when the bounded probe
 cannot prove equality.
 
-This mechanical binding deliberately removes the old human-attestation tripwire.
 One live exchange proves that the installed CLI still works through the adapter,
 but does not prove that the recorded offline fixture corpus still represents
 every current CLI event shape.
@@ -1025,9 +1017,9 @@ the aggregate also repeats the same-repository comparison. Manual dispatch
 remains available, a path-filtered push to `main` — gated on the pin manifest
 and the workflow file itself, so an edit to the workflow's own definition cannot
 land unexercised — reruns the smoke after merge, and a twice-daily schedule
-(13:00 and 01:00 UTC, drifting an hour under standard time — accepted) spends
-two further live exchanges a day as a paid provider-drift canary independent of
-any code change.
+(13:00 and 01:00 UTC, drifting an hour under standard time) spends two further
+live exchanges a day as a paid provider-drift canary independent of any code
+change.
 
 The `codex-smoke` environment is configured for all branches because GitHub
 evaluates an environment used by `pull_request` against `GITHUB_REF`, which is
@@ -1056,10 +1048,10 @@ spawning Claude. Execution consumes it as one fresh Unix process using
 `--print --verbose --output-format=stream-json --no-session-persistence`; it
 passes the rendered frontier on stdin, selects the resolved model, and never
 resumes a CLI session. `SendCommenced` immediately precedes spawn and no
-execution path respawns. The existing CLI-process supervision contract above
-applies: the adapter owns the created process group, bounds stdout events and
-retained stderr, and treats cancellation, timeout, incomplete upload, child
-exit, and group cleanup as typed evidence rather than logging them.
+execution path respawns. The CLI-process supervision contract above applies: the
+adapter owns the created process group, bounds stdout events and retained
+stderr, and treats cancellation, timeout, incomplete upload, child exit, and
+group cleanup as typed evidence rather than logging them.
 
 Caller tools are MCP tools, not prompt-embedded schema arrays. The adapter-owned
 stdio bridge publishes exactly the operation's tool definitions plus any
@@ -1070,12 +1062,11 @@ a typed assistant `tool_use` followed by a user `tool_result`, and the adapter
 returns the proposal for external authorization and execution. A controlled
 `SessionStart` hook waits for a private readiness marker written only after the
 bridge has answered `tools/list`. The bridge accepts exactly the MCP
-`2025-11-25` initialization protocol observed from Claude Code `2.1.220`; its
-`tools/call` request carries the declared name and object arguments, and its
-fixed result returns one text content block. This closes the print-mode
-discovery race: the accepted `system/init` must report that server `connected`
-and its `tools` set must equal the qualified declared MCP surface before any
-assistant content is admitted.
+`2025-11-25` initialization protocol; its `tools/call` request carries the
+declared name and object arguments, and its fixed result returns one text
+content block. This closes the print-mode discovery race: the accepted
+`system/init` must report that server `connected` and its `tools` set must equal
+the qualified declared MCP surface before any assistant content is admitted.
 
 The invocation excludes ambient settings, sessions, slash commands, browser
 integration, plugins, and built-in tools. `--tools` selects an empty built-in
@@ -1098,8 +1089,8 @@ invocation.
 The pinned stream establishes correlation and reported-model evidence through
 `system/init`. Nonterminal `system/status`, `system/hook_started`,
 `system/hook_progress`, `system/hook_response`, `system/api_retry`, and
-`system/thinking_tokens` lifecycle events are discarded, so they neither
-masquerade as initialization nor mask the later typed terminal or process-exit
+`system/thinking_tokens` lifecycle events are discarded, so they are neither
+mistaken for initialization nor mask the later typed terminal or process-exit
 classification. Their remaining members become dropped redaction context, and
 the two envelope fields that are not provider content — `type` and `subtype` —
 are removed before that. A lifecycle `session_id` is removed on the same ground
@@ -1142,7 +1133,7 @@ ambient adapter accepts only its one configured non-secret
 `CredentialReference`. File delivery is not so limited: the adapter holds the
 complete adapter-scoped catalog of declared `claude_cli` file profiles and
 resolves whichever reference the operation pins, so a historical session keeps
-the profile it was created with even when the configured default has moved on,
+the profile it was created with even when the configured default has changed,
 and two Claude families may prefer different profiles. It resolves that
 reference during cancellable preparation, rejects an empty, non-UTF-8, or
 NUL-bearing value, and writes the exact value to a mode-0600 credential file in
@@ -1167,7 +1158,7 @@ exception for this adapter. When an operation carries an explicit
 catalog-governed control, exact-target capability and mapping validation
 precedes the ambient-login reference check. A service tier is always rejected.
 
-The crate itself still defines no provider-selection or configuration mapping.
+The crate itself defines no provider-selection or configuration mapping.
 signalboxd composes it from the deployment-owned `claude_cli` adapter mapping
 and its three absolute process paths, described in
 [configuration-and-credentials](configuration-and-credentials.md#the-static-model-alias-and-web-fetch-catalog).
@@ -1246,8 +1237,8 @@ in the test process or CLI child environment.
 
 ## Credential-access boundary
 
-The in-process boundary implements the access-port rules of the credential
-lifecycle record (INV-035); channels, delivery, and rotation policy are
+The in-process boundary implements the credential access-port rules (INV-035);
+channels, delivery, and rotation policy are
 [configuration-and-credentials](configuration-and-credentials.md) scope.
 
 - `CredentialReference` is the non-secret durable name; it is safe in errors and
@@ -1344,8 +1335,8 @@ new one is a regression and a repaired one must shrink the ledger, so the set
 cannot drift in either direction. A shape the contract covers that the sink
 still leaks is carried as `KNOWN-FAILING`, which is a defect ledger and never an
 `ACCEPTED-UNCOVERED` classification — that status records only what this
-contract openly declines to cover. Fail-closed suppression is absorbing for the
-sink's lifetime: usage reports, other fact boundaries, and terminal flushes
+contract explicitly declines to cover. Fail-closed suppression is absorbing for
+the sink's lifetime: usage reports, other fact boundaries, and terminal flushes
 never re-enable provider-controlled bytes. Streamed lookbehind's 64-KiB memory
 bound is independent of its work bound. One initial unsafe-suffix classification
 decides whether a prefix is held; it is not charged as reclassification. After a
@@ -1404,15 +1395,14 @@ unchanged when that transition is what refused. The four classes:
 - **`CallerOrHubBug`** — a request or internal guard that can fail only because
   of a defect, kept distinct from corruption.
 
-The class states only how bad a failure is. The orthogonal sanitized cause code
+The class states only a failure's severity. The orthogonal sanitized cause code
 stating *what happened* is owned by whichever page owns the behavior that raises
 it: for provider and model-call failures — carried by the model-call bridge,
 reusing this page's `ProviderErrorKind` vocabulary verbatim for definitive
 provider errors — the owning page is
 [model-call-execution](model-call-execution.md#operator-diagnostics), and the
 turn-liveness causes are owned by
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md). No page owns
-a cause code for behavior it does not describe.
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
 
 Concurrent staleness is not a class: a guarded write that matches zero rows is
 consumed inside adapters by reload-and-rederive
@@ -1427,7 +1417,7 @@ failures after staleness handling.
   transport cannot prove complete request upload; surfacing refusal dispositions
   awaits an upload-proving transport or evidence source.
 - `CancellationConfirmed` and `SendIncompleteProvenUnacceptable` are
-  vocabulary-total variants no in-repository adapter constructs today.
+  vocabulary-total variants no in-repository adapter constructs.
 - The three-kind consumer allowlist (provider adapters, the
   `model-provider-runtime` bridge, the daemon composition root) is a review-time
   contract only; no manifest allowlist check enforces it.
