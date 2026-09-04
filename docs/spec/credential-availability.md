@@ -77,16 +77,15 @@ is organised per transaction. Each row above names the transaction that commits
 that ending; it says nothing about which objects that transaction takes, in what
 order, or in which mode.
 
-`park` and `fail` have their semantics here and nowhere else, and both act
-through exactly one question: **does this exhaustion select a wait?** `fail`
-never selects one. `park` selects one only when at least one exclusion in the
-snapshot is one a wake can clear — the second consequence below gives the
-reason, and this is the only statement of the rule. Where a wait is selected the
-ending is `contended-wait` or `exhausted-wait`; where none is, the ending is one
-of the four failure rows, chosen by whether the admission is a fresh one or the
-release of a parked wait, and by whether **this availability chain** had already
-issued a call. Neither value has any other effect, and neither appears in a row
-it does not name.
+`park` and `fail` have their semantics here, and both act through exactly one
+question: **does this exhaustion select a wait?** `fail` never selects one.
+`park` selects one only when at least one exclusion in the snapshot is one a
+wake can clear — the second consequence below gives the reason. Where a wait is
+selected the ending is `contended-wait` or `exhausted-wait`; where none is, the
+ending is one of the four failure rows, chosen by whether the admission is a
+fresh one or the release of a parked wait, and by whether **this availability
+chain** had already issued a call. Neither value has any other effect, and
+neither appears in a row it does not name.
 
 Stating it as wait selection rather than as the configured value is what keeps
 the rows total. A `park` pool whose exclusions no wake can clear must still end
