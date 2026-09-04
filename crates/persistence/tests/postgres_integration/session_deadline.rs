@@ -2,17 +2,24 @@ use std::{error::Error, time::Duration};
 
 use crate::*;
 use signalbox_domain::{
-    DispatchingModule, DurableCommandId, LifecycleActor, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SessionLifecycleState, SessionOwnership,
-    SessionParkCause, SessionParkResponder, StartGate, TranscriptAncestry,
+    CommandPrincipal, DispatchingModule, DurableCommandId, GoalStatement, GoalUserAction,
+    GoalUserCommand, LifecycleActor, SessionCreationCause, SessionCreationProvenance, SessionId,
+    SessionLifecycleApplication, SessionLifecycleCommand, SessionLifecycleCommandResult,
+    SessionLifecycleOperation, SessionLifecycleState, SessionOwnership, SessionParkCause,
+    SessionParkResponder, StartGate, TranscriptAncestry,
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
+    goal::GoalRepository,
+    goal_turn::GoalTurnCandidates,
     scheduler::PostgresEligibilitySweep,
     session_deadline::{
         PostgresSessionDeadlineRepository, SessionDeadlineBounds, SessionDeadlinePassOutcome,
     },
     session_lifecycle::SessionLifecycleRepository,
+    session_lifecycle_command::{
+        SessionLifecycleCommandHandlingOutcome, SessionLifecycleCommandRepository,
+    },
 };
 
 const SEED: u128 = 0x11fe_9000;
@@ -105,6 +112,23 @@ async fn waiting_expiry_parks_without_terminalizing_the_turn() -> Result<(), Box
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation)
         .await?;
+    GoalRepository::new(pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(SEED + 0x2a00)),
+                session,
+                GoalUserAction::Attach(
+                    GoalStatement::try_new(String::from("continue after the expired wait"))
+                        .expect("the fixture goal is admitted"),
+                ),
+            ),
+            Some(GoalTurnCandidates::new(
+                AcceptedInputId::from_uuid(Uuid::from_u128(SEED + 0x2b00)),
+                TurnId::from_uuid(Uuid::from_u128(SEED + 0x2c00)),
+            )),
+            |_| None,
+        )
+        .await?;
     sqlx::query(
         "UPDATE session_lifecycle
             SET state_kind = 'waiting',
@@ -141,6 +165,24 @@ async fn waiting_expiry_parks_without_terminalizing_the_turn() -> Result<(), Box
     .fetch_one(&pool)
     .await?;
     assert_eq!(terminal_turns, 0);
+    let resume = SessionLifecycleCommandRepository::new(pool.clone())
+        .handle(
+            SessionLifecycleCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(SEED + 0x2d00)),
+                session,
+                SessionLifecycleOperation::Resume,
+            ),
+            CommandPrincipal::Operator,
+        )
+        .await?;
+    assert_eq!(
+        resume,
+        SessionLifecycleCommandHandlingOutcome::Recorded(SessionLifecycleCommandResult::Applied(
+            SessionLifecycleApplication::Resumed {
+                state: SessionLifecycleState::Dispatched,
+            }
+        ))
+    );
 
     pool.close().await;
     drop(container);

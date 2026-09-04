@@ -13,7 +13,7 @@ use signalbox_domain::{
     SessionConfigurationDefaultsVersion, SessionFailureCause, SessionId,
     SessionLifecycleApplication, SessionLifecycleCommand, SessionLifecycleCommandRejection,
     SessionLifecycleCommandResult, SessionLifecycleOperation, SessionLifecycleState,
-    SessionParkCause, SessionTerminalOutcome, StopStickiness, TurnId,
+    SessionTerminalOutcome, StopStickiness, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -377,19 +377,9 @@ async fn apply(
                         "goal lineage",
                     )),
                 })?;
-            let module_parked_pursuit = matches!(
-                held.state(),
-                SessionLifecycleState::Parked {
-                    cause: SessionParkCause::ModulePark,
-                    ..
-                }
-            ) && goal
-                .as_ref()
-                .is_some_and(|goal| matches!(goal.current().state(), GoalState::Pursuing));
             if goal
                 .as_ref()
-                .is_some_and(|goal| goal.current().state().is_open())
-                && !module_parked_pursuit
+                .is_some_and(|goal| matches!(goal.current().state(), GoalState::Blocked { .. }))
             {
                 return Err(ApplyError::Rejected(
                     SessionLifecycleCommandRejection::GoalResumeRequired,
