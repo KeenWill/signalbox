@@ -153,7 +153,7 @@ impl AttentionRepository {
         })
     }
 
-    /// Reads the bounded legacy attention projection without scanning the
+    /// Reads the bounded attention projection without scanning the
     /// fleet for the catalog's exact filtered total.
     pub async fn page(
         &self,

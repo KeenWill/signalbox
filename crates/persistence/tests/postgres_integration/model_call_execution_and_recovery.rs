@@ -2634,12 +2634,11 @@ async fn s04_exhausted_automatic_reconciliation_is_visible_to_the_operator()
 /// interrupt on the turn row instead of racing past its uncommitted
 /// terminalization.
 ///
-/// Both sides used to read and write that row without a lock either could see,
-/// so discovery's `READ COMMITTED` snapshot could enrol a fresh `scheduled`
-/// recovery for a turn the interrupt was terminalizing, and the interrupt's own
-/// supersession could not see that uncommitted insert. The committed pair is
-/// the shape `process_read` rejects as corruption until a later supersession
-/// lap reaches it.
+/// Without a lock that either side can see, discovery's `READ COMMITTED` snapshot
+/// could enrol a fresh `scheduled` recovery for a turn the interrupt was
+/// terminalizing, and the interrupt's own supersession could not see that
+/// uncommitted insert. The committed pair is the shape `process_read` rejects as
+/// corruption until a later supersession lap reaches it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s04_recovery_discovery_waits_on_the_interrupted_turn_row() -> Result<(), Box<dyn Error>> {

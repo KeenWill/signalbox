@@ -989,7 +989,7 @@ fn checkout_root() -> &'static Path {
 /// Guards the pin that keeps `UPDATE_EXPECT=1` rewriting inline `expect![...]`
 /// literals in the checkout being compiled.
 ///
-/// The goldens above no longer depend on it: [`golden!`] hands expect-test an
+/// The goldens above do not depend on it: [`golden!`] hands expect-test an
 /// absolute path. Inline literals cannot be anchored that way — expect-test
 /// locates the source file to rewrite by joining `file!()` onto a workspace
 /// root it derives at run time, from `CARGO_WORKSPACE_DIR` or, without it, the
