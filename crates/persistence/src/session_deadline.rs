@@ -168,6 +168,10 @@ impl PostgresSessionDeadlineRepository {
         }
         let outcome = match (kind.as_str(), held.state()) {
             ("admission", SessionLifecycleState::Created | SessionLifecycleState::Dispatched) => {
+                sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::SUBMIT_INPUT_SCHEDULER)
+                    .bind(candidate)
+                    .fetch_one(&mut *transaction)
+                    .await?;
                 retire_queued_turns(&mut transaction, session).await?;
                 session_lifecycle::close_in_transaction(
                     &mut transaction,

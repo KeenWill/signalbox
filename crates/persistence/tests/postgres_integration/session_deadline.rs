@@ -61,7 +61,8 @@ async fn queue_turn(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn admission_expiry_retires_the_held_session_and_queued_turn_together()
+/// INV-010: expiry waits for the session scheduler lock before retiring turns.
+async fn inv010_admission_expiry_retires_the_held_session_and_queued_turn_together()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let creation = owned_creation(1, StartGate::Held);
@@ -71,12 +72,31 @@ async fn admission_expiry_retires_the_held_session_and_queued_turn_together()
         .await?;
     let turn = queue_turn(&pool, session, 1).await?;
 
-    let outcome = PostgresSessionDeadlineRepository::new(
-        pool.clone(),
-        SessionDeadlineBounds::new(Some(Duration::ZERO), None),
-    )
-    .expire_next()
-    .await?;
+    let mut scheduler_blocker = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE")
+        .bind(session.into_uuid())
+        .execute(&mut *scheduler_blocker)
+        .await?;
+    let expiry = tokio::spawn({
+        let repository = PostgresSessionDeadlineRepository::new(
+            pool.clone(),
+            SessionDeadlineBounds::new(Some(Duration::ZERO), None),
+        );
+        async move { repository.expire_next().await }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "admission expiry must block on the held scheduler row"
+    );
+    let queued_state: String =
+        sqlx::query_scalar("SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1")
+            .bind(turn.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(queued_state, "queued");
+
+    scheduler_blocker.rollback().await?;
+    let outcome = expiry.await??;
     assert_eq!(outcome, SessionDeadlinePassOutcome::Retired { session });
     let lifecycle = SessionLifecycleRepository::new(pool.clone())
         .load(session)
