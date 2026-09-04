@@ -33,7 +33,8 @@ implementing stack through this PR (`agent/model-settings-execution`).
 The usable context-ceiling definition and Codex CLI catalog values are
 re-verified against this PR (`agent/daemon-live-codex-effective-window`). The
 bounded Codex CLI startup pin probe is verified against this PR
-(`agent/daemon-live-codex-pin-preflight`).
+(`agent/daemon-live-codex-pin-preflight`). The GPT-6 Astra Codex CLI catalog
+value is verified against this PR (`agent/gpt6-astra-catalog`).
 
 The required numeric-bound configuration grammar and scheduler admission policy
 are verified against this PR (`agent/bounds-required-config-protocol`). The
