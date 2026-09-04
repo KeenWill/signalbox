@@ -54,10 +54,12 @@ lock, and holds that lock through final socket cleanup. Failure to open, verify,
 or lock the sidecar fails without touching the socket path. The sidecar remains
 after shutdown so a later daemon can lock the same inode. While holding that
 lifetime path lock, the daemon also reclaims a retained socket left at the
-reserved `<socket-path>.identity` name by an abrupt prior exit only when the
-public and reserved names still identify the same owned socket. An orphaned or
-differently paired entry at the reserved name fails startup without
-modification. It then handles the final path as follows:
+reserved `<socket-path>.identity` name by an abrupt prior exit when the public
+and reserved names still identify the same owned socket, or when the public
+socket entry is absent and the reserved entry is an owned socket. It revalidates
+and removes the retained entry before binding; a differently paired entry at the
+reserved name fails startup without modification. It then handles the final path
+as follows:
 
 1. an absent entry is available;
 2. an entry that is not a socket fails startup without modification;
@@ -83,8 +85,8 @@ completes. The identity link remains for the listener lifetime so the device and
 inode cannot be recycled. Any address, identity, ownership, or permission
 mismatch fails startup and removes no raced entry. Graceful shutdown keeps the
 listener and identity link live while a final `lstat` proves the public path
-still names this daemon's socket and removes that path, then releases the
-identity link and path lock.
+still names this daemon's socket, then releases the identity link before
+removing the public path and releasing the listener and path lock.
 
 The transport is local-machine and single-user only. The process protocol's lack
 of authentication is provisional; the protocol has no authorization exchange or
