@@ -403,32 +403,19 @@ DECLARE
     subject uuid;
     restored_state text;
 BEGIN
-    -- A parked obligation may be refreshed with a different blocker, released,
-    -- or settled. Restore subjects it no longer wraps before projecting any
-    -- replacement, unless a different parked obligation still names them.
-    IF OLD.parked_at IS NOT NULL AND OLD.settled_kind IS NULL THEN
+    -- Releasing or settling a parked obligation restores its subjects unless
+    -- a different parked obligation still names them.
+    IF OLD.parked_at IS NOT NULL
+       AND OLD.settled_kind IS NULL
+       AND (NEW.parked_at IS NULL OR NEW.settled_kind IS NOT NULL)
+    THEN
         FOR subject IN
-            (
-                SELECT OLD.external_blocking_session_id
-                 WHERE OLD.external_blocking_session_id IS NOT NULL
-                UNION
-                SELECT action.session_id
-                  FROM repo_watch_dispatch_action AS action
-                 WHERE action.dispatch_id = OLD.blocking_dispatch_id
-            )
-            EXCEPT
-            (
-                SELECT NEW.external_blocking_session_id
-                 WHERE NEW.parked_at IS NOT NULL
-                   AND NEW.settled_kind IS NULL
-                   AND NEW.external_blocking_session_id IS NOT NULL
-                UNION
-                SELECT action.session_id
-                  FROM repo_watch_dispatch_action AS action
-                 WHERE NEW.parked_at IS NOT NULL
-                   AND NEW.settled_kind IS NULL
-                   AND action.dispatch_id = NEW.blocking_dispatch_id
-            )
+            SELECT OLD.external_blocking_session_id
+             WHERE OLD.external_blocking_session_id IS NOT NULL
+            UNION
+            SELECT action.session_id
+              FROM repo_watch_dispatch_action AS action
+             WHERE action.dispatch_id = OLD.blocking_dispatch_id
         LOOP
             IF EXISTS (
                 SELECT 1
@@ -534,15 +521,11 @@ END;
 $$;
 
 CREATE CONSTRAINT TRIGGER repo_watch_obligation_parks_core_session
-    AFTER UPDATE OF parked_at, blocking_dispatch_id,
-                    external_blocking_session_id, settled_kind
+    AFTER UPDATE OF parked_at, settled_kind
     ON repo_watch_dispatch_obligation
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW
     WHEN (OLD.parked_at IS DISTINCT FROM NEW.parked_at
-          OR OLD.blocking_dispatch_id IS DISTINCT FROM NEW.blocking_dispatch_id
-          OR OLD.external_blocking_session_id
-                IS DISTINCT FROM NEW.external_blocking_session_id
           OR OLD.settled_kind IS DISTINCT FROM NEW.settled_kind)
     EXECUTE FUNCTION park_repo_watch_obligation_sessions();
 

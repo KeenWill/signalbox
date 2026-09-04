@@ -125,7 +125,8 @@ async fn inv010_admission_expiry_retires_the_held_session_and_queued_turn_togeth
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn waiting_expiry_parks_without_terminalizing_the_turn() -> Result<(), Box<dyn Error>> {
+async fn waiting_deadline_park_with_a_pursuing_goal_resumes_through_lifecycle()
+-> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let creation = owned_creation(2, StartGate::Open);
     let session = creation.applied_result().session();
