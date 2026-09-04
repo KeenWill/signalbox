@@ -1,21 +1,20 @@
 # Runner protocol and placement
 
-This page specifies the implemented runner-protocol domain foundation. It owns
-logical runner enrollment, daemon-authoritative catalog validation, runner
-leases, the independent session-composition axes, session placement and
-affinity, credential-profile grants, and workspace requirements. The tool
-registry's common declarations remain owned by [tool loop](tool-loop.md);
-session transcript and frontier mechanics remain owned by
-[sessions and transcript](sessions-and-transcript.md); physical tool attempts
-remain owned by [tool loop](tool-loop.md). Invariant tags cite
+This page specifies the runner protocol. It owns logical runner enrollment,
+daemon-authoritative catalog validation, runner leases, the independent
+session-composition axes, session placement and affinity, credential-profile
+grants, and workspace requirements. The tool registry's common declarations are
+owned by [tool loop](tool-loop.md); session transcript and frontier mechanics
+are owned by [sessions and transcript](sessions-and-transcript.md); physical
+tool attempts are owned by [tool loop](tool-loop.md). Invariant tags cite
 [the invariant test index](../invariants.md).
 
-The registration-only executable slice adds the dedicated local listener,
+The registration-only executable slice implements the dedicated local listener,
 durable idempotent enrollment receipts, exact resume and
 replacement-advertisement registration, the `signalbox-runner` binary, explicit
 credential/repository availability, and heartbeat liveness exchange with durable
 connection epochs, shutdown, suspect, and loss facts. Recovery inventory,
-workspaces, leases, execution, and model calls remain unimplemented as labeled
+workspaces, leases, execution, and model calls are unimplemented, as labeled
 below. Remote transport and dynamic policy stay under [Open edges](#open-edges).
 
 ## Version-one executable boundary
@@ -25,12 +24,11 @@ same effective user as `signalboxd`.
 
 No present runner surface provides workspace, Git, shell, build, test, or model
 execution. A future runner-side workstation registry and executor are
-unimplemented and undecided. The committed unimplemented runner foundation below
-continues to constrain sandbox, approval, workspace, credential, and generic
-execution behavior. Its existing per-tool compatibility constraints remain
-binding; the remaining registry inventory, any additional tool names,
-unconstrained argument details, and execution deadlines are undecided. That
-registry work is recorded under
+unimplemented and undecided. The committed unimplemented functionality below
+constrains sandbox, approval, workspace, credential, and generic execution
+behavior. Its per-tool compatibility constraints are binding; the registry
+inventory, any additional tool names, unconstrained argument details, and
+execution deadlines are undecided under
 [Scheduling and runners](../open-questions.md#scheduling-and-runners).
 
 The tool loop remains serial: the daemon offers at most one live lease for a
@@ -49,12 +47,10 @@ that forecloses it. The single active enrollment, and the rejection of a second
 healthy `enroll` below, are version-one artifacts that lift when multi-runner
 enrollment lands; they are not a statement that a deployment has one runner.
 Every runner-scoped fact — identity, enrollment, registration revision,
-connection and loss state, advertisement, workspace root — is therefore already
-per runner rather than per deployment, and a contract that reads "the runner" as
-a deployment-wide singleton is a defect to be repaired rather than a rule to be
-preserved. Why: an agent that mistakes this boundary for a decision attaches
-deployment-scoped meaning to runner-scoped facts, and every such attachment has
-to be found and undone before a second runner can connect.
+connection and loss state, advertisement, workspace root — is therefore per
+runner rather than per deployment. Why: deployment-scoped meaning attached to a
+runner-scoped fact has to be found and undone before a second runner can
+connect.
 
 ### Committed functionality beyond version one
 
@@ -62,13 +58,10 @@ Nothing in this section describes implemented behaviour. Version one has no
 `move_healthy_session` request, no client may send one, and no daemon or runner
 surface answers one, exactly as no second simultaneous enrollment exists above.
 Every statement here is a constraint on future change rather than a capability
-present today, and that constraint is the only force it carries: the version-one
-mechanisms it names may not be altered in a way that forecloses these
-commitments. What remains genuinely undecided about them — workspace portability
-between runners, and any automatic-placement policy — stays in
-[open questions](../open-questions.md#scheduling-and-runners), which remains the
-one home for undecided design; a commitment whose implementation is deferred is
-not an undecided question.
+present today: the version-one mechanisms it names may not be altered in a way
+that forecloses these commitments. Workspace portability between runners and any
+automatic-placement policy are undecided under
+[open questions](../open-questions.md#scheduling-and-runners).
 
 User-directed relocation of a healthy session is committed functionality that
 version one does not implement. `move_healthy_session` is the user command that
@@ -351,7 +344,7 @@ encoding fails with a stated cause instead of surfacing as a bare hash mismatch
 on the first acknowledgement.
 
 A runner that cannot perform an admitted operation reports it rather than
-falling silent. `operation_failed` carries the exact correlation of the refused
+sending nothing. `operation_failed` carries the exact correlation of the refused
 operation — provisioning authorization, release, or lease offer before
 `lease_claim` — and two layers. The first is one closed daemon-actionable
 category: `credential_unavailable`, `repository_unavailable`,
@@ -379,7 +372,7 @@ release's retirement would leave the reporting runner holding the journal and
 its one workspace-operation slot forever — the exact outcome this category
 exists to prevent. The undeleted placement then appears in the next startup
 report as a `cleanup_failed` leak, which is the version-one response to
-unreclaimed disk. Daemon logic keys off that category alone, so the set stays
+unreclaimed disk. Daemon logic branches on that category alone, so the set stays
 small and every member names a decision the daemon can make. The second is one
 runner-authored detail: a runner-specific code, a message, and a structured
 payload, all carried as data. The daemon retains the detail as operator evidence
@@ -387,11 +380,10 @@ and exposes it verbatim through user runner inspection; it never parses,
 interprets, or branches on it, so a runner may add detail codes freely without a
 daemon change.
 
-Extensible is not unbounded, and each member's limit is exact rather than
-described as bounded. The complete detail is durable operator evidence held
-within 4,096 UTF-8 bytes, the bound this system already uses for a known
-failure's durable detail and for an exact runner value, and the three members
-are derived from that bound:
+Each member's limit is exact. The complete detail is durable operator evidence
+held within 4,096 UTF-8 bytes, the bound this system uses for a known failure's
+durable detail and for an exact runner value, and the three members are derived
+from that bound:
 
 - the code uses the same checked-name syntax as every other runner catalog key —
   nonempty, U+0000-free, at most 64 UTF-8 bytes, only ASCII letters, digits,
@@ -419,11 +411,11 @@ the detail object's own framing and worst-case JSON escaping. A detail outside
 any of them is an oversized or malformed frame and fails closed like any other,
 so the runner checks the detail as it constructs it and never spools one it
 could not have admitted itself. Why: `operation_failed` is spooled until
-acknowledged, so a detail one side considers valid and the other rejects is not
-a cosmetic disagreement between implementations — it is resent forever, and the
-provisioning, release, or lease offer it was reporting waits permanently for an
-`operation_failure_recorded` that can never arrive. Exact limits are what make
-two independently implemented sides admit the same set.
+acknowledged, so a detail one side considers valid and the other rejects is
+resent forever, and the provisioning, release, or lease offer it was reporting
+waits permanently for an `operation_failure_recorded` that can never arrive.
+Exact limits are what make two independently implemented sides admit the same
+set.
 
 A failure the daemon has durably recorded terminates that operation: the
 corresponding provisioning, release, or lease authority is resolved as refused,
@@ -729,8 +721,8 @@ The registration-only daemon catalog has no allowed capability class, tool,
 workspace, or sandbox-profile entry. `signalbox-runner` therefore advertises
 each of those inventories as explicitly empty. It advertises only credential
 profiles and repository entries read from strict runner configuration. The
-daemon currently admits exactly the `github-runner` credential-profile name,
-with an empty approval policy, so that name confers no execution authority.
+daemon admits exactly the `github-runner` credential-profile name, with an empty
+approval policy, so that name confers no execution authority.
 
 The registration-only catalog remains empty. A future execution catalog,
 capability class, tool inventory, and sandbox-profile composition are
@@ -1038,15 +1030,13 @@ repository is advertised only to a session that has one; a workspace-free
 session advertises exactly the tools that can run in it
 ([model-call execution](model-call-execution.md#frontier-rendering) owns the
 snapshot, and [tool loop](tool-loop.md#registry-placement-and-effect-metadata)
-owns the declarations). No combination is rejected for being workspace-free, and
-no contract on this page may assume that a repository exists.
+owns the declarations). No combination is rejected for being workspace-free.
 
-Why: an earlier shape of this specification read as though a session were a
-repository clone on the one runner, and four separate defects — a credential
-inferred for a repository placement, a rejected empty repository, placement
-fields missing from template creation, and a workspace-free restricted placement
-advertising repository tools — were that single assumption surfacing in four
-places. Stating the axes once is what keeps a fifth from appearing.
+Why: treating a session as a repository clone on the one runner produces a
+defect wherever that assumption surfaces — a credential inferred for a
+repository placement, a rejected empty repository, placement fields missing from
+template creation, a workspace-free restricted placement advertising repository
+tools — and stating the axes once prevents them.
 
 ## Session placement and affinity
 
@@ -1256,9 +1246,9 @@ path and its own manifest
 restarted runner therefore re-adopts the root it was already using, with
 whatever the session wrote into it, and never substitutes a fresh empty
 directory for one holding session files. Why: defining restricted confinement in
-terms of the session repository made a repository a precondition for being
-sandboxed at all, which would have pushed every workspace-free session into
-`ambient` for no security reason.
+terms of the session repository would make a repository a precondition for being
+sandboxed at all, pushing every workspace-free session into `ambient` for no
+security reason.
 
 Repository provisioning uses the same profile before publication: it binds only
 the authorized empty staging repository at the fixed guest workspace path, uses
@@ -1447,19 +1437,18 @@ profile, and working directory. Replacement always uses the successor placement
 revision and cannot carry the prior workspace forward.
 
 Runners are not cleanup authorities. Only the runner that provisioned a
-workspace can delete it, and a runner that is replaced, revoked, or dead simply
-leaves its workspace on disk: no cleanup authority resumes for a retired
-identity, and no mechanism transfers ownership of an existing clone to a
-successor. The system records the abandoned clone through the existing startup
-workspace-leak report, which the user can read, and stops there. Reclaiming that
-disk is an operator and tooling concern — periodic cleanup jobs, added per
-backend over time — and is deliberately outside this contract. Why: making
-cleanup a runner obligation turned every loss-based replacement into a state the
-design could reach and not leave, while the alternative costs only disk — the
-leak is recorded, it is bounded by the workspaces that one runner held, and no
-correctness property depends on reclaiming it. The consequence is stated plainly
-rather than solved: a replaced or dead runner's workspace is leaked, and the
-leak record is the whole of the version-one response.
+workspace can delete it, and a runner that is replaced, revoked, or dead leaves
+its workspace on disk: no cleanup authority resumes for a retired identity, and
+no mechanism transfers ownership of an existing clone to a successor. The system
+records the abandoned clone through the existing startup workspace-leak report,
+which the user can read, and stops there. Reclaiming that disk is an operator
+and tooling concern — periodic cleanup jobs, added per backend over time — and
+is deliberately outside this contract. Why: making cleanup a runner obligation
+would turn every loss-based replacement into a state the design can reach and
+not leave, while the alternative costs only disk — the leak is recorded, it is
+bounded by the workspaces that one runner held, and no correctness property
+depends on reclaiming it. A replaced or dead runner's workspace is leaked, and
+the leak record is the whole of the version-one response.
 
 The runner opens one effective-user-owned real `0700` root without following its
 final component, pins and retains its directory identity, and holds a
@@ -1482,7 +1471,7 @@ proceeds exactly as for a populated repository.
 
 A placement that requires no worktree and names no working directory still needs
 one writable root, and that private root is a managed workspace rather than
-scratch space the runner forgets. It lives at the sibling path
+scratch space. It lives at the sibling path
 `sessions/<canonical-session-uuid>/<placement-revision>/work`, and the runner
 creates it on first use with the same fsynced non-secret manifest in the
 non-mounted placement parent, recording no repository key, clone-URL digest, or
@@ -1534,9 +1523,9 @@ described by
 [configuration and credentials](configuration-and-credentials.md#runner-credential-lifecycle)
 for a Git tool reaching a remote under a granted profile, the per-provisioning
 broker helper during provisioning, and no helper at all for an invocation that
-reaches no remote. Command-line configuration outranks the model-writable
-repository configuration, so no repository setting can move the effective
-transport off HTTPS, and a re-enabled external helper or a hook cannot
+reaches no remote. Command-line configuration takes precedence over the
+model-writable repository configuration, so no repository setting can move the
+effective transport off HTTPS, and a re-enabled external helper or a hook cannot
 substitute an executable for a fetch. Why: a repository-local
 `credential.helper` whose value begins with `!` is a shell snippet Git runs, so
 leaving the helper list unemptied would let an auto-approved, retry-classified
@@ -1563,21 +1552,21 @@ HTTPS: the rewritten URL is HTTPS, so `protocol.allow=never` with
 untouched, so a check that reads it sees the canonical value; the substitute's
 hostname can stay inside the admitted transport set, so the restricted broker's
 hostname and SNI checks pass; and a public substitute needs no credential helper
-at all. Passing an explicit URL rather than a remote name closes none of it, and
-the rewrite table cannot be emptied the way the protocol and helper keys are:
-`insteadOf` is an unbounded keyspace whose bases the writer chooses, so
+at all. Passing an explicit URL rather than a remote name prevents none of it,
+and the rewrite table cannot be emptied the way the protocol and helper keys
+are: `insteadOf` is an unbounded keyspace whose bases the writer chooses, so
 command-line configuration can add entries to it but can never subtract them,
 and no highest-priority value clears it.
 
-The canonical repository binding therefore gets its own boundary, placed where
-the transport boundary cannot reach. Every invocation that reaches a remote
-first selects exactly one repository entry: provisioning uses the entry in its
-placement authorization, an existing-worktree tool uses the exact key recorded
-by the workspace manifest, and `git_clone` uses its checked `repository`
-argument. The invocation then resolves the complete effective-URL sequence Git
-will use and requires every member, byte for byte, to equal the canonical URL of
-that selected entry. The runner does not compute that resolution itself; it asks
-Git, under exactly the forced configuration, working directory, and repository
+The canonical repository binding therefore has its own check, independent of the
+transport configuration. Every invocation that reaches a remote first selects
+exactly one repository entry: provisioning uses the entry in its placement
+authorization, an existing-worktree tool uses the exact key recorded by the
+workspace manifest, and `git_clone` uses its checked `repository` argument. The
+invocation then resolves the complete effective-URL sequence Git will use and
+requires every member, byte for byte, to equal the canonical URL of that
+selected entry. The runner does not compute that resolution itself; it asks Git,
+under exactly the forced configuration, working directory, and repository
 selection its guarded invocation will use, so each answer is post-rewrite rather
 than an approximation of Git's rules.
 
@@ -1606,25 +1595,23 @@ singular assumption. Validating the stored `remote.<name>.url` remains defense
 in depth above these checks rather than the boundary itself. Why: every
 pre-rewrite reading of the configuration reads exactly the value the model left
 in place to be read, so only the complete effective sequence is evidence — and
-the canonical binding is the whole of what stands between an auto-approved
-remote operation and an attacker-chosen repository.
+the canonical binding is the only check between an auto-approved remote
+operation and an attacker-chosen repository.
 
-What that check covers is worth stating exactly, because the root cause survives
-it. It resolves and then uses, and it holds because the two invocations are
-adjacent under the runner's one global execution permit with repository hooks
-disabled, so no model-authored code runs between them; admitting concurrent
-execution or repository hooks would break it, and preserving this adjacency is a
-condition on both. It binds the URL and not the bytes: fetching from the right
-repository is no claim about what that repository serves. It binds the URL and
-not everything else repository configuration reaches — configuration that
-changes what Git runs rather than where it connects, such as content filters
-applied on checkout or external diff and file-system-monitor programs, is
-neutralized only where one of the command-line settings above names it, which is
-a posture and not a closed set. Repository configuration is model-writable at
-all because `.git` sits inside the writable root; moving it outside the model's
-reach is the structural answer that would retire the class instead of
-enumerating it, and it is recorded as a design question under
-[tool safety](../open-questions.md#tool-safety) rather than settled here.
+The check covers exactly this. It resolves and then uses, and it holds because
+the two invocations are adjacent under the runner's one global execution permit
+with repository hooks disabled, so no model-authored code runs between them;
+admitting concurrent execution or repository hooks would break it, and
+preserving this adjacency is a condition on both. It binds the URL and not the
+bytes: fetching from the right repository is no claim about what that repository
+serves. It binds the URL and not everything else repository configuration
+reaches — configuration that changes what Git runs rather than where it
+connects, such as content filters applied on checkout or external diff and
+file-system-monitor programs, is neutralized only where one of the command-line
+settings above names it, and that set is not closed. Repository configuration is
+model-writable because `.git` sits inside the writable root; moving it outside
+the model's reach would retire the class instead of enumerating it, and is an
+open question under [tool safety](../open-questions.md#tool-safety).
 
 A daemon release is accepted only for an exact retired placement revision —
 either superseded by replacement or terminal `RunnerAbandoned` — after no live
@@ -1643,9 +1630,9 @@ runner-owned disk it is not reported as an unreclaimed-workspace leak either.
 Retirement of such a placement is complete the moment the placement state is
 durable. Why: the directory was named by the creation request rather than
 provisioned by the runner, so treating retirement as a reason to delete it would
-destroy a directory the system was only ever lent — and the release correlation
-has no identity it could name for it in any case, which makes an unconditional
-release unrepresentable on the wire as well as wrong.
+destroy a directory the system does not own — and the release correlation has no
+identity it could name for it, so an unconditional release is also
+unrepresentable on the wire.
 
 Reachability is the second precondition, and it is independent of the first: a
 release is enqueued only while the runner that holds the workspace is still
@@ -1653,18 +1640,17 @@ connected. Retirement whose predecessor connection is already durably lost —
 heartbeat-loss replacement onto a different runner or onto a pending enrollment,
 and every abandonment — enqueues no release, and durable loss of a connection
 that still owed one retires that release as unowned. Either way the workspace
-takes the recorded-leak response above rather than an exchange no identity can
-complete. In version one the exchange therefore exists only for the checked
-same-runner re-enrollment, where registration reconciliation retired the
-placement while the connection and enrollment stayed healthy, so the runner
-holding the workspace is the same runner still on the wire
+takes the recorded-leak response above. In version one the exchange therefore
+exists only for the checked same-runner re-enrollment, where registration
+reconciliation retired the placement while the connection and enrollment stayed
+healthy, so the runner holding the workspace is the same runner still on the
+wire
 ([identity, enrollment, and registration](#identity-enrollment-and-registration)).
 Why: both of the frames that can retire a release require the holding runner to
 acknowledge deletion or report cleanup failure, and no cleanup authority resumes
 for a retired identity, so a release addressed to an unreachable runner is a
 durable record that is redelivered after every restart and that nothing can ever
-clear — the leak this design already accepts, converted into a queue entry that
-outlives it.
+clear.
 
 For a workspace it did create, the runner journals the release before it does
 anything irreversible, following the same acknowledge-and-journal pattern that
