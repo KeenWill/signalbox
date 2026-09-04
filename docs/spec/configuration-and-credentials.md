@@ -21,12 +21,11 @@ operator-chosen model-provider profile names, and the retirement of both
 provider key-file environment channels are implemented in
 `apps/signalboxd/src/credential_pools.rs` and
 `apps/signalboxd/src/configuration.rs`. Preparation-time pool selection, durable
-trigger actions and chain exclusions, and the availability successor calls owned
-by
+trigger actions and chain exclusions, the availability successor calls owned by
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine),
-together with durable per-call pool-policy snapshots, are owned by that machine.
-Codex `codex_home` admission and the per-member `CODEX_HOME` the selected
-profile delivers to each Codex CLI child are implemented in
+together with durable per-call pool-policy snapshots, are implemented. Codex
+`codex_home` admission and the per-member `CODEX_HOME` the selected profile
+delivers to each Codex CLI child are implemented in
 `apps/signalboxd/src/credential_pools.rs` and
 `crates/model-runtime-codex-cli/src/runtime.rs`. Codex `file` and `oauth`,
 capacity reservations, and legacy family-to-reference migration remain committed
