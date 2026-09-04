@@ -1,20 +1,17 @@
 # Repository watch and event dispatch
 
-**Foundation contract.** Repository watch is a credentialed external-ingress
+**Implemented behavior.** Repository watch is a credentialed external-ingress
 boundary from its first operation: the daemon holds a distinct credential-file
 reference for each configured repository, reads secret bytes only for that
 repository's request, and never gives a dispatched session the watch credential.
 Per-repository tokens carry the least GitHub scope needed to read the configured
-signals and dismiss an eligible stale pull-request review. This is the C0
+signals and dismiss an eligible stale pull-request review. This is the
 confused-deputy boundary: a credential for one repository cannot authorize a
 request to another repository. A repository without a credential-file reference
 is invalid configuration and is not watched; a repository absent from the list
 is not watched; an absent repository-watch section means that the subsystem does
 not start. Dispatched sessions retain the approval posture of their named
 session templates, without authority inherited from the watcher.
-
-**Foundation contract.** This bottom specification diff owns the
-four-pull-request repository-watch stack.
 
 ## Configuration and credential boundary
 
@@ -191,7 +188,7 @@ scheduling it. What remains is measured from the durable record of the last
 completed sweep — written inside that sweep's own commit, so a commit that rolls
 back leaves the previous deadline in force — and never from the restarting
 process's own start: a daemon restarting more often than the interval would
-otherwise hand itself a full interval every time and never reach the deadline at
+otherwise reset to a full interval every time and never reach the deadline at
 all. A repository whose recorded sweep is already older than the interval, and a
 first-ever watch with no sweep on record, poll immediately. This keeps
 operational restarts from multiplying the provider request budget independently
@@ -335,13 +332,12 @@ carried rather than discarded, and their identity is derived under a hash domain
 reserved for the migration itself and disjoint from the differ's: a carried row
 can never claim an identity a producer would also derive, and never matches one.
 
-The carry completes across two migrations, because the first was applied before
-its shape was settled and an applied migration is immutable. `202608150001`
-marked those rows content-identity version zero and admitted both versions;
-`202608170003` moves them to version one and narrows the durable constraint to
-version one alone. Exactly one content-identity version is readable once both
-have run. The durable constraint and the decoder admit version one alone, so no
-earlier event shape survives for a reader to accept.
+The carry completes across two migrations. `202608150001` marked those rows
+content-identity version zero and admitted both versions; `202608170003` moves
+them to version one and narrows the durable constraint to version one alone.
+Exactly one content-identity version is readable once both have run. The durable
+constraint and the decoder admit version one alone, so no earlier event shape
+survives for a reader to accept.
 
 **Committed unimplemented functionality.** Storage version three records the
 pull request owning each recurring stream, or null for a repository-global
@@ -359,21 +355,18 @@ keeps each entry's stream identity and its occurrence sequence. Replacing the
 frontier with an empty one would restart every recurring stream at sequence one,
 and the next occurrence on a stream that already produced events would then mint
 a content identity a durable row already holds, which a commit coalesces — so
-that event and every dispatch it would have caused would be lost without a
-trace. `202608150001` is no precedent for taking that cost: it stamped every row
-that existed then with content-identity version zero and minted version one
-alone from then on, and coalescing searches version one, so nothing its own
-reset could collide with existed. A carried entry names no owning pull request,
-since version two stored none and the one-way hash cannot recover one; the
-stream's next occurrence overwrites the member with the pull request that
-produced it, so only a stream that never recurs again keeps null.
+that event and every dispatch it would have caused would be silently lost. A
+carried entry names no owning pull request, since version two stored none and
+the one-way hash cannot recover one; the stream's next occurrence overwrites the
+member with the pull request that produced it, so only a stream that never
+recurs again keeps null.
 
 Storage version four adds the required compact merged-pull-request baseline
 collection. Migration `202608260002` seeds that collection empty while retaining
 every version-three pull-request observation. The first successful cursor commit
 on the new runtime derives compact baselines from those full merged observations
 and removes the full entries atomically, so migration neither loses the prior
-comparison state nor requires manual cursor surgery. A version-four reader
+comparison state nor requires manual cursor editing. A version-four reader
 requires the collection rather than treating its absence as empty. Each baseline
 records the signal-reviewer filter that produced its retained reactions; a later
 hydration suppresses reaction transitions when that filter changed and replaces
@@ -393,13 +386,13 @@ cursor independently refuses more than 1,000,000 retained baseline subjects. The
 frontier's existing 1,000,000-stream safety ceiling continues to bound the
 recurring streams those subjects own.
 
-No lifecycle releases a stream today, and none may be added without deciding
-which subject provably produces no further occurrence. A merged pull request is
-not one: labels change after merge, and a completed check run's conclusion can
-change under an unchanged run identity and completion generation, so both remain
+No lifecycle releases a stream; a release is valid only for a subject that
+provably produces no further occurrence. A merged pull request is not one:
+labels change after merge, and a completed check run's conclusion can change
+under an unchanged run identity and completion generation, so both remain
 recurring streams. A released counter restarts at one, and the identity it then
 mints collides with a durable one, which commit coalescing discards. The
-1,000,000-stream ceiling is what bounds the frontier meanwhile.
+1,000,000-stream ceiling bounds the frontier.
 
 **Implemented behavior.** A pure differ compares consecutive canonical
 per-pull-request state, branch heads, and completed branch-workflow identities
@@ -422,8 +415,8 @@ and a new attempt under an unchanged run ID does emit. The display name remains
 the rule-visible event payload. A provider fact retained in the consecutive
 comparison baseline is not re-emitted. Rules receive only events: they cannot
 inspect normalized snapshots or rerun the differ. Why: transport independence
-requires both polling and a later authenticated webhook receiver to feed the
-same durable facts.
+requires both polling and an authenticated webhook receiver to feed the same
+durable facts.
 
 **Implemented behavior.** Polling fetches repository state, not rule inputs. The
 branch-workflow projection retains the latest completed run identity and
@@ -515,8 +508,7 @@ lacks actor identity, normalization conservatively carries forward the prior
 retained reactions for that subject only when their reactors remain in the
 current signal-reviewer set, so identity loss cannot manufacture removals and a
 filter change cannot preserve an excluded reactor. Why: reviewer signals are
-actionable facts; the full ambient emoji stream is neither a rule input nor
-retained noise.
+actionable facts; reactions from every other actor are not.
 
 **Implemented behavior.** The cursor binds its filtered reaction projection to
 the exact canonical signal-reviewer login set. When that set changes, the next
@@ -556,11 +548,11 @@ fields:
 - a mergeable-state `any_of` list; and
 - a conclusion `any_of` list.
 
-**Implemented behavior.** The last two fields are the ratified payload
-qualifiers. They do not split event kinds by payload. For `ChecksCompleted`,
-`success` and `failure` map to the same conclusion values used by the qualifier.
-A supplied payload qualifier is false for an event kind to which it does not
-apply. Expressiveness grows only by adding versioned fields.
+**Implemented behavior.** The last two fields are payload qualifiers. They do
+not split event kinds by payload. For `ChecksCompleted`, `success` and `failure`
+map to the same conclusion values used by the qualifier. A supplied payload
+qualifier is false for an event kind to which it does not apply. Expressiveness
+grows only by adding versioned fields.
 
 **Implemented behavior.** A branch event cannot satisfy pull-request-only base,
 head, title, body, label, draft, author, or mergeable-state fields. Repository,
@@ -596,7 +588,7 @@ match joins an outstanding delivery obligation, the eventual action uses the
 latest joined event and adds the current-state delivery member defined below; it
 never emits each joined event as a separate action.
 
-**Implemented behavior.** Dispatch context is the ratified tagged union:
+**Implemented behavior.** Dispatch context is the tagged union:
 
 - `PullRequestContext { repo, number, head_sha, event }`; or
 - `BranchContext { repo, branch, workflow, conclusion, event }`.
@@ -727,11 +719,11 @@ session creation included, is refused as conflicting reuse in both directions.
 **Committed unimplemented functionality.** No present session-creation or
 input-submission surface identifies repository watch as a purpose-specific actor
 or creation cause. Version one therefore uses the current user-initiated,
-no-ancestry creation interface and user-attributed input interface. A committed
-follow-up will add purpose-specific durable repository-watch provenance linked
-to `RepoWatchDispatchId`; compatibility requires it to preserve dispatch,
-session, context, and input identities rather than recreate or reinterpret them.
-This paragraph constrains only that future adoption.
+no-ancestry creation interface and user-attributed input interface.
+Purpose-specific durable repository-watch provenance linked to
+`RepoWatchDispatchId` will exist; compatibility requires it to preserve
+dispatch, session, context, and input identities rather than recreate or
+reinterpret them.
 
 ## Deduplication, concurrency, and audit
 
@@ -761,7 +753,7 @@ letting the first action suppress later actions from the same match. An occupied
 singleton, or an independently commissioned live session owning the same pull
 request, refuses another match and atomically opens one durable delivery
 obligation for that singleton. The obligation records exactly one blocker: the
-occupying repository-watch dispatch or the external commissioned session. If an
+occupying repository-watch dispatch or the external commissioned session. If a
 previous blocker terminates but another session is live at redispatch admission,
 the same obligation atomically replaces its blocker and remains non-ready.
 Further matching facts join its latest-event projection and increment its count,
@@ -825,12 +817,12 @@ parent-only stop when the commissioned generation-one goal is still current and
 appends an immutable lease-expiration record. A successor generation is never
 stopped for its predecessor's lease; its expiration record carries no goal
 command identity, recording that retirement occurred without a stop. The
-existing deferred goal-termination authority creates or joins the latest-state
-dispatch obligation before releasing every now-releasable singleton batch;
-sibling actions retain a multi-action batch until its ordinary release predicate
-holds. The obligation therefore survives capacity loss and becomes eligible for
-normal current-state redispatch rather than leaving the pull request assigned to
-a session that never started (INV-069). If model-call evidence wins the race,
+deferred goal-termination authority creates or joins the latest-state dispatch
+obligation before releasing every now-releasable singleton batch; sibling
+actions retain a multi-action batch until its ordinary release predicate holds.
+The obligation therefore survives capacity loss and becomes eligible for normal
+current-state redispatch rather than leaving the pull request assigned to a
+session that never started (INV-069). If model-call evidence wins the race,
 expiry changes no lifecycle state.
 
 **Implemented behavior.** Each obligation lineage carries a durable count of
@@ -847,7 +839,7 @@ ceiling. Six consecutive failed attempts park the obligation in the transaction
 that counts the exhausting attempt: it is excluded from dispatch, stamped with
 the time it parked, and readable in the `repo_watch_parked_dispatch_obligation`
 projection alongside its count, pull request, and the head it stalled on. That
-stalled state is held still for as long as the obligation is parked: a collapsed
+stalled state does not change while the obligation is parked: a collapsed
 singleton advances its latest-event projection on any match, including one from
 another pull request, and the release condition is decided against the state the
 lineage stalled on rather than against whatever matched last. A lineage whose
@@ -857,16 +849,16 @@ are written, the same progress release that any event would take appends a
 second transition, and the count comes back. The exhausting attempt may have run
 while a new head or review activity arrived, reaching its evaluation before
 there was a park to release, and nothing restates that fact afterwards, so it is
-read from the durable record at parking rather than waited for. Going through
-the park rather than refusing it is what records the fact as spent, so it buys
-one budget and not another at every later exhaustion, and the pair is what an
-operator reads in the journal. The delay is measured from the release of the
-whole batch, not from the first of its actions to fail: a batch holds its
-singleton until every action is terminal, so a clock started at the first
-termination would run out while the batch still occupied the slot. The attempt
-budget is a schema constant, so parking, the readiness projection, and the
-dispatch loader cannot disagree about it; the two delay bounds are compiled into
-the daemon and may only be lowered, never raised.
+read from the durable record at parking rather than waited for. Parking and then
+releasing, rather than refusing to park, records the fact as spent, so it
+restores the budget once rather than at every later exhaustion, and the pair of
+transitions is what an operator reads in the journal. The delay is measured from
+the release of the whole batch, not from the first of its actions to fail: a
+batch holds its singleton until every action is terminal, so a clock started at
+the first termination would run out while the batch still occupied the slot. The
+attempt budget is a schema constant, so parking, the readiness projection, and
+the dispatch loader cannot disagree about it; the two delay bounds are compiled
+into the daemon and may only be lowered, never raised.
 
 **Implemented behavior.** Two things return a parked obligation to dispatch. An
 operator calls `repo_watch_release_parked_dispatch_obligation` with their
@@ -875,11 +867,11 @@ attempt is asking for the allowance a lineage that never failed would have.
 Otherwise the pull request the obligation stalled on must produce a fact that is
 new about it — an event carrying a head other than the one it stalled on, or
 review activity against it. Whether the rule that parked the obligation also
-matches that fact is beside the point, and every event is tested against every
-park as it is evaluated: a rule watching one narrow signal would otherwise stay
-parked on an obsolete head however far the pull request moved. Progress must
-also follow the state the lineage stalled on, and must follow every fact about
-that same pull request which the lineage has already spent, counted across the
+matches that fact is irrelevant, and every event is tested against every park as
+it is evaluated: a rule watching one narrow signal would otherwise stay parked
+on an obsolete head however far the pull request moved. Progress must also
+follow the state the lineage stalled on, and must follow every fact about that
+same pull request which the lineage has already spent, counted across the
 successor obligations it opens as it settles and requeues: several facts can
 follow one stalled state, parking spends the newest of them, and the older ones
 stay unevaluated by any rule running behind its siblings. That ordering holds
@@ -888,29 +880,28 @@ repository's stream and a rule-scoped lineage spans repositories; a fact already
 spent anywhere in the lineage is refused by identity regardless. A single
 repository event is evaluated once per active rule, so without that ordering an
 older event replayed by a lagging rule, or a newer one seen again after a second
-park, would hand back a budget the pull request never earned. Rule, repository,
-and stack singletons collapse many pull requests onto one obligation, so the
-fact must name that same pull request: a neighbour's head differs from the
-stalled one almost always, and would otherwise restore the budget on every
-unrelated match. A branch target carries no head and no review activity at all,
-so an obligation stalled on one is released only by an operator. Matching events
-that are neither, such as a recomputed mergeable state or a label change, join
-the obligation's latest-state projection without restoring anything, so churn
-against an unchanged pull request buys no further attempts. Content identity
-keeps a restated observation from recording a second durable event, but it does
-not bound how often one durable event reaches this test: an event is tested once
-per active rule, and both evaluation paths run the test before checking whether
-that rule's evaluation of it was already recorded. The spent-event journal is
-what makes those repeated tests safe, and is a required guard rather than an
-optimization. Every park and every release appends a journal row naming the
-count at the transition and, for a release, its operator or the event that
-caused it; both releases are schema-owned, so the journal's vocabulary is
-spelled only where the constraint closing it lives. Readiness in
-`repo_watch_outstanding_dispatch_obligation` excludes a parked obligation and,
-independently, one whose count has reached the budget, so no ordering of parking
-against that read reports an exhausted obligation as ready. It does not model
-the delay between attempts, which the dispatch loader applies against bounds no
-projection can see.
+park, would restore the budget for a fact already spent. Rule, repository, and
+stack singletons collapse many pull requests onto one obligation, so the fact
+must name that same pull request: a neighbour's head differs from the stalled
+one almost always, and would otherwise restore the budget on every unrelated
+match. A branch target carries no head and no review activity at all, so an
+obligation stalled on one is released only by an operator. Matching events that
+are neither, such as a recomputed mergeable state or a label change, join the
+obligation's latest-state projection without restoring anything, so churn
+against an unchanged pull request restores no attempts. Content identity keeps a
+restated observation from recording a second durable event, but it does not
+bound how often one durable event reaches this test: an event is tested once per
+active rule, and both evaluation paths run the test before checking whether that
+rule's evaluation of it was already recorded. The spent-event journal is a
+required guard: it is what makes those repeated tests safe. Every park and every
+release appends a journal row naming the count at the transition and, for a
+release, its operator or the event that caused it; both releases are
+schema-owned, so the journal's vocabulary is defined only in the constraint that
+closes it. Readiness in `repo_watch_outstanding_dispatch_obligation` excludes a
+parked obligation and, independently, one whose count has reached the budget, so
+no ordering of parking against that read reports an exhausted obligation as
+ready. It does not model the delay between attempts, which the dispatch loader
+applies against bounds no projection can see.
 
 **Implemented behavior.** A completed approval-judge escalation judged under
 dispatch authority, which the rule above binds to the generation that dispatch
@@ -926,44 +917,43 @@ obligation — where the requeue rules above still owe one, which a deactivated
 rule or a later close or merge withdraws — becomes eligible under the ordinary
 cooldown, the failed-attempt delay above, and the attempt budget that parks a
 lineage which keeps failing, and can then create a fresh dispatch; the ended
-session does not remain load-bearing occupancy either way. That requeue is a
-counted attempt like any other, so a dispatched lineage whose work keeps
-escalating parks on that budget rather than redispatching without end. Two turns
-are not terminalized this way, and each parks for a user exactly as it would in
-a session no dispatch created. A turn a steer still names is attended by
+session no longer occupies the singleton either way. That requeue is a counted
+attempt like any other, so a dispatched lineage whose work keeps escalating
+parks on that budget rather than redispatching without end. Two turns are not
+terminalized this way, and each parks for a user exactly as it would in a
+session no dispatch created. A turn a steer still names is attended by
 definition, so its escalation parks for the user who steered, leaving the turn
 active and its batch held; terminalizing it would strand that steer against the
 rule that no turn becomes terminal while pending steering names it, and
 reclassifying the steer into a queued successor would start fresh work in a
 session whose dispatch is being released for redispatch. A repository-watch
-session that has already recorded an escalation parks too, and for a reason that
-reads off the record rather than off the batch: [goal mode](goal-mode.md)
-exempts its block from automatic resumption, so only a person can put that
-session back into flight. A second escalation there is therefore work an
+session that has already recorded an escalation parks too, and for a reason
+determined by the session's record rather than by the batch:
+[goal mode](goal-mode.md) exempts its block from automatic resumption, so only a
+person can resume that session. A second escalation there is therefore work an
 operator resumed, whether or not the batch has released — a sibling action still
 pursuing keeps the release absent while the resumption is just as attended — and
-it waits for them. Standing authority is the last word on it: a goal that ended
-while this judge was in flight leaves stale work, so its escalation is
-terminalized rather than parked for a user who will never come, and
-terminalizing it owes no second redispatch that the requeue rules above would
-not already withhold. A turn no escalation preceded is the dispatched work
-itself, including one an ordinary execution failure had automatically resumed,
-and takes the unattended path. The block the escalation writes claims no release
-— a batch a sibling action still pursues releases only when that sibling ends —
-and states that no automatic resumption is scheduled, which
-[goal mode](goal-mode.md) admits as its one exception and which is why that need
-text names the operator repair itself. Whether the batch released is likewise a
-fact about the batch: it is recorded in the release row and the escalation audit
-view, not reported as this completion's own effect, because a sibling settling
-later would otherwise change the answer an identical replay receives.
-`repo_watch_headless_approval_escalation_audit` joins the append-only escalation
-cause and rationale to its dispatch release and replacement obligation,
-including whether and when that obligation settled. The terminal attempt,
-failure transcript entry, and terminal frontier it recorded are all durable
-evidence of that transition, so a replayed completion offering any other one of
-them is reported as a mismatched replay rather than answered with the recorded
-outcome — the same treatment a differing recommendation, rationale, usage, or
-continuation attempt already receives.
+it waits for them. Standing authority takes precedence: a goal that ended while
+this judge was in flight leaves stale work, so its escalation is terminalized
+rather than parked for a user, and terminalizing it owes no second redispatch
+that the requeue rules above would not already withhold. A turn no escalation
+preceded is the dispatched work itself, including one an ordinary execution
+failure had automatically resumed, and takes the unattended path. The block the
+escalation writes claims no release — a batch a sibling action still pursues
+releases only when that sibling ends — and states that no automatic resumption
+is scheduled, which [goal mode](goal-mode.md) admits as its one exception and
+which is why that need text names the operator repair itself. Whether the batch
+released is likewise a fact about the batch: it is recorded in the release row
+and the escalation audit view, not reported as this completion's own effect,
+because a sibling settling later would otherwise change the answer an identical
+replay receives. `repo_watch_headless_approval_escalation_audit` joins the
+append-only escalation cause and rationale to its dispatch release and
+replacement obligation, including whether and when that obligation settled. The
+terminal attempt, failure transcript entry, and terminal frontier it recorded
+are all durable evidence of that transition, so a replayed completion offering
+any other one of them is reported as a mismatched replay rather than answered
+with the recorded outcome — the same treatment a differing recommendation,
+rationale, usage, or continuation attempt already receives.
 
 **Implemented behavior.** An operator-commissioned dispatch has an attending
 operator and no independent redispatch path. With its recorded fence resolved, a
@@ -987,8 +977,8 @@ stalled on as well as through its latest-event projection, since a collapsed
 singleton lets that projection follow another pull request; an obligation
 stalled on the cutoff event itself is preserved whatever has matched since,
 because it owes the close automation and an operator release is what lets it
-run; the admission recheck is the race-closing backstop. Either path settles
-stale nonterminal work as `target_closed` without creating a session. Cutoff
+run; the admission recheck closes the remaining race. Either path settles stale
+nonterminal work as `target_closed` without creating a session. Cutoff
 processing settles after it has stopped the goals it commissioned, so it takes
 session rows before obligation rows and cannot close a lock cycle against a
 dispatch session terminating into the same obligation, and it takes those
@@ -1067,28 +1057,28 @@ associated commit differs from the exact current head. The current convergence
 evidence must otherwise pass: zero unresolved threads, at least one gating check
 and zero non-green ones, a settled head, and nonconflicting mergeability. An
 unsettled head has not finished registering and completing its exact-head
-checks, so its empty non-green list is the absence of evidence rather than
-evidence of a green head; requiring settlement keeps a dismissal from racing
-checks that have yet to report. A head carrying no gating check at all presents
-that same empty non-green list, which is why the reference convergence rule
-counts it blocked and why clearance refuses it: the dismissed review would be
-the only gate that head ever had. Both the in-memory candidate rule and the
-durable eligibility query enforce that count, the settled head, and
-mergeability, so neither admits an intent the other would refuse. The durable
-query proves each term against the recorded assessment rather than against the
-watcher that raised the candidate, because the assessment it reads is whichever
-watcher recorded one last: a newer assessment appended for the unchanged cursor
-while this watcher reconciled must carry the predicate itself, or the intent
-would claim the review was the head's only blocker while the evidence it names
-records another. Settlement is recorded only for a mergeability GitHub has
-decided, so the query admits `mergeable` alone and refuses nothing the in-memory
-rule admits. Every effective blocking review must target a superseded head; one
-current-head blocker prevents every dismissal for that assessment. A
-current-head review is never dismissed automatically. Why: a new review is live
-judgment, while a stale aggregate decision whose complete thread inventory is
-resolved is forge state that alone prevents an otherwise finished head from
-converging. The following ordinary poll observes the dismissal and may then seal
-convergence; dismissal itself does not stop dispatch.
+checks, so its empty non-green list does not prove a green head; requiring
+settlement keeps a dismissal from racing checks that have yet to report. A head
+carrying no gating check at all presents that same empty non-green list, which
+is why the reference convergence rule counts it blocked and why clearance
+refuses it: the dismissed review would be the only gate that head ever had. Both
+the in-memory candidate rule and the durable eligibility query enforce that
+count, the settled head, and mergeability, so neither admits an intent the other
+would refuse. The durable query proves each term against the recorded assessment
+rather than against the watcher that raised the candidate, because the
+assessment it reads is whichever watcher recorded one last: a newer assessment
+appended for the unchanged cursor while this watcher reconciled must carry the
+predicate itself, or the intent would claim the review was the head's only
+blocker while the evidence it names records another. Settlement is recorded only
+for a mergeability GitHub has decided, so the query admits `mergeable` alone and
+refuses nothing the in-memory rule admits. Every effective blocking review must
+target a superseded head; one current-head blocker prevents every dismissal for
+that assessment. A current-head review is never dismissed automatically. Why: a
+new review is live judgment, while a stale aggregate decision whose complete
+thread inventory is resolved is provider state that alone prevents an otherwise
+finished head from converging. The following ordinary poll observes the
+dismissal and may then seal convergence; dismissal itself does not stop
+dispatch.
 
 **Implemented behavior.** Before sending GitHub's review-dismissal mutation, the
 daemon appends a unique intent naming the assessment, repository, pull request,
@@ -1209,32 +1199,32 @@ preserve stable identity and history.
 
 **Committed unimplemented functionality.** The structured-rule dispatch surface
 converges onto the program substrate by replacing each rule with a subscription
-whose action is a built-in dispatch program. This page owns that ingress
-cutover. Shadowing is validation only and never owns delivery. Cutover commits
-in one durable transaction at an event frontier after requiring a terminal
-evaluation outcome for every old-rule event through that frontier: it records
-deactivation of the old rule after the frontier, activation of the replacement
-subscription strictly after it, and the mapping from rule identity and version
-to the exact program registration. The same transaction transfers every occupied
-singleton batch, its responsible sessions, and any recorded cooldown boundary to
-substrate-owned dispatch state without recreating sessions or changing
-append-only audit identities. Events at or before the frontier remain owned only
-by rule evaluation; later events are owned only by subscription matching.
-Reconciliation, rule evaluation, event commit, and subscription matching
-serialize against this transaction, so a crash or concurrent poll may retry it
-but cannot omit or dispatch a boundary event twice or release an occupied
-singleton. After this transaction, the mapped rule is a subscription;
-subscription identity, delivery, continuation cursor inheritance, and
-cancellation follow the [program substrate](program-substrate.md).
+whose action is a built-in dispatch program. Shadowing is validation only and
+never owns delivery. Cutover commits in one durable transaction at an event
+frontier after requiring a terminal evaluation outcome for every old-rule event
+through that frontier: it records deactivation of the old rule after the
+frontier, activation of the replacement subscription strictly after it, and the
+mapping from rule identity and version to the exact program registration. The
+same transaction transfers every occupied singleton batch, its responsible
+sessions, and any recorded cooldown boundary to substrate-owned dispatch state
+without recreating sessions or changing append-only audit identities. Events at
+or before the frontier remain owned only by rule evaluation; later events are
+owned only by subscription matching. Reconciliation, rule evaluation, event
+commit, and subscription matching serialize against this transaction, so a crash
+or concurrent poll may retry it but cannot omit or dispatch a boundary event
+twice or release an occupied singleton. After this transaction, the mapped rule
+is a subscription; subscription identity, delivery, continuation cursor
+inheritance, and cancellation follow the
+[program substrate](program-substrate.md).
 
 ## Live merge-forward rule
 
-**Foundation contract.** The live merge-forward rule is
+**Implemented behavior.** The live merge-forward rule is
 `merge-forward-on-base-advance`. It matches `BaseAdvanced` for pull requests
 whose head branch matches `^agent/.+$`, uses pull-request singleton scope, and
-dispatches the merge-forward session template configured with the approved cheap
-model and pull-request context. Because each `BaseAdvanced` fact targets an open
-pull request based on the branch that advanced, the rule dispatches for each
+dispatches the merge-forward session template configured with the cheap model
+and pull-request context. Because each `BaseAdvanced` fact targets an open pull
+request based on the branch that advanced, the rule dispatches for each
 immediate dependent when a stacked parent branch advances and for each matching
 main-based pull request when `main` advances. It does not wait for a workflow
 conclusion or a `MergeableStateChanged` conflict fact, and a parent's own
@@ -1293,9 +1283,9 @@ Nothing the handler bounds begins until whole request headers arrive, so two
 further bounds sit before it: the listener holds at most 256 connections at
 once, taken at accept time before any router or handler work, and it retires any
 connection whose read makes no progress for 15 seconds. The connection budget is
-what bounds a peer that keeps dripping bytes, since each byte received restarts
-that deadline. The daemon serves HTTP/1 directly for this reason: the head
-ceilings sit on the connection builder, below any router.
+what bounds a peer that keeps sending bytes slowly, since each byte received
+restarts that deadline. The daemon serves HTTP/1 directly for this reason: the
+head ceilings sit on the connection builder, below any router.
 
 Each hook admits at most 3,000 deliveries in any rolling 60-second window,
 charged only once a delivery has proved the shared secret. Admissions are
@@ -1306,11 +1296,11 @@ distribution would still under-count a burst arriving at a window edge. One
 bucket more than the window spans is kept and counted whole, so the bucket
 straddling the edge is never dropped while part of it is still inside the
 trailing minute. Both choices err toward refusing rather than admitting. Nothing
-is charged before verification: a budget keyed on the hook a request claims is a
-lever the attacker holds and GitHub does not, and spending it with forged
+is charged before verification: a budget keyed on the hook a request claims is
+controlled by the attacker rather than by GitHub, and spending it with forged
 signatures would reject the deliveries it exists to protect. Unauthenticated
 cost is bounded by resources instead. These are hard safety ceilings, not
-configuration knobs. The listener does not grant GitHub-originated data
+configuration values. The listener does not grant GitHub-originated data
 process-protocol authority, session authority, or polling credentials.
 
 **Implemented behavior.** A verified delivery is durably admitted before the
@@ -1428,24 +1418,24 @@ and headers, and reading it would let a stalled response hold the serialized
 repository task to the request timeout during the outage that produced it. A
 body that is read but carries no such message, or none that parses, leaves the
 classification to the status and headers; a body whose read itself fails is
-reported as the transport failure it is, which stops the page on its own terms
-rather than being recorded as the permission rejection an empty body would name.
-Anything else is a resource-scoped permission rejection, so a credential that
-lacks one endpoint's scope defers its own receipt rather than stalling the drain
-at that same receipt on every retry. A GraphQL response reports throttling and
-outage in an error envelope under `HTTP 200`; the envelope's own classification
-is what classifies the failure, read from either carrier the provider spells it
-in — the error's `type` or its `extensions.code`, which of the two depending on
-the layer that rejected the query — with the repository-wide classifications
-stopping the page and every other one, a query-scoped failure or a missing node,
-deferring only its own receipt. A signature-valid delivery whose event or action
-is outside the mapped set, including a broadly subscribed `workflow_job`, is
-still acknowledged successfully and is cheaply logged and recorded as ignored
-rather than treated as an intake failure. A targeted projection records its
-terminal disposition and exact projections as the durable recovery handoff
-before its cursor write. If that cursor write conflicts with an intervening full
-poll, the delivery remains terminal and the in-memory shadow is handed over to
-the competing durable cursor before later pending receipts are projected. A
+reported as a transport failure, which stops the page, rather than being
+recorded as the permission rejection an empty body would name. Anything else is
+a resource-scoped permission rejection, so a credential that lacks one
+endpoint's scope defers its own receipt rather than stalling the drain at that
+same receipt on every retry. A GraphQL response reports throttling and outage in
+an error envelope under `HTTP 200`; the envelope's own classification is what
+classifies the failure, read from either carrier the provider spells it in — the
+error's `type` or its `extensions.code`, which of the two depending on the layer
+that rejected the query — with the repository-wide classifications stopping the
+page and every other one, a query-scoped failure or a missing node, deferring
+only its own receipt. A signature-valid delivery whose event or action is
+outside the mapped set, including a broadly subscribed `workflow_job`, is still
+acknowledged successfully and is cheaply logged and recorded as ignored rather
+than treated as an intake failure. A targeted projection records its terminal
+disposition and exact projections as the durable recovery handoff before its
+cursor write. If that cursor write conflicts with an intervening full poll, the
+delivery remains terminal and the in-memory shadow is handed over to the
+competing durable cursor before later pending receipts are projected. A
 webhook-enabled shadow wake may also preempt the read-only provider sweep of an
 in-flight complete poll, without resetting that poll's deadline, so the durable
 delivery drains before bounded reconciliation resumes. After the delivery's
@@ -1507,10 +1497,10 @@ retry. A poll taken during a backoff window therefore commits a cursor that a
 delivery still pending does not reflect. The shadow baseline that delivery
 seeded is marked superseded but retained, because replacement waits for an empty
 pending page, so its retry projects against that baseline rather than reseeding
-from the advanced cursor — the accepted cost is that divergence, taken against
-an unbounded repetition of work already failing. An overdue retry is taken ahead
-of an overdue poll, and a full poll that outlasts its own interval schedules the
-next one a whole interval from completion; without both, a poll deadline that is
+from the advanced cursor — that divergence is accepted rather than an unbounded
+repetition of work already failing. An overdue retry is taken ahead of an
+overdue poll, and a full poll that outlasts its own interval schedules the next
+one a whole interval from completion; without both, a poll deadline that is
 always already elapsed would win every scheduling decision and starve durable
 webhook work for as long as polling kept failing. An independent per-repository
 observer checks durable pending work every thirty seconds, reading delivery
@@ -1582,35 +1572,33 @@ cursor. `repo_watch_webhook_projection` records each resulting version-one
 content identity and event kind, and the cause of any divergence the producing
 delivery already knows, while `repo_watch_webhook_disposition` atomically
 records projected, committed, duplicate-state, superseded, ignored, or
-quarantined terminal disposition. Primary mode restores the committed spelling
-the shadow-only ruling had withdrawn, and a primary delivery — the one whose
-commit records the `webhook` producer — records it in place of projected. A
+quarantined terminal disposition. A primary delivery — the one whose commit
+records the `webhook` producer — records committed in place of projected. A
 shadow-mode targeted refresh also advances the cursor, but it reconciles through
 the poller's own credential and its rows keep the `poll` producer, so it keeps
-recording projected: those rows are the poll side of the very measurement its
+recording projected: those rows are the poll side of the measurement its
 projections are compared against, and reading such a refresh as the repository's
 promotion would end that measurement in a deployment that never entered primary
-mode. No resulting cursor generation is added. The ruling that authorized write
-mode chose the two-step durable handoff below, which records the terminal
-disposition *before* the cursor write, so no disposition row can name the
-generation its own write produces; the generation a delivery reached is carried
-by `repo_watch_event.cursor_generation` on the rows it wrote, which is where a
-reader already looks for it. The `repo_watch_webhook_parity` view joins those
-identities to the version-one poll-produced `repo_watch_event` rows that
-repository recorded between its first shadow receipt and its own promotion — its
-first committed disposition — and reports `matched`, `webhook_only`,
-`poll_only`, or `not_directly_mapped`, each divergent row alongside a `cause`
-drawn from one closed vocabulary: `compressed_transition`, `context_drift`,
-`poll_only_family`, and `cross_drain_shadow_gap`. A delivery records the cause
-it knows beside its own projection; `poll_only_family` is derived instead,
-because the event families polling produces and webhooks are not designed to
-reproduce — mergeability changes, aggregate check rollups, and reaction changes
-— have no delivery to carry it. Event projections intentionally carry no
-uniqueness constraint because separate deliveries may represent one content
-occurrence. Terminal exact payload bytes remain for seven days; after each
-successful full poll, at most once per day and starting with the first poll
-after boot, the daemon deletes only the expired payload bytes. Delivery
-tombstones, digests, projections, and dispositions remain append-only.
+mode. No resulting cursor generation is added. The two-step durable handoff
+below records the terminal disposition *before* the cursor write, so no
+disposition row can name the generation its own write produces; the generation a
+delivery reached is carried by `repo_watch_event.cursor_generation` on the rows
+it wrote. The `repo_watch_webhook_parity` view joins those identities to the
+version-one poll-produced `repo_watch_event` rows that repository recorded
+between its first shadow receipt and its own promotion — its first committed
+disposition — and reports `matched`, `webhook_only`, `poll_only`, or
+`not_directly_mapped`, each divergent row alongside a `cause` drawn from one
+closed vocabulary: `compressed_transition`, `context_drift`, `poll_only_family`,
+and `cross_drain_shadow_gap`. A delivery records the cause it knows beside its
+own projection; `poll_only_family` is derived instead, because the event
+families polling produces and webhooks are not designed to reproduce —
+mergeability changes, aggregate check rollups, and reaction changes — have no
+delivery to carry it. Event projections intentionally carry no uniqueness
+constraint because separate deliveries may represent one content occurrence.
+Terminal exact payload bytes remain for seven days; after each successful full
+poll, at most once per day and starting with the first poll after boot, the
+daemon deletes only the expired payload bytes. Delivery tombstones, digests,
+projections, and dispositions remain append-only.
 
 **Implemented behavior.** Projection coverage is closed by delivery family and
 action:
@@ -1828,7 +1816,6 @@ queued, non-converged, and unattempted states remain distinct.
 
 ## Open edges
 
-**Deferred or undecided work.** No repository-watch design question remains open
-for the commissioned version-one stack. Additional transports, event kinds,
-payload qualifiers, matcher fields, actions, and singleton scopes require later
-ratified extensions.
+**Deferred or undecided work.** No repository-watch design question is recorded
+as open. Additional transports, event kinds, payload qualifiers, matcher fields,
+actions, and singleton scopes are not specified.
