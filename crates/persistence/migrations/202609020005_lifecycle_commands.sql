@@ -1139,7 +1139,7 @@ BEGIN
                AND command.session_id = NEW.root_session_id
                AND command.operation_kind = 'stop'
                AND command.result_kind = 'applied'
-               AND command.applied_effect_kind = 'closed'
+               AND command.applied_effect_kind IN ('closed', 'closure_pending')
                AND command.descendant_scope = NEW.descendant_scope
                AND NEW.termination_kind = 'stopped')) THEN$new$
             ),
@@ -2815,25 +2815,26 @@ BEGIN
 END;
 $$;
 
--- The delegation authority check predates lifecycle handoffs and admitted
--- only an already-closed lifecycle root. Extend that exact forward definition
--- to authenticate a closure completed by deferred settlement too.
-DO $migration$
-DECLARE
-    prior_definition text;
-    next_definition text;
-BEGIN
-    SELECT pg_get_functiondef(
-        'require_delegation_termination_cascade_command()'::regprocedure
-    ) INTO prior_definition;
-    next_definition := replace(
-        prior_definition,
-        'AND command.applied_effect_kind = ''closed''',
-        'AND command.applied_effect_kind IN (''closed'', ''closure_pending'')'
-    );
-    IF next_definition = prior_definition THEN
-        RAISE EXCEPTION 'delegation cascade authority definition did not match';
-    END IF;
-    EXECUTE next_definition;
-END;
-$migration$;
+-- Adoption turns an unmonitored execution-failure block into daemon-owned
+-- work. Preserve that arming as an append-only overlay: the goal event remains
+-- immutable, while readers expose the scheduled need the owned block now has.
+CREATE TABLE goal_execution_failure_resumption_arm (
+    session_id uuid NOT NULL,
+    event_ordinal numeric(20, 0) NOT NULL,
+    need text NOT NULL,
+    armed_at timestamp with time zone DEFAULT transaction_timestamp() NOT NULL,
+    PRIMARY KEY (session_id, event_ordinal),
+    FOREIGN KEY (session_id, event_ordinal)
+        REFERENCES goal_event (session_id, event_ordinal)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CONSTRAINT goal_execution_failure_resumption_arm_need_check
+        CHECK (octet_length(need) BETWEEN 1 AND 1048576)
+);
+
+CREATE TRIGGER goal_execution_failure_resumption_arm_is_append_only
+BEFORE DELETE OR UPDATE ON goal_execution_failure_resumption_arm
+FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER goal_execution_failure_resumption_arm_reject_truncate
+BEFORE TRUNCATE ON goal_execution_failure_resumption_arm
+FOR EACH STATEMENT EXECUTE FUNCTION reject_goal_table_truncate();

@@ -608,10 +608,42 @@ impl PostgresGoalPassDisposition {
     pub fn arm_blocked_goal_resumption(&self, session: SessionId) {
         let adapter = self.clone();
         drop(tokio::spawn(async move {
-            let Ok(need) = AutomaticResumption::Unmonitored.need() else {
+            let resumption = AutomaticResumption::Scheduled {
+                delay: adapter.numeric_bounds.base_backoff,
+            };
+            let (Ok(unmonitored_need), Ok(scheduled_need)) =
+                (AutomaticResumption::Unmonitored.need(), resumption.need())
+            else {
                 return;
             };
-            adapter.resume_owned_execution_failure(session, &need).await;
+            let mut remaining = AUTOMATIC_RESUME_INFRASTRUCTURE_RETRIES;
+            loop {
+                match adapter
+                    .repository
+                    .arm_owned_execution_failure(session, &unmonitored_need, &scheduled_need)
+                    .await
+                {
+                    Ok(Some(blocked)) => {
+                        adapter.arm_automatic_resumption(session, blocked, resumption);
+                        return;
+                    }
+                    Ok(None) => return,
+                    Err(error) => {
+                        tracing::error!(
+                            session = %session.into_uuid(),
+                            retries_remaining = remaining,
+                            cause_code = "goal_blocked_resume_arming_failed",
+                            cause = %error,
+                            "an adopted goal block could not persist its automatic resumption"
+                        );
+                        if remaining == 0 {
+                            return;
+                        }
+                        remaining = remaining.saturating_sub(1);
+                        sleep_for_policy(adapter.numeric_bounds.base_backoff).await;
+                    }
+                }
+            }
         }));
     }
 

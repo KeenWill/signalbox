@@ -16,8 +16,9 @@ that authority again when a consumer commits is verified against this PR
 (`agent/judge-completion-recheck`). Repository-watch-composed stops are verified
 against this PR (`agent/daemon-ops-overnight`). This bottom specification diff
 owns both stack slices. Bounded automatic resumption of execution-failure blocks
-is verified against this PR (`agent/goal-blocked-autoresume`). The unattended
-repository-watch approval exemption is verified against this PR
+is verified against this PR (`agent/goal-blocked-autoresume`); durable arming of
+an adopted block is verified against this PR (`agent/lifecycle-t5-commands`).
+The unattended repository-watch approval exemption is verified against this PR
 (`agent/headless-approval-escalation`), and durable non-resumable compaction
 failure parking against this PR (`agent/daemon-live-compaction-terminal-park`).
 Operator-attended parking of an operator-commissioned escalation is verified
@@ -237,25 +238,26 @@ and therefore independently eligible to continue.
 
 **Implemented behavior.** An execution-failure block on an owned session owes
 its own bounded automatic resumption; on an unmonitored session it names none,
-and adoption arms it. The daemon derives from the goal event history how many
-consecutive automatic resumptions the current run has already spent: the run is
-the trailing alternation of execution-failure blocks and the resumptions that
-answered them, and every other event ends it. That history yields two counts,
-because one number cannot answer both questions the plan asks: every attempt
-already made is a model call the daemon issued, so the total is what paces the
-next attempt, while only a failure the session caused spends the chargeable
-budget. Below both required configured limits, the appended need text states
-that automatic resumption is scheduled and names the operator repair for a goal
-still blocked once resumption ends, and exactly one resume follows after the
-required configured backoff doubled per attempt already made, up to its required
-configured cap. At either limit the goal stays blocked, and its need text states
-which limit ended the run and states the operator repair. Every need text an
-execution-failure block carries names the operator repair, because an armed
-attempt can also fail to resume by being durably rejected, by losing its
-process, or by never reaching the database, and in each case that text is what
-an operator reads. Resumption does not bypass execution-failure blocking or make
-a failure a silent retry — the block is appended first, and every attempt is an
-ordinary recorded `resumed` event.
+and adoption durably replaces its effective need with the scheduled-resumption
+need under the session lock before arming it. The daemon derives from the goal
+event history how many consecutive automatic resumptions the current run has
+already spent: the run is the trailing alternation of execution-failure blocks
+and the resumptions that answered them, and every other event ends it. That
+history yields two counts, because one number cannot answer both questions the
+plan asks: every attempt already made is a model call the daemon issued, so the
+total is what paces the next attempt, while only a failure the session caused
+spends the chargeable budget. Below both required configured limits, the
+appended need text states that automatic resumption is scheduled and names the
+operator repair for a goal still blocked once resumption ends, and exactly one
+resume follows after the required configured backoff doubled per attempt already
+made, up to its required configured cap. At either limit the goal stays blocked,
+and its need text states which limit ended the run and states the operator
+repair. Every need text an execution-failure block carries names the operator
+repair, because an armed attempt can also fail to resume by being durably
+rejected, by losing its process, or by never reaching the database, and in each
+case that text is what an operator reads. Resumption does not bypass
+execution-failure blocking or make a failure a silent retry — the block is
+appended first, and every attempt is an ordinary recorded `resumed` event.
 
 A resumed turn does not spend the chargeable goal budget when durable evidence
 attributes its failure outside the session: its exact model-call or tool-attempt

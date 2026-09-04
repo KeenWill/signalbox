@@ -70,6 +70,7 @@ const SERVED_PROVIDER_MODEL: &str = "claude-haiku-4-5-20251001";
 const DATABASE_NAME: &str = "signalboxd_e2e";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
+const SCHEDULED_EXECUTION_FAILURE_NEED: &str = "The goal turn failed to execute and automatic resumption is scheduled. If the goal is still blocked here once resumption ends, it is waiting for an operator. Resolve the failed goal turn's execution condition, then resume the goal.";
 const GOAL_MODEL_CONFIGURATION: &str = r#"
 version = 1
 
@@ -263,10 +264,7 @@ fn assert_execution_failure_blocked(goal: &Goal) {
     // The first failure of a run is under the automatic-resumption budget, so
     // the need text states the scheduled attempt before the operator repair
     // every execution-failure need carries.
-    assert_eq!(
-        need.as_str(),
-        "The goal turn failed to execute and automatic resumption is scheduled. If the goal is still blocked here once resumption ends, it is waiting for an operator. Resolve the failed goal turn's execution condition, then resume the goal."
-    );
+    assert_eq!(need.as_str(), SCHEDULED_EXECUTION_FAILURE_NEED);
 }
 
 #[track_caller]
@@ -906,14 +904,28 @@ async fn resumed_goal(pool: &PgPool, session: SessionId) -> Result<Goal, Box<dyn
     Ok(goal)
 }
 
-/// §6: adopting a session whose goal is blocked arms the resumption the
-/// unmonitored block was not owed.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn adopting_a_blocked_goal_arms_its_resumption() -> Result<(), Box<dyn Error>> {
-    let (container, pool, goal) =
-        goal_failure_block_after_success(signalbox_domain::SessionOwnership::Unmonitored).await?;
-    let session = goal.session();
+/// Waits for adoption to persist the scheduled need before its delayed resume.
+async fn armed_goal(pool: &PgPool, session: SessionId) -> Result<Goal, Box<dyn Error>> {
+    let repository = GoalRepository::new(pool.clone());
+    let goal = timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(goal) = repository.load_goal(session).await.ok().flatten()
+                && matches!(
+                    goal.current().state(),
+                    GoalState::Blocked { need, .. }
+                        if need.as_str() == SCHEDULED_EXECUTION_FAILURE_NEED
+                )
+            {
+                return goal;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    Ok(goal)
+}
+
+async fn adopt_session(pool: &PgPool, session: SessionId) -> Result<(), Box<dyn Error>> {
     let adopted =
         signalbox_persistence::session_lifecycle_command::SessionLifecycleCommandRepository::new(
             pool.clone(),
@@ -935,6 +947,18 @@ async fn adopting_a_blocked_goal_arms_its_resumption() -> Result<(), Box<dyn Err
             signalbox_domain::SessionLifecycleCommandResult::Applied(_)
         )
     ));
+    Ok(())
+}
+
+/// §6: adopting a session whose goal is blocked arms the resumption the
+/// unmonitored block was not owed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn adopting_a_blocked_goal_arms_its_resumption() -> Result<(), Box<dyn Error>> {
+    let (container, pool, goal) =
+        goal_failure_block_after_success(signalbox_domain::SessionOwnership::Unmonitored).await?;
+    let session = goal.session();
+    adopt_session(&pool, session).await?;
     let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
     let (nudge, _work_source) =
         InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
@@ -942,13 +966,42 @@ async fn adopting_a_blocked_goal_arms_its_resumption() -> Result<(), Box<dyn Err
         pool.clone(),
         configuration,
         nudge,
-        GoalModeNumericBounds::new(None, None, None, None, None),
+        GoalModeNumericBounds::new(Some(Duration::ZERO), None, None, None, None),
     )
     .arm_blocked_goal_resumption(session);
 
     let resumed = resumed_goal(&pool, session).await?;
 
     assert_eq!(*resumed.current().state(), GoalState::Pursuing);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// §6: adoption durably changes the unmonitored block's effective need before
+/// the configured backoff elapses.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn adopting_a_blocked_goal_persists_its_scheduled_need() -> Result<(), Box<dyn Error>> {
+    let (container, pool, goal) =
+        goal_failure_block_after_success(signalbox_domain::SessionOwnership::Unmonitored).await?;
+    let session = goal.session();
+    adopt_session(&pool, session).await?;
+    let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
+    let (nudge, _work_source) =
+        InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
+    PostgresGoalPassDisposition::new(
+        pool.clone(),
+        configuration,
+        nudge,
+        GoalModeNumericBounds::new(Some(Duration::from_secs(60)), None, None, None, None),
+    )
+    .arm_blocked_goal_resumption(session);
+
+    let armed = armed_goal(&pool, session).await?;
+
+    assert_execution_failure_blocked(&armed);
 
     pool.close().await;
     drop(container);

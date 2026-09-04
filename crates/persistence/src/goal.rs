@@ -717,6 +717,9 @@ impl GoalRepository {
             // spending model work on its own.
             "SELECT event.session_id, event.event_ordinal
                FROM goal_event AS event
+               LEFT JOIN goal_execution_failure_resumption_arm AS arm
+                 ON arm.session_id = event.session_id
+                AND arm.event_ordinal = event.event_ordinal
                JOIN session_lifecycle AS lifecycle
                  ON lifecycle.session_id = event.session_id
                 AND lifecycle.owned
@@ -724,7 +727,7 @@ impl GoalRepository {
                 AND lifecycle.pending_terminal_outcome_kind IS NULL
               WHERE event.event_kind = 'blocked'
                 AND event.blocked_reason = 'execution_failure'
-                AND event.need = $1
+                AND COALESCE(arm.need, event.need) = $1
                 AND NOT EXISTS (
                     SELECT 1
                       FROM goal_event AS later
@@ -747,7 +750,7 @@ impl GoalRepository {
     }
 
     /// Selects one session's latest owned execution-failure block carrying an
-    /// exact need while holding the session lock.
+    /// exact effective need while holding the session lock.
     ///
     /// Adoption and block append both serialize on this lock. Rechecking here
     /// therefore closes either ordering of those commits without arming blocks
@@ -766,10 +769,13 @@ impl GoalRepository {
         let ordinal = sqlx::query_scalar::<_, Decimal>(
             "SELECT event.event_ordinal
                FROM goal_event AS event
+               LEFT JOIN goal_execution_failure_resumption_arm AS arm
+                 ON arm.session_id = event.session_id
+                AND arm.event_ordinal = event.event_ordinal
               WHERE event.session_id = $1
                 AND event.event_kind = 'blocked'
                 AND event.blocked_reason = 'execution_failure'
-                AND event.need = $2
+                AND COALESCE(arm.need, event.need) = $2
                 AND NOT EXISTS (
                     SELECT 1
                       FROM goal_event AS later
@@ -781,6 +787,63 @@ impl GoalRepository {
         .fetch_optional(&mut *transaction)
         .await?;
         transaction.rollback().await?;
+        ordinal
+            .map(|ordinal| positive(ordinal).map(GoalEventOrdinal::new))
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    /// Persists the scheduled need an adopted execution-failure block acquires.
+    ///
+    /// The session lock serializes the ownership check with release and block
+    /// append. The append-only overlay makes an ambiguous retry idempotent and
+    /// leaves the historical goal event unchanged.
+    pub async fn arm_owned_execution_failure(
+        &self,
+        session: SessionId,
+        unmonitored_need: &GoalNeed,
+        scheduled_need: &GoalNeed,
+    ) -> Result<Option<GoalEventOrdinal>, GoalRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let exists = lock_session(&mut transaction, session).await?;
+        if !exists || !session_admits_automatic_resume(&mut transaction, session).await? {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+        let ordinal = sqlx::query_scalar::<_, Decimal>(
+            "WITH candidate AS (
+                SELECT event.session_id, event.event_ordinal
+                  FROM goal_event AS event
+                 WHERE event.session_id = $1
+                   AND event.event_kind = 'blocked'
+                   AND event.blocked_reason = 'execution_failure'
+                   AND event.need = $2
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM goal_event AS later
+                        WHERE later.session_id = event.session_id
+                          AND later.event_ordinal > event.event_ordinal)
+            ), inserted AS (
+                INSERT INTO goal_execution_failure_resumption_arm
+                    (session_id, event_ordinal, need)
+                SELECT session_id, event_ordinal, $3 FROM candidate
+                ON CONFLICT DO NOTHING
+                RETURNING event_ordinal
+            )
+            SELECT event_ordinal FROM inserted
+            UNION ALL
+            SELECT arm.event_ordinal
+              FROM goal_execution_failure_resumption_arm AS arm
+              JOIN candidate USING (session_id, event_ordinal)
+             WHERE arm.need = $3
+            LIMIT 1",
+        )
+        .bind(session_id_to_uuid(session))
+        .bind(unmonitored_need.as_str())
+        .bind(scheduled_need.as_str())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        commit(transaction).await?;
         ordinal
             .map(|ordinal| positive(ordinal).map(GoalEventOrdinal::new))
             .transpose()
@@ -2099,14 +2162,19 @@ pub(crate) async fn load_goal_from_connection(
     session: SessionId,
 ) -> Result<Option<Goal>, GoalRepositoryError> {
     let rows = sqlx::query(
-        "SELECT event_ordinal, generation, event_kind, statement,
-                blocked_reason, need, guidance, report, user_command_id,
+        "SELECT event.event_ordinal, event.generation, event.event_kind,
+                event.statement, event.blocked_reason,
+                COALESCE(arm.need, event.need) AS need,
+                event.guidance, event.report, event.user_command_id,
                 model_turn_id, model_tool_request_id, scheduler_turn_id,
                 session_outcome_kind, closure_actor_kind, closure_actor_module,
                 closure_actor_turn_id, closure_actor_tool_request_id
-           FROM goal_event
-          WHERE session_id = $1
-          ORDER BY event_ordinal",
+           FROM goal_event AS event
+           LEFT JOIN goal_execution_failure_resumption_arm AS arm
+             ON arm.session_id = event.session_id
+            AND arm.event_ordinal = event.event_ordinal
+          WHERE event.session_id = $1
+          ORDER BY event.event_ordinal",
     )
     .bind(session_id_to_uuid(session))
     .fetch_all(&mut *connection)

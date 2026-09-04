@@ -352,9 +352,14 @@ macro_rules! summary_sql {
     SELECT DISTINCT ON (goal.session_id)
            goal.session_id, goal.event_ordinal,
            goal.generation::text AS generation, goal.event_kind,
-           goal.blocked_reason, goal.need, goal.scheduler_turn_id,
-           LEFT(goal.need, $4) AS need_summary
-      FROM goal_event AS goal JOIN selected USING (session_id)
+           goal.blocked_reason, COALESCE(arm.need, goal.need) AS need,
+           goal.scheduler_turn_id,
+           LEFT(COALESCE(arm.need, goal.need), $4) AS need_summary
+      FROM goal_event AS goal
+      LEFT JOIN goal_execution_failure_resumption_arm AS arm
+        ON arm.session_id = goal.session_id
+       AND arm.event_ordinal = goal.event_ordinal
+      JOIN selected ON selected.session_id = goal.session_id
      ORDER BY goal.session_id, goal.event_ordinal DESC
 ), automatic_resume_lineage AS (
     SELECT goal.session_id, goal.generation, goal.event_ordinal AS head_ordinal,
