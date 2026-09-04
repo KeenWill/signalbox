@@ -100,7 +100,7 @@ one transaction — bookkeeping only, no schema or data mutation. Why: the rule
 exists so no database's history is silently edited; a documented
 rehearsal-ledger correction preserves that while freezing a file that fails
 validation would instead freeze a defect into every future installation, and a
-collapse replaces the ledger loudly, with equivalence proofs.
+collapse replaces the ledger explicitly, with equivalence proofs.
 
 Every function reachable from a table constraint or index expression pins its
 search path in its catalogue definition, rendered through `current_schema` so
@@ -117,16 +117,15 @@ comments between a function name and its opening parenthesis remain calls; names
 inside comments or strings and bare aliases do not. The test fails on any
 unpinned member or on empty discovery, so a future migration cannot reintroduce
 the gap. Why: a backup that cannot restore is a silent failure that surfaces
-only during recovery, so restorability is part of the schema's contract rather
-than an operational afterthought.
+only during recovery, so restorability is part of the schema's contract.
 
 A migration added to the set carries a prefix strictly greater than every prefix
 already in the set, because `_sqlx_migrations` keys applied migrations by
 version, so a repeated prefix collides and a lower one applies out of order.
 
 Container-backed integration tests (`postgres-integration` feature, ignored by
-default, failing loudly when Docker is absent) exercise the real constraints,
-triggers, locks, and races described below against a pinned Postgres image.
+default, failing when Docker is absent) exercise the real constraints, triggers,
+locks, and races described below against a pinned Postgres image.
 
 Migration `202609020021_watchdog_durability.sql` adds the durable evidence and
 scan ordinal used by both turn-liveness watchdog predicates.
@@ -267,9 +266,10 @@ Representation rules, all enforced in the schema:
   pair also requires a nonnull command system prompt in both the schema and Rust
   reader. Reciprocal foreign keys bind every present pair across the creation
   command and its created session, so command replay and checked reconstitution
-  cannot cross-wire provenance. Preexisting, imported, and explicit sessions
-  carry two nulls. Both tables retain their append-only guards; no template
-  catalog or mutable template object exists in Postgres (INV-047).
+  cannot mismatch provenance between the command and its session. Preexisting,
+  imported, and explicit sessions carry two nulls. Both tables retain their
+  append-only guards; no template catalog or mutable template object exists in
+  Postgres (INV-047).
 - Migration `202607280303` adds the optional bounded `system_prompt` column to
   `session_defaults_version` and the three defaults-bearing command tables, each
   guarded by the 1,048,576-UTF-8-byte and nonempty CHECK constraints and, on
@@ -959,10 +959,10 @@ Locks per transaction, in acquisition order:
   PostgreSQL's local `lock_timeout` before it reads or writes anything, so the
   only statement that budget can interrupt is one waiting for a row and never
   the commit; opening the transaction and installing that budget run beyond
-  client cancellation, and the caller's configured deadline sits above both as
-  the last resort, floored so it cannot expire before the database-side budgets
-  report. Operator reconciliation uses the same endpoint-before-scheduler
-  prefix, so automatic reconciliation never introduces the reverse
+  client cancellation, and the caller's configured deadline is the outermost
+  bound, floored so it cannot expire before the database-side budgets report.
+  Operator reconciliation uses the same endpoint-before-scheduler prefix, so
+  automatic reconciliation never introduces the reverse
   child-scheduler-to-parent-session order.
 
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
@@ -1419,7 +1419,7 @@ scan (`StartupScanRepositoryError`), turn activation
 (`ToolLoopRepositoryError`). The classes: `Infrastructure { commit_ambiguous }`
 (with `commit_ambiguous: false`, infrastructure prevented the operation from
 completing before commit and retrying is safe; with `commit_ambiguous: true`,
-the failure struck at the commit boundary and the transaction may or may not
+the failure occurred at the commit boundary and the transaction may or may not
 have won, so the caller must reread durable state instead of assuming either
 outcome — see Commit-ambiguity handling), `FailClosedCorruption` (committed rows
 cannot construct the accepted domain value; nothing proceeds),
