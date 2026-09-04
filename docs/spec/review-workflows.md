@@ -669,8 +669,8 @@ attachment result with its exact posted finding event. The result must cover the
 inventory exactly; any failed, blocked, or cancelled member returns a typed
 `PublicationIncomplete` outcome rather than `Complete`. The publication
 admission check uses only `is_real_confidence` and the immutable target head; a
-moved change request is another target, and results produced against the earlier
-head are not posted to it.
+moved change request is another target and does not authorize posting results
+produced against the earlier head.
 
 Post-publication external-context import is committed but unimplemented by the
 present application service. A future continuation must use the import pass and
