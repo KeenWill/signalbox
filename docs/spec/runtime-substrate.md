@@ -757,8 +757,8 @@ sandbox and working root are the adapter's filesystem boundary. Unix supervision
 contains the process group the adapter creates, so construction rejects hosts
 where process-group control is unavailable; a descendant that deliberately
 leaves that group is outside the adapter's boundary. Host isolation owns
-containment beyond the created group — specifically the runner sandbox — and is
-not an adapter claim.
+containment beyond the created group — specifically the runner sandbox in
+build-out — and is not an adapter claim.
 
 The rendered prompt opens with a preamble whose tool-authority statement is
 singular and positionally first: the serialized `tools` array is named the
