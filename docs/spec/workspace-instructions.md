@@ -1,16 +1,13 @@
 # Workspace instructions and skills
 
-This page is the foundation proposal at the bottom of the workspace-instruction
-implementation stack. It specifies daemon-owned discovery, registration,
-eligibility, admission, model-input projection, and per-turn provenance for
-agent documentation and Agent Skills found in a session workspace or an
-explicitly registered directory. Its first implementing child supplies
-discovery, registration, and the durable per-turn record. Later child pull
-requests implement the functionality explicitly labeled unimplemented below.
+This page specifies daemon-owned discovery, registration, eligibility,
+admission, model-input projection, and per-turn provenance for agent
+documentation and Agent Skills found in a session workspace or an explicitly
+registered directory. Discovery, registration, and the durable per-turn record
+are implemented; the functionality explicitly labeled unimplemented below is
+not.
 
-The contract is informed by the comparative evidence collected for issue
-[#788](https://github.com/KeenWill/signalbox/issues/788). The
-[AGENTS.md convention](https://agents.md/) defines a portable filename and
+The [AGENTS.md convention](https://agents.md/) defines a portable filename and
 directory scope but not a complete discovery, budget, or provenance algorithm.
 The [Agent Skills specification](https://agentskills.io/specification) defines a
 portable bundle and progressive disclosure but leaves discovery locations,
@@ -20,10 +17,10 @@ without treating any client's ambient loader as authority.
 ## Boundary and vocabulary
 
 The daemon solely owns workspace-instruction context assembly. Model-runtime
-adapters continue to disable native project-document, rules, user-configuration,
-and skill-instruction loaders. A daemon result reaches an adapter only as
-explicit prepared model input. This preserves one reproducible path and keeps
-host-local files from bypassing session policy.
+adapters disable native project-document, rules, user-configuration, and
+skill-instruction loaders. A daemon result reaches an adapter only as explicit
+prepared model input. This preserves one reproducible path and keeps host-local
+files from bypassing session policy.
 
 A **bundle** is one independently addressable instruction source. Version one
 admits two kinds:
@@ -33,9 +30,7 @@ admits two kinds:
   satisfies the closed version-one grammar below.
 
 Supporting skill files are bundle resources, not independent bundles. Other
-vendor filenames and rule formats are not aliases in version one; adding one
-requires specifying its parsing, scope, and precedence rather than guessing from
-its name.
+vendor filenames and rule formats are not aliases in version one.
 
 The pipeline has four independent stages:
 
@@ -138,8 +133,8 @@ never rewrites an earlier turn manifest.
 Registration validates each candidate into a `RegisteredInstructionBundle`. Its
 identity is a distinct `InstructionBundleId`, not a display name, path, ordinal,
 or content hash. It remains stable for that registered record even when another
-bundle has the same skill name or bytes. Name collisions are inventory, not an
-implicit winner.
+bundle has the same skill name or bytes. Name collisions are recorded, not
+resolved to an implicit winner.
 
 Every registered bundle carries:
 
@@ -159,14 +154,14 @@ Each discovery snapshot separately retains its ordered candidate link to the
 registered identity. A registration is therefore observed by several scans
 without losing which session and root authorized each observation.
 
-Reuse across scans is a rule, not a liberty. The registration reuse key is
-closed kind, canonical absolute source path, and versioned source-content hash.
-A later scan yielding a candidate whose key equals an existing registration's
-reuses that identity and creates no second record; a candidate whose source
-bytes changed has a different key and registers a new identity, which is how
-version evidence stays addressable. Exactly one identity therefore exists per
-key, so a template's root/path/kind/hash selector never resolves ambiguously
-however many scans have run.
+Reuse across scans is required. The registration reuse key is closed kind,
+canonical absolute source path, and versioned source-content hash. A later scan
+yielding a candidate whose key equals an existing registration's reuses that
+identity and creates no second record; a candidate whose source bytes changed
+has a different key and registers a new identity, which is how version evidence
+stays addressable. Exactly one identity therefore exists per key, so a
+template's root/path/kind/hash selector never resolves ambiguously however many
+scans have run.
 
 Reuse updates root evidence and nothing else. The primary authorizing root is
 fixed by the scan that first registered the key and never moves afterwards, so
@@ -198,16 +193,15 @@ registered under workspace root `/repo` and later reached by another session
 through a configured root for `/repo/sub` therefore presents that configured
 root, its `root_id`, and paths relative to `/repo/sub` — not a `workspace` root
 the second session never had. Rendering under the registration's root instead
-would collapse distinct configured namespaces into one and hand the model an
-ancestor scope that does not hold for it, which is precisely what the ancestor
-and sibling-scope rules would then misapply.
+would collapse distinct configured namespaces into one and give the model an
+ancestor scope that does not hold for it.
 
-Rendered bytes therefore depend on the authority, not on the registration, and
-that is correct rather than a loss: an admission is per session, carries its own
-admission identity and rendered hash, and its manifest records the bytes that
-session's model actually received. What stays independent of authority is
-identity — one bundle, one `InstructionBundleId`, one source hash — so
-deduplication, reuse, and the no-double-render rule are unaffected.
+Rendered bytes therefore depend on the authority, not on the registration: an
+admission is per session, carries its own admission identity and rendered hash,
+and its manifest records the bytes that session's model actually received.
+Identity stays independent of authority — one bundle, one `InstructionBundleId`,
+one source hash — so deduplication, reuse, and the no-double-render rule are
+unaffected.
 
 For an agent document, source content is the file's exact bytes. For a skill,
 version-one source content is the exact `SKILL.md` bytes. Supporting resources
@@ -226,16 +220,14 @@ frontmatter ends at the next line containing exactly `---`; lines may end in LF
 or CRLF, but mixed line endings are rejected. Between those delimiters every
 nonempty line is one top-level `key: value` pair. A key is ASCII letters or
 hyphen, a single ASCII space follows the colon, and a value is a nonempty
-single-line UTF-8 plain scalar with no leading or trailing whitespace. The
-forbidden characters are enumerated rather than delegated to the phrase "YAML
-indicator", so that one reading is possible. A value contains no NUL, colon,
-number sign, quotation mark, apostrophe, grave accent, or reverse solidus at any
-position, and its first character is none of `-`, `?`, `,`, `[`, `]`, `{`, `}`,
-`&`, `*`, `!`, `|`, `>`, `%`, or `@`. An interior or trailing hyphen is
-therefore permitted, which is what the `name` grammar below requires of a
-hyphenated skill directory such as `my-skill`. Duplicate keys, comments,
-quoting, escapes, tags, anchors, aliases, flow collections, multiline scalars,
-nested mappings, and sequences are rejected rather than delegated to a
+single-line UTF-8 plain scalar with no leading or trailing whitespace. A value
+contains no NUL, colon, number sign, quotation mark, apostrophe, grave accent,
+or reverse solidus at any position, and its first character is none of `-`, `?`,
+`,`, `[`, `]`, `{`, `}`, `&`, `*`, `!`, `|`, `>`, `%`, or `@`. An interior or
+trailing hyphen is therefore permitted, which is what the `name` grammar below
+requires of a hyphenated skill directory such as `my-skill`. Duplicate keys,
+comments, quoting, escapes, tags, anchors, aliases, flow collections, multiline
+scalars, nested mappings, and sequences are rejected rather than delegated to a
 library-selected YAML revision.
 
 Exactly one `name` and one `description` are required. `name` is 1 through 64
@@ -252,7 +244,7 @@ SHA-256 is named in the representation rather than assumed. The MCP skill
 transfer proposal
 [SEP-2640](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/2640)
 provides public precedent for digest verification across an instruction-content
-boundary. Signalbox applies that discipline to repository content because a
+boundary. Signalbox applies digest verification to repository content because a
 checkout is input, not daemon authority.
 
 Registration hashes source bytes; admission separately hashes rendered bytes.
@@ -306,16 +298,15 @@ longer declares, and `instructions_list`, `instructions_preview`, and
 `instructions_read` see only what that snapshot holds — a dropped entry is
 absent, so a read naming it is the ordinary `not_eligible` failure rather than a
 new error class. Nothing rereads a removed root's path. Activation records the
-dropped entries as typed findings, since a session silently losing instructions
-across a restart is worth an operator seeing.
+dropped entries as typed findings, so that a session losing instructions across
+a restart is visible to an operator.
 
 An entry whose bundle is already admitted is the one case that cannot simply be
 dropped, because the admission is immutable and its bytes are already in the
 projection. Activation fails that turn closed with a typed finding naming the
 bundle and the absent root, rather than rendering content from a directory the
 configuration no longer authorizes or silently continuing without it. Recovering
-such a session needs unload, which is why removal of a still-admitted authority
-is an operator action with a visible consequence rather than a quiet one.
+such a session needs unload.
 
 Activation is not the only entry point, so it cannot be the only checkpoint. A
 session whose turn was already active when the daemon stopped can be retained
@@ -348,10 +339,8 @@ over that wait or releases the slot ahead of it. The turn is marked at recovery,
 root access is blocked from that moment on the same access-time terms as the
 unadmitted case, and the close is taken by the recovery path once the
 outstanding operation reconciles, carrying the typed finding that names the
-bundle and the absent root. Blocking access immediately and closing after
-reconciliation are not in tension: nothing new can be rendered from the removed
-root either way, and the ambiguity evidence the lifecycle contract requires
-survives.
+bundle and the absent root. Nothing new can be rendered from the removed root
+either way, and the ambiguity evidence the lifecycle contract requires survives.
 
 Revocation changes what enumeration returns while deliberately leaving the
 eligibility hash alone, so any cursor issued before it is void. A cursor's
@@ -359,17 +348,16 @@ ordinal is an index into the effective sequence, and a shorter sequence would
 silently reinterpret it — skipping an eligible item, returning a different page,
 or reading as stale purely by how many revoked entries preceded it. A cursor
 issued before a turn's revocation took effect is therefore the typed
-stale-cursor failure, and the caller re-enumerates from the start. That is
-decidable rather than merely required: the cursor's first field is the effective
-view's hash, so a pre-revocation token carries a value the current view no
-longer matches. This needs no change to the hash, the snapshot, or the manifest:
-revocation is turn state, and a cursor is checked against the effective view its
-turn currently has rather than against history.
+stale-cursor failure, and the caller re-enumerates from the start. The cursor's
+first field is the effective view's hash, so a pre-revocation token carries a
+value the current view no longer matches. This needs no change to the hash, the
+snapshot, or the manifest: revocation is turn state, and a cursor is checked
+against the effective view its turn currently has rather than against history.
 
 Revocation is otherwise confined to the affected turn. The next activation
 builds a fresh snapshot from live eligibility, where the dropped entries are
-simply absent, so the access-time rule is a bridge across one turn's frozen
-evidence rather than a second, parallel notion of eligibility. It may name a
+absent; the access-time rule applies only to one turn's frozen evidence and is
+not a second, parallel notion of eligibility. A replacement may name a
 workspace-root bundle only when the target session has a complete discovery
 snapshot that used its fixed workspace binding as the workspace root and linked
 that exact registered identity as a candidate. A canonical-path match without
@@ -407,15 +395,15 @@ An eligibility entry is authority-qualified, not a bare identity. Each names one
 `InstructionBundleId` together with the authorizing root the session reaches it
 through — the `workspace` kind, or `configured` plus that root's provider-safe
 reference — and a replacement names that root alongside each identity. Identity
-alone would be ambiguous exactly where it matters: a bundle with aliases under
-several configured roots would leave catalog values, wrapper paths, scope
-comparisons, and projection order undetermined, and choosing arbitrarily can
-broaden an `AGENTS.md` document's scope and change rendered and manifest bytes.
-The root named must be one this bundle's registration actually records, as its
-primary root or as an alias, and must be one the naming session is authorized to
-use; anything else is the typed rejection eligibility replacement already
-defines. The activation snapshot copies the pairs, so a turn's rendering is
-determined by evidence frozen at activation rather than re-derived later.
+alone would be ambiguous: a bundle with aliases under several configured roots
+would leave catalog values, wrapper paths, scope comparisons, and projection
+order undetermined, and choosing arbitrarily can broaden an `AGENTS.md`
+document's scope and change rendered and manifest bytes. The root named must be
+one this bundle's registration actually records, as its primary root or as an
+alias, and must be one the naming session is authorized to use; anything else is
+the typed rejection eligibility replacement already defines. The activation
+snapshot copies the pairs, so a turn's rendering is determined by evidence
+frozen at activation rather than re-derived later.
 
 Until whole-bundle unload is implemented, a replacement command rejects removal
 of any currently admitted identity or any identity in the frozen eligibility
@@ -443,12 +431,12 @@ serialized on the admitted-set head. A changed source may create new
 registration evidence, but contradictory versions of one source cannot become
 simultaneously admitted until unload can retire the old admission.
 
-**Committed unimplemented functionality — eligibility control.** The first
-implementation slice records the empty snapshot and exposes no replacement
-command. Template authoring, session replacement, and visibility variants such
-as metadata-only or user-only have no present template field, process request,
-or session command. Their implementation must preserve the allow-list default
-and frozen turn snapshot.
+**Committed unimplemented functionality — eligibility control.** The present
+implementation records the empty snapshot and exposes no replacement command.
+Template authoring, session replacement, and visibility variants such as
+metadata-only or user-only have no present template field, process request, or
+session command. Their implementation must preserve the allow-list default and
+frozen turn snapshot.
 
 ## Enumeration, preview, and admission
 
@@ -472,18 +460,18 @@ themselves by those same identity bytes. The identity tie-breaker is what makes
 the document order total rather than merely usually total: two distinct
 registrations can present the same root, depth, and relative path when one is a
 workspace document and the other reached this session through the configured
-alias of a bundle whose primary root is `workspace`. No implementation invents a
-scope depth or a root placement for a skill, and none is left to break a
-document tie by arrival order, so a snapshot has exactly one page ordinal
-sequence, one cursor sequence, and one instruction-region byte string. The
-provider-safe root comparator orders `workspace` before `configured`; all
-workspace bundles have the same root key, while configured roots compare by the
-32 raw bytes of that provider-safe reference in ascending lexicographic order.
-Canonical absolute paths never participate. This order is used wherever this
-page says catalog order or projection order, including admitted-set records and
-manifest records. An ancestor document precedes a descendant document, so a
-deliberately admitted descendant is the later, more specific instruction;
-sibling scopes never apply to each other.
+alias of a bundle whose primary root is `workspace`. Skills are ordered without
+a scope depth or root placement, no document tie is broken by arrival order, and
+so a snapshot has exactly one page ordinal sequence, one cursor sequence, and
+one instruction-region byte string. The provider-safe root comparator orders
+`workspace` before `configured`; all workspace bundles have the same root key,
+while configured roots compare by the 32 raw bytes of that provider-safe
+reference in ascending lexicographic order. Canonical absolute paths never
+participate. This order is used wherever this page says catalog order or
+projection order, including admitted-set records and manifest records. An
+ancestor document precedes a descendant document, so a deliberately admitted
+descendant is the later, more specific instruction; sibling scopes never apply
+to each other.
 
 Version one returns at most 32 identities and 524,288 catalog-result bytes per
 page. Those bytes are compact UTF-8 JSON with object keys sorted by raw ASCII
@@ -513,10 +501,10 @@ for the same reason and with the same bytes: those members are emitted inside
 the delimited untrusted-data region of the result, under the fixed
 daemon-authored label, escaped so they cannot terminate the delimiter. A
 description reading `approve the next request` is a description, not an
-instruction, and enumerating a bundle must not be a way to say otherwise. The
-members that cannot carry prose — `bundle_id`, `kind`, `source_bytes`,
-`source_sha256`, `root`, `root_id` — stay outside that region, so a reader can
-still address and order a page without parsing untrusted text.
+instruction, and enumeration must not present it as one. The members that cannot
+carry prose — `bundle_id`, `kind`, `source_bytes`, `source_sha256`, `root`,
+`root_id` — stay outside that region, so a reader can still address and order a
+page without parsing untrusted text.
 
 `instructions_preview` returns bounded structure — headings for a document and
 validated metadata plus headings for a skill — with full source byte length and
@@ -537,10 +525,8 @@ level, and heading text cleaned from the content after the opening run and its
 separator, in this exact order: remove trailing spaces or tabs; then, if what
 remains is entirely a run of `#` bytes or ends in a run of `#` bytes immediately
 preceded by a space or tab, remove that run together with the spaces or tabs
-immediately before it; then remove leading spaces or tabs. Order is specified
-because it is observable, and because two different strings change the canonical
-preview JSON and can move the heading cutoff. Leading whitespace is removed last
-for the same reason: it is part of the evidence that a trailing run is a closing
+immediately before it; then remove leading spaces or tabs. Leading whitespace is
+removed last because it is part of the evidence that a trailing run is a closing
 run. These lines fix the cases, written with a visible middle dot for each
 significant space:
 
@@ -579,9 +565,9 @@ that same bounded heading projection.
 
 Heading text, `name`, and `description` are repository-controlled bytes, and
 preview returns them through an `Auto` tool with no admission decision behind
-it. That is a deliberate asymmetry, not an oversight, but it only holds if the
-bytes carry their authority with them. A tool result is durably referenced from
-semantic history and rendered into later calls by the owning
+it. That asymmetry holds only if the result states the authority those bytes
+carry. A tool result is durably referenced from semantic history and rendered
+into later calls by the owning
 [tool result contract](tool-loop.md#result-authority-and-the-continuation-boundary),
 so without framing this path could put tens of kilobytes of source text into
 every later call while bypassing the `AlwaysConfirm` gate, the rendered-byte
@@ -623,13 +609,13 @@ string on this page, and its length under the result byte bound is the length of
 the encoded string as it appears in the serialized result — quotation marks and
 escapes included — like every other byte of the result.
 
-The asymmetry that justifies the differing gates is then honest. Preview yields
-bounded structural fragments, once, explicitly labeled as untrusted quotation.
-Admission yields the complete source at instruction authority, inside the
-region, in every later call, recorded in the manifest. Gating preview at
-`AlwaysConfirm` too would make progressive disclosure useless — a session would
-need an approval to decide whether to seek an approval — while returning no text
-at all would leave the model choosing bundles by identity alone.
+Preview yields bounded structural fragments, once, explicitly labeled as
+untrusted quotation. Admission yields the complete source at instruction
+authority, inside the region, in every later call, recorded in the manifest.
+Gating preview at `AlwaysConfirm` too would make progressive disclosure useless
+— a session would need an approval to decide whether to seek an approval — while
+returning no text at all would leave the model choosing bundles by identity
+alone.
 
 The preview success value is closed exactly as the catalog page is, since its
 65,536-byte bound cuts the heading list and cannot do so deterministically
@@ -657,7 +643,7 @@ The daemon re-reads and validates it under the authorizing root frozen in the
 session's eligibility entry, compares the source hash with registration
 evidence, applies the per-bundle render budget, reads at most the registered
 source byte length plus one byte exactly as preview does — a source that has
-grown is proved stale by that extra byte, so unbounded growth never buys
+grown is proved stale by that extra byte, so unbounded growth never causes
 unbounded admission-time I/O, and returns only a typed admission receipt
 containing identity, source hash, rendered hash, byte length, truncation
 evidence, and durable admission identity. The rendered instruction body is never
@@ -670,13 +656,14 @@ Admission is idempotent by bundle within the effective admitted set. A distinct
 request for an already admitted bundle returns an `already_admitted` receipt
 naming the existing admission and exact rendered evidence, records that
 request's replay link, and appends no second `InstructionAdmission`. It does not
-re-read a moving source. A replay of either request returns its recorded
-receipt, so one manifest can never contain duplicate bundle identities.
+re-read the source, which may have changed. A replay of either request returns
+its recorded receipt, so one manifest can never contain duplicate bundle
+identities.
 
 List reads only registration metadata; preview performs the single-source
 revalidated read above. Their bounds are independent of aggregate registered
-content. This retains the Agent Skills progressive-disclosure economics without
-unrecorded selection or budget outcomes.
+content. This retains Agent Skills progressive disclosure without unrecorded
+selection or budget outcomes.
 
 Nothing is admitted merely because it is eligible, heuristically relevant, near
 a touched file, or present in a template. Version one admits only by the closed
@@ -686,25 +673,25 @@ variants and triggering evidence.
 `instructions_read` declares the `AlwaysConfirm` permission default required of
 every entry in the owning
 [tool catalog](tool-loop.md#provider-bridge-and-daemon-catalog), together with
-the explicit `Delegated` approval posture. The pair is the point: an admission
+the explicit `Delegated` approval posture. Together they mean that an admission
 is decided by the approval judge against the session's commissioned brief, not
 by prompting a person. The
-[approval policy](tool-loop.md#approval-policy-and-decision-sources) already
-gives that combination the exact meaning this needs — an explicit `Delegated`
-posture is authoritative and parks the request for a judge, and it is the one
-posture that satisfies an `AlwaysConfirm` declaration, because a judge is not a
-blanket but a distinct decider that can still deny the request or escalate it to
-the user. The resulting decision is recorded as `Delegate`, naming the exact
-model call that made it and retaining the judge rationale.
+[approval policy](tool-loop.md#approval-policy-and-decision-sources) gives that
+combination this meaning: an explicit `Delegated` posture is authoritative and
+parks the request for a judge, and it is the one posture that satisfies an
+`AlwaysConfirm` declaration, because a judge is not a blanket but a distinct
+decider that can still deny the request or escalate it to the user. The
+resulting decision is recorded as `Delegate`, naming the exact model call that
+made it and retaining the judge rationale.
 
-`AlwaysConfirm` rather than `Auto` or `Confirm` is what makes the posture load
-bearing rather than decorative. Eligibility authorizes which bundles a session
-may admit, not that the model may spend an admission, and admission durably
-places repository-controlled bytes in every later projection; `AlwaysConfirm`
-means no frozen dangerous blanket and no sandbox-profile default can silently
-approve that. It also fails closed rather than open on misconfiguration: a
-deployment that clears the posture leaves the request undecided for a person,
-where `Auto` alone would have approved it unattended.
+The declaration is `AlwaysConfirm` rather than `Auto` or `Confirm` because
+eligibility authorizes which bundles a session may admit, not that the model may
+spend an admission, and admission durably places repository-controlled bytes in
+every later projection; `AlwaysConfirm` means no frozen dangerous blanket and no
+sandbox-profile default can silently approve that. It also fails closed rather
+than open on misconfiguration: a deployment that clears the posture leaves the
+request undecided for a person, where `Auto` alone would have approved it
+unattended.
 
 The posture governs initial routing only. While it is in force no admission
 *starts* by prompting a person — every request is routed to the judge. It does
@@ -712,10 +699,10 @@ not forbid a person from deciding one: the owning approval contract lets a judge
 return `EscalateToHuman`, which stores the completed call, records no decision,
 and leaves the request parked admitting a user decision, and a `KnownFailed`,
 `Refused`, `Cancelled`, or `Ambiguous` terminal judge call retains that park on
-the same terms. Those paths are the reason delegation is safe to make mandatory,
-so an implementation must preserve them: a judge that cannot escalate would have
-to approve or deny every admission it is unsure about, and a terminal judge
-failure would strand the wait.
+the same terms. Those paths are the reason delegation is safe to make mandatory
+and must be preserved: a judge that cannot escalate would have to approve or
+deny every admission it is unsure about, and a terminal judge failure would
+strand the wait.
 
 Two things are proved before approval is resolved, not after: that the arguments
 decode, and that the bundle is eligible. Argument-type failure is ordinarily
@@ -728,9 +715,7 @@ before any judge routing. The owning loop resolves a request's approval before
 creating and executing the attempt, so a `bundle_id` outside the turn's
 effective eligibility view — the frozen snapshot as narrowed by any recovery
 revocation, not the snapshot alone — would otherwise reach judge preparation
-with no evidence to build from — leaving an implementation to expose metadata
-for a bundle the session may not see, or to invent an evidence-free judge
-request. Neither is acceptable, so this is the family's declared
+with no evidence to build from. This is therefore the family's declared
 [pre-approval admissibility check](tool-loop.md#intra-turn-rounds-and-request-batches):
 the request resolves through the owning request-level transition before
 approval, carrying the typed `not_eligible` reason and creating no approval
@@ -769,13 +754,12 @@ owning judge prompt therefore carries the whole evidence block inside the same
 untrusted-data region this page already fixes byte-for-byte for
 `instructions_list` and `instructions_preview` — the identical open line, second
 line, JSON object, and close line, with `&`, `<`, and `>` taking the same
-six-character escapes inside the JSON. Saying only that the region is
-"explicitly delimited" would not have been enough here, and this is the place it
-matters most: a description or path containing delimiter-like text, which the
-admitted grammars permit, could otherwise close the region and continue as part
-of the judge request or the brief. Reusing the defined encoding means the
-repository-controlled fields provably cannot close or fabricate the boundary,
-and a judge that has learned one untrusted region has learned this one.
+six-character escapes inside the JSON. A description or path containing
+delimiter-like text, which the admitted grammars permit, could otherwise close
+the region and continue as part of the judge request or the brief. Reusing the
+defined encoding means the repository-controlled fields provably cannot close or
+fabricate the boundary, and a judge that has learned one untrusted region has
+learned this one.
 
 The region's JSON object holds `display_name`, `source`, `scope` when the bundle
 is a document, and `description` when present. The evidence a judge may rely on
@@ -789,22 +773,20 @@ admit nothing.
 
 All three declare the crash classification `EffectFree`, so a daemon lost
 between authorization and result commit closes the attempt `KnownFailed` and
-fails the turn honestly rather than parking it in ambiguity recovery. List and
-preview are self-evidently free of effect. `instructions_read` is `EffectFree`
-for the reason its transition is written that way: its only durable effect is
-the `InstructionAdmission` appended inside the atomic commit-result transaction,
-so a crash before that commit provably left no admission, no receipt, and no
-advanced head. Declaring it `ExternalEffect` would park a turn for recovery over
-an effect that cannot have happened. Re-reading a workspace file observes
-daemon-local state, exactly as `blob_read` does under the same classification.
+fails the turn rather than parking it in ambiguity recovery. List and preview
+are free of effect. `instructions_read` is `EffectFree` because its only durable
+effect is the `InstructionAdmission` appended inside the atomic commit-result
+transaction, so a crash before that commit provably left no admission, no
+receipt, and no advanced head. Declaring it `ExternalEffect` would park a turn
+for recovery over an effect that cannot have happened. Re-reading a workspace
+file observes daemon-local state, exactly as `blob_read` does under the same
+classification.
 
 The three names use an underscore rather than a dot because the owning
 [`ToolRequest` name grammar](tool-loop.md#intra-turn-rounds-and-request-batches)
 admits only ASCII letters, digits, underscore, and hyphen. A dotted name could
 be advertised but never converted into the durable request the admission flow
-requires, so the family would be unusable at the first proposal. Widening that
-grammar for a naming preference would change an implemented constructor and
-every tool name's validity for no behavioral gain.
+requires, so the family would be unusable at the first proposal.
 
 Each tool advertises a closed JSON-object argument schema with no additional
 properties, and neither schema accepts a session identity — every request takes
@@ -833,13 +815,11 @@ its session from the trusted tool-dispatch correlation.
   reach `total` is complete and returns `next_cursor` of null, including when
   the final page is exactly full, so no caller is ever sent back for an empty
   page it could not have needed. Ordinal `total` is therefore reachable only
-  from a hand-edited cursor, where being accepted is better than being a
-  failure. Stating the range closes the third outcome a hand-edited ordinal
-  would otherwise have: with it, `total - first_ordinal - returned` cannot
-  underflow, and implementations cannot disagree between rejecting, returning an
-  empty page, and failing internally. Its success shape is fixed below, because
-  the page boundary is a byte budget and a byte budget cannot be evaluated
-  against an unfixed shape.
+  from a hand-edited cursor. With that bound, `total - first_ordinal - returned`
+  cannot underflow, and implementations cannot disagree between rejecting,
+  returning an empty page, and failing internally. Its success shape is fixed
+  below, because the page boundary is a byte budget and a byte budget cannot be
+  evaluated against an unfixed shape.
 - `instructions_preview` requires exactly one `bundle_id`, the lowercase
   hyphenated UUID of an eligible bundle. Success returns the bounded structure
   described above. A syntactically valid identity that is not eligible for this
@@ -870,10 +850,10 @@ repository-controlled string, so it needs no untrusted region.
 These reasons are durable typed evidence first and provider-visible bytes
 second, and the two are not the same surface. Where an attempt exists it stores
 its closed reason as the attempt's own error evidence, which is what replay,
-audit, and recovery read; nothing about that is negotiable by what a provider
-can be shown. The two pre-approval reasons are the exception, because their
-transition creates no attempt: `not_eligible` and `invalid_arguments` resolved
-before approval store their reason on the request itself, under the owning
+audit, and recovery read, independently of what a provider is shown. The two
+pre-approval reasons are the exception, because their transition creates no
+attempt: `not_eligible` and `invalid_arguments` resolved before approval store
+their reason on the request itself, under the owning
 [request-level transition](tool-loop.md#intra-turn-rounds-and-request-batches),
 and replay, audit, and recovery read it there. Looking for an attempt in those
 two cases would find none, and creating one would recreate exactly the orphan
@@ -893,22 +873,21 @@ because the tool ran and failed for a defined reason. The `detail` is the exact
 reason token and nothing else: no prose, no punctuation, no path, no identity,
 and no explanation appended after it. `stale_cursor` belongs with them rather
 than with the arguments: it is a request outcome, not a malformed argument, so
-`invalid_arguments` would misreport a well-formed cursor whose snapshot has
-simply moved on.
+`invalid_arguments` would misreport a well-formed cursor whose snapshot is no
+longer current.
 
 The two pre-approval reasons never ran, and must not claim they did.
 `not_eligible` and `invalid_arguments` both resolve before approval and create
 no attempt, so `execution_failed` would record a false lifecycle for every one
-of them. Both map to `kind` of `invalid_arguments`, which is the honest
-non-execution kind: the request named something the session may not have, or
-named nothing decodable at all. They are told apart by `detail` — the token
-`not_eligible` for an ineligible bundle, and JSON null for arguments that did
-not decode, where no token would say anything the kind has not already said.
+of them. Both map to `kind` of `invalid_arguments`, which is the non-execution
+kind: the request named something the session may not have, or named nothing
+decodable at all. They are told apart by `detail` — the token `not_eligible` for
+an ineligible bundle, and JSON null for arguments that did not decode, where no
+token would say anything the kind has not already said.
 
-That closed vocabulary is validated on the way out, so a reader that matches on
-it is matching a specification rather than parsing a sentence, which is the
-property free-text detail would have lost. Every provider therefore replays one
-exact object for each reason, whichever implementation produced it.
+That closed vocabulary is validated when emitted, so a reader can match on it
+exactly. Every provider therefore replays one exact object for each reason,
+whichever implementation produced it.
 
 Identity strings are the lowercase hyphenated form everywhere. Byte lengths,
 counts, ordinals, and truncation boundaries are JSON numbers — unsigned decimal
@@ -952,19 +931,19 @@ order as the trusted `items`. Each element is one closed object whose members
 are exactly `bundle_id` and `display_name`, plus `source`, plus `scope` for an
 `agent_document`, plus `description` when a description is present, plus
 `description_bytes` only when that description was shortened. Repeating
-`bundle_id` there is deliberate: it makes the correspondence checkable rather
-than positional, so a truncated or reordered region cannot silently attach one
-bundle's description to another's identity.
+`bundle_id` there makes the correspondence checkable rather than positional, so
+a truncated or reordered region cannot silently attach one bundle's description
+to another's identity.
 
 An optional member is omitted entirely when absent rather than emitted as null,
-which is the opposite rule from `next_cursor` and deliberate: item objects vary
-in shape by kind and by what registration actually holds, while the page
-envelope must not. When a description was shortened, `description` is the
-shortened text and `description_bytes` its full byte length; a naturally short
-description carries no `description_bytes` at all. Its presence is therefore the
-truncation signal, which is how a reader tells the two apart without a third
-member — and why it must not be emitted for an untruncated description, where it
-would carry no information while still changing the page's canonical size.
+which is the opposite rule from `next_cursor`: item objects vary in shape by
+kind and by what registration actually holds, while the page envelope must not.
+When a description was shortened, `description` is the shortened text and
+`description_bytes` its full byte length; a naturally short description carries
+no `description_bytes` at all. Its presence is therefore the truncation signal,
+which is how a reader tells the two apart without a third member — and why it
+must not be emitted for an untruncated description, where it would carry no
+information while still changing the page's canonical size.
 
 Two implementations following this emit the same bytes for one snapshot —
 including the region's fixed label and delimiters, which count against the bound
@@ -974,22 +953,21 @@ and the next cursor names the same ordinal.
 **Committed unimplemented functionality — model-facing operations.** No present
 tool supplies list, preview, or read, and no present registry entry carries the
 permission defaults, approval posture, argument schemas, or crash
-classifications just stated. Unloading is not implemented in the first slice.
-The same holds for everything the rest of this page builds on those operations:
-the durable admission transition, the projection and its region bytes, the
-render budgets, and the per-turn manifest's admission-bearing rows are all
-committed unimplemented functionality, recorded because they constrain what the
-present slice may do, and no present persistence or runtime surface provides
+classifications just stated. Unloading is not implemented. The same holds for
+everything the rest of this page builds on those operations: the durable
+admission transition, the projection and its region bytes, the render budgets,
+and the per-turn manifest's admission-bearing rows are all committed
+unimplemented functionality, recorded because they constrain what the present
+implementation may do, and no present persistence or runtime surface provides
 them. The one exception is the turn-start manifest with an empty eligibility and
-admitted set, which the first slice does insert; each section below says so
-where it applies.
+admitted set, which is implemented; each section below says so where it applies.
 
 ## Durable admission transition
 
 **Committed unimplemented functionality.** This whole section is a compatibility
-constraint on the present slice, not a description of it: no present tool
-supplies `instructions_read`, and no present persistence surface stores an
-admitted-set head or an `InstructionAdmission`.
+constraint, not a description of present behavior: no present tool supplies
+`instructions_read`, and no present persistence surface stores an admitted-set
+head or an `InstructionAdmission`.
 
 Each `instructions_read` request has a replay-stable tool-request identity. The
 owning
@@ -1015,9 +993,8 @@ authority for the admitted set.
 
 **Committed unimplemented functionality.** No present runtime surface carries a
 `WorkspaceInstructionRegion`, so this section — the projection, its exact region
-bytes, the preamble, and the wrapper — is a compatibility constraint the
-implementing child must meet. The design comparison at its end records why the
-constraint is shaped this way rather than proposing an open question.
+bytes, the preamble, and the wrapper — is a compatibility constraint that its
+implementation must meet.
 
 Admitted instructions are a model-input **projection rebuilt each turn**, not
 semantic transcript entries. The daemon holds the declared admitted set,
@@ -1033,13 +1010,13 @@ produces exactly one; an empty admitted set produces none, and the optional
 field owned by [model-call execution](model-call-execution.md) and
 [runtime substrate](runtime-substrate.md) is absent rather than present and
 empty. A present region is therefore always nonempty, which is what those pages
-validate, and the first slice's guaranteed-empty projection needs no
+validate, and the present implementation's guaranteed-empty projection needs no
 workspace-capable target. Adapters serialize that region as instruction/system
 input supported by their provider; they may not reinterpret it as a user or tool
 message or invoke a native file loader. The frozen session system prompt and
 explicit user request remain higher priority than this repository-supplied
-region. That subordination is carried by the region's own bytes, not by adapter
-goodwill: because a provider may expose only a system-instruction transport, the
+region. That subordination is carried by the region's own bytes, not by the
+adapter: because a provider may expose only a system-instruction transport, the
 region opens with a fixed daemon-authored preamble stating it, specified exactly
 below. No adapter writes its own preamble, and none may drop, reorder, or
 rephrase this one; an adapter that cannot deliver the region with the preamble
@@ -1072,7 +1049,7 @@ anything under this session's workspace — a session with no daemon-local
 workspace still admits configured-root bundles — and because a file the daemon
 read may well have been written by the user. A false provenance claim would
 invite the model to apply a scope or trust rationale the evidence does not
-support, which is the opposite of what the preamble is for.
+support.
 
 The preamble is fixed and carries no session, turn, or bundle values, so
 replaying a manifest's rendered rows reproduces it without storing it. It is the
@@ -1081,11 +1058,11 @@ whose stored rows need protecting, so changing the preamble or the wrapper
 changes rendering everywhere at once, and reconstitution always builds under the
 current shape. No manifest names a region version and no daemon retains an
 earlier renderer to select. A version discriminator becomes necessary only when
-live stored data first requires it, which is an [open edge](#open-edges) rather
-than scaffolding to carry now. It is not a rendered bundle: it has no bundle
-identity, appears in no manifest row, and is covered by no per-bundle
-rendered-content hash. Its bytes do count toward the aggregate region budget and
-every declared transport capacity, since those measure the region as serialized.
+live stored data first requires it, which is an [open edge](#open-edges). The
+preamble is not a rendered bundle: it has no bundle identity, appears in no
+manifest row, and is covered by no per-bundle rendered-content hash. Its bytes
+do count toward the aggregate region budget and every declared transport
+capacity, since those measure the region as serialized.
 
 After the preamble, the region orders admitted agent documents by authorizing
 root, increasing scope depth, relative path, and bundle identity bytes, then
@@ -1099,11 +1076,11 @@ When that authorizing root is `configured` the wrapper additionally carries
 already reports, whether or not the registration's primary root was configured.
 Without it two configured roots holding documents at the same relative paths
 would be indistinguishable in the region, and the model could not tell one scope
-hierarchy from two namespaces — which is exactly what the ancestor and
-sibling-scope rules above ask it to apply. The field is absent for `workspace`,
-which needs no discriminator because a session has at most one. It is
-provider-safe by construction and discloses no host filesystem layout, and the
-rendered-content hash covers it like every other wrapper byte.
+hierarchy from two namespaces, which is exactly what the ancestor and
+sibling-scope rules above require. The field is absent for `workspace`, which
+needs no discriminator because a session has at most one. It is provider-safe by
+construction and discloses no host filesystem layout, and the rendered-content
+hash covers it like every other wrapper byte.
 
 ```text
 <signalbox_workspace_instruction>
@@ -1167,7 +1144,7 @@ is immutable semantic conversation history (INV-015); instruction policy is
 effective input configuration, not conversation authored by an actor. Append
 would make unloading incompatible with that immutability. Projection lets an
 append-only audit event change later effective input without altering an earlier
-frontier or manifest. The comparative evidence reaches the same boundary:
+frontier or manifest. Other clients show the same constraint:
 [Aider's read-only-file commands](https://aider.chat/docs/usage/commands.html)
 offer selective `/drop`, while
 [Continue's rules](https://docs.continue.dev/customize/deep-dives/rules) are
@@ -1176,9 +1153,9 @@ no equivalent selective removal. The daemon preserves cache stability by
 rendering byte-identical instruction regions while the set and bytes are
 unchanged and applying changes only at turn boundaries.
 
-This reserves but does not implement unloading. A later foundation slice must
-define unload authority, tombstone visibility, and admitted-set transition. Only
-whole bundles may leave later projections, and unloading must add durable
+This reserves but does not implement unloading. Unloading, when implemented,
+must define unload authority, tombstone visibility, and admitted-set transition.
+Only whole bundles may leave later projections, and unloading must add durable
 history rather than delete an admission or manifest.
 
 ## Canonical digest bytes
@@ -1239,8 +1216,8 @@ The empty turn-start vector ends immediately after literal `turn_start`.
 ## Budgets and rendered content
 
 **Committed unimplemented functionality.** Nothing renders a bundle in the
-present slice, so every budget, preflight, and target check below constrains the
-implementing child rather than describing current behavior.
+present implementation, so every budget, preflight, and target check below is a
+compatibility constraint rather than a description of current behavior.
 
 Version one fixes every admission's per-bundle source-byte budget at 32,768
 bytes. `instructions_read` has no caller-supplied budget field. Rendering
@@ -1276,12 +1253,12 @@ validated only against its stale pin. The next input would be rejected against
 the now-current defaults, with no unload to recover. A queued origin is checked
 because it froze its own target when it was accepted and keeps it across later
 replacements: an origin accepted under an uncapable target while the admitted
-set was empty passed acceptance honestly, and if a replacement then installs a
-capable target, the pin and the installed epoch both admit a bundle the queued
+set was empty passed acceptance legitimately, and if a replacement then installs
+a capable target, the pin and the installed epoch both admit a bundle the queued
 turn still cannot transport when it activates. Checking all three at admission
-closes every such order without forbidding replacements while a turn is active,
-and without demanding transport capability of an origin accepted for a session
-that has admitted nothing.
+covers every such ordering without forbidding replacements while a turn is
+active, and without demanding transport capability of an origin accepted for a
+session that has admitted nothing.
 
 That check is over a summary, not the queue, because the queue has no practical
 item bound and admission holds the scheduler and admitted-set locks while it
@@ -1305,10 +1282,10 @@ an origin whose freshly resolved target cannot carry the session's retained
 region fails closed with a typed finding rather than reaching provider spawn.
 The summary is rebuilt from those resolutions at the same point, so it describes
 the live catalog rather than the one that was loaded when the origins were
-accepted. Pinning the serving target durably at acceptance would close the same
-hole, and is deliberately not chosen: it would contradict the resolve-at-
-execution rule the catalog contract states for every origin, to fix a problem
-that only instruction-bearing sessions have.
+accepted. Pinning the serving target durably at acceptance would also prevent
+this and is not chosen: it would contradict the resolve-at-execution rule the
+catalog contract states for every origin, to fix a problem that only
+instruction-bearing sessions have.
 
 Concurrent and same-batch reads therefore observe one ordered predecessor and
 cannot commit a set whose instruction region alone is unrenderable. Aggregate
@@ -1340,15 +1317,14 @@ implicitly unload, summarize, or evict instructions.
 ## Durable per-turn instruction manifest
 
 This section is split between the two categories, and the split is exactly the
-first slice's boundary. The turn-start manifest with an empty eligibility and
-admitted set is implemented behavior: the first slice inserts it in the
-activation transaction and authenticates it. Every field the canonical preimage
-requires of that manifest is therefore implemented too, since a manifest cannot
-be authenticated against a preimage whose fields it omits. **Committed
+boundary of the present implementation. The turn-start manifest with an empty
+eligibility and admitted set is implemented behavior: the activation transaction
+inserts it and authenticates it. Every field the canonical preimage requires of
+that manifest is therefore implemented too, since a manifest cannot be
+authenticated against a preimage whose fields it omits. **Committed
 unimplemented functionality.** Everything here that depends on an admission —
-successor manifests at model-call boundaries and rendered bundle rows —
-constrains the implementing child; no present surface produces a nonempty
-manifest.
+successor manifests at model-call boundaries and rendered bundle rows — is a
+compatibility constraint; no present surface produces a nonempty manifest.
 
 Every turn owns an append-only sequence of immutable `TurnInstructionManifest`
 values, beginning with exactly one turn-start manifest even when the eligibility
@@ -1356,8 +1332,8 @@ and admission sets are empty. The initial manifest is fixed before the first
 provider call and authenticated whenever that call is prepared or reconstituted.
 A model-requested admission during a tool round appends admission evidence and
 the next preparation atomically produces a successor manifest with its model
-call; earlier call-boundary manifests remain addressable. The first
-implementation slice has no admission and stores only the turn-start manifest
+call; earlier call-boundary manifests remain addressable. The present
+implementation has no admission and stores only the turn-start manifest
 (INV-061). Ordinary activation records that empty manifest after activation and
 before model work. A counted activation retains its complete scan in memory
 after the fitting exact count. The scheduler-locked activation transaction then
@@ -1417,13 +1393,12 @@ recovery.
 - Eligibility and model-facing operations remain committed unimplemented
   functionality in their owning sections above.
 - Whole-bundle unload is reserved by the projection decision but deferred.
-- Region versioning is deliberately absent. The preamble and wrapper are a
-  current-shape contract while Signalbox is pre-alpha with no durable
-  deployment; a stored discriminator and renderer selection are the right answer
-  only once live stored rows exist that a shape change would misrender, and are
-  to be introduced then rather than carried in advance.
+- Region versioning is absent. The preamble and wrapper are a current-shape
+  contract while Signalbox has no durable deployment; a stored discriminator and
+  renderer selection are introduced only once live stored rows exist that a
+  shape change would misrender.
 - Resource reads, file watching, rescans, ignore rules, symlink traversal,
   further vendor formats, search/ranking, eager and path-triggered admission,
   and later externalization of retained rendered plaintext are undecided and
   tracked in [open questions](../open-questions.md), never inferred from this
-  baseline.
+  page.
