@@ -1,18 +1,13 @@
 # Sessions and the transcript
 
-The multipart user-content aggregate below is a foundation proposal.
-
 This page specifies the implemented behavior of session creation and ancestry,
 creation from an imported frontier, session-level configuration defaults and
 their replacement, replaceable organizational metadata and listing, the
 long-lived session aggregate, semantic transcript entries, accepted-input user
-content, and actor attribution. Delegated creation provenance and its durable
-mapping are the foundation proposal at the bottom of the delegation stack. The
-runner placement-entry paragraphs are the foundation proposal at the bottom of
-their implementing stack. The imported-conversation record and converter are
-owned by [conversation-import](conversation-import.md). Where a law is cited as
-`INV-NNN`, the generated [invariant test index](../invariants.md) resolves it;
-where mechanics owned by another contract are summarized, the owning sibling
+content, and actor attribution. The imported-conversation record and converter
+are owned by [conversation-import](conversation-import.md). Where a law is cited
+as `INV-NNN`, the generated [invariant test index](../invariants.md) resolves
+it; where mechanics owned by another contract are summarized, the owning sibling
 page is linked inline.
 
 ## Session identity and creation provenance
@@ -34,7 +29,7 @@ records two required, independent, immutable creation facts, paired as
   (explicitly no prior transcript), `SingleSource` naming one source `SessionId`
   and one opaque `TranscriptFrontier`, or `ImportedConversation` naming one
   `ImportedConversationId`, one inclusive imported entry boundary, and either a
-  `Resume` or `Fork` relationship to that point. `SingleSource` remains
+  `Resume` or `Fork` relationship to that point. `SingleSource` is
   unconstructible; imported-frontier session creation is the sole trusted
   producer of imported ancestry.
 
@@ -105,8 +100,8 @@ Application orchestration (`crates/application/src/create_session.rs`):
 Domain preparation admits the interactive and module-dispatched no-ancestry
 pairs. A `SingleSource` command is a valid canonical value but fails preparation
 with `TranscriptAncestryUnavailable` — a nonterminal error that claims no
-command identifier. Forks are therefore typed but not yet creatable.
-Import-seeded creation uses the separate command path below; it does not widen
+command identifier. Forks are therefore typed but not creatable. Import-seeded
+creation uses the separate command path below; it does not widen
 `CreateSession`.
 
 The committing transaction atomically inserts the session row, the scheduler
@@ -119,16 +114,13 @@ carry, and a carried placement is never dropped between the claim and the
 session. Completeness at every commit boundary is enforced by deferred reverse
 foreign keys (`session_current_defaults_fk`, `session_scheduler_row_fk`) plus
 deferred constraint triggers `session_requires_creation_command` and
-`durable_command_requires_typed_record`. The family-aware session trigger
-replaced `session_create_command_fk` when imported-frontier creation added its
-separate command family (migration `202607240002_imported_session_seed.sql`);
-migration `202607180002_replace_session_defaults.sql` installed in place of the
-dropped durable-command reverse foreign key (migrations
-`202607180001_create_session.sql`, `202607180004_turn_lifecycle_storage.sql`;
-INV-008, INV-012). Every table in this set is append-only except
-`session_current_defaults`: its one row per session is the deliberately mutable
-pointer that defaults replacement later moves in place. The same transaction
-appends a `session_created` update event to the outbox
+`durable_command_requires_typed_record` (migrations
+`202607180001_create_session.sql`, `202607180002_replace_session_defaults.sql`,
+`202607180004_turn_lifecycle_storage.sql`,
+`202607240002_imported_session_seed.sql`; INV-008, INV-012). Every table in this
+set is append-only except `session_current_defaults`: its one row per session is
+the deliberately mutable pointer that defaults replacement later moves in place.
+The same transaction appends a `session_created` update event to the outbox
 ([persistence-protocol](persistence-protocol.md)).
 
 Command claim, fail-closed replay reconstitution, and conflicting-reuse
@@ -136,30 +128,29 @@ resolution follow the shared durable-command contract owned by
 [identity-and-commands](identity-and-commands.md), implemented for this kind in
 `crates/persistence/src/create_session.rs`. The session-specific consequence:
 equal replay returns the recorded receipt, which may name a different session
-than the freshly minted candidate; the unused candidate is simply discarded.
+than the freshly minted candidate; the unused candidate is discarded.
 
 ### Path-scoped session placement
 
-Path placement is opt-in. `Pathless` is the compatibility value and preserves
-today's cross-session read behavior exactly. A placed session carries one
-validated dotted path whose nonempty ASCII label segments admit letters, digits,
-hyphen, and underscore; each segment is at most 64 bytes and a path is at most
-64 segments. Process-protocol requests and responses admit that same complete
-structural range, preserving exact replay of placement commands already recorded
-under the migration. The initial value is pinned by creation. Only the explicit
-`UpdateSessionPlacement` durable command changes it, appending a versioned
-`Updated` event that names its predecessor and command identity; creation itself
-appends version-one `Created`, so no update rewrites history. Every
-current-placement load authenticates the contiguous history from version one
-through the selected head against each event's typed receipt and durable-command
-registry claim and rejects a head when immutable history contains a later event.
-Equal native and imported-frontier creation replay likewise rejects a missing or
-lagging current head while reconstituting its immutable creation receipt. A
-placement-update replay authenticates the current head event and rejects either
-a head that selects no authenticated event or a head that lags later history
-before reconstituting applied or stateful-rejection evidence. A missing or
-lagging head, cross-wired history, or invalid command fact fails closed as typed
-storage corruption.
+Path placement is opt-in. `Pathless` is the compatibility value and leaves
+cross-session read behavior unchanged. A placed session carries one validated
+dotted path whose nonempty ASCII label segments admit letters, digits, hyphen,
+and underscore; each segment is at most 64 bytes and a path is at most 64
+segments. Process-protocol requests and responses admit that same complete
+structural range, so every recorded placement command replays exactly. The
+initial value is pinned by creation. Only the explicit `UpdateSessionPlacement`
+durable command changes it, appending a versioned `Updated` event that names its
+predecessor and command identity; creation itself appends version-one `Created`,
+so no update rewrites history. Every current-placement load authenticates the
+contiguous history from version one through the selected head against each
+event's typed receipt and durable-command registry claim and rejects a head when
+immutable history contains a later event. Equal native and imported-frontier
+creation replay likewise rejects a missing or lagging current head while
+reconstituting its immutable creation receipt. A placement-update replay
+authenticates the current head event and rejects either a head that selects no
+authenticated event or a head that lags later history before reconstituting
+applied or stateful-rejection evidence. A missing or lagging head, cross-wired
+history, or invalid command fact fails closed as typed storage corruption.
 
 A placed requester's readable scope is its parent directory's subtree. The
 decision computes the requesting path's parent prefix once and performs one
@@ -168,9 +159,9 @@ allowed; ancestors, pathless targets, and disjoint subtrees are refused. A
 refusal is typed evidence containing that requesting directory and the closed
 reason `OutsideRequestingDirectorySubtree`, never an empty successful result.
 The conversation tool renders ordinary refusals with the full reason name. If a
-maximum-width directory would exceed the unchanged durable error-detail bound,
-it uses the closed compact spelling `o<requesting-directory>`; `o` means that
-same outside-requesting-directory-subtree reason and the directory remains
+maximum-width directory would exceed the durable error-detail bound, it uses the
+closed compact spelling `o<requesting-directory>`; `o` means that same
+outside-requesting-directory-subtree reason and the directory remains
 byte-exact. The conversation-introspection adapter enforces this decision when
 it opens a selected native transcript. It loads requester and target placement
 and applies the prefix decision in the same repeatable-read transaction that
@@ -180,7 +171,7 @@ neither surface is filtered by this rule.
 
 A one-segment placement sits in the root directory and therefore has global
 conversation read, including pathless sessions. It is legal only through the
-loud `SessionPlacement::root_global_read` constructor, which requires
+explicit `SessionPlacement::root_global_read` constructor, which requires
 `RootPlacementGlobalReadIntent::Acknowledged`. The creation command, typed
 record, and version-one event all preserve both its path and the explicit
 global-read-intent bit. Ordinary scoped construction rejects a root path.
@@ -328,17 +319,15 @@ nonempty admitted set rejects its proposed model selection unless every target
 the current configuration can select from that direct selection or alias has a
 typed system-instruction transport and capacity for the complete retained
 workspace-instruction region. The replacement checks this before committing the
-successor defaults epoch. What this page requires is the atomicity, not a lock
-recipe: the replacement must resolve every possible target and validate the
-complete retained region under the same serialization it commits the successor
-epoch under, so an admission or activation occurs wholly before or after it and
-cannot invalidate the evidence it checked. Which rows that serialization takes,
-in what order, and in which mode belong to the
+successor defaults epoch. The replacement must resolve every possible target and
+validate the complete retained region under the same serialization it commits
+the successor epoch under, so an admission or activation occurs wholly before or
+after it and cannot invalidate the evidence it checked. Which rows that
+serialization takes, in what order, and in which mode belong to the
 [persistence lock protocol](persistence-protocol.md#lock-protocol), which owns
-that inventory for every transaction and is the only place it is stated.
-Rejection is typed and leaves the current defaults and admitted set unchanged.
-No present replacement path performs this check because no present surface
-admits a bundle. The owning
+that inventory for every transaction. Rejection is typed and leaves the current
+defaults and admitted set unchanged. No present replacement path performs this
+check because no present surface admits a bundle. The owning
 [model-selection validation](configuration-and-credentials.md#model-selection-validation)
 also performs the same retained-region check when each later origin is accepted,
 after resolving its alias against the then-current catalog. Replacement-time
@@ -364,16 +353,15 @@ extends through a generated exact-encoding SHA-256 digest column because
 megabyte text cannot join a btree key.
 
 The immutable epoch row is the prompt's single content authority. Origin
-acceptance keeps freezing only the epoch; per-turn origin rows copy no prompt
-text, and model-call preparation reads the prompt through the calling turn's
-frozen defaults version — including a reclassified-steering origin's inherited
-version — so every call the turn prepares sets `ModelOperation.system` to
-exactly that epoch's prompt, or none. A replacement that changes only the system
-prompt appends no semantic transcript entry: the new instructions reach the
-provider whole and out of band on the successor turn's calls, and the turn's
-frozen epoch already records durably which prompt governed it. The
-`ModelIdentityChanged` boundary below remains keyed to the frozen direct model
-selection alone.
+acceptance freezes only the epoch; per-turn origin rows copy no prompt text, and
+model-call preparation reads the prompt through the calling turn's frozen
+defaults version — including a reclassified-steering origin's inherited version
+— so every call the turn prepares sets `ModelOperation.system` to exactly that
+epoch's prompt, or none. A replacement that changes only the system prompt
+appends no semantic transcript entry: the new instructions reach the provider
+whole and out of band on the successor turn's calls, and the turn's frozen epoch
+already records durably which prompt governed it. The `ModelIdentityChanged`
+boundary below is keyed to the frozen direct model selection alone.
 
 ### Session-template provenance
 
@@ -393,10 +381,9 @@ provenance only (INV-047).
 
 A template supplies no placement. Template-derived creation therefore carries
 the caller's optional placement exactly as explicit creation does, and its typed
-command record stores that placement in full. Why: silently discarding a typed
-flag a caller supplied is the false-confidence pattern — the session would run
-daemon-only while the caller believed it had a runner — so the two choices
-compose and neither excludes the other.
+command record stores that placement in full. Why: silently discarding a
+caller-supplied placement would run the session daemon-only while the caller
+believed it had a runner.
 
 Durable-command equality distinguishes the caller's two creation modes. An
 explicit command compares its complete caller-supplied defaults exactly. A
@@ -410,8 +397,7 @@ complete resolved defaults and digest; this replay rule cannot rewrite them.
 Migration `202607300101_session_template_provenance.sql` adds nullable
 name/digest pairs to `session` and `create_session_command`, with `MATCH FULL`
 shape, name validation, a 32-byte digest bound, append-only protection, and
-command/session agreement. Existing and explicit sessions backfill as absent; no
-applied migration is modified.
+command/session agreement. Existing and explicit sessions backfill as absent.
 
 `ReplaceSessionDefaults` carries exactly command identity, target session,
 expected current version, and the complete replacement; equality excludes only
@@ -572,10 +558,10 @@ current defaults version — alongside imported-conversation headers, in one
 bounded keyset page of its own. It adds no session state and changes none of the
 rules above.
 
-Because no current session-creation boundary carries actor attribution, the
-implemented default view is exactly all non-archived sessions. No visibility
-taxonomy, creation-time override, or inference from missing attribution is
-stored. The dependency for future creation-derived visibility is recorded in
+Because no session-creation boundary carries actor attribution, the default view
+is exactly all non-archived sessions. No visibility taxonomy, creation-time
+override, or inference from missing attribution is stored. The dependency for
+future creation-derived visibility is recorded in
 [open-questions.md](../open-questions.md#session-organization-visibility-and-retention).
 
 **Committed unimplemented functionality.** No present surface constructs a
@@ -585,10 +571,9 @@ and `eval` variants for sessions created by registered programs under the
 (and, for `eval`, the trial identity the [evaluation system](eval-system.md)
 defines), is constructible only by the substrate's host-side session capability,
 and joins the stored closed-discriminator convention beside `interactive`,
-`module_dispatched`, and `delegated`. This constrains present change:
-creation-cause readers must not assume the present vocabulary is final, and the
-stored discriminator's decode surface must stay extensible without
-reinterpreting existing spellings.
+`module_dispatched`, and `delegated`. Creation-cause readers must not assume the
+present vocabulary is final, and the stored discriminator's decode surface must
+stay extensible without reinterpreting existing spellings.
 
 ## The session aggregate
 
@@ -642,7 +627,7 @@ values (INV-002, INV-039). Reconstitution never yields `None`, a default, or a
 partial session.
 
 Why (fail closed): a fabricated or partial session would mask corruption and
-launder invalid durable state into valid-looking domain values.
+present invalid durable state as valid domain values.
 
 ## Bounded browser session catalog
 
@@ -750,10 +735,10 @@ the session's lifetime event set.
 
 Each header retains one of the closed ordinary, goal, model, tool, runner, or
 delegation event categories. An unknown durable category is corruption rather
-than generic prose. This foundation intentionally exposes header facts rather
-than storage records or process frames. Browser DTOs are generated from the Rust
-web-contract schema; application values, persistence rows, browser DTOs, and
-presentation items remain distinct.
+than generic prose. The timeline exposes header facts rather than storage
+records or process frames. Browser DTOs are generated from the Rust web-contract
+schema; application values, persistence rows, browser DTOs, and presentation
+items remain distinct.
 
 The browser session-history adapter validates the generated DTOs, treats every
 64-bit value as a decimal string and `bigint`, clamps each request to the server
@@ -794,9 +779,9 @@ The first detail slice projects accepted input with reference-only attachment
 facts; model-call request context count, selected model identity, response text,
 reported token usage, terminal disposition, and provider failure cause code; and
 activated or terminalized turn lifecycle with a cause code. Known valid
-categories awaiting their richer typed body in the next stack slice remain a
-closed `event_fact` carrying their existing event category. An unknown durable
-event or state is corruption, never a generic body or guessed prose.
+categories without a richer typed body are a closed `event_fact` carrying their
+event category. An unknown durable event or state is corruption, never a generic
+body or guessed prose.
 
 Browser DTOs remain distinct from the application projection, persistence rows,
 and process messages. Text already masked before durable storage remains masked:
@@ -882,10 +867,7 @@ and closed:
   checked successor placement record at a user-explicit relocation boundary. One
   entry kind covers every session-relocation fact: a move to a different runner
   and a working-directory move on the same runner both require it, and the
-  referenced record is the authority for which of them occurred. Splitting the
-  kind so that a working-directory-only move carries its own payload variant
-  changes no other contract on this page, since every consumer resolves the
-  record rather than reading the payload;
+  referenced record is the authority for which of them occurred;
 - `TurnFailed { turn }` — an explicit marker that the turn terminalized as
   failed;
 - `AssistantText { producing_call, value }` — exact assistant text with
@@ -939,13 +921,11 @@ the unique steering entry, and `202607220005` adds the unique cancellation
 marker. Migration `202607280201_mid_session_model_selection.sql` adds the unique
 per-turn model-identity boundary and checks it against the origin's frozen epoch
 and selection. The tool-loop migration adds request/result references while
-widening the corresponding closed payload shapes. The origin-disposition guard
-arrived later: migration `202607180005_occupied_slot_submit_input.sql` — the
-migration that first admits the `pending_steering` disposition — replaces the
-entry/turn-state trigger so an origin entry additionally requires its input's
-`origin_of` disposition (constraint
-`semantic_transcript_entry_origin_disposition`); pending steering can never
-appear as a semantic origin.
+widening the corresponding closed payload shapes. An origin entry additionally
+requires its input's `origin_of` disposition (constraint
+`semantic_transcript_entry_origin_disposition`, migration
+`202607180005_occupied_slot_submit_input.sql`); a `pending_steering` input can
+never appear as a semantic origin.
 
 ### Context compaction
 
@@ -970,10 +950,10 @@ not assistant output attributed to an accepted-input turn.
 
 Compactions in one session form a forward-only chain. A successor's source must
 retain its predecessor's complete result frontier as a semantic prefix. A later
-ordinary turn cannot opt back into an uncompacted projection. The existing
-continue-from-boundary operation remains the escape hatch: choosing a position
-before the summary creates a different session whose ancestry frontier does not
-contain that compaction.
+ordinary turn cannot opt back into an uncompacted projection. The
+continue-from-boundary operation is the alternative: choosing a position before
+the summary creates a different session whose ancestry frontier does not contain
+that compaction.
 
 Each compaction range starts at the current model-visible frontier start: the
 complete frontier's first entry for a root compaction, or the predecessor
@@ -1029,8 +1009,8 @@ frozen direct selection changed, and finally appends its ordinary origin
 (INV-039, INV-046).
 
 Session relocation has a session-level frontier boundary. Every transaction that
-installs a successor placement — loss replacement today, and the committed
-user-directed move of a healthy session or of its working directory later
+installs a successor placement — loss replacement, and the committed
+user-directed move of a healthy session or of its working directory
 ([runner protocol and placement](runner-protocol.md#committed-functionality-beyond-version-one))
 — appends one `RunnerPlacementChanged` entry after the latest authoritative
 semantic frontier, or establishes a one-entry root when no frontier exists, and
@@ -1069,42 +1049,40 @@ content authorities. Exact ordering and closure rules are owned by
 
 Entry/turn-state agreement is a durable schema invariant, not only transactional
 practice. Deferred constraint triggers around
-`assert_turn_lifecycle_final_state` (migration `202607180004`) check every
-commit bidirectionally: a queued turn carries zero origin or failure entries; a
-started turn carries exactly one correlated origin entry, and its starting
-frontier ends with exactly that entry. A non-first turn carries exactly one
-immediately preceding model-identity entry iff its frozen direct selection
-differs from its predecessor's, subject to the immutable pre-boundary
-compatibility fact described above; a failed turn's terminal frontier extends
-its latest call frontier (or starting frontier) by its exact terminal
-tool-result suffix when one exists and exactly its failure marker last; a
-completed turn's terminal frontier extends its producing call's frontier by the
-call's assistant entries plus exactly its completion marker last; a cancelled
-turn's terminal frontier extends the latest call frontier (or starting frontier)
-by its exact terminal tool-result suffix when one exists and exactly its
-cancellation marker last; and a refused turn's terminal frontier is a distinct
-equal-content copy of its latest call frontier. A reconciliation-required turn
-over a model call likewise carries a distinct equal-content terminal frontier;
-one over a tool attempt extends the producing call's frontier by its exact
-terminal tool-result suffix. Both retain exactly one ambiguous operation plus
-the correlated ended turn attempt and applied interrupt proof. Migration
-`202607220001` first defined the model-call assertion; migrations `202607220004`
-and `202607220005` widen it for steering and stop requests. A writer that
-diverges from the transactional practice above is rejected at the commit
-boundary.
+`assert_turn_lifecycle_final_state` (migrations `202607180004`, `202607220001`,
+`202607220004`, and `202607220005`) check every commit bidirectionally: a queued
+turn carries zero origin or failure entries; a started turn carries exactly one
+correlated origin entry, and its starting frontier ends with exactly that entry.
+A non-first turn carries exactly one immediately preceding model-identity entry
+iff its frozen direct selection differs from its predecessor's, subject to the
+immutable pre-boundary compatibility fact described above; a failed turn's
+terminal frontier extends its latest call frontier (or starting frontier) by its
+exact terminal tool-result suffix when one exists and exactly its failure marker
+last; a completed turn's terminal frontier extends its producing call's frontier
+by the call's assistant entries plus exactly its completion marker last; a
+cancelled turn's terminal frontier extends the latest call frontier (or starting
+frontier) by its exact terminal tool-result suffix when one exists and exactly
+its cancellation marker last; and a refused turn's terminal frontier is a
+distinct equal-content copy of its latest call frontier. A
+reconciliation-required turn over a model call likewise carries a distinct
+equal-content terminal frontier; one over a tool attempt extends the producing
+call's frontier by its exact terminal tool-result suffix. Both retain exactly
+one ambiguous operation plus the correlated ended turn attempt and applied
+interrupt proof. A writer that diverges from the transactional practice above is
+rejected at the commit boundary.
 
-`TurnFailed` now has two producers — the model-call known-failure closure and
+`TurnFailed` has two producers — the model-call known-failure closure and
 startup recovery — each appending the marker after every earlier committed entry
 and emitting a `turn_failed` update event atomically. A later successor's
 starting frontier retains the failed predecessor's exact terminal prefix,
-including that marker. Turn and attempt lifecycle doctrine is
+including that marker. Turn and attempt lifecycle is owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), the entry
-commit boundaries are this page's own material, and update-event delivery is
+commit boundaries by this page, and update-event delivery by
 [persistence-protocol](persistence-protocol.md).
 
-**Committed unimplemented functionality — pre-call pool exhaustion.** The
-credential-pool implementing child adds a third `TurnFailed` producer for the
-`pre-call fail` and `wait-transition fail (no call)` endings of
+**Committed unimplemented functionality — pre-call pool exhaustion.** A third
+`TurnFailed` producer serves the `pre-call fail` and
+`wait-transition fail (no call)` endings of
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine):
 an active turn exhausts its frozen pool before any model call is prepared and
 that exhaustion selects no wait. Its single transaction ends the current attempt
@@ -1119,13 +1097,13 @@ That third producer serves two endings, which share its commit shape exactly.
 This page owns the transcript-producer column of
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine),
 and that column is total over all nine endings: `pre-call fail` and
-`wait-transition fail (no call)` use this new producer; `post-failure fail` and
+`wait-transition fail (no call)` use this producer; `post-failure fail` and
 `terminal` use the existing model-call known-failure closure, because their turn
 did issue a call and that closure is already the writer which commits one; and
 `selected`, `contended-wait`, `exhausted-wait`, and `successor` have no producer
 and append no entry, because none of them terminalizes a turn.
 
-The remaining ending, `wait-transition fail (after call)`, needs a **fourth**
+The remaining ending, `wait-transition fail (after call)`, needs a fourth
 producer, because it is a transition rather than an initial admission and the
 model-call closure cannot serve it: that closure committed earlier in the turn
 without terminalizing and is not available to a transition happening now. Its
@@ -1188,8 +1166,7 @@ failures precede construction, while checks whose answer depends on current
 catalog or session state occur under durable command authority; neither path can
 truncate, reorder, or rewrite content.
 
-This is a provisional maintainer-approved floor, not the resource-governance
-policy.
+These bounds are a provisional floor, not the resource-governance policy.
 
 ## Actor attribution
 
@@ -1211,11 +1188,10 @@ for metadata). The metadata actor also becomes its organizational last-writer
 stamp.
 
 Why (seeded before expansion): carrying user attribution from the first metadata
-write preserved a truthful backfill, and the existing closed actor columns now
-admit tool attribution without a semantic migration.
+write preserved a truthful backfill, and the closed actor columns admit tool
+attribution without a semantic migration.
 
-`CreateSession` carries no actor; amending it remains an explicit maintainer
-choice that has not been taken. `Recovery` and `Model` remain representable
+`CreateSession` carries no actor. `Recovery` and `Model` are representable
 without an implemented command-producing boundary.
 
 ## Implemented transcript projections
@@ -1227,13 +1203,12 @@ synchronization, and presentation rules are owned by
 [process-protocol](process-protocol.md). The provider-prompt projection is also
 implemented: `PreparedModelOperation::render` maps frontier entries to
 provider-neutral messages and binds the frozen epoch's optional session system
-prompt; multi-source system-prompt composition remains deferred under the open
-edges of [model-call-execution](model-call-execution.md).
+prompt; multi-source system-prompt composition is deferred under the open edges
+of [model-call-execution](model-call-execution.md).
 
 ## Session delegation
 
-This section is the foundation proposal at the bottom of the session-delegation
-stack. A delegated child is a distinct, independently browsable session. Its
+A delegated child is a distinct, independently browsable session. Its
 `SessionCreationCause::Delegated` names the exact spawning `ToolRequestId`; its
 `TranscriptAncestry` is independently `None`. Delegation does not copy,
 reference, merge, or expose the parent transcript, and it does not widen the
@@ -1265,11 +1240,11 @@ becomes model-visible.
 Each spawning request creates at most one immutable parent/child relationship.
 The public domain surface accepts neither a caller-supplied relationship count
 nor an unsealed relationship slice as evidence of that uniqueness. Aggregate
-construction remains sealed in the foundation slice; the persistence slice in
-this stack admits a spawn only from the complete parent relationship inventory
-held under the spawn transaction's lock, together with the child-session
-uniqueness check. The relationship records the exact parent session and turn,
-child session and delegated-task turn, and one parent-chosen policy:
+construction is sealed; persistence admits a spawn only from the complete parent
+relationship inventory held under the spawn transaction's lock, together with
+the child-session uniqueness check. The relationship records the exact parent
+session and turn, child session and delegated-task turn, and one parent-chosen
+policy:
 
 - `Background` never derives a child stop or cancellation from a parent state;
 - `Bound` states separate `on_parent_stopped` and `on_parent_cancelled` actions,
@@ -1333,22 +1308,22 @@ durable attempt seals the child as a failed result carrying that same
 transaction that commits the terminal transition, so a parent waiting on a call
 whose provider outcome can never be established is woken by evidence rather than
 left waiting on a turn that has already ended. **Committed unimplemented
-functionality.** Durable terminal-result reconstitution is not exposed by this
-foundation slice; the persistence slice must consume a sealed reconstituted
-ended-call/turn projection rather than accepting parallel raw identities or
-semantic entries. A parent-policy stop or cancellation instead carries opaque
-authority from the exact applied parent termination result. Every authority
-exposes its parent session, durable user command, command kind, and descendant
-scope; a turn interrupt additionally names its exact turn, while a goal stop
-names the exact goal generation and carries no turn. Raw identities cannot
-construct that authority, `parent_alone` authority cannot produce a child
-disposition, and the recorded outcome reason must match its command kind and
-scope. Parent-policy stop and cancellation both terminalize the exact delegated
-child turn through its existing cancelled-turn lifecycle state and exact
-cancellation marker; the relationship outcome preserves whether the chosen
-policy action was `ChildStopped` or `ChildCancelled`. `ChildStopped` is produced
-only by a parent-policy stop; the existing proof-bearing failed, refused, and
-cancelled model-call turn candidates can name any turn origin, including the
+functionality.** No present surface exposes durable terminal-result
+reconstitution; persistence must consume a sealed reconstituted ended-call/turn
+projection rather than accepting parallel raw identities or semantic entries. A
+parent-policy stop or cancellation instead carries opaque authority from the
+exact applied parent termination result. Every authority exposes its parent
+session, durable user command, command kind, and descendant scope; a turn
+interrupt additionally names its exact turn, while a goal stop names the exact
+goal generation and carries no turn. Raw identities cannot construct that
+authority, `parent_alone` authority cannot produce a child disposition, and the
+recorded outcome reason must match its command kind and scope. Parent-policy
+stop and cancellation both terminalize the exact delegated child turn through
+its existing cancelled-turn lifecycle state and exact cancellation marker; the
+relationship outcome preserves whether the chosen policy action was
+`ChildStopped` or `ChildCancelled`. `ChildStopped` is produced only by a
+parent-policy stop; the existing proof-bearing failed, refused, and cancelled
+model-call turn candidates can name any turn origin, including the
 delegated-task origin, but do not fabricate a distinct stopped outcome from that
 evidence. Delivery appends a `DelegationResult` semantic entry only to the
 target parent, names the exact awaiting request that receives the result, and is
@@ -1365,12 +1340,12 @@ independently inspectable even when no parent turn can consume it.
 parent's directory. No present delegation or placement surface implements or
 derives this default; its implementation is deferred to the session-placement
 surface. This compatibility constraint does not copy the parent's complete
-placement and this stack implements no placement logic.
+placement.
 
 ## Open edges
 
-- Native fork creation remains typed but unimplemented: `SingleSource` ancestry
-  fails preparation (`TranscriptAncestryUnavailable`) until a trusted native
+- Native fork creation is typed but unimplemented: `SingleSource` ancestry fails
+  preparation (`TranscriptAncestryUnavailable`) until a trusted native
   `TranscriptFrontier` producer exists. Imported boundaries are independently
   selectable at every entry and do not select or authorize a native-session
   fork. Selectable native fork boundaries remain open
@@ -1385,23 +1360,19 @@ placement and this stack implements no placement logic.
 - The static eligible-failure path (terminalize at eligibility without an
   attempt, committing origin plus failed marker in one transaction) has no
   implemented producer; startup recovery and the model-call known-failure
-  closure are the committed `TurnFailed` sources today.
+  closure are the committed `TurnFailed` sources.
 - Assistant text, tool-use/result references, completed-turn, steering,
   cancelled-turn, delegated-task, delegation-message, and delegation-result
   semantic entries are implemented. Refusal, reconciliation, mismatch,
   accepted-risk, and approval-event variants remain open.
-- `ReplaceSessionDefaults` carries no `actor` field although the accepted
-  actor-attribution design slated it for first-accepted-version adoption; its
-  record family has since committed storage versions 1 and 2 without one, so
-  later adoption needs another kind-scoped storage version; the truthful `User`
-  backfill that design relies on still exists.
-- `CreateSession` actor attribution remains implicit pending an explicit
-  maintainer amendment choice.
+- `ReplaceSessionDefaults` carries no `actor` field; its record family has
+  storage versions 1 and 2 without one, so adopting one needs another
+  kind-scoped storage version.
+- `CreateSession` actor attribution is implicit; adding it is undecided.
 - `Recovery` and `Model` actor variants have no constructing boundary;
   per-transition attribution adoption schedules remain open.
 - The multipart part-count, text-byte, metadata, and attachment-work bounds are
-  provisional maintainer floors; the resource-governance limit question stays
-  open.
+  provisional floors; the resource-governance limit question stays open.
 - The session system prompt remains one optional bounded string per defaults
   epoch. Composition from base, per-use-case, and instruction-file sources and
   richer named profiles remain the open
