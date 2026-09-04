@@ -1401,7 +1401,7 @@ Each adapter has a purpose-specific corruption enum with a shared vocabulary:
   no admitted mapping (unknown values fail; they are never coerced);
 - `Inconsistent(relationship)` — correlated durable records disagree;
 - `Column(field)` — a declared SQL field failed decoding, classified by a static
-  field label rather than driver prose;
+  field label rather than the driver's error text;
 - `InvalidOrdinal` / `InvalidContent` — checked scalar decoding failed;
 - nested `CurrentSession(...)`, `Domain(...)`, `Scheduling(...)` — a subordinate
   projection failed its own boundary or domain validation.
@@ -1458,21 +1458,20 @@ rather than only surfacing the flag.
 
 ## Delegation storage and locking
 
-**Implemented behavior.** Migration `202608020018_session_delegation.sql`
-retains the closed `parent_alone` or `parent_and_descendants` selection on every
-stop goal command and interrupt submit-input command. The accepted-input copy
-retains the same value for an applied interrupt. Other goal operations and
-delivery kinds require a null scope. Command and accepted-input reconstitution
-decode the stored selection without substituting a default, so equal replay
-returns the recorded result and changed-scope reuse conflicts.
+Migration `202608020018_session_delegation.sql` retains the closed
+`parent_alone` or `parent_and_descendants` selection on every stop goal command
+and interrupt submit-input command. The accepted-input copy retains the same
+value for an applied interrupt. Other goal operations and delivery kinds require
+a null scope. Command and accepted-input reconstitution decode the stored
+selection without substituting a default, so equal replay returns the recorded
+result and changed-scope reuse conflicts.
 
-This section is the foundation proposal for migration
-`202608020018_session_delegation.sql`. The migration widens
-`session.creation_cause` with `delegated`, adds the spawning request column
-required only by that cause, and keeps `ancestry_kind = none` as an independent
-required fact. The deferred session-creation-family check admits a delegated
-session only when one complete `session_delegation` row names it; user and
-imported creation families remain unchanged.
+The same migration widens `session.creation_cause` with `delegated`, adds the
+spawning request column required only by that cause, and keeps
+`ancestry_kind = none` as an independent required fact. The deferred
+session-creation-family check admits a delegated session only when one complete
+`session_delegation` row names it; user and imported creation families remain
+unchanged.
 
 `session_delegation` is append-only and keyed by the globally unique spawning
 `tool_request_id`. It correlates that request's parent session and turn, one
@@ -1615,30 +1614,29 @@ typed already-terminal event and traversal continues through that child's
 outgoing relationships, so a terminal intermediate session cannot hide live
 descendants.
 
-**SPEC PROPOSAL — cascade terminal authority.** For each newly stopped or
-cancelled edge, the cascade transaction appends one immutable logical-terminal
-row keyed by spawning request, child session/initial turn, and root command. The
-row foreign-keys the exact per-edge parent-termination authority and cannot
-commit without the matching parent-provenanced relationship event, unique child
-result, update, deliveries, and wake. The same transaction materializes an
-immutable retained terminal frontier and a one-to-one monotonic lifecycle flag.
-Partial active and queued indexes exclude the flagged row, while queue-order and
-start-frontier validation continue to recognize it as the immediate terminal
-predecessor of later accepted-input or delegation-wake work. Runtime eligibility
-therefore excludes the proof without rewriting the child's retained physical
-execution evidence. Provider observation commit rereads the proof under the
-session lock and discards a late response instead of persisting it. Transcript
-reads join the proof to its exact outcome event and expose the typed logical
-terminal state. This proposal is accepted with the implementing stack's merge.
+For each newly stopped or cancelled edge, the cascade transaction appends one
+immutable logical-terminal row keyed by spawning request, child session/initial
+turn, and root command. The row foreign-keys the exact per-edge
+parent-termination authority and cannot commit without the matching
+parent-provenanced relationship event, unique child result, update, deliveries,
+and wake. The same transaction materializes an immutable retained terminal
+frontier and a one-to-one monotonic lifecycle flag. Partial active and queued
+indexes exclude the flagged row, while queue-order and start-frontier validation
+continue to recognize it as the immediate terminal predecessor of later
+accepted-input or delegation-wake work. Runtime eligibility therefore excludes
+the proof without rewriting the child's retained physical execution evidence.
+Provider observation commit rereads the proof under the session lock and
+discards a late response instead of persisting it. Transcript reads join the
+proof to its exact outcome event and expose the typed logical terminal state.
 
 The scheduler sweep treats a deliverable foreground result, an undelivered
 background result, and a pending message inbox as durable hints. Every result
 and message commit also writes exactly one distinct parent- or recipient-scoped
 `delegation_wake` outbox event in the same transaction. A consumer may ignore
-the nudge while that session is already active. When a foreground wait is
+the wake while that session is already active. When a foreground wait is
 registered after its result and original wake already committed, the wait
 transaction writes a fresh result wake keyed by the awaiting request and ordered
-after the wait update. The ordinary nudge remains best effort and the durable
+after the wait update. The ordinary wake remains best effort and the durable
 predicate is authoritative after restart. A foreground hit does not try to
 activate a new turn: it locks and reconstitutes the exact `awaiting_child` tool
 batch, consumes the matching typed result into a `DelegationResult` semantic
@@ -1650,8 +1648,7 @@ frontier.
 
 Committed client-observable transitions become update events only through the
 transactional-outbox family (INV-032 mechanism; observation semantics are
-protocol scope). The authoritative typed-record inventory is the implemented
-storage below plus the delegation-stack extension identified inline:
+protocol scope). The typed-record inventory is:
 
 - the baseline `outbox_event` header and delegation-owned
   `delegation_outbox_event` header (both carrying allocator-owned
@@ -1673,20 +1670,20 @@ storage below plus the delegation-stack extension identified inline:
   typed table authenticates its header through the four-column key;
   `command_settled_outbox_event` uses the three-column
   `(event_sequence, event_kind, storage_version)` key so a null session member
-  cannot switch the proof off. Deferred triggers require exactly one typed
-  record per header, matching the header's disposition for `turn_terminal`. Both
-  header families share the one allocator and delivery prefix, so their
-  committed events form one gap-free global sequence. A runner-transition record
-  carries the affected runner, the positive placement revision, the sandbox
-  profile, one closed transition state, and the relocation facts that state
-  requires, so a follower learns of loss, suspicion, recovery, replacement,
-  working-directory relocation, and abandonment from the same family. The family
-  is deliberately shaped for extension: a later runner fact — another relocation
-  shape, or runner metadata and attributes — adds a state and its columns to
-  this one record kind rather than a second event kind, so a follower already
-  decoding the family needs no new kind to keep hearing runner news. Extension
-  stays version-gated rather than silent: an addition every existing decoder can
-  ignore leaves the kind-scoped `storage_version` alone, while a new closed
+  cannot disable that authentication. Deferred triggers require exactly one
+  typed record per header, matching the header's disposition for
+  `turn_terminal`. Both header families share the one allocator and delivery
+  prefix, so their committed events form one gap-free global sequence. A
+  runner-transition record carries the affected runner, the positive placement
+  revision, the sandbox profile, one closed transition state, and the relocation
+  facts that state requires, so a follower learns of loss, suspicion, recovery,
+  replacement, working-directory relocation, and abandonment from the same
+  family. The family extends by adding states: a later runner fact — another
+  relocation shape, or runner metadata and attributes — adds a state and its
+  columns to this one record kind rather than a second event kind, so a follower
+  already decoding the family needs no new kind to receive later runner
+  transitions. Extension is version-gated: an addition every existing decoder
+  can ignore leaves the kind-scoped `storage_version` alone, while a new closed
   transition state or a newly required column advances it, and a decoder that
   predates the advance rejects the record as `Unsupported` instead of coercing
   an unknown state onto one it knows. Tool-batch transition records carry the
@@ -1699,9 +1696,8 @@ storage below plus the delegation-stack extension identified inline:
   dedicated call, exact positive through position, appended summary, and result
   frontier.
 
-**Session-delegation foundation proposal.** Migration `202608020018` in the full
-delegation stack adds one version-one `delegation_outbox_event` header and one
-version-one `delegation_update_outbox_event` typed table, keyed by its
+Migration `202608020018` adds one version-one `delegation_outbox_event` header
+and one version-one `delegation_update_outbox_event` typed table, keyed by its
 `event_sequence` header foreign key and closed `update_kind`. Its common subject
 is the exact `spawning_request_id`; the shape-specific columns carry
 `child_session_id` and relationship for `child_spawned`, `await_request_id`,
@@ -1733,7 +1729,7 @@ recipient. A stopped or cancelled lifecycle disposition caused by a parent
 cascade is emitted on both the parent and child streams. Every result and
 message appends exactly one distinct `delegation_wake` record for that same
 recipient in the same transaction, even when the recipient is already active and
-may ignore the nudge; the internal wake subject does not stand in for the
+may ignore the wake; the internal wake subject does not stand in for the
 client-visible result or message update. A guarded transition that changes no
 durable state appends no update. State without its promised update, or an update
 without its state, is therefore unrepresentable.
@@ -1812,12 +1808,11 @@ appends one `runner_state_transition` per affected session in the same
 transaction that commits it: initial pin, first missed heartbeat, recovery
 before durable loss, loss before and after pin, owner replacement,
 working-directory relocation, and abandonment. Because a client cannot otherwise
-learn that its session lost its runner, this append is not optional bookkeeping:
-a loss or replacement committed without its event is a defect the deferred
-one-record-per-header trigger is there to catch. A guarded transition that
-changes zero rows appends zero events. Why: writing the event in the committing
-transaction makes the dual-write failure (state without event, or event without
-state) unrepresentable.
+learn that its session lost its runner, a loss or replacement committed without
+its event is a defect, which the deferred one-record-per-header trigger catches.
+A guarded transition that changes zero rows appends zero events. Why: writing
+the event in the committing transaction makes the dual-write failure (state
+without event, or event without state) unrepresentable.
 
 The public `OutboxDispatcher` is the storage-side single-consumer seam. It locks
 the delivery singleton, decodes exactly the next typed event, invokes a
@@ -1825,21 +1820,20 @@ synchronous consumer while retaining the lock, and advances and commits the
 cursor only after consumer acceptance. Consumer retry or exit before the commit
 request leaves the prefix unchanged for redelivery. A lost commit response is
 resolved by the next locked cursor read: a committed advance proceeds, while a
-rolled-back advance redelivers. The injected rolled-back-commit PostgreSQL test
-enforces ordered at-least-once behavior. Before offering a record or reporting
-idle, the dispatcher proves that no header exceeds the allocator cursor. An
-activation must agree with the durable turn's active current attempt or retained
-terminal attempt; a model-call transition must be reachable from the
-authoritative monotonic call state, with an exact disposition match at terminal;
-and failed, completed, refused, cancelled, and reconciliation-required records
-must agree with the durable turn, terminal frontier, semantic marker where
-present, and terminal model call or tool attempt where present. A
-reconciliation-required event carries exactly one of those two operation
-references. A runner-state-transition record must agree with the retained
-immutable placement record at exactly the revision the record itself names, and
-with the placement entry when its transition installed one; it is never required
-to equal the session's current placement state, and historical runner
-transitions remain dispatchable after their placement advances exactly as
+rolled-back advance redelivers. Delivery is therefore ordered and at-least-once.
+Before offering a record or reporting idle, the dispatcher proves that no header
+exceeds the allocator cursor. An activation must agree with the durable turn's
+active current attempt or retained terminal attempt; a model-call transition
+must be reachable from the authoritative monotonic call state, with an exact
+disposition match at terminal; and failed, completed, refused, cancelled, and
+reconciliation-required records must agree with the durable turn, terminal
+frontier, semantic marker where present, and terminal model call or tool attempt
+where present. A reconciliation-required event carries exactly one of those two
+operation references. A runner-state-transition record must agree with the
+retained immutable placement record at exactly the revision the record itself
+names, and with the placement entry when its transition installed one; it is
+never required to equal the session's current placement state, and historical
+runner transitions remain dispatchable after their placement advances exactly as
 historical Prepared and InFlight transition records remain dispatchable after
 their call advances. Why: delivery is one ordered singleton cursor, so a
 validation that demanded current state would let any later committed transition
@@ -1856,20 +1850,20 @@ ownership, polling, fan-out, and client observation semantics are owned by
 [process-protocol](process-protocol.md).
 
 **Committed unimplemented functionality — OAuth refresh staging.** No present
-migration or repository stores daemon-owned OAuth material. Its implementing
-child must supply three durable shapes and no interpretation of them: a
-per-generation `refresh_in_progress` marker that exactly one transaction can
-win, an atomic replace-and-clear that in one commit rewrites the refresh token,
-rewrites or retains the identity token, and clears the marker, and a reread of a
-generation that reports whether a replacement committed and whether the marker
-is still set. A generation stores the identity token beside its refresh token
-and under the same protections, because dispatch requires one on every
-invocation while a refresh happens about once per access-token lifetime, so a
-generation that held only the refresh token would leave the first preparation
-after any restart with no source for it. The replace shape must express both an
-exchange that returned a new identity token and one that returned none, without
-a second commit for either and without a state in which a new refresh token is
-durable beside an identity token from another exchange.
+migration or repository stores daemon-owned OAuth material. Storage for it must
+supply three durable shapes and no interpretation of them: a per-generation
+`refresh_in_progress` marker that exactly one transaction can win, an atomic
+replace-and-clear that in one commit rewrites the refresh token, rewrites or
+retains the identity token, and clears the marker, and a reread of a generation
+that reports whether a replacement committed and whether the marker is still
+set. A generation stores the identity token beside its refresh token and under
+the same protections, because dispatch requires one on every invocation while a
+refresh happens about once per access-token lifetime, so a generation that held
+only the refresh token would leave the first preparation after any restart with
+no source for it. The replace shape must express both an exchange that returned
+a new identity token and one that returned none, without a second commit for
+either and without a state in which a new refresh token is durable beside an
+identity token from another exchange.
 
 What those facts mean — which outcome each combination selects, which failures
 may clear the marker without changing the token, how many attempts a generation
@@ -1893,16 +1887,16 @@ commit. Under those locks it re-reads its memberships; if the set has grown it
 releases, repeats with the enlarged set, and proceeds only once the read taken
 under the locks agrees with the set it locked.
 
-Two properties of that shape are load-bearing, and neither survives a simpler
-one. Including the provisioned row in the *same* ordered acquisition is what
-avoids a cycle: taking one's own row first and only then the discovered
-co-members lets two concurrent provisionings of co-members A and B each hold
-their own row while waiting for the other's, which the database resolves by
-aborting one — a deadlock between two provisionings that need not even share an
-account. Re-reading the memberships under the locks is what closes the other
-direction: a profile currently in no revision would otherwise lock only itself,
-while a concurrent interning that first makes it a co-member commits, and the
-provisioning then stores a co-member's account identity having never seen it.
+Two properties of that shape are required, and a simpler shape loses both.
+Including the provisioned row in the *same* ordered acquisition is what avoids a
+cycle: taking one's own row first and only then the discovered co-members lets
+two concurrent provisionings of co-members A and B each hold their own row while
+waiting for the other's, which the database resolves by aborting one — a
+deadlock between two provisionings that need not even share an account.
+Re-reading the memberships under the locks prevents the other race: a profile
+currently in no revision would otherwise lock only itself, while a concurrent
+interning that first makes it a co-member commits, and the provisioning then
+stores a co-member's account identity having never seen it.
 
 The transaction that interns a pool-policy revision acquires the profile row of
 every member it is about to freeze in that same global order. Every transaction
@@ -2047,10 +2041,10 @@ surface provides it.
 
 **Committed unimplemented functionality — availability-successor storage.** No
 present migration, repository operation, or reconstitution path stores an
-availability successor or credential-availability wait. Its implementing child
-must give a predecessor-linked attempt a closed origin distinct from the
-tool-loop continuation origin and atomically persist its predecessor model call,
-the qualifying availability cause, and the typed non-acceptance evidence that
+availability successor or credential-availability wait. Storage for them must
+give a predecessor-linked attempt a closed origin distinct from the tool-loop
+continuation origin and atomically persist its predecessor model call, the
+qualifying availability cause, and the typed non-acceptance evidence that
 authorized substitution. That origin covers only a substitution authorized by a
 predecessor call. A wait entered before any call was issued — because a bounded
 member was full, or because every member was already excluded — has no such
@@ -2190,15 +2184,14 @@ surface provides it.
   owns retention of both the provider-offered and repository-committed outcomes.
 - Deferred outbox retention, pruning, and multiple-daemon fan-out are cataloged
   in [open questions](../open-questions.md#protocols-and-persistence).
-- Attempt continuation is presently admitted only for the tool-loop
-  yield/approval path. The availability-successor producer described above is
-  committed but unimplemented; no current producer can construct that second
+- Attempt continuation is admitted only for the tool-loop yield/approval path.
+  The availability-successor producer described above is committed but
+  unimplemented; no current producer can construct that second
   predecessor-linked shape.
 - Frontier lineage checks admit `none` and checked imported-frontier ancestry;
   native `SingleSource` fork ancestry remains unimplemented.
-- The aggregate-map rows for model calls and the tool loop have landed; provider
-  evidence, authority transfers, and fatal cancellation intent are not yet in
-  the schema.
+- The schema has the aggregate-map rows for model calls and the tool loop but
+  not provider evidence, authority transfers, or fatal cancellation intent.
 - Command-handling operator classification covers the tool-loop repository; the
   other command families do not yet implement `ClassifyOperatorFailure`.
 - Database-role separation remains a deployment choice; migration invocation
