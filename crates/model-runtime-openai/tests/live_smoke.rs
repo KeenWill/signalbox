@@ -439,8 +439,7 @@ fn is_the_refusal_downgrade_kind(kind: ProviderErrorKind) -> bool {
 /// Two questions, answered separately. *Which* violation is this — still the
 /// detail, because the loss vocabulary has no typed way to name the deferred
 /// unrecognized-finish verdict; see `OUTPUT_CEILING_VIOLATION_DETAIL`. And *was
-/// a tool call involved* — now `tool_calls`, which is what this PR added and
-/// what the suffix on that detail used to encode.
+/// a tool call involved* — `tool_calls`.
 ///
 /// Both are needed. Dropping the detail admits any stream defect that follows a
 /// `length` finish before `[DONE]` — a record after the final usage chunk, a

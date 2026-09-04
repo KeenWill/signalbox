@@ -2045,9 +2045,7 @@ impl EffectivePrivilege {
     /// skips the shadow and finds the runnable file in the later directory. As
     /// root the shadow is genuinely executable, so returning it is correct rather
     /// than a defect — the case has a real answer in both environments, which
-    /// is why the test asserts one instead of returning early. It previously
-    /// returned early under root and reported success without creating a
-    /// fixture or running an assertion at all.
+    /// is why the test asserts one instead of returning early.
     fn other_only_resolution(self, candidates: OtherOnlyCandidates) -> std::path::PathBuf {
         match self {
             Self::Root => candidates.shadow,

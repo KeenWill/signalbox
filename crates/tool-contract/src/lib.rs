@@ -909,7 +909,7 @@ pub mod __private {
         }
     }
 
-    /// Converts an owned schema object into the legacy schemars bridge.
+    /// Converts an owned schema object into the schemars bridge the derive macro emits.
     #[expect(
         clippy::expect_used,
         reason = "ToolSchema implementations produce object-valued JSON Schema fragments"
