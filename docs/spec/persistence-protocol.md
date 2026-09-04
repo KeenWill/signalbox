@@ -277,6 +277,9 @@ Container-backed integration tests (`postgres-integration` feature, ignored by
 default, failing loudly when Docker is absent) exercise the real constraints,
 triggers, locks, and races described below against a pinned Postgres image.
 
+Migration `202609020021_watchdog_durability.sql` adds the durable evidence and
+scan ordinal used by both turn-liveness watchdog predicates.
+
 Migration `202608210400_convergence_sweep.sql` uses the reserved `2026082104xx`
 block to add the mutable `convergence_sweep_target` scheduler projection, the
 append-only `convergence_sweep_event` audit, and the

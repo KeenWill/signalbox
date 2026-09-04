@@ -2146,6 +2146,8 @@ fn expired_pass_recovery_retry_delay(
     match error {
         TurnLivenessRepositoryError::TerminalizationLockUnavailable(_) => policy.lock_retry_delay,
         TurnLivenessRepositoryError::Inventory(_)
+        | TurnLivenessRepositoryError::Observation { .. }
+        | TurnLivenessRepositoryError::ObservationCorruption(_)
         | TurnLivenessRepositoryError::TerminalizationDatabase { .. }
         | TurnLivenessRepositoryError::Terminalization(_) => policy.conservative_retry_delay,
     }

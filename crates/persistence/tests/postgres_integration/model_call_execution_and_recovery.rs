@@ -272,8 +272,8 @@ async fn inv007_inv009_inv012_model_call_writers_guard_credential_before_outbox(
 /// a distinct successor on member B; exhausting B is a typed pool cause.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn quota_switch_now_rotates_and_pool_exhaustion_stays_distinct() -> Result<(), Box<dyn Error>>
-{
+async fn configured_quota_failure_records_pool_rotation_action_end_to_end()
+-> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7710_u128;
     let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
@@ -2744,7 +2744,7 @@ async fn s03_inv014_prepared_model_call_is_resumable_without_tool_round()
 /// and replay changes neither.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issued_model_calls()
+async fn s03_s04_inv006_inv014_inv034_startup_recovery_leaves_zero_failed_turns()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
     let prepared = checkpoint_restart_model_call(&pool, 0x2000, false).await?;
@@ -2863,6 +2863,23 @@ async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issue
 
     let first = scan.execute().await?;
     assert_eq!(first.recovered_turn_count(), 1);
+    let startup_recovery_failed_turns: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM turn_lifecycle
+          WHERE session_id = ANY($1::uuid[])
+            AND terminal_disposition_kind = 'failed'",
+    )
+    .bind(vec![
+        prepared.session.into_uuid(),
+        issued.session.into_uuid(),
+        stopped.session.into_uuid(),
+    ])
+    .fetch_one(&restarted_pool)
+    .await?;
+    assert_eq!(
+        startup_recovery_failed_turns, 0,
+        "startup recovery leaves no failed turn in this call-aware fixture"
+    );
 
     let prepared_state: (
         String,

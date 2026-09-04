@@ -11374,15 +11374,32 @@ pub enum StaleTurnOutcome {
     Superseded,
 }
 
+pub enum TurnLivenessGuardKind {
+    Quiescent,
+    SlotHeld,
+}
+impl TurnLivenessGuardKind {
+    pub const fn as_str(self) -> &'static str;
+}
+
+pub struct DurableTurnLivenessObservation { /* private */ }
+impl DurableTurnLivenessObservation {
+    pub const fn new(candidate: StaleTurnCandidate, ordinal: NonZeroU64) -> Self;
+    pub const fn candidate(self) -> StaleTurnCandidate;
+    pub const fn ordinal(self) -> NonZeroU64;
+}
+
 pub struct TurnLivenessLedger { /* private */ }
 impl TurnLivenessLedger {
-    pub fn new(bound: StaleActiveTurnBound) -> Self;
+    pub const fn new(
+        bound: StaleActiveTurnBound,
+        scan_interval: TurnLivenessScanInterval,
+    ) -> Self;
     pub const fn bound(&self) -> StaleActiveTurnBound;
-    pub fn watched_turn_count(&self) -> usize;
+    pub const fn scan_interval(&self) -> TurnLivenessScanInterval;
     pub fn reconcile(
-        &mut self,
-        quiescent: &[StaleTurnCandidate],
-        now: Instant,
+        self,
+        observations: &[DurableTurnLivenessObservation],
     ) -> Box<[StaleTurnCandidate]>;
 }
 ```
@@ -13533,6 +13550,6 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                                |
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 10 (incl. 3 traits)              |
-| application: turn_liveness                         | 14                               |
+| application: turn_liveness                         | 16                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **495 (+34 free fn)**            |
+| **signalbox-application total**                    | **497 (+34 free fn)**            |

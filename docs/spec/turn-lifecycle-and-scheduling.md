@@ -3,6 +3,8 @@
 The injection contract — steering accepted while stopping, watchdog
 reclassification, closure at a committed session terminal, and settlement
 receipts — is verified against PR #1483 (`agent/lifecycle-t7-injection`).
+Durable watchdog observations and the non-advancing first post-restart scan are
+verified against this PR (`agent/lifecycle-t9-watchdog`).
 
 The scheduler occupancy ceiling and metrics, daemon-owned ambiguous-call
 reconciliation, and outer slot-held watchdog coverage were verified against this
@@ -739,9 +741,9 @@ partially on the live rows those checks name, so what is indexed is bounded by
 how much is happening at once rather than by how much has ever happened. No part
 of one inventory read scans a history. The staleness bound is also refused below
 whole-second precision, so the bound an audit line reports is exactly the bound
-in force. That ledger is process-local and carries no authority: losing it to a
-restart costs one more bound before a wedged turn is reached, which is the
-direction that cannot end live work.
+in force. The ledger persists commit-ordered evidence and scan ordinals. Its
+first complete observation after restart preserves an existing ordinal; later
+observations advance it only after the configured scan interval.
 
 **Coverage.** One scan observes the whole quiescent population, so the bound is
 a property of the binary rather than of how many sessions happen to be
@@ -812,8 +814,14 @@ due again on a later scan, waiting rather than being forgotten.
 **Deployment bounds.** The required daemon configuration owns the staleness
 bound and scan interval. Either may be `"none"`: no scan interval leaves the
 liveness task idle until shutdown, while no staleness bound leaves automatic
-ambiguity reconciliation active without stale-turn terminalization. Finite
-values pass checked constructors that reject zero, subsecond precision, and an
+ambiguity reconciliation active without stale-turn terminalization. At startup,
+either disabled value clears both guards' observation rows. When the scan
+interval remains enabled, a failed clear makes no decision and retries at the
+next scan before ambiguity reconciliation. Without a scan interval, the clear
+waits for the first positive finite automatic-reconciliation backoff (base, then
+cap) before retrying until it succeeds or shutdown arrives; when neither is
+finite, it reports the failure once and idles without retrying. Finite values
+pass checked constructors that reject zero, subsecond precision, and an
 unrepresentable timer range; no compiled policy value remains.
 
 **Terminalization.** A due turn ends through the same committed failed-turn
