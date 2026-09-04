@@ -1,16 +1,14 @@
 # Model and session settings
 
-This page is the foundation proposal at the bottom of the model-settings
-implementation stack. It specifies the cross-crate contract for model reasoning,
-speed, and service-tier settings; the per-model capability catalog; durable
-settings provenance and adjustment events; provider-adapter translation; and the
-local process representation. The implementing child pull requests make these
-paragraphs current behavior before the stack merges.
+This page specifies the cross-crate contract for model reasoning, speed, and
+service-tier settings; the per-model capability catalog; durable settings
+provenance and adjustment events; provider-adapter translation; and the local
+process representation.
 
 Sampling controls outside the existing output-token, temperature, top-p, and
 stop-sequence fields are not part of this contract. Context-window and
-compaction controls remain a separate slice. Tool, Git, web, repository-watch,
-delegation, and Swift user-interface implementation are also outside this stack.
+compaction controls are outside this contract. Tool, Git, web, repository-watch,
+delegation, and Swift user-interface implementation are also outside it.
 
 ## Setting vocabulary
 
@@ -205,21 +203,18 @@ per-operation settings document, and supplies `CLAUDE_CODE_MAX_OUTPUT_TOKENS`
 through the adapter's cleared-and-allowlisted child environment. Temperature,
 top-p, and stop sequences remain advisory. It rejects every service tier.
 
-No adapter logs. Tests use synthetic provider values; live smoke tests remain
-ignored and are not part of this stack's validation.
+No adapter logs.
 
 ## Local process representation
 
-Protocol version one adds a capability-catalog list request and ordered item
+Protocol version one includes a capability-catalog list request and ordered item
 stream, complete settings on creation/defaults reads and receipts, provenance-
 preserving overrides on defaults replacement and origin-producing input, typed
 unsupported-setting results, and the two durable settings events above. A
 transcript snapshot completeness is owned by
 [process-protocol](process-protocol.md#transcript-snapshots), and the
 legacy-null cutover is owned by
-[persistence-protocol](persistence-protocol.md#relational-representation). The
-protocol freeze condition has not occurred, so the same-tree protocol changes in
-place.
+[persistence-protocol](persistence-protocol.md#relational-representation).
 
 The capability projection never exposes a mapped fast serving identity. Client
 choices name only the durable direct selection and supported setting values.
