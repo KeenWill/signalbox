@@ -85,12 +85,13 @@ edited.
 
 A migration becomes immutable as soon as its version is recorded in the
 `_sqlx_migrations` table of any database whose history must remain continuous:
-every deployed database, and every recording once the migration is on `main`.
-Correct an already-recorded migration with a new forward migration; never edit,
-replace, or renumber the recorded migration file. Two exceptions exist. A
-rehearsal installation's recording of a migration not yet on `main` whose
-recorded form fails validation on fresh databases — such a form has no correct
-forward continuation, so the file is corrected before it reaches `main` and the
+every deployed database, and every recording once the migration's pull request
+merges, whether into its stack branch or into `main`. Correct an
+already-recorded migration with a new forward migration; never edit, replace, or
+renumber the recorded migration file. Two exceptions exist. A rehearsal
+installation's recording of a migration not yet on `main` whose recorded form
+fails validation on fresh databases — such a form has no correct forward
+continuation, so the file is corrected before it reaches `main` and the
 rehearsal installation's ledger row is corrected at its next deployment as a
 documented step, never silently. And a chain collapse: while there is exactly
 one deployment and no release, the whole recorded set may be replaced by a
@@ -122,6 +123,14 @@ only during recovery, so restorability is part of the schema's contract.
 A migration added to the set carries a prefix strictly greater than every prefix
 already in the set, because `_sqlx_migrations` keys applied migrations by
 version, so a repeated prefix collides and a lower one applies out of order.
+
+The bottom pull request of a stack that will add migrations declares a reserved
+prefix block, a date plus a slot range, in its description, and sibling stacks
+pick disjoint blocks. A stack holding a reserved block does not renumber its
+migrations after a base merges while the reserved prefix still exceeds the
+highest prefix on `main`: the ordering guarantee is checked against the stack's
+ultimate `main` merge target, and within a stack each child pull request's
+prefix exceeds every prefix its ancestors add.
 
 Container-backed integration tests (`postgres-integration` feature, ignored by
 default, failing when Docker is absent) exercise the real constraints, triggers,
