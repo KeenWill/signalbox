@@ -1119,14 +1119,13 @@ through the requested page size of `runner_operation_failure` and
 ordinary first request carries page size 100 and null `after`; a nonnull
 `next_after` is copied unchanged into the next request. The terminal failure and
 leak counts cover this page, while `runner_count` covers the statuses on this
-page. A terminal null cursor proves that traversal reached the end. The
-repeating shape is deliberate: a daemon with several enrolled runners needs no
-new response vocabulary. Each status carries issued request, runner, enrollment,
-and registration identities, connection state (`connected`, `suspect`, or
-`lost`), registration revision, advertised capability classes, tool names,
-credential-profile names, repository entries — each naming its repository key
-and optional credential-profile name, with the configuration meaning of absence
-owned by
+page. A terminal null cursor proves that traversal reached the end. A daemon
+with several enrolled runners needs no new response vocabulary. Each status
+carries issued request, runner, enrollment, and registration identities,
+connection state (`connected`, `suspect`, or `lost`), registration revision,
+advertised capability classes, tool names, credential-profile names, repository
+entries — each naming its repository key and optional credential-profile name,
+with the configuration meaning of absence owned by
 [runner credential lifecycle](configuration-and-credentials.md#runner-credential-lifecycle)
 — workspace capabilities, and sandbox profiles. Each `runner_operation_failure`
 names its runner, the refused operation's correlation, one closed
@@ -1299,23 +1298,23 @@ verdict remains admissible beside wholly clean carried evidence. The base branch
 is what separates the two converged verdicts: a merge-ready verdict is settled
 only against `main`, an internally-converged verdict only against another
 branch, and an unconverged verdict against either. The seal takes no such
-pairing, because it is retained from the assessment that earned it and outlives
-later ones, so a pull request retargeted after sealing carries it beside a base
-branch that verdict could not have been settled against. Each non-green check
-name is canonical padded base64 of its exact UTF-8 bytes on the wire, keeping
-the complete admitted 10,000-name inventory below the frame cap even under
-worst-case JSON escaping. A pending-clearance row carries repository and pull
-request, current and reviewed heads, review identity, reviewer, and whole-second
-pending duration. The structured identifiers these rows carry are admitted by
-grammar rather than by width alone, each mirroring the domain constructor and
-durable check that produced it: a repository is a canonical lowercase
-`namespace/name` slug whose segments are neither empty nor a bare dot or double
-dot, a rule identity is ASCII letters, digits, hyphens, underscores, and dots, a
-branch name follows git's ref-name rules, and a reviewer is a lowercase login
-with an optional App-bot suffix. A check name and a review node identity remain
-unstructured text, which is all their durable counterparts require. Every
-duration is clamped nonnegative and sampled against the database transaction
-timestamp, not a client clock.
+pairing, because it is retained from the assessment that produced it and
+outlives later ones, so a pull request retargeted after sealing carries it
+beside a base branch that verdict could not have been settled against. Each
+non-green check name is canonical padded base64 of its exact UTF-8 bytes on the
+wire, keeping the complete admitted 10,000-name inventory below the frame cap
+even under worst-case JSON escaping. A pending-clearance row carries repository
+and pull request, current and reviewed heads, review identity, reviewer, and
+whole-second pending duration. The structured identifiers these rows carry are
+admitted by grammar rather than by width alone, each mirroring the domain
+constructor and durable check that produced it: a repository is a canonical
+lowercase `namespace/name` slug whose segments are neither empty nor a bare dot
+or double dot, a rule identity is ASCII letters, digits, hyphens, underscores,
+and dots, a branch name follows git's ref-name rules, and a reviewer is a
+lowercase login with an optional App-bot suffix. A check name and a review node
+identity remain unstructured text, which is all their durable counterparts
+require. Every duration is clamped nonnegative and sampled against the database
+transaction timestamp, not a client clock.
 
 Identifiers are canonical UUID strings. Request identities, ordinal versions,
 indices, counts, and outbox cursors are canonical decimal strings, preserving
@@ -1530,8 +1529,8 @@ execution names a request whose state is `awaiting_approval`, `denied`,
 proposal-ordered request has approval but no physical attempt yet. Durable equal
 replay is checked first against the exact stored operation and returns its
 original receipt without requiring a still-live execution attempt. The
-credential-administration operations this page adds extend that same closed
-inventory, as `rejected` details rather than new top-level codes: a
+credential-administration operations extend that same closed inventory, as
+`rejected` details rather than new top-level codes: a
 `clear_credential_exclusion` rejection admits
 `unknown_credential_exclusion { target }`, carrying the exact closed target
 object the request named, and
@@ -1541,7 +1540,7 @@ canonical decimal string. A `read_credential_pool_policy` rejection admits
 `unknown_pool_policy { session_id, turn_id, pool_policy_id }`. Each is a
 rejection detail because each names a refused precondition on an otherwise
 well-formed request, which is exactly what that closed set is for; none is a
-transport or framing fault, so none earns a top-level code.
+transport or framing fault, so none has a top-level code.
 
 `spawn_session` additionally admits
 `delegation_spawn_conflict { tool_request_id }` for a non-equal replay and
@@ -1723,12 +1722,11 @@ Conversation import carries no durable command identity because exact
 format-and-source replay already resolves through the import digest. Both the
 single-shot request and chunked commit pass the same complete format and source
 to that idempotent operation. The typed, content-silent conversion and size
-refusals above map to `invalid_request`. The current repository error does not
-retain the failing database phase, so every import database error maps
-conservatively to `commit_ambiguous`; retrying the exact format and bytes
-returns either the first inserted identity or the existing identity. Import
-assembly allocation exhaustion maps to `unavailable`; integrity failures map to
-`internal`.
+refusals above map to `invalid_request`. The repository error does not retain
+the failing database phase, so every import database error maps conservatively
+to `commit_ambiguous`; retrying the exact format and bytes returns either the
+first inserted identity or the existing identity. Import assembly allocation
+exhaustion maps to `unavailable`; integrity failures map to `internal`.
 
 Errors contain no database URL, socket path, credential path or value, SQL,
 caller content, or provider payload.
@@ -1781,11 +1779,10 @@ One logical snapshot is a bounded message sequence sharing the request identity:
 Usage rows are ordered first by the owning turn's acceptance position and then
 by model-call UUID. The native client models both usage rows and the mandatory
 model-calls-end boundary, validates their contiguous indices, identities, and
-count, and retains usage rows in its bounded snapshot record set without
-presenting the former false unknown-frame diagnostic. Each row carries
-contiguous zero-based `model_call_index`, `turn_id`, `model_call_id`, closed
-`usage_provenance` (`reported` or `estimated`), and a required `usage` object
-with required-nullable `input_tokens`, `output_tokens`,
+count, and retains usage rows in its bounded snapshot record set. Each row
+carries contiguous zero-based `model_call_index`, `turn_id`, `model_call_id`,
+closed `usage_provenance` (`reported` or `estimated`), and a required `usage`
+object with required-nullable `input_tokens`, `output_tokens`,
 `cache_creation_input_tokens`, and `cache_read_input_tokens`. A null field means
 that axis was not supplied; a present zero is the canonical decimal string
 `"0"`. The required-nullable `cost` member is null when no derivation is
@@ -1885,8 +1882,7 @@ The tool-bearing vocabulary adds
 where the attempt count and operator flag have the same durable five-attempt
 meaning as the model-call recovery variant, and
 `tool_reconciliation_required { terminal_frontier_id, terminal_attempt_id, terminal_tool_attempt_id }`.
-The distinct tool variant avoids changing the older `reconciliation_required`
-object. The runner-bearing vocabulary additionally admits
+The runner-bearing vocabulary additionally admits
 `active_awaiting_runner_recovery { runner_id, placement_revision, tool_attempt_id }`,
 where `tool_attempt_id` is null when no physical tool attempt owns the loss. The
 snapshot-level runner object remains authoritative for queued and otherwise
