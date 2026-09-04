@@ -17333,6 +17333,14 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn a_released_start_requests_an_eligibility_pass() {
+        assert!(lifecycle_command_needs_eligibility_nudge(
+            &SessionLifecycleApplication::StartReleased,
+            &SessionLifecycleOperation::ReleaseStart,
+        ));
+    }
+
     impl super::ClassifyConversationImportError for io::Error {
         fn disposition(self) -> super::ConversionFailureDisposition {
             super::ConversionFailureDisposition::Rejected(super::import_evidence(

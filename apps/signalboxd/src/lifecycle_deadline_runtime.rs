@@ -1,6 +1,6 @@
 //! Periodic application of durable session admission and waiting deadlines.
 
-use signalbox_application::TurnLivenessScanInterval;
+use signalbox_application::ReconciliationSweepInterval;
 use signalbox_persistence::session_deadline::{
     PostgresSessionDeadlineRepository, SessionDeadlineBounds, SessionDeadlinePassOutcome,
 };
@@ -11,18 +11,18 @@ use tokio::{
     time::{MissedTickBehavior, interval},
 };
 
-/// Core deadline expiry on the existing liveness cadence.
+/// Core deadline expiry on the existing reconciliation cadence.
 #[derive(Clone, Debug)]
 pub struct LifecycleDeadlineRuntime {
     repository: PostgresSessionDeadlineRepository,
-    scan_interval: Option<TurnLivenessScanInterval>,
+    scan_interval: Option<ReconciliationSweepInterval>,
 }
 
 impl LifecycleDeadlineRuntime {
     /// Uses the durable session deadline store and existing configured cadence.
     pub const fn new(
         pool: PgPool,
-        scan_interval: Option<TurnLivenessScanInterval>,
+        scan_interval: Option<ReconciliationSweepInterval>,
         bounds: SessionDeadlineBounds,
     ) -> Self {
         Self {
