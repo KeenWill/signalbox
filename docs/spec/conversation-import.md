@@ -72,11 +72,10 @@ identifiers make the header value `NULL`. The nullable byte value has a
 non-unique equality index so callers can group every exact snapshot carrying the
 same evidence. Checked loading rejects a non-null header value that disagrees
 with the source-session evidence reconstituted from its entries; `NULL` remains
-unknown, including for rows inserted before the column existed. It never
-participates in the source digest, the `imported_conversation` identity, or the
-unique source-identity constraint. The importer never derives this evidence or
-any identity from a filename, source path, neighboring record, or import-time
-context.
+unknown. It never participates in the source digest, the `imported_conversation`
+identity, or the unique source-identity constraint. The importer never derives
+this evidence or any identity from a filename, source path, neighboring record,
+or import-time context.
 
 Why: retrying or copying the same source must not duplicate history, while an
 append or edit cannot mutate the snapshot that an existing session already
@@ -236,8 +235,8 @@ The closed normalized content vocabulary is:
   array.
 
 An absent field is typed absence, never a placeholder string, empty object,
-guessed tool name, or summary. Exact raw bytes back every normalized variant,
-but raw preservation is not permission to drop a supported semantic field.
+guessed tool name, or summary. Exact raw bytes back every normalized variant;
+normalization retains every supported semantic field regardless.
 
 Why: maximum-fidelity normalization makes later rendering choices reversible,
 while a source-neutral algebra keeps provider JSON outside the domain.
@@ -270,10 +269,10 @@ has completely parsed and normalized the source, the converter invokes that
 callback exactly once immediately before emitting each normalized entry, in
 global physical entry order; it neither preallocates identities nor invokes the
 callback for an entry it does not emit. The callback's return type is an
-identity, not an option or result, so exhaustion is deliberately unrepresentable
-at this seam: a caller must provide one identity for every invocation. A
-duplicate identity or any later aggregate failure rejects the complete
-conversion without retrying or reusing consumed candidates.
+identity, not an option or result, so exhaustion is unrepresentable at this
+seam: a caller must provide one identity for every invocation. A duplicate
+identity or any later aggregate failure rejects the complete conversion without
+retrying or reusing consumed candidates.
 
 The converter returns one completely checked domain aggregate or a typed
 conversion error. The application calls the append-only store once only after
@@ -293,18 +292,17 @@ domain or application crates.
 Blob-bearing import conversion is committed unimplemented functionality: no
 present surface supplies a blob-backed source directly to a converter. The
 compatibility constraint is that such a path streams from the blob substrate
-through conversion without materializing the whole blob. The existing text-file
-and chunked socket paths remain the bounded whole-source conversion described
-below; this future streaming seam does not reinterpret an existing converter
-version.
+through conversion without materializing the whole blob. The text-file and
+chunked socket paths perform the bounded whole-source conversion described
+below; this streaming seam does not reinterpret an existing converter version.
 
 ## Operational surface
 
-The user terminal preserves the single-file form,
-`signalbox import --format <claude-code|codex> <file>`, and adds the explicit
-directory form, `signalbox import --format <claude-code|codex> --scan <dir>`.
-Exactly one file or scan directory is required. Both forms keep format selection
-explicit: `claude-code` selects `ClaudeCodeSessionJsonlV2`, and `codex` selects
+The user terminal provides the single-file form,
+`signalbox import --format <claude-code|codex> <file>`, and the directory form,
+`signalbox import --format <claude-code|codex> --scan <dir>`. Exactly one file
+or scan directory is required. Format selection is explicit in both forms:
+`claude-code` selects `ClaudeCodeSessionJsonlV2`, and `codex` selects
 `CodexRolloutJsonlV1`. No source path is inferred from an environment or fixed
 home-directory convention.
 
@@ -320,9 +318,9 @@ skipped instead of blocking the scan. Traversal selects only regular files whose
 extension is exactly lowercase `.jsonl`, sorts their full paths, and imposes no
 candidate-count cap. A traversal failure aborts before any request rather than
 hiding an unread subtree. Each candidate is then read and sent through one
-import operation in that sorted order; scan mode adds no protocol request or
-server-side batching. An operation uses `import_conversation` when the exact
-single-shot frame fits and the chunked request sequence otherwise.
+import operation in that sorted order; scan mode has no protocol request or
+server-side batching of its own. An operation uses `import_conversation` when
+the exact single-shot frame fits and the chunked request sequence otherwise.
 
 For every candidate, the terminal prints an escaped, quoted local path and one
 `imported`, `already_imported`, or `skipped` outcome. Successful outcomes name
@@ -335,13 +333,13 @@ candidates are processed, while an empty matching set succeeds with zero counts.
 The source path is local presentation only and is never transmitted or
 persisted.
 
-The wire encodes exact source bytes as canonical padded base64 and retains the 8
-MiB per-frame bound. For a file whose descriptor metadata size could fit one
-frame, the terminal reads the complete bytes, constructs the exact worst-case
-single-shot request envelope, and uses the existing
-`import_conversation { format, source }` request unchanged when that frame fits.
-For a larger file it opens one connection, declares the descriptor metadata size
-in `begin_conversation_import { format, declared_size_bytes }`, streams the file
+The wire encodes exact source bytes as canonical padded base64 under the 8 MiB
+per-frame bound. For a file whose descriptor metadata size could fit one frame,
+the terminal reads the complete bytes, constructs the exact worst-case
+single-shot request envelope, and uses the
+`import_conversation { format, source }` request when that frame fits. For a
+larger file it opens one connection, declares the descriptor metadata size in
+`begin_conversation_import { format, declared_size_bytes }`, streams the file
 through nonempty `append_conversation_import { chunk }` requests carrying at
 most 4 MiB of decoded bytes apiece, and finishes with
 `commit_conversation_import {}`. Acknowledgements echo the declared size at
@@ -357,12 +355,11 @@ so a file that changes size after metadata observation is rejected with both
 exact counts. The assembly and import permit are per-connection state. Commit,
 abort, a terminal size or conversion rejection, and disconnect release them; an
 `already_in_progress` refusal leaves the existing assembly available for append,
-commit, or explicit abort. No persistence migration is involved. Commit then
-supplies the whole assembled source to the same converter and
-`ImportConversationService` call as the single-shot path. Conversion remains
-whole-source and unchanged. The service executes away from asynchronous runtime
-workers against the append-only Postgres repository and admits one in-progress
-or single-shot import at a time.
+commit, or explicit abort. Commit then supplies the whole assembled source to
+the same converter and `ImportConversationService` call as the single-shot path.
+The service executes away from asynchronous runtime workers against the
+append-only Postgres repository and admits one in-progress or single-shot import
+at a time.
 
 Every import refusal is `invalid_request` with typed, content-silent evidence.
 State refusals name `conversation_import_already_in_progress` or
@@ -372,10 +369,10 @@ declaration/assembly mismatch names both counts. Converter refusals use the
 closed class and ordinal inventory in the
 [process protocol's conversation-import refusal mapping](process-protocol.md#server-messages).
 Errors and logs contain classes and ordinals only, never source content,
-source-derived identifiers, paths, or parser excerpts. Database failure remains
-conservatively `commit_ambiguous`, so the operator may retry the exact format
-and source bytes. Assembly allocation exhaustion or blob-store unavailability is
-`unavailable`; blob integrity failure remains `internal`.
+source-derived identifiers, paths, or parser excerpts. Database failure is
+`commit_ambiguous`, so the operator may retry the exact format and source bytes.
+Assembly allocation exhaustion or blob-store unavailability is `unavailable`;
+blob integrity failure is `internal`.
 
 A new exact snapshot returns
 `conversation_import_inserted { imported_conversation_id }`; exact reingestion
@@ -383,8 +380,8 @@ through either transport returns
 `conversation_import_already_imported { imported_conversation_id }` naming the
 existing identity. The terminal prints these as distinct `inserted` and
 `already_imported` outcomes with that identity. Neither outcome creates or seeds
-a session, and changed raw-record content or order continues to create a new
-exact snapshot under the identity model above.
+a session, and changed raw-record content or order creates a new exact snapshot
+under the identity model above.
 
 ## Imported-conversation inspection
 
@@ -422,19 +419,19 @@ not an absent-identity `not_found`; both classifications are owned by the
 ### Bounded browser discovery and continuation
 
 The browser HTTP contract exposes the same immutable imports as a selective read
-model rather than adapting the complete inspection spool. `GET /api/imports/`
-returns at most 100 summaries in ascending `ImportedConversationId` order. An
-optional `after` identity is an exclusive keyset cursor; the response includes a
-next cursor only when a bounded lookahead finds another row. Exact
-format/converter filters compose with that cursor. Exact attested source-session
-filters use the bounded raw `text/plain` body of `POST /api/imports/searches`.
-The body is the exact UTF-8 identifier, preserving empty text and edge
-whitespace, while avoiding URL expansion. A client-selected correlation UUID and
-SHA-256 of the complete exact value are echoed so truncated evidence remains
-unambiguous. Catalog and descriptor responses project at most 512 UTF-8 bytes of
-source-session evidence with explicit complete/truncated classification. The
-response deliberately has no total count and never reconstructs a complete
-imported aggregate.
+model rather than adapting the complete inspection read above.
+`GET /api/imports/` returns at most 100 summaries in ascending
+`ImportedConversationId` order. An optional `after` identity is an exclusive
+keyset cursor; the response includes a next cursor only when a bounded lookahead
+finds another row. Exact format/converter filters compose with that cursor.
+Exact attested source-session filters use the bounded raw `text/plain` body of
+`POST /api/imports/searches`. The body is the exact UTF-8 identifier, preserving
+empty text and edge whitespace, while avoiding URL expansion. A client-selected
+correlation UUID and SHA-256 of the complete exact value are echoed so truncated
+evidence remains unambiguous. Catalog and descriptor responses project at most
+512 UTF-8 bytes of source-session evidence with explicit complete/truncated
+classification. The response has no total count and never reconstructs a
+complete imported aggregate.
 
 `GET /api/imports/{imported-conversation-id}` returns the immutable identity,
 evidence-derived display title, raw-record and normalized-entry counts, exact
@@ -471,24 +468,24 @@ The client mints and retains the durable command identity before I/O. Exact
 replay returns the recorded session, conflicting reuse is rejected, and an
 ambiguous commit instructs the client to retry the same command and payload. The
 server verifies that the immutable entry identity and position still agree
-before applying the existing imported-frontier session-creation command. The
-response returns the new session identity and selected frontier; session
-timeline navigation is the separate browser timeline address contract.
+before applying the imported-frontier session-creation command. The response
+returns the new session identity and selected frontier; session timeline
+navigation is the separate browser timeline address contract.
 
 ## Claude Code session JSONL versions 1 and 2
 
 `ClaudeCodeJsonlConverter` implements
-`ClaudeCodeSessionJsonl { converter_version: 2 }`. Version 1 remains the
-unchanged interpretation for already stored version-1 snapshots. Both versions
-parse one JSON object per nonempty line, raw-preserve every record, and process
-records in physical file order. They scan for LF bytes. An LF ends and is
-excluded from a record; an immediately preceding CR is also excluded as the
-other half of a CRLF delimiter. A CR anywhere else remains record content.
-Nonempty bytes after the final delimiter form a final unterminated record, while
-a terminal LF or CRLF does not create another record. An empty delimited record
-rejects the complete conversion. Neither version strips a UTF-8 byte-order mark:
-the bytes `EF BB BF` at the beginning of any physical record are not JSON
-whitespace and reject that record as invalid JSON.
+`ClaudeCodeSessionJsonl { converter_version: 2 }`. Version 1 is the
+interpretation for stored version-1 snapshots. Both versions parse one JSON
+object per nonempty line, raw-preserve every record, and process records in
+physical file order. They scan for LF bytes. An LF ends and is excluded from a
+record; an immediately preceding CR is also excluded as the other half of a CRLF
+delimiter. A CR anywhere else remains record content. Nonempty bytes after the
+final delimiter form a final unterminated record, while a terminal LF or CRLF
+does not create another record. An empty delimited record rejects the complete
+conversion. Neither version strips a UTF-8 byte-order mark: the bytes `EF BB BF`
+at the beginning of any physical record are not JSON whitespace and reject that
+record as invalid JSON.
 
 The parser retains object-member order and duplicate names in the complete
 normalized source object. At every object level, repeating a member name that
@@ -667,16 +664,15 @@ domain type. Every encoded top-level value carries a fixed format version and
 payload-kind discriminator; a decoder rejects a value from another column kind
 rather than reinterpreting it. Encoded collection counts bound parsing but never
 directly drive capacity allocation: collections grow fallibly after each decoded
-element. Structured-value and source-metadata encodings remain at version `1`.
-Content using the existing closed vocabulary, including `SourceMessageBlock`,
-also remains at version `1`. A content value containing the new
-`SourceResultBlock` uses version `2`; content decoding retains the version-1
-message-block tag and rejects the new result-block tag beneath a version-1
-header.
+element. Structured-value and source-metadata encodings are at version `1`.
+Content without `SourceResultBlock`, including `SourceMessageBlock`, is at
+version `1`. A content value containing `SourceResultBlock` uses version `2`;
+content decoding retains the version-1 message-block tag and rejects the
+result-block tag beneath a version-1 header.
 
-Raw source bytes live in the blob store under their existing SHA-256 content
-hash; the relational record stores that ordinary blob digest and never a second
-copy. New ingestion publishes and verifies every raw blob before the aggregate
+Raw source bytes live in the blob store under their SHA-256 content hash; the
+relational record stores that ordinary blob digest and never a second copy.
+Ingestion publishes and verifies every raw blob before the aggregate
 transaction, then registers all blob and replica rows in the same transaction
 that first references them. One admitted import starts and awaits at most one
 raw blob publication or verification operation at a time; the process-wide
@@ -685,16 +681,15 @@ cannot fan out a record inventory into concurrent store operations. A failed
 import can therefore leave deterministic unregistered store orphans but no
 unreachable catalog rows. Loading first reads the complete append-only
 relational projection and releases its transaction, then reads and verifies the
-referenced blobs, so no database transaction spans store I/O. The current
-converter and reconstitution surfaces retain their configured bounded
-whole-source behavior; future streaming conversion remains the committed
-unimplemented seam above. Each checked aggregate load — including ordinary read,
-replay comparison, and imported-frontier reconstitution — has one non-resetting
-24-hour monotonic deadline shared across every referenced digest and replica
-candidate. It performs at most one referenced-blob store operation at a time;
-digest or candidate changes never restart the deadline. Every checked load
-acquires the blob contract's shared 16-slot read-traversal admission without
-waiting; when no slot is immediately available, it returns the ordinary
+referenced blobs, so no database transaction spans store I/O. Conversion and
+reconstitution are bounded whole-source operations; streaming conversion is the
+committed unimplemented seam above. Each checked aggregate load — including
+ordinary read, replay comparison, and imported-frontier reconstitution — has one
+non-resetting 24-hour monotonic deadline shared across every referenced digest
+and replica candidate. It performs at most one referenced-blob store operation
+at a time; digest or candidate changes never restart the deadline. Every checked
+load acquires the blob contract's shared 16-slot read-traversal admission
+without waiting; when no slot is immediately available, it returns the ordinary
 unavailable outcome and retains no queued connection task.
 
 One transaction resolves or inserts a complete aggregate:
@@ -739,9 +734,8 @@ exact agreement in entry count, order, content, speaker, and source metadata. It
 also reapplies the 128-container bound to complete records and entry-carried
 structured values (INV-002).
 
-The one-time storage-layer SQL migration produces the final blob-reference-only
-raw-source schema. The runtime repository accepts only that shape, and new
-imports write only blob references. The owning
+The raw-source schema is blob-reference-only. The runtime repository accepts
+only that shape, and imports write only blob references. The owning
 [blob-storage configuration contract](blob-storage.md#stores-routing-and-configuration)
 defines when omitted configuration is valid.
 
@@ -782,16 +776,15 @@ truncated to the first 256 Unicode scalars, and stripped of any
 truncation-exposed trailing ASCII space or tab; an empty shape exhausts the
 candidate. A conversation with no shapeable candidate has no display title,
 recorded as the `underivable` state, never a fabricated placeholder. Storage
-CHECK constraints seal the derived shape — nonempty single-line text of at most
-256 scalars without edge ASCII whitespace, present exactly in the `derived`
+CHECK constraints enforce the derived shape — nonempty single-line text of at
+most 256 scalars without edge ASCII whitespace, present exactly in the `derived`
 state.
 
-Insertion always resolves the title. The final schema's closed state
-discriminator admits only `derived` and `underivable`; runtime reads and writes
-only that shape. Checked complete loads re-derive and reject a resolved title
-that disagrees with the records; exact reingestion continues to resolve through
-the digest and conversion-equivalence check unchanged, since the deterministic
-derivation adds no new degree of freedom.
+Insertion always resolves the title. The closed state discriminator admits only
+`derived` and `underivable`; runtime reads and writes only that shape. Checked
+complete loads re-derive and reject a resolved title that disagrees with the
+records; exact reingestion resolves through the digest and
+conversion-equivalence check.
 
 ## Test data and local validation
 
