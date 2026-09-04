@@ -9257,6 +9257,10 @@ async fn review_orchestration_snapshot_excludes_a_write_committed_after_it_began
 }
 
 /// A snapshot under construction blocks no writer.
+///
+/// An import-table lock pauses `load_snapshot` mid-construction while
+/// `insert_active_turn_with_offset` writes `accepted_input` and `turn_lifecycle`.
+/// Completing that write before the timeout proves the snapshot blocks no writer.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn review_orchestration_snapshot_does_not_block_input_or_turns() -> Result<(), Box<dyn Error>>
