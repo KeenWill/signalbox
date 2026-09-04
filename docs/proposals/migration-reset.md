@@ -7,7 +7,7 @@ Status: proposed for owner decision; design only.
 Signalbox is pre-alpha with exactly one deployment: the dogfood daemon. The
 migration chain is written as if arbitrary external installations must upgrade
 across every historical schema shape, and that assumption is false. The cost of
-maintaining it grows daily:
+maintaining it:
 
 - **149 migrations, 65,093 lines of SQL.** 81 of the 149 files redefine
   something an earlier file created; the chain carries **125 superseded function
@@ -19,7 +19,7 @@ maintaining it grows daily:
   measured inventory (appendix) totals **~23,700–27,750 deletable lines**.
 - A version-prefix allocation scheme that collides across parallel agent
   branches, forcing renumbering on merge (72 renames across 43 migrations; 95
-  "renumber" commits). The reset does NOT cure this — collisions are
+  "renumber" commits). The reset does NOT fix this — collisions are
   branch-concurrency-relative, not chain-length-relative — it only shrinks the
   directory agents scan. The allocation scheme is a separate, small process
   question.
@@ -33,12 +33,13 @@ repo-watch storage rewrite above all — lands as an ordinary forward migration
 mechanical, verifiable, and days-scale.
 
 **A second collapse is part of the plan, not a failure of it.** The trim
-campaigns will pile forward migrations onto the fresh baseline, and that pile is
-expected to accumulate superseded definitions in exactly the way the current
-chain did. Once the campaigns land — and before any production database exists —
-the same procedure runs again and re-baselines the result. Campaign migrations
-therefore need not be minimal in count or form; the re-baseline erases them. The
-production-DB era is what ends the collapse cycle, not this reset.
+campaigns will add forward migrations on top of the fresh baseline, and those
+migrations are expected to accumulate superseded definitions in exactly the way
+the current chain did. Once the campaigns land — and before any production
+database exists — the same procedure runs again and re-baselines the result.
+Campaign migrations therefore need not be minimal in count or form; the
+re-baseline erases them. The production-DB era is what ends the collapse cycle,
+not this reset.
 
 Out of scope: repo-watch frontier normalization, table drops, archive imports,
 any data transformation.
@@ -166,8 +167,8 @@ What does NOT go:
   name), and the other decoders still read rows that exist. They are removed
   only when an authorized migration rewrites every row they decode — never as
   part of this reset, and not automatically at the second collapse either: a
-  collapse changes bookkeeping, not rows, so a reader retires there only if the
-  intervening campaigns have already rewritten its rows.
+  collapse changes bookkeeping, not rows, so a reader is removed there only if
+  the intervening campaigns have already rewritten its rows.
 - **`lock_inventory.rs` and its pinned CI hash** — deadlock-ordering machinery,
   not migration machinery.
 - **The `search_path` pinning effect** of migration `202608200001`: the file is
@@ -181,13 +182,13 @@ What does NOT go:
 ### 5. Rules after the reset
 
 - **Forward-only immutability stands.** An applied migration is never edited;
-  fixes are new migrations — `docs/spec/persistence-protocol.md` owns this rule.
-  The reset removes only the requirement that a fresh database be able to replay
-  pre-alpha history.
+  fixes are new migrations (`docs/spec/persistence-protocol.md`). The reset
+  removes only the requirement that a fresh database be able to replay pre-alpha
+  history.
 - **Version allocation:** timestamp prefixes continue, with the existing
-  uniqueness check (`scripts/check_migration_versions.py`, the owner of that
-  rule) retained — it is small and still needed. The supersession-naming rule is
-  retired — a new migration carries no supersession naming.
+  uniqueness check (`scripts/check_migration_versions.py`) retained — it is
+  small and still needed. The supersession-naming rule is retired — a new
+  migration carries no supersession naming.
 - **Future resets stay cheap** while there is one deployment and no release:
   this document is the template, and repeating it is expected rather than
   exceptional. That era ends at the freeze condition in
