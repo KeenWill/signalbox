@@ -148,7 +148,8 @@ impl ToolDefinition {
         self.permission_default
     }
 
-    /// Overrides the registry's blanket policy for this exact tool.
+    /// Configures an explicit posture for this exact tool, superseding the session
+    /// blanket and the registry default.
     pub const fn with_approval_posture(mut self, posture: ToolApprovalPosture) -> Self {
         self.approval_posture = Some(posture);
         self
