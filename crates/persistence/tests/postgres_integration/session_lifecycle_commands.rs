@@ -224,15 +224,32 @@ async fn a_core_issued_interrupt_records_the_core_actor_and_envelope_principal()
     Ok(())
 }
 
-/// A lifecycle stop atomically denies a parked tool approval before its core
-/// interrupt settles the live turn.
+/// A lifecycle stop cancels the active approval judge and atomically denies
+/// the parked delegated approval before its core interrupt settles the turn.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn lifecycle_stop_settles_an_awaiting_approval_turn() -> Result<(), Box<dyn Error>> {
+async fn lifecycle_stop_settles_an_awaiting_delegated_approval_turn() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x11ff_9000;
-    let (fixture, _, _, request) =
-        checkpoint_confirmed_tool_round(&pool, seed, "current_time", "{}").await?;
+    let (fixture, model_repository, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        &[("current_time", "{}")],
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let [request] = requests.as_slice() else {
+        panic!("the fixture has one delegated request")
+    };
+    let approval_repository = model_repository.approval_judge_repository();
+    let judge_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0x58));
+    let prepared = ready_approval_judge(
+        approval_repository
+            .prepare(fixture.session, fixture.turn, judge_call, None)
+            .await?,
+    );
+    let _authorized = authorized_approval_judge(approval_repository.authorize(&prepared).await?);
     let terminal_outcome = SessionTerminalOutcome::Stopped {
         sticky: StopStickiness::Sticky,
     };
@@ -306,6 +323,15 @@ async fn lifecycle_stop_settles_an_awaiting_approval_turn() -> Result<(), Box<dy
     .fetch_one(&pool)
     .await?;
     assert_eq!(premature_decisions, 0);
+    let active_judge: (String, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind
+           FROM tool_approval_judge_model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(judge_call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(active_judge, (String::from("in_flight"), None));
 
     let successor = TurnId::from_uuid(Uuid::from_u128(seed + 0x42));
     let closure_decision = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x48));
@@ -333,7 +359,7 @@ async fn lifecycle_stop_settles_an_awaiting_approval_turn() -> Result<(), Box<dy
             ),
             |_| successor,
             |requests| {
-                assert_eq!(requests, [request]);
+                assert_eq!(requests, [*request]);
                 (
                     vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
                         seed + 0x46,
@@ -377,6 +403,18 @@ async fn lifecycle_stop_settles_an_awaiting_approval_turn() -> Result<(), Box<dy
     .fetch_one(&pool)
     .await?;
     assert_eq!(explicit_decision_events, 0);
+    let terminal_judge: (String, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind
+           FROM tool_approval_judge_model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(judge_call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        terminal_judge,
+        (String::from("terminal"), Some(String::from("cancelled")))
+    );
     let lifecycle = SessionLifecycleRepository::new(pool.clone())
         .load(fixture.session)
         .await?

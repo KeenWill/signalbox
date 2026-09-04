@@ -42,14 +42,17 @@ use signalbox_domain::{
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::{
+    approval_judge::FailedApprovalJudgeDisposition,
     command_registry::{
         self, CommandKind, DECIDE_TOOL_REQUEST_KIND, OVERRIDE_DENIED_TOOL_REQUEST_KIND,
         RegistryCorruption, RegistryInspectionError,
     },
     commit_failure_is_ambiguous,
     mapping::{
+        ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
         BlobReadRejectionStorageKind, ToolApprovalDecisionSourceStorageKind,
-        ToolAttemptDispositionStorageKind, blob_read_rejection_from_str,
+        ToolAttemptDispositionStorageKind, approval_judge_state_to_str,
+        approval_judge_terminal_disposition_to_str, blob_read_rejection_from_str,
         blob_read_rejection_to_str, dangerous_tool_auto_approval_from_str,
         durable_command_id_from_uuid, durable_command_id_to_uuid, positive_u64_from_numeric,
         session_id_from_uuid, session_id_to_uuid, tool_approval_decision_source_from_str,
@@ -1911,6 +1914,29 @@ where
                     "closure denial does not match the approval wait",
                 )
             })?;
+        sqlx::query(
+            "UPDATE tool_approval_judge_model_call
+                SET state_kind = $1, terminal_disposition_kind = $2
+              WHERE request_id = $3
+                AND (state_kind = $4 OR state_kind = $5)",
+        )
+        .bind(approval_judge_state_to_str(
+            ApprovalJudgeStateStorageKind::Terminal,
+        ))
+        .bind(approval_judge_terminal_disposition_to_str(
+            ApprovalJudgeTerminalDispositionStorageKind::Failed(
+                FailedApprovalJudgeDisposition::Cancelled,
+            ),
+        ))
+        .bind(tool_request_id_to_uuid(request))
+        .bind(approval_judge_state_to_str(
+            ApprovalJudgeStateStorageKind::Prepared,
+        ))
+        .bind(approval_judge_state_to_str(
+            ApprovalJudgeStateStorageKind::InFlight,
+        ))
+        .execute(&mut *connection)
+        .await?;
         persist_batch_decision(connection, &decision).await?;
     }
 }

@@ -25,8 +25,9 @@ const FLEET_SEED: u128 = 0xa770_0000;
 /// automatic-resume budget instead of a number their story never uses.
 const UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS: AutomaticResumeAttemptBounds =
     AutomaticResumeAttemptBounds::unbounded();
-/// Exact prefix the daemon records when an unmonitored session owes no resume.
-const UNMONITORED_EXECUTION_FAILURE_NEED: &str = "The goal turn failed to execute and the session is unmonitored, so no automatic resumption is scheduled. Resolve the failed goal turn's execution condition, then resume the goal.";
+/// Need text for a failure whose automatic resumption was scheduled while owned.
+const SCHEDULED_EXECUTION_FAILURE_NEED: &str =
+    "automatic resumption is scheduled; repair execution";
 
 async fn create_mixed_scale_fleet(pool: &PgPool) -> Result<(), Box<dyn Error>> {
     for offset in 0..FLEET_SIZE {
@@ -706,7 +707,7 @@ async fn the_attention_state_projects_the_durable_session_state() -> Result<(), 
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn unmonitored_execution_failure_exposes_the_operator_action_until_adopted()
+async fn released_execution_failure_exposes_the_operator_action_until_adopted()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xa772_0000;
@@ -752,7 +753,7 @@ async fn unmonitored_execution_failure_exposes_the_operator_action_until_adopted
          VALUES ($1, 2, 1, 'blocked', 'execution_failure', $2, $3)",
     )
     .bind(session.into_uuid())
-    .bind(UNMONITORED_EXECUTION_FAILURE_NEED)
+    .bind(SCHEDULED_EXECUTION_FAILURE_NEED)
     .bind(goal_turn)
     .execute(&pool)
     .await?;

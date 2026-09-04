@@ -590,10 +590,8 @@ pub(crate) async fn insert_prepared(
     Ok(())
 }
 
-/// Records a claimed creation that §7 refuses: the typed row and its receipt,
-/// and no session row.
-/// Writes the typed command record. `session_created` is an applied creation's
-/// receipt; a rejection appends `command_settled`.
+/// Writes an applied creation's typed command record and `session_created`
+/// receipt.
 async fn insert_command_record(
     connection: &mut PgConnection,
     command: &signalbox_domain::CreateSession,
