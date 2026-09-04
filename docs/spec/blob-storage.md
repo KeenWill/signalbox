@@ -25,7 +25,7 @@ exactly those bytes. The domain value is a 32-byte digest newtype in the shape
 of the existing digest family (`ImportedRawRecordHash` and the other digest
 newtypes); the external spelling is `sha256:` followed by 64 lowercase
 hexadecimal characters. Why: the tag lives in the spelling, where format
-evolution happens, while the domain algebra stays as small as every other digest
+evolution happens, while the domain type stays as small as every other digest
 the repository carries.
 
 The digest covers raw bytes only. Filename, declared media type, purpose,
@@ -100,19 +100,19 @@ Configured store entries must also name distinct physical namespaces. Before
 initializing filesystem roots, startup resolves each opened directory's
 canonical path, `(st_dev, st_ino)` identity, and bounded Linux mount-inventory
 ancestry and rejects equality or ancestry overlap on those facts, so symlink,
-relative-component, and bind-mount aliases cannot manufacture replica diversity
-or place one store's control or deterministic object namespace inside another's.
-An identity that cannot be proved distinct fails startup. For S3, the namespace
-locator is the parsed endpoint's canonical URL serialization with default-port
-and empty-path variance removed, paired with the exact bucket; startup rejects a
-duplicate locator even when store names, namespace UUIDs, regions, or
-credentials differ. One physical namespace is represented by one store binding.
-The bucket marker below additionally detects physical aliases whose canonical
-locators differ. The canonical staging-directory path must be disjoint from
-every filesystem-store root: neither path may equal, contain, or be contained by
-the other, including through a bind mount. This also excludes every store's
-reserved `.publish-v1` subtree from staging ownership and prevents either
-startup sweep from encountering the other's files.
+relative-component, and bind-mount aliases cannot present one physical namespace
+as two replicas or place one store's control or deterministic object namespace
+inside another's. An identity that cannot be proved distinct fails startup. For
+S3, the namespace locator is the parsed endpoint's canonical URL serialization
+with default-port and empty-path variance removed, paired with the exact bucket;
+startup rejects a duplicate locator even when store names, namespace UUIDs,
+regions, or credentials differ. One physical namespace is represented by one
+store binding. The bucket marker below additionally detects physical aliases
+whose canonical locators differ. The canonical staging-directory path must be
+disjoint from every filesystem-store root: neither path may equal, contain, or
+be contained by the other, including through a bind mount. This also excludes
+every store's reserved `.publish-v1` subtree from staging ownership and prevents
+either startup sweep from encountering the other's files.
 
 Each filesystem root also owns a private exact-mode-0600
 `.signalbox-blob-namespace-v1` marker whose complete bytes are the configured
@@ -309,7 +309,7 @@ missing or corrupt object behind an existing routed replica record accepts the
 upload and atomically replaces that deterministic object only after verifying
 the staged source; a successful repair retains the matching replica fact.
 Otherwise ingest publishes and registers an additional replica in the routed
-store rather than minting a second identity. Deduplication across other stores
+store rather than creating a second identity. Deduplication across other stores
 is a future optimization, not a version-one upload path.
 
 ## Wire vocabulary
@@ -415,15 +415,15 @@ Image thumbnail (256-pixel edge) and preview (1,600-pixel edge) transforms are
 lazy deterministic producers. Repeated requests reuse the recorded key without
 executing the producer, provided its recorded output is still retrievable from
 the store; a record whose replicas are missing or fail verification triggers
-reproduction so the store's repair path can heal them, without appending a new
-derivation record. A miss (or an unretrievable cache hit) copies and re-verifies
-the source into a private temporary workspace, rejecting inputs above 64 MiB and
-bounding the copy to 120 seconds, then invokes the current daemon executable
-through the configured filesystem-confined supervisor with no network, a
-120-second deadline, and at most two concurrent workers. The decoder accepts
-only the enabled GIF, JPEG, PNG, and WebP formats, limits either axis to 16,384
-pixels, total pixels to 67,108,864, decoder allocation to 320 MiB, and the PNG
-output to 16 MiB. The digest of the exact worker executable is the
+reproduction so the store's repair path can restore them, without appending a
+new derivation record. A miss (or an unretrievable cache hit) copies and
+re-verifies the source into a private temporary workspace, rejecting inputs
+above 64 MiB and bounding the copy to 120 seconds, then invokes the current
+daemon executable through the configured filesystem-confined supervisor with no
+network, a 120-second deadline, and at most two concurrent workers. The decoder
+accepts only the enabled GIF, JPEG, PNG, and WebP formats, limits either axis to
+16,384 pixels, total pixels to 67,108,864, decoder allocation to 320 MiB, and
+the PNG output to 16 MiB. The digest of the exact worker executable is the
 implementation provenance. Publication to the generated-artifact route and
 catalog registration precede the derivation append.
 
@@ -611,7 +611,7 @@ new imports write only blob references.
   [session organization, visibility, and retention](../open-questions.md#session-organization-visibility-and-retention)
   and the artifact lifecycle bullets in
   [general-purpose artifacts](../open-questions.md#general-purpose-artifacts);
-  this page's append-only catalog is the constraint they design against.
+  this page's append-only catalog constrains them.
 - Concrete format adapters and their per-family dependency choices remain
   deferred with
   [general-purpose artifacts](../open-questions.md#general-purpose-artifacts).
