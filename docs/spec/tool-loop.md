@@ -5,11 +5,14 @@ unimplemented functionality. No present tool can create an instruction
 admission, and the transaction therefore has the four implemented effects named
 below.
 
-This page specifies the daemon-owned tool subsystem. The same laws extend to the
-runner locus. This page owns logical tool requests, approval policy and
-decisions, physical tool attempts, result admission, intra-turn continuation,
-crash classification, the compiled registry, and the daemon-local catalog. Turn
-and attempt lifecycle law lives in
+This page specifies the implemented daemon-owned tool subsystem. Its
+runner-locus paragraphs are committed unimplemented functionality that extends
+the same laws to the runner locus;
+[runner protocol and placement](runner-protocol.md#version-one-executable-boundary)
+owns their present implementation status. This page owns logical tool requests,
+approval policy and decisions, physical tool attempts, result admission,
+intra-turn continuation, crash classification, the compiled registry, and the
+daemon-local catalog. Turn and attempt lifecycle law lives in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
 entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
 model-call staging and provider translation in
@@ -655,12 +658,12 @@ request and are visible to the next model round; they do not by themselves fail
 the turn. Physical ambiguity remains a turn-level recovery wait and does not
 become an ordinary error result.
 
-Because a resolved request is otherwise visible only to the daemon and the
-model, admitting a `KnownFailed` observation also emits one operator telemetry
-event carrying the dispatched catalog name, the closed error kind, and the
-session and turn identities — never the bounded error detail, tool arguments, or
-any response content. Admission is the single site: it covers every executor
-behind the one dispatch trait and the failures admission itself substitutes for
+Because a resolved request is otherwise recorded only in the session transcript,
+admitting a `KnownFailed` observation also emits one operator telemetry event
+carrying the dispatched catalog name, the closed error kind, and the session and
+turn identities — never the bounded error detail, tool arguments, or any
+response content. Admission is the single site: it covers every executor behind
+the one dispatch trait and the failures admission itself substitutes for
 oversized or null-bearing results. Completed and ambiguous observations emit
 nothing here; ambiguity is carried by the recovery wait above. Preflight
 failures that never reach admission — unknown names and argument-decode failures
