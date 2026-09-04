@@ -9,11 +9,11 @@ use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    CommandPrincipal, DescendantTerminationScope, DurableCommandId, LifecycleActor,
+    CommandPrincipal, DescendantTerminationScope, DurableCommandId, GoalState, LifecycleActor,
     SessionConfigurationDefaultsVersion, SessionFailureCause, SessionId,
     SessionLifecycleApplication, SessionLifecycleCommand, SessionLifecycleCommandRejection,
     SessionLifecycleCommandResult, SessionLifecycleOperation, SessionLifecycleState,
-    SessionTerminalOutcome, StopStickiness, TurnId,
+    SessionParkCause, SessionTerminalOutcome, StopStickiness, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -366,7 +366,7 @@ async fn apply(
         }
         SessionLifecycleOperation::Resume => {
             require_parked(&held.state())?;
-            if crate::goal::load_goal_from_connection(connection, session)
+            let goal = crate::goal::load_goal_from_connection(connection, session)
                 .await
                 .map_err(|error| match error {
                     crate::goal::GoalRepositoryError::Database(error)
@@ -376,8 +376,20 @@ async fn apply(
                     _ => ApplyError::Failed(SessionLifecycleCommandRepositoryError::Corruption(
                         "goal lineage",
                     )),
-                })?
+                })?;
+            let module_parked_pursuit = matches!(
+                held.state(),
+                SessionLifecycleState::Parked {
+                    cause: SessionParkCause::ModulePark,
+                    ..
+                }
+            ) && goal
+                .as_ref()
+                .is_some_and(|goal| matches!(goal.current().state(), GoalState::Pursuing));
+            if goal
+                .as_ref()
                 .is_some_and(|goal| goal.current().state().is_open())
+                && !module_parked_pursuit
             {
                 return Err(ApplyError::Rejected(
                     SessionLifecycleCommandRejection::GoalResumeRequired,

@@ -6,12 +6,13 @@ use std::error::Error;
 
 use crate::*;
 use signalbox_domain::{
-    CommandPrincipal, DescendantTerminationScope, FinishCondition, FinishConditionStatement,
-    GoalCommandRejection, GoalCommandResult, GoalStatement, GoalUserAction, GoalUserCommand,
-    LifecycleActor, ModuleDispatch, ParentTerminationKind, RepoWatchDispatchId,
-    SessionCreationProvenance, SessionFailureCause, SessionLifecycleApplication,
-    SessionLifecycleCommand, SessionLifecycleCommandRejection, SessionLifecycleCommandResult,
-    SessionLifecycleOperation, SessionLifecycleState, SessionOwnership, SessionRetryableCause,
+    CommandPrincipal, DescendantTerminationScope, DispatchingModule, FinishCondition,
+    FinishConditionStatement, GoalCommandRejection, GoalCommandResult, GoalStatement,
+    GoalUserAction, GoalUserCommand, LifecycleActor, ModuleDispatch, ParentTerminationKind,
+    RepoWatchDispatchId, SessionCreationProvenance, SessionFailureCause,
+    SessionLifecycleApplication, SessionLifecycleCommand, SessionLifecycleCommandRejection,
+    SessionLifecycleCommandResult, SessionLifecycleOperation, SessionLifecycleState,
+    SessionOwnership, SessionParkCause, SessionParkResponder, SessionRetryableCause,
     SessionTerminalOutcome, StartGate, StopStickiness,
 };
 use signalbox_persistence::{
@@ -601,6 +602,62 @@ async fn a_resume_replays_its_recorded_state_after_the_session_closes() -> Resul
     );
     assert_eq!(replay, first);
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_module_parked_pursuing_goal_accepts_a_lifecycle_resume() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x43;
+    let session = creation_session(seed);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(seed))
+        .await?;
+    GoalRepository::new(pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(SEED + seed + 0xe00)),
+                session,
+                GoalUserAction::Attach(
+                    GoalStatement::try_new(String::from("continue after module intervention"))
+                        .expect("the fixture statement is admitted"),
+                ),
+            ),
+            Some(GoalTurnCandidates::new(
+                AcceptedInputId::from_uuid(Uuid::from_u128(SEED + seed + 0xe01)),
+                TurnId::from_uuid(Uuid::from_u128(SEED + seed + 0xe02)),
+            )),
+            |_| None,
+        )
+        .await?;
+    SessionLifecycleRepository::new(pool.clone())
+        .park(
+            session,
+            SessionParkCause::ModulePark,
+            SessionParkResponder::Module {
+                module: DispatchingModule::RepositoryWatch,
+            },
+            None,
+            LifecycleActor::Module {
+                module: DispatchingModule::RepositoryWatch,
+            },
+        )
+        .await?;
+
+    let resumed = recorded(
+        &pool,
+        lifecycle_command(seed, 1, session, SessionLifecycleOperation::Resume),
+    )
+    .await?;
+
+    assert!(matches!(
+        resumed,
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::Resumed { state })
+            if !state.is_parked()
+    ));
     pool.close().await;
     drop(container);
     Ok(())

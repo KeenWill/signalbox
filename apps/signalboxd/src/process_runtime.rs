@@ -15685,9 +15685,7 @@ where
         Ok(SessionLifecycleCommandHandlingOutcome::Recorded(
             SessionLifecycleCommandResult::Applied(application),
         )) => {
-            if application == SessionLifecycleApplication::StartReleased
-                || matches!(command.operation(), SessionLifecycleOperation::Release)
-            {
+            if lifecycle_command_needs_eligibility_nudge(&application, command.operation()) {
                 let _ = services.eligibility_nudge.nudge(session);
             }
             if matches!(command.operation(), SessionLifecycleOperation::Adopt { .. })
@@ -15783,6 +15781,17 @@ where
             .await
         }
     }
+}
+
+fn lifecycle_command_needs_eligibility_nudge(
+    application: &SessionLifecycleApplication,
+    operation: &SessionLifecycleOperation,
+) -> bool {
+    *application == SessionLifecycleApplication::StartReleased
+        || matches!(
+            operation,
+            SessionLifecycleOperation::Release | SessionLifecycleOperation::Resume
+        )
 }
 
 /// Hands a committed closure's live turn to the committed interrupt
@@ -17221,7 +17230,8 @@ mod tests {
         ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTargetId,
         ReviewWorkflowKind, RunnerGeneration, RunnerId, RunnerWorkingDirectory,
         SemanticTranscriptEntryId, SessionConfigurationDefaultsVersion, SessionId,
-        SessionInputPosition, SessionMetadataLastWriter, SessionMetadataUpdatedAt,
+        SessionInputPosition, SessionLifecycleApplication, SessionLifecycleOperation,
+        SessionLifecycleState, SessionMetadataLastWriter, SessionMetadataUpdatedAt,
         SessionModelSettingsChanged, SettingOverlay, SubmitInputRejectedResult,
         ToolApprovalDecision, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
         TurnModelSettingsResolved, ValidatedModelSettings,
@@ -17271,10 +17281,11 @@ mod tests {
         handle_append_conversation_import, handle_begin_conversation_import,
         handle_commit_conversation_import, import_evidence,
         imported_conversation_internal_diagnostic, inspect_connection_completion,
-        internal_protocol_error, map_rejection, nudge_after_process_await_rejection,
-        nudge_after_process_message_rejection, nudge_delegation_issuer, nudge_delegation_wake,
-        observe_outbox_metrics_once, operational_import_error, preserve_committed_foreground_wait,
-        process_delegation_rejection, process_delegation_rejection_for_recipient, read_frame_line,
+        internal_protocol_error, lifecycle_command_needs_eligibility_nudge, map_rejection,
+        nudge_after_process_await_rejection, nudge_after_process_message_rejection,
+        nudge_delegation_issuer, nudge_delegation_wake, observe_outbox_metrics_once,
+        operational_import_error, preserve_committed_foreground_wait, process_delegation_rejection,
+        process_delegation_rejection_for_recipient, read_frame_line,
         retain_inbound_frame_permit_during_import_admission,
         retry_context_compaction_range_database_reads, run_until_shutdown,
         snapshot_reader_capacity, spool_error_display, spool_goal_snapshot,
@@ -17310,6 +17321,16 @@ mod tests {
                 );
             )+
         };
+    }
+
+    #[test]
+    fn a_resumed_session_requests_an_eligibility_pass() {
+        assert!(lifecycle_command_needs_eligibility_nudge(
+            &SessionLifecycleApplication::Resumed {
+                state: SessionLifecycleState::Created,
+            },
+            &SessionLifecycleOperation::Resume,
+        ));
     }
 
     impl super::ClassifyConversationImportError for io::Error {

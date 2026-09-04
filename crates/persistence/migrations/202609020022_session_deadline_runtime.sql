@@ -251,7 +251,7 @@ CREATE FUNCTION park_repo_watch_obligation_sessions() RETURNS trigger
 DECLARE
     subject uuid;
 BEGIN
-    IF NEW.parked_at IS NULL OR OLD.parked_at IS NOT NULL THEN
+    IF NEW.parked_at IS NULL THEN
         RETURN NULL;
     END IF;
     IF NOT EXISTS (
@@ -261,6 +261,59 @@ BEGIN
            AND parked_at IS NOT NULL
     ) THEN
         RETURN NULL;
+    END IF;
+
+    -- A parked obligation may be refreshed with a different blocker. Restore
+    -- subjects it no longer wraps before projecting the replacement, unless a
+    -- different parked obligation still names that subject.
+    IF OLD.parked_at IS NOT NULL THEN
+        FOR subject IN
+            (
+                SELECT OLD.external_blocking_session_id
+                 WHERE OLD.external_blocking_session_id IS NOT NULL
+                UNION
+                SELECT action.session_id
+                  FROM repo_watch_dispatch_action AS action
+                 WHERE action.dispatch_id = OLD.blocking_dispatch_id
+            )
+            EXCEPT
+            (
+                SELECT NEW.external_blocking_session_id
+                 WHERE NEW.external_blocking_session_id IS NOT NULL
+                UNION
+                SELECT action.session_id
+                  FROM repo_watch_dispatch_action AS action
+                 WHERE action.dispatch_id = NEW.blocking_dispatch_id
+            )
+        LOOP
+            IF EXISTS (
+                SELECT 1
+                  FROM session_lifecycle
+                 WHERE session_id = subject
+                   AND state_kind = 'parked'
+                   AND parked_cause = 'module_park'
+                   AND parked_responder = 'repo_watch'
+            ) AND NOT EXISTS (
+                SELECT 1
+                  FROM repo_watch_dispatch_obligation AS obligation
+                 WHERE obligation.obligation_id <> NEW.obligation_id
+                   AND obligation.parked_at IS NOT NULL
+                   AND obligation.settled_kind IS NULL
+                   AND (
+                        obligation.external_blocking_session_id = subject
+                        OR EXISTS (
+                            SELECT 1
+                              FROM repo_watch_dispatch_action AS action
+                             WHERE action.dispatch_id = obligation.blocking_dispatch_id
+                               AND action.session_id = subject
+                        )
+                   )
+            ) THEN
+                PERFORM project_session_lifecycle(
+                    subject, true, 'module', 'repo_watch'
+                );
+            END IF;
+        END LOOP;
     END IF;
 
     FOR subject IN

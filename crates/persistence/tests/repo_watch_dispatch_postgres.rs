@@ -8674,6 +8674,80 @@ async fn repository_watch_observes_operator_commission_target_ownership()
             String::from("repo_watch"),
         )
     );
+
+    let replacement_session = SessionId::from_uuid(Uuid::from_u128(0x60_252));
+    let (template, defaults) = commissioned_template();
+    let replacement_creation = CreateSession::new_from_template(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x60_251)),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
+        template,
+        defaults,
+    )
+    .prepare(replacement_session)
+    .expect("the replacement blocker creation prepares");
+    assert!(matches!(
+        CreateSessionRepository::new(fixture.pool.clone(), credential_pin())
+            .handle(replacement_creation)
+            .await?,
+        CreateSessionHandlingOutcome::Applied(_)
+    ));
+    SessionLifecycleRepository::new(fixture.pool.clone())
+        .adopt(replacement_session, LifecycleActor::Operator)
+        .await?;
+    sqlx::query(
+        "UPDATE repo_watch_dispatch_obligation
+            SET blocking_dispatch_id = NULL,
+                external_blocking_session_id = $2
+          WHERE obligation_id = $1",
+    )
+    .bind(obligation.0)
+    .bind(replacement_session.into_uuid())
+    .execute(&fixture.pool)
+    .await?;
+    let lifecycle_repository = SessionLifecycleRepository::new(fixture.pool.clone());
+    assert!(
+        !lifecycle_repository
+            .load(fixture.session)
+            .await?
+            .expect("the previous blocker keeps its lifecycle row")
+            .state()
+            .is_parked()
+    );
+    assert!(
+        lifecycle_repository
+            .load(replacement_session)
+            .await?
+            .expect("the replacement blocker keeps its lifecycle row")
+            .state()
+            .is_parked()
+    );
+
+    sqlx::query(
+        "UPDATE repo_watch_dispatch_obligation
+            SET external_blocking_session_id = $2
+          WHERE obligation_id = $1",
+    )
+    .bind(obligation.0)
+    .bind(fixture.session.into_uuid())
+    .execute(&fixture.pool)
+    .await?;
+    assert!(
+        lifecycle_repository
+            .load(fixture.session)
+            .await?
+            .expect("the restored blocker keeps its lifecycle row")
+            .state()
+            .is_parked()
+    );
+    assert!(
+        !lifecycle_repository
+            .load(replacement_session)
+            .await?
+            .expect("the replaced blocker keeps its lifecycle row")
+            .state()
+            .is_parked()
+    );
+
     assert_eq!(
         dispatch_store
             .release_parked_dispatch_obligation(obligation.0, PARK_RELEASE_ACTOR)
