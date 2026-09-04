@@ -14,10 +14,10 @@ use signalbox_application::{
 use signalbox_domain::{
     BranchName, CommitSha, DangerousToolAutoApproval, DescendantTerminationScope,
     DirectModelSelection, DispatchingModule, DurableCommandId, GoalCommandResult, GoalStatement,
-    GoalUserAction, GoalUserCommand, ModelSelectionRequest, PullRequestNumber, RepositorySlug,
-    SessionConfigurationDefaults, SessionId, SessionLifecycleState, SessionParkCause,
-    SessionParkResponder, SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
-    SessionTemplateProvenance, UserContent,
+    GoalUserAction, GoalUserCommand, LifecycleActor, ModelSelectionRequest, PullRequestNumber,
+    RepositorySlug, SessionConfigurationDefaults, SessionId, SessionLifecycleState,
+    SessionOwnership, SessionParkCause, SessionParkResponder, SessionSystemPrompt,
+    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -1047,6 +1047,58 @@ async fn live_session_without_model_activity_is_parked() -> Result<(), Box<dyn E
             standing: None,
         }
     ));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn released_session_without_model_activity_does_not_block_failure_parking()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let commissioned = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
+    let store = PostgresConvergenceSweepStore::new(pool.clone());
+    let repository = repository()?;
+    let observation = observation()?;
+    let (dispatch, session) = dispatched(
+        commissioned
+            .commission(
+                prepared_commission(0x89_209)?,
+                &mut UuidV7SubmitInputIdGenerator,
+                |_| None,
+            )
+            .await?,
+    );
+    store
+        .record_dispatch_decision(
+            Uuid::from_u128(0x89_218),
+            &repository,
+            pull_request(),
+            &observation,
+            (dispatch, session),
+            ConvergenceSweepDecision::LiveSession,
+        )
+        .await?;
+    SessionLifecycleRepository::new(pool.clone())
+        .release(session, LifecycleActor::Operator)
+        .await?;
+
+    let disposition = store
+        .record_no_model_activity_failure(
+            Uuid::from_u128(0x89_219),
+            &repository,
+            pull_request(),
+            &observation,
+            session,
+        )
+        .await?;
+    let lifecycle = SessionLifecycleRepository::new(pool)
+        .load(session)
+        .await?
+        .expect("the released session retains its lifecycle row");
+
+    assert_eq!(disposition, ConvergenceSweepFailureDisposition::Parked);
+    assert_eq!(lifecycle.ownership(), SessionOwnership::Unmonitored);
+    assert!(!lifecycle.state().is_parked());
     Ok(())
 }
 

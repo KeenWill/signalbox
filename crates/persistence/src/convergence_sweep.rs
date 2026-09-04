@@ -9,7 +9,7 @@ use std::{
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_domain::{
     CommitSha, DispatchingModule, DurableCommandId, LifecycleActor, PullRequestNumber,
-    RepositorySlug, SessionId, SessionParkCause, SessionParkResponder,
+    RepositorySlug, SessionId, SessionOwnership, SessionParkCause, SessionParkResponder,
 };
 use sqlx::{
     PgConnection, PgPool,
@@ -1162,7 +1162,7 @@ impl PostgresConvergenceSweepStore {
             let lifecycle = crate::session_lifecycle::load_locked(&mut transaction, session)
                 .await
                 .map_err(|error| ConvergenceSweepStoreError::Lifecycle(Box::new(error)))?;
-            if !lifecycle.state().is_parked() {
+            if lifecycle.ownership() == SessionOwnership::Owned && !lifecycle.state().is_parked() {
                 crate::session_lifecycle::park_in_transaction(
                     &mut transaction,
                     session,
