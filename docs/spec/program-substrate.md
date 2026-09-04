@@ -67,7 +67,7 @@ the old run and starting the new revision. A frame-contract change is handled
 the same way, per the pre-alpha rule in `AGENTS.md`: no retired contract version
 is decoded by a newer host — that would be compatibility machinery for
 deployments that do not exist — so a run whose pinned contract version the
-current host no longer speaks is faulted terminally at its next wake with a
+current host no longer decodes is faulted terminally at its next wake with a
 deterministic, journaled `contract_retired` fault, and the host does not require
 outstanding runs to be closed or continued before a contract-changing upgrade.
 
@@ -77,18 +77,18 @@ boundary. The executable artifact is never accepted on trust: both paths derive
 it from the submitted source with one pinned, deterministic type-strip transform
 — parse and erase types, no checking — embedded identically in the CLI and the
 daemon, so the artifact bytes are a pure function of the source bytes and the
-reviewed source *is* the executed code; a submitted artifact whose digest
-differs from the derived artifact's digest is rejected. The operator path runs
-in the CLI: `tsc --strict` against the SDK's shipped declarations, then the
-pinned strip, digest, insert. The agent path is a gated daemon tool on the
-ordinary tool surface: a session submits the source, requested grants, and
-digests; the daemon re-derives the artifact, verifies digests, enforces the
-import allowlist and size bounds, and records which party claims the type-check
-(`cli` or `registrant`). The daemon never type-checks. Type-checking is an
-authoring aid, not a security boundary: a mistyped program can only fault inside
-its own sandbox. The security boundary for registration is the same as for every
-gated tool — the approval posture and the [approval judge](tool-loop.md), which
-see the program name, the requested grant list, the source digest, and the
+reviewed source is the executed code; a submitted artifact whose digest differs
+from the derived artifact's digest is rejected. The operator path runs in the
+CLI: `tsc --strict` against the SDK's shipped declarations, then the pinned
+strip, digest, insert. The agent path is a gated daemon tool on the ordinary
+tool surface: a session submits the source, requested grants, and digests; the
+daemon re-derives the artifact, verifies digests, enforces the import allowlist
+and size bounds, and records which party claims the type-check (`cli` or
+`registrant`). The daemon never type-checks. Type-checking is an authoring aid,
+not a security boundary: a mistyped program can only fault inside its own
+sandbox. The security boundary for registration is the same as for every gated
+tool — the approval posture and the [approval judge](tool-loop.md), which see
+the program name, the requested grant list, the source digest, and the
 registering session's context. Why: agents must be able to create programs the
 way they use any other tool, without the daemon acquiring a compiler toolchain
 or the type system acquiring authority it cannot enforce.
@@ -120,8 +120,8 @@ mappings. Each removal closes a path the others leave open: `Temporal` is a
 second ambient clock reached without `Date`; the prototype methods return
 results that follow the host's default locale and ICU data, which two hosts
 running the same run need not share; and the shared buffer, its atomics, and
-`WebAssembly` together close the waiting primitives, since `Atomics.wait` blocks
-the isolate thread, `Atomics.waitAsync` settles on a wall clock, and
+`WebAssembly` together remove the waiting primitives, since `Atomics.wait`
+blocks the isolate thread, `Atomics.waitAsync` settles on a wall clock, and
 `new WebAssembly.Memory({shared: true})` yields a shared buffer whose
 `memory.atomic.wait32` blocks even when the `SharedArrayBuffer` global is gone.
 Its only admitted asynchronous operation is the closed request op behind the
@@ -297,7 +297,7 @@ run reaching its recorded bound terminates with a deterministic, journaled
 `journal_bound` fault, making the per-run replay bound a property of every
 program, cooperative or not. No checkpointing or journal truncation exists. Why:
 continuation keeps replay linear in one run's work while every historical run
-remains a complete, immutable record, and the fault keeps that claim true for
+remains a complete, immutable record, and the fault enforces that bound for
 programs that never continue.
 
 **Committed unimplemented functionality.** No present surface parks program
@@ -305,8 +305,8 @@ runs. A run sleeping on a timer or subscription holds no isolate and no memory
 beyond its rows; wake builds a fresh isolate and replays. Sleeping runs survive
 daemon restarts by construction. Frame payloads inline below a fixed threshold;
 a larger payload is stored as an immutable SHA-256-addressed blob under the
-contract [blob storage](blob-storage.md) owns, journaled by digest, traveling
-under the daemon-derived `program_journal` storage class that page's routing
+contract [blob storage](blob-storage.md) owns, journaled by digest, routed under
+the daemon-derived `program_journal` storage class that page's routing
 vocabulary commits for this use — never an operation-selected class. No
 named-artifact aggregate is required or committed for payload offload: the
 journal references immutable bytes by digest only. Run admission requires that
