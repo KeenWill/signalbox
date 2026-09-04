@@ -95,5 +95,5 @@ events rather than silently re-entering the queue.
 
 - Porting this deliberately shallow daemon loop to the program substrate is a
   follow-on; the module creates no reusable program primitive.
-- Richer prioritization and scheduling are deferred. Fleet-wide projections are
-  deferred; the operator surface is the parked-target view.
+- Richer prioritization and scheduling are deferred. Fleet-wide projections
+  belong to issue #992; the operator surface is the parked-target view.
