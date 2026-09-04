@@ -1,8 +1,5 @@
 # Identity, commands, and telemetry correlation
 
-The `SubmitInput` multipart storage-version boundary below is proposed and not
-implemented.
-
 This page describes the implemented identity, durable-command, and
 telemetry-correlation behavior of Signalbox, including the imported identity
 kinds and command family and the tool-loop identity kinds and decision command.
