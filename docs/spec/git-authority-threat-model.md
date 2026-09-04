@@ -1,19 +1,15 @@
 # Git authority threat model
 
-The injected workspace-root and mutation boundary used here were verified
-through PR #360 (`agent/workspace-mutation-tools`). This page is the foundation
-proposal at the bottom of the implementing stack rooted at PR #409
-(`agent/git-tools-authority`): the bottom slice establishes the Git authority
-and filesystem laws, and its child slices add local operations, their typed tool
-surface, and explicitly approved repair writes. These paragraphs become verified
-only with that stack. Daemon catalog wiring is outside it.
+This page is the foundation proposal at the bottom of the implementing stack
+rooted at PR #409 (`agent/git-tools-authority`): the bottom slice establishes
+the Git authority and filesystem laws, and its child slices add local
+operations, their typed tool surface, and explicitly approved repair writes.
+Daemon catalog wiring is outside it.
 
 The scope of the authority — how many suites the daemon composes and which root
-each is constructed with — is not part of that stack, and was verified against
-PR #539 (`agent/per-session-workspaces`). The remote destination authority below
-is verified against this PR (`agent/git-remote-authority`), which lands the
-durable workspace record and the destination schema; the push transport that
-resolves against them is later work.
+each is constructed with — is not part of that stack. The remote destination
+authority below lands the durable workspace record and the destination schema;
+the push transport that resolves against them is later work.
 
 The deployment injects a workspace root into each constructed suite. The daemon
 composes one suite for the configured root, and one further suite for each
