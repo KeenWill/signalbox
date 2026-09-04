@@ -103,18 +103,6 @@ pub(crate) const REPO_WATCH_OBLIGATION_BLOCKER_SUBJECTS: &str = "SELECT lifecycl
       ORDER BY lifecycle.session_id
         FOR UPDATE OF lifecycle";
 
-pub(crate) const REPO_WATCH_ACTIVE_DISPATCH_OBLIGATION: &str = "SELECT obligation.obligation_id
-           FROM repo_watch_dispatch_obligation AS obligation
-          WHERE obligation.rule_id = $1
-            AND obligation.rule_version = $2
-            AND obligation.singleton_scope = $3
-            AND obligation.singleton_repository IS NOT DISTINCT FROM $4
-            AND obligation.singleton_pull_request_number IS NOT DISTINCT FROM $5
-            AND obligation.singleton_stack_root_pull_request_number
-                 IS NOT DISTINCT FROM $6
-            AND obligation.settled_kind IS NULL
-            FOR UPDATE";
-
 pub(crate) const REPO_WATCH_TERMINAL_TARGET_OBLIGATIONS: &str = "SELECT obligation.obligation_id
            FROM repo_watch_dispatch_obligation AS obligation
           WHERE obligation.settled_kind IS NULL

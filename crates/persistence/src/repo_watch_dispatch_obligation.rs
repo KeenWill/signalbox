@@ -375,37 +375,50 @@ pub(crate) async fn record_dispatch_obligation(
     rule_version: RepoWatchRuleVersion,
     singleton: &StoredSingletonKey,
 ) -> Result<(), RepoWatchDispatchRepositoryError> {
-    let active = sqlx::query(crate::lock_inventory::REPO_WATCH_ACTIVE_DISPATCH_OBLIGATION)
-        .bind(rule_id.as_str())
-        .bind(stored_rule_version(rule_version)?)
-        .bind(repo_watch_singleton_scope_to_str(singleton.scope))
-        .bind(singleton.repository.as_deref())
-        .bind(singleton.pull_request)
-        .bind(singleton.stack_root_pull_request)
-        .fetch_optional(&mut **transaction)
-        .await?;
+    let active = sqlx::query(
+        "SELECT obligation.obligation_id
+           FROM repo_watch_dispatch_obligation AS obligation
+          WHERE obligation.rule_id = $1
+            AND obligation.rule_version = $2
+            AND obligation.singleton_scope = $3
+            AND obligation.singleton_repository IS NOT DISTINCT FROM $4
+            AND obligation.singleton_pull_request_number IS NOT DISTINCT FROM $5
+            AND obligation.singleton_stack_root_pull_request_number
+                 IS NOT DISTINCT FROM $6
+            AND obligation.settled_kind IS NULL",
+    )
+    .bind(rule_id.as_str())
+    .bind(stored_rule_version(rule_version)?)
+    .bind(repo_watch_singleton_scope_to_str(singleton.scope))
+    .bind(singleton.repository.as_deref())
+    .bind(singleton.pull_request)
+    .bind(singleton.stack_root_pull_request)
+    .fetch_optional(&mut **transaction)
+    .await?;
     if let Some(active) = active {
         let obligation_id: Uuid = active.try_get("obligation_id")?;
-        sqlx::query(
+        if blocker.replaces_existing() {
+            replace_dispatch_obligation_blocker(transaction, obligation_id, blocker).await?;
+        }
+        let updated = sqlx::query(
             "UPDATE repo_watch_dispatch_obligation
                 SET repository = $1,
                     latest_event_id = $2,
                     matched_event_count = matched_event_count + 1,
-                    blocking_dispatch_id = CASE WHEN $3 THEN $4
-                        ELSE blocking_dispatch_id END,
-                    external_blocking_session_id = CASE WHEN $3 THEN $5
-                        ELSE external_blocking_session_id END,
                     latest_match_at = clock_timestamp()
-              WHERE obligation_id = $6",
+              WHERE obligation_id = $3
+                AND settled_kind IS NULL",
         )
         .bind(event.repository().as_str())
         .bind(event.id().as_uuid())
-        .bind(blocker.replaces_existing())
-        .bind(blocker.stored_dispatch())
-        .bind(blocker.stored_external_session())
         .bind(obligation_id)
         .execute(&mut **transaction)
         .await?;
+        if updated.rows_affected() != 1 {
+            return Err(RepoWatchDispatchRepositoryError::Corruption(
+                "repository-watch obligation disappeared while recording its match",
+            ));
+        }
         return Ok(());
     }
     if matches!(blocker, DispatchObligationBlocker::Existing) {

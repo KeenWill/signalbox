@@ -461,12 +461,7 @@ BEGIN
                                  FROM turn_lifecycle
                                 WHERE session_id = subject
                            ) THEN 'created'
-                           WHEN EXISTS (
-                               SELECT 1
-                                 FROM turn_lifecycle
-                                WHERE session_id = subject
-                                  AND state_kind = 'queued'
-                           ) AND NOT EXISTS (
+                           WHEN NOT EXISTS (
                                SELECT 1
                                  FROM turn_lifecycle
                                 WHERE session_id = subject

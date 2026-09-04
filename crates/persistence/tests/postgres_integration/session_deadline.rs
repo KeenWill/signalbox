@@ -2,15 +2,15 @@ use std::{error::Error, time::Duration};
 
 use crate::*;
 use signalbox_domain::{
-    CommandPrincipal, DispatchingModule, DurableCommandId, GoalStatement, GoalUserAction,
-    GoalUserCommand, LifecycleActor, SessionCreationCause, SessionCreationProvenance, SessionId,
-    SessionLifecycleApplication, SessionLifecycleCommand, SessionLifecycleCommandResult,
-    SessionLifecycleOperation, SessionLifecycleState, SessionOwnership, SessionParkCause,
-    SessionParkResponder, StartGate, TranscriptAncestry,
+    CommandPrincipal, DispatchingModule, DurableCommandId, GoalCommandResult, GoalStatement,
+    GoalUserAction, GoalUserCommand, LifecycleActor, SessionCreationCause,
+    SessionCreationProvenance, SessionId, SessionLifecycleApplication, SessionLifecycleCommand,
+    SessionLifecycleCommandResult, SessionLifecycleOperation, SessionLifecycleState,
+    SessionOwnership, SessionParkCause, SessionParkResponder, StartGate, TranscriptAncestry,
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
-    goal::GoalRepository,
+    goal::{GoalCommandHandlingOutcome, GoalRepository},
     goal_turn::GoalTurnCandidates,
     scheduler::PostgresEligibilitySweep,
     session_deadline::{
@@ -303,6 +303,103 @@ async fn held_start_gate_survives_a_module_park_and_resume() -> Result<(), Box<d
     .fetch_one(&pool)
     .await?;
     assert_eq!(resumed, (String::from("created"), true));
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn retired_never_started_turn_restores_dispatched_admission() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let creation = owned_creation(6, StartGate::Open);
+    let session = creation.applied_result().session();
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(creation)
+        .await?;
+    let turn = TurnId::from_uuid(Uuid::from_u128(SEED + 0x6c00));
+    let goal_repository = GoalRepository::new(pool.clone());
+    let attached = goal_repository
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(SEED + 0x6a00)),
+                session,
+                GoalUserAction::Attach(
+                    GoalStatement::try_new(String::from("never started parked goal"))
+                        .expect("the fixture goal is admitted"),
+                ),
+            ),
+            Some(GoalTurnCandidates::new(
+                AcceptedInputId::from_uuid(Uuid::from_u128(SEED + 0x6b00)),
+                turn,
+            )),
+            |_| None,
+        )
+        .await?;
+    let lifecycle_repository = SessionLifecycleRepository::new(pool.clone());
+    lifecycle_repository
+        .park(
+            session,
+            SessionParkCause::ModulePark,
+            SessionParkResponder::Module {
+                module: DispatchingModule::CommissionedDispatch,
+            },
+            None,
+            LifecycleActor::Module {
+                module: DispatchingModule::CommissionedDispatch,
+            },
+        )
+        .await?;
+    let stopped = goal_repository
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(SEED + 0x6d00)),
+                session,
+                GoalUserAction::Stop {
+                    descendant_scope: signalbox_domain::DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+
+    assert!(matches!(
+        attached,
+        GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(_))
+    ));
+    assert!(matches!(
+        stopped,
+        GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(_))
+    ));
+    let retired: (String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind, start_lineage_kind
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        retired,
+        (
+            String::from("terminal"),
+            Some(String::from("retired")),
+            None,
+        )
+    );
+    assert_eq!(
+        lifecycle_repository.resume(session).await?,
+        SessionLifecycleState::Dispatched
+    );
+    let deadline_kind: String =
+        sqlx::query_scalar("SELECT deadline_kind FROM session_deadline WHERE session_id = $1")
+            .bind(session.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(deadline_kind, "admission");
+
     pool.close().await;
     drop(container);
     Ok(())

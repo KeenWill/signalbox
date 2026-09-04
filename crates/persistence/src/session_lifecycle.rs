@@ -566,10 +566,7 @@ async fn lift_park_from_held(
             WHEN NOT EXISTS (
                 SELECT 1 FROM turn_lifecycle WHERE session_id = $1
             ) THEN 'created'
-            WHEN EXISTS (
-                SELECT 1 FROM turn_lifecycle
-                 WHERE session_id = $1 AND state_kind = 'queued'
-            ) AND NOT EXISTS (
+            WHEN NOT EXISTS (
                 SELECT 1 FROM turn_lifecycle
                  WHERE session_id = $1 AND start_lineage_kind IS NOT NULL
             ) THEN 'dispatched'
