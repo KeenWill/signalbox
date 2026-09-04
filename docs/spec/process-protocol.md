@@ -6,9 +6,9 @@ distinct representations.
 
 Signalbox admits one process-protocol version, integer `1`. Its closed
 vocabulary contains every request, response, event, and required field
-implemented in this tree. The version field remains required on every frame and
-exact-version admission remains fail closed, so the mechanism can begin counting
-again without being rebuilt.
+implemented in this tree. The version field is required on every frame and
+exact-version admission is fail closed, so a later version can be introduced
+without rebuilding the mechanism.
 
 **Freeze condition.** In-place protocol editing ends at the first durable
 deployment: the first client that cannot be rebuilt at will. In practice, that
@@ -18,7 +18,7 @@ incompatible vocabulary changes allocate permanent new numbers, and
 compatibility policy must be decided explicitly. Until that condition occurs,
 protocol changes modify version `1` in place.
 
-Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
+Invariants are defined in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
 [persistence-protocol](persistence-protocol.md). Runner-bearing process shapes
 marked proposed below are unimplemented.
@@ -309,7 +309,7 @@ explicit `start_when_idle` is equivalent. `start_when_idle` and `queue` require
 a non-null `expected_defaults_version`. Configuration-free `steer` instead
 requires that member to be present as JSON null, so it cannot carry an
 independent defaults choice or settings override; its `model_settings` overlay
-must inherit every knob. Both active-work variants name the exact active turn
+must inherit every member. Both active-work variants name the exact active turn
 the client observed; an idle slot or a changed turn is a typed rejection rather
 than a retarget. Unknown delivery tags or members, explicit JSON null in place
 of a delivery object, and every other correlation of delivery with the nullable
@@ -450,7 +450,7 @@ The session-placement object is exactly `pathless {}`, `scoped { path }`, or
 nonempty dot-separated ASCII label segments; each segment is at most 64 bytes
 and admits only letters, digits, hyphen, and underscore, so the complete maximum
 is 4,159 bytes including separators. `scoped` requires at least two segments. A
-one-segment root path is legal only in the loud `root_global_read` variant: its
+one-segment root path is legal only in the `root_global_read` variant: its
 explicit intent records that the session gains global conversation read.
 Creation defaults an omitted object to `pathless`; updates always carry the
 complete replacement object. Requests, update receipts, and `session_summary`
@@ -1264,7 +1264,7 @@ request. A branch fact carries no pull request for a singleton to be keyed by,
 so a branch origin accompanies only the rule and repository scopes; the
 pull-request and stack scopes accompany only a pull-request origin. A singleton
 that carries a repository names the row's own repository, and a pull-request
-singleton names the very pull request its origin names, because the projection
+singleton names the same pull request its origin names, because the projection
 keys both from the one event the dispatch was admitted from. A stack singleton
 instead names the root of the open component that pull request belongs to, which
 is a different pull request whenever the origin is not itself that root, so the
@@ -2445,8 +2445,7 @@ terminal state and result the command found. The run-state semantics — that a
 cancel never overwrites a terminal outcome and that an applied cancel is
 journaled and replayed — are owned by the substrate page; this contract owns the
 message pair, its versioned encoding, and the closed receipt algebra, which
-client and daemon must implement together in the release that makes runs
-nameable on the wire.
+client and daemon must implement together.
 
 ## Terminal client
 
