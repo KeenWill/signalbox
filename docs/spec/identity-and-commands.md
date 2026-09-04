@@ -51,7 +51,7 @@ Identities fall into three supply classes:
   `ProviderTargetEvidenceId` is assigned here but not yet minted (see Open
   edges). All production generators mint UUIDv7 (`uuid::Uuid::now_v7()`). Why:
   UUIDv7 gives insertion locality for append-heavy Postgres B-tree keys without
-  changing the 128-bit storage shape; no index-level artifact measures this.
+  changing the 128-bit storage shape.
 - **Configuration reference key** — `DirectModelSelection` and `ModelAlias`.
   Callers supply them inside command payloads to name operator-configured model
   selections; they persist in `uuid` columns (`direct_model_selection_id`,
@@ -186,8 +186,8 @@ lifecycle actor classification derives from the principal and the domain actor:
 a module principal takes precedence; otherwise the actor classifies. A goal
 event a command authored projects the session's actor from that command's
 envelope issuer, so daemon core's automatic resume and a module's composed stop
-never read as the operator's. No command kind, session, or client has a separate
-command-ID namespace.
+are never attributed to the operator. No command kind, session, or client has a
+separate command-ID namespace.
 
 Each admitted kind has one purpose-specific typed record family
 (`create_session_command`, `create_session_from_imported_frontier_command`,
@@ -245,9 +245,9 @@ after creation.
 For `SubmitInput`, each terminal command result must correlate with exactly its
 committed domain effects. Equal replay returns the recorded result only after
 the current durable state still proves that correlation; otherwise the adapter
-fails closed rather than treating an effectless receipt as truth. The exact
-relational representation, deferred triggers, migration evolution, and
-lifecycle-transition checks are owned by
+fails closed rather than returning an effectless receipt. The exact relational
+representation, deferred triggers, migration evolution, and lifecycle-transition
+checks are owned by
 [persistence-protocol](persistence-protocol.md#relational-representation).
 
 All registry and typed-record tables are append-only, enforced by
@@ -367,8 +367,8 @@ receipt reconstruction (the `CreateSessionTransaction` contract in
 `CreateSessionFromImportedFrontierTransaction` contract). Because a failed
 transaction claims no identifier, retransmitting under the same
 `DurableCommandId` is the caller's retry path and replays or claims cleanly.
-Compaction's off-transaction provider effect is the deliberate exception: its
-runtime retries authorization and terminal persistence after database or
+Compaction's off-transaction provider effect is the exception: its runtime
+retries authorization and terminal persistence after database or
 ambiguous-commit outcomes, while the repository rereads and exactly replays an
 already-landed transition. This retains one successful summary until its durable
 receipt is known instead of issuing another provider call.
@@ -435,11 +435,10 @@ verified reference to the issuing program run, constructible only by the
 [program substrate](program-substrate.md)'s host-side session capability, with
 the same validated-reference, no-conferred-authority semantics as every other
 arm — and `SubmitInput` gains a program admissibility path fixing that actor, so
-a program-driven turn is never recorded as user-issued. This constrains present
-change: the actor storage convention (closed `actor_kind` discriminator,
-variant-shaped reference columns, replay-equality inclusion) must remain
-extensible to that arm, and nothing may assume the `SubmitInput` actor is always
-`user`.
+a program-driven turn is never recorded as user-issued. The actor storage
+convention (closed `actor_kind` discriminator, variant-shaped reference columns,
+replay-equality inclusion) must remain extensible to that arm, and nothing may
+assume the `SubmitInput` actor is always `user`.
 
 ## Durable-command telemetry correlation
 
