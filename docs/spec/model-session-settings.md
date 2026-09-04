@@ -210,8 +210,8 @@ No adapter logs.
 Protocol version one includes a capability-catalog list request and ordered item
 stream, complete settings on creation/defaults reads and receipts, provenance-
 preserving overrides on defaults replacement and origin-producing input, typed
-unsupported-setting results, and the two durable settings events above. A
-transcript snapshot completeness is owned by
+unsupported-setting results, and the two durable settings events above.
+Transcript snapshot completeness is owned by
 [process-protocol](process-protocol.md#transcript-snapshots), and the
 legacy-null cutover is owned by
 [persistence-protocol](persistence-protocol.md#relational-representation).
