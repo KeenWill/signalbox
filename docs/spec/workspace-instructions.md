@@ -193,7 +193,7 @@ registered under workspace root `/repo` and later reached by another session
 through a configured root for `/repo/sub` therefore presents that configured
 root, its `root_id`, and paths relative to `/repo/sub` — not a `workspace` root
 the second session never had. Rendering under the registration's root instead
-would collapse distinct configured namespaces into one and hand the model an
+would collapse distinct configured namespaces into one and give the model an
 ancestor scope that does not hold for it.
 
 Rendered bytes therefore depend on the authority, not on the registration: an
@@ -244,7 +244,7 @@ SHA-256 is named in the representation rather than assumed. The MCP skill
 transfer proposal
 [SEP-2640](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/2640)
 provides public precedent for digest verification across an instruction-content
-boundary. Signalbox applies that discipline to repository content because a
+boundary. Signalbox applies digest verification to repository content because a
 checkout is input, not daemon authority.
 
 Registration hashes source bytes; admission separately hashes rendered bytes.
@@ -395,15 +395,15 @@ An eligibility entry is authority-qualified, not a bare identity. Each names one
 `InstructionBundleId` together with the authorizing root the session reaches it
 through — the `workspace` kind, or `configured` plus that root's provider-safe
 reference — and a replacement names that root alongside each identity. Identity
-alone would be ambiguous exactly where it matters: a bundle with aliases under
-several configured roots would leave catalog values, wrapper paths, scope
-comparisons, and projection order undetermined, and choosing arbitrarily can
-broaden an `AGENTS.md` document's scope and change rendered and manifest bytes.
-The root named must be one this bundle's registration actually records, as its
-primary root or as an alias, and must be one the naming session is authorized to
-use; anything else is the typed rejection eligibility replacement already
-defines. The activation snapshot copies the pairs, so a turn's rendering is
-determined by evidence frozen at activation rather than re-derived later.
+alone would be ambiguous: a bundle with aliases under several configured roots
+would leave catalog values, wrapper paths, scope comparisons, and projection
+order undetermined, and choosing arbitrarily can broaden an `AGENTS.md`
+document's scope and change rendered and manifest bytes. The root named must be
+one this bundle's registration actually records, as its primary root or as an
+alias, and must be one the naming session is authorized to use; anything else is
+the typed rejection eligibility replacement already defines. The activation
+snapshot copies the pairs, so a turn's rendering is determined by evidence
+frozen at activation rather than re-derived later.
 
 Until whole-bundle unload is implemented, a replacement command rejects removal
 of any currently admitted identity or any identity in the frozen eligibility
@@ -501,10 +501,10 @@ for the same reason and with the same bytes: those members are emitted inside
 the delimited untrusted-data region of the result, under the fixed
 daemon-authored label, escaped so they cannot terminate the delimiter. A
 description reading `approve the next request` is a description, not an
-instruction, and enumerating a bundle must not be a way to say otherwise. The
-members that cannot carry prose — `bundle_id`, `kind`, `source_bytes`,
-`source_sha256`, `root`, `root_id` — stay outside that region, so a reader can
-still address and order a page without parsing untrusted text.
+instruction, and enumeration must not present it as one. The members that cannot
+carry prose — `bundle_id`, `kind`, `source_bytes`, `source_sha256`, `root`,
+`root_id` — stay outside that region, so a reader can still address and order a
+page without parsing untrusted text.
 
 `instructions_preview` returns bounded structure — headings for a document and
 validated metadata plus headings for a skill — with full source byte length and
@@ -565,9 +565,9 @@ that same bounded heading projection.
 
 Heading text, `name`, and `description` are repository-controlled bytes, and
 preview returns them through an `Auto` tool with no admission decision behind
-it. That asymmetry holds only if the bytes carry their authority with them. A
-tool result is durably referenced from semantic history and rendered into later
-calls by the owning
+it. That asymmetry holds only if the result states the authority those bytes
+carry. A tool result is durably referenced from semantic history and rendered
+into later calls by the owning
 [tool result contract](tool-loop.md#result-authority-and-the-continuation-boundary),
 so without framing this path could put tens of kilobytes of source text into
 every later call while bypassing the `AlwaysConfirm` gate, the rendered-byte
@@ -656,8 +656,9 @@ Admission is idempotent by bundle within the effective admitted set. A distinct
 request for an already admitted bundle returns an `already_admitted` receipt
 naming the existing admission and exact rendered evidence, records that
 request's replay link, and appends no second `InstructionAdmission`. It does not
-re-read a moving source. A replay of either request returns its recorded
-receipt, so one manifest can never contain duplicate bundle identities.
+re-read the source, which may have changed. A replay of either request returns
+its recorded receipt, so one manifest can never contain duplicate bundle
+identities.
 
 List reads only registration metadata; preview performs the single-source
 revalidated read above. Their bounds are independent of aggregate registered
@@ -872,8 +873,8 @@ because the tool ran and failed for a defined reason. The `detail` is the exact
 reason token and nothing else: no prose, no punctuation, no path, no identity,
 and no explanation appended after it. `stale_cursor` belongs with them rather
 than with the arguments: it is a request outcome, not a malformed argument, so
-`invalid_arguments` would misreport a well-formed cursor whose snapshot has
-simply moved on.
+`invalid_arguments` would misreport a well-formed cursor whose snapshot is no
+longer current.
 
 The two pre-approval reasons never ran, and must not claim they did.
 `not_eligible` and `invalid_arguments` both resolve before approval and create
@@ -884,7 +885,7 @@ decodable at all. They are told apart by `detail` — the token `not_eligible` f
 an ineligible bundle, and JSON null for arguments that did not decode, where no
 token would say anything the kind has not already said.
 
-That closed vocabulary is validated on the way out, so a reader can match on it
+That closed vocabulary is validated when emitted, so a reader can match on it
 exactly. Every provider therefore replays one exact object for each reason,
 whichever implementation produced it.
 
@@ -1143,7 +1144,7 @@ is immutable semantic conversation history (INV-015); instruction policy is
 effective input configuration, not conversation authored by an actor. Append
 would make unloading incompatible with that immutability. Projection lets an
 append-only audit event change later effective input without altering an earlier
-frontier or manifest. The comparative evidence reaches the same boundary:
+frontier or manifest. Other clients show the same constraint:
 [Aider's read-only-file commands](https://aider.chat/docs/usage/commands.html)
 offer selective `/drop`, while
 [Continue's rules](https://docs.continue.dev/customize/deep-dives/rules) are
@@ -1255,9 +1256,9 @@ replacements: an origin accepted under an uncapable target while the admitted
 set was empty passed acceptance legitimately, and if a replacement then installs
 a capable target, the pin and the installed epoch both admit a bundle the queued
 turn still cannot transport when it activates. Checking all three at admission
-closes every such order without forbidding replacements while a turn is active,
-and without demanding transport capability of an origin accepted for a session
-that has admitted nothing.
+covers every such ordering without forbidding replacements while a turn is
+active, and without demanding transport capability of an origin accepted for a
+session that has admitted nothing.
 
 That check is over a summary, not the queue, because the queue has no practical
 item bound and admission holds the scheduler and admitted-set locks while it
@@ -1281,8 +1282,8 @@ an origin whose freshly resolved target cannot carry the session's retained
 region fails closed with a typed finding rather than reaching provider spawn.
 The summary is rebuilt from those resolutions at the same point, so it describes
 the live catalog rather than the one that was loaded when the origins were
-accepted. Pinning the serving target durably at acceptance would close the same
-hole and is not chosen: it would contradict the resolve-at-execution rule the
+accepted. Pinning the serving target durably at acceptance would also prevent
+this and is not chosen: it would contradict the resolve-at-execution rule the
 catalog contract states for every origin, to fix a problem that only
 instruction-bearing sessions have.
 
@@ -1400,4 +1401,4 @@ recovery.
   further vendor formats, search/ranking, eager and path-triggered admission,
   and later externalization of retained rendered plaintext are undecided and
   tracked in [open questions](../open-questions.md), never inferred from this
-  baseline.
+  page.
