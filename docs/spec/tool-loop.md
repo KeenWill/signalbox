@@ -1,40 +1,37 @@
 # Tool loop
 
-The daemon blob-read declarations below are a foundation proposal.
-
-The workspace-instruction addition to the continuation transaction is committed
+The workspace-instruction effect of the continuation transaction is committed
 unimplemented functionality. No present tool can create an instruction
-admission, and the current transaction therefore still has the four implemented
-effects named below.
+admission, and the transaction therefore has the four implemented effects named
+below.
 
-This page specifies the implemented daemon-owned tool subsystem. The runner
-executable stack rooted at this foundation proposal extends the same laws to the
-runner locus. This page owns logical tool requests, approval policy and
-decisions, physical tool attempts, result admission, intra-turn continuation,
-crash classification, the compiled registry, and the daemon-local catalog. Turn
-and attempt lifecycle law lives in
+This page specifies the implemented daemon-owned tool subsystem. Its
+runner-locus paragraphs are committed unimplemented functionality that extends
+the same laws to the runner locus;
+[runner protocol and placement](runner-protocol.md#version-one-executable-boundary)
+owns their present implementation status. This page owns logical tool requests,
+approval policy and decisions, physical tool attempts, result admission,
+intra-turn continuation, crash classification, the compiled registry, and the
+daemon-local catalog. Turn and attempt lifecycle law lives in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
 entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
 model-call staging and provider translation in
 [model-call-execution](model-call-execution.md); durable-command identity in
 [identity-and-commands](identity-and-commands.md); and relational mechanics in
 [persistence-protocol](persistence-protocol.md). Invariant tags cite
-[the invariant test index](../invariants.md). The runner-locus paragraphs in
-this page are the foundation proposal at the bottom of their implementing stack.
-The approval-delegation stack rooted at this foundation proposal adds frozen
-per-tool postures, recorded judge calls, and typed decision provenance.
+[the invariant test index](../invariants.md).
 
 ## Intra-turn rounds and request batches
 
 One turn spans the complete propose → decide → execute → result → continue loop.
 A model call is one physical round inside that turn. A completed response with
-no tool request appends `TurnCompleted` and terminalizes the turn exactly as
-before. A completed response containing one or more tool requests never
-terminalizes the turn: it ends the current turn attempt as a tool-round yield
-and keeps the active slot while the batch is resolved. A later model call uses a
-fresh turn attempt in the same turn. Why: a turn is the logical conversational
-outcome, while a model call and a turn attempt are physical tenures that may
-repeat without changing that logical identity (INV-004, INV-006).
+no tool request appends `TurnCompleted` and terminalizes the turn. A completed
+response containing one or more tool requests never terminalizes the turn: it
+ends the current turn attempt as a tool-round yield and keeps the active slot
+while the batch is resolved. A later model call uses a fresh turn attempt in the
+same turn. Why: a turn is the logical conversational outcome, while a model call
+and a turn attempt are physical tenures that may repeat without changing that
+logical identity (INV-004, INV-006).
 
 A completed response carries ordered assistant text and tool proposals. For each
 proposal the application supplies one fresh UUIDv7 `ToolRequestId`; the domain
@@ -48,8 +45,8 @@ adapter after that adapter applies its preparation-time credential scrub when
 JSON decoding fails. Undecodable text must also exclude U+0000, mirroring the
 result-content admission. Both arms must fit within 1 MiB before and after
 normalization. This preserves malformed arguments as bounded, identity-safe
-evidence without pretending they are JSON. An undecodable value, or valid JSON
-that does not decode against the selected tool's argument type, becomes a typed
+evidence without treating them as JSON. An undecodable value, or valid JSON that
+does not decode against the selected tool's argument type, becomes a typed
 execution error later.
 
 The same transaction that classifies the producing call `Completed` appends one
@@ -139,18 +136,17 @@ or `Human`. The selected posture is frozen into every resulting request. For
 every definition, an explicit posture is authoritative: `Auto` records
 `PolicyAuto`, `Delegated` parks for a judge, and `Human` parks for the user even
 when the session blanket would otherwise approve. When the mapping omits the
-posture, the existing precedence below is unchanged.
+posture, the precedence below applies.
 
 An `AlwaysConfirm` permission narrows that rule for exactly one posture. The
 declaration exists so that no session blanket can silently approve the tool, so
-a configured `Auto` posture never satisfies it: automation there would erase the
-decision the declaration demands. A configured `Delegated` posture does satisfy
-it, because an approval judge is not a blanket but a distinct decider that can
-still deny the request or escalate it to the user; routing to that judge serves
-the declaration's purpose rather than evading it. A configured `Human` posture
-leaves the stricter `AlwaysConfirm` outcome unchanged, since both await the same
-user. With no posture configured, an `AlwaysConfirm` declaration parks for a
-human under either session-blanket posture.
+a configured `Auto` posture never satisfies it: automation there would remove
+the decision the declaration requires. A configured `Delegated` posture does
+satisfy it, because an approval judge is not a blanket but a distinct decider
+that can still deny the request or escalate it to the user. A configured `Human`
+posture leaves the stricter `AlwaysConfirm` outcome unchanged, since both await
+the same user. With no posture configured, an `AlwaysConfirm` declaration parks
+for a human under either session-blanket posture.
 
 Daemon-local execution therefore leaves an `AlwaysConfirm` declaration undecided
 unless an explicit `Delegated` posture is configured for it; the dangerous
@@ -177,7 +173,7 @@ may exist after an earlier confirmation wait without bypassing it; only explicit
 user or delegate decisions must form a proposal-order prefix. After each user
 command, the earliest remaining undecided confirmation is the next wait, while
 already frozen automatic decisions require no later command. Why: recording the
-selected source makes unattended operation inspectable without laundering policy
+selected source makes unattended operation inspectable without presenting policy
 as human consent.
 
 The blanket is a field of each immutable `VersionedSessionConfigurationDefaults`
@@ -243,9 +239,9 @@ attended: its exceptional block has no automatic resumption, so only an operator
 could have resumed it. Either turn keeps the attended park described above: its
 completed `EscalateToHuman` leaves the turn active and the request parked for
 that user, exactly as in a session no dispatch created, and no steer is
-reclassified or stranded by a terminalization it did not expect. Otherwise a
-completed `EscalateToHuman` closes every unresolved request in the active batch
-as `ToolClosed`, appends `TurnFailed`, terminalizes the turn with the completed
+reclassified or stranded by terminalization. Otherwise a completed
+`EscalateToHuman` closes every unresolved request in the active batch as
+`ToolClosed`, appends `TurnFailed`, terminalizes the turn with the completed
 judge escalation as its typed cause, and records an append-only audit row
 linking the judge call and rationale, request, dispatch action, terminal
 attempt, failure entry, and terminal frontier. Repository-watch work atomically
@@ -290,22 +286,21 @@ the parked wait records the typed
 intact.
 
 A judge denial the user disagrees with is reversed forward, never in place: the
-denial is terminal (INV-027), and the session naturally re-proposes after a
-denial because the denial reason reaches the model at the continuation boundary.
-The canonical `OverrideDeniedToolRequest` command — user-global
-`DurableCommandId`, the owning `SessionId`, and the exact denied
-`ToolRequestId`; equality excludes only the command identifier — records one
-one-shot pre-approval for that re-proposal. Recording verifies every conjunct of
-the override predicate against durable evidence, each with its own recorded
-rejection: the recorded approval is a delegate denial (a user denial or any
-approval admits no override), the denial is terminal (its denied-result entry is
-materialized, so a denial whose round is still resolving cannot be overridden),
-the request belongs to the command's session, and no override is already
-recorded for it — each denial admits at most one override ever. The session is
-part of the canonical payload, unlike `decide_tool_request`, because the
-recorded override is a session-scoped standing fact consumed by a later
-proposal. An applied command durably links the denied request, its denying judge
-call, and the override command.
+denial is terminal (INV-027), and the session may re-propose after a denial
+because the denial reason reaches the model at the continuation boundary. The
+canonical `OverrideDeniedToolRequest` command — user-global `DurableCommandId`,
+the owning `SessionId`, and the exact denied `ToolRequestId`; equality excludes
+only the command identifier — records one one-shot pre-approval for that
+re-proposal. Recording verifies every conjunct of the override predicate against
+durable evidence, each with its own recorded rejection: the recorded approval is
+a delegate denial (a user denial or any approval admits no override), the denial
+is terminal (its denied-result entry is materialized, so a denial whose round is
+still resolving cannot be overridden), the request belongs to the command's
+session, and no override is already recorded for it — each denial admits at most
+one override ever. The session is part of the canonical payload, unlike
+`decide_tool_request`, because the recorded override is a session-scoped
+standing fact consumed by a later proposal. An applied command durably links the
+denied request, its denying judge call, and the override command.
 
 Recorded overrides are frozen into each prepared model call in the same
 transaction as the dangerous blanket posture, so consumption has blanket-frozen
@@ -317,31 +312,30 @@ Only a still-effective override is frozen, and two things retire one: the
 consuming `UserOverride` approval that names it, and an approval of the
 identical command recorded by any other authority after the denial — the judge
 approving a re-proposal it once denied, a user decision after escalation, or a
-policy approval. The second is what keeps the boundary below from leaking. The
-call that first carries a denial cannot hold that denial's override, so its
-re-proposal is decided without one, and an override left standing after that
-decision would pre-approve a repeat of a command the session has already let
-through. Ordering here is structural rather than clocked, because none of these
-append-only records carries a timestamp. Across turns the order is the
-acceptance position of the input that opened each turn; inside a turn each model
-call owns one turn attempt and attempts chain through their predecessor, so a
-proposal counts as later when its turn was accepted after the denial's or its
-attempt continues the denied proposal's. Both are needed, because the
-re-proposal an override exists for is normally made in the denial's own turn.
-The scope is required rather than decorative — the same command is routinely
+policy approval. The second is needed because the call that first carries a
+denial cannot hold that denial's override, so its re-proposal is decided without
+one, and an override left standing after that decision would pre-approve a
+repeat of a command the session has already let through. Ordering here is
+structural, because none of these append-only records carries a timestamp.
+Across turns the order is the acceptance position of the input that opened each
+turn; inside a turn each model call owns one turn attempt and attempts chain
+through their predecessor, so a proposal counts as later when its turn was
+accepted after the denial's or its attempt continues the denied proposal's. Both
+are needed, because the re-proposal an override exists for is normally made in
+the denial's own turn. The scope is required: the same command is routinely
 approved and executed earlier in a session, long before a later proposal of it
 is denied, and an unscoped rule would retire most overrides at the instant they
 were recorded.
 
-The continuation that first carries a denial to the model is therefore out of
-reach by design, and this is the boundary of the feature rather than a gap in
-it. That continuation is checkpointed by the same transaction that projects the
-denied result, so at the instant its override inventory freezes no override for
-the denial can exist — the user has not yet been shown the denial to disagree
-with. The user overrides it, the model re-proposes on the following call, and
-that call's frozen inventory carries the override. The accepted cost is one
-extra round; the gain is that a prepared call's approval inputs are fixed at
-checkpoint and no concurrent command can race them.
+The continuation that first carries a denial to the model therefore never
+carries that denial's override. That continuation is checkpointed by the same
+transaction that projects the denied result, so at the instant its override
+inventory freezes no override for the denial can exist — the user has not yet
+been shown the denial to disagree with. The user overrides it, the model
+re-proposes on the following call, and that call's frozen inventory carries the
+override. The accepted cost is one extra round; the gain is that a prepared
+call's approval inputs are fixed at checkpoint and no concurrent command can
+race them.
 
 When the completing call proposes a command whose initial selection would park
 for the judge (`Delegated`) and an unconsumed recorded override matches the
@@ -365,9 +359,9 @@ permission default (`Auto`, `Confirm`, or `AlwaysConfirm`), optional approval
 posture (`Auto`, `Delegated`, or `Human`), and the stored two-class crash
 classification used by the implemented local attempt machinery.
 
-The runner foundation adds one immutable daemon-owned `RunnerToolDeclaration`
-per runner-advertisable name. It carries a required checked model-facing
-description and canonical JSON-object argument schema, the required three-way
+Each runner-advertisable name has one immutable daemon-owned
+`RunnerToolDeclaration`. It carries a required checked model-facing description
+and canonical JSON-object argument schema, the required three-way
 `RunnerToolEffectClass` (`Pure`, `Idempotent`, or `SideEffecting`), one nonempty
 `ToolAdmissibleLoci` value (`DaemonOnly`, `RunnerOnly { selector }`, or
 `DaemonOrRunner { selector }`), and the session capability its execution
@@ -379,18 +373,17 @@ therefore still has one authoritative definition for model advertisement and
 argument validation. The typed placement and runner-dispatch law is owned by
 [runner protocol and placement](runner-protocol.md).
 
-The current daemon-local application catalog remains one process-lifetime
-immutable compiled value. Its existing `EffectFree` declaration maps to
-`RunnerToolEffectClass::Pure`, and `ExternalEffect` maps to
-`RunnerToolEffectClass::SideEffecting`; no current local declaration can project
-`Idempotent`. Before a shared name can use a daemon locus, the application
-adapter validates exact model-facing description and schema, permission
-equality, and this effect mapping against the authoritative runner declaration;
-it also compiles the schema into the executable validator used before dispatch.
-A mismatch is unavailable, never a choice between two policies. The runner
-authority child stack persists the consolidated placement and policy snapshot.
-Catalog lookup and iteration remain ports rather than a static global, but
-runtime rebinding and deployment compatibility for outstanding requests are not
+The daemon-local application catalog is one process-lifetime immutable compiled
+value. Its `EffectFree` declaration maps to `RunnerToolEffectClass::Pure`, and
+`ExternalEffect` maps to `RunnerToolEffectClass::SideEffecting`; no local
+declaration can project `Idempotent`. Before a shared name can use a daemon
+locus, the application adapter validates exact model-facing description and
+schema, permission equality, and this effect mapping against the authoritative
+runner declaration; it also compiles the schema into the executable validator
+used before dispatch. A mismatch is unavailable, never a choice between two
+policies. The consolidated placement and policy snapshot is persisted. Catalog
+lookup and iteration remain ports rather than a static global, but runtime
+rebinding and deployment compatibility for outstanding requests are not
 implemented; they require the durable definition-revision decision recorded
 under Open edges.
 
@@ -430,23 +423,23 @@ mutation and Git families rather than one process-wide domain. One session takes
 exactly one such domain at a time: a retained set a request still holds is never
 released, so a second set is never composed beside one already mutating that
 session's tree. Sessions with no derived directory share the configured root's
-own composition, which is what every session bound before the derivation
-existed.
+own composition.
 
-The catalog stays one process-lifetime immutable compiled value across that
-change. Every declaration a workspace-root-bound family advertises — its name,
-description, schema, permission default, and effect class — is a property of the
-family's code rather than of the repository it binds. The one compiled value
-that is not is the local Git argument validator, which carries the pinned
-repository's object format. A session whose repository selects another format is
-therefore refused rather than validated against the configured root's width, and
-the refusal has two shapes because catalog preflight runs before any session
-executor is resolved. An argument carrying a full object identifier in the
-session's own format is refused at preflight as invalid arguments, since the one
-compiled validator admits only the format it was compiled with. Every other
-argument reaches composition, which rejects the disagreeing repository and
-closes the request as a known tool failure whose sanitized detail names the
-closed reason. Neither shape redirects the request to another session's root.
+The catalog stays one process-lifetime immutable compiled value across
+per-session root binding. Every declaration a workspace-root-bound family
+advertises — its name, description, schema, permission default, and effect class
+— is a property of the family's code rather than of the repository it binds. The
+one compiled value that is not is the local Git argument validator, which
+carries the pinned repository's object format. A session whose repository
+selects another format is therefore refused rather than validated against the
+configured root's object format, and the refusal has two shapes because catalog
+preflight runs before any session executor is resolved. An argument carrying a
+full object identifier in the session's own format is refused at preflight as
+invalid arguments, since the one compiled validator admits only the format it
+was compiled with. Every other argument reaches composition, which rejects the
+disagreeing repository and closes the request as a known tool failure whose
+sanitized detail names the closed reason. Neither shape redirects the request to
+another session's root.
 
 Every advertised argument schema declares an object at its root and carries no
 root keyword outside that object declaration (INV-055). One request carries the
@@ -456,8 +449,7 @@ internally tagged argument type is therefore advertised as one object whose tag
 property holds the variant vocabulary and names what each variant requires,
 while its Rust type still decodes the tagged form unchanged; the advertised
 schema alone widens, and each family's own argument validation still refuses
-what the declaration excludes. The composed catalog is swept for this property
-offline.
+what the declaration excludes.
 
 The exact required inputs and fail-closed startup validation are owned by
 [configuration and credentials](configuration-and-credentials.md#daemon-tool-mapping-registry).
@@ -505,16 +497,15 @@ or removed after the request was recorded does not rewrite its name or
 arguments.
 
 Effect class controls crash classification, not permission identity. In the
-current daemon-local executor, a crash-lost prepared attempt, or an in-flight
-attempt declared `EffectFree`, closes `KnownFailed` and fails the current turn
-honestly; version one performs no automatic local retry. A crash-lost in-flight
-attempt declared `ExternalEffect` closes `Ambiguous`, ends the abandoned turn
-attempt `Lost`, and parks the turn in `AwaitingRecoveryDecision` naming that
-exact tool attempt (INV-025, INV-026, INV-034). Runner lease loss uses the
-separate re-lease law in
+daemon-local executor, a crash-lost prepared attempt, or an in-flight attempt
+declared `EffectFree`, closes `KnownFailed` and fails the current turn; version
+one performs no automatic local retry. A crash-lost in-flight attempt declared
+`ExternalEffect` closes `Ambiguous`, ends the abandoned turn attempt `Lost`, and
+parks the turn in `AwaitingRecoveryDecision` naming that exact tool attempt
+(INV-025, INV-026, INV-034). Runner lease loss uses the separate re-lease law in
 [runner protocol and placement](runner-protocol.md#effect-classes-and-runner-leases);
-re-leasing one fenced runner attempt is not the current local executor
-fabricating a new physical attempt.
+re-leasing one fenced runner attempt is not the local executor fabricating a new
+physical attempt.
 
 ## Serialized staged execution
 
@@ -582,17 +573,18 @@ commits the terminal typed failure as this attempt's result and leaves the
 admitted-set head and every existing admission untouched. Rolling both back
 would discard a completed executor result and strand the attempt `InFlight`,
 which contradicts the monotonic terminal transition required above and would
-wedge the serialized batch behind an attempt that can never close. The
+block the serialized batch behind an attempt that can never close. The
 distinction is that the executor work already happened outside any transaction;
 what this transaction decides is whether its evidence becomes an admission, and
-"no" is a result to record rather than a reason to forget the attempt. Replay of
-an already committed request returns the recorded receipt and admission link
-without appending either again; a conflicting receipt or link is corruption.
-That head lock's position in the repository-wide order and its mode belong to
-the [persistence lock protocol](persistence-protocol.md#lock-protocol), which
+a rejected admission is a recorded result, not grounds to roll back the attempt.
+Replay of an already committed request returns the recorded receipt and
+admission link without appending either again; a conflicting receipt or link is
+corruption. That head lock's position in the repository-wide order and its mode
+belong to the
+[persistence lock protocol](persistence-protocol.md#lock-protocol), which
 carries it in the same inventory as this transaction's scheduler lock; this page
 states that the lock is taken, never where or how. No present tool supplies this
-effect until an implementing child advances the owning workspace contract.
+effect.
 
 The runner durably spools a terminal evidence envelope until `result_recorded`.
 A process exit, timeout, supervisor loss, or channel loss after claim is not a
@@ -664,19 +656,18 @@ request and are visible to the next model round; they do not by themselves fail
 the turn. Physical ambiguity remains a turn-level recovery wait and does not
 become an ordinary error result.
 
-Because a resolved request is otherwise a conversation between the daemon and
-the model, admitting a `KnownFailed` observation also emits one operator
-telemetry event carrying the dispatched catalog name, the closed error kind, and
-the session and turn identities — never the bounded error detail, tool
-arguments, or any response content. Admission is the single site: it covers
-every executor behind the one dispatch trait and the failures admission itself
-substitutes for oversized or null-bearing results. Completed and ambiguous
-observations emit nothing here; ambiguity is carried by the recovery wait above.
-Preflight failures that never reach admission — unknown names and
-argument-decode failures — are likewise silent, being model-authored rather than
-deployment facts. Telemetry field discipline is
-[identity-and-commands](identity-and-commands.md#durable-command-telemetry-correlation)
-scope.
+Because a resolved request is otherwise recorded only in the session transcript,
+admitting a `KnownFailed` observation also emits one operator telemetry event
+carrying the dispatched catalog name, the closed error kind, and the session and
+turn identities — never the bounded error detail, tool arguments, or any
+response content. Admission is the single site: it covers every executor behind
+the one dispatch trait and the failures admission itself substitutes for
+oversized or null-bearing results. Completed and ambiguous observations emit
+nothing here; ambiguity is carried by the recovery wait above. Preflight
+failures that never reach admission — unknown names and argument-decode failures
+— are likewise silent, being model-authored rather than deployment facts.
+Telemetry field rules are owned by
+[identity-and-commands](identity-and-commands.md#durable-command-telemetry-correlation).
 
 An interrupt against a tool recovery wait does not reinterpret or erase the
 ambiguous attempt. It materializes exactly one reference-only result per request
@@ -794,25 +785,25 @@ carries `ToolRoundLimitReached`. The terminal event consequently uses
 
 The round ceiling bounds latency and provider spend; it does not bound retained
 memory, because it multiplies against the 32-request batch bound and the 1 MiB
-argument and result bounds. Retained content is therefore bounded on its own
-terms: at most 256 MiB of projected frontier content may be rendered into one
-call's provider messages. The bound counts every kind of content the render
-clones, not tool evidence alone — request arguments, result text, error detail,
-and denial reasons, plus assistant text, context summaries, delegated task and
-peer-message content, delivered delegation-outcome content, origin and steering
-user content, and attested imported text. Assistant text carries no length bound
-of its own beyond the transport cap on a single response, so a ceiling counting
-only tool evidence would leave the same round multiplication unbounded through
-the entries it clones without counting. The bound is enforced once the frontier
-projection names its entries and before any of that content is cloned into
-messages — the projection reads the durable frontier by reference for exactly
-that reason — so an over-bound frontier is refused rather than materialized.
-Exceeding it closes the checkpoint through the same pre-send contract as round
-saturation, emitting a warning carrying the ceiling and the observed byte count
-and terminalizing as `tool_round_limit_reached` (INV-071). Because one maximal
-round retains at most 64 MiB of tool evidence, the ceiling admits four maximal
-rounds and leaves the round ceiling operative for the kilobyte-scale results
-executors return in practice.
+argument and result bounds. Retained content is therefore bounded separately: at
+most 256 MiB of projected frontier content may be rendered into one call's
+provider messages. The bound counts every kind of content the render clones, not
+tool evidence alone — request arguments, result text, error detail, and denial
+reasons, plus assistant text, context summaries, delegated task and peer-message
+content, delivered delegation-outcome content, origin and steering user content,
+and attested imported text. Assistant text carries no length bound of its own
+beyond the transport cap on a single response, so a ceiling counting only tool
+evidence would leave the same round multiplication unbounded through the entries
+it clones without counting. The bound is enforced once the frontier projection
+names its entries and before any of that content is cloned into messages — the
+projection reads the durable frontier by reference for exactly that reason — so
+an over-bound frontier is refused rather than materialized. Exceeding it closes
+the checkpoint through the same pre-send contract as round saturation, emitting
+a warning carrying the ceiling and the observed byte count and terminalizing as
+`tool_round_limit_reached` (INV-071). Because one maximal round retains at most
+64 MiB of tool evidence, the ceiling admits four maximal rounds and leaves the
+round ceiling operative for the kilobyte-scale results executors return in
+practice.
 
 These durable-content bounds avoid wall-clock policy and ensure one
 model-controlled response or chain cannot retain the progressing slot
@@ -836,9 +827,9 @@ logical dependency behind a terminal turn (INV-006).
 `closed_inadmissible` is never reclassified by any of these paths. It has a
 durable resolution and a typed reason before the interrupt or crash arrives, and
 because it deliberately has no attempt it would otherwise fall into the
-`ToolClosed` fallback and lose both — reporting a request that was refused on
-its own terms as one the turn ran out of time for. Its result entry is
-`ToolInadmissible` wherever these algorithms name a materialization.
+`ToolClosed` fallback and lose both, reporting a request refused before approval
+as one closed by turn end. Its result entry is `ToolInadmissible` wherever these
+algorithms name a materialization.
 
 ## Approval waits and restart
 
@@ -876,8 +867,7 @@ the current continuation attempt to disappear.
 
 ## Session-delegation tool family
 
-This section is the foundation proposal at the bottom of the delegation stack.
-The daemon catalog adds three automatic, daemon-local tools. Their invoking
+The daemon catalog contains three automatic, daemon-local tools. Their invoking
 session, turn, and request always come from trusted dispatch correlation and
 never from model arguments.
 
@@ -886,13 +876,13 @@ never from model arguments.
   and `on_parent_cancelled` actions (`keep_running`, `stop`, or `cancel`).
   **Committed unimplemented functionality.** No present tool or process
   execution surface creates the child; the daemon rejects execution until the
-  placement-owned creation transaction implements the decided parent-directory
-  default. That transaction must atomically create one delegated, no-ancestry
-  child and its initial task work, close the spawning physical attempt with its
-  matching receipt in that same transaction, then return the child session
-  identity as a durable completion. Equal physical replay must return that
-  child; a second child cannot attach to the request. Version one imposes no
-  fixed active-child-count limit; admission must check the complete locked
+  placement-owned creation transaction implements the parent-directory default.
+  That transaction must atomically create one delegated, no-ancestry child and
+  its initial task work, close the spawning physical attempt with its matching
+  receipt in that same transaction, then return the child session identity as a
+  durable completion. Equal physical replay must return that child; a second
+  child cannot attach to the request. Version one imposes no fixed
+  active-child-count limit; admission must check the complete locked
   relationship inventory for request and child uniqueness.
 
 - `await_session` takes the related child identity and `foreground` or
@@ -996,7 +986,7 @@ detail, denial selects `denied` and its reason, and terminal closure selects
 whose failures do not fit it maps into it rather than extending it, and may fix
 `D` to its own closed token vocabulary so the projection stays machine-readable.
 **Committed unimplemented functionality.** The instruction family is the one
-such mapping so far, fixed by
+such mapping, fixed by
 [workspace instructions](workspace-instructions.md#enumeration-preview-and-admission):
 its four execution-stage failures select `execution_failed` with `D` set to
 exactly one closed reason token and no other text, while its two pre-approval
@@ -1007,10 +997,10 @@ because its wire shape has no failure flag; Anthropic also receives the
 provider-neutral failure flag. Malformed proposal arguments remain exact after
 preparation-time credential scrubbing on the durable request but replay as the
 exact provider-neutral JSON object `{"signalbox_invalid_arguments":true}`,
-allowing the paired typed error result to reach either provider without
-pretending the placeholder is durable evidence.
+allowing the paired typed error result to reach either provider without treating
+the placeholder as durable evidence.
 
-The first compiled tool is `current_time`:
+`current_time` is a compiled tool:
 
 - optional argument `timezone` is an IANA time-zone name; absence selects `UTC`;
 - permission default is `Auto`;
@@ -1027,11 +1017,10 @@ An unknown time zone or wrong argument shape produces `InvalidArguments` error
 evidence. An injected instant outside the supported civil-time range produces
 known-failure evidence with detail
 `current time is outside the supported range`. IANA lookup and offset conversion
-use the focused `jiff` dependency; Signalbox owns only the port and result
-contract, not a time-zone database implementation.
+use the `jiff` dependency; Signalbox owns only the port and result contract, not
+a time-zone database implementation.
 
-The same process-lifetime compiled catalog also declares the Tier 0 daemon
-tools:
+The same process-lifetime compiled catalog also declares these daemon tools:
 
 - `echo` requires exactly one `text` string and returns the same canonical
   compact `{"text": ...}` object. Its permission default is `Auto` and its
@@ -1187,30 +1176,29 @@ The declarations and compact result objects are:
   ranged inspection classifies a NUL-bearing or non-UTF-8 blob as binary even
   when those bytes lie outside the selected lines. A ranged content result can
   claim truncation only when the exact source bytes observed inside the selected
-  lines exceed the retained bytes; source bytes before the selection cannot
-  impersonate discarded selected content. `path_not_found`,
-  `revision_not_found`, `not_a_file` with the observed repository-object type,
-  and `binary_file` with source bytes are separate non-content outcomes; every
-  file outcome carries `truncated`. Before any Contents request, the GitHub
-  adapter requests the bounded SHA representation of `/commits/{revision}`.
-  Success must return the exact required revision; a different resolution,
-  including a forty-hex branch or tag name that resolves to another commit,
-  fails execution before repository content is read. An exact resolution pins
-  the Contents request to that commit, and a Contents 404 then means
-  `path_not_found`. A commit conflict proves an empty repository and returns
-  `revision_not_found` without a Contents request. A commit 422 whose bounded
-  JSON `message` is exactly `No commit found for SHA: {revision}` also proves
-  absence without a Contents request; any other 422 remains failed execution. A
-  commit 404 permits one Contents visibility probe pinned to the requested
-  revision: only a bounded 404 body that exactly names that revision as an
-  absent ref returns `revision_not_found`; a generic 404 remains failed
-  execution because metadata visibility alone cannot prove absence. A successful
-  text or binary file read therefore uses three requests (commit resolution,
-  Contents metadata, immutable blob), a directory result or path absence uses
-  two (commit resolution and Contents), and revision absence uses one or two.
-  Every request shares one 30-second transaction budget, and every request after
-  resolution names the resolved commit or immutable blob rather than a moving
-  reference.
+  lines exceed the retained bytes; source bytes before the selection cannot be
+  counted as discarded selected content. `path_not_found`, `revision_not_found`,
+  `not_a_file` with the observed repository-object type, and `binary_file` with
+  source bytes are separate non-content outcomes; every file outcome carries
+  `truncated`. Before any Contents request, the GitHub adapter requests the
+  bounded SHA representation of `/commits/{revision}`. Success must return the
+  exact required revision; a different resolution, including a forty-hex branch
+  or tag name that resolves to another commit, fails execution before repository
+  content is read. An exact resolution pins the Contents request to that commit,
+  and a Contents 404 then means `path_not_found`. A commit conflict proves an
+  empty repository and returns `revision_not_found` without a Contents request.
+  A commit 422 whose bounded JSON `message` is exactly
+  `No commit found for SHA: {revision}` also proves absence without a Contents
+  request; any other 422 remains failed execution. A commit 404 permits one
+  Contents visibility probe pinned to the requested revision: only a bounded 404
+  body that exactly names that revision as an absent ref returns
+  `revision_not_found`; a generic 404 remains failed execution because metadata
+  visibility alone cannot prove absence. A successful text or binary file read
+  therefore uses three requests (commit resolution, Contents metadata, immutable
+  blob), a directory result or path absence uses two (commit resolution and
+  Contents), and revision absence uses one or two. Every request shares one
+  30-second transaction budget, and every request after resolution names the
+  resolved commit or immutable blob rather than a moving reference.
 - `repository_list_directory` accepts `repository`, one repository-relative
   directory `path`, and the same required exact commit `revision`. An entries
   outcome retains at most 100 immediate children with path, repository-object
@@ -1424,12 +1412,11 @@ advertised catalog and executor is classified as a daemon defect.
 
 ## Persistence boundaries
 
-One migration removes `semantic_transcript_entry_tool_use_unavailable`, adds the
-three result-entry shapes, and introduces append-only `tool_request`,
+Persistence holds the three result-entry shapes and append-only `tool_request`,
 `tool_approval_decision`, and guarded `tool_attempt` tables. Deferred
 constraints assert complete call-response/request-entry batches, approval-wait
 evidence, result-entry materialization, and terminal closure. The session
-scheduler row remains the first explicit lock for every turn-side transaction.
+scheduler row is the first explicit lock for every turn-side transaction.
 Preparing a model operation collects all frontier-referenced tool requests,
 attempts, and approval decisions in one batched query per record family before
 reconstructing provider history in frontier order; it performs no per-entry
@@ -1440,11 +1427,9 @@ typed record family, and `OverrideDeniedToolRequest` likewise; the recorded
 override row, its recording and consumption triggers, and the UNIQUE consumption
 column are owned by
 [persistence protocol](persistence-protocol.md#relational-representation).
-Adding the dangerous posture originally advanced each defaults-bearing command
-family to kind-scoped storage version 2; version-1 records reconstitute with
-`DangerousToolAutoApproval::Disabled`. Later system-prompt and template
-provenance migrations advance the affected families independently. The current
-kind-scoped versions and their compatibility gates are owned by
+Defaults-bearing command records at kind-scoped storage version 1 reconstitute
+with `DangerousToolAutoApproval::Disabled`. The current kind-scoped versions and
+their compatibility gates are owned by
 [identity and commands](identity-and-commands.md#durable-command-records) and
 [persistence protocol](persistence-protocol.md#relational-representation).
 Registry inspection validates the supported version set for the selected kind
@@ -1453,7 +1438,7 @@ rather than applying one global version constant.
 ## Open edges
 
 - Replacing direct approval-judge recommendations with graded risk and brief
-  alignment remains recorded under
+  alignment is recorded under
   [Graded approval judging](../open-questions.md#graded-approval-judging).
 - Dynamic execution-strategy policy beyond the two named runner profiles,
   model-declared approval expiry and additional high-risk guardrails are
@@ -1469,12 +1454,12 @@ rather than applying one global version constant.
   [Tool safety](../open-questions.md#tool-safety).
 - Runner placement, local transport, workspace, profile, and lease law are owned
   by [runner protocol and placement](runner-protocol.md). Remote runner
-  transport and multiple-runner scheduling remain recorded under
+  transport and multiple-runner scheduling are recorded under
   [Scheduling and runners](../open-questions.md#scheduling-and-runners),
   [Protocols and persistence](../open-questions.md#protocols-and-persistence),
   and
   [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance).
 - Client approval presentation is recorded under
   [Client scope](../open-questions.md#client-scope).
-- Streaming tool deltas remain part of the model-streaming question in
+- Streaming tool deltas are part of the model-streaming question in
   [Protocols and persistence](../open-questions.md#protocols-and-persistence).
