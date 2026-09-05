@@ -50,8 +50,9 @@ code-host, workspace, conversation, plan, session-delegation, goal-declaration,
 local Git, and execution tools. The workspace, conversation, local Git,
 execution, and mapped GitHub families are composed only under the complete
 mapped composition
-([configuration-and-credentials](configuration-and-credentials.md)). Each
-family's crate or daemon module documents its tools.
+([configuration-and-credentials](configuration-and-credentials.md)), and
+blob-read is composed only when blob storage is configured. Each family's crate
+or daemon module documents its tools.
 
 Each approved request that reaches execution runs as one physical attempt
 through staged transactions. That promise is daemon-local: a lost runner lease
@@ -194,10 +195,10 @@ the call.
 A tool executor receives checked request content and returns evidence. It writes
 no transcript, request, attempt, approval, turn, placement, grant, or lease
 state directly; a delegation executor persists through its port. One terminal
-attempt row holds a tool's output. Result entries reference that row; they never
-copy the output. The tool registry is an input to policy and execution; it never
-determines request content. Approval and dispatch use the snapshot frozen when
-the proposal was made, never a later lookup.
+attempt row holds a tool's output. An execution result entry references that
+row; no result entry copies the output. The tool registry is an input to policy
+and execution; it never determines request content. Approval and dispatch use
+the snapshot frozen when the proposal was made, never a later lookup.
 
 Contracts owned elsewhere bind here: one recorded attempt per model call in
 [model-call-execution](model-call-execution.md); no transaction across external
@@ -253,7 +254,8 @@ generation's dispatch authority, which [repo-watch](repo-watch.md) owns, an
 `EscalateToHuman` result stores the completed call but no decision and leaves
 the same request parked. Under that authority the request stays parked when the
 turn has pending steering, or when the session escalated earlier and the
-authority still stands. A `KnownFailed`, `Refused`, `Cancelled`, or `Ambiguous`
+authority still stands; an operator-commissioned dispatch keeps the park while
+its authority stands. A `KnownFailed`, `Refused`, `Cancelled`, or `Ambiguous`
 terminal judge call retains the attended park while immediately admitting a user
 decision.
 
@@ -332,13 +334,14 @@ trustworthy evidence returns but its commit fails, the service retains that
 exact correlated observation as an opaque linear same-incarnation value and
 never downgrades still-owned evidence to restart crash loss.
 
-Preflight and executor errors resolve the logical request and are visible to the
-next model round; they do not by themselves fail the turn. A crash-lost error
-appends its result suffix and then fails the turn, so no next round observes it.
-Physical ambiguity remains a turn-level recovery wait and never becomes an
-ordinary error result. An interrupt against a tool recovery wait does not
-reinterpret or erase the ambiguous attempt. Without an interrupt, the daemon
-claims the same ambiguity through the automatic-reconciliation ledger, which
+Preflight errors and trustworthy executor-reported errors resolve the logical
+request and are visible to the next model round; they do not by themselves fail
+the turn. A crash-lost error appends its result suffix and then fails the turn,
+so no next round observes it. Physical ambiguity remains a turn-level recovery
+wait and never becomes an ordinary error result. An interrupt against a tool
+recovery wait does not reinterpret or erase the ambiguous attempt. Without an
+interrupt, the daemon claims the same ambiguity through the
+automatic-reconciliation ledger, which
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) owns, and
 terminalizes through the same boundary. Only an admitted executor `KnownFailed`
 observation emits the failed-attempt telemetry event, which carries only the
