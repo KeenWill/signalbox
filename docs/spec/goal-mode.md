@@ -11,9 +11,9 @@ stream of events, and the current state is derived by replaying that stream.
 Each statement is one generation. A generation is pursuing from its commission
 until it is blocked, achieved, stopped by the user, superseded by a replacement
 statement, or closed with its session. A blocked generation admits resume or
-supersede; the other endings are final for that generation, and a later attach
-may start a new one after an achieved or stopped generation. The event
-vocabulary is closed: a commission, each block and resumption, and the ending.
+supersede; the other endings are final, and a later attach may start a new
+generation after an achieved or stopped one. The event vocabulary is closed: a
+commission, each block and resumption, and the ending.
 
 Users act on a goal through four commands: attach, resume with optional
 guidance, stop, and supersede with a replacement statement. Supersede changes an
@@ -23,11 +23,11 @@ only through the session-scoped `goal_declare` tool, and may declare only
 blocked or achieved. [Repository watch](repo-watch.md) commissions goals for the
 sessions it dispatches by attaching a synthesized statement.
 
-While a generation is pursuing, the end of each successful turn makes the
-scheduler create and start the next turn without user input. A failed goal turn
-is not retried; the daemon appends a blocked event with the execution-failure
-reason, need text, and the failed turn's provenance. Every goal turn is either
-scheduled by this machinery or bound to a turn a command already accepted.
+While a generation is pursuing, each successful turn's end makes the scheduler
+create and start the next turn without user input. A failed goal turn is not
+retried; the daemon appends a blocked event with the execution-failure reason,
+need text, and the failed turn's provenance. Every goal turn is either scheduled
+by this machinery or bound to a turn a command already accepted.
 
 The planner in `apps/signalboxd/src/goal_mode.rs` resumes an execution-failure
 block on an owned session automatically and within bounds. It derives from the
