@@ -1,8 +1,7 @@
 # File and media interpretation
 
 The file and media layer gives a model typed, bounded views of attached blob
-bytes, with every parser running in an isolated worker process outside the
-daemon.
+bytes; every parser runs in an isolated worker process outside the daemon.
 
 ## Map
 
@@ -13,11 +12,11 @@ blob's bytes belong to, which views that reader offers, and the bounded text or
 structure a view returns. Its two agent tools are declared through the
 [tool loop](tool-loop.md).
 
-Three frames describe the data. A blob digest names immutable bytes and carries
-no type fact. A file use is a caller's declaration about one use of those bytes:
-their length, the attachment intent, and a declared media type. A validated file
-is one reader's byte-derived evidence about the same bytes, together with the
-ordered views the reader offers for them.
+The same bytes have three descriptions. A blob digest names immutable bytes and
+carries no type fact. A file use is a caller's declaration about one use of
+those bytes: their length, the attachment intent, and a media type. A validated
+file is one reader's byte-derived evidence about the same bytes, together with
+the ordered views the reader offers for them.
 
 `signalbox-file-media-runtime` is the provider-neutral core: the checked
 declaration and value types, the registry, the detection and validation
@@ -26,10 +25,9 @@ application, persistence, daemon, parser, image, audio, or provider crate. The
 daemon-side `FileMediaRegistry` holds checked reader declarations and calls only
 the `FileMediaProcessor` port; it never runs adapter code in its own process.
 Inspection probes every registered reader, resolves the claims to one type and
-reader or to a typed outcome, and validates through that reader. Inspection ends
-as a validated file, as unknown bytes with no views, or as a typed failure. A
-read selects one declared view and returns bounded UTF-8 or bounded JSON with a
-completeness or continuation fact.
+reader, and validates through that reader. It ends as a validated file, as
+unknown bytes with no views, or as a typed failure. A read selects one declared
+view and returns bounded UTF-8 or JSON with a completeness or continuation fact.
 
 Each format family is one adapter crate implementing `FileMediaProvider`,
 compiled into its own worker executable.
@@ -39,8 +37,8 @@ daemon for byte ranges, which the daemon checks against the declared envelope
 before serving them from a `VerifiedBlobSource`. A worker's response is
 untrusted until the registry has reparsed and cross-checked it.
 
-Two effect-free tools face the model. `file_inspect` takes a canonical digest
-and an optional selector for a repeated visible use; `file_read` adds an exact
+The model has two effect-free tools. `file_inspect` takes a canonical digest and
+an optional selector for a repeated visible use; `file_read` adds an exact
 provider-owned view and object options. `signalbox-file-media-provider-runtime`
 supplies the registry-backed service behind both and authorizes each request
 through an injected `FileUseResolver`.
@@ -72,9 +70,8 @@ model-supplied media type or reader identity. Why: no classification from an
 earlier call is trusted.
 
 The raw processor output types carry strings and JSON text rather than checked
-registry values, and the registry reparses and cross-checks every claim before
-admitting it. Why: a worker is untrusted, so its output is not evidence until
-the daemon has checked it against the declaration it invoked.
+registry values, and the registry reparses and cross-checks every claim against
+the declaration it invoked before admitting it. Why: a worker is untrusted.
 
 The processor runtime starts one fresh local process for every probe,
 validation, or read. Why: a compromised worker cannot carry bytes or state into
@@ -82,10 +79,10 @@ another request.
 
 On Linux the processor launches the exact worker through bubblewrap.
 
-A worker receives one digest and length and the byte ranges it requests. It is
-never given a store locator, a source path, the catalog, a database connection
-or open transaction, the daemon socket, configuration, a credential, a home
-directory, or a network namespace.
+A worker receives one digest and length and the byte ranges it requests. It
+never receives a store locator, a source path, the catalog, a database
+connection or open transaction, the daemon socket, configuration, a credential,
+a home directory, or a network namespace.
 
 Bounded worker stderr is drained and discarded; it is never parser evidence,
 telemetry content, or model-visible output.
@@ -96,8 +93,8 @@ Recognized encrypted or locked content is a terminal outcome, and no password
 channel exists.
 
 A reader revision is immutable. An earlier durable tool result keeps what the
-model saw while a later request may use a newer revision. Why: results are never
-reclassified after the fact.
+model saw while a later request may use a newer revision. Why: a durable result
+is never reclassified.
 
 ## Contracts
 
@@ -131,8 +128,8 @@ recovery is registered as part of the reader's validation.
 
 - Daemon composition of `file_inspect` and `file_read` behind a
   `FileUseResolver` that reuses the rendered-frontier visibility proof; no
-  daemon catalog registers either tool today, and the daemon registry recognizes
-  no format. See the [design](../design/file-and-media.md).
+  daemon catalog registers either tool, and the daemon registry recognizes no
+  format. See the [design](../design/file-and-media.md).
 - Image, audio, and general-file views and the rich blob-reference result arm,
   with publication and registration before result commit and no dangling result
   on failure. See the [design](../design/file-and-media.md).

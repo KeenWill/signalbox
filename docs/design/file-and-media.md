@@ -18,14 +18,14 @@ transcription are outside this design; both remain undecided in
 
 The resolver takes the request's digest and optional visible-part selector and
 resolves exactly one visible use. Authorization reuses the `blob_read`
-rendered-frontier allow-set and additionally verifies the selector; a digest
-alone never chooses among repeated uses of the same bytes. The resolver finishes
-all catalog work, then returns the exact file use and a placement-free verified
-source, so no database transaction stays open into source or worker I/O. A
-continuation request presents the cursor from the preceding visible result, and
-the digest, selector, reader, and view bound to that cursor must still name a
-stub in the current allow-set. Once a stub leaves the rendered frontier, a
-remembered digest, selector, or cursor grants nothing.
+rendered-frontier allow-set and verifies the selector; a digest alone never
+chooses among repeated uses of the same bytes. The resolver finishes all catalog
+work, then returns the exact file use and a placement-free verified source, so
+no database transaction stays open into source or worker I/O. A continuation
+request presents the cursor from the preceding visible result, and the digest,
+selector, reader, and view bound to that cursor must still name a stub in the
+current allow-set. Once a stub leaves the rendered frontier, a remembered
+digest, selector, or cursor grants nothing.
 
 `FileReadResult` gains one provider-neutral reference arm. It carries the
 presented blob's digest and length, its canonical media type, its presentation
@@ -58,10 +58,9 @@ Registry construction keeps rejecting image, audio, and general-file views, and
 `FileReadResult` keeps only its text and structured arms, until one producer
 path has proved publication, registration, preparation, and failure behavior end
 to end. Any daemon composition supplies the existing rendered-frontier
-visibility proof to `FileUseResolver`; a catalog-presence check is not an
-acceptable substitute. The service keeps re-inspecting on every read. The rich
-arm changes no adapter and adds no MIME branch to the executor, bridge, or
-daemon.
+visibility proof to `FileUseResolver`; a catalog-presence check is no
+substitute. The service keeps re-inspecting on every read. The rich arm changes
+no adapter and adds no MIME branch to the executor, bridge, or daemon.
 
 ## Acceptance
 
