@@ -127,7 +127,7 @@ different authority:
    from, so the record is to carry the durable command that registered it,
    keeping that act provable after the fact.
 2. **Daemon-system-minted.** The daemon is to record the roots its
-   [per-session derivation](configuration-and-credentials.md#not-built)
+   [per-session derivation](configuration-and-credentials.md#planned)
    materializes from the configured base. Authority still flows from that base
    and its fixed formula: these rows are to record what the formula produced,
    never an input to which roots the daemon may open, and nothing is to read

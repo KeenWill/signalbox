@@ -261,11 +261,11 @@ unique. A repository entry is one exact repository key paired with the exact
 optional credential-profile name that key's runner configuration carries, and
 entries are sorted and unique by key. Absence advertises anonymous HTTPS
 availability rather than an incomplete pair;
-[runner credential lifecycle](configuration-and-credentials.md#contracts) owns
-that configuration meaning. Why: the daemon has to decide before a model call
-whether a session can clone anything at all, and independent inventories of keys
-and profiles cannot answer that — only the pairing shows whether an entry is
-anonymous or requires the profile this session was granted
+[runner credential lifecycle](configuration-and-credentials.md#boundary-contracts)
+owns that configuration meaning. Why: the daemon has to decide before a model
+call whether a session can clone anything at all, and independent inventories of
+keys and profiles cannot answer that — only the pairing shows whether an entry
+is anonymous or requires the profile this session was granted
 ([tool loop](tool-loop.md#registry-placement-and-effect-metadata) owns the
 advertisement condition that reads it). Workspace and sandbox inventories are
 their closed vocabularies. A reconnect inventory contains at most one lease, one
@@ -664,7 +664,7 @@ A registration carries availability claims only:
 - tool names;
 - credential-profile names, and repository entries pairing each key with the
   optional profile defined by
-  [runner credential lifecycle](configuration-and-credentials.md#contracts),
+  [runner credential lifecycle](configuration-and-credentials.md#boundary-contracts),
   where absence advertises anonymous HTTPS; and
 - workspace and sandbox-profile capabilities.
 
@@ -744,7 +744,8 @@ registration and acquire no policy by being stored: the profile name a
 repository entry carries, when present, states which configured credential that
 repository requires, never that any session holds it; absence states that the
 entry is anonymous. The configuration meaning of presence and absence is owned
-by [runner credential lifecycle](configuration-and-credentials.md#contracts).
+by
+[runner credential lifecycle](configuration-and-credentials.md#boundary-contracts).
 
 The registration-only daemon composition constructs one `RunnerCatalog` with
 empty class, tool, workspace, and sandbox inventories plus the exact
@@ -1019,8 +1020,8 @@ names no profile, otherwise it fails `credential_unavailable`; and a repository
 with a named profile provisions with that grant only when the entry names the
 same profile, otherwise it fails `credential_unavailable`. No case selects,
 removes, or substitutes a credential implicitly
-([runner credential lifecycle](configuration-and-credentials.md#contracts) owns
-the configuration meaning of an absent repository profile).
+([runner credential lifecycle](configuration-and-credentials.md#boundary-contracts)
+owns the configuration meaning of an absent repository profile).
 
 The advertised executable tool set is therefore a function of the session's
 actual capabilities rather than of the compiled registry. A declaration whose
@@ -1350,11 +1351,11 @@ category rather than proceeding under a profile the placement did not select.
 Conversely a named profile is grantable to a placement with no repository and no
 workspace, because the credential belongs to the session's work rather than to a
 clone ([session composition](#session-composition));
-[runner credential lifecycle](configuration-and-credentials.md#contracts) owns
-the configuration meaning of the optional repository profile. Why: a silently
-inferred credential is an authorization the user never granted, and refusing to
-guess is the only behavior that keeps the grant record a truthful statement of
-intent.
+[runner credential lifecycle](configuration-and-credentials.md#boundary-contracts)
+owns the configuration meaning of the optional repository profile. Why: a
+silently inferred credential is an authorization the user never granted, and
+refusing to guess is the only behavior that keeps the grant record a truthful
+statement of intent.
 
 The pinning transition snapshots the selected profile and validated advertised
 tool set into one `CredentialProfileGrant`, because only then are the exact
@@ -1429,8 +1430,8 @@ matching grant; one absent value or two unequal present values produce a
 unselected or mismatched grant. That same optional equality governs every Git
 operation, however the entry was reached — through the workspace manifest,
 through this authorization, or through a checked `git_clone` argument
-([configuration and credentials](configuration-and-credentials.md#not-built)
-owns the helper that enforces it). The provisioned workspace binds the session,
+([configuration and credentials](configuration-and-credentials.md#planned) owns
+the helper that enforces it). The provisioned workspace binds the session,
 placement revision, runner, repository key, exact clone URL identity, sandbox
 profile, and working directory. Replacement always uses the successor placement
 revision and cannot carry the prior workspace forward.
@@ -1519,12 +1520,12 @@ credential-helper list before installing the helper that invocation is supposed
 to use, so the effective helper set is exactly what the runner installed and
 never what the repository configuration asked for: the fixed runner-owned helper
 described by
-[configuration and credentials](configuration-and-credentials.md#not-built) for
-a Git tool reaching a remote under a granted profile, the per-provisioning
-broker helper during provisioning, and no helper at all for an invocation that
-reaches no remote. Command-line configuration takes precedence over the
-model-writable repository configuration, so no repository setting can move the
-effective transport off HTTPS, and a re-enabled external helper or a hook cannot
+[configuration and credentials](configuration-and-credentials.md#planned) for a
+Git tool reaching a remote under a granted profile, the per-provisioning broker
+helper during provisioning, and no helper at all for an invocation that reaches
+no remote. Command-line configuration takes precedence over the model-writable
+repository configuration, so no repository setting can move the effective
+transport off HTTPS, and a re-enabled external helper or a hook cannot
 substitute an executable for a fetch. Why: a repository-local
 `credential.helper` whose value begins with `!` is a shell snippet Git runs, so
 leaving the helper list unemptied would let an auto-approved, retry-classified
@@ -1537,8 +1538,8 @@ remote invocation installs no helper. Why: with Git's false default, the helper
 receives protocol and host but not the owner/repository path, so the exact-path
 authorization check must return no credential and every authenticated remote
 operation fails;
-[runner credential lifecycle](configuration-and-credentials.md#not-built) owns
-the helper and forced-configuration contract.
+[runner credential lifecycle](configuration-and-credentials.md#planned) owns the
+helper and forced-configuration contract.
 
 That forced configuration gates the transport and nothing else, and one
 repository-local key defeats every check built on it. `url.<base>.insteadOf`

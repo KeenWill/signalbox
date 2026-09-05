@@ -799,7 +799,7 @@ delivery gives the adapter a daemon-minted access token, the identity token
 issued with it, and the account metadata in a scratch credential home rather
 than through the child environment. Before anything is written or the child
 starts, the adapter must seed the exact-value redaction boundary with every
-value that [the `oauth` delivery](configuration-and-credentials.md#not-built)
+value that [the `oauth` delivery](configuration-and-credentials.md#planned)
 requires the redactor to be seeded with. That contract decides *which* values
 those are and why; this page owns *how* the adapter installs and applies the
 scrub. Each such value is seeded both as the raw token and as the JSON string

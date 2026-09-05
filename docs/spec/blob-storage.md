@@ -578,7 +578,7 @@ reads reverify as required by the wire-vocabulary contract above.
 
 The model and serving-target modality grammar, defaults, effective selection,
 and client projection are owned by
-[configuration and credentials](configuration-and-credentials.md#not-built). The
+[configuration and credentials](configuration-and-credentials.md#planned). The
 attachment-specific compatibility constraint is that version-one rendered
 messages carry only text, attachment stubs, and text-only blob-read results; no
 present surface materializes attachment bytes into a prepared call.

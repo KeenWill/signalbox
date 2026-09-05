@@ -15,7 +15,7 @@ the refresh token. Credential exclusions expire, coalesce, and clear; sessions
 carry the complete pool policy they were created under; and a runner reads,
 injects, and scrubs a granted credential for the work it dispatches.
 
-## Shape
+## Design
 
 Reload is one admin verb, `reload_configuration`, owned by
 [process protocol](../spec/process-protocol.md). It re-reads the configured
@@ -351,7 +351,7 @@ dispatch is a fixed `ExecutionFailed` observation naming only the profile and
 failure class, and it never authorizes an automatic repeat of side-effecting
 work.
 
-## Constraints on present code
+## Compatibility constraints
 
 The configuration grammar already admits the `oauth` spelling, the `codex_cli`
 `file` spelling, `max_concurrent_invocations`, `headroom_reserve_percent`,
@@ -386,7 +386,7 @@ model-provider names; runner credential execution adds no such field.
 Every catalog reader takes one immutable snapshot, so reload can swap the
 snapshot atomically without a reader observing two documents.
 
-## Acceptance
+## Acceptance criteria
 
 - `reload_configuration` re-reads and validates the complete document as startup
   does, swaps atomically on success, and leaves the running configuration in

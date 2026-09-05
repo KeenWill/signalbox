@@ -660,8 +660,8 @@ A `KnownFailed` call whose cause is one of the three availability causes —
 and whose pool configures `switch_now` for that cause may be followed by a
 *successor call*: a distinct model call, on a successor turn attempt, against
 the next admitted member of the same credential pool
-([configuration-and-credentials](configuration-and-credentials.md#map)). This is
-the `successor` row of
+([configuration-and-credentials](configuration-and-credentials.md#overview)).
+This is the `successor` row of
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine),
 which owns every other projection of it; this section owns the call's own
 mechanics.

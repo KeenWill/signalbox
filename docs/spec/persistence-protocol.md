@@ -1878,23 +1878,23 @@ What those facts mean — which outcome each combination selects, which failures
 may clear the marker without changing the token, how many attempts a generation
 admits, and why an ambiguous exchange is never replayed — is the refresh
 protocol, owned by
-[the `oauth` delivery](configuration-and-credentials.md#not-built). This
-paragraph makes those decisions representable and takes none of them.
-Provisioning replaces the quarantined generation with a fresh authorization in
-one transaction, and publishes the durable member-availability update the
-scheduler consumes in that same transaction, for the reason an accepted clear
-does: re-provisioning is the only recovery from an OAuth delivery-origin
-quarantine, so a wait held by that quarantine has no other wake, and a crash
-between the replacement and any in-memory notification would leave the repaired
-profile's turn parked with its session slot held and nothing left to release it.
-That transaction also decides account-level independence, and its lock *order*
-is what makes that decision total. It reads the pool-policy revisions its
-profile is pinned into, forms the complete set of profile rows it will need —
-**its own row together with every co-member's** — and acquires that whole set in
-one acquisition ordered by profile reference, holding it until after its own
-commit. Under those locks it re-reads its memberships; if the set has grown it
-releases, repeats with the enlarged set, and proceeds only once the read taken
-under the locks agrees with the set it locked.
+[the `oauth` delivery](configuration-and-credentials.md#planned). This paragraph
+makes those decisions representable and takes none of them. Provisioning
+replaces the quarantined generation with a fresh authorization in one
+transaction, and publishes the durable member-availability update the scheduler
+consumes in that same transaction, for the reason an accepted clear does:
+re-provisioning is the only recovery from an OAuth delivery-origin quarantine,
+so a wait held by that quarantine has no other wake, and a crash between the
+replacement and any in-memory notification would leave the repaired profile's
+turn parked with its session slot held and nothing left to release it. That
+transaction also decides account-level independence, and its lock *order* is
+what makes that decision total. It reads the pool-policy revisions its profile
+is pinned into, forms the complete set of profile rows it will need — **its own
+row together with every co-member's** — and acquires that whole set in one
+acquisition ordered by profile reference, holding it until after its own commit.
+Under those locks it re-reads its memberships; if the set has grown it releases,
+repeats with the enlarged set, and proceeds only once the read taken under the
+locks agrees with the set it locked.
 
 Two properties of that shape are required, and a simpler shape loses both.
 Including the provisioned row in the *same* ordered acquisition is what avoids a
@@ -1914,13 +1914,13 @@ share a profile serialize on it: an interning that loses sees the stored
 identity and refuses to intern, and a provisioning that loses re-reads the new
 revision under its locks and fails on the collision. Which memberships are
 consulted, and what a collision does, are owned by
-[the `oauth` delivery](configuration-and-credentials.md#not-built); this
-paragraph supplies only the lock span that makes two concurrent commits decide
-it the same way. Each generation stores the exact provisioning tuple it was
-minted under — `client_id`, `token_url`, `device_authorization_url`, and ordered
-`scopes` — and every refresh and dispatch compares it with the current
-registration under the same profile lock, by the canonical components
-[configuration and credentials](configuration-and-credentials.md#contracts)
+[the `oauth` delivery](configuration-and-credentials.md#planned); this paragraph
+supplies only the lock span that makes two concurrent commits decide it the same
+way. Each generation stores the exact provisioning tuple it was minted under —
+`client_id`, `token_url`, `device_authorization_url`, and ordered `scopes` — and
+every refresh and dispatch compares it with the current registration under the
+same profile lock, by the canonical components
+[configuration and credentials](configuration-and-credentials.md#boundary-contracts)
 defines rather than by the configured bytes; a difference quarantines instead of
 exchanging, so an edited endpoint cannot receive a token minted for another.
 This paragraph constrains the future schema; no present storage surface provides

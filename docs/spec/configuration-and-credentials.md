@@ -4,7 +4,7 @@ This page states how signalboxd and signalbox-runner load their deployment
 configuration, what the static catalogs define, and how a credential value
 reaches a provider without being stored or logged.
 
-## Map
+## Overview
 
 Configuration is loaded once at startup from the process environment and two
 versioned TOML documents: the model catalog and the session-template catalog.
@@ -147,7 +147,7 @@ current, an Anthropic route may resolve through it and a Codex route never may.
 composition constructs them through the injected `SessionPlanPort`, and
 production injects `SessionPlanRepository`.
 
-## Decisions
+## Design decisions
 
 Model-provider credential paths live in catalog profiles rather than environment
 variables, because one variable cannot name several accounts.
@@ -345,7 +345,7 @@ Model-provider credentials are daemon-only and cannot be granted or injected to
 a runner. An explicit `ambient` login nevertheless retains same-user filesystem
 powers outside the grant channel.
 
-## Contracts
+## Boundary contracts
 
 The daemon refers to a credential by its non-secret name everywhere except at
 the point of use. No credential value, credential file path, or database URL
@@ -592,7 +592,7 @@ of that value and its JSON-escaped form before it crosses into evidence. An
 output receives only the credential-shape redaction owned by
 [runtime substrate](runtime-substrate.md).
 
-## Not built
+## Planned
 
 - Input-modality declarations on model and serving-target records, and the blob
   catalog they feed: [design](../design/configuration-and-credentials.md).

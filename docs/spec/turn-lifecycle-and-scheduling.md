@@ -19,7 +19,7 @@ labeled below.
 A turn is one durable logical request for one conversational outcome from one
 accepted-input origin under one frozen effective configuration. Model-selection
 freeze is
-[configuration-and-credentials](configuration-and-credentials.md#contracts)
+[configuration-and-credentials](configuration-and-credentials.md#boundary-contracts)
 scope; defaults-epoch binding is
 [sessions-and-transcript](sessions-and-transcript.md#session-defaults-and-replacement)
 scope. Each turn stores one of three lifecycle states
@@ -486,7 +486,7 @@ the sweep (INV-007).
 
   With Prometheus export enabled, the loop publishes the scheduler occupancy
   observations owned by
-  [configuration and credentials](configuration-and-credentials.md#contracts).
+  [configuration and credentials](configuration-and-credentials.md#boundary-contracts).
   Age is calculated at scrape time, so it advances while a pass is stalled even
   when the scheduler emits no event.
 
@@ -1295,7 +1295,7 @@ naming provider targets, selections, and aliases),
 model-provider credential path is not among them: every `file` profile carries
 its own path, and composition builds `FileCredentialAccess` from the complete
 profile map, as specified by
-[configuration and credentials](configuration-and-credentials.md#map). The
+[configuration and credentials](configuration-and-credentials.md#overview). The
 configuration page owns these provisional channels. It validates the model
 catalog, then resolves the template catalog and all of its prompt files against
 that model catalog, before connecting. It then acquires the single-daemon guard,
@@ -1313,7 +1313,7 @@ resolves every prior-process capacity reservation, resolves every retained OAuth
 refresh-in-progress marker to a replacement token or a quarantine, scavenges
 every crash-left OAuth scratch home, and runs the legacy family-to-policy
 backfill
-([configuration and credentials](configuration-and-credentials.md#not-built)).
+([configuration and credentials](configuration-and-credentials.md#planned)).
 Those five gates sit after the recovery scan so a failure cannot block recovery
 of acknowledged work, and before any socket binding or scheduling so no request
 reaches a historical session whose policy is not yet rewritten and no CLI call
