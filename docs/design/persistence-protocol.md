@@ -31,8 +31,9 @@ unequal reuse is a correlation error.
 Imported-create command records at storage version 4 carry runner placement.
 
 The instruction admitted set is one durable table with one repository operation
-that writes it. Its row locks join `crates/persistence/src/lock_inventory.rs`
-and take their place in the fixed lock order the spec page states.
+that writes it. Its row locks join `crates/persistence/src/lock_inventory.rs`,
+and a transaction takes the admitted-set head after the session's scheduler row
+and before the current-defaults pointer row and any credential-pool row.
 
 Credential-pool state, capacity reservations, and availability waits are durable
 rows with locks recorded in the same inventory. The machine they serve is owned
