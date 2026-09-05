@@ -66,11 +66,10 @@ request, a delegation result names the foreground `await_session` request and
 the child whose durable result completed its wait, and `ToolClosed` names a
 request whose turn ended before it completed ordinary execution, whether it was
 still undecided, approved but not yet attempted, or ambiguous when an interrupt
-or automatic reconciliation terminalized the turn. Once every request in the
-batch is resolved other than by turn end, one continuation transaction projects
-the results and prepares the next model call. An approval wait is a stored
-active-turn phase that names the earliest undecided request and survives
-restart.
+or automatic reconciliation terminalized the turn. Once every request in a
+running batch is resolved, one continuation transaction projects the results and
+prepares the next model call. An approval wait is a stored active-turn phase
+that names the earliest undecided request and survives restart.
 
 ## Design decisions
 
@@ -146,7 +145,7 @@ claim that an unknown tool is safe to run.
 
 Logical closure leaves a provider-renderable conversation while the lifecycle
 and outbox boundaries retain the physical uncertainty, instead of fabricating a
-model call or a result.
+model call or an execution result.
 
 Each tool family owns its bounded capture, truncation, and completeness
 evidence; no universal true-size field exists, because a traversal cannot always
@@ -162,10 +161,10 @@ the automatic-reconciliation ledger's claim on that exact ambiguity; resolving
 evidence and accepted-risk continuation are undecided in
 [open questions](../open-questions.md).
 
-After restart, a batch with no current tool attempt continues through the
-ordinary next-attempt or continuation transaction, never a recovery path that
-fails the turn or waits for process-local wake state; a persisted prepared or
-in-flight attempt takes the effect-class crash-loss path.
+After restart, a running batch with no current tool attempt continues through
+the ordinary next-attempt or continuation transaction, never a recovery path
+that fails the turn or waits for process-local wake state; a persisted prepared
+or in-flight attempt takes the effect-class crash-loss path.
 
 Foreground waiting on a child through `await_session` is a logical tool
 transition that ends any physical attempt before committing the wait, so restart
@@ -329,21 +328,20 @@ evidence and therefore projects an execution result, not `ToolClosed`. Attempt
 evidence commits as soon as execution ends, independently of semantic
 projection.
 
-Once every request in the batch is resolved other than by turn end, one
-continuation transaction appends exactly one result entry per request in
-proposal order, consumes every pending steering input in ascending acceptance
-position and appends its entry after the results, derives the exact
-prefix-preserving frontier extension, and creates the next round's `Prepared`
-model call against that frontier. These effects commit or roll back together. An
-interrupt or crash loss that ends the turn appends the result suffix with its
-terminal marker and prepares no call. When at least one request entered
-execution, the continuation turn attempt already entered `Running` during
-authorization and owns the new call without moving backward. An optional
-configured ceiling bounds the tool rounds one turn may complete, and a policy of
-none sets no ceiling. After the last batch a ceiling admits resolves,
-continuation still projects every result and creates its `Prepared` call, and
-model execution closes that call `KnownFailed` before capability preparation or
-send.
+Once every request in a running batch is resolved, one continuation transaction
+appends exactly one result entry per request in proposal order, consumes every
+pending steering input in ascending acceptance position and appends its entry
+after the results, derives the exact prefix-preserving frontier extension, and
+creates the next round's `Prepared` model call against that frontier. These
+effects commit or roll back together. An interrupt or crash loss that ends the
+turn appends the result suffix with its terminal marker and prepares no call.
+When at least one request entered execution, the continuation turn attempt
+already entered `Running` during authorization and owns the new call without
+moving backward. An optional configured ceiling bounds the tool rounds one turn
+may complete, and a policy of none sets no ceiling. After the last batch a
+ceiling admits resolves, continuation still projects every result and creates
+its `Prepared` call, and model execution closes that call `KnownFailed` before
+capability preparation or send.
 
 At most 256 MiB of projected frontier content may be rendered into one call's
 provider messages. The bound counts every kind of content the render clones, not
