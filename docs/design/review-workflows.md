@@ -18,11 +18,11 @@ external-context import, session-backed passes, repair, and reserved
 publication: a provider adapter for the code host, a model adapter for the
 review model, and a workspace adapter for checkouts. The workspace adapter
 prepares a read-only checkout for review and judgment passes, or an explicitly
-writable checkout for repair passes, always at the exact target head and
-comparison revision. The provider adapter constructs an external object
-identifier as an opaque canonical provider-wide key: it qualifies a
-repository-scoped host identifier with the canonical repository key before it
-constructs the attachment.
+writable checkout for repair passes, always at the exact target head and, when
+the target carries a base revision, at that comparison revision. The provider
+adapter constructs an external object identifier as an opaque canonical
+provider-wide key: it qualifies a repository-scoped host identifier with the
+canonical repository key before it constructs the attachment.
 
 The model adapter exposes one tool, `submit_review_findings`, forces exactly one
 call to it, disables parallel tool use, and decodes the call's arguments
@@ -45,11 +45,10 @@ canonical identity-ordered inventory atomically through the complete-findings
 path; no proposal survives as untyped text or as a partial inventory. Free-form
 assistant text stays transcript evidence.
 
-A blocked repair seals an incomplete repair outcome that blocks every
-publication for the attempt. A new application-store operation replaces that
-sealed outcome once every blocked finding has been reconciled to a fixed or
-surviving state, and publication becomes eligible against the inventory that
-reconciliation leaves.
+A new application-store operation replaces the sealed incomplete repair outcome
+once every blocked finding has been reconciled to a fixed or surviving state,
+and publication becomes eligible against the inventory that reconciliation
+leaves.
 
 After publication completes, a continuation records the external state of the
 posted objects through an external-context-import pass. Each report appends the
@@ -85,8 +84,8 @@ The review model's only route to a finding is one `submit_review_findings` call;
 a pass with no call, several calls, or an invalid payload fails and admits no
 finding.
 
-Every adapter checkout is at the exact target head and comparison revision, and
-only a repair checkout is writable.
+Every adapter checkout is at the exact target head, and at the comparison
+revision when the target carries one; only a repair checkout is writable.
 
 An attachment identifier for a repository-scoped host object is the qualified
 canonical key.
