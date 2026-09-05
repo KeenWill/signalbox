@@ -17,8 +17,8 @@ sessions. The imported conversation record belongs to
 update-event delivery to [persistence-protocol](persistence-protocol.md); this
 page owns the boundaries at which transcript entries commit. Every command on
 this page claims and replays under the command contract of
-[identity-and-commands](identity-and-commands.md), and the actor a command
-carries is provenance only under the same page.
+[identity-and-commands](identity-and-commands.md), which also fixes the actor a
+command carries as provenance only.
 
 Every session records two independent immutable creation facts, paired as
 `SessionCreationProvenance`. The cause says why the session exists: a user
@@ -40,36 +40,33 @@ and a runner placement, which [runner-protocol](runner-protocol.md) owns.
 
 Session configuration defaults are immutable numbered epochs holding the model
 selection, the dangerous-tool blanket, and an optional system prompt. A session
-points at its current epoch, and a turn freezes the epoch current when its
+points at its current epoch, and a turn freezes the current epoch when its
 origin input is accepted. Session metadata is a separate replaceable snapshot of
 title, tags, attributes, and an archive flag. The loaded `Session` aggregate
 holds identity, creation provenance, optional template provenance, and the
 current defaults epoch, and nothing else.
 
 The transcript is a sequence of semantic entries grouped into frontiers. A
-`SemanticTranscriptEntry` is one immutable identified semantic-history fact with
-its own identity, a source session, and a closed payload. Payloads reference
-rather than copy: an origin or steering entry names the accepted input, an
-assistant text or tool-use entry names the completed producing call, and a
-tool-result entry names the attempt that owns the evidence. A context summary
-carries the summary text its dedicated call produced and the inclusive range it
-stands for. An imported entry carries one normalized imported content value with
-its speaker attestation, covering text, tool, result, thinking, redacted
-thinking, document, and content-absence forms. A model-identity entry marks
-where executed history crossed to a different frozen model selection. Delegation
-entries record a delegated task, a delegation message, and a delivered result.
-Each turn ends with exactly one terminal marker: completed, cancelled, or
-failed.
+`SemanticTranscriptEntry` is one immutable semantic-history fact with its own
+identity, a source session, and a closed payload. Payloads reference rather than
+copy: an origin or steering entry names the accepted input, an assistant text or
+tool-use entry names the completed producing call, and a tool-result entry names
+the attempt that owns the evidence. A context summary carries the summary text
+its dedicated call produced and the inclusive range it stands for. An imported
+entry carries one normalized imported content value with its speaker
+attestation. A model-identity entry marks where executed history crossed to a
+different frozen model selection. Delegation entries record a delegated task, a
+delegation message, and a delivered result. Each turn ends with exactly one
+terminal marker: completed, cancelled, or failed.
 
 A `ContextCompaction` has five correlated immutable facts: its identity and
 optional predecessor, the source frontier, a dedicated model call, the
 summarized inclusive range, and the result frontier. The compaction-call record
 separately retains the session's current direct selection, the resolved provider
-target, the source frontier, the call's lifecycle and disposition, its
-credential reference, and each optional usage field. Explicit compaction chooses
-an optional through position, defaulting to the latest safe boundary; automatic
-compaction is triggered as [model-call-execution](model-call-execution.md)
-describes.
+target, the source frontier, and the call's lifecycle, disposition, credential
+reference, and optional usage fields. Explicit compaction chooses an optional
+through position, defaulting to the latest safe boundary; automatic compaction
+is triggered as [model-call-execution](model-call-execution.md) describes.
 
 Accepted-input content is `UserContent`, one ordered nonempty sequence of closed
 text or attachment parts. The multipart bounds belong to
@@ -128,13 +125,12 @@ sessions, so neither is filtered.
 Defaults replacement is a compare-and-set on the version the caller names, so a
 racing replacement surfaces as a typed rejection instead of a silent lost
 update. A replacement may name a selection whose target belongs to another
-provider; neither the domain nor the command imposes a same-provider
-restriction. A replacement that changes only the system prompt appends no
-transcript entry, because the new instructions reach the provider whole on the
-successor turn's calls and the frozen epoch already records which prompt
-governed each turn. The model-identity boundary records the model identity that
-executed history actually crossed, not every replacement epoch, so an epoch no
-started turn used leaves no entry.
+provider; there is no same-provider restriction. A replacement that changes only
+the system prompt appends no transcript entry, because the new instructions
+reach the provider whole on the successor turn's calls and the frozen epoch
+already records which prompt governed each turn. The model-identity boundary
+records the model identity that executed history crossed, not every replacement
+epoch, so an epoch no started turn used leaves no entry.
 
 Tags are human-facing organization and attributes are machine-facing provenance;
 neither substitutes for the other. Creation writes no metadata row and
@@ -260,7 +256,7 @@ conversation and inclusive boundary, and the command accepts no second
 conversation identity. Import never chooses the relationship or a frontier, and
 a client may create a session against any boundary of any imported conversation,
 at any later time and more than once. Resume and fork both create independent
-session identities, use the same exact imported prefix, and leave the imported
+session identities, use the same imported prefix, and leave the imported
 conversation unchanged.
 
 A missing imported conversation or frontier is returned without claiming the
@@ -347,9 +343,9 @@ the process boundary's not-found response; only an existing session without a
 metadata root returns the initial projection.
 
 `SubmitInput` and `ReplaceSessionMetadata` are the conversational command
-payloads that carry an actor. `SubmitInput` fixes the user actor; the
-process-facing metadata request fixes the user actor, and a separate constructor
-accepts only the tool actor for the exact executing tool request.
+payloads that carry an actor. `SubmitInput` and the process-facing metadata
+request fix the user actor, and a separate constructor accepts only the tool
+actor for the exact executing tool request.
 
 First handling of a metadata replacement locks the target session, then either
 records session-not-found without an effect or atomically replaces the complete
