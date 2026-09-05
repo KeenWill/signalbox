@@ -10,19 +10,19 @@ The daemon and the runner are two processes on one host under one effective
 user. `signalboxd` binds a Unix domain stream socket reserved for runners,
 distinct from the client socket; `signalbox-runner` dials it and never listens.
 On first startup the runner creates one enrollment-request identity, journals it
-below its private state root, and sends `enroll`; the daemon issues the runner's
-identities and its first registration and the runner journals the receipt. Every
-later connection sends `resume` under those identities. After the handshake the
-runner advertises its availability and answers heartbeat challenges. The daemon
-records each connection under a durable connection epoch, marks a runner suspect
-and then lost when heartbeats stop, and propagates the loss to the sessions
-pinned to that runner. This registration slice and the `signalbox-runner` binary
-are the whole of what is built. The runner advertises no capability class, tool,
-workspace capability, or sandbox profile, sends an empty reconnect inventory,
-and executes nothing; the daemon catalog that would admit such claims is empty,
-and the runner advertises only the credential-profile names and repository
-entries its strict configuration carries. Leases, dispatch, workspaces,
-sandboxes, and recovery are listed under Not built.
+below its private state root, and sends `enroll`. The daemon issues the runner's
+identities and its first registration, and the runner journals the receipt.
+Every later connection sends `resume` under those identities. After the
+handshake the runner advertises its availability and answers heartbeat
+challenges. The daemon records each connection under a durable connection epoch,
+marks a runner suspect and then lost when heartbeats stop, and propagates the
+loss to the sessions pinned to that runner. This registration slice and the
+`signalbox-runner` binary are the whole of what is built. The runner advertises
+no capability class, tool, workspace capability, or sandbox profile, sends an
+empty reconnect inventory, and executes nothing. The daemon catalog that would
+admit such claims is empty; the runner advertises only the credential-profile
+names and repository entries its strict configuration carries. Leases, dispatch,
+workspaces, sandboxes, and recovery are listed under Not built.
 
 The domain lives in `crates/domain/src/runner.rs` and the wire vocabulary in
 `crates/runner-wire`. A `RunnerEnrollment` binds the daemon-issued runner,
@@ -34,44 +34,41 @@ credential-profile names with their repository entries, and workspace and
 sandbox-profile capabilities. Policy stays with the daemon. Each tool a runner
 may advertise has one daemon-authoritative `RunnerToolDeclaration` giving its
 model-facing definition, its effect class, and its admissible loci. Every
-declaration has exactly one of three effect classes, pure, idempotent, or
-side-effecting, with no default; the class decides what a lost or repeated
-execution may do. A tool's admissible loci (`ToolAdmissibleLoci`) are daemon
-only, runner only, or either, and a runner locus names one runner identity or
-one capability class.
+declaration has exactly one effect class, pure, idempotent, or side-effecting,
+with no default; the class decides what a lost or repeated execution may do. A
+tool's admissible loci are daemon only, runner only, or either, and a runner
+locus names one runner identity or one capability class.
 
-A session's runner request is one `SessionRunnerPlacement`. It composes four
-axes, workspace, repository, credentials, and sandbox, and starts unpinned. The
+A session's runner request is one `SessionRunnerPlacement`. Its four axes are
+workspace, repository, credentials, and sandbox, and it starts unpinned. The
 first dispatch pins it to one runner, snapshots the registration it was
 validated against, and creates a `CredentialProfileGrant` when a profile was
 selected. A `RunnerLease` is the domain record of one tool attempt offered to
 that runner; its offer, claim, loss, and retry transitions are domain code, and
-the wire dispatch that would drive them is listed under Not built. Placement
-changes only by explicit transition, and the sole producer of a placement change
-is loss replacement. When a pinned runner is lost, the placement enters a lost
+the wire dispatch that would drive them is listed under Not built. A placement
+changes only by explicit transition, and loss replacement is the only transition
+that changes one. When a pinned runner is lost, the placement enters a lost
 state that only two user commands leave: replace, which installs a successor
 placement, and abandon, which retires the placement.
 
 ## Decisions
 
 One runner runs on the same host and under the same effective user as
-`signalboxd`. That local effective user is the trust boundary, so the
-authentication-reference identity is correlated with the stored enrollment and
-is not a secret.
+`signalboxd`. That user is the trust boundary, so the authentication-reference
+identity is correlated with the stored enrollment and is not a secret.
 
 The single-runner rule is a short-term development boundary, not a design
-commitment. Several runners enrolled with one daemon at once is required
-functionality, and nothing may be built that forecloses it.
+commitment. Several runners enrolled with one daemon at once is a requirement,
+and nothing built may foreclose it.
 
 Positive placement revisions, the `RunnerPlacementChanged` boundary, the runner
 event family, and the placement fields of session-creation records stay
 compatible with a relocation that no loss caused. Why: a user-directed move of a
 healthy session will consume them.
 
-Nothing here migrates a session, promotes a successor runner, or reschedules
-work without a user command. A fresh enrollment is active at once; only a
-successor after loss waits, and it waits on a user command, never on a daemon
-decision.
+No path migrates a session, promotes a successor runner, or reschedules work
+without a user command. A fresh enrollment is active at once; only a successor
+after loss waits, and it waits on a user command, never on a daemon decision.
 
 The daemon issues and owns logical enrollment authority; the runner keeps only a
 stable idempotency fact for crash recovery.
@@ -113,7 +110,7 @@ is fatal and advances nothing.
 
 A runner identity is issued by one logical enrollment and is never derived from
 hardware, a hostname, a network address, or any machine fingerprint. Persistent
-and short-lived runners follow the same law: a newly enrolled ephemeral runner
+and short-lived runners follow the same rule: a newly enrolled ephemeral runner
 receives a new identity, and a runner reconnecting under an active enrollment
 keeps its existing one. The runner creates one random enrollment-request
 identity on first startup and journals it atomically below its private state
@@ -137,9 +134,9 @@ daemon-only tool, or one runner tool whose identity-or-class selector the
 advertisement does not satisfy rejects the complete registration.
 Capability-class, credential-profile, and repository-key names share one checked
 syntax, but classes are catalog keys while the other two are availability keys
-from runner configuration. Credential-profile names are checked, duplicate-free
-availability facts from that configuration; the user selects one advertised
-name, and daemon-owned policy decides approval independently of the name.
+from runner configuration. Credential-profile names are duplicate-free; the user
+selects one advertised name, and daemon-owned policy decides approval
+independently of the name.
 
 Omitting a formerly advertised capability removes its availability from the new
 registration and never changes daemon-side policy. Omitting a combined-locus
@@ -175,16 +172,15 @@ Workspace, repository, credentials, and sandbox are independent axes of one
 session: a choice on any axis constrains no other, and no axis is inferred from
 another. Every combination is a stated choice at creation; a request that
 selects nothing on an axis states that absence explicitly and receives absence,
-never a daemon- or runner-selected substitute. Why: a silently inferred
-credential is an authorization the user never granted, and refusing to guess
-keeps the grant record a truthful statement of intent. No repository and no
-profile performs no repository operation and creates no grant; no repository
-with a named profile creates the grant for the session's other admitted
-dispatches; a profileless placement creates no grant, resolves no configured
-path, and injects no value. A repository-worktree requirement is satisfiable
-only when the selected registration advertises the per-session worktree
-capability and the repository key resolves in checked runner configuration to a
-credential-free HTTPS clone URL.
+never a daemon- or runner-selected substitute, because a silently inferred
+credential is an authorization the user never granted. A placement with no
+repository performs no repository operation; with a named profile it still
+creates the grant for the session's other admitted dispatches. A profileless
+placement creates no grant, resolves no configured path, and injects no value. A
+repository-worktree requirement is satisfiable only when the selected
+registration advertises the per-session worktree capability and the repository
+key resolves in checked runner configuration to a credential-free HTTPS clone
+URL.
 
 Ordinary attachment and lease creation accept only the exact pinned runner and
 the current grant; re-registration and reconnect change none of the pinned

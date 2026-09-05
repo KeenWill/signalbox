@@ -42,8 +42,7 @@ dispatch carry the same complete correlation. It fsyncs `dispatch_received`
 before acknowledging the frame internally and `execution_may_have_started`
 immediately before it invokes the executor. The runner retains one terminal
 evidence envelope and resends it until the daemon commits the matching attempt
-and lease transition and replies `result_recorded`; only then does the runner
-discard it.
+and lease transition and replies `result_recorded`, then discards it.
 
 The phases `waiting_dispatch` and `dispatch_received` prove only that the
 journaled executor invocation had not started; `execution_may_have_started`
@@ -67,8 +66,8 @@ refused, and neither side waits on it further.
 ### Successor enrollment, promotion, and replacement
 
 After durable predecessor loss, one successor `enroll` may be admitted as a
-provisioning-only pending replacement candidate; it receives the same identity
-shapes plus a pending enrollment and pending registration revision, at most one
+provisioning-only pending replacement candidate. It receives the same identity
+shapes plus a pending enrollment and pending registration revision; at most one
 pending request exists, and equal replay returns its exact original receipt.
 Pending authority admits heartbeat, startup leak reconciliation, and one
 user-command-bound workspace operation, and never registration mutation, grant
@@ -172,7 +171,7 @@ the manifest, and re-adopts the root with whatever the session wrote into it; it
 never substitutes a fresh empty directory for one holding session files.
 
 The manifest lifecycle is `staging`, `ready`, `active`, then `releasing`.
-Transitions only advance in that order, equal replay retains the same value, and
+Transitions advance only in that order, equal replay retains the same value, and
 deletion is represented by absence rather than a fifth token. Recovery resolves
 the repository key again and requires the current canonical URL digest to equal
 the manifest value; a changed mapping is `manifest_conflict`, never a
@@ -182,7 +181,7 @@ Runners are not cleanup authorities. Only the runner that provisioned a
 workspace can delete it; a replaced, revoked, or dead runner leaves its
 workspace on disk. No cleanup authority resumes for a retired identity, and no
 mechanism transfers ownership of an existing clone to a successor. The leak
-report is the whole response to that disk.
+report is the whole response to a workspace left on disk.
 
 ### Release and leak reconciliation
 
@@ -254,7 +253,7 @@ nothing about the encrypted application protocol.
 
 ### Forced Git configuration and the canonical binding
 
-Every Git invocation, in provisioning and in every Git tool alike, runs with its
+Every Git invocation, in provisioning and in every Git tool, runs with its
 effective configuration forced by the runner rather than validated afterwards.
 The runner points `GIT_CONFIG_SYSTEM` and `GIT_CONFIG_GLOBAL` at `/dev/null`,
 passes `protocol.allow=never`, `protocol.https.allow=always`, and
