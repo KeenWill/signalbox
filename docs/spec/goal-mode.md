@@ -1,458 +1,149 @@
 # Goal mode
 
-**Implemented behavior.** This page owns the cross-crate contract for one
-commissioned goal attached to a session: its immutable statements, event-sourced
-state, user commands, model declarations, scheduler continuation, process wire,
-and terminal-client verbs. Identity and durable-command mechanics are owned by
+Goal mode attaches one commissioned goal to a session and keeps the scheduler
+starting turns toward it until the goal's own state stops them.
+
+## Map
+
+A goal is one statement of work attached to a session. The domain type `Goal` in
+`crates/domain/src/goal.rs` holds the session's goal lineage as an append-only
+stream of events, and every reader derives the current state by replaying that
+stream. Each statement is one generation. A generation is pursuing from its
+commission until it is blocked, achieved, stopped by the user, superseded by a
+replacement statement, or closed with its session. A blocked generation admits
+resume or supersede; the other endings are final for that generation, and a
+later attach may start a new one after an achieved or stopped generation. The
+event vocabulary is closed: a commission, each block and resumption, and the
+ending.
+
+Users act on a goal through four commands: attach, resume with optional
+guidance, stop, and supersede with a replacement statement. Supersede is the
+command for changing an active generation's scope; guidance that leaves the
+scope alone is a steer while the goal is pursuing or a resume while it is
+blocked. A model reaches the goal only through the session-scoped `goal_declare`
+tool, and may declare only blocked or achieved. Repository watch commissions
+goals for the sessions it dispatches by composing an attach with a synthesized
+statement, as [repository watch](repo-watch.md) describes.
+
+While a generation is pursuing, the end of each successful turn makes the
+scheduler create and start the next turn without user input, and this repeats
+until the state changes. A failed goal turn is not retried; the daemon appends a
+blocked event with the execution-failure reason, need text, and the failed
+turn's provenance. Every goal turn is either scheduled by this machinery or
+bound to a turn a command already accepted, and never neither.
+
+An execution-failure block on an owned session is resumed automatically within
+bounds. The planner in `apps/signalboxd/src/goal_mode.rs` derives how many
+attempts the current run has spent from the event history, schedules one resume
+after a backoff, and writes into each block's need text either the scheduled
+resumption or the operator repair. At startup the daemon inventories
+execution-failure blocks whose need promises resumption and treats their lost
+timers as immediately due.
+
+Command identity and replay are owned by
 [identity and commands](identity-and-commands.md), turn execution by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool dispatch
-by [tool loop](tool-loop.md), and framing by
-[process protocol](process-protocol.md). INV-048 is the lifecycle enforcement
-family indexed by [the invariant test index](../invariants.md).
+by [tool loop](tool-loop.md), session state and the parked rule by
+[sessions and transcript](sessions-and-transcript.md), and wire framing by
+[process protocol](process-protocol.md).
 
-## Statement lineage and state
+## Decisions
 
-**Implemented behavior.** A goal statement is exact, nonempty UTF-8 bounded to 1
-MiB and immutable after admission; no statement-edit operation exists. Attach
-commissions generation one when no lineage exists, and may commission the next
-generation after an achieved or user-stopped generation. A pursuing or blocked
-generation is active and rejects attach: changing its scope requires supersede,
-and mid-goal guidance that does not change scope uses steer while pursuing or
-resume while blocked.
+Goal mode is reserved for long-horizon work of hours or days; routine dispatch
+uses plain sessions with vendor compaction.
 
-**Implemented behavior.** Supersede is one atomic event: it marks the active
-generation `superseded { by_generation }`, commissions its immutable successor
-as `pursuing`, and retains the replacement statement and user command
-provenance. All earlier generations and events remain readable, and exactly one
-generation can be active at a time.
+A statement is immutable after admission and no edit operation exists; a change
+of scope is a supersede, which commissions a new generation and leaves the old
+one readable.
 
-**Implemented behavior.** The current state is derived only by replaying the
-session's append-only goal event stream; no mutable goal-state column is
-authoritative. The state algebra is:
+Steer is the only mid-pursuit guidance path.
 
-- `pursuing`;
-- `blocked { reason, need }` — scheduler-terminal, but admits explicit resume or
-  supersede;
-- `achieved { report_ref }` and `user_stopped` — each ends that generation, and
-  a later explicit attach may start another; and
-- `superseded { by_generation }` — terminal for the replaced generation, while
-  its same event starts the successor; and
-- `session_closed { outcome }` — the session closed while the generation was
-  still open. Terminal with no outgoing transition: no resume, no supersession,
-  no later commission.
+Goal state is the only continuation stopping condition: there is no goal turn
+count, elapsed-time budget, verdict counter, or fallback to another model.
 
-**Implemented behavior.** The closed event vocabulary is `commissioned`,
-`blocked`, `resumed`, `achieved`, `user_stopped`, `superseded`, and
-`session_closed`. Positive event ordinals are contiguous within one session, and
-positive statement generations are contiguous across commission and
-supersession. Domain replay rejects a missing first commission, a noncontiguous
-event, or a transition that is invalid from the preceding derived state
-(INV-048).
+Resumption never bypasses execution-failure blocking: the block is appended
+first and every attempt is a recorded resumed event, so no failed goal turn
+becomes a silent retry.
 
-**Implemented behavior.** Goal state is the sole continuation-stopping condition
-in this contract, so a terminal session settles its live generation in the same
-transaction that closes it: a pursuing or blocked generation records
-`session_closed`, carrying the closed outcome class that closed the session and
-the actor classification behind it. A generation the contract already settles by
-its own event does not gain a second one — a verified achievement is `achieved`
-and a session stop is `user_stopped`, and a closure naming either over a still
-open generation is rejected rather than recording one closure twice. The member
-each session outcome carries — the standing failure cause, the successor, the
-retirement predicate — stays on the session's own lifecycle record, so the goal
-lineage holds no second copy that could disagree with it.
-
-## Transition authority and provenance
-
-**Implemented behavior.** User transitions carry their user-global durable
-command identity. The user commands are attach, resume with optional guidance,
-stop, and supersede with a replacement statement. Their immutable receipts
-record either the appended event ordinal or a closed rejection, including
-`unknown_model_alias` when the session's selected alias is absent at turn
-acceptance and `acceptance_position_exhausted` when the session's positive
-accepted-input ordinal cannot advance. Equal replay returns the recorded result;
-structurally different reuse is a conflict.
-
-**Implemented behavior.** A commission need not originate from a user request.
-Repository-watch dispatch composes an attach for the session it is creating and
-commits it in that creation's own transaction, with its own durable command
-identity and the same receipt and event shapes any attach records; the goal
-statement is synthesized from the dispatch rather than supplied as text. Such a
-statement's template is system-authored, but the identifiers it renders come
-from the watched repository, so a consumer placing it in a model prompt owes it
-exactly the quoting it owes any session text.
-
-**Implemented behavior.** A synthesized statement delimits every
-repository-supplied identifier it renders, because those identifiers are
-ordinary text and the sentence around them is not: an identifier left bare could
-close the field it sits in and continue as though it were the statement. Each is
-rendered between double quotes, with the quote and the backslash escaped so the
-closing delimiter cannot be forged, and with every line terminator escaped so a
-value cannot leave its line. The encoding is injective, so two distinct
-identifiers never render alike and the statement always says which one it named.
-Delimiting bounds where the repository's bytes begin and end; it does not make
-quoted data harmless, and a consumer still owes the whole statement the quoting
-above.
-
-**Implemented behavior.** Every goal turn records the generation it belongs to,
-and a consumer reading the authority a turn ran under reads that generation and
-not the session's current one, so a supersession while the turn is parked cannot
-broaden what that consumer sees. A turn with no such record resolves to no
-statement, leaving the consumer to treat the authority as unsettled. A goal
-session runs such turns — an ordinary input submitted into a session that
-already has a goal — and no generation states anything about them, so inferring
-one from the lineage's shape would let a goal attached after the turn already
-existed supply authority it never covered.
-
-**Implemented behavior.** The delegated tool-approval judge is the one consumer
-that binds its read to its commit. It resolves the statement again when it
-commits, under the lock the commit takes, and compares it against the one it
-read. Equal statements commit the decision. A statement that resolved before and
-resolves to nothing now belongs to a generation that closed, whether it was
-stopped, achieved, or replaced by a supersession — a replacement closes the
-generation the decision was formed under rather than restating it, so it too
-resolves to nothing. That escalates rather than committing a decision formed
-under authority no longer in force. Escalating means the attended park, except
-for a turn the unattended terminal path claims — one judged under dispatch
-authority recorded by [repository watch](repo-watch.md) or by an
-operator-commissioned dispatch (also specified there), unsteered, and either the
-dispatched work itself or work whose authority has since ended — and which fails
-the turn without blocking the generation that has already closed. Work an
-operator resumed after an earlier escalation is the other case, and it parks
-while its authority stands, because the exemption stated below means only a
-person could have resumed it. A judge that read no statement decided without
-one, so a generation attached since withdraws nothing and leaves that decision
-alone: the comparison detects withdrawn authority, not newly attached authority.
-
-**Implemented behavior.** The commit-time resolution is not the reading
-resolution. Reading binds a recorded generation exactly, so a supersession while
-a turn is parked cannot broaden what the consumer is shown. Committing asks
-whether the authority the decision was formed under is still in force, so a
-recorded generation supplies its statement only while it remains open. A
-resolution that bound the generation exactly at commit time would compare a
-statement against itself and find withdrawn authority intact.
-
-**Committed unimplemented functionality.** No consumer other than the approval
-judge resolves the authority it read a second time when it commits. Such a
-consumer commits under the statement as it stood at its read. A future consumer
-binding its own read to its own commit follows the escalation rule above rather
-than choosing again.
-
-**Implemented behavior.** A model may declare only `blocked` or `achieved`
-through the session-scoped goal declaration tool. The declaration has no
-caller-supplied session identity: trusted tool-dispatch correlation supplies the
-invoking session, turn, and tool-request identity, and persistence requires that
-exact triple to name the request. The request must name `goal_declare`, carry
-canonical transition-and-reason JSON, be immediately preceded by one
-assistant-text part in the same model response, and be that response's final
-part. That text is the exact need or report and must match the event the request
-causes. A request failing any of those requirements cannot commit. Only the
-current goal turn may declare; an otherwise valid request from an older turn
-returns `NotCurrentGoalTurn` without appending an event. A tool-request identity
-can cause at most one goal declaration event. An achieved event stores the exact
-final report and derives its transcript reference from that same invocation. An
-achievement is gated on the session's finish check: a failing verdict appends
-`blocked{finish_check_failed}` with the check's result as its need; a passing
-verdict commits `achieved_verified` to the session's terminal handoff in the
-same transaction, and a declaration no finish check verifies (no finish
-condition, or no verifier) commits `achieved_declared`. A goal command or model
-declaration on a session whose closure is committed to the terminal handoff, or
-settled, is refused `session_closing`: the closure settles the generation.
-
-**Implemented behavior.** Model-selectable blocked reasons are
-`user_input_required`, `external_change_required`, and `authorization_required`.
-Every blocked event carries exact nonempty need text. `execution_failure` is the
-fourth stored reason and is scheduler-only: its provenance shape requires the
-source turn and cannot be constructed from a model declaration.
-`finish_check_failed` is the fifth: the block a failing finish check appends,
-with the declaring request's provenance and the check's result as its need.
-
-**Implemented behavior.** Stop and supersede are explicit user authority. Stop
-yields `user_stopped`, distinct from model-declared achievement and blocking;
-supersede is admitted only while the current generation is pursuing or blocked.
-Repository watch may compose that same durable parent-only stop solely to
-withdraw a generation-one commission it created when the target pull request
-closes or merges. It cannot stop descendants or a later user-authored
-generation. Resume is admitted only while blocked, and its optional guidance
-becomes the next turn's input. Steer is the only mid-pursuit guidance path.
-
-## Scheduler continuation
-
-**Implemented behavior.** While the current goal state is pursuing, successful
-turn terminalization causes the daemon scheduler to create and start the next
-turn without user input, and repeats after each successful turn while replayed
-state remains pursuing. Goal state is the only continuation stopping condition:
-there is no goal turn count, elapsed-time budget, verdict counter, or silent
-model fallback. If current defaults still name the predecessor's alias, restart
-reconciliation may reuse that turn's frozen definition when the catalog entry
-has disappeared. A changed current alias with no definition returns a typed
-`UnknownModelAlias` continuation outcome and never falls back or becomes durable
-corruption. If the session's positive accepted-input ordinal is exhausted,
-continuation returns typed `AcceptancePositionExhausted` without appending a
-successor. If scheduler failure blocking cannot append because the positive
-goal-event ordinal is exhausted, it returns typed `EventOrdinalExhausted`
-instead of classifying valid durable state as corrupt.
-
-**Implemented behavior.** A failed goal turn is not retried; in the same
-scheduler disposition path the daemon appends `blocked` with reason
-`execution_failure`, need text stating either the scheduled automatic resumption
-or the operator repair required, and the exact failed-turn provenance. That
-scheduler-turn provenance is single-use and durably requires the current goal
-turn to have an unsuccessful terminal disposition. A delayed replay of an
-already-recorded failure returns that blocked transition without appending a
-second event, including after resume. An unrecorded failure from an older turn
-returns `NotCurrentGoalTurn` once resume has made a successor turn current, so
-it cannot block the resumed pursuit. Continuation stops on blocked, achieved,
-user-stopped, and a superseded generation; supersession's successor is pursuing
-and therefore independently eligible to continue.
-
-**Implemented behavior.** An execution-failure block on an owned session owes
-its own bounded automatic resumption; on an unmonitored session it names none,
-and adoption durably replaces its effective need with the scheduled-resumption
-need under the session lock before arming it. The daemon derives from the goal
-event history how many consecutive automatic resumptions the current run has
-already spent: the run is the trailing alternation of execution-failure blocks
-and the resumptions that answered them, and every other event ends it. That
-history yields two counts: every attempt already made is a model call the daemon
-issued, so the total sets the backoff before the next attempt, while only a
-failure the session caused spends the chargeable budget. Below both required
-configured limits, the appended need text states that automatic resumption is
-scheduled and names the operator repair for a goal still blocked once resumption
-ends, and exactly one resume follows after the required configured backoff
-doubled per attempt already made, up to its required configured cap. At either
-limit the goal stays blocked, and its need text states which limit ended the run
-and states the operator repair. Every need text an execution-failure block
-carries names the operator repair, because an armed attempt can also fail to
-resume by being durably rejected, by losing its process, or by never reaching
-the database, and in each case that text is what an operator reads. Resumption
-does not bypass execution-failure blocking or make a failure a silent retry —
-the block is appended first, and every attempt is an ordinary recorded `resumed`
-event.
-
-A resumed turn does not spend the chargeable goal budget when durable evidence
-attributes its failure outside the session: its exact model-call or tool-attempt
-automatic reconciliation is `reconciled`, whether startup or the live watchdog
-created the wait, or its terminal provider failure is `rate_limited`,
-`overloaded`, or `provider_internal`. The lineage still records the ordinary
-resumed event and execution-failure block, and budget derivation associates that
-resumption with the turn it started before applying the exemption. Credential,
-permission, invalid-request, target, request-size, quota, and unrecognized
-provider failures remain chargeable because they do not prove a transient
-provider-availability condition. Typed records rather than a log line are the
-authority, so deploys, reconciliation deadlines, and transient provider
-availability cannot charge the budget for work the session did not fail.
-
-That exemption bounds what the operator's budget may be charged, never how long
-a run may continue. A run whose every failure is exempt charges nothing, so the
-budget alone can never end it, and the required configured lifetime ceiling —
-which counts every attempt whatever its evidence proved — is what does. The two
-limits are independent and a run ends at whichever it reaches first. Both are
-also the numbers an operator projection reads to report whether a blocked goal
-is still owed a resume, so the projection and the planner end a run together.
+Only an execution-failure block arms an automatic resumption. Why: each
+model-selectable blocked reason names a condition no retry can clear.
 
 A chargeable failure resumes with fixed guidance to inspect durable state and
-choose a different safe approach before repeating the failed operation, making
-the resumed run reconsider its strategy rather than simply replaying the
-immutable commissioned statement. An unchargeable failure resumes without
-guidance and therefore reuses that statement: infrastructure recovery must not
-invent a new model instruction. The exact failed-turn evidence used for budget
-charging selects between those inputs; inability to read it leaves the
-resumption unsettled for the bounded database retry rather than guessing.
+choose a different safe approach; an unchargeable failure resumes without
+guidance and reuses the statement. Why: infrastructure recovery must not invent
+a model instruction.
 
-**Implemented behavior.** An automatic resumption's durable command identity is
-derived from the session and the exact blocked event it answers rather than
-minted. A repeated attempt is therefore an exact command replay rather than a
-second resume, and the recorded `resumed` event is self-identifying: a resume
-carrying any other identity is an operator's, ends the run, and restarts the
-budget. Each attempt carries the blocked event it answers into the command, and
-that expectation is checked against the lineage under the same session lock the
-resume would append within: an automatic resume applies to exactly that blocked
-event or to nothing, and an unmet expectation appends nothing and leaves the
-derived identity unspent. A goal since resumed, stopped, superseded, or blocked
-for another reason is therefore left alone even when it moved between the
-attempt's read and its lock. The model-selectable reasons are never
-automatically resumed: each names a condition no retry can clear, and only
-execution-failure blocking arms an attempt.
+Two execution-failure classes require an operator instead of automatic
+resumption: the block an unattended repository-watch approval escalation
+appends, described by [repository watch](repo-watch.md), and a failed turn
+carrying the durable cause that no context-compaction boundary fits the model
+window. Why: repository watch already owes the first a redispatch, and an
+unchanged successor to the second would meet the same proof.
 
-**Implemented behavior.** An attempt that reaches no durable answer is owed
-another, because nothing else re-reads a blocked goal: an attempt whose database
-call fails retries up to three times at the base backoff, reusing its derived
-identity so a retry that follows a lost acknowledgement replays rather than
-resumes twice. Blocking whose own commit acknowledgement is lost is reconciled
-the same way — the daemon reads the lineage back and arms the execution-failure
-block it finds, since the need text it was appending expects resumption whether
-or not the acknowledgement arrived. That read is retried under the same bound,
-because the event ordinal it recovers is the one thing the lost acknowledgement
-did not report and the derived identity is a function of it, and it runs off the
-scheduler pass, which returns its ambiguity without waiting. Arming a block
-another pass already armed is harmless for the same reason a retry is: both
-derive one identity, and the second attempt replays it.
-
-**Implemented behavior.** Startup inventories current execution-failure blocks
-whose exact need promises automatic resumption and treats their lost timers as
-immediately due. The inventory excludes runs either limit has ended and blocks
-whose need requires an operator, including unattended approval escalations.
-Inventory failure receives three retries at a one-second cadence and then
-remains a visible durable block; individual resume attempts use the ordinary
-bounded reconciliation and derived command identity, so concurrent or repeated
-startup attempts cannot append two resumptions for one block.
-
-**Implemented behavior.** Two durable execution-failure classes require an
-operator instead of automatic resumption. The first is the block an unattended
-repository-watch approval escalation appends in the transaction that fails its
-turn, described by [repository watch](repo-watch.md). It arms no attempt, and
-its need text states that and names the operator repair directly instead. The
-work that block ended is already owed a different retry — repository watch
-redispatches it under a fresh dispatch while its rule and target remain eligible
-— so resuming this goal would re-run an escalating turn against a request no
-user is attending, beside that redispatch, until the budget ran out. Where that
-redispatch is withheld, because the rule was deactivated or the pull request
-closed or merged, the work is not wanted at all, and an automatic resumption
-would be the only thing still pursuing it. An operator-commissioned dispatch has
-an attending operator and no independent redispatch path, so its delegated
-approval escalation remains an active operator-visible approval wait rather than
-creating an execution-failure block. The second is a call-free failed turn
-carrying the append-only typed cause that no safe context-compaction boundary
-fits the configured model window. An unchanged successor would encounter the
-same proof, so its execution-failure block arms no attempt and tells the
-operator to start a fresh session or reduce the imported context. Every other
-actual execution-failure block still owes the bounded resumption, including one
-appended for a session repository watch created or an operator commissioned.
-
-That typed cause is read wherever an execution-failure block is planned, not
-only on the disposition path that fails the turn. Planning reads the cause for
-the failed turn the block names, deriving that turn from the generation's
-current turn when its caller names none, and a recorded cause decides the plan
-alone. Block provenance cannot reach that conclusion: it says a turn failed,
-never that resuming it could progress. So the block a reconciled still-terminal
-turn appends, and the block an ambiguously acknowledged commit is read back to
-arm, carry the same operator-required need the direct path appends rather than
-resuming into the compaction their own durable evidence already proved cannot
-fit.
-
-**Implemented behavior.** A periodic durable sweep includes a pursuing goal
-whose current goal turn is terminal and still owed continuation or blocking. The
-initial post-startup sweep therefore recovers a process loss between turn
-terminalization and goal disposition; reconciliation is idempotent and removes
-that terminal turn from this candidate shape by scheduling its successor or
-appending the blocking event.
-
-**Implemented behavior.** Attaching or superseding commissions a pursuing
-generation and schedules its first turn; resuming schedules exactly one next
-turn and supplies guidance, when present, as that turn's accepted input.
-
-**Implemented behavior.** A queued turn whose goal generation becomes blocked,
-achieved, user-stopped, or superseded remains immutable history but is
-ineligible for activation and is excluded from queue predecessor selection and
-periodic reconciliation hints. When such a retired origin falls inside an active
-turn's accepted-input tail, the runtime projection retains its immutable
-acceptance position with an explicit retired-goal-origin marker while omitting
-it from the process transcript's turn inventory; tail completeness and the
-session acceptance high-water mark therefore remain exact. A stop or supersede
-that retires queued goal work moves the turn to `terminal{retired}` and appends
-a durable `turn_terminal{retired}` update before any replacement input
-acceptance. A live follower clears only that exact queued identity, so obsolete
-work cannot mask a replacement activation. Durable event and input correlation
-makes retrying command delivery idempotent rather than duplicating continuation
-work.
-
-## Persistence and process surfaces
-
-**Implemented behavior.** Migration `202608020013` owns `goal_command` and
-`goal_event`. Both are append-only and reject truncation, relational checks
-close every discriminator and payload shape, and loads replay complete rows
-through the domain aggregate rather than reading a mutable current-state
-projection (INV-048). Durable rules bind append, correlation, and provenance:
-
-- a session-row lock serializes event append, and a trigger enforces ordinal and
-  generation continuity;
-- an applied receipt can reference only the event carrying its own command
-  identity, operation, and statement or guidance payload, and every user event
-  reverse-correlates to that exact applied receipt;
-- rejected reasons are closed over the operations that can produce them,
-  including durable acceptance-position exhaustion for pursuit-starting
-  commands;
-- every pursuit-starting user event reverse-correlates to exactly one queued
-  goal turn, whose requested and frozen configuration derives from its exact
-  defaults epoch;
-- a continuation successor must name the acceptance-latest successfully
-  completed goal turn in its generation, so an older turn cannot branch after
-  resume;
-- model-declaration requests and scheduler-failure turns are single-use, and
-  composite foreign keys enforce user-command, model-invocation, and
-  scheduler-turn provenance; and
-- deferred constraints bind each model event to the current goal turn, the exact
-  `goal_declare` name and canonical arguments of its request, the immediately
-  preceding assistant-text part, and its final position in the model response,
-  and bind every scheduler failure event to the current unsuccessfully terminal
-  goal turn.
-
-**Implemented behavior.** Migration `202608110013` supersedes the two rule
-functions `202608020013` installed for a goal turn's accepted input. A
-generation's turn is either scheduled by the goal machinery or bound to a turn a
-command already accepted. The machinery mints an accepted input with no
-accepting command and writes the statement, or the resume guidance, into it; the
-rule that a goal turn's input restate its immutable source verbatim applies to
-exactly that case, because it is what proves the machinery invented no text. A
-bound turn's text was authored by whoever issued its command — for
-repository-watch dispatch, the tagged context of the event dispatched on — so it
-carries that command instead. A goal turn therefore either restates its
-statement or names an accepting command, and never neither, and an accepted
-input with no command still requires exactly one goal source.
-
-**Implemented behavior.** The process protocol exposes attach, show, resume,
-stop, and supersede requests. Show returns the current generation and complete
-ordered event history, and the terminal client provides exactly the
-corresponding verbs. Attach and supersede statements, and optional resume
-guidance, accept either inline text or one bounded UTF-8 file so the 1 MiB
-goal-text contract is not constrained by operating-system argument limits.
-Session creation may compose an explicit attach immediately after creation,
-while the two durable commands retain separate replay identities.
-
-## Compatibility constraints
-
-**Committed unimplemented functionality.** No present goal-mode surface
-delegates work or creates child sessions. Future child sessions will compose
-with goal mode rather than becoming a goal transition, so version-one goal
+No goal-mode surface delegates work or creates child sessions, and the goal
 events and commands reserve no delegation variant.
 
-**Committed unimplemented functionality.** No present goal-mode surface starts
-or governs a review workflow. Future review composition must refer to goal and
-session evidence without adding review states to the goal state algebra.
+## Contracts
 
-**Committed unimplemented functionality.** No present goal-mode surface chooses
-runner placement. Future runner placement of goal sessions must leave goal
-statements, transitions, and stopping authority independent of placement.
+When an execution failure blocks a session that has an owner, the daemon
+automatically resumes the session within a bound. The daemon derives the command
+identity of that resumption from the session and the blocked event it responds
+to; it never generates a new identity. A retry therefore cannot resume the
+session twice.
 
-**Committed unimplemented functionality.** No present goal-mode surface
-automatically falls back between models. Future fallback work must not turn a
-failed goal turn into a silent retry or bypass execution-failure blocking.
+The current state is derived only by replaying the session's append-only goal
+event stream; no mutable goal-state column is authoritative.
 
-**Committed unimplemented functionality.** No present goal-mode surface has a
-goal priority or more than one concurrent goal per session. Future extension
-must preserve immutable statements, full lineage, and the version-one rule that
-at most one generation is pursuing or blocked.
+On an unmonitored session an execution-failure block names no resumption; when
+the session is adopted, the daemon replaces that need with the
+scheduled-resumption need under the session lock and then arms it.
 
-**Committed unimplemented functionality.** No present judge record carries both
-what the provider recommended and what the repository committed. Escalating a
-completion whose authority was withdrawn overwrites the provider's answer with
-the escalation, so the record retains only the second. A replay can therefore
-prove that a substitution was legitimate — the authority is still withdrawn, and
-a closed generation cannot reopen — but not which recommendation was
-substituted, so a retry offering a different recommendation from the one first
-offered is admitted as an exact replay. The structural answer is for the record
-to carry both, after which a replay compares the offered value against the
-stored offered value and needs no such proof. The same loss admits the mirror
-case: a provider's own escalation, committed while the authority was open and
-followed by a withdrawal, is indistinguishable from a substituted one, so a
-retry offering an approval or a denial is admitted there too. Until then the
-exposure is latent rather than live: no caller retries a completion with a
-recommendation other than the one it first offered, because the only
-uncertain-commit path fails an in-flight judge as ambiguous instead of
-re-entering completion.
+The automatic-resumption run is the trailing alternation of execution-failure
+blocks and the resumptions that answered them; every other event ends it, and a
+resume carrying any identity other than the derived one is an operator's and
+ends it too. Why: the planner and the attention projection must agree on this
+definition.
 
-## Open edges
+Two independent limits end a run. The chargeable budget counts only failures the
+session caused; a failure that durable evidence attributes outside the session,
+including a context-compaction boundary the daemon owns, is not charged. The
+lifetime ceiling counts every attempt, so a run whose every failure is exempt
+still ends. The operator projection reads the same two limits, so it and the
+planner end a run together.
 
-**Deferred or undecided work.** Separating consecutive execution failures from
-ones distant in the same pursuit is recorded under
-[goal mode](../open-questions.md#goal-mode). No other goal-mode open question is
-recorded by this version-one contract.
+The compaction cause is read wherever an execution-failure block is planned, not
+only on the disposition path that fails the turn. Why: the direct disposition,
+the reconciliation of a still-terminal turn, and the arming of an ambiguously
+acknowledged block all plan blocks, and nothing else forces them to agree.
+
+A goal turn whose credential pool is exhausted blocks with the ordinary
+execution-failure reason when
+[credential availability](credential-availability.md) selects no wait; when it
+selects a wait, the turn remains the current goal turn and no event is appended.
+
+A goal event a command authored projects the session's actor from that command's
+issuer, so a resumption the daemon issues never reads as the operator's.
+
+Every goal turn records the generation it belongs to, and a consumer reads that
+recorded generation rather than the session's current one. Why: a supersession
+while the turn is parked must not broaden what the consumer sees.
+
+A synthesized statement's template is system-authored, but the identifiers it
+renders come from the watched repository, so a consumer that places it in a
+model prompt quotes it as it quotes any session text.
+
+An achievement is gated on the session's finish check: a failing verdict appends
+a block for the failed check with the check's result as its need, a passing
+verdict commits a verified achievement to the session's terminal handoff in the
+same transaction, and a declaration no check verifies commits a declared
+achievement.
+
+The command claim and replay protocol and the attribution rule are stated on
+[identity and commands](identity-and-commands.md), the lock order on
+[persistence protocol](persistence-protocol.md), and the parked-state rule on
+[sessions and transcript](sessions-and-transcript.md).
+
+## Not built
+
+No committed unbuilt design is recorded for goal mode; undecided items are in
+[open questions](../open-questions.md).
