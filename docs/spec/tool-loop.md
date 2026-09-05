@@ -75,30 +75,29 @@ prepared-attempt `KnownFailed` route that families without the declaration use.
 The two cannot both run, and the declared check is the earlier of them. The
 instruction family declares two: arguments that do not decode to its schema, and
 a bundle outside the effective eligibility view, both specified by
-[workspace instructions](workspace-instructions.md#enumeration-preview-and-admission).
-Such a request resolves before approval through a request-level transition that
-mints no attempt: it records a fourth durable logical resolution,
-`closed_inadmissible`, carrying the family's typed reason on the request itself,
-and creates no approval state, no judge call, no attempt row, and no executor
-work. It must be request-level, because a tool attempt names its issuing turn
-attempt and a batch parked on an undecided approval has no current turn attempt
-to name — minting one here would either orphan the attempt or force a turn
-attempt into existence under the approval-wait constraints. Storing the reason
-on the request instead is sound because nothing executed: there is no attempt
-history to explain, only a request that was never admissible. The projection
-renders it through the same provider-visible error object as any other typed
-failure, so no new result shape reaches a provider. A request resolved this way
-is not undecided, so the batch is not parked behind it and proposal order
-continues at the next request. It is resolved for the continuation boundary too:
-it projects one `ToolInadmissible` result entry in proposal order, and it
-satisfies the batch-complete condition that creates the fresh continuation turn
-attempt. A batch whose only proposal is inadmissible therefore still prepares
-its next model call rather than stalling with nothing to project. Why this
-rather than deciding approval first: a delegated decision needs evidence the
-daemon can only build for a bundle the session may see, so asking a judge about
-an inadmissible request would mean either exposing metadata the session is not
-entitled to or sending an evidence-free prompt. No present family declares such
-a check.
+[workspace instructions](workspace-instructions.md). Such a request resolves
+before approval through a request-level transition that mints no attempt: it
+records a fourth durable logical resolution, `closed_inadmissible`, carrying the
+family's typed reason on the request itself, and creates no approval state, no
+judge call, no attempt row, and no executor work. It must be request-level,
+because a tool attempt names its issuing turn attempt and a batch parked on an
+undecided approval has no current turn attempt to name — minting one here would
+either orphan the attempt or force a turn attempt into existence under the
+approval-wait constraints. Storing the reason on the request instead is sound
+because nothing executed: there is no attempt history to explain, only a request
+that was never admissible. The projection renders it through the same
+provider-visible error object as any other typed failure, so no new result shape
+reaches a provider. A request resolved this way is not undecided, so the batch
+is not parked behind it and proposal order continues at the next request. It is
+resolved for the continuation boundary too: it projects one `ToolInadmissible`
+result entry in proposal order, and it satisfies the batch-complete condition
+that creates the fresh continuation turn attempt. A batch whose only proposal is
+inadmissible therefore still prepares its next model call rather than stalling
+with nothing to project. Why this rather than deciding approval first: a
+delegated decision needs evidence the daemon can only build for a bundle the
+session may see, so asking a judge about an inadmissible request would mean
+either exposing metadata the session is not entitled to or sending an
+evidence-free prompt. No present family declares such a check.
 
 ## Approval policy and decision sources
 
@@ -566,21 +565,20 @@ execution and continuation. For each next approved request:
 successful fresh `instructions_read`, the commit-result transaction also locks
 the session's admitted-set head and atomically appends the
 `InstructionAdmission` specified by
-[workspace instructions](workspace-instructions.md#durable-admission-transition)
-with the receipt-only completed result. A stale head, failed read, or failed
-admission validation discards the admission, not the round: the transaction
-commits the terminal typed failure as this attempt's result and leaves the
-admitted-set head and every existing admission untouched. Rolling both back
-would discard a completed executor result and strand the attempt `InFlight`,
-which contradicts the monotonic terminal transition required above and would
-block the serialized batch behind an attempt that can never close. The
-distinction is that the executor work already happened outside any transaction;
-what this transaction decides is whether its evidence becomes an admission, and
-a rejected admission is a recorded result, not grounds to roll back the attempt.
-Replay of an already committed request returns the recorded receipt and
-admission link without appending either again; a conflicting receipt or link is
-corruption. That head lock's position in the repository-wide order and its mode
-belong to the
+[workspace instructions](workspace-instructions.md) with the receipt-only
+completed result. A stale head, failed read, or failed admission validation
+discards the admission, not the round: the transaction commits the terminal
+typed failure as this attempt's result and leaves the admitted-set head and
+every existing admission untouched. Rolling both back would discard a completed
+executor result and strand the attempt `InFlight`, which contradicts the
+monotonic terminal transition required above and would block the serialized
+batch behind an attempt that can never close. The distinction is that the
+executor work already happened outside any transaction; what this transaction
+decides is whether its evidence becomes an admission, and a rejected admission
+is a recorded result, not grounds to roll back the attempt. Replay of an already
+committed request returns the recorded receipt and admission link without
+appending either again; a conflicting receipt or link is corruption. That head
+lock's position in the repository-wide order and its mode belong to the
 [persistence lock protocol](persistence-protocol.md#lock-protocol), which
 carries it in the same inventory as this transaction's scheduler lock; this page
 states that the lock is taken, never where or how. No present tool supplies this
@@ -986,19 +984,18 @@ detail, denial selects `denied` and its reason, and terminal closure selects
 whose failures do not fit it maps into it rather than extending it, and may fix
 `D` to its own closed token vocabulary so the projection stays machine-readable.
 **Committed unimplemented functionality.** The instruction family is the one
-such mapping, fixed by
-[workspace instructions](workspace-instructions.md#enumeration-preview-and-admission):
-its four execution-stage failures select `execution_failed` with `D` set to
-exactly one closed reason token and no other text, while its two pre-approval
-reasons, which resolve before approval and create no attempt, select
-`invalid_arguments` with `D` the token `not_eligible` or JSON null for arguments
-that did not decode. OpenAI carries that JSON as ordinary tool-message content
-because its wire shape has no failure flag; Anthropic also receives the
-provider-neutral failure flag. Malformed proposal arguments remain exact after
-preparation-time credential scrubbing on the durable request but replay as the
-exact provider-neutral JSON object `{"signalbox_invalid_arguments":true}`,
-allowing the paired typed error result to reach either provider without treating
-the placeholder as durable evidence.
+such mapping, fixed by [workspace instructions](workspace-instructions.md): its
+four execution-stage failures select `execution_failed` with `D` set to exactly
+one closed reason token and no other text, while its two pre-approval reasons,
+which resolve before approval and create no attempt, select `invalid_arguments`
+with `D` the token `not_eligible` or JSON null for arguments that did not
+decode. OpenAI carries that JSON as ordinary tool-message content because its
+wire shape has no failure flag; Anthropic also receives the provider-neutral
+failure flag. Malformed proposal arguments remain exact after preparation-time
+credential scrubbing on the durable request but replay as the exact
+provider-neutral JSON object `{"signalbox_invalid_arguments":true}`, allowing
+the paired typed error result to reach either provider without treating the
+placeholder as durable evidence.
 
 `current_time` is a compiled tool:
 
