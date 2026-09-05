@@ -183,7 +183,7 @@ def blank_comments_and_strings(text: str) -> str:
     """Blank comment and string-literal contents, preserving offsets.
 
     An explicit scanner rather than a regex, for the same reason as the one
-    in scripts/check_style_rules.py: raw string literals and the apostrophe's
+    in source scans: raw string literals and the apostrophe's
     double duty as lifetime and character literal are not a regular language,
     and getting either wrong moves impl blocks into or out of the scan.
     Rustdoc examples are comments, so the `impl` blocks they quote vanish
