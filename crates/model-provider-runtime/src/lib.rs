@@ -869,7 +869,7 @@ impl RuntimeModelCallProviderError {
     /// outcome.
     ///
     /// The shared operator taxonomy
-    /// (docs/spec/runtime-substrate.md#operator-failure-taxonomy) says only
+    /// (docs/spec/runtime-substrate.md) says only
     /// *how bad* a failure is; this says *what happened*, without exposing
     /// provider text or user content.
     pub const fn cause_code(self) -> ModelCallCauseCode {

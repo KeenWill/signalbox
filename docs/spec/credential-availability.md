@@ -14,8 +14,7 @@ vocabulary by
 [sessions and the transcript](sessions-and-transcript.md#when-entries-come-to-exist);
 the wire shapes by
 [process protocol](process-protocol.md#credential-pool-preparation-failure); and
-the evidence algebra by
-[terminal evidence](runtime-substrate.md#terminal-evidence).
+the evidence algebra by [terminal evidence](runtime-substrate.md).
 
 ## The credential-availability machine
 
@@ -186,10 +185,10 @@ Each projection below is a column above, and names the page that owns it:
   [process protocol](process-protocol.md#credential-pool-preparation-failure),
   with the operator clear surface at
   [credential-exclusion administration](process-protocol.md#credential-exclusion-administration).
-- Terminal evidence and cause —
-  [terminal evidence](runtime-substrate.md#terminal-evidence) for the evidence
-  algebra, and [terminal outcomes](model-call-execution.md#terminal-outcomes)
-  for the outcome each one derives.
+- Terminal evidence and cause — [terminal evidence](runtime-substrate.md) for
+  the evidence algebra, and
+  [terminal outcomes](model-call-execution.md#terminal-outcomes) for the outcome
+  each one derives.
 - Pool grammar, ranking, and admission —
   [credential pools and selection](configuration-and-credentials.md#credential-pools-and-selection).
 

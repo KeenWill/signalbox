@@ -1608,11 +1608,10 @@ is never added to the environment the adapter assembles, and the store is
 removed when the prepared capability is dropped. How that store is constructed
 and applied — its file modes, the `apiKeyHelper` script and its fixed
 interpreter, and the one allowlisted child value the adapter replaces — is owned
-by the
-[credential-access boundary](runtime-substrate.md#credential-access-boundary)
-and is not restated here. What this page fixes is which value seeds redaction:
-the exact resolved credential, retained in the one-shot capability, is what
-provider-controlled observations and terminal evidence are scrubbed against.
+by the [credential-access boundary](runtime-substrate.md) and is not restated
+here. What this page fixes is which value seeds redaction: the exact resolved
+credential, retained in the one-shot capability, is what provider-controlled
+observations and terminal evidence are scrubbed against.
 
 This is the delivery for every credential that has an external source of truth —
 provider API keys, and any long-lived bearer token a provider's own tooling
@@ -1945,8 +1944,7 @@ bearer material for the same account and the CLI reflects it, so seeding only
 one of them leaks the other through provider-controlled output. How the adapter
 installs and applies that scrub — the representations it covers, its behaviour
 across output chunk boundaries, and where it sits relative to parsing and
-persistence — is owned by
-[the Codex CLI provider adapter](runtime-substrate.md#codex-cli-provider-adapter)
+persistence — is owned by [the Codex CLI provider adapter](runtime-substrate.md)
 and is not stated here. A path that cannot install it fails preparation before
 writing the scratch home or spawning the CLI, which is this contract's
 obligation rather than the adapter's.
@@ -3003,8 +3001,8 @@ Enforcement as implemented:
   seeds that scrub; how the adapter applies it — the representations it covers,
   its behaviour across provider chunk boundaries, where it sits relative to
   truncation and parsing, and the limit that bounds the guarantee — is owned by
-  [the credential-access boundary](runtime-substrate.md#credential-access-boundary).
-  INV-035-tagged tests in `crates/model-runtime/src/credential.rs`,
+  [the credential-access boundary](runtime-substrate.md). INV-035-tagged tests
+  in `crates/model-runtime/src/credential.rs`,
   `crates/model-runtime-anthropic/tests/loopback.rs`, and
   `apps/signalboxd/src/configuration.rs` enforce this boundary.
 - Every checked string in a successful code-host result is scrubbed of the exact
