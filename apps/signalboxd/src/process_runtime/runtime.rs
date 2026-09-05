@@ -82,7 +82,7 @@ impl ProcessRuntime {
         }
     }
 
-    /// Wires the goal-mode disposition that arms §9 resumption when an adopt
+    /// Wires the goal-mode disposition that arms automatic resumption when an adopt
     /// takes a blocked goal.
     #[must_use]
     pub fn with_goal_resumption(mut self, disposition: PostgresGoalPassDisposition) -> Self {

@@ -9,7 +9,7 @@ pub(super) struct WireCreateSessionRequest {
     pub(super) lifecycle: SessionLifecycleMembers,
 }
 
-/// The §7 lifecycle members of one creation, admitted into domain values.
+/// The lifecycle members of one creation, admitted into domain values.
 pub(super) struct LifecycleMembers {
     start_gate: DomainStartGate,
     ownership: DomainSessionOwnership,

@@ -1,4 +1,5 @@
-//! PostgreSQL proof for the §12 metric views.
+//! PostgreSQL proof for the lifecycle metric views
+//! (docs/spec/session-lifecycle.md).
 //!
 //! Every fixture here is built to be one of the cases the specification's
 //! denominator and cohort rules single out: a session released mid-life, a
@@ -28,7 +29,7 @@ use signalbox_persistence::{
 
 const METRIC_SEED: u128 = 0x12fe_0000;
 
-/// Builds one repository-watch dispatch, which §6 records as owned work.
+/// Builds one repository-watch dispatch, recorded as owned work.
 fn dispatched_creation(seed: u128) -> PreparedCreateSession {
     CreateSession::new(
         DurableCommandId::from_uuid(Uuid::from_u128(METRIC_SEED + seed)),
@@ -43,7 +44,7 @@ fn dispatched_creation(seed: u128) -> PreparedCreateSession {
     .expect("a module-dispatched creation without ancestry is preparable")
 }
 
-/// Builds one interactive creation, which §6 records as unmonitored.
+/// Builds one interactive creation, recorded as unmonitored.
 fn interactive_creation(seed: u128) -> PreparedCreateSession {
     prepared(
         METRIC_SEED + seed,
@@ -224,7 +225,7 @@ async fn settled_turn_with_cause(
     Ok(turn)
 }
 
-/// Removes one session's armed deadline record, leaving the §1 violation.
+/// Removes one session's armed deadline record, leaving the deadline violation.
 ///
 /// The invariant is enforced by trigger, which is why the alarm exists at all:
 /// the violation it counts is the state a path that got around the enforcement
@@ -293,7 +294,7 @@ fn latest_populated_week(weeks: &[LifecycleWeeklyMetrics]) -> LifecycleWeeklyMet
         .expect("the fixture closed at least one cohort member")
 }
 
-/// §12: the headline's cohort follows the ownership journal and its
+/// The headline's cohort follows the ownership journal and its
 /// denominator drops exactly the stops and the failure-free supersessions.
 ///
 /// Six closures, one per rule the specification singles out: a release does
@@ -390,8 +391,8 @@ async fn the_headline_counts_released_and_failure_driven_closures() -> Result<()
     repository
         .close(
             conversation,
-            // §2 reserves `abandoned` for an operator writing off a parked
-            // session, and §6 refuses to park an unmonitored one; a stop is
+            // `abandoned` is reserved for an operator writing off a parked
+            // session, and an unmonitored one cannot be parked; a stop is
             // how a conversation ends.
             SessionTerminalOutcome::Stopped {
                 sticky: StopStickiness::Redispatchable,
@@ -419,7 +420,7 @@ async fn the_headline_counts_released_and_failure_driven_closures() -> Result<()
     Ok(())
 }
 
-/// §12 and §1: an unbounded deadline satisfies the invariant explicitly and is
+/// An unbounded deadline satisfies the invariant explicitly and is
 /// never counted; only a missing record is the violation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -445,7 +446,7 @@ async fn an_unbounded_deadline_is_exempt_and_a_missing_record_is_not() -> Result
     Ok(())
 }
 
-/// §12's first companion alarm counts an expiry, and only an expiry: a
+/// The first companion alarm counts an expiry, and only an expiry: a
 /// deadline still ahead of the clock is the ordinary case and never counts.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -487,7 +488,7 @@ async fn a_deadline_counts_once_it_expires_and_not_before() -> Result<(), Box<dy
     Ok(())
 }
 
-/// §12: a wall attributes to the week the session was dispatched in, while its
+/// A wall attributes to the week the session was dispatched in, while its
 /// closure lands in the week it terminalized in — so a long-lived session
 /// contributes to two different weekly cohorts, each measuring a different
 /// thing.
@@ -537,7 +538,7 @@ async fn a_wall_attributes_to_its_dispatch_week_and_the_closure_to_its_own()
     Ok(())
 }
 
-/// §12: overflow incidence is over the full terminal cohort before the trim,
+/// Overflow incidence is over the full terminal cohort before the trim,
 /// and `P(finish | overflow)` is over exactly the sessions it counted.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -597,7 +598,7 @@ async fn overflow_reads_the_untrimmed_cohort_and_its_finished_share() -> Result<
     Ok(())
 }
 
-/// §12: cause completeness measures two axes, each outside its own catch-all
+/// Cause completeness measures two axes, each outside its own catch-all
 /// set — terminal turns over their whole population, and `known_failed` model
 /// calls over the calls whose disposition admits a cause.
 #[tokio::test(flavor = "multi_thread")]
@@ -718,7 +719,7 @@ async fn drain_operator_status(
     Ok((items, counts))
 }
 
-/// §12: the operator-status snapshot carries the metrics and the alarm as two
+/// The operator-status snapshot carries the metrics and the alarm as two
 /// further sections of the same coherent read.
 ///
 /// The snapshot and the telemetry pass run the same statements, which is what
@@ -783,9 +784,9 @@ async fn backdate_park(
     Ok(())
 }
 
-/// §12 finding F9's immediate half: a wall is counted in the week it happened.
+/// A wall is counted in the week it happened.
 ///
-/// §2 parks a session on a wall and leaves its turn suspended, so at the
+/// A wall parks the session and leaves its turn suspended, so at the
 /// moment the alarm most needs to page there is no terminal turn to read. The
 /// park is the durable evidence, and terminalization carries it forward so the
 /// week the wall is counted in does not move when the session later closes.
@@ -920,7 +921,7 @@ fn one_wall_occurrence_week(weeks: &[LifecycleWeeklyMetrics]) -> PrimitiveDateTi
         .week_start()
 }
 
-/// §12's cohort is sessions "owned at any point in their life", so ownership
+/// The metric cohort is sessions "owned at any point in their life", so ownership
 /// taken after the closure is not ownership during it.
 ///
 /// An adoption recorded after `ended_at` would otherwise write an already-ended
@@ -935,8 +936,8 @@ async fn ownership_taken_after_the_closure_joins_no_cohort() -> Result<(), Box<d
     repository
         .close(
             conversation,
-            // §2 reserves `abandoned` for an operator writing off a parked
-            // session, and §6 refuses to park an unmonitored one; a stop is
+            // `abandoned` is reserved for an operator writing off a parked
+            // session, and an unmonitored one cannot be parked; a stop is
             // how a conversation ends.
             SessionTerminalOutcome::Stopped {
                 sticky: StopStickiness::Redispatchable,
@@ -1012,7 +1013,7 @@ async fn adopt_by_statement(pool: &PgPool, session: SessionId) -> Result<(), sql
     Ok(())
 }
 
-/// §12 counts a supersession that closed a park holding a failure cause, so
+/// The metrics count a supersession that closed a park holding a failure cause, so
 /// the cause must outlive the committed decision waiting on the turn.
 ///
 /// A cause cleared once the closure commits would reach settlement empty and

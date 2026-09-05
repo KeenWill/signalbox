@@ -833,8 +833,7 @@ Locks per transaction, in acquisition order:
   temporary boundaries are sound only while eligibility is the one immutable
   empty value. The committed nonempty eligibility surface moves every manifest
   into activation under this same scheduler lock, as
-  [the activation transaction](turn-lifecycle-and-scheduling.md#the-activation-transaction)
-  requires.
+  [the activation transaction](turn-lifecycle-and-scheduling.md) requires.
 
 - **StartEligibleTurn** and nonterminal **model-call execution transactions**
   (prepare and authorize): first model-call insertion first takes the
@@ -855,8 +854,7 @@ Locks per transaction, in acquisition order:
   the admitted-set locks stated here, in the tool-loop bullet below, and in the
   `ReplaceSessionDefaults` bullet below are the protocol that functionality must
   follow. This inventory fixes their order and mode. The instruction eligibility
-  freeze that
-  [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md#the-activation-transaction)
+  freeze that [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md)
   adds to `StartEligibleTurn`, and the session-eligibility replacement command,
   take the session's admitted-set head immediately after the `session_scheduler`
   row, before the `session_current_defaults` pointer row, and before any
@@ -1091,19 +1089,18 @@ Locks per transaction, in acquisition order:
   `session_defaults_version` insert takes `FOR KEY SHARE` on the session row
   through the non-deferrable session foreign key. **Committed unimplemented
   functionality — instruction-aware replacement.** The retained-region check
-  that
-  [sessions-and-transcript](sessions-and-transcript.md#session-defaults-and-replacement)
-  adds to this command needs two further locks, and they precede the pointer row
-  rather than following it, because the established order everywhere else is
-  scheduler row before `session_current_defaults` pointer row. The complete
-  sequence is the `session_scheduler` row `FOR UPDATE`, then the session's
-  admitted-set head `FOR SHARE` — the replacement only reads the retained
-  region, and `FOR SHARE` already excludes the `FOR UPDATE` an admission takes —
-  then the `session_current_defaults` pointer row `FOR UPDATE` as above. All
-  three are held until the successor epoch commits, so an admission or an
-  activation falls wholly before or after the replacement and cannot invalidate
-  the evidence it checked. This is the same head-lock position the
-  `StartEligibleTurn` bullet fixes: immediately after the scheduler row.
+  that [sessions-and-transcript](sessions-and-transcript.md) adds to this
+  command needs two further locks, and they precede the pointer row rather than
+  following it, because the established order everywhere else is scheduler row
+  before `session_current_defaults` pointer row. The complete sequence is the
+  `session_scheduler` row `FOR UPDATE`, then the session's admitted-set head
+  `FOR SHARE` — the replacement only reads the retained region, and `FOR SHARE`
+  already excludes the `FOR UPDATE` an admission takes — then the
+  `session_current_defaults` pointer row `FOR UPDATE` as above. All three are
+  held until the successor epoch commits, so an admission or an activation falls
+  wholly before or after the replacement and cannot invalidate the evidence it
+  checked. This is the same head-lock position the `StartEligibleTurn` bullet
+  fixes: immediately after the scheduler row.
 
 - **ReplaceSessionMetadata**: the target session row is locked
   `FOR NO KEY UPDATE` before the complete satellite snapshot is replaced. This
@@ -2176,10 +2173,9 @@ below the current bound. Any one such member suffices, since one admissible
 member is all preparation needs. A bound raised, lowered, or removed across a
 restart is therefore evaluated the same way for every member of every wait,
 without waiting for an unrelated release. These are the shapes required by
-[turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot).
-Reconstitution and wake must fail closed on partial, stale, or mismatched
-evidence. This paragraph constrains that future schema; no present storage
-surface provides it.
+[turn lifecycle](turn-lifecycle-and-scheduling.md). Reconstitution and wake must
+fail closed on partial, stale, or mismatched evidence. This paragraph constrains
+that future schema; no present storage surface provides it.
 
 ## Open edges
 

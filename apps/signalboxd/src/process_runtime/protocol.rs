@@ -807,7 +807,7 @@ pub(super) fn lifecycle_command_needs_eligibility_nudge(
 }
 
 /// Hands a committed closure's live turn to the committed interrupt
-/// machinery (§2) under a fresh core-owned identity.
+/// machinery under a fresh core-owned identity.
 pub(super) async fn interrupt_for_closure(
     services: &ConnectionServices,
     command: &SessionLifecycleCommand,
