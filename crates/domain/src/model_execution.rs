@@ -1082,7 +1082,7 @@ impl ModelCallExecution {
     /// The caller must first validate the call-pinned credential-pool policy
     /// and select a different admitted member. This aggregate transition owns
     /// only the lifecycle proof required by
-    /// `docs/spec/model-call-execution.md#availability-successor-calls`: the
+    /// `docs/spec/model-call-execution.md`: the
     /// predecessor remains `KnownFailed`, one authorization is never reused,
     /// and the successor receives a fresh physical attempt.
     pub fn apply_availability_successor(

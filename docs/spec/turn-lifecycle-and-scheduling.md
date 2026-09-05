@@ -63,14 +63,14 @@ batch and carries no live turn or tool attempt ([tool-loop](tool-loop.md)).
 **Committed unimplemented functionality — credential-availability wait.** No
 present `ActiveTurnPhase`, storage discriminator, startup-scan branch, scheduler
 path, or process state supplies the pool-availability wait in
-[model-call execution](model-call-execution.md#availability-successor-calls),
-and no present runtime can enter it. That wait must be a distinct active phase
-with a closed `exhausted`/`contended` cause that retains the session slot and
-durably binds the frozen pool-policy snapshot. The exhausted form carries every
-policy member's exclusion evidence and optional reset, plus the optional
-deadline the machine computes from them — this page carries the field, never its
-formula, since only the machine decides which exclusion kinds expire at a reset
-they report. The contended form carries every durable exclusion in the selection
+[model-call execution](model-call-execution.md), and no present runtime can
+enter it. That wait must be a distinct active phase with a closed
+`exhausted`/`contended` cause that retains the session slot and durably binds
+the frozen pool-policy snapshot. The exhausted form carries every policy
+member's exclusion evidence and optional reset, plus the optional deadline the
+machine computes from them — this page carries the field, never its formula,
+since only the machine decides which exclusion kinds expire at a reset they
+report. The contended form carries every durable exclusion in the selection
 snapshot and the complete nonempty set of otherwise-admissible bounded members
 with exact invocation-reservation identities. Startup may reconstitute either
 only from that complete evidence. Which ending a selection attempt reaches — and
@@ -112,13 +112,13 @@ and it splits them in two. A predecessor exclusion earned by a qualifying
 failure in this turn is insert-only and turn-local, so nothing readmits that
 member within this turn — not a reset passing, not an operator clear of its
 exact predecessor correlation, and not any other durable availability update
-([model-call execution](model-call-execution.md#availability-successor-calls));
-without that, waking a one-member `switch_now` pool on its own reported reset
-would call the same profile again without bound. Every other exclusion the wait
-recorded — an ordinary reset-aware membership exclusion, an `avoid_new_sessions`
-exclusion, a profile quarantine — is re-read from its current active state
-instead, because a release that re-applied a reset which had already passed
-would re-enter the same wait on the wake its deadline exists to produce.
+([model-call execution](model-call-execution.md)); without that, waking a
+one-member `switch_now` pool on its own reported reset would call the same
+profile again without bound. Every other exclusion the wait recorded — an
+ordinary reset-aware membership exclusion, an `avoid_new_sessions` exclusion, a
+profile quarantine — is re-read from its current active state instead, because a
+release that re-applied a reset which had already passed would re-enter the same
+wait on the wake its deadline exists to produce.
 
 Eligibility is permission to retry selection, not a guarantee of a slot. One
 release can make several contended waits eligible while admitting only one, so
@@ -1007,10 +1007,9 @@ The occupied-slot delivery outcomes implemented here are:
   specified here. Before any terminal transition releases the slot, the same
   transaction reclassifies every pending steering input against the interrupted
   turn as an ordered queued successor origin. Call, attempt, and turn
-  terminalization follow
-  [model-call-execution](model-call-execution.md#terminal-outcomes). A matching
-  interrupt against `AwaitingRecoveryDecision` preserves the already terminal
-  ambiguous call and ended attempt, records the new proof on the turn's
+  terminalization follow [model-call-execution](model-call-execution.md). A
+  matching interrupt against `AwaitingRecoveryDecision` preserves the already
+  terminal ambiguous call and ended attempt, records the new proof on the turn's
   reconciliation marker, and terminalizes `ReconciliationRequired` with the
   wait's exact operation set. The `reconcile_turn` request in
   [process-protocol](process-protocol.md) is the operator surface that supplies

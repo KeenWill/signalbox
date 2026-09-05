@@ -1025,8 +1025,7 @@ so the call's own entries precede it and the prefix-only law holds
 The entry copies no runner advertisement, workspace path, credential fact, or
 tool output; the placement record remains its content authority. The provider
 projection resolves that record to the exact injected placement event owned by
-[model-call execution](model-call-execution.md#frontier-rendering) (INV-015,
-INV-044).
+[model-call execution](model-call-execution.md) (INV-015, INV-044).
 
 Pending steering has a separate safe-point boundary (INV-036). A `steer` submit
 accepted while its exact source turn is active returns the accepted-input
@@ -1090,8 +1089,8 @@ that exhaustion selects no wait. Its single transaction ends the current attempt
 terminalizes the turn `Failed`, and emits both the ordinary `turn_failed` update
 and the typed `turn_credential_pool_exhausted` event. The sealed failure and
 complete member evidence are owned by
-[model-call execution](model-call-execution.md#availability-successor-calls). No
-present transcript writer can produce this shape.
+[model-call execution](model-call-execution.md). No present transcript writer
+can produce this shape.
 
 That third producer serves two endings, which share its commit shape exactly.
 This page owns the transcript-producer column of

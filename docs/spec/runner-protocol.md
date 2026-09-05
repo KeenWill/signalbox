@@ -76,7 +76,7 @@ later change to those mechanisms must remain compatible with a relocation that
 no loss caused. Its model-facing consequence distinguishes retired placement
 authority from filesystem reachability: the injected placement event never
 claims that relocation deleted prior files
-([model-call execution](model-call-execution.md#frontier-rendering)).
+([model-call execution](model-call-execution.md)).
 
 Successor promotion stays user-initiated in every form. Fresh-install enrollment
 is instantly active; only a successor after loss waits, and it waits on a user
@@ -1028,9 +1028,9 @@ actual capabilities rather than of the compiled registry. A declaration whose
 arguments, paths, or working directory are defined relative to a session
 repository is advertised only to a session that has one; a workspace-free
 session advertises exactly the tools that can run in it
-([model-call execution](model-call-execution.md#frontier-rendering) owns the
-snapshot, and [tool loop](tool-loop.md#registry-placement-and-effect-metadata)
-owns the declarations). No combination is rejected for being workspace-free.
+([model-call execution](model-call-execution.md) owns the snapshot, and
+[tool loop](tool-loop.md#registry-placement-and-effect-metadata) owns the
+declarations). No combination is rejected for being workspace-free.
 
 Why: treating a session as a repository clone on the one runner produces a
 defect wherever that assumption surfaces — a credential inferred for a
