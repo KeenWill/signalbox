@@ -21,7 +21,8 @@ runtime through the `RuntimeModelCallProvider` bridge in
 `crates/model-provider-runtime`, which implements the application's model-call
 port over any `ModelRuntime` and its input-token counting port over an adapter
 that counts a prospective operation's rendered input without a generation
-request.
+request, sending the same prompt- and cache-affecting controls the generation
+request would carry.
 
 Caller identity crosses the boundary as an opaque correlation parameter carried
 by `ModelOperation`, every `Observation` and the final `TerminalReport`; the
@@ -223,9 +224,10 @@ claiming provider-side work stopped. In a subprocess adapter cancellation before
 spawn is proven unsent; after spawn the adapter interrupts the process group,
 holds the unreaped leader through a grace period, kills the group and reports
 boundary loss; dropping the execution after spawn kills the still-owned process
-group before the child handle drops. After a stdin write failure a provider
-failure remains definitive, but a nominal completion becomes boundary loss
-because the adapter cannot prove the full frontier reached the CLI.
+group before the child handle drops. On an ordinary exit the executor kills the
+remaining process group before it reaps the leader. After a stdin write failure
+a provider failure remains definitive, but a nominal completion becomes boundary
+loss because the adapter cannot prove the full frontier reached the CLI.
 
 Settings are provider-enforced request controls unless an adapter records a
 capability-limited advisory exception; an adapter never presents prompt
@@ -258,10 +260,13 @@ Terminal evidence is typed so the caller classifies without string matching;
 strings appear only as retained detail inside already-classified variants. Each
 adapter owns an exhaustive native mapping into the shared provider-error kind,
 which lives in the core crate, and unknown material classifies as unrecognized
-with its native facts retained rather than guessed at. A provider-directed retry
-delay, decoded from the HTTP `Retry-After` header or the Codex CLI's rendered
-retry phrase, rides the provider-error evidence, and the bridge carries it into
-the durable failure observation that feeds the availability-successor backoff.
+with its native facts retained rather than guessed at. An error record that
+follows the provider's finish marker and names no classifiable failure is
+stream-protocol loss, while a classified one stays definitive and outranks the
+finish. A provider-directed retry delay, decoded from the HTTP `Retry-After`
+header or the Codex CLI's rendered retry phrase, rides the provider-error
+evidence, and the bridge carries it into the durable failure observation that
+feeds the availability-successor backoff.
 
 The non-acceptance proof on a provider error is an adapter-owned typed fact,
 never inferred from the error kind, status retryability or provider prose. An
@@ -336,9 +341,9 @@ The configured whole-exchange timeout covers connection establishment through
 the complete buffered body or streamed terminal record, and callers may
 configure a shorter connect timeout; a connect timeout is proven unsent, while a
 whole-exchange timeout after send is boundary loss. The whole-exchange timeout
-is a required deployment bound supplied to both HTTP adapters, and a `none`
-setting leaves the exchange unbounded. Success is HTTP 200 only; another 2xx is
-not terminal success.
+is a required deployment bound supplied to both HTTP adapters and to both
+subprocess adapters, and a `none` setting leaves the exchange unbounded. Success
+is HTTP 200 only; another 2xx is not terminal success.
 
 The HTTP adapters bound all provider-controlled response input before it can
 accumulate into parsed or retained output, and complete records inside the byte
@@ -420,9 +425,11 @@ credential value crosses the adapter's boundary, so CLI-controlled text and JSON
 receive only recursive scrubbing by credential-bearing member names and token
 shapes before they leave the crate. For any delta fragmentation of one text
 stream, the concatenated streamed output is never less redacted than a stateless
-scan of the concatenated provider text. Fail-closed suppression is absorbing for
-a sink's lifetime: usage reports, other fact boundaries and terminal flushes
-never re-enable provider-controlled bytes.
+scan of the concatenated provider text. Held pending bytes and the rescanning
+work one candidate can cost are bounded, and the sink fails closed past either
+bound. Fail-closed suppression is absorbing for a sink's lifetime: usage
+reports, other fact boundaries and terminal flushes never re-enable
+provider-controlled bytes.
 
 Each CLI adapter's build derives its supported-version constant from the exact
 version in its pin manifest, so the manifest is the sole source. The daemon
