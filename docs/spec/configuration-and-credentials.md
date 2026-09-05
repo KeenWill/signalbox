@@ -9,35 +9,34 @@ reaches a provider without being stored or logged.
 Configuration is loaded once at startup from the process environment and two
 versioned TOML documents: the model catalog and the session-template catalog.
 The parser in `apps/signalboxd/src/configuration.rs` and
-`apps/signalboxd/src/credential_pools.rs` admits a document fail-closed, and no
-present surface re-reads a file after startup. The subsystem also owns the
-runner's own startup configuration, the refusals that keep ambient settings away
-from the production database channel, and the bridge that carries a credential
-value from its file or login directory to the adapter that uses it.
+`apps/signalboxd/src/credential_pools.rs` admits a document fail-closed. The
+subsystem also owns the runner's startup configuration, the refusals that keep
+ambient settings away from the production database channel, and the bridge that
+carries a credential value from its file or login directory to the adapter that
+uses it.
 
 The environment supplies a fixed set of deployment values: the database URL, the
 catalog paths, the socket paths, the paths of the two integration credential
 files, and the optional browser bind address. `DATABASE_URL` is the whole
 database channel, and a deployment carries every connection parameter in the
-URL. Model-provider credential paths are not process settings; each comes from a
+URL. Model-provider credential paths are not process settings: each comes from a
 `file` profile in the catalog, and `ANTHROPIC_API_KEY_FILE` and
-`OPENAI_API_KEY_FILE` variables are not read. `SIGNALBOX_WEB_BIND` is optional;
-absence binds a loopback default, and an explicit socket must be a loopback
-address or configuration fails. The browser HTTP listener shares that bind with
-the static web build and the `/api` routes. The DTOs and schemas under
+`OPENAI_API_KEY_FILE` are not read. `SIGNALBOX_WEB_BIND` is optional; absence
+binds a loopback default, and an explicit socket must be a loopback address or
+configuration fails. The browser HTTP listener shares that bind with the static
+web build and the `/api` routes. The DTOs and schemas under
 `crates/web-contract` are the authority for that surface, and the checked-in
 JavaScript decoders and TypeScript declarations are generated from them.
 
 Telemetry export is opt-in. Presence of `SIGNALBOX_OTLP_ENDPOINT` enables span
 export; its absence disables OTLP and makes every other OTLP setting inert. A
-separate bind setting enables a Prometheus listener independently. Every
-exported record carries only daemon-minted identifiers and closed tokens.
+separate bind setting enables a Prometheus listener.
 
 `signalbox-runner` reads one strict versioned TOML file at startup, whose
 checked-in example is `config/signalbox-runner.example.toml`. Its
-`allowed_network_hosts` is a bounded subset of a fixed host list; configuration
-narrows that list and cannot add a hostname. Runner credential profiles are
-non-secret checked names the daemon grants and only the runner resolves.
+`allowed_network_hosts` narrows a fixed host list and cannot add a hostname.
+Runner credential profiles are non-secret checked names the daemon grants and
+only the runner resolves.
 
 The model catalog declares what the four adapters can serve. Each `[[models]]`
 entry binds an immutable direct-selection key to one exact provider target, a
@@ -58,16 +57,16 @@ catalogs: the domain `ModelTargetCatalog` for execution-time target resolution
 and the `RuntimeModelCatalog` for the provider bridge.
 
 The `[[tool_mappings]]` array composes the deployment-mapped tool families and
-binds one configured workspace root. Each session's own workspace root is
-derived from that root by a fixed formula: `<name>.sessions/<session uuid>`
-beside the configured root, where `<name>` is the configured root's final path
-component. A session names no path and no column supplies one, so the set of
-roots the daemon can open is fixed by the configured root alone.
-`sandboxed_exec` and `cargo_diagnostics` share one daemon-local bubblewrap
-profile whose default launch unshares the user, pid, ipc, uts, and network
-namespaces and mounts a fresh `/proc`. A container-process-namespace variant
-omits the pid unshare and read-only binds the existing `/proc`; it is admissible
-only when an outer container already isolates that namespace.
+binds one configured workspace root. Each session's workspace root is derived
+from that root by a fixed formula: `<name>.sessions/<session uuid>` beside the
+configured root, where `<name>` is the configured root's final path component. A
+session names no path and no column supplies one, so the set of roots the daemon
+can open is fixed by the configured root alone. `sandboxed_exec` and
+`cargo_diagnostics` share one daemon-local bubblewrap profile whose default
+launch unshares the user, pid, ipc, uts, and network namespaces and mounts a
+fresh `/proc`. A container-process-namespace variant omits the pid unshare and
+read-only binds the existing `/proc`; it is admissible only when an outer
+container already isolates that namespace.
 
 A credential profile names one account. Its `CredentialReference` is the
 non-secret name that appears in configuration, errors, logs, and durable
@@ -75,54 +74,52 @@ records; its `CredentialValue` carries the secret bytes and exists only at the
 adapter boundary. Every model-provider reference is an operator-chosen profile
 name. The two integration constants are `brave-search-primary` and
 `github-primary`, and `codex-subscription-primary` and
-`claude-subscription-primary` are the defaults a CLI runtime falls back to when
-its mapping names nothing else. A profile's delivery states how its secret
-reaches the provider. `file` is the delivery for every credential with an
-external source of truth, such as a provider API key or a long-lived token a
-provider's tooling mints; a direct-HTTP adapter forms its header from the file
-value and rejects `env_key` because it uses no child environment. `ambient`
-leaves login resolution to a CLI. `codex_home` names the login directory a Codex
-child receives as `CODEX_HOME`: delivery replaces the child's inherited
-`CODEX_HOME` with the admitted path of the profile the operation's reference
-names, leaves every other profile's path absent, and the daemon retains the path
-as a reference only. Each `FileCredentialAccess` instance binds one
-consumer-scoped map of references to deployment paths, and a model adapter
-receives its adapter's complete file-profile catalog.
+`claude-subscription-primary` are the defaults a CLI runtime uses when its
+mapping names nothing else. A profile's delivery states how its secret reaches
+the provider. `file` is the delivery for every credential with an external
+source of truth, such as a provider API key or a long-lived token a provider's
+tooling mints; a direct-HTTP adapter forms its header from the file value and
+rejects `env_key` because it uses no child environment. `ambient` leaves login
+resolution to a CLI. `codex_home` names the login directory a Codex child
+receives as `CODEX_HOME`: delivery replaces the child's inherited `CODEX_HOME`
+with the admitted path of the profile the operation's reference names and leaves
+every other profile's path absent. Each `FileCredentialAccess` instance binds
+one consumer-scoped map of references to deployment paths, and a model adapter
+receives the complete file-profile catalog declared for it.
 
 A credential pool is the set of profiles that may substitute for one another for
 one model family. An `[[adapter_mappings]]` entry maps each family to exactly
 one pool, and every member of that pool carries the mapping's adapter. A pool's
 name is 1 through 256 unpadded NUL-free bytes and it holds 1 through 1,024
-members, each with a priority within this pool. Priorities need not be unique or
-contiguous: equal values are what `tie_break` resolves, and gaps let a later
-profile take an intermediate rank. Five closed trigger keys each carry one
-closed action, and an omitted key selects `stay`; the actions are `stay`,
-`switch_next_turn`, `switch_now`, `avoid_new_sessions`, and `quarantine`. A
-one-member pool is the ordinary single-account deployment and needs no trigger
-keys. Selection happens at model-call preparation, never at session creation: it
-first takes the sticky member when that member remains admissible, then walks
-members in priority order, skipping excluded ones and breaking ties by the
-snapshot's rule. Trigger actions and the exclusions they create are durable and
-survive restart. What an attempt can end as when a pool admits no member is
-owned by [credential availability](credential-availability.md).
+members, each with a priority within the pool. Priorities need not be unique or
+contiguous: `tie_break` resolves equal values, and gaps let a later profile take
+an intermediate rank. Five closed trigger keys each carry one closed action, and
+an omitted key selects `stay`; the actions are `stay`, `switch_next_turn`,
+`switch_now`, `avoid_new_sessions`, and `quarantine`. A one-member pool is the
+ordinary single-account deployment and needs no trigger keys. Selection happens
+at model-call preparation, never at session creation: it prefers the sticky
+member while that member remains admissible and otherwise walks members in
+priority order, skipping excluded ones and breaking ties by the snapshot's rule.
+Trigger actions and the exclusions they create are durable. How an attempt ends
+when a pool admits no member is owned by
+[credential availability](credential-availability.md).
 
-The session-template catalog is a second versioned TOML document read after the
-model catalog. Each template binds a name and version to a model or alias, a
-system prompt, and a dangerous-tool blanket. A prompt is inline or a file
-reference, either relative to the document's parent directory or `$HOME/` plus a
-relative suffix resolved from the process `HOME` at load; the file must be a
-regular file of readable UTF-8 constructing the same bounded
-`SessionSystemPrompt` as an inline value, with no trimming or interpolation. One
-valid table becomes an immutable resolved bundle whose content digest,
-`SessionTemplateContentDigest`, is domain-separated SHA-256 over length-framed
-canonical values in a fixed frame order. Unknown fields, mistyped values,
-duplicate names, and every invalid field fail as sanitized
-`SessionTemplateConfigurationError` variants without file paths, prompt content,
-or document text.
+The session-template catalog is read after the model catalog. Each template
+binds a name and version to a model or alias, a system prompt, and a
+dangerous-tool blanket. A prompt is inline or a file reference, either relative
+to the document's parent directory or `$HOME/` plus a relative suffix resolved
+from the process `HOME` at load; the file must be a readable regular UTF-8 file
+and yields the same bounded `SessionSystemPrompt` as an inline value, with no
+trimming or interpolation. One valid table becomes an immutable resolved bundle
+whose content digest, `SessionTemplateContentDigest`, is domain-separated
+SHA-256 over length-framed canonical values in a fixed frame order. Unknown
+fields, mistyped values, duplicate names, and every invalid field fail as
+sanitized `SessionTemplateConfigurationError` variants without file paths,
+prompt content, or document text.
 
 Every session carries an append-only credential history. First handling of a
 native or imported session-creation command appends event ordinal 1 in the same
-transaction as the session. In this build that event carries a complete nonempty
+transaction as the session. That event carries a complete nonempty
 family-to-reference snapshot copied from the validated mapping table, and
 preparation reads the latest entry for the resolved target's family. Sessions
 predating the history carry a `migration_backfill` creation event; while it is
@@ -135,8 +132,7 @@ production injects `SessionPlanRepository`.
 ## Decisions
 
 Model-provider credential paths live in catalog profiles rather than environment
-variables, because one variable cannot name several accounts and a deployment
-holding two keys for one provider needs the catalog.
+variables, because one variable cannot name several accounts.
 
 The production connection path refuses to parse while any libpq `PG*` variable,
 `SSL_CERT_FILE`, or `SSL_CERT_DIR` is present or a default password file exists.
@@ -145,8 +141,8 @@ TLS backend takes its roots only from those two variables and adds a URL
 `sslrootcert` to that set rather than replacing it.
 
 The local test connection path keeps SQLx's behavior and no check confines its
-URL to a local cluster; the production refusals, not that path's name, are what
-protect production.
+URL to a local cluster; the production refusals, not that path's name, protect
+production.
 
 A failed migration is the one startup failure that records the database's own
 rejection text in a structured field, because the phase alone cannot separate a
@@ -156,10 +152,10 @@ The browser listener emits no permissive CORS headers and adds no account,
 login, bearer-token, TLS, proxy, VPN, or ingress machinery, so it binds only a
 loopback address.
 
-The deployed daemon supplies no Anthropic or OpenAI endpoint or per-adapter
-timeout setting and constructs each adapter with its defaults. The
-whole-exchange timeout is the required `numeric_bounds.model_exchange_timeout`
-policy, and the exact value `"none"` makes the exchange unbounded.
+The daemon supplies no Anthropic or OpenAI endpoint or per-adapter timeout
+setting and constructs each adapter with its defaults. The whole-exchange
+timeout is the required `numeric_bounds.model_exchange_timeout` policy, and the
+exact value `"none"` makes the exchange unbounded.
 
 `signalbox-debug` composes no daemon tool catalog and reads no
 `GITHUB_TOKEN_FILE`; it is a development driver, not the client protocol.
@@ -167,8 +163,8 @@ policy, and the exact value `"none"` makes the exchange unbounded.
 A nonempty OTLP header file requires an HTTPS endpoint, so collector credentials
 never cross the network without transport protection.
 
-Span-queue insertion is nonblocking, and a full queue drops the just-completed
-newest span rather than evicting older work or waiting on the daemon.
+Span-queue insertion is nonblocking, and a full queue drops the newest span
+rather than evicting older work or waiting on the daemon.
 
 The daemon contains no backend-specific tracing protocol or attribute.
 
@@ -215,7 +211,7 @@ something stabler than a path.
 A derived parent that is itself one of the configured composition's directories
 is refused, because ancestry is not equality and the bound pair cannot show the
 nesting. A parent that is a real directory whose contents are a bind mount of a
-tree inside the configured root is an accepted residual and is admitted.
+tree inside the configured root is an accepted residual.
 
 The configured root must have a lexical parent and final component; a root such
 as `/srv/workspace/child/..` is rejected at composition rather than treated as
@@ -263,7 +259,7 @@ second credential. Two distinct paths that a symlink, hard link, or copy
 resolves to one secret remain two members, and the cost is bounded to one extra
 successor attempt that fails as its predecessor did.
 
-Settings whose effect this build cannot supply are typed startup failures rather
+Settings whose effect the daemon cannot supply are typed startup failures rather
 than retained and inert: `round_robin`, `least_used`, any headroom reserve, a
 non-`stay` `on_headroom_low`, and a `switch_now` whose adapter cannot prove
 non-acceptance for that trigger's cause. Why: a configured protection that
@@ -276,9 +272,9 @@ worst-case JSON escaping.
 Priority is a property of the membership rather than the profile, because one
 account holds different ranks in different pools.
 
-`stay` writes no action row: an action that creates no durable state writes no
-record and the observation commits alone, so the default configuration can still
-commit a terminal observation.
+`stay` creates no durable state and writes no action row; the observation
+commits alone, so the default configuration can still commit a terminal
+observation.
 
 `switch_now` is refused on `on_credential_rejected` and `on_headroom_low`,
 because a rejected credential is deployment misconfiguration that substitution
@@ -295,7 +291,7 @@ whatever token it holds, because by then the provider has begun processing the
 request.
 
 An `avoid_new_sessions` exclusion is durable and scoped to the membership that
-observed it, and nothing in this build ends one.
+observed it, and nothing ends one.
 
 A session's credential history stores the preferred reference rather than the
 pool policy, so a fresh availability chain resolves the pool from the current
@@ -318,8 +314,7 @@ A credential is named by a stable reference and its value rotates behind it, so
 no record or log ever needs the secret.
 
 The credential value is the file's bytes less trailing line termination, because
-the tools that write a credential file terminate the line they print; the
-terminator is how the file ends, not part of the secret.
+the tools that write a credential file terminate the line they print.
 
 A `file` credential has an external source of truth, so the daemon stores no
 copy of it; a stored copy would be a second source.

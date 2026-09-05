@@ -10,10 +10,10 @@ The daemon reloads its catalogs without a restart, prices a call against dated
 rate windows, declares each model's input modalities and workspace-instruction
 capacity, records the workspace roots it derives, binds a session to its
 workspace before its first turn when a template asks for it, and holds a
-daemon-owned OAuth authorization for a Codex CLI child without ever handing the
-child the refresh token. Credential exclusions expire, coalesce, and clear;
-sessions carry the complete pool policy they were created under; and a runner
-reads, injects, and scrubs a granted credential for the work it dispatches.
+daemon-owned OAuth authorization for a Codex CLI child without handing the child
+the refresh token. Credential exclusions expire, coalesce, and clear; sessions
+carry the complete pool policy they were created under; and a runner reads,
+injects, and scrubs a granted credential for the work it dispatches.
 
 ## Shape
 
@@ -229,12 +229,12 @@ the quarantine, and bypasses pool trigger policy.
 Dispatch supplies each invocation a scratch credential home carrying the
 complete authentication state the CLI needs to form a request minus the refresh
 token: the daemon-minted access token, the identity token, and the harvested
-account metadata. Withholding the refresh token is what permits concurrency,
-since processes holding none share no mutable authorization state and the daemon
-refreshes once on behalf of all of them. Every token written into a scratch home
-seeds the adapter's exact-value redactor before it is written, and a path that
-cannot install the redactor fails preparation before writing the home or
-spawning the CLI; how the adapter applies the scrub is owned by
+account metadata. Withholding the refresh token permits concurrency: processes
+holding none share no mutable authorization state, and the daemon refreshes once
+on behalf of all of them. Every token written into a scratch home seeds the
+adapter's exact-value redactor before it is written, and a path that cannot
+install the redactor fails preparation before writing the home or spawning the
+CLI; how the adapter applies the scrub is owned by
 [runtime substrate](../spec/runtime-substrate.md). Scratch homes live beneath a
 single daemon-owned `0700` root, are themselves `0700`, contain only `0600`
 regular files, are created and removed through descriptor-relative operations
@@ -321,35 +321,35 @@ An explicit session credential update appends the next complete history event
 with its own command provenance and advances the head by exactly one; it never
 rewrites history and never applies a configuration edit automatically.
 
-A runner uses a granted credential as follows. A session may hold no credential,
-and no boundary infers one: with no profile selected the daemon issues no grant,
-the lease carries no credential authorization, and the runner injects nothing; a
-repository entry naming a profile then fails `credential_unavailable`, while a
-named profile is granted to a session with no repository because the credential
-is scoped to the session's dispatches. At lease admission the runner requires
-the exact granted name in its startup configuration, and absence rejects the
-claim before any executable capability is issued. Immediately before each
-dispatch the runner opens the configured path without following symlinks,
-requires a `0600` regular file owned by the effective user, reads at most 65,536
-bytes, and drops trailing `\n` and `\r` bytes; empty, NUL-containing,
-unreadable, oversized, wrong-owner, wrong-mode, or non-regular files are typed
-unavailable failures. The value is scoped to that dispatch and never cached. It
-is supplied only under the configured environment name inside the bubblewrap
-namespace and never in arguments, remote URLs, Git configuration, the inherited
-environment, errors, or logs. Git tools use a fixed runner-owned credential
-helper bound to the repository entry the dispatch resolved, the manifest's
-repository key for an existing worktree or the checked `repository` argument for
-`git_clone`; the helper returns the value only when the query's protocol, exact
-`github.com` host, and owner/repository path match that entry's validated
-canonical URL and the entry names exactly the granted profile. Every guarded Git
-command that installs the helper also forces `credential.useHttpPath=true` on
-the same command line, because Git otherwise strips the path before calling the
-helper. The runner scrubs the exact value and its JSON-escaped form from
-admitted stdout, stderr, and result text; it cannot prevent model-controlled
-code from using the value within its granted scope. A credential failure after a
-claimed dispatch is a fixed `ExecutionFailed` observation naming only the
-profile and failure class, and it never authorizes an automatic repeat of
-side-effecting work.
+A session may hold no credential, and no boundary infers one: with no profile
+selected the daemon issues no grant, the lease carries no credential
+authorization, and the runner injects nothing; a repository entry naming a
+profile then fails `credential_unavailable`, while a named profile is granted to
+a session with no repository because the credential is scoped to the session's
+dispatches. At lease admission the runner requires the exact granted name in its
+startup configuration, and absence rejects the claim before any executable
+capability is issued. Immediately before each dispatch the runner opens the
+configured path without following symlinks, requires a `0600` regular file owned
+by the effective user, reads at most 65,536 bytes, and drops trailing `\n` and
+`\r` bytes; empty, NUL-containing, unreadable, oversized, wrong-owner,
+wrong-mode, or non-regular files are typed unavailable failures. The value is
+scoped to that dispatch and never cached. It is supplied only under the
+configured environment name inside the bubblewrap namespace and never in
+arguments, remote URLs, Git configuration, the inherited environment, errors, or
+logs. Git tools use a fixed runner-owned credential helper bound to the
+repository entry the dispatch resolved, the manifest's repository key for an
+existing worktree or the checked `repository` argument for `git_clone`; the
+helper returns the value only when the query's protocol, exact `github.com`
+host, and owner/repository path match that entry's validated canonical URL and
+the entry names exactly the granted profile. Every guarded Git command that
+installs the helper also forces `credential.useHttpPath=true` on the same
+command line, because Git otherwise strips the path before calling the helper.
+The runner scrubs the exact value and its JSON-escaped form from admitted
+stdout, stderr, and result text; it cannot prevent model-controlled code from
+using the value within its granted scope. A credential failure after a claimed
+dispatch is a fixed `ExecutionFailed` observation naming only the profile and
+failure class, and it never authorizes an automatic repeat of side-effecting
+work.
 
 ## Constraints on present code
 
