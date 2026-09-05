@@ -39,25 +39,6 @@ use crate::{
 
 // numeric-bound: guard - prevents nudge backpressure from dropping part of one rule's admitted dispatch
 const MINIMUM_DISPATCH_START_BACKLOG_CAPACITY: usize = 32;
-/// Capacity kept available for a dispatched session that has not made a model call.
-///
-/// The reservation is inside whatever pass cap the deployment configured. Long
-/// lived recovery and execution passes therefore cannot occupy every admission
-/// slot.
-// numeric-bound: guard - prevents long-lived passes from taking every slot and starving dispatch starts forever
-const DISPATCH_START_RESERVED_PASS_CAPACITY: usize = 1;
-
-/// Returns the concurrent ordinary passes admissible under a configured cap.
-///
-/// One place inside the cap stays reserved for a repository-watch dispatch
-/// start carrying no model-call evidence, so ordinary recovery and execution
-/// passes cannot consume the start lane. The cap itself is deployment
-/// configuration rather than a compiled constant, so callers that need the
-/// derived ordinary limit pass the admission cap they were configured with.
-pub const fn scheduler_ordinary_pass_limit(max_in_flight_passes: usize) -> usize {
-    ordinary_pass_limit(max_in_flight_passes)
-}
-
 /// A configured optional bound on one authoritative pass's occupancy.
 ///
 /// This bounds *occupancy*, not turn duration, and the difference matters: one
@@ -1531,11 +1512,7 @@ fn pop_pending_hint(
 }
 
 const fn ordinary_pass_limit(max_in_flight_passes: usize) -> usize {
-    if max_in_flight_passes > DISPATCH_START_RESERVED_PASS_CAPACITY {
-        max_in_flight_passes - DISPATCH_START_RESERVED_PASS_CAPACITY
-    } else {
-        max_in_flight_passes
-    }
+    max_in_flight_passes
 }
 
 struct PendingHintQueues<'a> {
@@ -1964,7 +1941,7 @@ mod tests {
         SessionId, TurnAttemptId,
     };
     use tokio::{
-        sync::{Notify, mpsc, oneshot},
+        sync::{Notify, oneshot},
         time::timeout,
     };
     use uuid::Uuid;
@@ -2992,7 +2969,7 @@ mod tests {
     const FIXTURE_PASS_ADMISSION_CAP: usize = 16;
 
     #[test]
-    fn inv069_dispatch_start_admission_reserves_capacity_inside_the_shared_cap() {
+    fn dispatch_start_admission_precedes_ordinary_work_with_available_capacity() {
         let ordinary = session(48);
         let dispatch_start = session(49);
         let mut in_flight = HashSet::from_iter([ordinary]);
@@ -3031,10 +3008,10 @@ mod tests {
     }
 
     #[test]
-    fn inv069_ordinary_admission_cannot_consume_reserved_capacity() {
+    fn ordinary_admission_uses_the_last_available_capacity() {
         let ordinary = session(50);
         let in_flight = HashSet::from_iter(
-            (0..ordinary_pass_limit(FIXTURE_PASS_ADMISSION_CAP))
+            (0..ordinary_pass_limit(FIXTURE_PASS_ADMISSION_CAP) - 1)
                 .map(|offset| session(200 + offset as u128)),
         );
         let mut reruns = HashMap::new();
@@ -3064,12 +3041,9 @@ mod tests {
                     max_in_flight_passes: FIXTURE_PASS_ADMISSION_CAP,
                 },
             ),
-            None
+            Some((ordinary, EligibilityHintPriority::Ordinary))
         );
-        assert_eq!(
-            pending.get(&ordinary),
-            Some(&EligibilityHintPriority::Ordinary)
-        );
+        assert!(pending.is_empty());
     }
 
     #[test]
@@ -3592,128 +3566,6 @@ mod tests {
             Ok(dispatch_start)
         );
         assert_eq!(source.next().await, Ok(ordinary));
-    }
-
-    #[derive(Debug)]
-    struct ReservedLaneWakeWorkSource {
-        ordinary: VecDeque<SessionId>,
-        ordinary_calls: Arc<AtomicUsize>,
-        ordinary_backlog_returned: Arc<Notify>,
-        dispatch_starts: mpsc::Receiver<SessionId>,
-    }
-
-    impl EligibilityWorkSource for ReservedLaneWakeWorkSource {
-        type Error = FakeSweepError;
-
-        async fn next(&mut self) -> Result<SessionId, Self::Error> {
-            let call = self.ordinary_calls.fetch_add(1, Ordering::SeqCst) + 1;
-            if let Some(session) = self.ordinary.pop_front() {
-                if call == 2 {
-                    self.ordinary_backlog_returned.notify_one();
-                }
-                return Ok(session);
-            }
-            pending().await
-        }
-
-        async fn next_pending_dispatch_start(&mut self) -> Result<SessionId, Self::Error> {
-            Ok(self
-                .dispatch_starts
-                .recv()
-                .await
-                .expect("the test retains its dispatch-start sender"))
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct ReservedLaneWakePass {
-        dispatch_started: Arc<Notify>,
-        release: Arc<Notify>,
-    }
-
-    impl EligibilityPass for ReservedLaneWakePass {
-        type Error = FakeSweepError;
-
-        fn run(
-            &mut self,
-            _session: SessionId,
-        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
-            let release = Arc::clone(&self.release);
-            async move {
-                release.notified().await;
-                Ok(())
-            }
-        }
-
-        fn run_dispatch_start(
-            &mut self,
-            _session: SessionId,
-        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
-            let dispatch_started = Arc::clone(&self.dispatch_started);
-            let release = Arc::clone(&self.release);
-            async move {
-                dispatch_started.notify_one();
-                release.notified().await;
-                Ok(())
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn inv069_new_dispatch_start_wakes_the_reserved_lane_at_ordinary_capacity() {
-        let first_ordinary = session(55);
-        let queued_ordinary = session(56);
-        let dispatch_start = session(57);
-        let ordinary_calls = Arc::new(AtomicUsize::new(0));
-        let ordinary_backlog_returned = Arc::new(Notify::new());
-        let dispatch_started = Arc::new(Notify::new());
-        let release = Arc::new(Notify::new());
-        let (dispatch_sender, dispatch_starts) = mpsc::channel(1);
-        let (shutdown_sender, shutdown_receiver) = oneshot::channel();
-        let mut scheduler = SchedulerLoop::with_max_in_flight(
-            ReservedLaneWakeWorkSource {
-                ordinary: VecDeque::from([first_ordinary, queued_ordinary]),
-                ordinary_calls: Arc::clone(&ordinary_calls),
-                ordinary_backlog_returned: Arc::clone(&ordinary_backlog_returned),
-                dispatch_starts,
-            },
-            ReservedLaneWakePass {
-                dispatch_started: Arc::clone(&dispatch_started),
-                release: Arc::clone(&release),
-            },
-            NonZeroUsize::new(2).expect("the test admits one ordinary and one reserved pass"),
-        );
-        let runtime = tokio::spawn(async move {
-            scheduler
-                .run_until(async {
-                    shutdown_receiver.await.expect("the test requests shutdown");
-                })
-                .await
-        });
-
-        timeout(Duration::from_secs(1), ordinary_backlog_returned.notified())
-            .await
-            .expect("the ordinary backlog reaches the scheduler");
-        dispatch_sender
-            .send(dispatch_start)
-            .await
-            .expect("the scheduler retains the dispatch-start receiver");
-        timeout(Duration::from_secs(1), dispatch_started.notified())
-            .await
-            .expect("the new dispatch start enters the reserved lane");
-
-        assert_eq!(ordinary_calls.load(Ordering::SeqCst), 2);
-        shutdown_sender
-            .send(())
-            .expect("the scheduler still waits for shutdown");
-        release.notify_waiters();
-        assert_eq!(
-            timeout(Duration::from_secs(1), runtime)
-                .await
-                .expect("the scheduler exits within its bounded window")
-                .expect("the scheduler task completes"),
-            SchedulerLoopExit::Shutdown
-        );
     }
 
     #[tokio::test]

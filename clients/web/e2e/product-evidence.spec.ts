@@ -18,7 +18,6 @@ const sessionEvidenceFixture = {
 const attentionEvidence = { path: '/attention', title: 'Attention', snapshot: 'attention' } as const
 const sessionsEvidence = { path: '/sessions', title: 'Sessions', snapshot: 'sessions' } as const
 const searchEvidence = { path: '/search', title: 'Search', snapshot: 'search' } as const
-const activityEvidence = { path: '/activity', title: 'Activity', snapshot: 'activity' } as const
 const runnersEvidence = { path: '/runners', title: 'Runners', snapshot: 'runners' } as const
 const reviewsEvidence = { path: '/reviews', title: 'Reviews', snapshot: 'reviews' } as const
 const importsEvidence = { path: '/imports', title: 'Imports', snapshot: 'imports' } as const
@@ -50,17 +49,6 @@ const useDeterministicBootstrap = async (page: Page) => {
   )
   await page.route('**/api/attention', (route) => route.fulfill({ json: emptyAttentionFixture }))
 }
-
-const emptyRepositoryWatchFixture = {
-  continuation_after_repository: null,
-  repositories: [],
-} as const
-
-// Only the Activity route reads this adapter; every other route ignores it.
-const useDeterministicRepositoryWatchApi = (page: Page) =>
-  page.route('**/api/repository-watch/repositories**', (route) =>
-    route.fulfill({ json: emptyRepositoryWatchFixture }),
-  )
 
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }
@@ -125,7 +113,6 @@ const captureRouteEvidence = async (page: Page, evidence: RouteEvidence) => {
   await useDeterministicBootstrap(page)
   // Only the Imports route reads this adapter; every other route ignores it.
   await useDeterministicImportApi(page)
-  await useDeterministicRepositoryWatchApi(page)
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto(evidence.path)
   await expect(page.getByRole('heading', { name: evidence.title, level: 1 })).toBeVisible()
@@ -178,11 +165,6 @@ test('captures Sessions route evidence', async ({ page }, testInfo) => {
 test('captures Search route evidence', async ({ page }, testInfo) => {
   skipUnlessLinuxChromium(testInfo)
   await captureRouteEvidence(page, searchEvidence)
-})
-
-test('captures Activity route evidence', async ({ page }, testInfo) => {
-  skipUnlessLinuxChromium(testInfo)
-  await captureRouteEvidence(page, activityEvidence)
 })
 
 test('captures Runners route evidence', async ({ page }, testInfo) => {

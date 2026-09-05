@@ -20,8 +20,9 @@ guidance, stop, and supersede with a replacement statement. Supersede changes an
 active generation's scope; guidance that leaves the scope alone is a steer while
 the goal is pursuing or a resume while it is blocked. A model reaches the goal
 only through the session-scoped `goal_declare` tool, and may declare only
-blocked or achieved. [Repository watch](repo-watch.md) commissions goals for the
-sessions it dispatches by attaching a synthesized statement.
+blocked or achieved. The repository-watch session-command vocabulary contains
+checked goal operations, but the inactive module dispatches no sessions or
+goals.
 
 While a generation is pursuing, each successful turn's end makes the scheduler
 create and start the next turn without user input. A failed goal turn is not
@@ -70,12 +71,10 @@ choose a different safe approach; an unchargeable failure resumes without
 guidance and reuses the statement. Why: infrastructure recovery must not invent
 a model instruction.
 
-Two execution-failure classes require an operator instead of automatic
-resumption: the block an unattended repository-watch approval escalation
-appends, described by [repository watch](repo-watch.md), and a failed turn
-carrying the durable cause that no context-compaction boundary fits the model
-window. Why: repository watch already owes the first a redispatch, and an
-unchanged successor to the second would fail for the same cause.
+One execution-failure class requires an operator instead of automatic
+resumption: a failed turn carrying the durable cause that no context-compaction
+boundary fits the model window. Why: an unchanged successor would fail for the
+same cause.
 
 No goal-mode surface delegates work or creates child sessions, and the goal
 events and commands reserve no delegation variant.
@@ -83,11 +82,11 @@ events and commands reserve no delegation variant.
 ## Boundary contracts
 
 When an execution failure blocks a session that has an owner, the daemon
-automatically resumes the session within a bound. The two execution-failure
-classes that require an operator are excluded. The daemon derives the command
-identity of that resumption from the session and the blocked event it responds
-to; it never generates a new identity. A retry therefore cannot resume the
-session twice.
+automatically resumes the session within a bound. The execution-failure class
+that requires an operator is excluded. The daemon derives the command identity
+of that resumption from the session and the blocked event it responds to; it
+never generates a new identity. A retry therefore cannot resume the session
+twice.
 
 The current state is derived only by replaying the session's append-only goal
 event stream; no mutable goal-state column is authoritative.

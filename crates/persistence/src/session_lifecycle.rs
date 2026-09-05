@@ -22,8 +22,8 @@
 use std::{error::Error, fmt};
 
 use signalbox_domain::{
-    CoreAgency, DispatchingModule, DurableCommandId, FinishCondition, Goal, GoalState,
-    LifecycleActor, SessionClosureOutcome, SessionCreationCause, SessionFailureCause, SessionId,
+    CoreAgency, DurableCommandId, FinishCondition, Goal, GoalState, LifecycleActor,
+    SessionClosureOutcome, SessionCreationCause, SessionFailureCause, SessionId,
     SessionLifecycleState, SessionOwnership, SessionOwnershipTransition, SessionParkCause,
     SessionParkResponder, SessionTerminalOutcome, SessionWait, SessionWaitKind, StartGate,
     StopStickiness,
@@ -502,26 +502,6 @@ pub(crate) async fn resume_in_transaction(
     actor: LifecycleActor,
 ) -> Result<SessionLifecycleState, SessionLifecycleRepositoryError> {
     lift_park_in_transaction(connection, session, actor, false).await
-}
-
-/// Lifts a park owned by one module after that module's authority is cleared.
-pub(crate) async fn restore_module_park_in_transaction(
-    connection: &mut PgConnection,
-    session: SessionId,
-    module: DispatchingModule,
-) -> Result<bool, SessionLifecycleRepositoryError> {
-    let held = load_locked(connection, session).await?;
-    if held.state
-        != (SessionLifecycleState::Parked {
-            cause: SessionParkCause::ModulePark,
-            responder: SessionParkResponder::Module { module },
-            standing: None,
-        })
-    {
-        return Ok(false);
-    }
-    lift_park_from_held(connection, held, LifecycleActor::Module { module }, true).await?;
-    Ok(true)
 }
 
 async fn lift_park_in_transaction(

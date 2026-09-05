@@ -1388,14 +1388,6 @@ impl PostgresModelCallRepository {
         let result = async {
             lock_delegated_child_endpoint_sessions(&mut transaction, session).await?;
             lock_session(&mut transaction, session).await?;
-            let dispatch_start_lease_expired: bool =
-                sqlx::query_scalar(crate::lock_inventory::EXPIRED_DISPATCH_START_LEASE)
-                    .bind(session_id_to_uuid(session))
-                    .fetch_one(&mut *transaction)
-                    .await?;
-            if dispatch_start_lease_expired {
-                return Ok((false, PrepareInitialModelCallOutcome::NoWork));
-            }
             let execution =
                 require_live_execution(&mut transaction, session, &self.targets).await?;
             if execution.current_call().is_none()
@@ -7051,7 +7043,6 @@ pub(crate) async fn insert_prepared_call(
     credential_pool_policy: Option<&CredentialPoolRuntimePolicy>,
     input_includes_cache_tokens: bool,
 ) -> Result<(), ModelCallRepositoryError> {
-    crate::convergence_sweep::lock_model_activity_fence(connection, prepared.session()).await?;
     let call = prepared.call();
     let (kind, direct, alias, alias_selected) = encode_selection(call.selection());
     for steering in prepared.consumed_steering() {

@@ -371,20 +371,6 @@ macro_rules! summary_sql {
        AND goal.blocked_reason = 'execution_failure'
        AND lifecycle.owned
        AND goal.need <> $12
-       -- A headless approval escalation blocks the goal without arming any
-       -- automatic resumption: it writes its `execution_failure` block outside
-       -- `PostgresGoalPassDisposition` precisely so that only an operator can
-       -- resume the session (`docs/spec/goal-mode.md`). Seeding the lineage
-       -- from such a block would report a resumption as pending forever and
-       -- suppress `ProvideGoalNeed`, hiding the one session that actually
-       -- needs the operator. The block names its scheduler turn, which is the
-       -- turn both escalation tables record.
-       AND NOT EXISTS (
-           SELECT 1
-             FROM repo_watch_headless_approval_escalation AS escalation
-            WHERE escalation.session_id = goal.session_id
-              AND escalation.turn_id = goal.scheduler_turn_id
-       )
        AND NOT EXISTS (
            SELECT 1
              FROM commissioned_dispatch_headless_approval_escalation AS escalation
@@ -548,35 +534,6 @@ SELECT selected.session_id, turn.turn_id, turn.state_kind AS turn_state,
                     AND approval_call.recommendation_kind = 'escalate_to_human')
                    OR approval_call.terminal_disposition_kind IN (
                        'known_failed', 'refused', 'cancelled', 'ambiguous'
-                   )
-               )
-               -- `unattended_escalation_applies` decides headlessness per
-               -- dispatch source, and only repository watch can suppress a
-               -- human. A commissioned dispatch takes the unattended path only
-               -- when its authority has been withdrawn, and that path
-               -- terminalizes the turn rather than parking it, so a
-               -- commissioned request still parked in `awaiting_tool_approval`
-               -- is always waiting on the commissioning operator.
-               AND (
-                   NOT (
-                       COALESCE(turn.goal_generation = 1, false)
-                       AND EXISTS (
-                           SELECT 1
-                             FROM repo_watch_dispatch_action AS dispatched
-                            WHERE dispatched.session_id = selected.session_id
-                       )
-                   )
-                   OR EXISTS (
-                       SELECT 1
-                         FROM accepted_input AS steering
-                        WHERE steering.session_id = selected.session_id
-                          AND steering.expected_active_turn_id = turn.turn_id
-                          AND steering.disposition_kind = 'pending_steering'
-                   )
-                   OR EXISTS (
-                       SELECT 1
-                         FROM repo_watch_headless_approval_escalation AS escalation
-                        WHERE escalation.session_id = selected.session_id
                    )
                )
            ELSE false

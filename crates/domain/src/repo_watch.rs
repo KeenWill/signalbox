@@ -922,10 +922,6 @@ impl RepoWatchMatcherV1 {
             && self.produces_context_shape(RepoWatchDispatchContextShape::Branch)
     }
 
-    fn produces_pull_request_context(&self) -> bool {
-        self.produces_context_shape(RepoWatchDispatchContextShape::PullRequest)
-    }
-
     fn produces_context_shape(&self, shape: RepoWatchDispatchContextShape) -> bool {
         if self.event_kinds.is_empty() {
             return match shape {
@@ -1238,62 +1234,6 @@ impl fmt::Display for RepoWatchDispatchContextShape {
             Self::PullRequest => "pull-request",
             Self::Branch => "branch",
         })
-    }
-}
-
-/// Template declaration of the repository-watch context shapes it accepts.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RepoWatchTemplateContextDeclaration {
-    template: SessionTemplateName,
-    accepted: Box<[RepoWatchDispatchContextShape]>,
-}
-
-/// Why a template's repository-watch context declaration was refused.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RepoWatchTemplateContextDeclarationError {
-    NoAcceptedContextShape { template: SessionTemplateName },
-}
-
-impl fmt::Display for RepoWatchTemplateContextDeclarationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NoAcceptedContextShape { template } => write!(
-                formatter,
-                "repository-watch template {} accepts no dispatch context shape",
-                template.as_str()
-            ),
-        }
-    }
-}
-
-impl Error for RepoWatchTemplateContextDeclarationError {}
-
-impl RepoWatchTemplateContextDeclaration {
-    pub fn try_new(
-        template: SessionTemplateName,
-        accepted: Vec<RepoWatchDispatchContextShape>,
-    ) -> Result<Self, RepoWatchTemplateContextDeclarationError> {
-        if accepted.is_empty() {
-            return Err(
-                RepoWatchTemplateContextDeclarationError::NoAcceptedContextShape { template },
-            );
-        }
-        Ok(Self {
-            template,
-            accepted: accepted.into_boxed_slice(),
-        })
-    }
-
-    pub const fn template(&self) -> &SessionTemplateName {
-        &self.template
-    }
-
-    pub fn accepted(&self) -> &[RepoWatchDispatchContextShape] {
-        &self.accepted
-    }
-
-    pub fn accepts(&self, shape: RepoWatchDispatchContextShape) -> bool {
-        self.accepted.contains(&shape)
     }
 }
 
@@ -1779,16 +1719,7 @@ pub struct RepoWatchRule {
 pub enum RepoWatchRuleValidationError {
     NoActions,
     SubsecondCooldown,
-    BranchEventWithPullRequestSingleton {
-        scope: RepoWatchSingletonScope,
-    },
-    TemplateNotDeclared {
-        template: SessionTemplateName,
-    },
-    TemplateRejectsContext {
-        template: SessionTemplateName,
-        shape: RepoWatchDispatchContextShape,
-    },
+    BranchEventWithPullRequestSingleton { scope: RepoWatchSingletonScope },
 }
 
 impl fmt::Display for RepoWatchRuleValidationError {
@@ -1802,16 +1733,6 @@ impl fmt::Display for RepoWatchRuleValidationError {
                 formatter,
                 "repository-watch branch event cannot use `{}` singleton scope",
                 scope.as_str()
-            ),
-            Self::TemplateNotDeclared { template } => write!(
-                formatter,
-                "repository-watch template `{}` has no context declaration",
-                template.as_str()
-            ),
-            Self::TemplateRejectsContext { template, shape } => write!(
-                formatter,
-                "repository-watch template `{}` rejects `{shape}` context",
-                template.as_str()
             ),
         }
     }
@@ -2128,45 +2049,6 @@ impl RepoWatchRule {
             }
         }
         RepoWatchRuleIdentityFieldDigest(digest.finalize().into())
-    }
-
-    pub fn required_context_shapes(&self) -> Vec<RepoWatchDispatchContextShape> {
-        let branch = self.matcher.produces_branch_context();
-        let pull_request = self.matcher.produces_pull_request_context();
-        match (pull_request, branch) {
-            (true, true) => vec![
-                RepoWatchDispatchContextShape::PullRequest,
-                RepoWatchDispatchContextShape::Branch,
-            ],
-            (true, false) => vec![RepoWatchDispatchContextShape::PullRequest],
-            (false, true) => vec![RepoWatchDispatchContextShape::Branch],
-            (false, false) => Vec::new(),
-        }
-    }
-
-    pub fn validate_template_contexts(
-        &self,
-        declarations: &[RepoWatchTemplateContextDeclaration],
-    ) -> Result<(), RepoWatchRuleValidationError> {
-        let required = self.required_context_shapes();
-        for action in &self.actions {
-            let template = action.template();
-            let declaration = declarations
-                .iter()
-                .find(|declaration| declaration.template() == template)
-                .ok_or_else(|| RepoWatchRuleValidationError::TemplateNotDeclared {
-                    template: template.clone(),
-                })?;
-            for shape in &required {
-                if !declaration.accepts(*shape) {
-                    return Err(RepoWatchRuleValidationError::TemplateRejectsContext {
-                        template: template.clone(),
-                        shape: *shape,
-                    });
-                }
-            }
-        }
-        Ok(())
     }
 
     /// Derives the complete ordered action list for one matching durable fact.
@@ -2573,8 +2455,7 @@ mod tests {
         RepoWatchLabelMatcher, RepoWatchLabelMatcherInput, RepoWatchMatcherV1,
         RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1,
         RepoWatchRuleId, RepoWatchRuleIdentityField, RepoWatchRuleValidationError,
-        RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
-        RepoWatchTemplateContextDeclarationError, RepoWatchTextError, RepositorySlug,
+        RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTextError, RepositorySlug,
     };
 
     const CONTEXT_HEAD_SHA: &str = "1111111111111111111111111111111111111111";
@@ -3388,168 +3269,6 @@ mod tests {
                 }
             )
         );
-        Ok(())
-    }
-
-    #[test]
-    fn mergeable_qualifier_with_all_kinds_produces_only_pull_request_context()
-    -> Result<(), Box<dyn Error>> {
-        let template = SessionTemplateName::try_new(String::from("conflict-handler"))?;
-        let rule = RepoWatchRule::try_new(
-            RepoWatchRuleId::try_new(String::from("mergeable-only"))?,
-            RepoWatchRuleVersion::V1,
-            RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
-                mergeable_state: vec![MergeableState::Conflicting],
-                ..RepoWatchMatcherV1Input::default()
-            }),
-            vec![RepoWatchRuleActionV1::DispatchSession { template }],
-            RepoWatchSingletonScope::PullRequest,
-            Duration::ZERO,
-        )?;
-
-        assert_eq!(
-            rule.required_context_shapes(),
-            [RepoWatchDispatchContextShape::PullRequest]
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn pull_request_matcher_fields_exclude_branch_context() -> Result<(), Box<dyn Error>> {
-        let template = SessionTemplateName::try_new(String::from("author-handler"))?;
-        let rule = RepoWatchRule::try_new(
-            RepoWatchRuleId::try_new(String::from("author-only"))?,
-            RepoWatchRuleVersion::V1,
-            RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
-                author: Some(RepoWatchAuthorLogin::try_new(String::from("maintainer"))?),
-                ..RepoWatchMatcherV1Input::default()
-            }),
-            vec![RepoWatchRuleActionV1::DispatchSession { template }],
-            RepoWatchSingletonScope::PullRequest,
-            Duration::ZERO,
-        )?;
-
-        assert_eq!(
-            rule.required_context_shapes(),
-            [RepoWatchDispatchContextShape::PullRequest]
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn conclusion_qualifier_with_all_kinds_produces_both_context_shapes()
-    -> Result<(), Box<dyn Error>> {
-        let template = SessionTemplateName::try_new(String::from("failure-handler"))?;
-        let rule = RepoWatchRule::try_new(
-            RepoWatchRuleId::try_new(String::from("conclusion-only"))?,
-            RepoWatchRuleVersion::V1,
-            RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
-                conclusion: vec![CheckConclusion::Failure],
-                ..RepoWatchMatcherV1Input::default()
-            }),
-            vec![RepoWatchRuleActionV1::DispatchSession { template }],
-            RepoWatchSingletonScope::Repository,
-            Duration::ZERO,
-        )?;
-
-        assert_eq!(
-            rule.required_context_shapes(),
-            [
-                RepoWatchDispatchContextShape::PullRequest,
-                RepoWatchDispatchContextShape::Branch,
-            ]
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn aggregate_checks_exclude_unavailable_conclusion_values() -> Result<(), Box<dyn Error>> {
-        let template = SessionTemplateName::try_new(String::from("neutral-handler"))?;
-        let rule = RepoWatchRule::try_new(
-            RepoWatchRuleId::try_new(String::from("neutral-aggregate"))?,
-            RepoWatchRuleVersion::V1,
-            RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
-                event_kinds: vec![RepoWatchEventKindNameV1::ChecksCompleted],
-                conclusion: vec![CheckConclusion::Neutral],
-                ..RepoWatchMatcherV1Input::default()
-            }),
-            vec![RepoWatchRuleActionV1::DispatchSession { template }],
-            RepoWatchSingletonScope::PullRequest,
-            Duration::ZERO,
-        )?;
-
-        assert!(rule.required_context_shapes().is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn rule_validation_rejects_a_template_context_mismatch() -> Result<(), Box<dyn Error>> {
-        let template = SessionTemplateName::try_new(String::from("branch-handler"))?;
-        let rule = RepoWatchRule::try_new(
-            RepoWatchRuleId::try_new(String::from("branch-failure"))?,
-            RepoWatchRuleVersion::V1,
-            RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
-                event_kinds: vec![RepoWatchEventKindNameV1::BranchWorkflowRunCompleted],
-                conclusion: vec![CheckConclusion::Failure],
-                ..RepoWatchMatcherV1Input::default()
-            }),
-            vec![RepoWatchRuleActionV1::DispatchSession {
-                template: template.clone(),
-            }],
-            RepoWatchSingletonScope::Repository,
-            Duration::ZERO,
-        )?;
-        let declarations = [RepoWatchTemplateContextDeclaration::try_new(
-            template.clone(),
-            vec![RepoWatchDispatchContextShape::PullRequest],
-        )?];
-
-        assert_eq!(
-            rule.validate_template_contexts(&declarations),
-            Err(RepoWatchRuleValidationError::TemplateRejectsContext {
-                template,
-                shape: RepoWatchDispatchContextShape::Branch,
-            })
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn template_context_declaration_rejects_an_empty_shape_list() -> Result<(), Box<dyn Error>> {
-        let template = SessionTemplateName::try_new(String::from("empty-context"))?;
-
-        assert_eq!(
-            RepoWatchTemplateContextDeclaration::try_new(template.clone(), Vec::new()),
-            Err(
-                RepoWatchTemplateContextDeclarationError::NoAcceptedContextShape {
-                    template: template.clone(),
-                }
-            )
-        );
-        assert!(
-            RepoWatchTemplateContextDeclarationError::NoAcceptedContextShape { template }
-                .to_string()
-                .contains("empty-context")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn rule_validation_diagnostics_retain_template_and_shape() -> Result<(), Box<dyn Error>> {
-        let template = SessionTemplateName::try_new(String::from("branch-handler"))?;
-        let missing_declaration = RepoWatchRuleValidationError::TemplateNotDeclared {
-            template: template.clone(),
-        }
-        .to_string();
-        let rejected_context = RepoWatchRuleValidationError::TemplateRejectsContext {
-            template: template.clone(),
-            shape: RepoWatchDispatchContextShape::Branch,
-        }
-        .to_string();
-
-        assert!(missing_declaration.contains(template.as_str()));
-        assert!(rejected_context.contains(template.as_str()));
-        assert!(rejected_context.contains(&RepoWatchDispatchContextShape::Branch.to_string()));
         Ok(())
     }
 

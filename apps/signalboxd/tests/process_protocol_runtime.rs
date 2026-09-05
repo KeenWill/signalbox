@@ -33,29 +33,26 @@ use signalbox_application::{
     ModelCallCredentialReference, ModelCallExecutionOutcome, ModelCallExecutionService,
     ModelCallInputTokenCount, ModelCallInputTokenCounter, NoToolCatalog, OperatorFailureClass,
     PreparedModelOperation, ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest,
-    ReplaceSessionMetadataService, RepoWatchConvergenceVerdict, RepoWatchReviewDecision,
-    SchedulerLoop, SchedulerLoopExit, SchedulerPassExpiryHandler, SchedulerPassOccupancyBound,
-    ScriptedModelCallProvider, ScriptedModelCallStep, StaleActiveTurnBound,
-    StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanService,
+    ReplaceSessionMetadataService, SchedulerLoop, SchedulerLoopExit, SchedulerPassExpiryHandler,
+    SchedulerPassOccupancyBound, ScriptedModelCallProvider, ScriptedModelCallStep,
+    StaleActiveTurnBound, StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanService,
     TurnLivenessScanInterval, UuidV7ModelCallExecutionIdGenerator,
     UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
-    scheduler_ordinary_pass_limit,
 };
 use signalbox_blob_store::BlobObjectKey;
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
-    ActiveTurnPhase, Actor, AssistantResponsePart, AssistantText, BlobDigest, BranchName,
-    CheckRunName, CommitSha, ContextCompactionId, ContextCompactionTokenUsage, ContextFrontierId,
-    DirectModelSelection, DurableCommandId, FailedModelCallTurnIdentities,
-    ImportedConversationFormat, ImportedConversationId, ImportedSessionRelationship,
-    ImportedTranscriptEntryId, InitialToolApproval, MergeableState, ModelCallId,
+    ActiveTurnPhase, Actor, AssistantResponsePart, AssistantText, BlobDigest, ContextCompactionId,
+    ContextCompactionTokenUsage, ContextFrontierId, DirectModelSelection, DurableCommandId,
+    FailedModelCallTurnIdentities, ImportedConversationFormat, ImportedConversationId,
+    ImportedSessionRelationship, ImportedTranscriptEntryId, InitialToolApproval, ModelCallId,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
     ModelSelectionRequest, ModelTargetCatalog, NormalizedToolArguments,
-    PhysicalCancellationModelCallTurnIdentities, ProviderModelIdentity, PullRequestNumber,
-    ReplaceSessionMetadataResult, RepoWatchAuthorLogin, RepositorySlug, ResolvedProviderTarget,
-    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionId, SessionMetadataContent, ToolCallProposal, ToolName, ToolRequestId,
-    ToolResponsePartIdentity, ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TurnId,
+    PhysicalCancellationModelCallTurnIdentities, ProviderModelIdentity,
+    ReplaceSessionMetadataResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
+    SessionMetadataContent, ToolCallProposal, ToolName, ToolRequestId, ToolResponsePartIdentity,
+    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TurnId,
 };
 use signalbox_model_provider_runtime::{
     RuntimeContextCompactionModel, RuntimeInputTokenCountError, RuntimeModelCallProvider,
@@ -85,10 +82,7 @@ use signalbox_persistence::{
     session_metadata::SessionMetadataRepository,
     start_eligible_turn::StartEligibleTurnRepository,
     startup::PostgresStartupScanRepository,
-    test_support::{
-        FleetSoakCensus, FleetSoakCensusRepository, OperatorStatusConvergenceFixture,
-        OperatorStatusFixtureRepository, OperatorStatusStaleReviewClearanceFixture,
-    },
+    test_support::{FleetSoakCensus, FleetSoakCensusRepository},
     turn_liveness::TurnLivenessPersistenceBounds,
 };
 use signalbox_process_protocol::{
@@ -100,10 +94,8 @@ use signalbox_process_protocol::{
     ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
     MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MetadataActor, ModelChangeAdjustment, ModelSelection,
     ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence, ModelSettingsSnapshot,
-    OperatorStatusConvergenceVerdict, OperatorStatusEndMessage, OperatorStatusMergeableState,
-    OperatorStatusMessage, OperatorStatusPendingStaleReviewClearanceMessage,
-    OperatorStatusPullRequestConvergenceMessage, OperatorStatusReviewDecision, ProtocolVersion,
-    ReasoningLevel, RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewDiffSide,
+    OperatorStatusEndMessage, OperatorStatusMessage, ProtocolVersion, ReasoningLevel,
+    RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewDiffSide,
     ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
     ReviewImportTerminalOutcome, ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome,
     ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus,
@@ -2528,7 +2520,7 @@ const FLEET_PASS_ADMISSION_CAP: usize = 16;
 // One place inside the shared admission cap stays reserved for a
 // repository-watch dispatch start, so a fleet that saturates ordinary
 // scheduler capacity is one session smaller than the cap itself.
-const FLEET_SESSION_COUNT: usize = scheduler_ordinary_pass_limit(FLEET_PASS_ADMISSION_CAP);
+const FLEET_SESSION_COUNT: usize = FLEET_PASS_ADMISSION_CAP;
 // numeric-bound: test setup - preserves the ordinary production occupancy fixture
 const FLEET_BASELINE_OCCUPANCY_BOUND: Duration = Duration::from_secs(900);
 // numeric-bound: test deadline - exercises the production recovery path promptly
@@ -4216,111 +4208,6 @@ async fn process_runtime_reads_an_empty_operator_status_snapshot() -> Result<(),
         end.message(),
         &ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::End(Box::new(
             OperatorStatusEndMessage {
-                held_slot_count: CanonicalU64::new(0),
-                queued_obligation_count: CanonicalU64::new(0),
-                pull_request_convergence_count: CanonicalU64::new(0),
-                pending_stale_review_clearance_count: CanonicalU64::new(0),
-                lifecycle_week_count: CanonicalU64::new(0),
-                lifecycle_deadline_violation_count: CanonicalU64::new(0),
-            },
-        ))))
-    );
-
-    drop(connection);
-    runtime.stop().await
-}
-
-#[tokio::test]
-#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn process_runtime_reads_populated_convergence_status_rows() -> Result<(), Box<dyn Error>> {
-    let runtime = RunningRuntime::start().await?;
-    let repository = RepositorySlug::try_new(String::from("example/repo"))?;
-    let gating_check = CheckRunName::try_new(String::from("ci"))?;
-    let clearance_fixture = OperatorStatusStaleReviewClearanceFixture {
-        review_node_id: String::from("PRR_node"),
-        reviewer: RepoWatchAuthorLogin::try_new(String::from("reviewer"))?,
-        reviewed_head_sha: CommitSha::try_new(String::from(
-            "3333333333333333333333333333333333333333",
-        ))?,
-        dismissal_message: String::from("Superseded by the current head."),
-    };
-    let convergence_fixture = OperatorStatusConvergenceFixture {
-        number: PullRequestNumber::new(41.try_into()?),
-        head_sha: CommitSha::try_new(String::from("1111111111111111111111111111111111111111"))?,
-        base_branch: BranchName::try_new(String::from("main"))?,
-        base_revision: CommitSha::try_new(String::from(
-            "2222222222222222222222222222222222222222",
-        ))?,
-        mergeable_state: MergeableState::Mergeable,
-        settled: true,
-        review_decision: RepoWatchReviewDecision::ChangesRequested,
-        unresolved_threads: Vec::new(),
-        gating_check_count: 1,
-        non_green_gating_checks: vec![gating_check.clone()],
-        verdict: RepoWatchConvergenceVerdict::NotConverged,
-        stale_review_clearance: Some(clearance_fixture.clone()),
-    };
-    OperatorStatusFixtureRepository::new(runtime.pool.clone())
-        .seed_pull_request_convergences(&repository, std::slice::from_ref(&convergence_fixture))
-        .await?;
-
-    let mut connection = Connection::connect(runtime.socket()).await?;
-    connection
-        .request(1, ClientRequest::ReadOperatorStatus {})
-        .await?;
-
-    let start = response_within(&mut connection).await?;
-    assert_eq!(
-        start.message(),
-        &ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::Start {}))
-    );
-    let convergence = response_within(&mut connection).await?;
-    assert_eq!(
-        convergence.message(),
-        &ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
-            Box::new(OperatorStatusPullRequestConvergenceMessage {
-                repository: repository.as_str().to_owned(),
-                pull_request_number: CanonicalU64::new(convergence_fixture.number.get()),
-                head_sha: convergence_fixture.head_sha.as_str().to_owned(),
-                base_branch: convergence_fixture.base_branch.as_str().to_owned(),
-                base_revision: convergence_fixture.base_revision.as_str().to_owned(),
-                mergeable_state: OperatorStatusMergeableState::Mergeable,
-                review_decision: OperatorStatusReviewDecision::ChangesRequested,
-                unresolved_thread_count: CanonicalU64::new(0),
-                gating_check_count: CanonicalU64::new(convergence_fixture.gating_check_count),
-                non_green_gating_checks: vec![gating_check.as_str().to_owned()],
-                verdict: OperatorStatusConvergenceVerdict::NotConverged,
-                seal: None,
-                assessed_seconds_ago: CanonicalU64::new(0),
-            },)
-        ),))
-    );
-    let clearance = response_within(&mut connection).await?;
-    assert_eq!(
-        clearance.message(),
-        &ServerMessage::OperatorStatus(Box::new(
-            OperatorStatusMessage::PendingStaleReviewClearance(Box::new(
-                OperatorStatusPendingStaleReviewClearanceMessage {
-                    repository: repository.as_str().to_owned(),
-                    pull_request_number: CanonicalU64::new(convergence_fixture.number.get()),
-                    current_head_sha: convergence_fixture.head_sha.as_str().to_owned(),
-                    review_node_id: clearance_fixture.review_node_id.clone(),
-                    reviewer: clearance_fixture.reviewer.as_str().to_owned(),
-                    reviewed_head_sha: clearance_fixture.reviewed_head_sha.as_str().to_owned(),
-                    pending_for_seconds: CanonicalU64::new(0),
-                },
-            )),
-        ))
-    );
-    let end = response_within(&mut connection).await?;
-    assert_eq!(
-        end.message(),
-        &ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::End(Box::new(
-            OperatorStatusEndMessage {
-                held_slot_count: CanonicalU64::new(0),
-                queued_obligation_count: CanonicalU64::new(0),
-                pull_request_convergence_count: CanonicalU64::new(1),
-                pending_stale_review_clearance_count: CanonicalU64::new(1),
                 lifecycle_week_count: CanonicalU64::new(0),
                 lifecycle_deadline_violation_count: CanonicalU64::new(0),
             },

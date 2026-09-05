@@ -15,10 +15,10 @@ use signalbox_domain::{
     DelegateApprovalRecommendation, DelegateToolApproval, DirectModelSelection,
     FrozenModelSelection, GoalGeneration, GoalGenerationSnapshot, GoalNeed,
     GoalSchedulerProvenance, GoalStatement, ModelCallId, ModelTargetCatalog, ProviderModelIdentity,
-    ProviderReportedTokenUsage, PullRequestNumber, RepoWatchDispatchId, RepositorySlug,
-    ResolvedProviderTarget, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId,
-    SessionSystemPrompt, SessionTemplateName, ToolApprovalPosture, ToolDecisionRationale,
-    ToolRequest, ToolRequestId, TurnAttemptId, TurnId, TurnTerminalCause,
+    ProviderReportedTokenUsage, PullRequestNumber, RepositorySlug, ResolvedProviderTarget,
+    SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId, SessionSystemPrompt,
+    SessionTemplateName, ToolApprovalPosture, ToolDecisionRationale, ToolRequest, ToolRequestId,
+    TurnAttemptId, TurnId, TurnTerminalCause,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
@@ -215,12 +215,7 @@ pub enum CompleteApprovalJudgeOutcome {
     EscalatedToHuman,
     /// An unattended turn was terminalized and audited for its dispatch.
     ///
-    /// Whether the batch released is a fact about the batch rather than about
-    /// this completion — a sibling action still pursuing holds it, and settles
-    /// it later — so it is read from `repo_watch_dispatch_release` and the
-    /// escalation audit view instead of being reported here. Reporting it here
-    /// made an exact replay answer differently once a sibling finished, and
-    /// credited this completion with that sibling's effect.
+    /// The owning dispatch module records its command settlement separately.
     HeadlessEscalationTerminalized,
 }
 
@@ -717,27 +712,14 @@ impl PostgresApprovalJudgeRepository {
 }
 
 /// Need text for the execution-failure block an unattended escalation appends.
-///
-/// It claims no release, because a batch a sibling action still pursues is not
-/// released by this escalation and becomes so only when that sibling ends. It
-/// promises no redispatch either: `repo_watch_owe_dispatch_requeue` records the
-/// replacement obligation only while the rule remains active and, for a
-/// pull-request target, while a later close or merge has not made the work
-/// stale — and the requeue it does record counts as a failed attempt, so the
-/// attempt that spends the lineage's budget parks the obligation in the same
-/// transaction rather than redispatching. It states that no automatic
-/// resumption is coming, which is true of this block alone among
-/// execution-failure blocks and is why it names the repair itself — the repair
-/// is the whole of what an operator is promised.
-const HEADLESS_ESCALATION_GOAL_NEED: &str = "A delegated tool approval escalated with no attending user, so this goal turn was failed. Repository watch redispatches the work under a fresh dispatch once its batch ends, unless its rule has been deactivated, the pull request has closed or merged since, or this attempt spent the lineage's retry budget and parked it for an operator or new pull-request activity; no automatic resumption is scheduled for this block either way. Resume this goal only to continue this session by hand: a further escalation on work you resumed waits for you instead of failing the turn again.";
+const HEADLESS_ESCALATION_GOAL_NEED: &str = "A delegated tool approval escalated with no attending user, so this goal turn was failed. No automatic resumption is scheduled. Resume this goal only to continue this session by hand: a further escalation on work you resumed waits for you instead of failing the turn again.";
 
 /// The generation a repository-watch dispatch commissions in the session it
 /// creates, which is the only generation its authority describes.
 ///
 /// The dispatch creates the session and commissions its goal in one
 /// transaction, so the commission is that session's first generation. Repository
-/// watch identifies the commission it owns the same way where it stops one
-/// (`goal::insert_repo_watch_composed_stop`).
+/// watch identifies the commission it owns through the same provenance.
 const DISPATCH_COMMISSIONED_GENERATION: GoalGeneration = GoalGeneration::new(NonZeroU64::MIN);
 
 /// Whether this escalation takes the unattended path rather than parking.
@@ -790,19 +772,7 @@ async fn unattended_escalation_applies(
     }
     match dispatch.dispatch() {
         ApprovalJudgeDispatchProvenance::Commissioned(_) => Ok(!authority_stands),
-        ApprovalJudgeDispatchProvenance::RepoWatch(_) => {
-            let escalated_before: bool = sqlx::query_scalar(
-                "SELECT EXISTS (
-                    SELECT 1
-                      FROM repo_watch_headless_approval_escalation
-                     WHERE session_id = $1
-                )",
-            )
-            .bind(session_id_to_uuid(prepared.request.session()))
-            .fetch_one(&mut *connection)
-            .await?;
-            Ok(!(escalated_before && authority_stands))
-        }
+        ApprovalJudgeDispatchProvenance::RepoWatch(_) => Ok(false),
     }
 }
 
@@ -1034,26 +1004,12 @@ async fn persist_headless_escalation(
     )
     .await?;
     let audited = match dispatch {
-        ApprovalJudgeDispatchProvenance::RepoWatch(dispatch) => sqlx::query(
-            "INSERT INTO repo_watch_headless_approval_escalation
-                    (model_call_id, request_id, dispatch_id, action_ordinal, session_id,
-                     turn_id, terminal_attempt_id, failure_entry_id, terminal_frontier_id)
-                 SELECT $1, $2, action.dispatch_id, action.action_ordinal, $3, $4, $5, $6, $7
-                   FROM repo_watch_dispatch_action AS action
-                  WHERE action.session_id = $3 AND action.dispatch_id = $8",
-        )
-        .bind(prepared.call.into_uuid())
-        .bind(tool_request_id_to_uuid(prepared.request.id()))
-        .bind(session_id_to_uuid(session))
-        .bind(turn_id_to_uuid(turn))
-        .bind(attempt)
-        .bind(failure_entry.into_uuid())
-        .bind(identities.terminal_frontier().into_uuid())
-        .bind(dispatch.as_uuid())
-        .execute(&mut *connection)
-        .await
-        .map_err(classify_insert)?
-        .rows_affected(),
+        ApprovalJudgeDispatchProvenance::RepoWatch(_) => {
+            return Err(ApprovalJudgeCorruption::Inconsistent(
+                "retired repository-watch dispatch authority",
+            )
+            .into());
+        }
         ApprovalJudgeDispatchProvenance::Commissioned(dispatch) => sqlx::query(
             "INSERT INTO commissioned_dispatch_headless_approval_escalation
                     (model_call_id, request_id, dispatch_id, session_id, turn_id,
@@ -1109,15 +1065,6 @@ async fn persist_headless_escalation(
             )
             .into());
         }
-    }
-    // Only a repository-watch dispatch holds a batch singleton to release; a
-    // commissioned dispatch owns no batch, so there is nothing to settle.
-    if matches!(dispatch, ApprovalJudgeDispatchProvenance::RepoWatch(_)) {
-        sqlx::query("SELECT repo_watch_release_completed_dispatch_batches_for_turn($1, $2)")
-            .bind(turn_id_to_uuid(turn))
-            .bind(session_id_to_uuid(session))
-            .execute(&mut *connection)
-            .await?;
     }
     Ok(())
 }
@@ -1304,58 +1251,10 @@ async fn load_dispatch_authority(
     if generation != Some(DISPATCH_COMMISSIONED_GENERATION) {
         return Ok(None);
     }
-    let repo_watch = load_repo_watch_dispatch_authority(&mut *connection, session).await?;
-    let commissioned = load_commissioned_dispatch_authority(&mut *connection, session).await?;
-    match (repo_watch, commissioned) {
-        (Some(_), Some(_)) => {
-            Err(ApprovalJudgeCorruption::Inconsistent("dispatch session ownership").into())
-        }
-        (authority @ Some(_), None) | (None, authority) => Ok(authority),
-    }
+    load_commissioned_dispatch_authority(&mut *connection, session).await
 }
 
 /// Reads the repository-watch fence recorded for one dispatched session.
-async fn load_repo_watch_dispatch_authority(
-    connection: &mut PgConnection,
-    session: SessionId,
-) -> Result<Option<ApprovalJudgeDispatchAuthority>, ApprovalJudgeRepositoryError> {
-    let rows = sqlx::query(
-        "SELECT action.dispatch_id, event.repository, event.target_kind,
-                event.pull_request_number, event.head_sha, event.head_repository,
-                event.head_branch, event.base_branch, event.workflow_branch
-           FROM repo_watch_dispatch_action AS action
-           JOIN repo_watch_event AS event ON event.event_id = action.event_id
-          WHERE action.session_id = $1
-          ORDER BY action.dispatch_id
-          LIMIT 2",
-    )
-    .bind(session_id_to_uuid(session))
-    .fetch_all(&mut *connection)
-    .await?;
-    let row = match rows.as_slice() {
-        [] => return Ok(None),
-        [row] => row,
-        [_, _, ..] => {
-            return Err(ApprovalJudgeCorruption::Inconsistent("dispatch session ownership").into());
-        }
-    };
-    let dispatch = ApprovalJudgeDispatchProvenance::RepoWatch(RepoWatchDispatchId::from_uuid(
-        required(row, "dispatch_id")?,
-    ));
-    decode_dispatch_authority(DispatchAuthorityRow {
-        dispatch,
-        repository: required(row, "repository")?,
-        target_kind: required(row, "target_kind")?,
-        pull_request_number: row.try_get("pull_request_number")?,
-        head_sha: row.try_get("head_sha")?,
-        head_repository: row.try_get("head_repository")?,
-        head_branch: row.try_get("head_branch")?,
-        base_branch: row.try_get("base_branch")?,
-        branch: row.try_get("workflow_branch")?,
-    })
-    .map(Some)
-}
-
 /// Reads the commissioned fence recorded for one operator-commissioned session.
 ///
 /// The row is written by the commissioning transaction itself, so unlike the
@@ -1846,19 +1745,13 @@ async fn exact_completed(
 
 /// Reads the identities a headless escalation durably closed the turn under.
 ///
-/// Either audit family may hold the record — one call closes under exactly one
-/// dispatch source — and absence in both is the attended escalation, which
-/// records no such row.
+/// Only the commissioned-dispatch audit family retains this legacy path.
 async fn headless_escalation_identities(
     connection: &mut PgConnection,
     call: ModelCallId,
 ) -> Result<Option<ApprovalJudgeCompletionIdentities>, ApprovalJudgeRepositoryError> {
     let Some(row) = sqlx::query(
         "SELECT terminal_attempt_id, failure_entry_id, terminal_frontier_id
-           FROM repo_watch_headless_approval_escalation
-          WHERE model_call_id = $1
-         UNION ALL
-         SELECT terminal_attempt_id, failure_entry_id, terminal_frontier_id
            FROM commissioned_dispatch_headless_approval_escalation
           WHERE model_call_id = $1",
     )

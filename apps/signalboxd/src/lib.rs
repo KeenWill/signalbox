@@ -54,7 +54,6 @@ mod blob_tools;
 mod blob_upload_runtime;
 mod configuration;
 mod context_guard;
-mod convergence_sweep_runtime;
 mod conversation_introspection;
 mod credential_pools;
 mod daemon_tools;
@@ -66,8 +65,6 @@ mod lifecycle_metrics_runtime;
 mod local_socket;
 pub mod model_adapter;
 mod process_runtime;
-mod repo_watch_runtime;
-mod repo_watch_webhook_runtime;
 mod review_orchestration_runtime;
 pub mod runner_protocol_runtime;
 mod session_delegation;
@@ -79,7 +76,6 @@ pub mod usage_limits;
 mod web_blob_runtime;
 pub mod web_http;
 mod web_imports;
-mod web_repo_watch;
 mod workspace_instruction_runtime;
 
 pub use attachment_preparation_runtime::AttachmentPreparingModelCallProvider;
@@ -92,19 +88,14 @@ pub use blob_tools::{
     BlobToolConstructionError, BlobToolExecutor, BlobToolExecutorError, BlobTools,
 };
 pub use configuration::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, ConvergenceSweepConfiguration,
-    DaemonToolConfiguration, DerivedModelCallCost, FileCredentialAccess, HubModelConfiguration,
-    HubModelConfigurationError, ModelAdapter, ModelBillingRates, NumericBoundsConfiguration,
-    OPENAI_CREDENTIAL_REFERENCE, RepositoryWatchConfiguration, WatchedRepositoryConfiguration,
+    ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DaemonToolConfiguration, DerivedModelCallCost,
+    FileCredentialAccess, HubModelConfiguration, HubModelConfigurationError, ModelAdapter,
+    ModelBillingRates, NumericBoundsConfiguration, OPENAI_CREDENTIAL_REFERENCE,
     WorkspaceInstructionConfiguration,
 };
 pub use context_guard::{
     ContextGuardedTurnPass, ContextGuardedTurnPassError, ReportedUsageCompaction,
     ReportedUsageCompactionError,
-};
-pub use convergence_sweep_runtime::{
-    ConvergenceSweepNumericBounds, ConvergenceSweepRuntime,
-    ConvergenceSweepRuntimeConstructionError,
 };
 pub use conversation_introspection::{
     ConversationIntrospectionError, PostgresConversationIntrospection,
@@ -135,10 +126,6 @@ pub use process_runtime::{
     ProcessMonitor, ProcessMonitorReceiveError, ProcessMonitorSubscription, ProcessMonitorUpdate,
     ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError,
     shared_snapshot_reader_budget,
-};
-pub use repo_watch_runtime::{
-    RepositoryWatchNumericBounds, RepositoryWatchRuntime, RepositoryWatchRuntimeConstructionError,
-    RepositoryWatchRuntimeError,
 };
 pub use session_delegation::{PostgresSessionDelegationPort, PostgresSessionDelegationPortError};
 pub use session_template_configuration::{

@@ -22,6 +22,10 @@ use signalbox_ownership_seam::{
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+mod github;
+
+pub use github::{GitHubClient, GitHubClientError};
+
 /// Current provider state for one watched repository.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositoryState<'a> {

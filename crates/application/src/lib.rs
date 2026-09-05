@@ -17,8 +17,6 @@ mod model_execution;
 mod operator_failure;
 mod replace_session_defaults;
 mod repo_watch;
-mod repo_watch_operations;
-mod repo_watch_webhook;
 mod review_orchestration;
 mod review_workflow;
 mod scheduler;
@@ -121,46 +119,19 @@ pub use repo_watch::{
     RepoWatchCheckSuiteObservation, RepoWatchConvergenceAssessment,
     RepoWatchConvergenceAssessmentError, RepoWatchConvergenceAssessmentInput,
     RepoWatchConvergenceVerdict, RepoWatchDifferError, RepoWatchDifferFailureKind,
-    RepoWatchDispatchIdGenerator, RepoWatchDispatchPreparationError, RepoWatchDispatchService,
-    RepoWatchDispatchServiceError, RepoWatchDispatchTransaction, RepoWatchEventContentIdentityV1,
-    RepoWatchEventIdGenerator, RepoWatchEventIdentityFrontierEntryV1,
-    RepoWatchEventIdentityFrontierError, RepoWatchEventIdentityFrontierV1,
-    RepoWatchEventOccurrenceV1, RepoWatchMergedCheckRunBaselineV1,
-    RepoWatchMergedCheckSuiteBaselineV1, RepoWatchMergedPullRequestBaselineInputV1,
-    RepoWatchMergedPullRequestBaselineV1, RepoWatchObservation, RepoWatchPreparedDispatchAction,
-    RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
-    RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateError,
-    RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate, RepoWatchReviewDecision,
-    RepoWatchReviewObservation, RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
-    RepoWatchSingletonKey, RepoWatchStaleReviewClearanceCandidate,
-    RepoWatchStaleReviewClearanceCandidateError, RepoWatchTemplateResolver,
-    RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunObservation,
-    UuidV7RepoWatchDispatchIdGenerator, UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
+    RepoWatchEventContentIdentityV1, RepoWatchEventIdGenerator,
+    RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventIdentityFrontierError,
+    RepoWatchEventIdentityFrontierV1, RepoWatchEventOccurrenceV1,
+    RepoWatchMergedCheckRunBaselineV1, RepoWatchMergedCheckSuiteBaselineV1,
+    RepoWatchMergedPullRequestBaselineInputV1, RepoWatchMergedPullRequestBaselineV1,
+    RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
+    RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
+    RepoWatchRepositoryStateError, RepoWatchRepositoryStateInput, RepoWatchReviewDecision,
+    RepoWatchReviewObservation, RepoWatchStaleReviewClearanceCandidate,
+    RepoWatchStaleReviewClearanceCandidateError, RepoWatchThreadObservation, RepoWatchThreadState,
+    RepoWatchWorkflowRunObservation, UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
     derive_repo_watch_events_with_merged_baselines,
     repo_watch_events_have_equal_identified_content,
-};
-pub use repo_watch_operations::{
-    RepoWatchActivityPage, RepoWatchAutomationStatus, RepoWatchChecksStatus, RepoWatchDraftStatus,
-    RepoWatchEventCursor, RepoWatchEventKindCount, RepoWatchHeldCursor, RepoWatchHeldSlot,
-    RepoWatchHeldSlotBlocker, RepoWatchLatestWebhook, RepoWatchObligationCursor,
-    RepoWatchObligationId, RepoWatchObligationReadiness, RepoWatchOperationsReader,
-    RepoWatchOperatorDispatch, RepoWatchOperatorEvent, RepoWatchOperatorSettlement,
-    RepoWatchPagePosition, RepoWatchPullRequestOperations, RepoWatchPullRequestOperationsFacts,
-    RepoWatchPullRequestPage, RepoWatchPullRequestSession, RepoWatchPullRequestSessionPage,
-    RepoWatchQueuedObligation, RepoWatchRepositoryStatus, RepoWatchRepositoryStatusPage,
-    RepoWatchReviewStatus, RepoWatchSessionCursor, RepoWatchSessionPurpose,
-    RepoWatchWebhookActivity, RepoWatchWebhookDisposition, RepoWatchWebhookWindow,
-    RepoWatchWorkPage, max_repo_watch_activity_page_items, max_repo_watch_operations_page_items,
-};
-pub use repo_watch_webhook::{
-    RepoWatchBranchHeadPreviousV1, RepoWatchObservationApplyV1, RepoWatchObservationChangeV1,
-    RepoWatchObservationPatchV1, RepoWatchPullRequestHeadGuardV1,
-    RepoWatchPullRequestMissingPolicyV1, RepoWatchTargetedRefreshCoalescerV1,
-    RepoWatchTargetedRefreshV1, RepoWatchWebhookApplyError, RepoWatchWebhookBodyReferenceV1,
-    RepoWatchWebhookDeliveryV1, RepoWatchWebhookDeliveryV1Input, RepoWatchWebhookIgnoredReasonV1,
-    RepoWatchWebhookMappedNoChangeV1, RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1,
-    RepoWatchWebhookPullRequestContextV1, RepoWatchWebhookPullRequestContextV1Input,
-    apply_repo_watch_observation_patch_v1, map_repo_watch_webhook_delivery_v1,
 };
 pub use review_orchestration::{
     ReviewConcernClaim, ReviewConcernOutcome, ReviewConcernSpec, ReviewConcernSuccess,
@@ -188,7 +159,7 @@ pub use scheduler::{
     InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
     InvalidSchedulerPassOccupancyBound, ReconciliationSweepInterval, SchedulerLoop,
     SchedulerLoopExit, SchedulerOccupancyObserver, SchedulerOldestInFlightPass,
-    SchedulerPassExpiryHandler, SchedulerPassOccupancyBound, scheduler_ordinary_pass_limit,
+    SchedulerPassExpiryHandler, SchedulerPassOccupancyBound,
 };
 pub use search::{
     MAX_SEARCH_HIGHLIGHTS_PER_RESULT, SearchArtifactId, SearchArtifactProjection,

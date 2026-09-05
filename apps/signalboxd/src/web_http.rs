@@ -960,15 +960,6 @@ fn production_router_with_budget(
         )
         .route_layer(middleware::from_fn(validate_loopback_host))
         .with_state(state);
-    // Repository-watch operator projections carry session identities, dispatch
-    // state, and webhook activity, so they sit behind the same inner gate for
-    // the same reason the session reads do.
-    let repository_watch_reads = crate::web_repo_watch::router(
-        pool.clone(),
-        read_runtime.snapshot_reader_budget,
-        automatic_resume_attempts,
-    )
-    .route_layer(middleware::from_fn(validate_loopback_host));
     // Every route that reads session-attached content sits behind the
     // loopback authority gate. Blob descriptors and bytes are reachable by
     // digest alone and a descriptor read can start isolated derivation work,
@@ -994,8 +985,7 @@ fn production_router_with_budget(
         .route("/bootstrap", get(contract_bootstrap))
         .with_state(http_state)
         .merge(session_reads)
-        .merge(blob_reads)
-        .merge(repository_watch_reads);
+        .merge(blob_reads);
     // Imported-conversation reads need both a pool and hub model settings; the
     // bootstrap and session surfaces stay routable without either.
     let api = match (pool, model_configuration) {

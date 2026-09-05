@@ -4474,7 +4474,9 @@ dependencies = [
 name = "signalbox-module-repo-watch-v2"
 version = "0.0.0"
 dependencies = [
+ "reqwest",
  "rust_decimal",
+ "rustls",
  "serde_json",
  "signalbox-ownership-seam",
  "sqlx",
