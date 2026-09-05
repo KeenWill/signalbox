@@ -38,9 +38,9 @@ specification diff. Accepted cross-component and wire contracts live in the
 - **Further content variants and rendering.** Ordered multipart content with
   content-addressed attachment parts, its replay equality, persistence, terminal
   rendering, and model-visible stubs are decided and specified by
-  [blob storage](spec/blob-storage.md#multipart-user-content). Any non-text
-  content variant beyond attachment parts and provider-native media rendering
-  remain open. Blocks only those further extensions. (S01, S03, S08)
+  [blob storage](spec/blob-storage.md). Any non-text content variant beyond
+  attachment parts and provider-native media rendering remain open. Blocks only
+  those further extensions. (S01, S03, S08)
 
 ## Model-input projection
 
@@ -763,7 +763,7 @@ the implemented session and external-link evidence.
   content-type-aware readers exist, which formats they support, and the concrete
   sandbox mechanism remain undecided. The required strong process-isolation
   posture and visibility contract are fixed by
-  [blob storage](spec/blob-storage.md#attachment-visibility-and-model-reads).
+  [blob storage](spec/blob-storage.md).
 - **Non-socket ingest paths.** Daemon-local file adoption and runner-produced
   artifact ingest — moving multi-gigabyte content into the catalog without
   base64 chunking over the local socket — remain undecided.
