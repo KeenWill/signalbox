@@ -41,7 +41,8 @@ frozen as delegated goes to one dedicated approval-judge call, prepared and
 authorized through the configured provider adapter with the session credential
 snapshot. When a user disagrees with a judge denial, the
 `OverrideDeniedToolRequest` command records a one-shot pre-approval for the next
-proposal of the same command.
+proposal of the same command; each delegate denial admits at most one override
+ever, and a second command is rejected.
 
 The daemon composes one process-lifetime immutable registry from the implemented
 tool families in `apps/signalboxd/src/daemon_tools.rs`: basic, blob-read, web,
@@ -53,15 +54,17 @@ mapped composition
 family's crate or daemon module documents its tools.
 
 Each approved request that reaches execution runs as one physical attempt
-through staged transactions. A prepare transaction mints the attempt and commits
-a `Prepared` row that fixes the request, owning turn, issuing turn attempt,
-effect class, locus, and dispatch generation before any executor work. An
-authorize transaction moves the attempt in flight under fresh locked state. The
-executor then runs outside any transaction, and a commit transaction records its
-evidence against the same correlation. A process-shared, turn-keyed dispatch
-gate in `crates/application/src/tool_dispatch_gate.rs` orders immediate
-interrupts against attempt checkpointing, preflight, the window from
-authorization to result commit, crash classification, and the continuation
+through staged transactions. That promise is daemon-local: a lost runner lease
+for pure or idempotent work mints a fresh physical attempt that replaces the
+retired one ([runner-protocol](runner-protocol.md)). A prepare transaction mints
+the attempt and commits a `Prepared` row that fixes the request, owning turn,
+issuing turn attempt, effect class, locus, and dispatch generation before any
+executor work. An authorize transaction moves the attempt in flight under fresh
+locked state. The executor then runs outside any transaction, and a commit
+transaction records its evidence against the same correlation. A process-shared,
+turn-keyed dispatch gate in `crates/application/src/tool_dispatch_gate.rs`
+orders immediate interrupts against attempt checkpointing, preflight, the window
+from authorization to result commit, crash classification, and the continuation
 checkpoint.
 
 A result entry in the transcript references a durable row rather than carrying
@@ -226,8 +229,12 @@ turn end.
 A declaration without an explicit posture follows one precedence: an
 `AlwaysConfirm` declaration is consulted before any blanket and stays undecided
 under it, then the frozen approve-all blanket, then the registry default, then
-fail-closed confirmation when no declaration exists. The approval posture is
-part of the configuration a turn binds at origin acceptance
+fail-closed confirmation when no declaration exists. A runner-locus request
+instead resolves approval from the placement's exact permission override, then a
+workspace-restricted profile, then automatic approval only for a pure ambient
+tool; the session blanket and the registry default do not authorize a runner
+dispatch ([runner-protocol](runner-protocol.md)). The approval posture is part
+of the configuration a turn binds at origin acceptance
 ([sessions-and-transcript](sessions-and-transcript.md)), and steering-derived
 work inherits the frozen value of its source turn. When the provider credential
 boundary suppresses a request's whole argument object, the application records a
@@ -235,9 +242,10 @@ fixed `RuntimeSafety` denial and continues the same turn; it never dispatches
 sentinel JSON to an executor.
 
 The judge selection is an optional direct-selection mapping; without one, the
-judge uses the exact direct selection of the request-producing call. Every
-session-derived field in the judge prompt is separately delimited and quoted as
-untrusted evidence, and the prompt treats it as scope to compare with the
+judge uses the exact direct selection of the request-producing call. The judge
+prompt carries the session's commissioned goal, template, frozen system prompt,
+and optional dispatch authority, each separately delimited and quoted as
+untrusted evidence, and the prompt treats them as scope to compare with the
 request, never as instruction. Outside a turn judged under the commissioned
 generation's dispatch authority, which [repo-watch](repo-watch.md) owns, an
 `EscalateToHuman` result stores the completed call but no decision and leaves
@@ -248,7 +256,9 @@ decision.
 Deny-and-end composes the recorded denial with the applied-interrupt stop path,
 and the interrupt remains the proof-bearing authority for ending the turn. An
 interrupt alone against an approval wait is not a denial and does not bypass the
-decision command.
+decision command. A committed session closure first records core-issued
+lifecycle-closure denials for the outstanding approval waits, then applies its
+interrupt.
 
 Recorded overrides are frozen into each prepared model call in the same
 transaction as the blanket posture. Two things retire an override: the consuming
@@ -326,7 +336,9 @@ ordinary error result. An interrupt against a tool recovery wait does not
 reinterpret or erase the ambiguous attempt. Without an interrupt, the daemon
 claims the same ambiguity through the automatic-reconciliation ledger, which
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) owns, and
-terminalizes through the same boundary.
+terminalizes through the same boundary. Only an admitted executor `KnownFailed`
+observation emits the failed-attempt telemetry event; completed, ambiguous, and
+preflight-only failures emit none.
 
 A result larger than the bound is replaced by the typed `ResultTooLarge` error,
 and oversized bytes are never persisted. The result-text and error-detail bounds
@@ -437,9 +449,10 @@ than 512 KiB of encoded JSON. Every bounded review-log list reports whether it
 is truncated together with its continuation cursor, and a verdict never treats a
 partial evidence page as complete. The reviewer verdict is parsed from review
 bodies and issue comments merged in code-host timestamp order, and a usage-limit
-response is recognized separately as one exact canonical text. Only the reviewer
-bot account supplies a verdict or a usage-limit response, and a verdict must
-carry a line whose whole content is the `Reviewed commit:` label followed by a
+response is recognized separately as one exact canonical text that supersedes an
+earlier verdict until a later verdict arrives. Only the reviewer bot account
+supplies a verdict or a usage-limit response, and a verdict must carry a line
+whose whole content is the `Reviewed commit:` label followed by a
 7-to-40-character hexadecimal revision, with only emphasis or backtick markers
 around them; a verdict whose revision does not prefix the current head is stale
 and never counts as current convergence evidence. The latest exact review
