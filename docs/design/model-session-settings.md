@@ -1,0 +1,46 @@
+# Model and session settings design
+
+This design is not built. It extends
+[model-session-settings.md](../spec/model-session-settings.md) with a Swift
+settings user interface.
+
+## Goal
+
+A Swift client screen reads a session's settings, sets session and per-call
+overrides, and offers only values the daemon declares as supported for the
+selected model.
+
+## Shape
+
+The screen reads the capability catalog through the process protocol's catalog
+read, described on [process-protocol.md](../spec/process-protocol.md). For the
+selected direct model it offers the reasoning levels in that record, fast mode
+only when the record supports it, and the service tiers in that record. An alias
+is offered through the record of the direct selection it currently resolves to.
+Inherit and provider default are offered for every setting.
+
+Each override member the screen submits is inherit, clear, or set(value), the
+overlay the settings-carrying commands already accept. The screen displays an
+inherited value distinctly from an explicitly set value. It submits inherit for
+a member the user did not touch, and it never converts an inherited value into
+set(value) on the user's behalf.
+
+The screen shows the automatic adjustments carried on the settings events the
+daemon already records; it derives none itself.
+
+## Constraints on present code
+
+The capability projection on [process-protocol.md](../spec/process-protocol.md)
+remains the only source of offered values, and it continues to name only
+client-selectable models. The settings overlay on session commands keeps its
+inherit, clear, and set members, so a client can express provenance. No daemon
+change adds a capability derived from a model name or a provider probe.
+
+## Acceptance
+
+Every value the screen offers for a direct model appears in that model's
+daemon-provided capability record. No Swift source carries a reasoning-level,
+fast-mode, or service-tier table of its own beyond the protocol types. A
+submitted overlay marks untouched members as inherit and chosen members as set
+or clear, and a defaults read returns the same provenance. Automatic adjustments
+shown to the user are the ones the daemon recorded.

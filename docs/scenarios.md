@@ -1228,8 +1228,8 @@ INV-tagged test names and attached doc comments.
 - **Required invariants:** INV-008, INV-012, INV-014, INV-051, INV-052, INV-053,
   INV-054.
 - **Remaining questions:** Context compaction and the other settings listed in
-  [model and session settings](spec/model-session-settings.md#open-edges) remain
-  outside this scenario.
+  [model and session settings](spec/model-session-settings.md) remain outside
+  this scenario.
 
 ## Coverage note
 
