@@ -77,19 +77,22 @@ an exclusive keyset `after`, and returns `runner_status`,
 `runner_operation_failure`, and `runner_workspace_leak` messages followed by
 `runner_status_end { runner_count, failure_count, leak_count, next_after }`.
 `after` and `next_after` are null or one tagged cursor object naming the last
-row the page emitted. The `operation_failure` variant carries the runner, the
-`operation_kind`, and the complete correlation arm that kind selects; the
-`workspace_leak` variant carries the runner, fact kind, locator, entry digest,
-and the leak fact's optional session and placement revision. Both variants are
-exclusive, failures order before leaks, and the traversal each one continues
-belongs to [persistence-protocol.md](../spec/persistence-protocol.md). Each
-failure names its runner, the refused operation's correlation, one closed
-daemon-actionable `category`, and the runner-authored `detail` object with its
-bounded `code`, `message`, and structured `payload`. The category set is exactly
-the closed daemon-actionable set the runner wire carries, member for member, so
-every retained failure is serializable. The daemon bounds the detail and
-reproduces it without interpretation, following the `operation_failed` contract
-in [runner-protocol.md](../spec/runner-protocol.md). The detail is untrusted
+row the page emitted. The projection carries a pending provisioning-only
+successor's enrollment-request identity and its authority state, because
+`promote_pending_runner` names that identity. The `operation_failure` variant
+carries the runner, the `operation_kind`, and the complete correlation arm that
+kind selects; the `workspace_leak` variant carries the runner, fact kind,
+locator, entry digest, and the leak fact's optional session and placement
+revision. Both variants are exclusive, failures order before leaks, and the
+traversal each one continues belongs to
+[persistence-protocol.md](../spec/persistence-protocol.md). Each failure names
+its runner, the refused operation's correlation, one closed daemon-actionable
+`category`, and the runner-authored `detail` object with its bounded `code`,
+`message`, and structured `payload`. The category set is exactly the closed
+daemon-actionable set the runner wire carries, member for member, so every
+retained failure is serializable. The daemon bounds the detail and reproduces it
+without interpretation, following the `operation_failed` contract in
+[runner-protocol.md](../spec/runner-protocol.md). The detail is untrusted
 runner-authored text; the daemon does not inspect it for host paths, repository
 URLs, or credential facts. The event notifies a follower of each live runner
 transition above its snapshot cursor; the snapshot's runner projection carries

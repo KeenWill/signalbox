@@ -24,18 +24,21 @@ grammars. Indices, counts, and event cursors are canonical decimal strings that
 preserve the full unsigned 64-bit range, while a listing request resumes from
 the identity of the last row it returned. A request identity is a nonzero
 decimal string; zero is reserved for an error the daemon cannot correlate to a
-request.
+request. Every correlated server frame repeats the initiating request's identity
+unchanged, and the client rejects one that does not.
 
-A client sends requests and receives receipts, reads, or errors. A mutation
-carries a client-supplied command identity under the claim protocol in
-[identity-and-commands.md](identity-and-commands.md). Submitted input is an
-ordered array of parts, each a text part or an attachment reference carrying a
-blob digest and its metadata. The request states how the input is delivered:
-started when the session is idle, steered into the active turn, or queued behind
-it, with idle start as the default. A session placement is pathless or names a
-directory path. A model selection names a configured selection directly or by
-alias. Session metadata is one object replaced whole; its title, tags, and
-attribute keys are nonempty and contain no U+0000.
+A client sends requests and receives receipts, reads, or errors. A
+durable-command mutation carries a client-supplied command identity under the
+claim protocol in [identity-and-commands.md](identity-and-commands.md). A
+delegation mutation admits no command identity and carries only its invoking
+session, turn, and tool-request correlation. Submitted input is an ordered array
+of parts, each a text part or an attachment reference carrying a blob digest and
+its metadata. The request states how the input is delivered: started when the
+session is idle, steered into the active turn, or queued behind it, with idle
+start as the default. A session placement is pathless or names a directory path.
+A model selection names a configured selection directly or by alias. Session
+metadata is one object replaced whole; its title, tags, and attribute keys are
+nonempty and contain no U+0000.
 
 A conversation import whose source fits one frame is one single-shot request; a
 larger source, and every blob upload, moves bytes in chunks through a begin,
@@ -53,9 +56,11 @@ transcript snapshot and then the session's durable events above the snapshot's
 cursor. The snapshot projects the session's turns with their states, the
 terminal model calls with their usage, and the transcript entries in frontier
 order; an imported entry identifies its source conversation and carries a closed
-attestation of whether the source recorded the speaker. A turn's projected state
-follows [turn-lifecycle-and-scheduling.md](turn-lifecycle-and-scheduling.md); a
-failure that credential selection produces is owned by
+attestation of whether the source recorded the speaker. Model-call usage rows
+follow their owning turn's acceptance position and then model-call identity, and
+the client rejects any other order. A turn's projected state follows
+[turn-lifecycle-and-scheduling.md](turn-lifecycle-and-scheduling.md); a failure
+that credential selection produces is owned by
 [credential-availability.md](credential-availability.md). The one ephemeral
 message is the provider text delta, admitted only on a follow connection and
 correlated to its session, turn, model call, and part. Delegation between
@@ -87,10 +92,13 @@ representation is expressible at version 1.
 
 The socket's immediate parent directory must be owner-private even when the
 socket node itself is mode 0600, because not every Unix enforces socket-node
-permissions. Socket filesystem access is the deployment boundary; the daemon
-adds no application-level file-owner proof. The absence of authentication is
-provisional: remote access needs an authenticated identity and revocation design
-that does not exist, recorded in [open-questions.md](../open-questions.md).
+permissions. Every ancestor above that parent must be owned by root or the
+effective user. A group- or other-writable ancestor is admitted only when it is
+sticky and its child is owned by the effective user. Socket filesystem access is
+the deployment boundary; the daemon adds no application-level file-owner proof.
+The absence of authentication is provisional: remote access needs an
+authenticated identity and revocation design that does not exist, recorded in
+[open-questions.md](../open-questions.md).
 
 A denial on the wire requires a reason although the domain command admits its
 absence, so every client-issued denial is explainable.
@@ -142,18 +150,21 @@ as a known one. An oversized outbound frame terminates only its connection;
 every other encoding failure is fatal runtime evidence.
 
 A connection processes one request at a time, and a follow request consumes its
-connection until it closes. One process-wide bulk-ingest permit admits at most
-one chunked or single-shot conversation import or blob upload at a time. The
-daemon admits one review mutation at a time and releases the inbound frame slot
-after acquiring that permit and before application handling.
+connection until it closes. Inbound admission is bounded globally by an
+active-connection ceiling, a bounded pre-admission read-ahead, and an aggregate
+buffered-frame budget that reserves one slot for an active import. One
+process-wide bulk-ingest permit admits at most one chunked or single-shot
+conversation import or blob upload at a time. The daemon admits one review
+mutation at a time and releases the inbound frame slot after acquiring that
+permit and before application handling.
 
 Every accepted non-review mutation, import transport request, or blob transport
 request produces exactly one receipt message or an error. A mutation whose
 commit outcome is unknown returns `commit_ambiguous`; an infrastructure failure
 known to precede the commit returns `unavailable`.
 
-The client, never the server, supplies a mutation's command identity, so an
-equal retransmission reaches the replay boundary in
+The client, never the server, supplies a durable-command mutation's command
+identity, so an equal retransmission reaches the replay boundary in
 [identity-and-commands.md](identity-and-commands.md). An ambiguous submission is
 retried with the same command identity, session, content, expected version, and
 treatment; changing any of them is conflicting reuse. Durable command equality
