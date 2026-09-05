@@ -65,20 +65,18 @@ constructible only by the program substrate's host-side session capability, with
 the same validated-reference and no-conferred-authority semantics as every other
 arm. Submit-input gains a program admissibility path that fixes that actor.
 
-Repository watch and commissioned dispatch create no program run, so their
-initial inputs take a module arm instead of the program arm. It names the
-dispatch that composed the input, either a `RepoWatchDispatchId` or a
-`CommissionedDispatchId`, and never a fabricated program-run reference. The
-module boundary that stamps the registry issuer principal fixes it, and it ends
-the exception that attributes a module-composed input to the user.
+Repository watch and commissioned dispatch create no program run, so the program
+arm does not cover their initial inputs. Whether they gain a module arm naming
+the dispatch is pending an owner decision; until it is made those inputs keep
+the user attribution the spec page documents.
 
-Each new arm follows the existing storage convention: a closed `actor_kind`
+The program arm follows the existing storage convention: a closed `actor_kind`
 spelling, a variant-shaped reference column under a check constraint, and
-inclusion in replay equality and hashing. The new arms enter the submit-input
-record at storage version 4, so their spellings and reference columns are
-written only from that version on. A version-3 row carries none of them and
-reconstitutes under the actor its stored kind names; a version-3 row carrying
-one is corruption. The reader accepts both versions.
+inclusion in replay equality and hashing. It enters the submit-input record at
+storage version 4, so its spelling and reference column are written only from
+that version on. A version-3 row does not carry it and reconstitutes under the
+actor its stored kind names; a version-3 row that carries it is corruption. The
+reader accepts both versions.
 
 Create-session actor adoption is a maintainer choice made explicitly; every
 existing version carries no actor and reconstitutes without one, and a version
@@ -117,7 +115,6 @@ that adds the field states how each earlier version reconstitutes.
   versions reconstitute it absent, and replay equality compares it.
 - A program-issued submit-input records the program actor, and replaying its
   identifier under the user actor is conflicting reuse.
-- A module-composed initial input records a module actor naming its dispatch.
-- Submit-input writes the new actor arms only at storage version 4, and
-  version-3 rows reconstitute without them.
+- Submit-input writes the program actor only at storage version 4, and version-3
+  rows reconstitute without it.
 - No telemetry site emits a command identifier after the change.

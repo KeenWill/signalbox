@@ -49,10 +49,10 @@ or the execution of one tool request. Only submit-input and metadata-replacement
 commands carry an actor in their durable payload. Repository watch and
 commissioned dispatch stamp a module issuer principal on the registry row and
 compose their initial input under the user actor. That module-composed input is
-the one automated action attributed to the user; the non-user actor that ends
-the exception is Planned. Actor answers who issued one command; a session's
-creation cause, owned by [sessions-and-transcript](sessions-and-transcript.md),
-answers why the session exists, and neither fact substitutes for the other.
+the one automated action attributed to the user. Actor answers who issued one
+command; a session's creation cause, owned by
+[sessions-and-transcript](sessions-and-transcript.md), answers why the session
+exists, and neither fact substitutes for the other.
 
 ## Design decisions
 
@@ -198,6 +198,4 @@ what errors and logs may contain is in [process-protocol](process-protocol.md).
 - Imported-creation storage version 4 and create-session storage version 5,
   reserved and unwritten: [design](../design/identity-and-commands.md).
 - A program arm of `Actor` and a program admissibility path for submit-input:
-  [design](../design/identity-and-commands.md).
-- A non-user actor for module-composed initial inputs:
   [design](../design/identity-and-commands.md).
