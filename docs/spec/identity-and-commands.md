@@ -35,9 +35,10 @@ kind has one typed record family keyed one-to-one by command identifier; the
 record holds the caller-supplied fields under check constraints and foreign
 keys. The canonical command payload is the typed domain value constructed at the
 boundary, not a serialization, and construction ordinarily precedes registry
-lookup. Reading the registry yields three error families: storage corruption,
-infrastructure failure, and recorded domain rejection;
-`crates/persistence/src/command_registry.rs` defines the corruption family.
+lookup. Reading the registry yields two error families, storage corruption and
+infrastructure failure; `crates/persistence/src/command_registry.rs` defines the
+corruption family. A recorded domain rejection is decoded from the typed record
+and returned as a replay outcome, not as a registry error.
 
 `Actor` in `crates/domain` records, from a closed set, what issued a command:
 the user, daemon core, the model output of one turn, the startup recovery scan,
@@ -80,13 +81,13 @@ formatted error.
 
 ## Contracts
 
-Every command handler first records the command identifier in the registry,
-before it validates anything against current state. Replaying the same command
-with the same payload returns the recorded result. Replaying it with a different
-payload or kind is a conflict and changes nothing. A command's registry row,
-payload record, result, and every effect commit in one transaction. If that
-transaction fails, the registry holds no row for the identifier. A rejection
-records the identifier in the registry exactly as an applied command does.
+Every command handler inspects the registry for the command identifier before it
+validates anything against current state. Replaying the same command with the
+same payload returns the recorded result. Replaying it with a different payload
+or kind is a conflict and changes nothing. A single-transaction command commits
+its registry row, payload record, result, and every effect together, and a
+failed transaction leaves no claim behind. A rejection claims the identifier the
+same way an applied command does.
 
 Recording who or what caused an action is provenance only. It grants no
 lifecycle, authorization, or approval authority. No automated path can attribute
@@ -95,7 +96,9 @@ the user.
 
 Unsigned 64-bit ordinals are stored as numeric(20,0). What kind of thing an id
 names is known from its table and column, never from the UUID's bytes. No code
-derives order, time, ancestry, ownership, or authority from a UUID.
+derives acceptance order, queue order, lifecycle precedence, ancestry,
+ownership, or authority from a UUID; listing rows by identifier for display or
+paging is not such a derivation.
 
 The identity macro derives value semantics and `Debug` but no storage or
 serialization trait, so every storage boundary maps explicitly.
@@ -123,10 +126,10 @@ triggers, so a claimed identifier's recorded meaning is never rewritten.
 The boundary that admitted a command stamps the issuer principal on its registry
 row: the principal's kind and, for a module, the module name.
 
-Every command payload type implements structural equality by hand, covering
-every caller-supplied semantic field and excluding the command identifier. Why:
-the identifier is the lookup key that names the payload, not part of the meaning
-it names.
+A command payload type that implements structural equality by hand covers every
+caller-supplied semantic field and excludes the command identifier. Why: the
+identifier is the lookup key that names the payload, not part of the meaning it
+names.
 
 For submit-input, equal replay returns the recorded result only when current
 durable state still proves that result correlates with committed effects;
@@ -144,10 +147,10 @@ exactly once, returns no applied result before that transaction commits, and
 surfaces infrastructure failure to its caller without retry or receipt
 reconstruction.
 
-After registry inspection and before claiming an unseen identifier, a command
-may perform one pre-claim admission read. A failed admission read returns an
-admission error and claims nothing; an authoritative rejection is derived only
-after the claim and is stored for replay.
+After registry inspection and before it inserts the claim for an unseen
+identifier, a handler may read current state and reject on it; such a rejection
+is an admission error and claims nothing. The handler inserts the claim together
+with the applied result.
 
 Equal semantic content never merges distinct commands, and a caller who needs
 corrected intent after a recorded rejection uses a new identifier.
