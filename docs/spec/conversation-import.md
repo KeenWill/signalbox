@@ -8,21 +8,22 @@ record, and a session can later be created from any of its entry boundaries.
 An imported conversation (`ImportedConversation`) is one snapshot of an external
 transcript. The daemon mints its identity; its content identity is a digest over
 the converter's format and the sequence of raw source records. One header holds
-two sequences: the raw records, the nonempty physical JSONL records of the
-source preserved verbatim as content-addressed blobs, and the normalized entries
-derived from them. Each normalized entry references the raw record it came from,
-so every conversion decision is traceable to exact source bytes.
+two sequences: the raw records and the normalized entries derived from them. A
+raw record is one nonempty physical JSONL record of the source, preserved
+verbatim as a content-addressed blob. Each normalized entry references the raw
+record it came from, so every conversion decision is traceable to exact source
+bytes.
 
-Every source field on an entry is recorded as attested with a value, attested
-absent, or not attested; a JSON null is attested absence and an omitted member
-is not attested. The normalized content vocabulary (`ImportedTranscriptContent`)
-is closed: one variant per recognized message content kind, one typed absence
-for a message without content, and generic variants that retain a source-defined
-record or block whose kind has no more specific variant.
+Every source field on an entry is attested with a value, attested absent, or not
+attested; a JSON null is attested absence and an omitted member is not attested.
+The normalized content vocabulary (`ImportedTranscriptContent`) is closed: one
+variant per recognized message content kind, one typed absence for a message
+without content, and generic variants that retain a source-defined record or
+block whose kind has no more specific variant.
 
 Every normalized entry boundary is one immutable, addressable
 `ImportedTranscriptFrontier` naming its conversation and the inclusive final
-entry. Frontiers are what the rest of Signalbox consumes:
+entry. The rest of Signalbox consumes frontiers:
 [sessions-and-transcript](sessions-and-transcript.md) describes creating a
 session that resumes or forks from one, and
 [model-call-execution](model-call-execution.md) describes how imported entries
@@ -34,14 +35,14 @@ caller-supplied conversation identity, and a total lazy callback that supplies
 entry identities; it declares a closed `ImportedConversationFormat` carrying
 both the source family and the Signalbox converter version. Two converters
 exist. `ClaudeCodeJsonlConverter` reads Claude Code session JSONL and produces
-converter version 2; version 1 remains the interpretation for stored version-1
-snapshots. `CodexRolloutJsonlConverter` reads Codex rollout JSONL and produces
-converter version 1.
+converter version 2; stored version-1 snapshots keep the version-1
+interpretation. `CodexRolloutJsonlConverter` reads Codex rollout JSONL and
+produces converter version 1.
 
 `ImportConversationService` runs a converter and calls the append-only Postgres
 import store once, after complete conversion. The store keeps raw bytes in the
-blob store under their content hash ([blob-storage](blob-storage.md)) and keeps
-the header, raw-record occurrences, and normalized entries in relational tables.
+blob store under their content hash ([blob-storage](blob-storage.md)) and the
+header, raw-record occurrences, and normalized entries in relational tables.
 Each header also carries a display title derived once from the preserved
 records, so the unified conversation listing in
 [process-protocol](process-protocol.md) can show imported rows by name.
@@ -59,9 +60,9 @@ entries around a position. The wire shapes of all three surfaces are owned by
 
 ## Decisions
 
-External history is stored as its own aggregate and never replayed as native
-execution. Why: treating it as native execution would fabricate the evidence
-chain the native lifecycle invariants require.
+External history is stored as its own aggregate. Why: replaying it as native
+execution would fabricate the evidence chain the native lifecycle invariants
+require.
 
 The content identity is the digest of the converter format and the raw record
 sequence, so reingesting the same source returns the existing identity and a
@@ -95,9 +96,9 @@ application's release.
 A converter does not read files or choose paths; its caller supplies bytes, so
 later formats add no filesystem types to the domain or application crates.
 
-Claude Code version 2 does not reject a structurally valid source-defined block
-merely because its discriminator has no more specific normalized variant; it
-retains the block as a generic variant.
+The Claude Code converter at version 2 does not reject a structurally valid
+source-defined block whose discriminator has no more specific normalized
+variant; it retains the block as a generic variant.
 
 The Codex converter treats `response_item` as the semantic conversation stream;
 every other top-level item kind, and every `response_item` payload type without
@@ -126,8 +127,7 @@ The browser descriptor route returns no raw blob, normalized record, host path,
 or source repository location.
 
 A failed import may leave unregistered store orphans but never an unreachable
-catalog row. Why: raw blobs are published before the aggregate transaction, so
-the database never references bytes the store lacks.
+catalog row. Why: the database never references bytes the store lacks.
 
 The display title is presentation evidence, not identity: it never participates
 in the source digest, the conversation identity, or the unique source-identity
