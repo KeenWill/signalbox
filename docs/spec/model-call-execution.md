@@ -6,9 +6,9 @@ one durable, at-most-once physical call and records what came back.
 ## Map
 
 The subsystem is the model-call chain: rendering a context frontier into
-provider messages, the staged prepare, authorize-send, and commit-observation
-transactions, the tool rounds between calls, classification of the provider's
-answer into a physical disposition, and the prohibition on retrying a call.
+provider messages; the staged prepare, authorize-send, and commit-observation
+transactions; the tool rounds between calls; classification of the provider's
+answer into a physical disposition; and the prohibition on retrying a call.
 [credential-availability](credential-availability.md) owns what a
 credential-pool selection can end as; this page owns the evidence and cause a
 terminal call records and the mechanics of a successor call. Tool requests,
@@ -99,7 +99,7 @@ Usage evidence is a projection of terminal physical model calls that never
 materializes the transcript; `UsageReader` in `crates/application/src/usage.rs`
 is the read port. Each projected row carries the call's target, a bounded
 non-secret credential-profile label, its usage provenance and input semantics,
-and its token axes, and the projection is append-only. Two read forms exist: an
+and its token axes; the projection is append-only. Two read forms exist: an
 aggregate report grouped by compatibility key, and a newest-first detail page
 with a keyset cursor.
 
@@ -116,9 +116,9 @@ turn as recovery.
 
 A call prepared before the input-semantics pin existed keeps a null pin and its
 reported axes exactly; the null, not a rewrite of the axes, keeps a read from
-deriving cost from possibly cache-inclusive input. Every present writer records
-usage provenance as `reported`; `estimated` exists in the closed vocabulary for
-a later explicit estimator.
+deriving cost from possibly cache-inclusive input. Every writer records usage
+provenance as `reported`; `estimated` exists in the closed vocabulary for a
+later explicit estimator.
 
 Reconstitution refuses every invalid shape rather than repairing it, because
 acting on a partially consistent projection could authorize a second provider
@@ -144,8 +144,8 @@ only render the ceiling as advisory context, so such a deployment keeps its
 intended reply budget rather than the model's larger capability ceiling.
 
 The headroom guard reads the newest reported input from any terminal ordinary
-call since the last compaction, whatever its disposition, because a failed or
-ambiguous round may still have been accepted and its reported size protects a
+call since the last compaction, whatever its disposition. Why: a failed or
+ambiguous round may still have been accepted, and its reported size keeps a
 resumed session from resending a request that already exhausted headroom. An
 ordinary call's reported input is the next request's baseline because its
 successor resends that prefix; a compaction call's reported input measures
@@ -164,7 +164,7 @@ and domain code can only move, so credential escape and capability reuse are
 structurally impossible rather than a review convention. A deterministic adapter
 defect commits the guarded unsent known-failure closure before raising its fatal
 operator signal, so a successfully recorded defect cannot terminate every later
-incarnation on the same call; only failure or ambiguity of that closure leaves
+incarnation on the same call. Only failure or ambiguity of that closure leaves
 the call prepared for startup to validate and retry. The per-attempt dispatch
 gate is held from the authorize-send commit until the runtime first reports that
 provider acceptance is possible, which serializes execution passes for that
@@ -183,14 +183,13 @@ because a unique-violation rollback is the one failure that guarantees the
 transaction had no effect.
 
 Ambiguity parks the turn instead of retrying or substituting, because a lost
-acknowledgement cannot prove the provider did not act; recording ambiguity is
-preferred to an invented exactly-once claim that could duplicate both an effect
-and its spend. Refusal never admits a successor: it is provider judgment about
-the request, so another account would refuse the same content and substituting
-one would only seek a different answer. Credential resolution failure and
-credential rejection never admit a successor: both are deployment
-misconfiguration, and moving to another account hides the account that is
-broken.
+acknowledgement cannot prove the provider did not act, and an invented
+exactly-once claim could duplicate both an effect and its spend. Refusal never
+admits a successor: it is provider judgment about the request, so another
+account would refuse the same content and substituting one would only seek a
+different answer. Credential resolution failure and credential rejection never
+admit a successor: both are deployment misconfiguration, and moving to another
+account hides the account that is broken.
 
 A successor prepared when a parked wait releases carries the predecessor call
 and its non-acceptance proof in its origin, so it is that failure's authorized
@@ -206,9 +205,9 @@ owns the disposition.
 The identity relation is derived from the configured target's own family, never
 from a table of known provider identifiers, so a newly published model needs no
 code change. Alias concretion requires a full date shape rather than any
-trailing segment, which keeps a version extension of the same family name from
-being read as a snapshot. An accepted alias concretion records the identity that
-served only as operator diagnostics, not as a durable per-call provenance row. A
+trailing segment, so a version extension of the same family name is not read as
+a snapshot. An accepted alias concretion records the identity that served only
+as operator diagnostics, not as a durable per-call provenance row. A
 substitution fails the adapter stage closed with an operator error, because the
 durable substitution provenance it would have to record does not exist; a
 substituted call is therefore classified `Ambiguous` by restart rather than
@@ -226,7 +225,7 @@ writers while the guard still prevents a credential/allocator cycle.
 
 A failure with retained execution evidence after its one reconciliation pass, an
 ambiguous commit outcome, an unwind, or cancellation raises the fatal signal and
-the process exits nonzero, because startup recovery is the one audited path that
+the process exits nonzero. Why: startup recovery is the one audited path that
 classifies an issued call from durable evidence, and a live process that cannot
 construct a trustworthy result must stop rather than improvise. Repeated
 same-incarnation reconciliation drains are exercised only by tests.
@@ -306,19 +305,18 @@ transition outbox event in the transaction that commits it;
 provider port is invoked at most once per invocation, and exactly once only
 after the in-flight commit is known. Credential-pool effects derived from an
 observation reload the immutable policy identity pinned by that prepared call,
-not the session's current credential-history head, and every derived record
-commits with the observation's exact correlation in the same all-or-nothing
-transaction as the terminal evidence and the disposition it selects. The
-application owns all candidate identity minting, and persistence uses or
-discards candidates but never mints its own. An ambiguous commit is never
-resolved by replay; the next pass rereads authoritative state before any later
-action.
+not the session's current credential-history head. Every derived record commits
+with the observation's exact correlation in the same all-or-nothing transaction
+as the terminal evidence and the disposition it selects. The application owns
+all candidate identity minting, and persistence uses or discards candidates but
+never mints its own. An ambiguous commit is never resolved by replay; the next
+pass rereads authoritative state before any later action.
 
 A physical call completion is never treated alone as proof that the logical turn
 completed. A `KnownFailed` call retains only the closed provider-error
 classification as its optional cause, never provider prose. A known failure ends
 the attempt and fails the turn with a `TurnFailed` entry and a terminal frontier
-unless the same observation admits an availability successor; an admitting
+unless the same observation admits an availability successor. An admitting
 observation ends the predecessor attempt as a known failure but appends no
 `TurnFailed`, creates no terminal frontier, and reclassifies no pending steering
 while a successor or wait keeps the turn active;
