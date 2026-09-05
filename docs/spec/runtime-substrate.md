@@ -329,23 +329,25 @@ configure a shorter connect timeout; a connect timeout is proven unsent, while a
 whole-exchange timeout after send is boundary loss. Success is HTTP 200 only;
 another 2xx is not terminal success.
 
-All provider-controlled response input is bounded before it can accumulate into
-parsed or retained output, and complete records inside the byte budget are
-processed before a coalesced over-budget suffix, so transport batching cannot
-erase earlier evidence or a terminal marker. Before serde sees a buffered
-success body or a JSON stream record, a shared allocation-free scanner rejects
-JSON nested beyond a fixed depth, unknown fields and raw material included.
-Unknown fields stay tolerated for additive provider evolution under the same
-byte and nesting limits as known ones. The HTTP and Codex CLI decoders also
-tolerate an unknown event name and discard its bounded payload without typed
-parsing; the Claude Code CLI decoder rejects an unrecognized top-level event
-type as a stream protocol violation. Malformed or over-depth JSON in a success
-body is unintelligible-response boundary loss. In the HTTP and Claude Code CLI
-decoders, over-depth streamed material and malformed known-event JSON are stream
-protocol violations; the Codex CLI decoder fails both closed as an unrecognized
-provider error. A malformed or over-depth body attached to a definitive error
-status cannot erase that exchange: the adapter falls back to status
-classification with bounded sanitized native material.
+The HTTP adapters bound all provider-controlled response input before it can
+accumulate into parsed or retained output, and complete records inside the byte
+budget are processed before a coalesced over-budget suffix, so transport
+batching cannot erase earlier evidence or a terminal marker. The CLI adapters
+bound each event and the retained stderr evidence, not the decoded total across
+an exchange. Before serde sees a buffered success body or a JSON stream record,
+a shared allocation-free scanner rejects JSON nested beyond a fixed depth,
+unknown fields and raw material included. Unknown fields stay tolerated for
+additive provider evolution under the same byte and nesting limits as known
+ones. The HTTP and Codex CLI decoders also tolerate an unknown event name and
+discard its bounded payload without typed parsing; the Claude Code CLI decoder
+rejects an unrecognized top-level event type as a stream protocol violation.
+Malformed or over-depth JSON in a success body is unintelligible-response
+boundary loss. In the HTTP and Claude Code CLI decoders, over-depth streamed
+material and malformed known-event JSON are stream protocol violations; the
+Codex CLI decoder fails both closed as an unrecognized provider error. A
+malformed or over-depth body attached to a definitive error status cannot erase
+that exchange: the adapter falls back to status classification with bounded
+sanitized native material.
 
 Each CLI adapter mechanically disables every native facility of the pinned CLI
 that could add a model-visible tool, an instruction source, an external
