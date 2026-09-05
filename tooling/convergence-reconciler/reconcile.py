@@ -90,6 +90,7 @@ query($ids: [ID!]!) {
           id
           author { login }
           state
+          body
           submittedAt
           commit { oid }
           comments(first: 1) { totalCount }
@@ -325,6 +326,10 @@ class GitHubGraphQL:
         self._finish_paginated_connections(pull_requests)
         self._finish_thread_comments(pull_requests)
         for pull_request in pull_requests:
+            pull_request["_review_thread_evidence"] = review_thread_signature(
+                pull_request["review_threads"]
+            )
+        for pull_request in pull_requests:
             resolution_times = pull_request["_persisted_record"].get(
                 "resolved_thread_observed_at", {}
             )
@@ -364,6 +369,7 @@ query($id: ID!, $commentsAfter: String, $reviewsAfter: String) {
           id
           author { login }
           state
+          body
           submittedAt
           commit { oid }
           comments(first: 1) { totalCount }
@@ -409,6 +415,16 @@ query($id: ID!, $commentsAfter: String, $reviewsAfter: String) {
     def _finish_thread_comments(
         self, pull_requests: list[dict[str, Any]]
     ) -> None:
+        for pull_request in pull_requests:
+            threads = pull_request.pop("_review_thread_nodes")
+            self._finish_raw_thread_comments(threads)
+            pull_request["review_threads"].extend(
+                normalize_review_threads(threads, pull_request["author_login"])
+            )
+
+    def _finish_raw_thread_comments(
+        self, threads: list[dict[str, Any]]
+    ) -> None:
         query = """
 query($id: ID!, $after: String!) {
   node(id: $id) {
@@ -421,23 +437,19 @@ query($id: ID!, $after: String!) {
   }
 }
 """
-        for pull_request in pull_requests:
-            for thread in pull_request.pop("_review_thread_nodes"):
-                comments = thread["comments"]
-                page = comments["pageInfo"]
-                while page["hasNextPage"]:
-                    data = self.execute(
-                        query, {"id": thread["id"], "after": page["endCursor"]}
-                    )
-                    node = data.get("node")
-                    if node is None:
-                        raise RuntimeError("review thread became unavailable")
-                    next_comments = node["comments"]
-                    comments["nodes"].extend(next_comments["nodes"])
-                    page = next_comments["pageInfo"]
-                pull_request["review_threads"].extend(
-                    normalize_review_threads([thread], pull_request["author_login"])
+        for thread in threads:
+            comments = thread["comments"]
+            page = comments["pageInfo"]
+            while page["hasNextPage"]:
+                data = self.execute(
+                    query, {"id": thread["id"], "after": page["endCursor"]}
                 )
+                node = data.get("node")
+                if node is None:
+                    raise RuntimeError("review thread became unavailable")
+                next_comments = node["comments"]
+                comments["nodes"].extend(next_comments["nodes"])
+                page = next_comments["pageInfo"]
 
     def _validate_fixing_commits(
         self, pull_requests: list[dict[str, Any]]
@@ -487,6 +499,10 @@ query($id: ID!, $after: String!) {
         for pull_request in pull_requests:
             comments = pull_request.pop("_review_comments")
             reviews = pull_request.pop("_reviews")
+            pull_request["_review_comment_evidence"] = review_comment_signature(
+                comments
+            )
+            pull_request["_review_evidence"] = review_signature(reviews)
             quiet_oids: list[str] = []
             observed_codex_reviews: dict[str, str] = {}
             live_codex_review_oids: dict[str, str] = {}
@@ -561,7 +577,10 @@ query($id: ID!, $after: String!) {
                     and author_login(review).casefold()
                     == CODEX_REVIEWER_LOGIN.casefold()
                     and (
-                        review["comments"]["totalCount"] == 0
+                        (
+                            review["comments"]["totalCount"] == 0
+                            and not (review.get("body") or "").strip()
+                        )
                         or all_findings_declined
                         or informational_wave
                     )
@@ -668,6 +687,13 @@ query($id: ID!, $after: String!) {
             ]
             prior_base = record.get("review_wave_base_oid")
             persisted_head = record.get("head_oid")
+            review_wave_base_oid = pull_request["base_oid"]
+            if (
+                isinstance(prior_base, str)
+                and prior_base != pull_request["base_oid"]
+                and persisted_head == pull_request["head_oid"]
+            ):
+                review_wave_base_oid = prior_base
             material_base_forward = False
             if (
                 isinstance(prior_base, str)
@@ -690,6 +716,7 @@ query($id: ID!, $after: String!) {
                 )
             pull_request["known_codex_review_ids"] = current_ids
             pull_request["review_wave_ids"] = wave_ids
+            pull_request["review_wave_base_oid"] = review_wave_base_oid
             wave_reviews = [
                 review for review in reviews if review["id"] in wave_ids
             ]
@@ -1025,7 +1052,57 @@ query($id: ID!, $after: String) {
       headRefOid
       reviewThreads(first: 100, after: $after) {
         totalCount
-        nodes { id isResolved }
+        nodes {
+          id
+          isResolved
+          comments(first: 100) {
+            totalCount
+            nodes { author { login } authorAssociation body createdAt lastEditedAt pullRequestReview { id } }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+      comments(first: 100) {
+        nodes { author { login } authorAssociation body createdAt lastEditedAt }
+        pageInfo { hasNextPage endCursor }
+      }
+      reviews(first: 100) {
+        nodes {
+          id
+          author { login }
+          state
+          body
+          submittedAt
+          commit { oid }
+          comments(first: 1) { totalCount }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+        evidence_query = """
+query($id: ID!, $commentsAfter: String, $reviewsAfter: String) {
+  node(id: $id) {
+    ... on PullRequest {
+      baseRefOid
+      headRefOid
+      comments(first: 100, after: $commentsAfter) {
+        nodes { author { login } authorAssociation body createdAt lastEditedAt }
+        pageInfo { hasNextPage endCursor }
+      }
+      reviews(first: 100, after: $reviewsAfter) {
+        nodes {
+          id
+          author { login }
+          state
+          body
+          submittedAt
+          commit { oid }
+          comments(first: 1) { totalCount }
+        }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -1033,53 +1110,108 @@ query($id: ID!, $after: String) {
 }
 """
         for pull_request in pull_requests:
-            expected = [
-                (thread.get("id"), thread["isResolved"])
-                for thread in pull_request["review_threads"]
-            ]
-            observed: list[tuple[str, bool]] = []
-            after: str | None = None
-            total_count: int | None = None
-            while True:
-                data = self.execute(
-                    query, {"id": pull_request["node_id"], "after": after}
+            data = self.execute(
+                query, {"id": pull_request["node_id"], "after": None}
+            )
+            node = data.get("node")
+            if node is None:
+                raise RuntimeError(
+                    "pull request became unavailable during thread revalidation"
                 )
-                node = data.get("node")
-                if node is None:
+            if (
+                node["baseRefOid"] != pull_request["base_oid"]
+                or node["headRefOid"] != pull_request["head_oid"]
+            ):
+                pull_request["checked_head_oid"] = None
+                pull_request["base_commits_not_in_head"] = None
+                continue
+
+            thread_connection = node["reviewThreads"]
+            total_count = thread_connection["totalCount"]
+            if not isinstance(total_count, int) or isinstance(total_count, bool):
+                raise RuntimeError("review thread totalCount is not an integer")
+            observed_threads = list(thread_connection["nodes"])
+            thread_page = thread_connection["pageInfo"]
+            while thread_page["hasNextPage"]:
+                task = PaginationTask(
+                    "threads", pull_request, thread_page["endCursor"]
+                )
+                page_query, variables = pagination_query([task])
+                page_data = self.execute(page_query, variables)
+                page_node = page_data.get("item0")
+                if page_node is None:
                     raise RuntimeError(
                         "pull request became unavailable during thread revalidation"
                     )
+                next_page = pagination_page(page_node, "threads")
+                if next_page["totalCount"] != total_count:
+                    raise RuntimeError(
+                        "review thread totalCount changed during revalidation"
+                    )
+                observed_threads.extend(next_page["nodes"])
+                thread_page = next_page["pageInfo"]
+            if len(observed_threads) != total_count:
+                raise RuntimeError(
+                    "review thread revalidation returned an incomplete census"
+                )
+            self._finish_raw_thread_comments(observed_threads)
+
+            observed_comments = list(node["comments"]["nodes"])
+            observed_reviews = list(node["reviews"]["nodes"])
+            comment_page = node["comments"]["pageInfo"]
+            review_page = node["reviews"]["pageInfo"]
+            while comment_page["hasNextPage"] or review_page["hasNextPage"]:
+                evidence_data = self.execute(
+                    evidence_query,
+                    {
+                        "id": pull_request["node_id"],
+                        "commentsAfter": (
+                            comment_page["endCursor"]
+                            if comment_page["hasNextPage"]
+                            else None
+                        ),
+                        "reviewsAfter": (
+                            review_page["endCursor"]
+                            if review_page["hasNextPage"]
+                            else None
+                        ),
+                    },
+                )
+                evidence_node = evidence_data.get("node")
+                if evidence_node is None:
+                    raise RuntimeError(
+                        "pull request became unavailable during review revalidation"
+                    )
                 if (
-                    node["baseRefOid"] != pull_request["base_oid"]
-                    or node["headRefOid"] != pull_request["head_oid"]
+                    evidence_node["baseRefOid"] != pull_request["base_oid"]
+                    or evidence_node["headRefOid"] != pull_request["head_oid"]
                 ):
                     pull_request["checked_head_oid"] = None
                     pull_request["base_commits_not_in_head"] = None
                     break
-                page = node["reviewThreads"]
-                page_total = page["totalCount"]
-                if not isinstance(page_total, int) or isinstance(page_total, bool):
-                    raise RuntimeError("review thread totalCount is not an integer")
-                if total_count is None:
-                    total_count = page_total
-                elif page_total != total_count:
-                    raise RuntimeError(
-                        "review thread totalCount changed during revalidation"
-                    )
-                observed.extend(
-                    (thread["id"], thread["isResolved"])
-                    for thread in page["nodes"]
+                if comment_page["hasNextPage"]:
+                    comments = evidence_node["comments"]
+                    observed_comments.extend(comments["nodes"])
+                    comment_page = comments["pageInfo"]
+                if review_page["hasNextPage"]:
+                    reviews = evidence_node["reviews"]
+                    observed_reviews.extend(reviews["nodes"])
+                    review_page = reviews["pageInfo"]
+            else:
+                normalized_threads = normalize_review_threads(
+                    observed_threads, pull_request["author_login"]
                 )
-                if not page["pageInfo"]["hasNextPage"]:
-                    if len(observed) != total_count:
-                        raise RuntimeError(
-                            "review thread revalidation returned an incomplete census"
-                        )
-                    if observed != expected:
-                        pull_request["checked_head_oid"] = None
-                        pull_request["base_commits_not_in_head"] = None
-                    break
-                after = page["pageInfo"]["endCursor"]
+                evidence_changed = (
+                    review_thread_signature(normalized_threads)
+                    != pull_request.pop("_review_thread_evidence")
+                    or review_comment_signature(observed_comments)
+                    != pull_request.pop("_review_comment_evidence")
+                    or review_signature(observed_reviews)
+                    != pull_request.pop("_review_evidence")
+                )
+                if evidence_changed:
+                    pull_request["checked_head_oid"] = None
+                    pull_request["base_commits_not_in_head"] = None
 
     def _finalize_check_inventory(
         self, pull_requests: list[dict[str, Any]]
@@ -1256,6 +1388,66 @@ def same_repository(left: str | None, right: str) -> bool:
 def author_login(node: dict[str, Any]) -> str | None:
     author = node.get("author")
     return author.get("login") if isinstance(author, dict) else None
+
+
+def review_comment_signature(
+    comments: Sequence[dict[str, Any]],
+) -> tuple[tuple[Any, ...], ...]:
+    return tuple(
+        (
+            author_login(comment),
+            comment.get("authorAssociation"),
+            comment.get("body"),
+            comment.get("createdAt"),
+            comment.get("lastEditedAt"),
+        )
+        for comment in comments
+    )
+
+
+def review_signature(
+    reviews: Sequence[dict[str, Any]],
+) -> tuple[tuple[Any, ...], ...]:
+    return tuple(
+        (
+            review.get("id"),
+            author_login(review),
+            review.get("state"),
+            review.get("body"),
+            review.get("submittedAt"),
+            (
+                review["commit"].get("oid")
+                if isinstance(review.get("commit"), dict)
+                else None
+            ),
+            (
+                review["comments"].get("totalCount")
+                if isinstance(review.get("comments"), dict)
+                else None
+            ),
+        )
+        for review in reviews
+    )
+
+
+def review_thread_signature(
+    threads: Sequence[dict[str, Any]],
+) -> tuple[tuple[Any, ...], ...]:
+    return tuple(
+        (
+            thread.get("id"),
+            thread.get("isResolved"),
+            thread.get("isDispositioned"),
+            thread.get("isEscalated"),
+            thread.get("isInformational"),
+            thread.get("latestReviewerAt"),
+            thread.get("dispositionAt"),
+            thread.get("dispositionKind"),
+            thread.get("fixingCommit"),
+            tuple(thread.get("reviewIds", [])),
+        )
+        for thread in threads
+    )
 
 
 def blob_has_planning_banner(blob: dict[str, Any] | None) -> bool:
@@ -2167,9 +2359,11 @@ def process_pull_request(
     )
     record["review_wave_ids"] = pull_request.get("review_wave_ids", [])
     record["check_inventory"] = pull_request.get("check_inventory", [])
-    base_oid = pull_request.get("base_oid")
-    if isinstance(base_oid, str):
-        record["review_wave_base_oid"] = base_oid
+    review_wave_base_oid = pull_request.get(
+        "review_wave_base_oid", pull_request.get("base_oid")
+    )
+    if isinstance(review_wave_base_oid, str):
+        record["review_wave_base_oid"] = review_wave_base_oid
     computed = evaluate_convergence(pull_request)
     if computed["converged"]:
         record["last_dispatched_at"] = None

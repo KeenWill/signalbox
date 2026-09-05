@@ -1,0 +1,21 @@
+-- Retire repository-watch and convergence-sweep decision state.
+
+DROP VIEW repo_watch_pending_stale_review_clearance;
+DROP VIEW repo_watch_current_pull_request_convergence;
+DROP VIEW convergence_sweep_parked_target;
+
+DROP TABLE repo_watch_stale_review_clearance_result;
+DROP TABLE repo_watch_stale_review_clearance_claim;
+DROP TABLE repo_watch_stale_review_clearance_recovery_cursor;
+DROP TABLE repo_watch_stale_review_clearance;
+DROP TABLE repo_watch_convergence_cutoff_goal;
+DROP TABLE repo_watch_convergence_cutoff;
+DROP TABLE repo_watch_pull_request_convergence;
+DROP TABLE repo_watch_pull_request_convergence_identity;
+DROP TABLE repo_watch_pull_request_convergence_assessment;
+DROP TABLE convergence_sweep_event;
+DROP TABLE convergence_sweep_target;
+
+DROP FUNCTION repo_watch_convergence_threads_are_valid(text[]);
+DROP FUNCTION repo_watch_convergence_check_names_are_valid(text[]);
+DROP FUNCTION convergence_sweep_retry_budget();
