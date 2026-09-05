@@ -157,13 +157,14 @@ precedence:
 2. the registry default (`Auto` or `Confirm`); then
 3. fail-closed `Confirm` when no declaration exists.
 
-Runner execution instead uses the immutable placement policy owned by
-[runner protocol and placement](runner-protocol.md):
+Runner execution instead resolves approval from the immutable placement facts
+that [runner protocol and placement](runner-protocol.md) owns:
 
 1. an exact per-tool override, recording `SessionOverride` for `Auto` and
    leaving `Confirm` undecided;
-2. the selected profile default, recording `PolicyAuto` for `Auto` and leaving
-   `Confirm` undecided; then
+2. otherwise the sandbox profile: a workspace-restricted placement approves
+   every tool and an ambient placement approves only a pure tool, both recording
+   `PolicyAuto`, and every other tool is left undecided; then
 3. fail closed when no exact daemon-owned runner declaration exists.
 
 The dangerous blanket has no runner rung. The producing-call completion

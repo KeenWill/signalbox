@@ -46,10 +46,11 @@ validated against, and creates a `CredentialProfileGrant` when a profile was
 selected. A `RunnerLease` is the domain record of one tool attempt offered to
 that runner; its offer, claim, loss, and retry transitions are domain code, and
 the wire dispatch that would drive them is listed under Not built. A placement
-changes only by explicit transition, and loss replacement is the only transition
-that changes one. When a pinned runner is lost, the placement enters a lost
-state that only two user commands leave: replace, which installs a successor
-placement, and abandon, which retires the placement.
+changes only by explicit transition: replacing a lost runner and replacing the
+pinned credential profile each advance its revision. When a pinned runner is
+lost, the placement enters a lost state that only two user commands leave:
+replace, which installs a successor placement, and abandon, which retires the
+placement.
 
 ## Decisions
 
@@ -224,8 +225,8 @@ credential reference and value split and the runner credential lifecycle;
 [the Git authority threat model](git-authority-threat-model.md) owns the
 transport threat narrative.
 
-A session's dotted placement path is advanced after creation only by the
-`UpdateSessionPlacement` command.
+[Sessions and transcript](sessions-and-transcript.md) owns the session's dotted
+placement path, which is not a runner placement fact.
 
 ## Not built
 
