@@ -233,16 +233,18 @@ connections outside snapshot work.
 The imported seed frontier is selected only when no persisted turn-start lineage
 exists; a queued but unstarted first native turn does not hide it.
 
-The daemon streams snapshot rows through server-side cursors into a secure
-unnamed temporary file, commits the transaction, and only then streams the
-completed file, so a projection or spool failure before transmission returns
-`unavailable` and exposes no partial snapshot. Every bounded sequence read is a
-start message, its items, and an end message carrying the count. The client
-spools each complete snapshot or page into an owner-private anonymous temporary
-file and treats it as authoritative only after the end message arrives and its
-counts, indices, fragment sequence, session, and cursor validate. Snapshot
-deduplication uses the complete semantic identity of source session and entry; a
-second occurrence of that key fails the snapshot.
+The transcript snapshot and the operator-status read stream their rows through
+server-side cursors into a secure unnamed temporary file, commit the
+transaction, and only then stream the completed file; the imported-conversation
+and goal reads load the complete aggregate first, then spool it the same way. A
+projection or spool failure before transmission returns `unavailable` and
+exposes no partial snapshot. Every bounded sequence read is a start message, its
+items, and an end message carrying the count. The client spools each complete
+snapshot or page into an owner-private anonymous temporary file and treats it as
+authoritative only after the end message arrives and its counts, indices,
+fragment sequence, session, and cursor validate. Snapshot deduplication uses the
+complete semantic identity of source session and entry; a second occurrence of
+that key fails the snapshot.
 
 Tool entry arguments and content are JSON strings, never nested untyped JSON
 values, and a client never infers the semantic arm by reparsing either string.
@@ -319,16 +321,17 @@ subscribed connection do.
 
 The terminal client reads submitted input from standard input, never from
 process arguments; only the delegation message and spawn task flags accept their
-text on the command line or from a file. It sends no local path over the wire.
-When no command identity is given, it generates a fresh one and prints it to
-standard error before any socket I/O; every client-generated or
-server-discovered recovery value is printed before the commit it belongs to can
-become ambiguous, each recovery set is printed all or none, and the client never
-substitutes a new command identity for an ambiguous attempt. Its ambiguity
-diagnostic never echoes standard-input content and never synthesizes a shell
-command. It renders every C0 control code point other than line feed, DEL, and
-every C1 code point in process-derived text as a visible escape; a single
-explicit raw-output option is the only opt-in to unescaped text.
+text on the command line or from a file. It sends no local source path over the
+wire; a recorded review finding carries its repository-relative path. When no
+command identity is given, it generates a fresh one and prints it to standard
+error before any socket I/O; every client-generated or server-discovered
+recovery value is printed before the commit it belongs to can become ambiguous,
+each recovery set is printed all or none, and the client never substitutes a new
+command identity for an ambiguous attempt. Its ambiguity diagnostic never echoes
+standard-input content and never synthesizes a shell command. It renders every
+C0 control code point other than line feed, DEL, and every C1 code point in
+process-derived text as a visible escape; a single explicit raw-output option is
+the only opt-in to unescaped text.
 
 ## Planned
 

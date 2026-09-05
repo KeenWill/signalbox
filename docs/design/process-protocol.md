@@ -81,13 +81,15 @@ daemon-actionable `category`, and the runner-authored `detail` object with its
 bounded `code`, `message`, and structured `payload`. The category set is exactly
 the closed daemon-actionable set the runner wire carries, member for member, so
 every retained failure is serializable. The daemon bounds the detail and
-reproduces it without interpretation; runner evidence never carries an absolute
-host path, a repository URL, or a credential fact. The event family is the only
-surface on which a follower learns that its session lost, changed, or moved
-runner, and it is the extension point for later runner facts: a new fact adds a
-state and its members to this event kind, never a second kind. A snapshot's
-session summary carries the same runner object, with connection health present
-exactly for a pinned placement.
+reproduces it without interpretation, following the `operation_failed` contract
+in [runner-protocol.md](../spec/runner-protocol.md). The detail is untrusted
+runner-authored text; the daemon does not inspect it for host paths, repository
+URLs, or credential facts. The event notifies a follower of each live runner
+transition above its snapshot cursor; the snapshot's runner projection carries
+the current state on reconnect. The event family is the extension point for
+later runner facts: a new fact adds a state and its members to this event kind,
+never a second kind. A snapshot's session summary carries the same runner
+object, with connection health present exactly for a pinned placement.
 
 `spawn_session` carries a bounded `task` and the closed relationship object and
 returns `session_spawned { tool_request_id, child_session_id, relationship }`.
@@ -173,9 +175,9 @@ An equal `command_id` replay returns the stored receipt for
 `stale_generation` is evaluated only for a fresh command and only within the
 target's own scope.
 
-A follower learns runner loss, change, or relocation only through
-`runner_state_transition`, and every retained runner failure serializes in the
-status read.
+A follower learns a live runner loss, change, or relocation through
+`runner_state_transition` and the current runner state from its snapshot, and
+every retained runner failure serializes in the status read.
 
 In the exhaustion projection, `members` and `policy_members` are equal in length
 and order, the snapshot state and the live event carry identical `members`, the
