@@ -76,9 +76,11 @@ isolate receives only journaled answers.
 
 - The isolate bootstrap stays closed: nothing new reaches a program except
   through the frame protocol, and no executor moves into the isolate.
-- `InlineFramePayload` remains the only holder of payload bytes, so a
-  digest-backed representation is added there without changing frame kinds or
-  rewriting inline rows.
+- `InlineFramePayload` holds exact bytes and never a digest. The persistence row
+  records whether a payload is inline or a blob, and the repository hydrates
+  blob bytes before it reconstitutes the frame, so replay compares identical
+  bytes however the row was stored. Frame kinds and existing inline rows do not
+  change.
 - Blob storage keeps the `program_journal` storage class reserved and
   daemon-derived.
 - `DeliveryKind::RunCancel` keeps a payload able to carry a command identity and
@@ -104,7 +106,7 @@ isolate receives only journaled answers.
   operation, or a journaled ambiguous answer, and never a silent re-issue.
 - A payload above the inline threshold and within the configured blob maximum is
   stored once as a blob under the `program_journal` class and journaled by
-  digest, and replay reads it by that digest.
+  digest, and the loaded frame carries the exact bytes.
 - A journaled session outcome contains identities and a digest and no transcript
   bytes.
 - An applied cancel appears as one `run_cancel` delivery carrying the command

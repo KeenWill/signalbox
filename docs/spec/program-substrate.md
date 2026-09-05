@@ -40,8 +40,10 @@ The journal's stream row pins only frame-contract version one. It is not a run
 aggregate: no row records a program's registration, grants, or budgets. The
 capability vocabulary is closed and fixed by `ProgramCapability` and the
 migration, and no code grants or exercises a capability. Registration,
-capability executors, event subscriptions, cancellation, and session driving
-have no present code.
+capability executors, event subscriptions, and session driving have no present
+code. A journaled `run_cancel` delivery is terminal: the host returns the
+cancelled outcome and creates no isolate. No present surface initiates a
+cancellation.
 
 ## Decisions
 
