@@ -30,9 +30,9 @@ on that startup re-evaluation. An exhausted wait becomes eligible on its
 deadline, when it has one, on a durable member-availability update, or on an
 operator clearing a credential exclusion. A wake re-runs admission from current
 state, and the turn resumes only when that admission selects a member. A woken
-contended wait that still finds every named member at its bound replaces its
-reservation evidence with the reservations now holding those members and stays
-parked. Release atomically consumes the wait, creates a fresh prepared successor
+contended wait stays parked whenever an admissible member remains at its bound,
+rewritten with the surviving bounded members and their live reservations.
+Release atomically consumes the wait, creates a fresh prepared successor
 attempt, and returns the same turn to running, resuming the availability chain
 the wait was part of rather than starting a new one. A stop-turn request against
 a parked wait consumes the wait, creates a fresh immediate-successor attempt
