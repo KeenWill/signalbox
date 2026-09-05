@@ -3624,7 +3624,7 @@ async fn persist_batch_decision(
     Ok(())
 }
 
-/// Settles a decision's injection receipt (§8): applied decisions deliver to
+/// Settles a decision's injection receipt: applied decisions deliver to
 /// the request's turn; a decision that arrives after its request was decided
 /// or its turn ended is `not_delivered`. A decision naming no request has no
 /// session to carry a receipt.

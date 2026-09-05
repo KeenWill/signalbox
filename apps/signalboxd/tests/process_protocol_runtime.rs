@@ -7446,7 +7446,7 @@ async fn s10_decide_tool_request_final_approval_opens_the_executing_phase()
     runtime.stop().await
 }
 
-/// §8: a decision in flight when the daemon drains is either acknowledged and
+/// A decision in flight when the daemon drains is either acknowledged and
 /// durable or unacknowledged and unclaimed; after the restart the same command
 /// replays to one applied decision with one `delivered` receipt.
 #[tokio::test]

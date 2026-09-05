@@ -1195,7 +1195,7 @@ impl TelemetryMetrics {
         })
     }
 
-    /// Publishes one §12 report onto the exported gauges.
+    /// Publishes one lifecycle-metrics report onto the exported gauges.
     ///
     /// A rate with no population is withdrawn rather than exported as a zero
     /// the durable columns do not claim. The deadline count is instantaneous
