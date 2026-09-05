@@ -17,6 +17,7 @@ from reconcile import (
     PaginationTask,
     PULL_REQUEST_DETAILS_QUERY,
     choose_decision,
+    completed_codex_review_summary,
     comment_only_patch,
     configured_path,
     empty_page_info,
@@ -98,17 +99,6 @@ class ConvergencePredicateTests(unittest.TestCase):
                 },
                 {
                     "__typename": "CheckRun",
-                    "name": "Comment the coverage report",
-                    "status": "COMPLETED",
-                    "conclusion": "FAILURE",
-                },
-                {
-                    "__typename": "StatusContext",
-                    "context": "codecov/patch",
-                    "state": "PENDING",
-                },
-                {
-                    "__typename": "CheckRun",
                     "name": "Tool live smokes (report only)",
                     "status": "COMPLETED",
                     "conclusion": "FAILURE",
@@ -119,11 +109,8 @@ class ConvergencePredicateTests(unittest.TestCase):
         computed = evaluate_convergence(
             pull_request,
             (
-                "*(report only)",
-                "*smoke*",
-                "codecov/patch",
-                "codecov/project",
-                "comment the coverage report",
+                "Tool live smokes (report only)",
+                "Web search live smoke (report only)",
             ),
         )
 
@@ -136,10 +123,88 @@ class ConvergencePredicateTests(unittest.TestCase):
         self.assertEqual(
             computed["non_gating_checks"],
             [
-                {"name": "Comment the coverage report", "state": "FAILURE"},
-                {"name": "codecov/patch", "state": "PENDING"},
                 {"name": "Tool live smokes (report only)", "state": "FAILURE"},
             ],
+        )
+
+    def test_coverage_context_is_gating_without_report_only_label(self) -> None:
+        pull_request = {
+            "base_commits_not_in_head": 0,
+            "checked_head_oid": "head-coverage",
+            "check_rollup_state": "FAILURE",
+            "checks": [
+                {
+                    "__typename": "StatusContext",
+                    "context": "codecov/patch",
+                    "state": "FAILURE",
+                }
+            ],
+            "head_oid": "head-coverage",
+            "mergeable": "MERGEABLE",
+            "quiet_review_head_oids": ["head-coverage"],
+            "review_threads": [],
+        }
+
+        computed = evaluate_convergence(pull_request)
+
+        self.assertFalse(computed["converged"])
+        self.assertEqual(
+            computed["reasons"],
+            ["check-not-green:codecov/patch:FAILURE"],
+        )
+
+    def test_non_tool_context_cannot_claim_report_only_exemption(self) -> None:
+        pull_request = {
+            "base_commits_not_in_head": 0,
+            "checked_head_oid": "head-impostor",
+            "check_rollup_state": "FAILURE",
+            "checks": [
+                {
+                    "__typename": "CheckRun",
+                    "name": "OpenAI smoke compatibility (report only)",
+                    "status": "COMPLETED",
+                    "conclusion": "FAILURE",
+                }
+            ],
+            "head_oid": "head-impostor",
+            "mergeable": "MERGEABLE",
+            "quiet_review_head_oids": ["head-impostor"],
+            "review_threads": [],
+        }
+
+        computed = evaluate_convergence(pull_request)
+
+        self.assertFalse(computed["converged"])
+        self.assertEqual(
+            computed["reasons"],
+            [
+                "check-not-green:OpenAI smoke compatibility (report only):FAILURE"
+            ],
+        )
+
+    def test_completed_codex_summary_requires_current_head(self) -> None:
+        comment = {
+            "author": {"login": "chatgpt-codex-connector"},
+            "body": (
+                "<!-- codex-pull-request-review-summary -->\n"
+                "| 📝 **Code Review** | ✅ **Completed** "
+                '<relative-time datetime="2026-09-05T18:35:26.344586Z">now'
+                "</relative-time> | `abcdef1` | User request |"
+            ),
+            "createdAt": "2026-09-05T17:02:17Z",
+            "lastEditedAt": "2026-09-05T18:35:26Z",
+        }
+
+        self.assertEqual(
+            completed_codex_review_summary(
+                comment, "abcdef1234567890", "chatgpt-codex-connector"
+            ),
+            ("abcdef1234567890", "2026-09-05T18:35:26.344586Z"),
+        )
+        self.assertIsNone(
+            completed_codex_review_summary(
+                comment, "fffffff234567890", "chatgpt-codex-connector"
+            )
         )
 
     def test_required_provider_smoke_failure_blocks_convergence(self) -> None:
@@ -442,6 +507,53 @@ class ConvergencePredicateTests(unittest.TestCase):
 
         client._revalidate_checks([pull_request])
 
+        self.assertIsNone(pull_request["checked_head_oid"])
+        self.assertIsNone(pull_request["base_commits_not_in_head"])
+
+    def test_per_pr_decision_revalidation_rejects_new_check_identity(self) -> None:
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY",
+            12,
+            "chatgpt-codex-connector",
+            10_000,
+            ("Tool live smokes (report only)",),
+        )
+        pull_request = {
+            "checks": [
+                {
+                    "__typename": "CheckRun",
+                    "name": "required",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                }
+            ],
+            "checked_head_oid": "head",
+            "base_commits_not_in_head": 0,
+        }
+        calls: list[str] = []
+
+        def refresh_checks(_pull_requests: object) -> None:
+            calls.append("checks")
+            pull_request["checks"].append(
+                {
+                    "__typename": "CheckRun",
+                    "name": "late required",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                }
+            )
+
+        client._revalidate_checks = mock.Mock(side_effect=refresh_checks)
+        client._revalidate_review_threads = mock.Mock(
+            side_effect=lambda _pull_requests: calls.append("reviews")
+        )
+        client._verify_snapshot_oids = mock.Mock(
+            side_effect=lambda _pull_requests, **_kwargs: calls.append("oids")
+        )
+
+        client.revalidate_for_decision(pull_request)
+
+        self.assertEqual(calls, ["checks", "reviews", "oids"])
         self.assertIsNone(pull_request["checked_head_oid"])
         self.assertIsNone(pull_request["base_commits_not_in_head"])
 
@@ -1226,6 +1338,57 @@ class GitHubGraphQLTests(unittest.TestCase):
         client._finalize_review_evidence([pull_request])
 
         self.assertEqual(pull_request["quiet_review_head_oids"], [])
+        self.assertEqual(pull_request["live_codex_review_oids"], {})
+
+    def test_completed_summary_and_reaction_authenticate_quiet_review(self) -> None:
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY",
+            12,
+            "chatgpt-codex-connector",
+            10_000,
+            ("Tool live smokes (report only)",),
+        )
+        head = "a" * 40
+        pull_request = {
+            "head_oid": head,
+            "check_rollup_state": "SUCCESS",
+            "checks": [],
+            "review_threads": [],
+            "_review_comments": [
+                {
+                    "id": "request",
+                    "authorAssociation": "OWNER",
+                    "body": f"@codex review\nExact head {head}",
+                    "createdAt": "2026-09-05T18:30:00Z",
+                },
+                {
+                    "id": "summary",
+                    "author": {"login": "chatgpt-codex-connector"},
+                    "body": (
+                        "<!-- codex-pull-request-review-summary -->\n"
+                        "| 📝 **Code Review** | ✅ **Completed** "
+                        '<relative-time datetime="2026-09-05T18:35:26.344586Z">'
+                        "now</relative-time> | `aaaaaaaaaa` | User request |"
+                    ),
+                    "createdAt": "2026-09-05T17:02:17Z",
+                    "lastEditedAt": "2026-09-05T18:35:26Z",
+                },
+            ],
+            "_thumbs_up_reactions": [
+                {
+                    "user": {"login": "chatgpt-codex-connector[bot]"},
+                    "createdAt": "2026-09-05T18:35:29Z",
+                }
+            ],
+            "_reviews": [],
+        }
+
+        client._finalize_review_evidence([pull_request])
+
+        self.assertEqual(pull_request["quiet_review_head_oids"], [head])
+        self.assertEqual(
+            pull_request["authenticated_review_ids"], {head: "summary"}
+        )
 
     def test_description_edit_after_review_invalidates_fresh_evidence(self) -> None:
         client = GitHubGraphQL(
@@ -2386,17 +2549,18 @@ class GitHubGraphQLTests(unittest.TestCase):
             "base_oid": "base-old",
             "head_oid": "head",
         }
-        comparison = {"repository": {"item0": {"behindBy": 0}}}
+        comparison = {"behind_by": 0}
         verification = {
             "state0": {"baseRefOid": "base-new", "headRefOid": "head"}
         }
-        with mock.patch.object(
-            client, "execute", side_effect=[comparison, verification]
-        ) as execute:
+        with (
+            mock.patch.object(client, "execute_rest", return_value=comparison),
+            mock.patch.object(client, "execute", return_value=verification) as execute,
+        ):
             client._load_base_ancestry([pull_request])
 
         self.assertIsNone(pull_request["base_commits_not_in_head"])
-        self.assertEqual(execute.call_count, 2)
+        self.assertEqual(execute.call_count, 1)
 
     def test_existing_banners_make_modified_file_planning_only(self) -> None:
         client = GitHubGraphQL(
@@ -2461,13 +2625,19 @@ class GitHubGraphQLTests(unittest.TestCase):
             "reviews": {
                 "nodes": [
                     {
+                        "id": "codex-review",
                         "author": {"login": "chatgpt-codex-connector"},
+                        "state": "COMMENTED",
+                        "body": "",
                         "submittedAt": "2026-08-16T10:01:00Z",
                         "commit": {"oid": "head-authenticated"},
                         "comments": {"totalCount": 0},
                     },
                     {
+                        "id": "human-review",
                         "author": {"login": "human-reviewer"},
+                        "state": "COMMENTED",
+                        "body": "",
                         "submittedAt": "2026-08-16T10:02:00Z",
                         "commit": {"oid": "unrelated-head"},
                         "comments": {"totalCount": 0},

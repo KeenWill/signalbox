@@ -82,8 +82,11 @@ query($ids: [ID!]!) {
         pageInfo { hasNextPage endCursor }
       }
       comments(first: 100) {
-        nodes { author { login } authorAssociation body createdAt lastEditedAt }
+        nodes { id author { login } authorAssociation body createdAt lastEditedAt }
         pageInfo { hasNextPage endCursor }
+      }
+      reactions(last: 100, content: THUMBS_UP) {
+        nodes { user { login } createdAt }
       }
       reviews(first: 100) {
         nodes {
@@ -145,6 +148,11 @@ FIX_DISPOSITION = re.compile(
 )
 ESCALATION_DISPOSITION = "escalated without disposition"
 CODEX_REVIEW_COMMAND = re.compile(r"@codex review(?![\w-])")
+CODEX_REVIEW_SUMMARY_MARKER = "<!-- codex-pull-request-review-summary -->"
+CODEX_COMPLETED_REVIEW = re.compile(
+    r'\|\s*📝\s*\*\*Code Review\*\*\s*\|\s*✅\s*\*\*Completed\*\*'
+    r'.*?datetime="([^"]+)".*?\|\s*`([0-9a-f]{7,40})`\s*\|'
+)
 EXECUTABLE_COMMENT_DIRECTIVE = re.compile(
     r"^#!|^#.*coding[:=]\s*[-_.a-zA-Z0-9]+"
 )
@@ -366,7 +374,7 @@ query($id: ID!, $commentsAfter: String, $reviewsAfter: String) {
   node(id: $id) {
     ... on PullRequest {
       comments(first: 100, after: $commentsAfter) {
-        nodes { author { login } authorAssociation body createdAt lastEditedAt }
+        nodes { id author { login } authorAssociation body createdAt lastEditedAt }
         pageInfo { hasNextPage endCursor }
       }
       reviews(first: 100, after: $reviewsAfter) {
@@ -508,6 +516,9 @@ query($id: ID!, $after: String!) {
                 comments
             )
             pull_request["_review_evidence"] = review_signature(reviews)
+            pull_request["_review_reaction_evidence"] = review_reaction_signature(
+                pull_request.get("_thumbs_up_reactions", [])
+            )
             quiet_oids: list[str] = []
             observed_codex_reviews: dict[str, str] = {}
             live_codex_review_oids: dict[str, str] = {}
@@ -545,19 +556,9 @@ query($id: ID!, $after: String!) {
                 ]
                 review_id = review.get("id")
                 is_live_codex_review = (
-                    author_login(review) is not None
-                    and author_login(review).casefold()
-                    == self.reviewer_login.casefold()
+                    is_reviewer_login(author_login(review), self.reviewer_login)
                     and isinstance(review_id, str)
                 )
-                if is_live_codex_review:
-                    # Tracks every live (non-dismissed, not stale-body) Codex
-                    # review regardless of whether a qualifying request was
-                    # found this tick, so a previously authenticated review
-                    # can be reconfirmed even when gating checks were rerun
-                    # (and so now postdate the original request) on the same,
-                    # unchanged head.
-                    live_codex_review_oids[review_id] = reviewed_oid
                 if is_live_codex_review and request_times:
                     observed_codex_reviews[review_id] = reviewed_oid
                 review_threads = [
@@ -576,24 +577,75 @@ query($id: ID!, $after: String!) {
                     and thread.get("isInformational", False)
                     for thread in review_threads
                 )
+                review_is_quiet = review.get("state") != "CHANGES_REQUESTED" and (
+                    (
+                        review["comments"]["totalCount"] == 0
+                        and not (review.get("body") or "").strip()
+                    )
+                    or all_findings_declined
+                    or informational_wave
+                )
+                if is_live_codex_review and review_is_quiet:
+                    # Same-head evidence may survive a check rerun only while
+                    # the live review still has its authenticated quiet shape.
+                    live_codex_review_oids[review_id] = reviewed_oid
                 if (
                     request_times
-                    and review.get("state") != "CHANGES_REQUESTED"
-                    and author_login(review) is not None
-                    and author_login(review).casefold()
-                    == self.reviewer_login.casefold()
-                    and (
-                        (
-                            review["comments"]["totalCount"] == 0
-                            and not (review.get("body") or "").strip()
-                        )
-                        or all_findings_declined
-                        or informational_wave
-                    )
+                    and is_live_codex_review
+                    and review_is_quiet
                 ):
                     quiet_oids.append(reviewed_oid)
                     if isinstance(review_id, str):
                         authenticated_review_ids[reviewed_oid] = review_id
+
+            for comment in comments:
+                summary = completed_codex_review_summary(
+                    comment, pull_request["head_oid"], self.reviewer_login
+                )
+                if summary is None:
+                    continue
+                reviewed_oid, completed_at = summary
+                request_times = [
+                    effective_at
+                    for request in comments
+                    for effective_at in [comment_effective_at(request)]
+                    if is_codex_review_request(request, reviewed_oid)
+                    and effective_at is not None
+                    and timestamp_not_after(effective_at, completed_at)
+                    and checks_green_before_request(
+                        pull_request["checks"],
+                        pull_request["check_rollup_state"],
+                        effective_at,
+                        self.non_gating_check_patterns,
+                    )
+                    and prior_threads_dispositioned_before(
+                        pull_request.get("review_threads", []), effective_at
+                    )
+                ]
+                has_completion_reaction = any(
+                    is_reviewer_login(
+                        author_login(reaction), self.reviewer_login
+                    )
+                    and isinstance(reaction.get("createdAt"), str)
+                    and timestamp_not_after(completed_at, reaction["createdAt"])
+                    for reaction in pull_request.get("_thumbs_up_reactions", [])
+                )
+                summary_id = comment.get("id")
+                summary_is_live = (
+                    isinstance(summary_id, str)
+                    and has_completion_reaction
+                    and (
+                        not isinstance(pull_request.get("body_last_edited_at"), str)
+                        or timestamp_not_after(
+                            pull_request["body_last_edited_at"], completed_at
+                        )
+                    )
+                )
+                if summary_is_live:
+                    live_codex_review_oids[summary_id] = reviewed_oid
+                if summary_is_live and request_times:
+                    quiet_oids.append(reviewed_oid)
+                    authenticated_review_ids[reviewed_oid] = summary_id
             pull_request["authenticated_quiet_review_oids"] = quiet_oids
             pull_request["authenticated_review_ids"] = authenticated_review_ids
             pull_request["observed_codex_reviews"] = observed_codex_reviews
@@ -607,6 +659,7 @@ query($id: ID!, $after: String!) {
             pull_request["quiet_review_head_oids"] = [
                 oid for oid in quiet_oids if oid == pull_request["head_oid"]
             ]
+            pull_request.pop("_thumbs_up_reactions", None)
 
     def _restore_persisted_review_evidence(
         self, pull_requests: list[dict[str, Any]]
@@ -904,40 +957,18 @@ query($id: ID!, $after: String!) {
         self, pull_requests: list[dict[str, Any]]
     ) -> None:
         comparisons: list[tuple[dict[str, Any], int | None]] = []
-        for offset in range(0, len(pull_requests), DETAIL_BATCH_SIZE):
-            batch = pull_requests[offset : offset + DETAIL_BATCH_SIZE]
-            declarations = ["$owner: String!", "$name: String!"]
-            selections: list[str] = []
-            variables: dict[str, Any] = {
-                "owner": self.owner,
-                "name": self.name,
-            }
-            for index, pull_request in enumerate(batch):
-                variable = f"basehead{index}"
-                declarations.append(f"${variable}: String!")
-                variables[variable] = (
-                    f"{pull_request['base_oid']}...{pull_request['head_oid']}"
-                )
-                selections.append(
-                    f"item{index}: comparison(basehead: ${variable}) {{ behindBy }}"
-                )
-            query = (
-                f"query({', '.join(declarations)}) {{ "
-                f"repository(owner: $owner, name: $name) "
-                f"{{ {' '.join(selections)} }} }}"
+        for pull_request in pull_requests:
+            comparison = self.execute_rest(
+                f"repos/{self.owner}/{self.name}/compare/"
+                f"{pull_request['base_oid']}...{pull_request['head_oid']}"
             )
-            data = self.execute(query, variables)
-            repository = data.get("repository")
-            if repository is None:
-                raise RuntimeError("configured GitHub repository is unavailable")
-            for index, pull_request in enumerate(batch):
-                comparison = repository[f"item{index}"]
-                comparisons.append(
-                    (
-                        pull_request,
-                        comparison["behindBy"] if comparison is not None else None,
-                    )
-                )
+            behind_by = (
+                comparison.get("behind_by")
+                if isinstance(comparison, dict)
+                and isinstance(comparison.get("behind_by"), int)
+                else None
+            )
+            comparisons.append((pull_request, behind_by))
 
         for offset in range(0, len(comparisons), DETAIL_BATCH_SIZE):
             batch = comparisons[offset : offset + DETAIL_BATCH_SIZE]
@@ -1081,8 +1112,11 @@ query($id: ID!, $after: String) {
         pageInfo { hasNextPage endCursor }
       }
       comments(first: 100) {
-        nodes { author { login } authorAssociation body createdAt lastEditedAt }
+        nodes { id author { login } authorAssociation body createdAt lastEditedAt }
         pageInfo { hasNextPage endCursor }
+      }
+      reactions(last: 100, content: THUMBS_UP) {
+        nodes { user { login } createdAt }
       }
       reviews(first: 100) {
         nodes {
@@ -1107,7 +1141,7 @@ query($id: ID!, $commentsAfter: String, $reviewsAfter: String) {
       baseRefOid
       headRefOid
       comments(first: 100, after: $commentsAfter) {
-        nodes { author { login } authorAssociation body createdAt lastEditedAt }
+        nodes { id author { login } authorAssociation body createdAt lastEditedAt }
         pageInfo { hasNextPage endCursor }
       }
       reviews(first: 100, after: $reviewsAfter) {
@@ -1179,6 +1213,9 @@ query($id: ID!, $commentsAfter: String, $reviewsAfter: String) {
 
             observed_comments = list(node["comments"]["nodes"])
             observed_reviews = list(node["reviews"]["nodes"])
+            observed_reactions = list(
+                node.get("reactions", {"nodes": []})["nodes"]
+            )
             comment_page = node["comments"]["pageInfo"]
             review_page = node["reviews"]["pageInfo"]
             while comment_page["hasNextPage"] or review_page["hasNextPage"]:
@@ -1224,15 +1261,37 @@ query($id: ID!, $commentsAfter: String, $reviewsAfter: String) {
                 )
                 evidence_changed = (
                     review_thread_signature(normalized_threads)
-                    != pull_request.pop("_review_thread_evidence")
+                    != pull_request["_review_thread_evidence"]
                     or review_comment_signature(observed_comments)
-                    != pull_request.pop("_review_comment_evidence")
+                    != pull_request["_review_comment_evidence"]
                     or review_signature(observed_reviews)
-                    != pull_request.pop("_review_evidence")
+                    != pull_request["_review_evidence"]
+                    or review_reaction_signature(observed_reactions)
+                    != pull_request.get("_review_reaction_evidence", ())
                 )
                 if evidence_changed:
                     pull_request["checked_head_oid"] = None
                     pull_request["base_commits_not_in_head"] = None
+
+    def revalidate_for_decision(self, pull_request: dict[str, Any]) -> None:
+        """Refresh every mutable gate immediately before one PR decision."""
+        prior_check_inventory = tuple(
+            sorted(
+                f"{check['__typename']}:{check_name(check)}"
+                for check in pull_request["checks"]
+            )
+        )
+        self._revalidate_checks([pull_request])
+        self._revalidate_review_threads([pull_request])
+        if tuple(
+            sorted(
+                f"{check['__typename']}:{check_name(check)}"
+                for check in pull_request["checks"]
+            )
+        ) != prior_check_inventory:
+            pull_request["checked_head_oid"] = None
+            pull_request["base_commits_not_in_head"] = None
+        self._verify_snapshot_oids([pull_request], raise_on_change=True)
 
     def _finalize_check_inventory(
         self, pull_requests: list[dict[str, Any]]
@@ -1407,8 +1466,22 @@ def same_repository(left: str | None, right: str) -> bool:
 
 
 def author_login(node: dict[str, Any]) -> str | None:
-    author = node.get("author")
+    author = node.get("author", node.get("user"))
     return author.get("login") if isinstance(author, dict) else None
+
+
+def is_reviewer_login(login: str | None, reviewer_login: str) -> bool:
+    if login is None:
+        return False
+    return login.casefold().removesuffix("[bot]") == reviewer_login.casefold().removesuffix(
+        "[bot]"
+    )
+
+
+def timestamp_not_after(left: str, right: str) -> bool:
+    return dt.datetime.fromisoformat(left.replace("Z", "+00:00")) <= dt.datetime.fromisoformat(
+        right.replace("Z", "+00:00")
+    )
 
 
 def review_comment_signature(
@@ -1416,6 +1489,7 @@ def review_comment_signature(
 ) -> tuple[tuple[Any, ...], ...]:
     return tuple(
         (
+            comment.get("id"),
             author_login(comment),
             comment.get("authorAssociation"),
             comment.get("body"),
@@ -1424,6 +1498,34 @@ def review_comment_signature(
         )
         for comment in comments
     )
+
+
+def review_reaction_signature(
+    reactions: Sequence[dict[str, Any]],
+) -> tuple[tuple[Any, ...], ...]:
+    return tuple(
+        (author_login(reaction), reaction.get("createdAt"))
+        for reaction in reactions
+    )
+
+
+def completed_codex_review_summary(
+    comment: dict[str, Any], head_oid: str, reviewer_login: str
+) -> tuple[str, str] | None:
+    body = comment.get("body") or ""
+    if (
+        not is_reviewer_login(author_login(comment), reviewer_login)
+        or CODEX_REVIEW_SUMMARY_MARKER not in body
+    ):
+        return None
+    match = CODEX_COMPLETED_REVIEW.search(body)
+    if match is None or not head_oid.startswith(match.group(2)):
+        return None
+    completed_at = match.group(1)
+    effective_at = comment_effective_at(comment)
+    if effective_at is None or not timestamp_not_after(effective_at, completed_at):
+        return None
+    return head_oid, completed_at
 
 
 def review_signature(
@@ -1813,6 +1915,9 @@ def normalize_pull_request(node: dict[str, Any]) -> dict[str, Any]:
         "_review_thread_nodes": list(threads["nodes"]),
         "_thread_total_count": threads["totalCount"],
         "_review_comments": list(node["comments"]["nodes"]),
+        "_thumbs_up_reactions": list(
+            node.get("reactions", {"nodes": []})["nodes"]
+        ),
         "_reviews": list(node["reviews"]["nodes"]),
         "_review_comment_page": node["comments"].get(
             "pageInfo", empty_page_info()
@@ -2678,6 +2783,7 @@ def run_tick(config: Config, logger: JsonLogger) -> list[dict[str, Any]]:
             pull_request["head_ref"], config.head_pattern
         )
         if watched:
+            client.revalidate_for_decision(pull_request)
             summaries.append(
                 process_pull_request(
                     config, logger, state, pull_request, time.time()

@@ -28,6 +28,7 @@ use signalbox_domain::{
     WorkflowName,
 };
 use signalbox_persistence::{
+    MIGRATOR,
     attention::AutomaticResumeAttemptBounds,
     disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
@@ -91,7 +92,7 @@ fn candidate(head: Option<&str>) -> Result<RepoWatchCursorCandidate, Box<dyn Err
     Ok(RepoWatchCursorCandidate::new(observation(head)?))
 }
 
-async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+async fn postgres_pool() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
         .with_db_name(DATABASE_NAME)
         .with_user(DATABASE_USER)
@@ -110,6 +111,11 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .max_connections(4)
         .connect_with(local_test_connection_options(&database_url)?)
         .await?;
+    Ok((container, pool))
+}
+
+async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+    let (container, pool) = postgres_pool().await?;
     migrate(&pool).await?;
     Ok((container, pool))
 }
@@ -356,6 +362,87 @@ async fn forward_migration_removes_retired_convergence_schema() -> Result<(), Bo
 
     assert_eq!(remaining_relations, Vec::<String>::new());
     assert_eq!(remaining_functions, Vec::<String>::new());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn forward_migration_restores_convergence_owned_session_park() -> Result<(), Box<dyn Error>> {
+    const PRE_REMOVAL_MIGRATION: i64 = 202_609_020_022;
+    let (_container, pool) = postgres_pool().await?;
+    MIGRATOR.run_to(PRE_REMOVAL_MIGRATION, &pool).await?;
+    let session = Uuid::from_u128(0x89_900);
+    let mut connection = pool.acquire().await?;
+
+    // The lifecycle row is deliberately isolated from the rest of the session
+    // fixture: this test exercises the data handoff in the forward migration.
+    sqlx::query("SET session_replication_role = replica")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query(
+        "INSERT INTO session (session_id, creation_cause, ancestry_kind)
+         VALUES ($1, 'interactive', 'none')",
+    )
+    .bind(session)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_lifecycle
+            (session_id, state_kind, owned, actor_kind, actor_module,
+             parked_cause, parked_responder, parked_since, start_gate_held)
+         VALUES ($1, 'parked', true, 'module', 'commissioned_dispatch',
+                 'module_park', 'commissioned_dispatch', statement_timestamp(), true)",
+    )
+    .bind(session)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_ownership_event
+            (session_id, event_ordinal, transition_kind, owned_after,
+             actor_kind, actor_module)
+         VALUES ($1, 1, 'created_owned', true, 'module',
+                 'commissioned_dispatch')",
+    )
+    .bind(session)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO convergence_sweep_target
+            (repository, pull_request_number, state_kind, failure_kind,
+             consecutive_failures, parked_at, operator_need,
+             parked_dispatch_id, parked_session_id, parked_dispatched_at)
+         VALUES ('signalbox/repository', 41, 'parked', 'no_model_activity',
+                 convergence_sweep_retry_budget(), statement_timestamp(),
+                 'inspect_inactive_session', $1, $2, statement_timestamp())",
+    )
+    .bind(Uuid::from_u128(0x89_901))
+    .bind(session)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query("SET session_replication_role = origin")
+        .execute(&mut *connection)
+        .await?;
+    drop(connection);
+
+    MIGRATOR.run(&pool).await?;
+
+    let restored = sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
+        "SELECT state_kind, actor_kind, actor_module, parked_cause
+           FROM session_lifecycle
+          WHERE session_id = $1",
+    )
+    .bind(session)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        restored,
+        (
+            String::from("created"),
+            String::from("module"),
+            Some(String::from("commissioned_dispatch")),
+            None,
+        )
+    );
     Ok(())
 }
 

@@ -83,8 +83,9 @@ successful.
 The configured `non_gating_check_patterns` are case-insensitive shell globs
 matched against check-run and status-context names. Matching results are still
 included in the computed state passed to operator commands. The repository
-configuration excludes report-only and informational coverage results while
-leaving provider compatibility smoke aggregates gating.
+configuration exempts only `Tool live smokes (report only)` and
+`Web search live smoke (report only)`; provider compatibility smoke aggregates
+remain gating.
 
 `CONFLICTING` and `UNKNOWN` mergeability both block convergence. Draft pull
 requests also remain unconverged.
@@ -194,10 +195,8 @@ avoid quoting ambiguity:
   "repository": "OWNER/REPOSITORY",
   "reviewer_login": "chatgpt-codex-connector",
   "non_gating_check_patterns": [
-    "*(report only)",
-    "codecov/project",
-    "codecov/patch",
-    "Comment the coverage report"
+    "Tool live smokes (report only)",
+    "Web search live smoke (report only)"
   ],
   "review_thread_limit": 10000,
   "head_pattern": "agent/*",
@@ -217,7 +216,7 @@ The equivalent environment-oriented shape is useful under a service manager:
 ```console
 export CONVERGENCE_RECONCILER_REPOSITORY=OWNER/REPOSITORY
 export CONVERGENCE_RECONCILER_REVIEWER_LOGIN=chatgpt-codex-connector
-export CONVERGENCE_RECONCILER_NON_GATING_CHECK_PATTERNS='["*(report only)","codecov/project","codecov/patch","Comment the coverage report"]'
+export CONVERGENCE_RECONCILER_NON_GATING_CHECK_PATTERNS='["Tool live smokes (report only)","Web search live smoke (report only)"]'
 export CONVERGENCE_RECONCILER_REVIEW_THREAD_LIMIT=10000
 export CONVERGENCE_RECONCILER_ACTIVE_COMMAND='session-control is-active'
 export CONVERGENCE_RECONCILER_DISPATCH_COMMAND='session-control dispatch'
