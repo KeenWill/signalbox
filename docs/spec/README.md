@@ -26,8 +26,9 @@ A design document is titled `<Subsystem> design`, opens with a preamble saying
 it is not built and naming the spec page it extends, and has the sections Goal,
 Design, Compatibility constraints, and Acceptance criteria. It keeps decisions,
 shapes, transitions, and acceptance criteria, and links the spec page for built
-behavior instead of restating it. A foundation-weight change proposes its
-semantics in that document at the bottom of the implementing stack; the spec
+behavior instead of restating it, except that a compatibility constraint states
+the current behavior the design preserves. A foundation-weight change proposes
+its semantics in that document at the bottom of the implementing stack; the spec
 page changes with the code that builds them.
 
 ## Page shape
