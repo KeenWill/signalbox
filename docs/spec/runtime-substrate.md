@@ -19,7 +19,9 @@ and the transcript commit to
 [sessions-and-transcript](sessions-and-transcript.md). The daemon reaches the
 runtime through the `RuntimeModelCallProvider` bridge in
 `crates/model-provider-runtime`, which implements the application's model-call
-port over any `ModelRuntime`.
+port over any `ModelRuntime` and its input-token counting port over an adapter
+that counts a prospective operation's rendered input without a generation
+request.
 
 Caller identity crosses the boundary as an opaque correlation parameter carried
 by `ModelOperation`, every `Observation` and the final `TerminalReport`; the
@@ -60,9 +62,10 @@ build on, from transport byte chunks to event-stream records.
 `StructuredOutputContract` carries a name, description and JSON Schema,
 generated from a Rust type or supplied explicitly, that every adapter realizes
 as one tool proposal under a reserved name: OpenAI forces it through tool
-choice, Anthropic asks for it by instruction, and Codex renders it into the
-prompt with an outer response schema. One provider-independent decoder enforces
-exactly one proposal.
+choice, Anthropic asks for it by instruction, Codex renders it into the prompt
+with an outer response schema, and Claude Code adds it to the private MCP
+catalog and forces it as the named tool choice. One provider-independent decoder
+enforces exactly one proposal.
 
 The Anthropic and OpenAI adapters share one shape: at most one POST per
 operation, hand-written wire types with no provider SDK dependency, and typed
@@ -132,6 +135,10 @@ The HTTP clients disable ambient system and environment proxies and expose no
 proxy configuration, so credentials and content never traverse an
 operator-unreviewed intermediary.
 
+Each HTTP adapter's base URL must use HTTPS, or plain HTTP to a loopback IP
+literal, and carry no userinfo, query or fragment; construction rejects anything
+else.
+
 Idle-connection reuse is disabled so every send opens a fresh connection; this
 removes stale-connection replay and lets a connect failure claim proven-unsent.
 
@@ -169,8 +176,11 @@ covers, and the version actually invoked.
 The compatibility smokes assert nothing about answer quality.
 
 A smoke's required aggregate gates merge for a pull request that changes the
-adapter crate or the workflow itself, an exception to the repository default
-that a credentialed live smoke never gates merge.
+paths its gate names, an exception to the repository default that a credentialed
+live smoke never gates merge. The Anthropic, OpenAI and Claude Code gates name
+their adapter crate and workflow file, the Claude Code gate also the shared CLI
+supervision module; the Codex gate names only the `tooling/codex-cli` pin
+directory and its workflow file, so an adapter-only change runs no Codex smoke.
 
 A twice-daily schedule runs each smoke as a provider-drift canary between
 adapter-touching changes, spending one paid exchange per run.
@@ -243,7 +253,10 @@ Terminal evidence is typed so the caller classifies without string matching;
 strings appear only as retained detail inside already-classified variants. Each
 adapter owns an exhaustive native mapping into the shared provider-error kind,
 which lives in the core crate, and unknown material classifies as unrecognized
-with its native facts retained rather than guessed at.
+with its native facts retained rather than guessed at. A provider-directed retry
+delay, decoded from the HTTP `Retry-After` header or the Codex CLI's rendered
+retry phrase, rides the provider-error evidence, and the bridge carries it into
+the durable failure observation that feeds the availability-successor backoff.
 
 The non-acceptance proof on a provider error is an adapter-owned typed fact,
 never inferred from the error kind, status retryability or provider prose. An
@@ -320,14 +333,16 @@ processed before a coalesced over-budget suffix, so transport batching cannot
 erase earlier evidence or a terminal marker. Before serde sees a buffered
 success body or a JSON stream record, a shared allocation-free scanner rejects
 JSON nested beyond a fixed depth, unknown fields and raw material included.
-Unknown fields and unknown event names stay tolerated for additive provider
-evolution under the same byte and nesting limits as known ones, and an unknown
-event's bounded payload is discarded without typed parsing. Malformed or
-over-depth JSON in a success body is unintelligible-response boundary loss;
-over-depth streamed material and malformed known-event JSON are stream protocol
-violations. A malformed or over-depth body attached to a definitive error status
-cannot erase that exchange: the adapter falls back to status classification with
-bounded sanitized native material.
+Unknown fields stay tolerated for additive provider evolution under the same
+byte and nesting limits as known ones. The HTTP and Codex CLI decoders also
+tolerate an unknown event name and discard its bounded payload without typed
+parsing; the Claude Code CLI decoder rejects an unrecognized top-level event
+type as a stream protocol violation. Malformed or over-depth JSON in a success
+body is unintelligible-response boundary loss; over-depth streamed material and
+malformed known-event JSON are stream protocol violations. A malformed or
+over-depth body attached to a definitive error status cannot erase that
+exchange: the adapter falls back to status classification with bounded sanitized
+native material.
 
 Each CLI adapter mechanically disables every native facility of the pinned CLI
 that could add a model-visible tool, an instruction source, an external

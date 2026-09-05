@@ -163,7 +163,8 @@ Exemplar paths below are in `crates/model-runtime-anthropic` unless noted.
     exposes, each with an `Unrecognized` arm; the count is provider-specific,
     not fixed at two. The per-provider classification precedence (401 first,
     then recognized native material across every native field, then status) is
-    owned by [Provider adapters](../spec/runtime-substrate.md). Exemplar:
+    defined by each adapter's `status.rs`; the runtime page states only that the
+    mapping is exhaustive and unknown material is unrecognized. Exemplar:
     `src/status.rs` (`classify_error_status`, `classify_error_token`,
     `classify_error`); the OpenAI `status.rs` (`classify_error_envelope`) shows
     the multi-field shape — an unrecognized `error.code` falls through to a
@@ -179,13 +180,15 @@ Exemplar paths below are in `crates/model-runtime-anthropic` unless noted.
     `model-runtime` — do NOT write your own SSE framer. Framing guarantees and
     limit semantics: [SSE framing](../spec/runtime-substrate.md). The provider's
     terminal-marker protocol and every stream-integrity rule the decoder
-    enforces: the per-provider stream-integrity paragraphs in
-    [Provider adapters](../spec/runtime-substrate.md). The decoder's record
-    bound is only one of the response bounds: the same section's buffered-body
-    and cumulative-stream caps apply before parsing and live in `runtime.rs`
-    (`MAX_BUFFERED_RESPONSE_BYTES`, `MAX_STREAMED_RESPONSE_BYTES` in both
-    exemplars), in addition to `SseFraming`'s per-record limit. Exemplar:
-    `src/stream.rs`; the OpenAI `stream.rs` for a `[DONE]`-style protocol.
+    enforces: each exemplar's `StreamDecoder` and the module comment of its
+    `src/stream.rs`; the runtime page owns only the shared rule that a stream
+    ending without its terminal marker is incomplete-stream evidence, never
+    success. The decoder's record bound is only one of the response bounds: the
+    same section's buffered-body and cumulative-stream caps apply before parsing
+    and live in `runtime.rs` (`MAX_BUFFERED_RESPONSE_BYTES`,
+    `MAX_STREAMED_RESPONSE_BYTES` in both exemplars), in addition to
+    `SseFraming`'s per-record limit. Exemplar: `src/stream.rs`; the OpenAI
+    `stream.rs` for a `[DONE]`-style protocol.
 07. **`Prepared` capability struct** — holds the built `reqwest::Request`, a
     cloned `Client`, execution settings, and the captured `CredentialValue`. Its
     required properties (opaque, one-shot, non-cloneable, non-serializable):
