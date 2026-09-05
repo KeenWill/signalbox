@@ -996,12 +996,15 @@ where
                             }
                             observe_turn(activated.turn());
                             report_guarded_turn_activation(activated.session(), activated.turn());
+                            if dispatch_start {
+                                // The counted commit already created the first
+                                // durable call checkpoint. Returning releases
+                                // the reserved start lane; ordinary scheduling
+                                // resumes the prepared call.
+                                return Ok(());
+                            }
                             let execution = async {
-                                if dispatch_start {
-                                    execution.execute_dispatch_start(activated).await
-                                } else {
-                                    execution.execute(activated).await
-                                }
+                                execution.execute(activated).await
                             };
                             return execution
                                 .instrument(guarded_turn_span(session, turn))
