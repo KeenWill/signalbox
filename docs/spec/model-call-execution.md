@@ -749,15 +749,16 @@ each, is defined by
 [the credential-availability machine](credential-availability.md).
 
 This page owns the terminal evidence and cause of each ending named by
-[the credential-availability machine](credential-availability.md). A chain that
-already observed a qualifying provider failure carries that last observed cause
-and its `ProviderError` evidence. A turn that reached an exhausted pool before
-issuing any call instead carries the distinct `credential_pool_exhausted`
-preparation cause together with the frozen policy's durable member-exclusion
-evidence; it never fabricates provider evidence and never borrows a stale
-provider cause, because no provider request was issued for it to have observed.
-A parked turn carries no terminal evidence at all: it has not terminalized, and
-is not one of this page's terminal outcomes.
+[the credential-availability machine](credential-availability.md). An attempt
+whose observation closed a qualifying provider failure carries that last
+observed cause and its `ProviderError` evidence. A call-free attempt that
+reached an exhausted pool, whether a fresh chain or a deferred successor whose
+preparation found exhaustion, instead carries the distinct
+`credential_pool_exhausted` preparation cause together with the frozen policy's
+durable member-exclusion evidence; it never fabricates provider evidence and
+never borrows a stale provider cause, because no provider request was issued for
+it to have observed. A parked turn carries no terminal evidence at all: it has
+not terminalized, and is not one of this page's terminal outcomes.
 
 **Implemented behavior — typed pool exhaustion.** A sealed
 `CredentialPoolExhaustedModelCallTurn` carries the pool identity separately from
