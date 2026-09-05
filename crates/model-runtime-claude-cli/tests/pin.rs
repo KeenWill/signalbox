@@ -31,7 +31,7 @@ fn the_pin_manifest_uses_an_exact_version() {
 
     assert!(
         is_exact_pin(&pinned),
-        "package.json must pin {PIN_PACKAGE} at an exact `major.minor.patch` \
+        "package.json must pin {PIN_PACKAGE} at an exact SemVer \
          version, not the range, tag, or alias {pinned}"
     );
 }
@@ -65,17 +65,9 @@ fn the_lockfile_root_dependency_matches_the_manifest() {
     );
 }
 
-/// Whether `version` is an exact `major.minor.patch` pin: exactly three
-/// dot-separated components, each a nonempty run of ASCII digits — so a range
-/// (`^1.2.3`), tag (`latest`), alias, prerelease suffix, or wrong component
-/// count is rejected. Factored out of the manifest test so focused fixtures
-/// exercise both accepted and rejected shapes, not only the live manifest.
+/// Whether `version` is one exact SemVer rather than an npm range or tag.
 fn is_exact_pin(version: &str) -> bool {
-    let components: Vec<&str> = version.split('.').collect();
-    components.len() == 3
-        && components
-            .iter()
-            .all(|component| !component.is_empty() && component.bytes().all(|b| b.is_ascii_digit()))
+    semver::Version::parse(version).is_ok()
 }
 
 #[test]
@@ -114,8 +106,8 @@ fn exact_pin_rejects_an_empty_component() {
 }
 
 #[test]
-fn exact_pin_rejects_a_prerelease_suffix() {
-    assert!(!is_exact_pin("2.1.220-beta"));
+fn exact_pin_accepts_a_prerelease() {
+    assert!(is_exact_pin("2.1.220-beta.1"));
 }
 
 /// The manifest's declared dependency version, as the single value every

@@ -31,9 +31,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 manifest_path.display()
             ))
         })?;
-    if !is_exact_pin(pinned) {
+    if semver::Version::parse(pinned).is_err() {
         return Err(std::io::Error::other(format!(
-            "{} must pin {PIN_PACKAGE} at an exact major.minor.patch version",
+            "{} must pin {PIN_PACKAGE} at an exact SemVer version",
             manifest_path.display()
         ))
         .into());
@@ -41,12 +41,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("cargo:rustc-env=SIGNALBOX_CODEX_CLI_VERSION={pinned}");
     Ok(())
-}
-
-fn is_exact_pin(version: &str) -> bool {
-    let components: Vec<&str> = version.split('.').collect();
-    components.len() == 3
-        && components
-            .iter()
-            .all(|component| !component.is_empty() && component.bytes().all(|b| b.is_ascii_digit()))
 }
