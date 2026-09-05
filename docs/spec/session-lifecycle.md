@@ -12,16 +12,16 @@ core-owned column on the session's lifecycle satellite row, and
 `SessionLifecycleState` in the domain crate defines the states and the
 transitions between them. The turn machine that
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md) owns runs
-beneath the session machine. For a session that is not parked, the session state
-is a projection of its live turn: a running turn makes the session active, a
-turn awaiting approval or a child makes it waiting, and a turn in any recovery
-phase makes it recovering. A blocked goal with no live turn makes the session
-blocked. With no live turn and no blocked goal, the held state and whether a
-turn is queued decide: created becomes dispatched once a turn is queued,
-dispatched holds until a turn activates, and every other session reads active,
-which the attention classifier reads as idle. Core writes the session state in
-the same transaction as the turn or goal transition that changes the projection,
-so the two machines never disagree.
+beneath the session machine. For a session that is neither terminal nor parked,
+the session state is a projection of its live turn: a running turn makes the
+session active, a turn awaiting approval or a child makes it waiting, and a turn
+in any recovery phase makes it recovering. A blocked goal with no live turn
+makes the session blocked. With no live turn and no blocked goal, the held state
+and whether a turn is queued decide: created becomes dispatched once a turn is
+queued, dispatched holds until a turn activates, and every other session reads
+active, which the attention classifier reads as idle. A terminal session stays
+terminal. Core writes the session state in the same transaction as the turn or
+goal transition that changes the projection, so the two machines never disagree.
 
 Waiting carries a typed kind and the party expected to end the wait. Only an
 owned session carries a deadline, and its state sets the kind: admission covers
@@ -57,12 +57,12 @@ a held start gate, so a session that already has queued work becomes dispatched.
 Five further commands close a session or lift a park: a session-level stop
 closes any non-terminal session unless a different terminal outcome is already
 pending, supersede closes it in favour of a named successor, abandon and close
-as failed close a parked session, and resume returns a parked session to its
-mapped state. A parked session with a blocked goal resumes through the goal's
-resume-with-guidance command; one with a pursuing goal may use the session-level
-resume. The goal command that [goal mode](goal-mode.md) calls supersede starts a
-new goal generation in the same session and is unrelated to the session outcome
-superseded.
+as failed close a parked session, and resume returns a parked session with no
+pending terminal outcome to its mapped state. A parked session with a blocked
+goal resumes through the goal's resume-with-guidance command; one with a
+pursuing goal may use the session-level resume. The goal command that
+[goal mode](goal-mode.md) calls supersede starts a new goal generation in the
+same session and is unrelated to the session outcome superseded.
 
 Modules observe the lifecycle through seven event kinds with typed payloads on
 the transactional outbox that [persistence protocol](persistence-protocol.md)
@@ -107,13 +107,14 @@ parks the session; it never ends work on staleness evidence alone.
 
 An owned session that waits for an operator is parked, or blocked on a goal that
 no automatic resumption will lift; a pending tool-approval decision is the
-separate waiting state. An active model call awaiting recovery is a further
-operator wait, ambiguous until the operator reconciles the turn. A turn awaiting
-runner recovery is an operator wait too, and only replacement or abandonment
-leaves the lost state. A module that parks something wrapping a session drives
-the session itself to parked. Attention states shown to operators are derived
-from durable facts by one classifier, and a read that encounters a state it does
-not recognize returns an error rather than a guess.
+separate waiting state. An ambiguous model call or external-effect tool attempt
+whose automatic reconciliation budget is exhausted is a further operator wait
+until the operator reconciles the turn. A turn awaiting runner recovery is an
+operator wait too, and only replacement or abandonment leaves the lost state. A
+module that parks something wrapping a session drives the session itself to
+parked. Attention states shown to operators are derived from durable facts by
+one classifier, and a read that encounters a state it does not recognize returns
+an error rather than a guess.
 
 Lifecycle state, deadlines, budgets, recovery, and staleness detection live in
 daemon core; no module implements any of them. A dispatched
