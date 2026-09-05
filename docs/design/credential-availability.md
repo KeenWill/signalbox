@@ -185,6 +185,10 @@ spec page states.
   from a terminal one.
 - Every attempt a release opens names the wait-release origin; the continuation
   chain stays total over attempts.
+- The contended re-park rewrite extends the storage contract in
+  [persistence protocol](../spec/persistence-protocol.md): it replaces the
+  wait's exclusion evidence and derived deadline as well as its reservation
+  identities.
 - A release extends the built preparation transaction, which admits a member and
   inserts its `Prepared` call on an attempt that already exists, to also open
   the successor attempt and consume the wait; no release commits a `Prepared`
