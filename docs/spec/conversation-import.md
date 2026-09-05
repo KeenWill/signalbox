@@ -55,8 +55,9 @@ begin, append, and commit sequence. The one operator setting,
 to 256 MiB. An inspection read lists the normalized entries of one import with
 their positions, so a user can choose the position a session continues from. A
 browser read model lists imports, returns a descriptor for one, and windows its
-entries around a position. The wire shapes of all three surfaces are owned by
-[process-protocol](process-protocol.md).
+entries around a position. The terminal and inspection wire shapes are owned by
+[process-protocol](process-protocol.md). The browser DTOs are defined in the
+web-contract crate; the daemon's web adapter serves the routes that carry them.
 
 ## Decisions
 
@@ -138,9 +139,10 @@ Committed tests and fixtures are entirely synthetic.
 
 ## Contracts
 
-Errors, logs, and evidence contain classes, counts, and identifiers the daemon
-generated. They never contain source bytes, file paths, provider payloads, SQL,
-or user content.
+Errors, logs, and diagnostic evidence contain classes, counts, and identifiers
+the daemon generated. They never contain source bytes, file paths, provider
+payloads, SQL, or user content. Imported entries are retained source content,
+not diagnostic evidence.
 
 An imported conversation is a durable record, never execution. Ingestion
 performs no session, scheduler, slot, turn, attempt, model-call, tool,
@@ -216,11 +218,11 @@ when both an explicit enable variable and a source-directory variable are set.
 It reports only aggregate counts and typed failure classes, never paths,
 identifiers, raw bytes, text, tool data, thinking, media, or parser excerpts.
 
-The bulk-ingest permit, the frame bound, and every request and refusal shape are
-owned by [process-protocol](process-protocol.md). Blob identity and the catalog
-the raw records converge onto are owned by [blob-storage](blob-storage.md). The
-rule that no database transaction spans store I/O is owned by
-[persistence-protocol](persistence-protocol.md).
+The bulk-ingest permit, the frame bound, and every socket request and refusal
+shape are owned by [process-protocol](process-protocol.md). Blob identity and
+the catalog the raw records converge onto are owned by
+[blob-storage](blob-storage.md). The rule that no database transaction spans
+store I/O is owned by [persistence-protocol](persistence-protocol.md).
 
 ## Not built
 

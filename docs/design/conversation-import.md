@@ -51,9 +51,10 @@ recorded hash, and no database transaction spans the store read.
 
 The same source bytes imported through the terminal path and through a
 blob-backed path resolve to one imported conversation with one identity. Peak
-memory of a blob-backed import does not grow with the source size. Every stored
-snapshot still reconstitutes under its recorded converter version with no
-change. An imported entry that carries usage exposes a cost at read time
-computed from the window covering its attested timestamp, and no column holds a
-dollar amount. Errors and logs from either path still carry only classes,
-counts, and daemon-generated identifiers.
+memory of a blob-backed import is the aggregate it returns plus a bounded read
+buffer; the whole source is never held in memory at once. Every stored snapshot
+still reconstitutes under its recorded converter version with no change. An
+imported entry that carries usage exposes a cost at read time computed from the
+window covering its attested timestamp, and no column holds a dollar amount.
+Errors and logs from either path still carry only classes, counts, and
+daemon-generated identifiers.
