@@ -223,7 +223,10 @@ from a table of known provider identifiers, so a newly published model needs no
 code change. Alias concretion requires a full date shape rather than any
 trailing segment, so a version extension of the same family name is not read as
 a snapshot. An accepted alias concretion records the identity that served only
-as operator diagnostics, not as a durable per-call provenance row. A
+as operator diagnostics, not as a durable per-call provenance row. A reported
+identity reaches operator diagnostics only after the adapter's credential
+redaction and a character-boundary truncation to the configured diagnostic
+bound; [runtime-substrate](runtime-substrate.md) owns the redaction. A
 substitution fails the adapter stage closed with an operator error, because the
 durable substitution provenance it would have to record does not exist; a
 substituted call is therefore classified `Ambiguous` by restart rather than
@@ -353,19 +356,22 @@ admit a successor, because the physical result has not proven cancellation.
 `Completed` admits only text and tool-call parts: empty text and empty thinking
 blocks are dropped, while thinking with text and redacted thinking fail the
 adapter stage closed as unsupported material, because no durable semantic
-representation exists for either. Classification is an adapter contract
-consuming the full-request-send boundary; the daemon never reinterprets SDK
-errors by retryability or exception type. The identity relation applies to every
-identity the exchange reported, early observations and terminal evidence alike,
-because it is timing-sensitive. Different lineage is a substitution: the
-provider served a model the daemon never authorized, and it is never collapsed
-into the alias case or into an ordinary provider failure. When the Anthropic
-adapter sees the server-side fallback block, the response can never complete as
-the resolved target's output, whatever the block names; a block naming the
-configured target itself classifies as ambiguity rather than substitution,
-because no durable marker-only evidence exists to carry a substitution. Every
-classified outcome and every fail-closed bridge defect carries a stable
-sanitized cause code alongside the shared operator failure class defined in
+representation exists for either. Tool content and a tool-use finish must agree;
+either one without the other is a known failure. The dedicated compaction call
+rejects every tool and suppressed-tool part, because its completion must be
+summary text. Classification is an adapter contract consuming the
+full-request-send boundary; the daemon never reinterprets SDK errors by
+retryability or exception type. The identity relation applies to every identity
+the exchange reported, early observations and terminal evidence alike, because
+it is timing-sensitive. Different lineage is a substitution: the provider served
+a model the daemon never authorized, and it is never collapsed into the alias
+case or into an ordinary provider failure. When the Anthropic adapter sees the
+server-side fallback block, the response can never complete as the resolved
+target's output, whatever the block names; a block naming the configured target
+itself classifies as ambiguity rather than substitution, because no durable
+marker-only evidence exists to carry a substitution. Every classified outcome
+and every fail-closed bridge defect carries a stable sanitized cause code
+alongside the shared operator failure class defined in
 [runtime-substrate](runtime-substrate.md).
 
 A model-call transaction that both appends an outbox event and locks shared
