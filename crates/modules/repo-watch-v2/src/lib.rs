@@ -16,8 +16,8 @@ use signalbox_ownership_seam::{
     RepoWatchEventIdentityFrontierV1, RepoWatchEventKindNameV1, RepoWatchEventKindV1,
     RepoWatchEventOccurrenceV1, RepoWatchEventTarget, RepoWatchRule, RepoWatchRuleActionV1,
     RepoWatchRuleId, RepoWatchRuleVersion, RepositorySlug, ReviewState, SessionCommand,
-    SessionCommandKind, SessionLifecycleCommand, SessionLifecycleOperation, SessionOwnership,
-    StartGate, StopStickiness,
+    SessionCommandKind, SessionCommandPayload, SessionLifecycleCommand, SessionLifecycleOperation,
+    SessionOwnership, StartGate, StopStickiness,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -175,12 +175,15 @@ pub enum RuleAdmission {
 }
 
 /// Result of idempotently recording one emitted command.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum DispatchAdmission {
     /// The complete action batch was new.
     Inserted,
     /// This rule revision and event already have a retained action batch.
-    Replayed,
+    Replayed {
+        /// The retained command identities paired with the regenerated payloads.
+        commands: Box<[PlannedCommand]>,
+    },
     /// A durable dispatch or command identity was already bound elsewhere.
     ConflictingReuse,
     /// The named rule revision is not currently active in this repository.
@@ -264,6 +267,53 @@ impl PlannedCommand {
     /// Consumes the plan and returns its checked command.
     pub fn into_command(self) -> SessionCommand {
         self.command
+    }
+
+    fn with_retained_identity(
+        mut self,
+        dispatch: RepoWatchDispatchId,
+        command_id: signalbox_ownership_seam::DurableCommandId,
+    ) -> Result<Self, StoreError> {
+        self.dispatch = dispatch;
+        self.command = match self.command.into_payload() {
+            SessionCommandPayload::CreateSession(command) => {
+                let recreated = match command.template_provenance() {
+                    Some(template) => CreateSession::new_from_template_with_placement(
+                        command_id,
+                        command.provenance(),
+                        template.clone(),
+                        command.initial_configuration_defaults().clone(),
+                        command.placement().clone(),
+                    ),
+                    None => CreateSession::new_with_placement(
+                        command_id,
+                        command.provenance(),
+                        command.initial_configuration_defaults().clone(),
+                        command.placement().clone(),
+                    ),
+                }
+                .with_lifecycle(
+                    command.start_gate(),
+                    command.ownership(),
+                    command.finish_condition().cloned(),
+                );
+                SessionCommand::create_session(recreated)
+                    .map_err(|_: CommandOutsideSeam| StoreError::InvalidDispatchBatch)?
+            }
+            SessionCommandPayload::Lifecycle(command) => {
+                let recreated = SessionLifecycleCommand::new(
+                    command_id,
+                    command.session(),
+                    command.operation().clone(),
+                );
+                SessionCommand::lifecycle(recreated)
+                    .map_err(|_: CommandOutsideSeam| StoreError::InvalidDispatchBatch)?
+            }
+            SessionCommandPayload::SubmitInput(_) | SessionCommandPayload::Goal(_) => {
+                return Err(StoreError::InvalidDispatchBatch);
+            }
+        };
+        Ok(self)
     }
 }
 
@@ -747,15 +797,41 @@ impl RepoWatchStore {
         repository: &RepositorySlug,
         stream_identity: &[u8; 32],
     ) -> Result<bool, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('frontier:' || $1, 0))")
+            .bind(repository.as_str())
+            .execute(&mut *transaction)
+            .await?;
         let deleted = sqlx::query(
             "DELETE FROM frontier
               WHERE repository = $1 AND stream_identity = $2",
         )
         .bind(repository.as_str())
         .bind(stream_identity.as_slice())
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
-        Ok(deleted.rows_affected() == 1)
+        if deleted.rows_affected() == 0 {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        let advanced = sqlx::query(
+            "UPDATE repository_state
+                SET frontier_generation = frontier_generation + 1,
+                    last_frontier_commit_digest = sha256($3),
+                    updated_at = statement_timestamp()
+              WHERE repository = $1 AND frontier_generation < $2",
+        )
+        .bind(repository.as_str())
+        .bind(Decimal::from(u64::MAX))
+        .bind(frontier_release_identity(stream_identity))
+        .execute(&mut *transaction)
+        .await?;
+        if advanced.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Err(StoreError::InvalidFrontierGeneration);
+        }
+        transaction.commit().await?;
+        Ok(true)
     }
 
     /// Activates one checked rule revision without retaining configuration text.
@@ -944,6 +1020,12 @@ fn frontier_candidate_identity(
     for occurrence in events {
         identity.extend_from_slice(occurrence.content_identity().as_bytes());
     }
+    identity
+}
+
+fn frontier_release_identity(stream_identity: &[u8; 32]) -> Vec<u8> {
+    let mut identity = b"signalbox-repo-watch-frontier-release-v1".to_vec();
+    identity.extend_from_slice(stream_identity);
     identity
 }
 
@@ -1236,38 +1318,55 @@ impl RepoWatchStore {
                   AND (repository IS DISTINCT FROM $2
                        OR rule_id IS DISTINCT FROM $3
                        OR rule_revision IS DISTINCT FROM $4
-                       OR event_id IS DISTINCT FROM $5
-                       OR trigger_sequence IS DISTINCT FROM $6))",
+                       OR event_id IS DISTINCT FROM $5))",
         )
         .bind(first.dispatch().into_uuid())
         .bind(first.repository().as_str())
         .bind(first.rule_id().as_str())
         .bind(Decimal::from(first.rule_revision().get()))
         .bind(first.event_id().into_uuid())
-        .bind(first.trigger_sequence().map(Decimal::from))
         .fetch_one(&mut *transaction)
         .await?;
         if conflicting_dispatch {
             transaction.rollback().await?;
             return Ok(DispatchAdmission::ConflictingReuse);
         }
-        let retained_actions: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM dispatch_ledger
+        let retained_actions: Vec<(Uuid, Decimal, Uuid, String)> = sqlx::query_as(
+            "SELECT dispatch_ref, action_ordinal, command_id, command_kind
+               FROM dispatch_ledger
               WHERE repository = $1 AND rule_id = $2 AND rule_revision = $3
-                AND event_id = $4 AND trigger_sequence IS NOT DISTINCT FROM $5",
+                AND event_id = $4 AND trigger_sequence IS NOT DISTINCT FROM $5
+              ORDER BY action_ordinal",
         )
         .bind(first.repository().as_str())
         .bind(first.rule_id().as_str())
         .bind(Decimal::from(first.rule_revision().get()))
         .bind(first.event_id().into_uuid())
         .bind(first.trigger_sequence().map(Decimal::from))
-        .fetch_one(&mut *transaction)
+        .fetch_all(&mut *transaction)
         .await?;
-        if usize::try_from(retained_actions).ok() == Some(planned.len()) {
+        if retained_actions.len() == planned.len() {
+            let mut commands = Vec::with_capacity(planned.len());
+            for (planned, (dispatch, ordinal, command_id, kind)) in
+                planned.iter().cloned().zip(retained_actions)
+            {
+                if ordinal != Decimal::from(planned.action_ordinal())
+                    || kind != command_kind_storage(planned.command().kind())
+                {
+                    transaction.rollback().await?;
+                    return Ok(DispatchAdmission::ConflictingReuse);
+                }
+                commands.push(planned.with_retained_identity(
+                    RepoWatchDispatchId::from_uuid(dispatch),
+                    signalbox_ownership_seam::DurableCommandId::from_uuid(command_id),
+                )?);
+            }
             transaction.rollback().await?;
-            return Ok(DispatchAdmission::Replayed);
+            return Ok(DispatchAdmission::Replayed {
+                commands: commands.into_boxed_slice(),
+            });
         }
-        if retained_actions != 0 {
+        if !retained_actions.is_empty() {
             transaction.rollback().await?;
             return Ok(DispatchAdmission::ConflictingReuse);
         }
@@ -1328,13 +1427,22 @@ impl RepoWatchStore {
         };
         let updated = sqlx::query(
             "UPDATE dispatch_ledger
-                SET status = $2, rejection_kind = $3, settled_at = $4
+                SET status = $2, rejection_kind = $3, settled_at = $4,
+                    created_session_id = CASE
+                        WHEN command_kind = 'create_session' AND $2 = 'applied' THEN $5
+                        ELSE NULL
+                    END
               WHERE command_id = $1 AND status = 'pending'",
         )
         .bind(command.into_uuid())
         .bind(status)
         .bind(rejection_kind)
         .bind(event.recorded_at())
+        .bind(
+            event
+                .session()
+                .map(signalbox_ownership_seam::SessionId::into_uuid),
+        )
         .execute(&self.pool)
         .await?;
         Ok(updated.rows_affected() == 1)

@@ -17,6 +17,7 @@ CREATE TABLE dispatch_ledger (
     event_id uuid NOT NULL,
     trigger_sequence numeric(20,0),
     command_kind text NOT NULL,
+    created_session_id uuid,
     status text NOT NULL,
     rejection_kind text,
     issued_at timestamptz NOT NULL,
@@ -27,6 +28,8 @@ CREATE TABLE dispatch_ledger (
         REFERENCES rule_revision(repository, rule_id, revision),
     FOREIGN KEY (event_id) REFERENCES gh_event(event_id),
     CHECK (command_kind = ANY (ARRAY['create_session', 'submit_input', 'goal', 'lifecycle'])),
+    CHECK ((created_session_id IS NOT NULL) =
+        (command_kind = 'create_session' AND status = 'applied')),
     CHECK (action_ordinal BETWEEN 1 AND 18446744073709551615),
     CHECK (trigger_sequence IS NULL OR trigger_sequence BETWEEN 1 AND 18446744073709551615),
     CHECK (status = ANY (ARRAY['pending', 'applied', 'rejected'])),
@@ -35,7 +38,7 @@ CREATE TABLE dispatch_ledger (
     CHECK (rejection_kind IS NULL OR octet_length(rejection_kind) BETWEEN 1 AND 128)
 );
 
-CREATE FUNCTION enforce_dispatch_reference_evaluation() RETURNS trigger
+CREATE FUNCTION enforce_dispatch_reference_origin() RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = pg_catalog, mod_repo_watch
 AS $$
@@ -48,8 +51,7 @@ BEGIN
            AND (retained.repository IS DISTINCT FROM NEW.repository
                 OR retained.rule_id IS DISTINCT FROM NEW.rule_id
                 OR retained.rule_revision IS DISTINCT FROM NEW.rule_revision
-                OR retained.event_id IS DISTINCT FROM NEW.event_id
-                OR retained.trigger_sequence IS DISTINCT FROM NEW.trigger_sequence)
+                OR retained.event_id IS DISTINCT FROM NEW.event_id)
     ) THEN
         RAISE EXCEPTION 'dispatch reference is already bound to another evaluation';
     END IF;
@@ -57,9 +59,9 @@ BEGIN
 END;
 $$;
 
-CREATE TRIGGER dispatch_reference_names_one_evaluation
+CREATE TRIGGER dispatch_reference_names_one_origin
 BEFORE INSERT ON dispatch_ledger
-FOR EACH ROW EXECUTE FUNCTION enforce_dispatch_reference_evaluation();
+FOR EACH ROW EXECUTE FUNCTION enforce_dispatch_reference_origin();
 
 RESET search_path;
 RESET ROLE;
