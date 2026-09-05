@@ -1764,8 +1764,6 @@ class GitHubGraphQLTests(unittest.TestCase):
                 raise GitHubNotFoundError("gh REST request failed: not found")
             return {
                 "status": "ahead",
-                "total_commits": 1,
-                "commits": [{"sha": "head"}],
                 "base_commit": {"sha": "abcdef1234567890"},
                 "merge_base_commit": {"sha": "abcdef1234567890"},
             }

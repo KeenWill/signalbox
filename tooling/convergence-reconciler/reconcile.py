@@ -486,33 +486,23 @@ query($id: ID!, $after: String!) {
                     else:
                         base_commit = comparison.get("base_commit")
                         merge_base = comparison.get("merge_base_commit")
-                        commits = comparison.get("commits")
-                        total_commits = comparison.get("total_commits")
                         status = comparison.get("status")
                         base_sha = (
                             base_commit.get("sha")
                             if isinstance(base_commit, dict)
                             else None
                         )
-                        compared_head_is_current = (
-                            status == "identical"
-                            and base_sha == pull_request["head_oid"]
-                        ) or (
-                            status == "ahead"
-                            and isinstance(commits, list)
-                            and isinstance(total_commits, int)
-                            and total_commits == len(commits)
-                            and bool(commits)
-                            and isinstance(commits[-1], dict)
-                            and commits[-1].get("sha")
-                            == pull_request["head_oid"]
-                        )
+                        # The exact current head is part of the authenticated
+                        # compare endpoint. GitHub caps the returned commit
+                        # list, so ancestry is proven by the resolved fixing
+                        # commit being the merge base rather than by replaying
+                        # every intervening commit.
                         validity[fixing_commit] = (
                             isinstance(base_sha, str)
                             and base_sha.startswith(fixing_commit.casefold())
                             and isinstance(merge_base, dict)
                             and base_sha == merge_base.get("sha")
-                            and compared_head_is_current
+                            and status in {"ahead", "identical"}
                         )
                 if not validity[fixing_commit]:
                     thread["isDispositioned"] = False
