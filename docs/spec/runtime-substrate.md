@@ -4,7 +4,7 @@ The model-runtime substrate is the typed boundary through which the daemon sends
 one prepared model operation to a provider and receives typed evidence of what
 happened.
 
-## Map
+## Overview
 
 The substrate is `crates/model-runtime` plus four adapter crates: Anthropic and
 OpenAI over HTTPS, and the Codex CLI and Claude Code CLI as supervised
@@ -74,7 +74,7 @@ so fixtures declare their result rather than simulate one. The page also carries
 the one cross-page rule for `OperatorFailureClass`, the closed severity
 classification defined in `crates/application`.
 
-## Decisions
+## Design decisions
 
 The Cargo manifest is the boundary's enforcement: an undeclared dependency fails
 the workspace build, so a boundary violation is a reviewable diff instead of a
@@ -180,7 +180,7 @@ shared group would let an unrelated run evict a required check's queued slot;
 required-check integrity outweighs the fraction of a cent serialization would
 save.
 
-## Contracts
+## Boundary contracts
 
 The daemon refers to a credential by its non-secret name everywhere except at
 the point of use. No credential value, credential file path, or database URL
@@ -405,7 +405,7 @@ owned by the page that owns the behavior raising it:
 causes, [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) for
 turn-liveness causes.
 
-## Not built
+## Planned
 
 - Workspace-instruction transport: a typed instruction region on the operation,
   admitted only where the resolved target and adapter mapping declare

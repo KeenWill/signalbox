@@ -15,7 +15,7 @@ installed before the child starts. The direct HTTP adapters gain a way to
 surface refusal evidence once a transport can prove the response followed the
 complete request upload.
 
-## Shape
+## Design
 
 Workspace-instruction region. `ModelOperation` carries
 `workspace_instructions: Option<WorkspaceInstructionRegion>` beside the system
@@ -59,7 +59,7 @@ transport or evidence source that proves the response arrived only after the
 complete request upload; the downgrade is removed only for an exchange that
 carries that proof.
 
-## Constraints on present code
+## Compatibility constraints
 
 No present runtime operation carries the workspace-instruction field and no
 present adapter mapping declares typed-system capacity. An adapter may not
@@ -77,7 +77,7 @@ the CLI adapters keep a seam where exact values can be seeded before spawn.
 The refusal downgrade in both HTTP adapters stays unconditional, and no caller
 treats an unrecognized provider error from an HTTP adapter as a refusal.
 
-## Acceptance
+## Acceptance criteria
 
 An operation with a present region against a target or adapter mapping without
 declared typed-system capacity fails preparation before any send. With capacity,
