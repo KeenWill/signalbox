@@ -518,10 +518,11 @@ An applied submit-input that creates a turn origin appends an input-accepted
 event; pending steering appends nothing until terminal reclassification mints
 its successor turn and appends the correlated event. Turn activation appends the
 turn's activation event in the activating transaction. Binding an
-already-accepted turn to a goal generation appends nothing. A stop or supersede
-that makes a queued goal turn ineligible appends a retired turn-terminal event
-in the same transaction, and supersede appends that retirement before the
-replacement's input-accepted event.
+already-accepted turn to a goal generation appends nothing. Every durable goal
+event appends a goal-changed event in the transaction that stores it. A stop or
+supersede that makes a queued goal turn ineligible appends a retired
+turn-terminal event in the same transaction, and supersede appends that
+retirement before the replacement's input-accepted event.
 
 The transaction that terminalizes a session's last live turn settles the
 session's pending closure at commit through a deferred constraint trigger, so
