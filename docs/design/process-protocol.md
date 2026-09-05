@@ -125,11 +125,11 @@ length, and each evidence item's `profile` equals the same-ordinal
 `membership_exclusion { record_generation }`,
 `session_displacement { record_generation }`, or
 `chain_exclusion { predecessor_model_call_id }`. A member satisfying several
-exclusions reports exactly one, chosen by that order, which is widest scope
-first, so two producers cannot describe one exhaustion differently.
-`reset_at_unix_ms` is present only when every exclusion active for the member at
-the failure commit expires at the reset it reports, and is then the latest of
-them. The snapshot and event carry no credential bytes, path, provider prose, or
+exclusions reports exactly one, chosen in that order, widest scope first, so two
+producers cannot describe one exhaustion differently. `reset_at_unix_ms` is
+present only when every exclusion active for the member at the failure commit
+expires at the reset it reports, and is then the latest of them. The snapshot
+and event carry no credential bytes, path, provider prose, or
 current-configuration lookup, and the projection is never paginated or
 truncated; configuration admission bounds each profile and pool name to 256
 UTF-8 bytes and each pool to 1,024 members so the duplicated evidence fits one

@@ -5,10 +5,10 @@ The process protocol is the wire boundary between a local client process and
 
 ## Map
 
-`crates/process-protocol` defines one protocol version, integer 1, and a closed
-set of request, message, event, and field shapes; that set is the whole wire
-surface the daemon implements. The daemon side of the boundary is
-`apps/signalboxd/src/process_runtime.rs`; the first client is the `signalbox`
+`crates/process-protocol` defines protocol version 1 and a closed set of
+request, message, event, and field shapes; that set is the whole wire surface
+the daemon implements. The daemon side of the boundary is
+`apps/signalboxd/src/process_runtime.rs`; the client side is the `signalbox`
 terminal binary in `apps/client`.
 
 The transport is one Unix domain stream socket. The daemon reads the socket path
@@ -16,11 +16,10 @@ from `SIGNALBOX_SOCKET_PATH`, and the terminal client reads the same variable
 unless given an explicit path. Each frame is one UTF-8 JSON object followed by a
 newline, at most 8 MiB including the newline; an empty line is a malformed
 frame. Every frame carries the version, a request identity, and exactly one
-tagged request or message object. Request and message objects carry a required
-string `type`; a field the variant does not admit is rejected. Identifiers are
-canonical UUID strings; request identities, versions, indices, counts, and
-cursors are canonical decimal strings that preserve the full unsigned 64-bit
-range.
+request or message object tagged by its `type` string; a field the variant does
+not admit is rejected. Identifiers are canonical UUID strings; request
+identities, versions, indices, counts, and cursors are canonical decimal strings
+that preserve the full unsigned 64-bit range.
 
 A client sends requests and receives receipts, reads, or errors. A mutation
 carries a client-supplied command identity under the claim protocol in
@@ -62,15 +61,15 @@ transactional outbox owned by [persistence-protocol.md](persistence-protocol.md)
 one sequence at a time and offers each event to two process-local fan-outs: one
 durable-only and one composite that also admits deltas. A database-scoped
 advisory guard and a generation fence in `crates/persistence/src/hub_fence.rs`
-together enforce one active daemon process, and therefore one dispatcher and its
-fan-outs, for a database.
+enforce one active daemon process per database, and therefore one dispatcher and
+its fan-outs.
 
 ## Decisions
 
-Version 1 is edited in place until the first durable deployment, the first
-client that cannot be rebuilt at will; an owner-operated remote daemon or
-installed app counts as one, and every later incompatible change allocates a
-permanent new version number.
+Version 1 is edited in place until the first durable deployment, a client that
+cannot be rebuilt at will, such as an owner-operated remote daemon or installed
+app; after that, every incompatible change allocates a permanent new version
+number.
 
 Every frame carries the version so captured traffic and errors are
 self-describing without connection-global negotiation state. Selecting a session
@@ -80,10 +79,9 @@ representation is expressible at version 1.
 The socket's immediate parent directory must be owner-private even when the
 socket node itself is mode 0600, because not every Unix enforces socket-node
 permissions. Socket filesystem access is the deployment boundary; the daemon
-adds no application-level file-owner proof. The lack of authentication is
-provisional: remote access would require an authenticated identity and
-revocation design that does not exist, recorded in
-[open-questions.md](../open-questions.md).
+adds no application-level file-owner proof. The absence of authentication is
+provisional: remote access needs an authenticated identity and revocation design
+that does not exist, recorded in [open-questions.md](../open-questions.md).
 
 A denial on the wire requires a reason although the domain command admits its
 absence, so every client-issued denial is explainable.
