@@ -39,17 +39,19 @@ retryable when a retry could clear it, structural when the same input will fail
 again (a compaction wall, a broken toolchain, a moderation block that a resume
 re-trips), and unknown when no cause was classified. A session is stopped by a
 human or a rule, and the stop records whether it is sticky. It is superseded
-when a newer session owns the work; the outcome also admits a successor-free
-form, for work that is gone. It is abandoned when an operator writes off a
-parked session, and retired when it never did the work and never will.
+when the caller names an existing session other than the one closed; the outcome
+also admits a successor-free form, for work that is gone. It is abandoned when
+an operator writes off a parked session, and retired when it never did the work
+and never will.
 
 Every session carries an owned-or-unmonitored bit, set at creation and flipped
 by a journaled adopt or release. Owned means the daemon holds a liveness
 obligation: deadlines and a driven path to a terminal outcome. Unmonitored means
 a conversation the daemon does not drive. Every lifecycle command and every
-state transition records a lifecycle actor (core, the operator, a named module,
-or the watchdog) classified from the domain actor that
-[identity and commands](identity-and-commands.md) defines.
+state transition records a lifecycle actor: core, the operator, a named module,
+or the watchdog. A transition classifies that actor from the domain actor
+[identity and commands](identity-and-commands.md) defines; a lifecycle command
+carries no actor and derives one from the authenticated principal.
 
 The command surface creates a session, releases its start gate, submits input,
 attaches, resumes, or stops a goal, adopts, and releases; a release also settles
