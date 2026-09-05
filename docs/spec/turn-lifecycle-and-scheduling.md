@@ -251,13 +251,14 @@ ordinary row locking and records the automatic attempt as superseded. When the
 configured attempt budget is spent, the recovery row becomes exhausted, the wait
 remains unchanged, and the process transcript sets operator action required.
 
-Startup acquires the single-daemon guard, fences the prior pool incarnation,
-runs migrations, completes the generic scan, initializes every configured blob
-store, marks prior-process runner connections lost, binds the runner socket,
-binds the process socket, and then starts enrollment, admission, dispatch, and
-scheduling concurrently. No request, dispatch cursor advance, scheduler pass, or
-runner admission occurs before recovery completes. Any phase failure is a failed
-startup with a classified, key-bearing log line and a failure exit code.
+Startup acquires the single-daemon guard, fences the prior pool incarnation once
+the fence migration has run, runs the remaining migrations, completes the
+generic scan, initializes every configured blob store, marks prior-process
+runner connections lost, binds the runner socket, binds the process socket, and
+then starts enrollment, admission, dispatch, and scheduling concurrently. No
+request, dispatch cursor advance, scheduler pass, or runner admission occurs
+before recovery completes. Any phase failure is a failed startup with a
+classified, key-bearing log line and a failure exit code.
 
 Each scan transaction classifies the lost tenure by its durable evidence and
 never fabricates a live end. A turn with no model call ends its attempt lost and
@@ -418,11 +419,11 @@ rather than reacquiring. On SIGINT or SIGTERM the listener stops accepting
 requests, follow streams close, the dispatcher stops starting transactions, the
 scheduler stops admitting passes, and liveness stops scanning. Finite handlers,
 the current dispatcher transaction, in-flight scheduler passes, and an in-flight
-liveness read share a grace window of the configured longest model exchange plus
-a fixed cleanup margin. An admitted pass stops spending its occupancy bound and
-drains under that window. After its in-flight operation reaches a durable
-boundary, a pass checkpoints the active turn and returns without issuing
-another, and a successor resumes from that boundary.
+liveness read or terminalization share a grace window of the configured longest
+model exchange plus a fixed cleanup margin. An admitted pass stops spending its
+occupancy bound and drains under that window. After its in-flight operation
+reaches a durable boundary, a pass checkpoints the active turn and returns
+without issuing another, and a successor resumes from that boundary.
 
 ## Planned
 
