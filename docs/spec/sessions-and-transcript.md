@@ -212,11 +212,12 @@ content, never transcript access.
 An owned session that waits for an operator is parked, or blocked on a goal that
 no automatic resumption will lift; a pending tool-approval decision is the
 separate waiting state. An active model call awaiting recovery is a further
-operator wait, ambiguous until the operator reconciles the turn. A module that
-parks something wrapping a session drives the session itself to parked.
-Attention states shown to operators are derived from durable facts by one
-classifier, and a read that encounters a state it does not recognize returns an
-error rather than a guess.
+operator wait, ambiguous until the operator reconciles the turn. A turn awaiting
+runner recovery is an operator wait too, and only replacement or abandonment
+leaves the lost state. A module that parks something wrapping a session drives
+the session itself to parked. Attention states shown to operators are derived
+from durable facts by one classifier, and a read that encounters a state it does
+not recognize returns an error rather than a guess.
 
 The only way to derive a new transcript snapshot is to append to the old one, so
 every earlier entry stays in order. Two frontiers are equal only if they are the
@@ -225,10 +226,12 @@ changes which entries are visible to the model, never what is stored. A summary
 cannot hide an unsummarized prefix, and its end boundary must close every tool
 exchange it covers.
 
-A turn binds its configuration when its origin is accepted. Replacing defaults
-later never rebinds it, whether the turn is queued, running, or finished. A
-delegated child copies the parent turn's frozen defaults epoch, never the
-parent's current defaults pointer and never the turn's per-call overrides.
+An accepted-input turn binds its configuration when its input is accepted, and a
+delegated-task or delegation-wake turn binds the configuration stored with its
+delegated origin. Replacing defaults later never rebinds a turn, whether it is
+queued, running, or finished. A delegated child copies the parent turn's frozen
+defaults epoch, never the parent's current defaults pointer and never the turn's
+per-call overrides.
 
 The application's `CreateSession` request has no cause or ancestry input and
 fixes the interactive cause with no ancestry; the imported-frontier family

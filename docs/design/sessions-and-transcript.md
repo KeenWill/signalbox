@@ -61,17 +61,17 @@ its durable contract explicitly supplies, and only after its own source exists.
 Relocation boundary entry. One entry kind references the complete checked
 successor placement record at a relocation boundary, and the referenced record
 is the authority for whether the runner or the working directory moved. Every
-transaction that installs a successor placement, whether loss replacement or a
-user-directed move of a healthy session or of its working directory, appends one
-such entry after the latest authoritative semantic frontier, or establishes a
-one-entry root when no frontier exists, and advances a session
-placement-frontier pointer with the placement revision. Active continuation and
-the next eligible origin both extend that exact boundary before any execution on
-the successor placement. A same-revision, missing-record, non-prefix,
-cross-session, or second placement boundary fails closed. When the installing
-command runs while an authorized model call is in flight, the boundary is
-appended only after that call's observation commits, so the call's own entries
-precede it and the prefix-only law holds. The entry copies no runner
+transaction that installs a successor placement, whether a pinned loss
+replacement or a user-directed move of a healthy session or of its working
+directory, appends one such entry after the latest authoritative semantic
+frontier, or establishes a one-entry root when no frontier exists, and advances
+a session placement-frontier pointer with the placement revision. Active
+continuation and the next eligible origin both extend that exact boundary before
+any execution on the successor placement. A same-revision, missing-record,
+non-prefix, cross-session, or second placement boundary fails closed. When the
+installing command runs while an authorized model call is in flight, the
+boundary is appended only after that call's observation commits, so the call's
+own entries precede it and the prefix-only law holds. The entry copies no runner
 advertisement, workspace path, credential fact, or tool output; the placement
 record remains its content authority, and the checked placement transactions are
 its only producers. The provider projection resolves the record to a rendered
@@ -139,14 +139,17 @@ workspace is open. The session summary read reports referenced blob count and
 byte length equal to the relation's totals, nonzero for a session whose timeline
 references blobs, and no detail read fetches blob bytes. Attachment filename,
 media metadata, and derived-text classes appear in search results with reveal
-addresses only after their source committed. Every successor placement
-installation appends exactly one relocation entry, the next model call reads a
-frontier containing it, each fail-closed case is rejected, and the entry carries
-no runner, workspace, credential, or tool content. Delegation result sealing
-reads one sealed projection and has no raw-identity path. A spawned child sits
-in its parent's directory, is pathless when its parent is, and copies no other
-placement axis. A turn that fails at eligibility carries one origin entry and
-one failed marker committed together with a turn-failed event and no attempt
-row. A turn released from a wait with an exhausted pool and an already-issued
+addresses only after their source committed. Every pinned replacement and every
+user-directed move appends exactly one relocation entry, the next model call
+reads a frontier containing it, each fail-closed case is rejected, and the entry
+carries no runner, workspace, credential, or tool content. Replacing a runner
+lost before the session pinned it appends no entry and returns the placement to
+unpinned at the successor revision. Delegation result sealing reads one sealed
+projection and has no raw-identity path. A spawned child sits in its parent's
+directory, is pathless when its parent is, and copies no other placement axis. A
+turn that fails at eligibility carries its origin entries, one for an accepted
+input and every coalesced delivery in sequence for a delegation wake, and one
+failed marker committed together with a turn-failed event and no attempt row. A
+turn released from a wait with an exhausted pool and an already-issued
 predecessor call carries one failed marker committed with a fresh call-free
 ended attempt, a turn-failed event, and no terminal model call.
