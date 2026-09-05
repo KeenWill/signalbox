@@ -155,8 +155,8 @@ transactions: it commits its registry row, pending typed command, and prepared
 call before provider work, and a later session-locked transaction settles the
 command exactly once.
 
-Every explicit row lock taken from Rust lives in one reviewed inventory so lock
-order is auditable instead of scattered through query strings.
+The row locks the lock inventory names are issued from that one reviewed file,
+so their order is auditable instead of scattered through query strings.
 
 Creating a session from an imported frontier takes no explicit row lock, because
 the selected imported aggregate is immutable and append-only.
@@ -265,12 +265,13 @@ its own rows through explicit fallible functions and assembles a checked input;
 the domain validates that input and returns one canonical value or a typed
 failure.
 
-A load returns nothing only for an identifier it has never seen; a claimed row
-that cannot be reconstructed is corruption, never an unclaimed identifier. Load
-paths never panic on durable data. Startup recovery operates only on projections
-that reconstituted successfully. A guarded write that matches zero rows is
-benign staleness to reload and rederive, unless the transaction's own premises
-made a match mandatory, in which case it is corruption.
+A durable-command load returns nothing only for a command identifier it has
+never seen; a claimed row that cannot be reconstructed is corruption, never an
+unclaimed identifier. Load paths never panic on durable data. Startup recovery
+operates only on projections that reconstituted successfully. A guarded write
+that matches zero rows is benign staleness to reload and rederive, unless the
+transaction's own premises made a match mandatory, in which case it is
+corruption.
 
 A load that must be complete proves it: the scheduling load counts queued input
 origins against lifecycle rows and fails on mismatch rather than trusting
