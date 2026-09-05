@@ -519,7 +519,29 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .await?,
         FrontierEventAdmission::Stale
     );
+    let committed_digest: Vec<u8> = sqlx::query_scalar(
+        "SELECT last_frontier_commit_digest
+           FROM repository_state WHERE repository = $1",
+    )
+    .bind(repository.as_str())
+    .fetch_one(&module_pool)
+    .await?;
     assert!(store.release_frontier(&repository, &stream).await?);
+    let (released_generation, released_digest): (Decimal, Vec<u8>) = sqlx::query_as(
+        "SELECT frontier_generation, last_frontier_commit_digest
+           FROM repository_state WHERE repository = $1",
+    )
+    .bind(repository.as_str())
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(released_generation, Decimal::from(2_u64));
+    assert_ne!(released_digest, committed_digest);
+    assert_eq!(
+        store
+            .commit_frontier_candidate(&repository, 1, &frontier, &[], observed_at, retain_until,)
+            .await?,
+        FrontierEventAdmission::Stale
+    );
     assert!(!store.release_frontier(&repository, &stream).await?);
 
     let mut replay = delivery();
