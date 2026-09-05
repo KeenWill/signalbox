@@ -21,7 +21,7 @@ eligibility, and a wait-transition failure producer terminalizes a turn whose
 predecessor model call already issued. Further semantic entry variants cover
 refusal, reconciliation, mismatch, accepted risk, and approval events.
 
-## Shape
+## Design
 
 Instruction-aware replacement. A replacement for a session with a nonempty
 admitted instruction set rejects its proposed model selection unless every
@@ -110,7 +110,7 @@ Further entry variants. Refusal, reconciliation, mismatch, accepted-risk, and
 approval-event entries join the closed payload set as reference-bearing facts,
 each naming the durable record that owns its content.
 
-## Constraints on present code
+## Compatibility constraints
 
 Creation-cause readers do not assume the present vocabulary is final, and the
 stored discriminator's decode surface stays extensible without reinterpreting
@@ -129,7 +129,7 @@ parent-directory default. The static eligible-failure and wait-transition
 failure paths have no producer, and every present failed-turn producer keeps
 emitting the turn-failed event atomically with the marker.
 
-## Acceptance
+## Acceptance criteria
 
 A replacement against a session with a nonempty admitted set and a selection
 lacking transport or capacity is rejected with a typed rejection that leaves

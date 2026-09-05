@@ -3,7 +3,7 @@
 This subsystem creates sessions, holds each session's configuration defaults and
 metadata, and records the semantic transcript that every model call reads.
 
-## Map
+## Overview
 
 A session is one durable, independently browsable conversation with its own
 `SessionId`. This page covers session creation and ancestry, creation from an
@@ -83,7 +83,7 @@ projection and follow stream for one session, a timeline of durable events with
 typed detail, and lexical search. Its request and response shapes live in
 `crates/web-contract`.
 
-## Decisions
+## Design decisions
 
 Cause and ancestry are recorded as independent facts, because deriving one from
 the other would make ordinary forks look delegated and force delegated children
@@ -202,7 +202,7 @@ orphan or a silent kill. Per-relationship message ordinals are provenance and do
 not serve as a cross-relationship tie-break. A child result is delivered
 content, never transcript access.
 
-## Contracts
+## Boundary contracts
 
 An owned session that waits for an operator is in the parked state and no other;
 a pending tool-approval decision is the separate waiting state. A module that
@@ -547,7 +547,7 @@ correlates the entry as the logical result of its still-open await request. The
 immutable child result stays keyed by the spawning request, and a detached child
 may return after the parent has stopped or cancelled.
 
-## Not built
+## Planned
 
 - Instruction-aware defaults replacement, rejecting a model selection whose
   targets lack instruction transport or capacity for the session's admitted set
