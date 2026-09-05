@@ -6,22 +6,21 @@ them.
 
 ## Map
 
-Repository watch is a credentialed external-ingress boundary from its first
-operation. Each configured repository has its own credential-file reference,
-read only for that repository's request and never given to a dispatched session.
-Only configured repositories are watched, and without a repository-watch section
-the subsystem does not start. The configuration section
-(`RepositoryWatchConfiguration`) and the example TOML own the shape of what an
-operator writes.
+Repository watch is a credentialed external-ingress boundary. Each configured
+repository has its own credential-file reference, read only for that
+repository's request and never given to a dispatched session. Only configured
+repositories are watched, and without a repository-watch section the subsystem
+does not start. The configuration section (`RepositoryWatchConfiguration`) and
+the example TOML own the shape of what an operator writes.
 
 Two transports feed one fact store. Polling sends conditional requests from one
 independent task per configured repository at that repository's interval; the
 conditional-request cache starts empty on every daemon start, so the first poll
 after a restart is one complete unconditional fetch. A webhook listener accepts
 only `POST` on its configured path as plain HTTP, and a repository that enables
-it runs in one of two modes, shadow or primary. Shadow projects a delivery
-against an in-memory baseline and records parity rows only; primary applies it
-to the durable cursor and writes webhook-produced events.
+it runs in shadow or primary mode. Shadow projects a delivery against an
+in-memory baseline and records parity rows only; primary applies it to the
+durable cursor and writes webhook-produced events.
 
 Each repository has one versioned durable cursor (`RepoWatchCursor`). It retains
 the normalized repository state the next comparison needs, the exact
@@ -105,7 +104,7 @@ Repository-watch operations are readable through a typed read-only application
 port (`repo_watch_operations`) backed by the durable cursor, event, evaluation,
 dispatch, obligation, webhook, and commissioned records.
 
-The convergence sweep is a periodic pass composed beside repository watch.
+The convergence sweep is a periodic pass that runs beside repository watch.
 Repository watch owns event-driven dispatch; the sweep supplies liveness for
 watched pull requests whose provider events stopped arriving. It owns its
 convergence predicate, its fenced commission, its durable retry and park
@@ -141,11 +140,11 @@ activation, dispatch, webhook projection, and cursor commit stay outside that
 cancellation region. An attempt reuses a committed detail and settled check
 baseline for an open pull request only when the recorded fetch reached the
 durable cursor and observed every check terminal and a known mergeable state,
-because an uncommitted fetch cannot vouch for a baseline it never replaced and
-neither a check completion nor a mergeability calculation moves `updated_at`.
-Reviews, threads, and reactions are re-fetched every attempt and replace their
-prior projections before comparison, because a reaction does not move
-`updated_at` and a delayed detail refresh must not defer a review dispatch
+because an uncommitted fetch proves nothing about a baseline it never replaced
+and neither a check completion nor a mergeability calculation moves
+`updated_at`. Reviews, threads, and reactions are re-fetched every attempt and
+replace their prior projections before comparison, because a reaction does not
+move `updated_at` and a delayed detail refresh must not defer a review dispatch
 signal; with no configured signal reviewer the poller issues no reaction
 request. A restart schedules the next complete poll at what remains of the
 configured cadence, measured from the durable record of the last completed sweep
@@ -169,21 +168,21 @@ current reaction lacks actor identity, normalization carries prior retained
 reactions for that subject forward only while their reactors remain in the
 signal-reviewer set, so identity loss cannot manufacture removals.
 
-Compacting a merged pull request's baseline means a merge burst cannot make
-every later webhook refresh re-transfer full terminal detail, while post-merge
-label, check, review, thread, and reaction changes still produce events. A
-compact baseline remains while the merged pull request's recurring streams
-remain in the frontier, because evicting it alone would make a later refresh
-look like an initial observation. No lifecycle releases a stream: a release is
-valid only for a subject that provably produces no further occurrence, and a
-merged pull request is not one. Exceeding the stream ceiling fails the
-comparison, and sequence exhaustion fails rather than wrapping, because reuse
-would mint a content identity colliding with a durable one. The frontier is
-never replaced with an empty one, because every stream would restart at sequence
-one and mint identities a commit coalesces, silently losing those events and
-their dispatches. The frontier records the pull request owning each recurring
-stream although nothing reads it yet, because a stream identity is a one-way
-hash no later migration can invert.
+A merged pull request's baseline is compacted so a merge burst cannot make every
+later webhook refresh re-transfer full terminal detail, while post-merge label,
+check, review, thread, and reaction changes still produce events. A compact
+baseline remains while the merged pull request's recurring streams remain in the
+frontier, because evicting it alone would make a later refresh look like an
+initial observation. No lifecycle releases a stream: a release is valid only for
+a subject that provably produces no further occurrence, and a merged pull
+request is not one. Exceeding the stream ceiling fails the comparison, and
+sequence exhaustion fails rather than wrapping, because reuse would mint a
+content identity colliding with a durable one. The frontier is never replaced
+with an empty one, because every stream would restart at sequence one and mint
+identities a commit coalesces, silently losing those events and their
+dispatches. The frontier records the pull request owning each recurring stream
+although nothing reads it yet, because a stream identity is a one-way hash no
+later migration can invert.
 
 The content identity is a domain-separated SHA-256 digest over the repository,
 event version, canonical target, identifying payload members, a separately
@@ -250,8 +249,8 @@ lowest-numbered root, or its lowest-numbered member for a rootless cycle.
 
 The goal statement is synthesized from the dispatching rule, the resolved
 template, and the typed parameters, and states only rule, template, and the pull
-request or branch in its repository, with a head branch qualified by the fork
-holding it so a consumer cannot misread it as the watched repository's. The
+request or branch in its repository. A head branch is qualified by the fork
+holding it, so a consumer cannot misread it as the watched repository's. The
 statement is composed by the dispatch rather than declared by the session,
 because only an already-attached goal admits a model declaration. Commissioning
 records the tagged-context turn as the generation's own first goal turn rather
@@ -263,16 +262,16 @@ resolves either append-only authority source under the same generation-one
 binding, renders both through one rendering, and refuses a session recording
 both as corruption. The commission's durable command identity binds template,
 fence, statement, and initial content digest, so an equal retry replays and a
-different intent under that identity is refused, under the command protocol
-[identity and commands](identity-and-commands.md) states. The append-only
-dispatch records identify the sessions responsible for a pull request; no
-mutable assignment flag replaces them.
+different intent under that identity is refused, under the command protocol in
+[identity and commands](identity-and-commands.md). The append-only dispatch
+records identify the sessions responsible for a pull request; no mutable
+assignment flag replaces them.
 
 Further matching facts join an obligation's latest-event projection and
 increment its count, including a match racing release, so one singleton has at
 most one outstanding obligation. A blocked or user-stopped dispatch session, and
 an achieved session whose delivered state is no longer the pull request's latest
-durable head, opens a latest-state obligation before release, and sibling
+durable head, opens a latest-state obligation before release. Sibling
 terminations and matching events collapse into it without regressing its latest
 event. Achievement is terminal exactly when the delivered state is known and
 still the latest durable head, so the successor carrying the newest head seals;
@@ -314,17 +313,16 @@ request, and stalled head. The attempt budget is a schema constant so parking,
 the readiness projection, and the dispatch loader cannot disagree, and the two
 delay bounds are compiled in and may only be lowered. An operator release
 through `repo_watch_release_parked_dispatch_obligation` restores the whole
-budget. Whether the rule that parked an obligation also matches the progressing
-fact is irrelevant, and every event is tested against every park as it is
-evaluated, so a rule watching one narrow signal cannot stay parked on an
-obsolete head. Progress must follow the state the lineage stalled on and every
-fact about that pull request the lineage already spent across its successor
-obligations, so a lagging rule replaying an older event cannot restore the
-budget for a fact already spent. Rule, repository, and stack singletons collapse
-many pull requests onto one obligation, so a releasing fact must name the same
-pull request the lineage stalled on. A branch target carries no head and no
-review activity, so an obligation stalled on one is released only by an
-operator.
+budget. Every event is tested against every park as it is evaluated, whether or
+not the rule that parked the obligation matches it, so a rule watching one
+narrow signal cannot stay parked on an obsolete head. Progress must follow the
+state the lineage stalled on and every fact about that pull request the lineage
+already spent across its successor obligations, so a lagging rule replaying an
+older event cannot restore the budget for a fact already spent. Rule,
+repository, and stack singletons collapse many pull requests onto one
+obligation, so a releasing fact must name the same pull request the lineage
+stalled on. A branch target carries no head and no review activity, so an
+obligation stalled on one is released only by an operator.
 
 The escalation fails the active turn and blocks the commissioned goal only while
 that goal's authority still stands, then enters the latest-state obligation and
@@ -359,32 +357,31 @@ its requeue while its own cutoff remains the latest. Corruption in one
 commissioned goal rolls back that goal's stop to a savepoint without rolling
 back the cutoff, so healthy goals stop and later cutoffs stay eligible.
 
-Every completed poll commits its cursor, events, and convergence evidence for
-each pull request at the exact head and base revision in one transaction;
-evidence identical to that identity's latest assessment is an idempotent replay
-and changed evidence appends a new assessment. The gating-check inventory is
-settled only after the same inventory is observed in two consecutive committed
-polls for the unchanged head, so a fast check cannot seal the head before a
-later workflow registers. Check runs are green only when completed with success,
-skipped, or neutral, status contexts only at success, and pending or
-missing-conclusion results are not green. Check names containing `report only`,
-`CodeRabbit`, `codecov/project`, or `codecov/patch`, compared
-case-insensitively, are non-gating. Head, check, and aggregate-review evidence
-is read before the thread inventory, so a thread opened between those reads
-cannot be hidden by an earlier snapshot. The rollup's commit, head, and
-base-branch evidence must agree with the REST projection and cursor generation,
-or the poll fails without recording an assessment. An append-only
-cursor-generation identity advances the current projection when an A-B-A return
-reuses A's unchanged evidence, while a superseded exact replay cannot advance
-it. The first passing assessment creates one monotonic seal for repository, pull
-request, exact head, and exact base revision; later checks or reviews on a
-sealed identity stay visible but cannot reopen dispatch, so a session does not
-revisit threads it already resolved, and a different head or base inherits no
-seal. A convergence cutoff is recorded only when a seal's head and base are the
-latest assessed identity, stale seals stay pending until their identity is
-current again, and admission rechecks the seal under the repository lock,
-settling a stale match as `target_converged` only for the latest assessed and
-sealed identity.
+Every completed poll commits its cursor, events, and convergence evidence in one
+transaction; evidence identical to the latest assessment for the same head and
+base revision is an idempotent replay, and changed evidence appends a new
+assessment. The gating-check inventory is settled only after the same inventory
+is observed in two consecutive committed polls for the unchanged head, so a fast
+check cannot seal the head before a later workflow registers. Check runs are
+green only when completed with success, skipped, or neutral, status contexts
+only at success, and pending or missing-conclusion results are not green. Check
+names containing `report only`, `CodeRabbit`, `codecov/project`, or
+`codecov/patch`, compared case-insensitively, are non-gating. Head, check, and
+aggregate-review evidence is read before the thread inventory, so a thread
+opened between those reads cannot be hidden by an earlier snapshot. The rollup's
+commit, head, and base-branch evidence must agree with the REST projection and
+cursor generation, or the poll fails without recording an assessment. An
+append-only cursor-generation identity advances the current projection when an
+A-B-A return reuses A's unchanged evidence, while a superseded exact replay
+cannot advance it. The first passing assessment creates one monotonic seal for
+repository, pull request, exact head, and exact base revision; later checks or
+reviews on a sealed identity stay visible but cannot reopen dispatch, so a
+session does not revisit threads it already resolved, and a different head or
+base inherits no seal. A convergence cutoff is recorded only when a seal's head
+and base are the latest assessed identity, stale seals stay pending until their
+identity is current again, and admission rechecks the seal under the repository
+lock, settling a stale match as `target_converged` only for the latest assessed
+and sealed identity.
 
 `CHANGES_REQUESTED` gates merging, never dispatching: repository watch keeps
 delivering matching findings while that aggregate decision remains. A blocking
@@ -482,8 +479,8 @@ failure, unpublished provider freshness is invalidated, so a later unrelated
 commit cannot authorize reuse of state that never reached that cursor. A mapped
 delivery needing a missing baseline, current mergeability, or a check rollup
 records a targeted-query projection and reuses the poller's credential, client,
-cache, normalization, and bounds. Guards make stale head, lifecycle, branch,
-workflow-attempt, and immutable-provider facts superseded or duplicate rather
+cache, normalization, and bounds. Guards classify stale head, lifecycle, branch,
+workflow-attempt, and immutable-provider facts as superseded or duplicate rather
 than allowing a regression. Event projections carry no uniqueness constraint,
 because separate deliveries may represent one content occurrence. Terminal
 payload bytes remain seven days; after a successful full poll, at most once per
@@ -496,22 +493,21 @@ never projected from a delivery. The shadow baseline is cumulative and belongs
 to the repository task; a delivery advances it only once its own terminal
 disposition is durable, and only a full poll, once nothing is pending, replaces
 it, because only a full poll is the complete reconciliation sweep. Primary mode
-applies a mapped delivery to the durable cursor, reloading that cursor per
-delivery so the loaded generation is the expected generation the optimistic
-commit needs; a patch that duplicates state, is superseded, or names a fact
-outside the observable set records the same disposition as in shadow mode and
-writes nothing, and a patch that applies is compared against the loaded cursor
-in one differ pass whose occurrences are the batch the commit writes. A primary
-delivery records no event projection, because its own commit is the durable row
-and projecting it too would leave a permanent `webhook_only` row nothing can
-match. The parity view's poll side is bounded by the repository's promotion, its
-first committed disposition, rather than by its first webhook-produced row, and
-a disposition records what a delivery did rather than what mode was configured,
-so no mode record exists for a reverted configuration to strand. Dispatch
-processing follows a landed primary commit, because under primary mode every
-applied delivery is a cursor advance rules may act on. Parity is measurable in
-shadow mode as zero parity rows whose status is `webhook_only` or `poll_only`
-and whose cause is null.
+reloads the durable cursor per delivery so the loaded generation is the expected
+generation the optimistic commit needs; a patch that duplicates state, is
+superseded, or names a fact outside the observable set records the same
+disposition as in shadow mode and writes nothing, and a patch that applies is
+compared against the loaded cursor in one differ pass whose occurrences are the
+batch the commit writes. A primary delivery records no event projection, because
+its own commit is the durable row and projecting it too would leave a permanent
+`webhook_only` row nothing can match. The parity view's poll side is bounded by
+the repository's promotion, its first committed disposition, rather than by its
+first webhook-produced row, and a disposition records what a delivery did rather
+than what mode was configured, so no mode record exists for a reverted
+configuration to strand. Dispatch processing follows a landed primary commit,
+because under primary mode every applied delivery is a cursor advance rules may
+act on. Parity is measurable in shadow mode as zero parity rows whose status is
+`webhook_only` or `poll_only` and whose cause is null.
 
 Automation convergence is not provider mergeability or checks: a current-head
 seal requires the latest dispatch released, its goal achieved, and its delivered
@@ -600,9 +596,8 @@ The dispatch action is the immutable authority source for an approval judge
 invoked by the generation that dispatch commissioned. Its values are read from
 the append-only dispatch event and action, never inferred from the synthesized
 goal or refreshed provider state. A judged turn recorded in another generation
-of that session, or in no generation, resolves no dispatch authority at all. The
-quoted rendering and the use of the judge's decision follow
-[tool loop](tool-loop.md).
+of that session, or in no generation, resolves no dispatch authority. The quoted
+rendering and the use of the judge's decision follow [tool loop](tool-loop.md).
 
 An occupied singleton, or an independently commissioned live session owning the
 same pull request, refuses another match and atomically opens one durable

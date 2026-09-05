@@ -43,7 +43,7 @@ that attribution as user action.
 Shadowing is validation only and never owns delivery; a shadowed subscription
 must not become a second producer of dispatches, singleton batches, or audit
 rows. The rule surface grows only in ways a subscription can express, so the
-cutover does not have to reproduce a rule feature the substrate lacks.
+cutover need not reproduce a rule feature the substrate lacks.
 
 The persisted cache never holds raw provider JSON, credential values, or
 reactions from actors outside the configured signal-reviewer set. Rules and
