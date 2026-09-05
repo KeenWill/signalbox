@@ -13,12 +13,13 @@ recording tables.
 ## Shape
 
 A session created by an evaluation carries the eval creation cause, naming the
-evaluation run and the trial that created it; the cause vocabulary is owned by
-[sessions-and-transcript](../spec/sessions-and-transcript.md). A session the
-model delegates from inside an evaluation-created session carries its ordinary
-delegated cause. Evaluation traffic is therefore every session whose
-creation-cause ancestry, followed through the recorded delegation lineage, roots
-in an eval cause; the predicate is transitive, not a single column.
+evaluation run and the trial that created it;
+[sessions-and-transcript](../spec/sessions-and-transcript.md) owns the cause
+vocabulary. A session the model delegates from inside an evaluation-created
+session carries its ordinary delegated cause. Evaluation traffic is therefore
+every session whose creation-cause ancestry, followed through the recorded
+delegation lineage, roots in an eval cause; the predicate is transitive, not a
+single column.
 
 A reference artifact is an immutable blob that a case pins by digest under the
 contract [blob storage](../spec/blob-storage.md) owns. A run reads it through

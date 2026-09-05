@@ -41,12 +41,11 @@ Evaluation verdicts gate nothing; every evaluation surface is report-only.
 The checked-in seed manifest, corpus, and response file contain synthetic
 strings only, so no real request data enters the repository.
 
-The live-provider runner is a separate, operator-driven surface outside the
-offline harness, because it spends provider quota.
+The live-provider runner is an operator-driven surface outside the offline
+harness, because it spends provider quota.
 
-No case field admits a number, so canonical JSON never serializes one. Why: RFC
-8785 number serialization is not implemented, so a numeric field would leave the
-digest undefined.
+No case field admits a number. Why: RFC 8785 number serialization is not
+implemented, so a numeric field would leave the digest undefined.
 
 ## Contracts
 
@@ -57,9 +56,8 @@ bytewise, has no insignificant whitespace, and escapes strings by RFC 8785. For
 corpus format version one, the preimage is the bytes `signalbox-eval-corpus-v1`,
 one zero byte, the case count as an unsigned 64-bit big-endian integer, and then
 for each case its canonical-JSON byte length as an unsigned 64-bit big-endian
-integer followed by those bytes. Lengths count bytes, not characters. No test
-pins the preimage or the escaping rule; `corpus_digest` in the harness crate is
-the one implementation.
+integer followed by those bytes. No test pins the preimage or the escaping rule;
+`corpus_digest` in the harness crate is the one implementation.
 
 ## Not built
 
