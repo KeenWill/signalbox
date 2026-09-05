@@ -10,7 +10,7 @@ Run approval-judge evaluations on the
 provenance and digest-pinned reference artifacts, then retire the judge-specific
 recording tables.
 
-## Shape
+## Design
 
 A session created by an evaluation carries the eval creation cause, naming the
 evaluation run and the trial that created it;
@@ -30,7 +30,7 @@ records into judge-specific tables. Once judge evaluations run on the substrate,
 those tables and their recorded data are dropped without migration, because a
 recorded run is a reproducible measurement, not history.
 
-## Constraints on present code
+## Compatibility constraints
 
 No path deletes or rewrites a stored delegation link while evaluation rows that
 depend on that lineage are still read.
@@ -38,7 +38,7 @@ depend on that lineage are still read.
 Nothing builds on the judge-specific recording surface in a way that outlives
 it; a reader of those tables is a reader of the harness, not of the daemon.
 
-## Acceptance
+## Acceptance criteria
 
 A session created by an evaluation carries the eval cause with run and trial
 identity, and a query that walks delegation lineage classifies every descendant

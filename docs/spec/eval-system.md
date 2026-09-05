@@ -3,7 +3,7 @@
 The evaluation system measures the approval judge against a labeled corpus and
 reports a scorecard.
 
-## Map
+## Overview
 
 The evaluation system defines, on top of the
 [program substrate](program-substrate.md), what an evaluation is and what its
@@ -28,7 +28,7 @@ own JSONL case file in its own case shape, sends each case to a configured
 provider, prints its own scorecard, and can record the run in judge-specific
 tables.
 
-## Decisions
+## Design decisions
 
 Replay uses the daemon's current approval-judge prompt, renderer,
 structured-output contract, and decoder without entering the daemon's durable
@@ -51,7 +51,7 @@ No case field admits a number. Why: RFC 8785 number serialization is not
 implemented, so a numeric field would have no encoder-independent canonical
 form.
 
-## Contracts
+## Boundary contracts
 
 The corpus digest is independent of storage form. It is SHA-256 in lowercase
 hexadecimal over the corpus's logical cases, each serialized to canonical JSON
@@ -63,7 +63,7 @@ unsigned 64-bit big-endian integer, and then for each case its canonical-JSON
 byte length as an unsigned 64-bit big-endian integer followed by those bytes.
 The harness crate's `corpus_digest` is the one implementation.
 
-## Not built
+## Planned
 
 - Evaluation-created sessions whose provenance stays walkable through delegation
   lineage for as long as evaluation rows are read:
