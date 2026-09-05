@@ -4766,6 +4766,7 @@ dependencies = [
  "expect-test",
  "futures-util",
  "git2",
+ "hex",
  "hmac",
  "http-body-util",
  "hyper",
