@@ -175,9 +175,9 @@ Approval-judge completion takes the session row FOR NO KEY UPDATE before the
 scheduler row so a goal-closing transition and the completion recheck exclude
 each other.
 
-Input submitted to a delegated child locks both endpoint session rows in
-identity order before the child's scheduler row, because processing the input
-can terminalize the delegated turn.
+Input submitted to a delegated child locks both endpoint session rows FOR NO KEY
+UPDATE in identity order before the child's scheduler row, because processing
+the input can terminalize the delegated turn.
 
 Runner-loss propagation may be interrupted at any session: a crash resumes at
 the first uncommitted session, and every placement not yet projected is already
@@ -293,14 +293,18 @@ whichever rows a filter returned.
 
 A commit failure is ambiguous only for SQLSTATE 08007 or 40003, or for a
 non-database error while awaiting the commit response; every other rejection is
-definite. When the ambiguity flag is set the caller rereads durable state
-instead of assuming either outcome.
+definite. When the ambiguity flag is set a caller that holds a command
+identifier rereads durable state instead of assuming either outcome. A caller
+that minted a fresh identity surfaces the ambiguity instead.
 
 At startup the daemon takes the singleton guard and applies the migrations
 through the hub-fence migration on its bootstrap connection, so a fresh database
 holds the fence singleton. It then fences the prior pool generation, applies the
 remaining migrations through the fenced pool, runs the startup scan, and starts
-the runtime.
+the runtime. Fencing locks the singleton, waits on the prior generation's
+exclusive advisory lock until its pooled sessions end, and advances the row. It
+acquires the matching session-level lock before commit and holds it through
+construction of the new pool.
 
 The bottom pull request of a stack that adds migrations declares a reserved
 prefix block in its description, and sibling stacks pick disjoint blocks.

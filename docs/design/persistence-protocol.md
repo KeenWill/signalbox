@@ -33,8 +33,10 @@ Runner operation-failure evidence is stored in the transaction that resolves the
 correlated operation as refused, and the daemon acknowledges the failure to the
 runner only after that commit. The record is append-only and keyed by the
 refused operation's correlation identity, so success and refusal are exclusive
-after the operation head retires. Equal retransmission rereads the equal record;
-unequal reuse is a correlation error.
+after the operation head retires. The record keeps the bounded code, message,
+and exact payload of the admitted detail, so runner status inspection reproduces
+the failure. Equal retransmission rereads the equal record; unequal reuse is a
+correlation error.
 
 Imported-create command records at storage version 4 carry the complete
 placement request, and replay compares it with the created session's
@@ -77,14 +79,15 @@ refresh-in-progress marker that exactly one transaction can win; an atomic
 replace-and-clear that installs the new material and clears the marker in one
 commit; and a reread that reports whether a replacement committed and whether
 the marker is set. The replace-and-clear commit publishes the durable
-member-availability update that wakes a parked deadline-free exhausted wait. The
-replace shape expresses an exchange that returns a new identity token and one
-that returns none, without a second commit and without mixing tokens from
-different exchanges. Provisioning locks its own profile row and every co-member
-profile row in one reference-ordered acquisition, rereads membership under those
-locks and repeats when the set has grown, and interning a pool-policy revision
-locks every member's profile row in the same order. Delivery of OAuth material
-to a model call is owned by
+member-availability update that wakes a parked deadline-free exhausted wait, as
+every accepted exclusion clear does in its own transaction. A clear that removes
+no exclusion publishes nothing. The replace shape expresses an exchange that
+returns a new identity token and one that returns none, without a second commit
+and without mixing tokens from different exchanges. Provisioning locks its own
+profile row and every co-member profile row in one reference-ordered
+acquisition, rereads membership under those locks and repeats when the set has
+grown, and interning a pool-policy revision locks every member's profile row in
+the same order. Delivery of OAuth material to a model call is owned by
 [configuration-and-credentials](../spec/configuration-and-credentials.md).
 
 ## Compatibility constraints
