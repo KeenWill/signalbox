@@ -4,6 +4,7 @@ use std::{
     error::Error,
     fmt,
     net::{IpAddr, SocketAddr},
+    sync::LazyLock,
     time::Duration,
 };
 
@@ -159,34 +160,48 @@ pub fn build_web_fetch_client(
 
 #[doc(hidden)]
 pub fn is_public_destination_address(address: IpAddr) -> bool {
-    match address {
-        IpAddr::V4(address) => {
-            let [first, second, third, _fourth] = address.octets();
-            !(first == 0
-                || first == 10
-                || first == 127
-                || first >= 224
-                || (first == 100 && (64..=127).contains(&second))
-                || (first == 169 && second == 254)
-                || (first == 172 && (16..=31).contains(&second))
-                || (first == 192 && second == 0 && third == 0)
-                || (first == 192 && second == 0 && third == 2)
-                || (first == 192 && second == 88 && third == 99)
-                || (first == 192 && second == 168)
-                || (first == 198 && matches!(second, 18 | 19))
-                || (first == 198 && second == 51 && third == 100)
-                || (first == 203 && second == 0 && third == 113))
-        }
-        IpAddr::V6(address) => {
-            let segments = address.segments();
-            let in_global_unicast = (0x2000..=0x3fff).contains(&segments[0]);
-            let special_2001 =
-                segments[0] == 0x2001 && (segments[1] <= 0x01ff || segments[1] == 0x0db8);
-            let transition_6to4 = segments[0] == 0x2002;
-            let documentation_3fff = segments[0] == 0x3fff && segments[1] <= 0x0fff;
-            in_global_unicast && !special_2001 && !transition_6to4 && !documentation_3fff
-        }
-    }
+    const DENIED_NETWORKS: [&str; 17] = [
+        "0.0.0.0/8",
+        "10.0.0.0/8",
+        "100.64.0.0/10",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.0.0.0/24",
+        "192.0.2.0/24",
+        "192.88.99.0/24",
+        "192.168.0.0/16",
+        "198.18.0.0/15",
+        "198.51.100.0/24",
+        "203.0.113.0/24",
+        "224.0.0.0/3",
+        "2001::/23",
+        "2001:db8::/32",
+        "2002::/16",
+    ];
+    static DENIED: LazyLock<Option<Vec<ipnet::IpNet>>> = LazyLock::new(|| {
+        DENIED_NETWORKS
+            .into_iter()
+            .map(str::parse::<ipnet::IpNet>)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()
+    });
+    static GLOBAL_V6: LazyLock<Option<ipnet::IpNet>> = LazyLock::new(|| "2000::/3".parse().ok());
+    static DOCUMENTATION_V6: LazyLock<Option<ipnet::IpNet>> =
+        LazyLock::new(|| "3fff::/20".parse().ok());
+    let permitted_family = match address {
+        IpAddr::V4(_) => true,
+        IpAddr::V6(_) => GLOBAL_V6
+            .as_ref()
+            .is_some_and(|network| network.contains(&address)),
+    };
+    permitted_family
+        && DENIED
+            .as_ref()
+            .is_some_and(|networks| !networks.iter().any(|network| network.contains(&address)))
+        && DOCUMENTATION_V6
+            .as_ref()
+            .is_some_and(|network| !network.contains(&address))
 }
 
 #[doc(hidden)]
