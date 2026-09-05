@@ -1399,13 +1399,13 @@ uses that closed order regardless of configuration order, as owned by the
 [static model capability catalog](configuration-and-credentials.md#the-static-model-alias-and-web-fetch-catalog).
 The exact settings vocabulary and the prohibition on exposing an alternate fast
 serving identity are owned by
-[model/session settings](model-session-settings.md#local-process-representation).
-Reasoning-level and service-tier overlay members admit `inherit`,
-`provider_default`, or `value`; fast-mode overlay members admit only `inherit`
-or a `value` of `disabled` or `enabled`. The same vocabulary carries the closed
-`unsupported_reasoning_level`, `unsupported_fast_mode`, and
-`unsupported_service_tier` rejection details; each names the direct selection,
-and the value-bearing forms retain the unsupported value.
+[model/session settings](model-session-settings.md). Reasoning-level and
+service-tier overlay members admit `inherit`, `provider_default`, or `value`;
+fast-mode overlay members admit only `inherit` or a `value` of `disabled` or
+`enabled`. The same vocabulary carries the closed `unsupported_reasoning_level`,
+`unsupported_fast_mode`, and `unsupported_service_tier` rejection details; each
+names the direct selection, and the value-bearing forms retain the unsupported
+value.
 
 `session_metadata` is the successful single-session read and
 `session_metadata_replaced` is the successful write receipt. Both carry
