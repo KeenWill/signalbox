@@ -60,7 +60,14 @@ action-head row of every member of the policy it may select after the session's
 scheduler row and the admitted-set head, in profile-reference byte order, FOR
 SHARE for a member it only reads and FOR UPDATE for a member whose exclusion
 state it writes, and takes a capacity or cursor row FOR UPDATE only after every
-action head. A pool-selected call pins an interned immutable pool-policy
+action head, taking multiple capacity rows in profile-reference byte order
+before any cursor row. An admission that will insert a contended wait takes the
+capacity row of every bounded member the wait will name before it counts
+reservations and holds those locks through commit. A reservation release and the
+wake it grants commit in one transaction that holds that profile's capacity row.
+A capacity reservation records its invocation's process-group identity at spawn,
+and startup releases the reservation only after proving that group absent or
+terminating it. A pool-selected call pins an interned immutable pool-policy
 identity, so a fresh availability chain resolves the policy the call was
 authorized under rather than the current document. A chain-exclusion row holds a
 separately clearable state beside its insert-only turn-local fact. Exhaustion
@@ -106,9 +113,10 @@ would forget evidence operators must inspect; the operation transition is never
 delayed until after acknowledgement, because the runner would keep resending a
 failure the daemon had already acted on.
 
-Every new table follows the spec page: typed records with kind-scoped storage
-versions, append-only facts under triggers, events appended in the committing
-transaction, and the row locks the inventory names issued from that file.
+Every new table follows the spec page: kind-scoped storage versions on
+durable-command and outbox records, append-only facts under triggers, events
+appended in the committing transaction, and the row locks the inventory names
+issued from that file.
 
 ## Acceptance criteria
 

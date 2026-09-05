@@ -199,17 +199,17 @@ per-turn provenance. The following extensions remain undecided:
 
 - **Creation-attributed default visibility.** The implemented visibility and
   attribution limits are owned by
-  [sessions-and-transcript](spec/sessions-and-transcript.md#session-metadata-and-list-projection).
-  Decide derivation, override shape and authority, and monitor inclusion
-  together with the attributed-creation implementation.
+  [sessions-and-transcript](spec/sessions-and-transcript.md). Decide derivation,
+  override shape and authority, and monitor inclusion together with the
+  attributed-creation implementation.
 - **Expressive metadata filters.** The implemented filter grammar is owned by
-  [sessions-and-transcript](spec/sessions-and-transcript.md#session-metadata-and-list-projection).
-  Whether to add OR, negation, attribute predicates, case folding, or a general
-  query language remains open.
+  [sessions-and-transcript](spec/sessions-and-transcript.md). Whether to add OR,
+  negation, attribute predicates, case folding, or a general query language
+  remains open.
 - **Imported-conversation archive semantics.** Ordinary session archive and
   immutable imported-source behavior are owned by
-  [sessions-and-transcript](spec/sessions-and-transcript.md#session-metadata-and-list-projection)
-  and [conversation-import](spec/conversation-import.md). Whether imported
+  [sessions-and-transcript](spec/sessions-and-transcript.md) and
+  [conversation-import](spec/conversation-import.md). Whether imported
   conversation records have a distinct non-destructive archive state, and how
   that state affects discovery, remains undecided.
 - **Destructive retention or purge beyond ordinary archive.** Kept separate from
@@ -289,9 +289,9 @@ per-turn provenance. The following extensions remain undecided:
   end as, and every projection of each ending, by
   [the credential-availability machine](spec/credential-availability.md); the
   qualifying causes and the successor-call shape by
-  [availability successor calls](spec/model-call-execution.md#availability-successor-calls);
-  the pool grammar, per-membership ranking, and closed action vocabulary by
-  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
+  [availability successor calls](spec/model-call-execution.md); the pool
+  grammar, per-membership ranking, and closed action vocabulary by
+  [credential pools and selection](spec/configuration-and-credentials.md#overview).
   What remains open is the client projection: snapshots expose each call's usage
   and the final turn state, while the predecessor, cause, and successor relation
   is committed future storage that no present migration or repository operation
@@ -311,26 +311,28 @@ per-turn provenance. The following extensions remain undecided:
   `headroom_reserve_percent`, `tie_break = "least_used"`, and any
   `on_headroom_low` action other than `stay`, under the fail-closed admission
   rule in
-  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection),
+  [credential pools and selection](spec/configuration-and-credentials.md#design-decisions),
   because a protection that silently never fires reads as one the deployment
   has. What remains undecided is which adapters can supply headroom at all and
   the normalized quantity, observation lifetime, and deterministic secondary
   tie-break a later contract must define before `least_used` is admitted, and
   whether a free probe exists that does not consume the quota it reports. Blocks
   capacity-aware selection, not availability failover. (S22)
-- **Zero-cost liveness probes.** Quarantine semantics are decided and owned by
-  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection):
-  durable, profile-scoped, cleared by an operator command or by a probe that
-  calls no model. What remains open is whether any adapter can offer such a
-  probe. Absent one, an operator command is the only clearing path. Blocks
-  automatic recovery from a rejected credential, not recovery itself. (S22)
+- **Zero-cost liveness probes.** Operator clear and probe recovery belong to the
+  planned credential-exclusion lifecycle in
+  [the configuration and credentials design](design/configuration-and-credentials.md),
+  and no present command or adapter probe clears a quarantine. What remains open
+  is whether any adapter can offer a probe that calls no model. Absent one, an
+  operator command or another durable availability update are the clearing paths
+  that design admits. Blocks automatic recovery from a rejected credential, not
+  recovery itself. (S22)
 - **Access-token-only Codex CLI conformance evidence.** The committed `oauth`
   delivery contract is owned by
-  [credential deliveries](spec/configuration-and-credentials.md#credential-deliveries).
-  What remains open is the minimum supported CLI version and exact live
-  conformance check that establish this behavior. The implementing slice cannot
-  land until that evidence exists; a current CLI version declining the store
-  blocks that slice rather than making the committed delivery optional. (S22)
+  [credential deliveries](spec/configuration-and-credentials.md#planned). What
+  remains open is the minimum supported CLI version and exact live conformance
+  check that establish this behavior. The implementing slice cannot land until
+  that evidence exists; a current CLI version declining the store blocks that
+  slice rather than making the committed delivery optional. (S22)
 - **Reuse-detection blast radius.** Whether a provider rejecting a reused
   refresh token invalidates only that token or the whole authorization family is
   not determinable from either CLI's source. It does not affect the `oauth`
@@ -339,14 +341,14 @@ per-turn provenance. The following extensions remain undecided:
   family revocation is account loss. (S22)
 - **Detailed provider provenance representation.** Model identifier
   normalization is decided: the
-  [provider-target identity rule](spec/model-call-execution.md#provider-target-identity)
-  accepts an alias resolved to its own dated snapshot as the same target and
-  keeps a different lineage as a distinct substitution outcome. The mismatch
-  disposition itself is likewise accepted
-  ([model-call-execution](spec/model-call-execution.md)). What remains open is
-  the durable per-call provenance schema that would record the concrete served
-  identity and a substitution as evidence rather than as operator diagnostics
-  and a fail-closed error. Blocks the provider provenance schema. (S20–S23)
+  [provider-target identity rule](spec/model-call-execution.md) accepts an alias
+  resolved to its own dated snapshot as the same target and keeps a different
+  lineage as a distinct substitution outcome. The mismatch disposition itself is
+  likewise accepted ([model-call-execution](spec/model-call-execution.md)). What
+  remains open is the durable per-call provenance schema that would record the
+  concrete served identity and a substitution as evidence rather than as
+  operator diagnostics and a fail-closed error. Blocks the provider provenance
+  schema. (S20–S23)
 - **Future same-profile retry.** Repeating a known provider failure or ambiguous
   outcome against the target and credential profile that produced it remains
   outside every accepted policy; the successor-call decision above authorizes
@@ -364,7 +366,7 @@ local runner orchestration are specified in
 cleanup, contract-gap, and session-composition questions this section previously
 carried are decided, and each decision is stated by the contract page that owns
 it: staged replacement ordering and the runner-recovery turn phase in
-[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md#runner-loss-session-recovery);
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md);
 same-runner recovery after a registration-triggered loss, deployment-scoped
 successor promotion, non-transferable workspace cleanup, pinned canonical digest
 bytes, runner-to-daemon failure frames, workspace-release acknowledgement,
@@ -378,13 +380,12 @@ transcript entry in the
 execution object, creation-request placement, and template creation carrying
 placement in [process-protocol](spec/process-protocol.md); the relocation
 transcript boundary in
-[sessions-and-transcript](spec/sessions-and-transcript.md#semantic-transcript-entries);
-capability-derived tool advertisement in
-[model-call-execution](spec/model-call-execution.md#frontier-rendering). Why: a
-decided question is a contract, and a contract binds only where the implementer
-of that contract reads it; a decision restated on this page would be a second
-authority over prose that already owns it, free to drift from the page it
-paraphrases. Multiple simultaneously enrolled runners and user-directed
+[sessions-and-transcript](spec/sessions-and-transcript.md); capability-derived
+tool advertisement in [model-call-execution](spec/model-call-execution.md). Why:
+a decided question is a contract, and a contract binds only where the
+implementer of that contract reads it; a decision restated on this page would be
+a second authority over prose that already owns it, free to drift from the page
+it paraphrases. Multiple simultaneously enrolled runners and user-directed
 relocation of a healthy session are committed functionality that version one
 defers rather than open questions
 ([runner protocol and placement](spec/runner-protocol.md#planned)). The
@@ -504,9 +505,9 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
 - **Ambiguous tool-wait resolution.** Who may record resolving evidence, how an
   exact accepted-risk continuation is represented, and which effects permit it
   beyond the
-  [proof-bearing terminal paths](spec/turn-lifecycle-and-scheduling.md#runner-loss-session-recovery)
-  remain undecided. Blocks reconciliation and continuation from
-  `AwaitingToolRecovery`. (S06)
+  [proof-bearing terminal paths](spec/turn-lifecycle-and-scheduling.md) remain
+  undecided. Blocks reconciliation and continuation from `AwaitingToolRecovery`.
+  (S06)
 - **Durable tool-definition revisioning.** The implemented compiled catalog is
   immutable for one process lifetime. A dynamic catalog or a deployment that
   changes a definition while requests are outstanding must first decide how the
@@ -518,9 +519,8 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   representation, revision identity, change audit, compatibility, and safe
   rebinding decisions.
 - **Execution-strategy configuration placement.** Whether a future
-  serial/concurrent choice beyond the
-  [fixed serial loop](spec/tool-loop.md#serialized-staged-execution) is a
-  deployment, session-default, per-turn, or executor-selection value remains
+  serial/concurrent choice beyond the [fixed serial loop](spec/tool-loop.md) is
+  a deployment, session-default, per-turn, or executor-selection value remains
   undecided. Blocks configurable/concurrent execution.
 - **Model-declared approval expiry.** Pending user approval currently waits
   indefinitely. Whether a model may request an expiry, how it is frozen, and
@@ -550,11 +550,11 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   does not settle escalates rather than approves.
 - **Per-template thread-resolution policy.** Whether a session template may
   choose its own posture toward
-  [`change_request_thread_resolve`](spec/tool-loop.md#provider-bridge-and-daemon-catalog)
-  — so that one template resolves the reviewer threads it has answered while
-  another may only reply and leave resolution to the reviewer — is undecided.
-  Deciding it requires the template configuration surface to carry per-template
-  tool posture at all, which is itself open under
+  [`change_request_thread_resolve`](spec/tool-loop.md) — so that one template
+  resolves the reviewer threads it has answered while another may only reply and
+  leave resolution to the reviewer — is undecided. Deciding it requires the
+  template configuration surface to carry per-template tool posture at all,
+  which is itself open under
   [Template storage and authoring](#template-storage-and-authoring). Recorded as
   a design question rather than a blocker; it blocks only a per-template choice,
   never the posture the daemon composition already applies.
@@ -566,18 +566,18 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   policy rather than by physics: 1 MiB of result text, 1 MiB of arguments, 4,096
   bytes of error detail, and 4,096 bytes of exact runner value, all held in
   PostgreSQL `text` columns with no physical ceiling near those values. Under
-  [tool-loop result authority](spec/tool-loop.md#result-authority-and-the-continuation-boundary),
-  every admitted result fits those bounds. A family may compact output with its
-  crate-owned truncation and completeness evidence, or its bounded transport may
-  reject an oversized response before result admission; the family contract owns
-  that choice. `ResultTooLarge` remains the admission classification for an
-  admitted result that still exceeds the durable bound. Blob storage decides
-  only where deliberately larger byte payloads live: content-addressed blobs
-  with model-visible attachment stubs and bounded explicit reads. The
-  tool-result side remains open — whether and how a family's durable admitted
-  result references a blob rather than embedding bytes, its truncation and
-  completeness evidence, and per-family adoption. The existing family caps
-  remain correct until that lands.
+  [tool-loop result authority](spec/tool-loop.md), every admitted result fits
+  those bounds. A family may compact output with its crate-owned truncation and
+  completeness evidence, or its bounded transport may reject an oversized
+  response before result admission; the family contract owns that choice.
+  `ResultTooLarge` remains the admission classification for an admitted result
+  that still exceeds the durable bound. Blob storage decides only where
+  deliberately larger byte payloads live: content-addressed blobs with
+  model-visible attachment stubs and bounded explicit reads. The tool-result
+  side remains open — whether and how a family's durable admitted result
+  references a blob rather than embedding bytes, its truncation and completeness
+  evidence, and per-family adoption. The existing family caps remain correct
+  until that lands.
 - **Repository configuration outside the model's writable root.** A session's
   `.git` sits inside its writable root, so repository-local Git configuration is
   model-writable, and version one answers that key by key: a forced transport
@@ -597,7 +597,7 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
 - **Several bound workspaces per session, and explicit session relocation.** A
   session binds one workspace root, derived from the configured root by the
   fixed session-UUID formula owned by
-  [configuration and credentials](spec/configuration-and-credentials.md#derived-session-workspace-roots),
+  [configuration and credentials](spec/configuration-and-credentials.md#overview),
   which is what keeps the set of roots the daemon can open a property of
   deployment configuration alone. Two operations are anticipated on that
   mechanism and are inexpressible today: a session bound to several workspaces
@@ -638,7 +638,7 @@ questions below remain open.
   pools. (S30, S32)
 - **Runner result credential egress beyond exact-value redaction.** Whether
   stronger taint, isolation, or egress controls beyond the
-  [runner credential boundary](spec/configuration-and-credentials.md#runner-credential-lifecycle)
+  [runner credential boundary](spec/configuration-and-credentials.md#planned)
   apply remains undecided. Blocks a general no-credential-disclosure claim for
   runner output.
 - **In-memory credential hygiene.** Zeroization or equivalent handling for the

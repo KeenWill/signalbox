@@ -694,7 +694,7 @@ async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_re
     Ok(())
 }
 
-/// §6: an unmonitored session is owed no automatic resumption, and its failure
+/// An unmonitored session is owed no automatic resumption, and its failure
 /// block's need says so instead of promising one.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -950,7 +950,7 @@ async fn adopt_session(pool: &PgPool, session: SessionId) -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// §6: adopting a session whose goal is blocked arms the resumption the
+/// Adopting a session whose goal is blocked arms the resumption the
 /// unmonitored block was not owed.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -979,7 +979,7 @@ async fn adopting_a_blocked_goal_arms_its_resumption() -> Result<(), Box<dyn Err
     Ok(())
 }
 
-/// §6: adoption durably changes the unmonitored block's effective need before
+/// Adoption durably changes the unmonitored block's effective need before
 /// the configured backoff elapses.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]

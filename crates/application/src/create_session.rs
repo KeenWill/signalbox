@@ -125,7 +125,7 @@ impl CreateSessionRequest {
         self
     }
 
-    /// Installs the §7 start gate, ownership, and finish condition.
+    /// Installs the lifecycle start gate, ownership, and finish condition.
     pub fn with_lifecycle(
         mut self,
         start_gate: StartGate,

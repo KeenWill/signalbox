@@ -1731,6 +1731,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "headers"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3314d5adb5d94bcdf56771f2e50dbbc80bb4bdf88967526706205ac9eff24eb"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "headers-core",
+ "http",
+ "httpdate",
+ "mime",
+ "sha1 0.10.7",
+]
+
+[[package]]
+name = "headers-core"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54b4a22553d4242c49fddb9ba998a99962b5cc6f22cb5a3482bec22522403ce4"
+dependencies = [
+ "http",
+]
+
+[[package]]
 name = "heapless"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4166,6 +4190,7 @@ dependencies = [
  "divan",
  "expect-test",
  "gungraun",
+ "hex",
  "regex",
  "rpds",
  "serde",
@@ -4181,6 +4206,7 @@ name = "signalbox-egress-transport"
 version = "0.0.0"
 dependencies = [
  "futures-util",
+ "ipnet",
  "reqwest",
  "rustls",
  "tokio",
@@ -4331,6 +4357,8 @@ version = "0.0.0"
 dependencies = [
  "futures-timer",
  "futures-util",
+ "hex",
+ "mime",
  "serde",
  "serde_json",
  "tokio",
@@ -4355,6 +4383,7 @@ dependencies = [
 name = "signalbox-model-reference-catalog"
 version = "0.0.0"
 dependencies = [
+ "jiff",
  "rust_decimal",
  "serde",
  "serde_json",
@@ -4505,6 +4534,7 @@ dependencies = [
 name = "signalbox-runner-wire"
 version = "0.0.0"
 dependencies = [
+ "hex",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -4761,6 +4791,8 @@ dependencies = [
  "expect-test",
  "futures-util",
  "git2",
+ "headers",
+ "hex",
  "hmac",
  "http-body-util",
  "hyper",

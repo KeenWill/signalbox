@@ -484,10 +484,9 @@ item.
 
 The owner commissioned the pickup on 2026-07-25. The bottom specification diff
 governs the implementation:
-[sessions-and-transcript](../spec/sessions-and-transcript.md#session-metadata-and-list-projection)
-owns the metadata and listing contract,
-[process-protocol](../spec/process-protocol.md) owns the additive wire surface,
-and
+[sessions-and-transcript](../spec/sessions-and-transcript.md) owns the metadata
+and listing contract, [process-protocol](../spec/process-protocol.md) owns the
+additive wire surface, and
 [open-questions.md](../open-questions.md#session-organization-visibility-and-retention)
 owns deferred visibility and filter design.
 

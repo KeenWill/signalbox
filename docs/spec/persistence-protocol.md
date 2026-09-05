@@ -29,7 +29,8 @@ by one `migrate` call. Fifteen files form the baseline: one schema split by
 domain, applied only as a whole in filename order, with
 `HUB_FENCE_MIGRATION_VERSION` naming the last of them. Every later file is a
 forward migration on top of that baseline. SQLx records each applied file and
-its checksum in `_sqlx_migrations`.
+its checksum in `_sqlx_migrations`, and `.gitattributes` pins migration files to
+LF so an embedded file's checksum matches the recorded one on every checkout.
 
 The schema is normalized and purpose-specific: mutable current-state rows
 guarded by constraints and triggers, and append-only facts that triggers protect
@@ -95,7 +96,10 @@ future installation.
 
 A collapse to a regenerated baseline is proved schema-equivalent first and cuts
 the deployed database over by replacing the `_sqlx_migrations` rows in one
-transaction; it changes bookkeeping, never schema or data.
+transaction; it changes bookkeeping, never schema or data. A collapse keeps a
+dump of the prior ledger, so a cutover whose verification fails is undone by
+restoring the previous `_sqlx_migrations` rows and redeploying the previous
+binary.
 
 Every planned schema improvement lands as an ordinary forward migration in its
 own campaign, never inside a collapse.
@@ -115,7 +119,9 @@ backup that cannot restore fails silently until recovery.
 
 A stack holding a reserved prefix block does not renumber its migrations after a
 base merges while the reserved prefix still exceeds the highest prefix on
-`main`.
+`main`. A migration merged into a stack branch is immutable to the branches
+stacked on it, and only the pull request that adds a migration may still edit
+that file.
 
 Serialization of concurrent migration runs is SQLx behavior, relied on and not
 demonstrated in this repository.
@@ -135,9 +141,10 @@ The session system prompt joins its selection key through a generated SHA-256
 digest, because megabyte text cannot be a btree key, and an absent prompt is
 stored as the empty digest rather than null so the foreign key still checks.
 
-Every typed record kind carries a kind-scoped storage version, and a change an
-older reader could misread advances it, so an older reader rejects the record
-instead of projecting it wrongly.
+Durable command and outbox records carry a kind-scoped storage version, and a
+change an older reader could misread advances it, so an older reader rejects the
+record instead of projecting it wrongly. Typed event families such as goal,
+plan, and delegation events carry a closed kind discriminator and no version.
 
 Some rules are enforced twice, as typed domain transitions and as database
 constraints, because a row set that passes SQL checks can still fail domain
@@ -174,6 +181,8 @@ so their order is auditable instead of scattered through query strings.
 Creating a session from an imported frontier takes no explicit row lock, because
 the selected imported aggregate is immutable and append-only.
 
+Approval-judge preparation takes the scheduler row before its insert, whose
+trigger locks the request row and then the active turn-lifecycle row.
 Approval-judge completion takes the session row FOR NO KEY UPDATE before the
 scheduler row so a goal-closing transition and the completion recheck exclude
 each other. Every goal transition takes that same session lock before it reads
@@ -214,9 +223,11 @@ A guarded transition that changes no durable state appends no event, so where
 the transition has a producer, state without its event, or an event without its
 state, is unrepresentable.
 
-The command-settled record authenticates its header without the session column,
-because that column is null for a receipt with no session and a null key member
-would disable the check.
+A claimed session-lifecycle command appends its command-settled receipt in the
+transaction that records its applied or rejected result. The command-settled
+record authenticates its header without the session column, because that column
+is null for a receipt with no session and a null key member would disable the
+check.
 
 A later runner fact adds a state and its columns to the one
 runner-state-transition record kind rather than a second event kind, so an
@@ -261,12 +272,13 @@ derives acceptance order, queue order, lifecycle precedence, ancestry,
 ownership, or authority from a UUID; listing rows by identifier for display or
 paging is not such a derivation.
 
-A new migration's version prefix is greater than every existing one. Once a
-migration is recorded in any deployed database, or once its pull request merges
-to main, it is immutable: fix it with a new forward migration, never by editing,
-replacing, or renumbering the file. The one exception is a full collapse to a
-regenerated baseline, allowed only while there is exactly one deployment and no
-release.
+A new migration's version prefix is greater than every prefix on `main` and on
+the stack's own ancestor branches, and a sibling stack's reserved prefix block
+stays valid while it still exceeds `main`. Once a migration is recorded in any
+deployed database, or once its pull request merges to main, it is immutable: fix
+it with a new forward migration, never by editing, replacing, or renumbering the
+file. The one exception is a full collapse to a regenerated baseline, allowed
+only while there is exactly one deployment and no release.
 
 A durable row that does not decode produces a typed corruption error. The row is
 never normalized into a nearby valid value, never repaired or dropped on load,
@@ -321,8 +333,11 @@ prefix block in its description, and sibling stacks pick disjoint blocks.
 A regenerated baseline omits `_sqlx_migrations`, which the migrator creates
 itself. It carries the seed rows a schema-only dump discards: the
 outbox-sequence and hub-fence singletons, each outbox-consumer cursor, and both
-automatic-reconciliation cursors. The old files are deleted in the same commit
-that adds it, because a tree carrying both chains would collide on every create.
+automatic-reconciliation cursors. It carries no schema qualifications, and
+fresh-apply equivalence is proved on the default schema and again with the
+role's `search_path` selecting a nondefault schema. The old files are deleted in
+the same commit that adds it, because a tree carrying both chains would collide
+on every create.
 
 Decode paths for stored row shapes, such as storage-version thresholds and
 legacy readers, stay until an authorized migration rewrites every row they
@@ -406,8 +421,8 @@ then its scheduler, then the relationship. A peer message locks both endpoint
 session rows FOR NO KEY UPDATE in ascending session-identity order, then both
 scheduler rows, and only then the relationship row. A descendant-scoped stop or
 interrupt locks the complete reachable session frontier in ascending
-session-identity order before the ordinary root or scheduler locks, then the
-relationships in spawning-request order.
+session-identity order before the ordinary root or scheduler locks and before it
+allocates any outbox event, then the relationships in spawning-request order.
 
 A durable user-command claim precedes the runner lock subsequence.
 
@@ -482,8 +497,10 @@ hide live descendants.
 
 Every result and message commit appends exactly one distinct recipient-scoped
 delegation wake in the same transaction, even when the recipient is already
-active. The wake is best effort after restart and never stands in for the
-client-visible update.
+active. A foreground wait registered after its child result committed appends
+another result wake keyed by the awaiting request in the wait transaction. The
+wake is best effort after restart and never stands in for the client-visible
+update.
 
 Both outbox header tables share one allocator, so their committed events form
 one gap-free global sequence. Each consumer holds an independent delivery
@@ -515,19 +532,37 @@ timestamp, stop stickiness, superseder, and actor. A tool-batch transition fails
 the dispatch unless its round, frontier, and attempt correlate: a proposed
 frontier is the round boundary, a projected frontier contains every result of
 the round, and a recovery attempt belongs to a request the named call produced.
+An input-accepted record fails the dispatch unless its accepted input, queued
+origin, and lifecycle row correlate and an applied submit command or a goal-turn
+row authored it. A session-created record fails the dispatch unless its creation
+cause, dispatch reference, spawning request, and initial ownership match the
+session and its first ownership journal entry. A settings event fails the
+dispatch unless a session change matches its applied replacement command and
+both defaults epochs, or a turn resolution matches its accepted origin and its
+frozen selection, defaults, overlay, and adjustments.
 
 An applied submit-input that creates a turn origin appends an input-accepted
 event; pending steering appends nothing until terminal reclassification mints
-its successor turn and appends the correlated event. Turn activation appends the
-turn's activation event in the activating transaction. Binding an
-already-accepted turn to a goal generation appends nothing. A stop or supersede
-that makes a queued goal turn ineligible appends a retired turn-terminal event
-in the same transaction, and supersede appends that retirement before the
-replacement's input-accepted event.
+its successor turn and appends the correlated event. Every turn origin produced
+from an accepted input appends its resolved-settings event before its
+input-accepted event; a delegated-task origin appends neither. Turn activation
+appends the turn's activation event in the activating transaction. Binding an
+already-accepted turn to a goal generation appends nothing. Every durable goal
+event appends a goal-changed event in the transaction that stores it. Every turn
+that reaches a terminal state appends its typed turn-terminal event in the
+terminalizing transaction. A stop or supersede that makes a queued goal turn
+ineligible appends a retired turn-terminal event in the same transaction, and
+supersede appends that retirement before the replacement's input-accepted event.
+Adopting or releasing a session appends an ownership-changed event in the
+transaction that journals it. A claimed tool-decision command appends its
+injection-settled receipt in the decision transaction, not delivered when the
+request was already resolved. Completing a compaction appends the
+context-compacted event atomically with the completed call, summary, result
+frontier, and applied command.
 
 The transaction that terminalizes a session's last live turn settles the
-session's pending closure at commit through a deferred constraint trigger, so
-the causal turn's own event precedes the settlement.
+session's pending closure at commit through a deferred constraint trigger, which
+appends the session-terminal event, so the causal turn's own event precedes it.
 
 Lifecycle-disposition updates admit only cascade evaluations caused by a parent
 turn command or parent goal command; a child-origin terminal event is delivered
