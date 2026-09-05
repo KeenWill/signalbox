@@ -169,8 +169,8 @@ import time.
 **Committed unimplemented functionality.** No imported entry carries usage
 evidence today. Where one does, dollar cost derives at read time from the window
 covering that attested timestamp under the same
-[configuration and credentials](configuration-and-credentials.md#the-static-model-alias-and-web-fetch-catalog)
-contract native calls use, and no dollar amount is persisted.
+[configuration and credentials](configuration-and-credentials.md) contract
+native calls use, and no dollar amount is persisted.
 
 Claude Code versions 1 and 2 map the four text-valued provenance fields from the
 exact top-level members `uuid` (source record identifier), `parentUuid` (source

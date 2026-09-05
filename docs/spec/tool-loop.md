@@ -414,16 +414,16 @@ families are absent when their complete deployment configuration is absent.
 The workspace read, workspace mutation, local Git, and execution families all
 bind one workspace root, and that root is per session. Each session's root is
 derived from the configured root by a fixed formula owned by
-[configuration and credentials](configuration-and-credentials.md#daemon-tool-mapping-registry);
-a session supplies no path and cannot select another session's root. The
-executors bound to one root are composed once per session and retained under a
-bound, so two sessions executing concurrently write two trees, hold two pinned
-root descriptors, and take two independent serialization domains for the
-mutation and Git families rather than one process-wide domain. One session takes
-exactly one such domain at a time: a retained set a request still holds is never
-released, so a second set is never composed beside one already mutating that
-session's tree. Sessions with no derived directory share the configured root's
-own composition.
+[configuration and credentials](configuration-and-credentials.md#map); a session
+supplies no path and cannot select another session's root. The executors bound
+to one root are composed once per session and retained under a bound, so two
+sessions executing concurrently write two trees, hold two pinned root
+descriptors, and take two independent serialization domains for the mutation and
+Git families rather than one process-wide domain. One session takes exactly one
+such domain at a time: a retained set a request still holds is never released,
+so a second set is never composed beside one already mutating that session's
+tree. Sessions with no derived directory share the configured root's own
+composition.
 
 The catalog stays one process-lifetime immutable compiled value across
 per-session root binding. Every declaration a workspace-root-bound family
@@ -452,9 +452,9 @@ schema alone widens, and each family's own argument validation still refuses
 what the declaration excludes.
 
 The exact required inputs and fail-closed startup validation are owned by
-[configuration and credentials](configuration-and-credentials.md#daemon-tool-mapping-registry).
-The mapping-free base composition remains available without local Git or
-execution tools.
+[configuration and credentials](configuration-and-credentials.md). The
+mapping-free base composition remains available without local Git or execution
+tools.
 
 The implemented `git_push_configured` declaration is not part of the daemon
 registry. No production `GitPushTransport` exists, so no production composition
@@ -1048,9 +1048,9 @@ The same process-lifetime compiled catalog also declares these daemon tools:
   User information, fragments, and direct non-public IP destinations are
   invalid. Before dispatch, its canonical origin must satisfy the
   deployment-owned
-  [web-fetch catalog policy](configuration-and-credentials.md#the-static-model-alias-and-web-fetch-catalog),
-  which owns the origin bound, canonicalization, and absent-or-empty behavior;
-  this admission gates execution. A domain must resolve to between one and 32
+  [web-fetch catalog policy](configuration-and-credentials.md#contracts), which
+  owns the origin bound, canonicalization, and absent-or-empty behavior; this
+  admission gates execution. A domain must resolve to between one and 32
   addresses and every address must be public; the admitted addresses are pinned
   into the request client so connection setup cannot substitute a later DNS
   answer. Its permission default is `Confirm`; its effect class is

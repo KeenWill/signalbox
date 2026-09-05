@@ -92,7 +92,7 @@ INV-tagged test names and attached doc comments.
   [availability successor calls](spec/model-call-execution.md#availability-successor-calls),
   [the credential-availability machine](spec/credential-availability.md#the-credential-availability-machine),
   and
-  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
+  [credential pools and selection](spec/configuration-and-credentials.md#map).
   No partial draft becomes final content. A later authorized call must retain
   steering already committed to turn history.
 - **Required invariants:** INV-005, INV-008, INV-014, INV-015, INV-032, INV-035.
@@ -723,7 +723,7 @@ INV-tagged test names and attached doc comments.
   [availability successor calls](spec/model-call-execution.md#availability-successor-calls),
   [the credential-availability machine](spec/credential-availability.md#the-credential-availability-machine),
   and
-  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
+  [credential pools and selection](spec/configuration-and-credentials.md#map).
 - **State transitions:** Predecessor call → known availability failure and
   predecessor attempt → known failed; turn → successor eligible; successor
   attempt/call → terminal. Each availability-successor chain is bounded to at
@@ -745,8 +745,8 @@ INV-tagged test names and attached doc comments.
   credential rejection never do. The successor cannot cross adapters or change
   the exact target. Exhausting the pool follows its configured durable park or
   known-failure outcome
-  ([credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection)).
-  A provider-reported mismatch against either call's own target follows the
+  ([credential pools and selection](spec/configuration-and-credentials.md)). A
+  provider-reported mismatch against either call's own target follows the
   accepted timing-sensitive mismatch failure rule
   ([model-call-execution](spec/model-call-execution.md)) and is never an allowed
   substitution.

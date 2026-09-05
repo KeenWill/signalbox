@@ -1878,8 +1878,8 @@ What those facts mean — which outcome each combination selects, which failures
 may clear the marker without changing the token, how many attempts a generation
 admits, and why an ambiguous exchange is never replayed — is the refresh
 protocol, owned by
-[the `oauth` delivery](configuration-and-credentials.md#the-oauth-delivery).
-This paragraph makes those decisions representable and takes none of them.
+[the `oauth` delivery](configuration-and-credentials.md#not-built). This
+paragraph makes those decisions representable and takes none of them.
 Provisioning replaces the quarantined generation with a fresh authorization in
 one transaction, and publishes the durable member-availability update the
 scheduler consumes in that same transaction, for the reason an accepted clear
@@ -1914,13 +1914,13 @@ share a profile serialize on it: an interning that loses sees the stored
 identity and refuses to intern, and a provisioning that loses re-reads the new
 revision under its locks and fails on the collision. Which memberships are
 consulted, and what a collision does, are owned by
-[the `oauth` delivery](configuration-and-credentials.md#the-oauth-delivery);
-this paragraph supplies only the lock span that makes two concurrent commits
-decide it the same way. Each generation stores the exact provisioning tuple it
-was minted under — `client_id`, `token_url`, `device_authorization_url`, and
-ordered `scopes` — and every refresh and dispatch compares it with the current
+[the `oauth` delivery](configuration-and-credentials.md#not-built); this
+paragraph supplies only the lock span that makes two concurrent commits decide
+it the same way. Each generation stores the exact provisioning tuple it was
+minted under — `client_id`, `token_url`, `device_authorization_url`, and ordered
+`scopes` — and every refresh and dispatch compares it with the current
 registration under the same profile lock, by the canonical components
-[configuration and credentials](configuration-and-credentials.md#distinct-members-are-distinct-authorizations)
+[configuration and credentials](configuration-and-credentials.md#contracts)
 defines rather than by the configured bytes; a difference quarantines instead of
 exchanging, so an edited endpoint cannot receive a token minted for another.
 This paragraph constrains the future schema; no present storage surface provides

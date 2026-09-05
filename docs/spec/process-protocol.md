@@ -930,8 +930,8 @@ returns `configuration_reloaded { reloaded_sections }`, an array of the closed
 values `model_catalog`, `session_templates`, and `repository_watch`. Failure
 returns `configuration_reload_failed { phase, reason }`, sanitized exactly as
 startup logs are, and leaves the running configuration unchanged.
-[Configuration and credentials](configuration-and-credentials.md#configuration-reload)
-owns which sections are reloadable and the validate-then-swap rule.
+[Configuration and credentials](configuration-and-credentials.md#not-built) owns
+which sections are reloadable and the validate-then-swap rule.
 
 ## Server messages
 
@@ -1130,8 +1130,8 @@ connection state (`connected`, `suspect`, or `lost`), registration revision,
 advertised capability classes, tool names, credential-profile names, repository
 entries — each naming its repository key and optional credential-profile name,
 with the configuration meaning of absence owned by
-[runner credential lifecycle](configuration-and-credentials.md#runner-credential-lifecycle)
-— workspace capabilities, and sandbox profiles. Each `runner_operation_failure`
+[runner credential lifecycle](configuration-and-credentials.md#contracts) —
+workspace capabilities, and sandbox profiles. Each `runner_operation_failure`
 names its runner, the refused operation's correlation, one closed
 daemon-actionable `category` (`credential_unavailable`,
 `repository_unavailable`, `sandbox_unavailable`, `workspace_conflict`,
@@ -1396,7 +1396,7 @@ provider-tagged service-tier sets, fast-mode support Boolean, and the ordered
 nonempty `input_modalities` set. Modalities use exactly `text`, `image`, or
 `document`; `text` is always present, duplicates are invalid, and projection
 uses that closed order regardless of configuration order, as owned by the
-[static model capability catalog](configuration-and-credentials.md#the-static-model-alias-and-web-fetch-catalog).
+[static model capability catalog](configuration-and-credentials.md#not-built).
 The exact settings vocabulary and the prohibition on exposing an alternate fast
 serving identity are owned by
 [model/session settings](model-session-settings.md#local-process-representation).

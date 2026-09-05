@@ -50,11 +50,11 @@ grants no session authority, and eligibility spends no model context.
 Discovery greedily walks every non-excluded directory rooted at the session's
 daemon-local resolved workspace and each instruction directory explicitly
 registered by the owning
-[configuration grammar](configuration-and-credentials.md#workspace-instruction-roots).
-The workspace and every configured root are separate `DiscoveryRoot` values; a
-configured root is not silently folded into the workspace's authority or
-relative-path namespace. A session without a daemon-local resolved workspace
-still discovers configured roots.
+[configuration grammar](configuration-and-credentials.md). The workspace and
+every configured root are separate `DiscoveryRoot` values; a configured root is
+not silently folded into the workspace's authority or relative-path namespace. A
+session without a daemon-local resolved workspace still discovers configured
+roots.
 
 Version one has exactly two root kinds and canonical lowercase spellings:
 `workspace` for the session's daemon-local resolved workspace and `configured`
@@ -271,9 +271,9 @@ the command takes any lock, because activation must copy and hash the complete
 list while holding `session_scheduler` and catalog pagination bounds only
 enumeration, not that transaction's work. A template predates the workspace
 registrations, so it instead names the exact selectors owned by the
-[static-template grammar](configuration-and-credentials.md#the-static-session-template-catalog).
-Session creation copies those selectors as unresolved eligibility input; it does
-not scan an unbound workspace or invent bundle identities.
+[static-template grammar](configuration-and-credentials.md#not-built). Session
+creation copies those selectors as unresolved eligibility input; it does not
+scan an unbound workspace or invent bundle identities.
 
 A session-specific allow-list replacement may name a configured-root bundle from
 any scan because its stable configured-root identity is the sharing authority —
@@ -367,7 +367,7 @@ rejection and exposes no source metadata to the target session.
 Before a session carrying selectors can activate its first turn, the daemon
 resolves its configured-root selectors and, when a workspace selector is
 present, establishes the session's workspace binding through the owning
-[pre-activation binding contract](configuration-and-credentials.md#derived-session-workspace-roots).
+[pre-activation binding contract](configuration-and-credentials.md#not-built).
 It scans and registers only after that binding is fixed, then resolves every
 selector to exactly one identity and requires the resolved identities to be
 distinct. Two selectors resolving to one identity is a typed rejection of the

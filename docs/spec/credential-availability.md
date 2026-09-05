@@ -3,8 +3,8 @@
 This page owns what a credential-pool selection attempt can end as, and what
 every other page states about each ending. The pool grammar, membership ranking,
 trigger vocabulary, and admission rules are owned by
-[credential pools and selection](configuration-and-credentials.md#credential-pools-and-selection);
-the successor call's own mechanics by
+[credential pools and selection](configuration-and-credentials.md#map); the
+successor call's own mechanics by
 [availability successor calls](model-call-execution.md#availability-successor-calls);
 the phase algebra by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot);
@@ -142,7 +142,7 @@ those across members, exactly as the row above states — so such a release woul
 exclude every member again and re-enter the exhausted wait immediately, forever,
 on exactly the wake the deadline exists to produce. It would also contradict the
 two contracts that own these records —
-[credential pools and selection](configuration-and-credentials.md#credential-pools-and-selection),
+[credential pools and selection](configuration-and-credentials.md#not-built),
 where a reported reset time clears an `avoid_new_sessions` exclusion when it
 passes, and [persistence protocol](persistence-protocol.md#lock-protocol), which
 gives the insert-only turn-local fact to a chain exclusion alone.
@@ -164,8 +164,8 @@ delivery-layer credential failure — a rejected daemon-owned OAuth refresh, or 
 credential-home identity that failed its walk — never enters this machine at
 all: it occurs before any provider request, is typed as its own refresh or
 credential-home failure, and quarantines the profile directly under
-[credential deliveries](configuration-and-credentials.md#credential-deliveries).
-The pool's trigger policy does not see it, and no row above describes it.
+[credential deliveries](configuration-and-credentials.md#not-built). The pool's
+trigger policy does not see it, and no row above describes it.
 
 ## Derived views
 
@@ -191,7 +191,7 @@ Each projection below is a column above, and names the page that owns it:
   algebra, and [terminal outcomes](model-call-execution.md#terminal-outcomes)
   for the outcome each one derives.
 - Pool grammar, ranking, and admission —
-  [credential pools and selection](configuration-and-credentials.md#credential-pools-and-selection).
+  [credential pools and selection](configuration-and-credentials.md#map).
 
 ## Open edges
 
