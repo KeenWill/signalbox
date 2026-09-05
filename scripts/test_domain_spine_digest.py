@@ -13,6 +13,55 @@ import domain_spine_digest as digest
 
 
 class DomainSpineDigestTests(unittest.TestCase):
+    def test_applied_generic_blanket_implementations_are_not_delta_items(self) -> None:
+        baseline = "pub mod sample\npub struct sample::Record\n"
+        current = baseline + """\
+impl<T, U> core::convert::Into<U> for sample::Record where U: core::convert::From<T>
+impl<T> core::any::Any for sample::Record where T: 'static
+impl<T> core::borrow::Borrow<T> for sample::Record where T: ?core::marker::Sized
+impl<T, U> core::convert::TryInto<U> for sample::Record where U: core::convert::TryFrom<T>
+"""
+        expected = """\
+sample
+  (root): types=1 traits=0 functions=0
+    added: none
+    removed: none
+"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            snapshot = Path(temporary_directory) / "sample.txt"
+            snapshot.write_text(current)
+            output = StringIO()
+            with (
+                patch.object(digest, "previous_text", return_value=baseline),
+                redirect_stdout(output),
+            ):
+                digest.render("sample", snapshot)
+
+        self.assertEqual(output.getvalue(), expected)
+
+    def test_public_static_is_delta_item(self) -> None:
+        baseline = "pub mod sample\n"
+        current = baseline + "pub static sample::REGISTRY: usize\n"
+        expected = """\
+sample
+  (root): types=0 traits=0 functions=0
+    added: static REGISTRY
+    removed: none
+"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            snapshot = Path(temporary_directory) / "sample.txt"
+            snapshot.write_text(current)
+            output = StringIO()
+            with (
+                patch.object(digest, "previous_text", return_value=baseline),
+                redirect_stdout(output),
+            ):
+                digest.render("sample", snapshot)
+
+        self.assertEqual(output.getvalue(), expected)
+
     def test_associated_type_is_delta_item_not_top_level_type(self) -> None:
         baseline = "pub mod sample\npub trait sample::Source\n"
         current = baseline + "pub type sample::Source::Output\n"
