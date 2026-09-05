@@ -53,7 +53,11 @@ its schema. Core and other modules receive no privileges on the module tables.
 
 The module schema contains twelve tables:
 
-- `repository_state` and `pr_state` are mutable provider-state projections.
+- `repository_state` and `pr_state` are mutable provider-state projections. A
+  repository row fences complete frontier commits with a generation and the
+  digest of the last candidate; a generation mismatch is stale unless the
+  complete frontier and ordered event batch exactly replay the immediately
+  succeeding commit.
 - `frontier` holds one mutable occurrence counter per recurring event stream; an
   advance is an UPSERT and a retired pull-request stream is releasable by
   DELETE.
@@ -88,7 +92,9 @@ table or scheduler join exists.
 
 The module records a command in `dispatch_ledger` before submission and applies
 `command_settled` events to pending ledger rows. Identity reuse is idempotent
-only when all retained command metadata agrees.
+only when all retained command metadata agrees. One dispatch reference names
+exactly one rule revision and event evaluation, including its complete ordered
+action batch.
 
 ## Ingest
 

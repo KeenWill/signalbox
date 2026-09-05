@@ -271,13 +271,17 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         store
             .commit_frontier_candidate(
                 &repository,
+                0,
                 &frontier,
                 std::slice::from_ref(&occurrence),
                 observed_at,
                 retain_until,
             )
             .await?,
-        FrontierEventAdmission::Committed(Box::new([EventAdmission::Inserted]))
+        FrontierEventAdmission::Committed {
+            generation: 1,
+            events: Box::new([EventAdmission::Inserted]),
+        }
     );
     let replayed_event = RepoWatchEvent::branch_workflow(
         RepoWatchEventId::from_uuid(Uuid::from_u128(16)),
@@ -291,13 +295,37 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         store
             .commit_frontier_candidate(
                 &repository,
+                0,
                 &frontier,
                 std::slice::from_ref(&replayed_occurrence),
                 observed_at + Duration::from_secs(1),
                 retain_until + Duration::from_secs(1),
             )
             .await?,
-        FrontierEventAdmission::Committed(Box::new([EventAdmission::Replayed]))
+        FrontierEventAdmission::Committed {
+            generation: 1,
+            events: Box::new([EventAdmission::Replayed]),
+        }
+    );
+    let incompatible_frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![
+        RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+            [19; 32],
+            NonZeroU64::MIN,
+            PullRequestNumber::new(NonZeroU64::new(7).expect("seven is positive")),
+        ),
+    ])?;
+    assert_eq!(
+        store
+            .commit_frontier_candidate(
+                &repository,
+                0,
+                &incompatible_frontier,
+                &[],
+                observed_at,
+                retain_until,
+            )
+            .await?,
+        FrontierEventAdmission::Stale
     );
     let mut ids = FixedDispatchIds {
         value: 16,
@@ -334,7 +362,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     };
     let mut grouped_factory = FixtureSessionFactory { next_command: 42 };
     let grouped = plan_repository_event(
-        &[rule.clone(), second_rule],
+        &[rule.clone(), second_rule.clone()],
         &event,
         &mut grouped_ids,
         &mut grouped_factory,
@@ -352,6 +380,29 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_eq!(
         store.record_commands(plans, observed_at).await?,
         DispatchAdmission::Inserted
+    );
+    assert_eq!(
+        store
+            .record_rule(&repository, &second_rule, observed_at)
+            .await?,
+        RuleAdmission::Inserted
+    );
+    let mut colliding_ids = FixedDispatchIds {
+        value: 16,
+        calls: 0,
+    };
+    let mut colliding_factory = FixtureSessionFactory { next_command: 80 };
+    let colliding_batches = plan_repository_event(
+        std::slice::from_ref(&second_rule),
+        &event,
+        &mut colliding_ids,
+        &mut colliding_factory,
+    )?;
+    assert_eq!(
+        store
+            .record_commands(&colliding_batches[0], observed_at)
+            .await?,
+        DispatchAdmission::ConflictingReuse
     );
     let mut replay_ids = FixedDispatchIds {
         value: 30,
@@ -424,6 +475,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         store
             .commit_frontier_candidate(
                 &repository,
+                1,
                 &next_frontier,
                 &[preceding_occurrence, conflicting_occurrence],
                 observed_at,
@@ -458,6 +510,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         store
             .commit_frontier_candidate(
                 &repository,
+                1,
                 &stale_frontier,
                 &[],
                 observed_at,

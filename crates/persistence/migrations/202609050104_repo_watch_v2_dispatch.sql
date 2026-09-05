@@ -35,5 +35,31 @@ CREATE TABLE dispatch_ledger (
     CHECK (rejection_kind IS NULL OR octet_length(rejection_kind) BETWEEN 1 AND 128)
 );
 
+CREATE FUNCTION enforce_dispatch_reference_evaluation() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, mod_repo_watch
+AS $$
+BEGIN
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended('dispatch:' || NEW.dispatch_ref::text, 0));
+    IF EXISTS (
+        SELECT 1 FROM dispatch_ledger AS retained
+         WHERE retained.dispatch_ref = NEW.dispatch_ref
+           AND (retained.repository IS DISTINCT FROM NEW.repository
+                OR retained.rule_id IS DISTINCT FROM NEW.rule_id
+                OR retained.rule_revision IS DISTINCT FROM NEW.rule_revision
+                OR retained.event_id IS DISTINCT FROM NEW.event_id
+                OR retained.trigger_sequence IS DISTINCT FROM NEW.trigger_sequence)
+    ) THEN
+        RAISE EXCEPTION 'dispatch reference is already bound to another evaluation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER dispatch_reference_names_one_evaluation
+BEFORE INSERT ON dispatch_ledger
+FOR EACH ROW EXECUTE FUNCTION enforce_dispatch_reference_evaluation();
+
 RESET search_path;
 RESET ROLE;
