@@ -698,12 +698,21 @@ impl StreamDecoder {
                         event.index
                     ));
                 }
-                let block_json = serde_json::json!({
-                    "type": "compaction",
-                    "content": content,
-                    "encrypted_content": encrypted_content,
-                })
-                .to_string();
+                let Ok(content_json) = serde_json::to_string(&content) else {
+                    return self.violation(format!(
+                        "compaction block {} content cannot be encoded",
+                        event.index
+                    ));
+                };
+                let Ok(encrypted_content_json) = serde_json::to_string(&encrypted_content) else {
+                    return self.violation(format!(
+                        "compaction block {} encrypted content cannot be encoded",
+                        event.index
+                    ));
+                };
+                let block_json = format!(
+                    r#"{{"content":{content_json},"encrypted_content":{encrypted_content_json},"type":"compaction"}}"#
+                );
                 AssistantPart::ProviderCompaction { block_json }
             }
             BlockBuilder::ToolUse {
