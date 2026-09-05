@@ -161,11 +161,10 @@ inferred from UUID bits.
 
 Five read-only repository-watch routes expose the durable operator projection:
 `GET /api/repository-watch/repositories`, `pull-requests`, `work`, `sessions`,
-and `activity`. Their projection bounds, keyset continuation semantics, typed
-facts, and read-only behavior are owned by the
-[repository-watch operator read projection](repo-watch.md#operator-read-projection).
-The activity route exposes independently selectable event and webhook cursors
-under that contract; an excluded feed cannot carry a cursor.
+and `activity`. They are read-only projections of the records
+[repository watch](repo-watch.md) describes. The activity route exposes
+independently selectable event and webhook cursors; an excluded feed cannot
+carry a cursor.
 
 Rust serde DTOs and their schemars schemas under `crates/web-contract` are the
 authority. The checked-in `web-contract.mjs` runtime decoders and
