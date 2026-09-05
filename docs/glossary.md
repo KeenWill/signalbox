@@ -60,14 +60,14 @@ provider against one exact resolved target and context frontier. See
 
 The sole model call eligible to determine one provider interaction's completion,
 refusal, failure, or cancellation; authority transfer is deferred design. See
-[model-call open edges](spec/model-call-execution.md#open-edges).
+[model-call execution design](design/model-call-execution.md).
 
 ## Provider-target mismatch invalidation
 
 A typed value recorded when trusted mismatch evidence is first learned after the
 outcome-authoritative call completed but before its turn terminalized, stopping
 further semantic effects without rewriting the call. Deferred design; see
-[model-call open edges](spec/model-call-execution.md#open-edges).
+[model-call execution design](design/model-call-execution.md).
 
 ## Tool request
 
