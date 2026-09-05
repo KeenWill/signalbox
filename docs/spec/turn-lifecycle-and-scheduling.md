@@ -9,12 +9,12 @@ A turn is one durable logical request for one conversational outcome, made from
 one accepted-input origin under one frozen effective configuration. A turn is
 queued, active, or terminal, and a terminal turn carries one closed disposition;
 the types live in `crates/domain/src/turn_lifecycle.rs`. A retired turn is a
-queued turn that never activated. At most one turn per session is active, and
-the active turn holds the session's progressing slot. An active turn is running
-or is parked in a durable wait: on a tool approval, on a recovery decision after
-an ambiguous operation, on a lost runner, or on a foreground delegated child.
-Every wait retains the slot. Which credential a model call uses, and what
-happens to the turn when none is available, is owned by
+queued turn that never activated. At most one turn per session is active, and it
+holds the session's progressing slot. An active turn is running or parked in a
+durable wait: on a tool approval, on a recovery decision after an ambiguous
+operation, on a lost runner, or on a foreground delegated child. Every wait
+retains the slot. Which credential a model call uses, and what happens to the
+turn when none is available, is owned by
 [credential-availability](credential-availability.md).
 
 A turn attempt is one exclusive physical orchestration tenure;
@@ -29,16 +29,16 @@ and interrupt relations define a total order over a session's inputs
 (`derive_accepted_input_total_order`), and the earliest queued turn is eligible
 when no turn holds the slot. Activation is one transaction under the session's
 scheduler lock: it fixes the turn's lineage, its starting context frontier, and
-its initial attempt, and flips the row from queued to active. The lock protocol
+its initial attempt, and moves the row from queued to active. The lock protocol
 is owned by [persistence-protocol](persistence-protocol.md).
 
 The scheduler is a loop of per-session authoritative passes. An in-process nudge
 after an accepted input feeds it first, and a periodic sweep over the durable
 rows (`PostgresEligibilitySweep`) backs it up. The sweep finds four shapes: a
 queued turn with no active turn, an active turn holding a prepared model call,
-an active tool round, and a terminal pursuing goal turn that still owes its goal
-disposition. A pass activates a turn and then drives its model call through the
-execution ports owned by [model-call-execution](model-call-execution.md) and
+an active tool round, and a terminal pursuing goal turn that still lacks its
+goal disposition. A pass activates a turn and then drives its model call through
+the execution ports owned by [model-call-execution](model-call-execution.md) and
 [tool-loop](tool-loop.md).
 
 Every component deadline covers one physical operation. A running turn with no
@@ -75,10 +75,10 @@ relationships and their cascade are owned by
 [sessions-and-transcript](sessions-and-transcript.md); this page owns the
 parent's wait, the wake turn, and their scheduling.
 
-The daemon runtime composes these parts. It acquires the single-daemon guard
-owned by [process-protocol](process-protocol.md), migrates, completes the
-startup scan, then binds its sockets and starts admission, dispatch, scheduling,
-and the watchdog together.
+The daemon runtime acquires the single-daemon guard owned by
+[process-protocol](process-protocol.md), migrates, completes the startup scan,
+then binds its sockets and starts admission, dispatch, scheduling, and the
+watchdog together.
 
 ## Decisions
 
@@ -94,8 +94,8 @@ A separate timer, not a scheduler pass, owns turn liveness, because the sessions
 it exists to reach are exactly the ones no pass is scheduled for.
 
 Pending steering does not remove a turn from the quiescent shape. Why: a steered
-turn that is otherwise quiescent is wedged rather than working, and excluding it
-would leave it permanently invisible to the watchdog.
+but otherwise quiescent turn is wedged rather than working, and excluding it
+would hide it from the watchdog.
 
 No lifecycle table stores an activity timestamp; staleness is decided by
 repeated observation of unchanged evidence.
@@ -103,7 +103,7 @@ repeated observation of unchanged evidence.
 The progress frontier is the outbox sequence rather than the transcript's,
 because the outbox assigns its sequence in commit order and every session-scoped
 transition lands there. An identity ordering would let a backward clock
-adjustment or a skewed mint make progress read as silence.
+adjustment or a skewed mint hide progress.
 
 The progress scope is written as exclusions rather than as the kinds that count,
 because counting an unrelated event only delays ending a wedged turn while
@@ -185,9 +185,9 @@ Lineage is first-in-session when the session has no earlier turn; otherwise it
 names the exact terminal turn ordered immediately before it. The starting
 frontier is the predecessor's terminal frontier, then a model-identity boundary
 exactly when the frozen direct model differs from the predecessor's, then the
-origin entry. A first-in-session turn starts with the imported seed frontier
-followed by the origin entry under imported ancestry, or with the origin entry
-alone; the first native turn is first-in-session, imported entries are a context
+origin entry. A first-in-session turn starts with the origin entry alone or,
+under imported ancestry, with the imported seed frontier followed by the origin
+entry; the first native turn is first-in-session, imported entries are a context
 prefix and never a synthetic predecessor, and no other lifecycle check depends
 on ancestry. Imported ancestry is admitted only when its seed satisfies the
 imported-session contract on
@@ -211,8 +211,8 @@ revalidates authority; a pass that cannot immediately get an
 attachment-preparation permit ends and leaves only the durable prepared row for
 a later sweep. When a pass exceeds its occupancy bound, the handoff invokes the
 startup-recovery transaction only for a turn whose attempt and turn-progress
-frontier stood still between two observations, and a resumability read that does
-not settle counts as a resumption.
+frontier did not change between two observations, and a resumability read that
+does not settle counts as a resumption.
 
 A quiescent candidate is an active turn with an accepted-input origin in the
 running phase, with no tool round, approval, or recovery attempt, and no live
@@ -236,7 +236,7 @@ that code is reserved for a committed terminalization, a candidate left alone
 carries `turn_liveness_candidate_superseded`, and an unacknowledged commit
 carries `turn_liveness_terminalization_ambiguous`.
 
-If a daemon disappears while a reconciliation attempt is attempting, its
+If a daemon disappears while a reconciliation attempt is in progress, its
 recorded deadline lets the next daemon classify it as an infrastructure failure.
 A concurrent operator decision or other authoritative transition wins by
 ordinary row locking and records the automatic attempt as superseded. When the
@@ -418,12 +418,12 @@ another, and a successor resumes from that boundary.
   runner-loss projection's effect on queued activation and runner execution;
   design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
-- Recovery-only startup: a runner reconciliation phase between migrations and
+  \- Recovery-only startup: a runner reconciliation phase between migrations and
   the generic scan; design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
-- The credential-pool availability wait as a distinct active phase, with its
+  \- The credential-pool availability wait as a distinct active phase, with its
   attempt yield, scheduler wake conditions, and release; design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
-- The instruction-eligibility freeze in the activation transaction and the
+  \- The instruction-eligibility freeze in the activation transaction and the
   replacement command's lock order; design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
