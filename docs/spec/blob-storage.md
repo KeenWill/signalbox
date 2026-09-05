@@ -4,7 +4,7 @@ Blob storage keeps immutable byte content under its SHA-256 digest, records
 which stores hold each blob, and delivers verified bytes to clients, browsers,
 and models.
 
-## Map
+## Overview
 
 This page owns blob identity, the durable replica catalog, store configuration
 and routing, the ingest and read lifecycle, the blob wire vocabulary, multipart
@@ -56,7 +56,7 @@ model sees a textual stub, and the model reaches the bytes only through the
 blob-read tools. Before a model call is authorized to send, attachment
 preparation verifies a replica of every attachment the rendered request names.
 
-## Decisions
+## Design decisions
 
 Blob identity is global to the installation, so one byte sequence is one blob
 whoever uploads it. Why: the single-user authorization model makes global
@@ -129,7 +129,7 @@ The per-turn cap on blob-read requests exists alongside the byte budget because
 it bounds complete replica reverification work even when the model repeatedly
 requests a tiny range from a store without generation-pinned reuse.
 
-## Contracts
+## Boundary contracts
 
 The database records which stores hold each blob; a read uses those records, not
 configuration, to find the blob. A replica row is written only after the upload
@@ -296,7 +296,7 @@ Imported raw source records of [conversation-import](conversation-import.md)
 converge onto the blob catalog: the import satellite's content hash is an
 ordinary blob reference and the bytes live in a routed store.
 
-## Not built
+## Planned
 
 - A `program_journal` storage class for over-threshold program journal payloads;
   see [blob storage design](../design/blob-storage.md).

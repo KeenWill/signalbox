@@ -14,7 +14,7 @@ descriptors and URLs so a browser can render attachments from the transcript
 alone. A modality-unsupported preparation failure closes a call whose rendered
 request carries media its target cannot accept.
 
-## Shape
+## Design
 
 The routing-class vocabulary gains `program_journal`, and the routes table
 requires it alongside the four present classes. The daemon derives the class
@@ -57,7 +57,7 @@ before durable send authorization. The call records the failure as a terminal
 preparation outcome; media is never dropped from the request to make it
 sendable.
 
-## Constraints on present code
+## Compatibility constraints
 
 The class vocabulary and route-validation surface stay extensible to one added
 class without loosening the closed-set rejection of unknown classes.
@@ -76,7 +76,7 @@ A typed media result fails preparation before durable authorization when its
 target lacks that modality; no present or future surface silently drops media
 from a prepared call.
 
-## Acceptance
+## Acceptance criteria
 
 A routes table naming `program_journal` parses, a routes table missing it fails
 startup, and a table naming an unknown class still fails startup. An
