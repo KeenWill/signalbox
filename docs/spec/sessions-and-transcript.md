@@ -1,7 +1,8 @@
 # Sessions and the transcript
 
 This subsystem creates sessions, holds each session's configuration defaults and
-metadata, and records the semantic transcript that every model call reads.
+metadata, and records the semantic transcript that a session's conversational
+model calls read.
 
 ## Overview
 
@@ -305,14 +306,16 @@ directory and is admitted only when the caller acknowledges root global read;
 that acknowledgement grants global conversation read, including pathless
 sessions, and a scoped construction of the same path is rejected. The
 conversation-introspection adapter applies the decision in the same
-repeatable-read transaction that opens the transcript cursor.
+repeatable-read transaction that opens the transcript cursor, and encodes the
+refusal in a compact closed form when the full detail would exceed the bound on
+tool-error detail.
 
 Defaults are immutable epochs identified by a positive 64-bit ordinal. Each
 replacement installs the checked successor ordinal as a new immutable row and
-moves the session's single current pointer. The dangerous-tool blanket is
-disabled for explicit creation, copied from the resolved template for
-template-derived creation, and changes only when a replacement installs a
-complete later epoch.
+moves the session's single current pointer. Explicit creation installs the
+caller's complete defaults value, including its dangerous-tool blanket;
+template-derived creation installs the resolved template's copy. The blanket
+then changes only when a replacement installs a complete later epoch.
 
 Configuration-free steering inherits its configuration from its source turn and
 reads no defaults. A predecessor turn's prepared or in-flight call keeps its
