@@ -1536,3 +1536,75 @@ fn complete_structure(result: FileReadResult) -> Result<serde_json::Value, Box<d
         _ => Err("expected complete structured result".into()),
     }
 }
+
+#[tokio::test]
+async fn view_box_trailing_comma_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200,"/>"#),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn angle_dimension_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="1deg"/>"#),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn time_dimension_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="2s"/>"#),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn unknown_dimension_unit_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="10bananas"/>"#),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn clamp_requires_three_arguments() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="clamp(1px)"/>"#),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn calculation_unterminated_trailing_comment_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(1px)/*"/>"#),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn uppercase_pixel_unit_retains_numeric_metadata() -> Result<(), Box<dyn Error>> {
+    let source = SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="10PX"/>"#)
+        .into_source()?;
+    let result = read(
+        &DirectProcessor::new(),
+        &source,
+        "metadata",
+        serde_json::json!({}),
+    )
+    .await?;
+    assert_eq!(
+        complete_structure(result)?["width"],
+        serde_json::json!(10.0)
+    );
+    Ok(())
+}
