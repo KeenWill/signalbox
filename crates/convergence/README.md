@@ -9,7 +9,7 @@ changed pull-request identity return an error.
 ```sh
 cargo run -p signalbox-convergence --bin signalbox-converge -- record --pr 1566 --out pr.json.gz
 cargo run -p signalbox-convergence --bin signalbox-converge -- evaluate --fixture pr.json.gz --policy crates/convergence/examples/repository.toml
-cargo run -p signalbox-convergence --bin signalbox-converge -- evaluate --pr 1566 --policy crates/convergence/examples/repository.toml
+cargo run -p signalbox-convergence --bin signalbox-converge -- evaluate --pr 1566 --policy crates/convergence/examples/repository.toml --state pr-1566-state.json
 ```
 
 Evaluation prints JSON and exits 0 for convergence, 1 for a negative verdict,
@@ -18,6 +18,14 @@ evidence facts, and the next observation state. A recording's `previous` field
 supplies authenticated review history, wave identities, thread-resolution
 observation times, and the preceding check inventory. A first observation has an
 unsettled check inventory.
+
+`--state` loads the preceding state before fetching and atomically writes the
+next state after evaluation. Use one state file per pull request. A missing file
+starts a new history; repeating the command allows its check inventory to
+settle. The option also works with recorded fixtures. Live recordings timestamp
+resolved threads so later review requests can authenticate their dispositions.
+The final identity read follows pagination and checks; `checks_green` describes
+those refreshed checks.
 
 The [policy example](examples/repository.toml) supplies reviewer identities,
 request and summary grammars, root completion reaction, check exemptions,
@@ -29,7 +37,10 @@ The unmodified differential reference is
 [39bfc826d](https://github.com/KeenWill/signalbox/commit/39bfc826d). The
 configuration shape follows
 [#1588](https://github.com/KeenWill/signalbox/pull/1588). The reference supplies
-the evidence rules; it is not a consumer of this crate.
+the evidence rules; it is not a consumer of this crate. The harness additionally
+applies the [repository-watch contract](../../docs/spec/repo-watch.md) requiring
+at least one gating check. An empty or entirely exempt inventory cannot
+converge.
 
 Run `python3 tooling/convergence-reconciler/differential.py` after building the
 CLI. The harness compares convergence and the complete reason set for every

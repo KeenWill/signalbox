@@ -38,6 +38,9 @@ def assemble(responses):
         if page_node is None:
             continue
         if page_node["id"] == node["id"]:
+            if "headRefOid" in page_node and any(page_node[key] != node[key] for key in
+                ("state", "baseRefName", "baseRefOid", "headRefName", "headRefOid", "isDraft", "body", "lastEditedAt", "mergeable", "reviewDecision")):
+                raise RuntimeError("pull request changed after its convergence snapshot")
             for kind in ("reviewThreads", "comments", "reviews", "reactions", "files"):
                 if kind in page_node:
                     append_page(node[kind], page_node[kind])
@@ -116,7 +119,12 @@ def reference_evaluation(recording):
     client._load_base_ancestry([pr])
     client._finalize_check_inventory([pr])
     client.revalidate_for_decision(pr)
-    return reference.evaluate_convergence(pr)
+    result = reference.evaluate_convergence(pr)
+    # The repository-watch contract additionally requires at least one gating check.
+    if not any(not reference.is_non_gating_check(check) for check in pr["checks"]):
+        result["converged"] = False
+        result["reasons"].append("gating-checks-missing")
+    return result
 
 
 def fixtures():

@@ -7,6 +7,16 @@ use std::{
     process::{Command, Stdio},
 };
 
+/// One GitHub operation; transports retain their existing credential boundary.
+pub enum GitHubRequest {
+    GraphQl { query: String, variables: Value },
+    Rest { path: String },
+}
+
+pub type RequestFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, Error>> + Send + 'a>>;
+type SendRequest<'a> = dyn FnMut(GitHubRequest) -> RequestFuture<'a> + Send + 'a;
+
 const PAGE_SIZE: usize = 100;
 const COMMENT_FIELDS: &str =
     "id author { login } authorAssociation body createdAt lastEditedAt pullRequestReview { id }";
@@ -75,11 +85,17 @@ fn gh(arguments: &[&str], input: Option<&Value>) -> Result<Value, Error> {
     Ok(response)
 }
 
-fn query(responses: &mut Vec<Response>, query: String, variables: Value) -> Result<Value, Error> {
-    let response = gh(
-        &["api", "graphql", "--input", "-"],
-        Some(&json!({"query":query,"variables":variables})),
-    )?;
+async fn query(
+    send: &mut SendRequest<'_>,
+    responses: &mut Vec<Response>,
+    query: String,
+    variables: Value,
+) -> Result<Value, Error> {
+    let response = send(GitHubRequest::GraphQl {
+        query: query.clone(),
+        variables: variables.clone(),
+    })
+    .await?;
     let data = response["data"].clone();
     responses.push(Response {
         query,
@@ -120,7 +136,8 @@ fn append_page(connection: &mut Value, page: &Value) -> Result<(), Error> {
     Ok(())
 }
 
-fn pages(
+async fn pages(
+    send: &mut SendRequest<'_>,
     responses: &mut Vec<Response>,
     id: &str,
     kind: &str,
@@ -146,14 +163,14 @@ fn pages(
             .as_str()
             .ok_or_else(|| Error::Evidence("page cursor missing".into()))?
             .to_owned();
-        let data = query(
+        let data = query(send,
             responses,
             format!(
                 "query($id:ID!,$after:String!) {{ node(id:$id) {{ ... on {typename} {{ id {} }} }} }}",
                 selection(kind, true)?
             ),
             json!({"id":id,"after":after}),
-        )?;
+        ).await?;
         let page = &data["node"][name];
         if page["pageInfo"]["hasNextPage"] == true && page["pageInfo"]["endCursor"] == after {
             return Err(Error::Evidence("page cursor repeated".into()));
@@ -164,7 +181,8 @@ fn pages(
     complete_connection(connection)
 }
 
-fn observation(
+async fn observation(
+    send: &mut SendRequest<'_>,
     repository: &str,
     number: u64,
     policy: &ConvergencePolicy,
@@ -179,13 +197,13 @@ fn observation(
         .map(|kind| selection(kind, false))
         .collect::<Result<Vec<_>, _>>()?
         .join(" ");
-    let data = query(
+    let data = query(send,
         &mut responses,
         format!(
             "query($owner:String!,$name:String!,$number:Int!) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{ id number state title body lastEditedAt url isDraft reviewDecision author {{ login }} baseRefName baseRefOid headRefName headRefOid headRepository {{ nameWithOwner }} mergeable {selections} }} }} }}"
         ),
         json!({"owner":owner,"name":name,"number":number}),
-    )?;
+    ).await?;
     let mut node = data["repository"]["pullRequest"].clone();
     let id = text(&node["id"]).to_owned();
     if id.is_empty() {
@@ -198,7 +216,7 @@ fn observation(
         return Err(Error::Evidence("configured thread limit exceeded".into()));
     }
     for kind in kinds {
-        pages(&mut responses, &id, kind, &mut node[kind], policy)?;
+        pages(send, &mut responses, &id, kind, &mut node[kind], policy).await?;
     }
     for thread in node["reviewThreads"]["nodes"]
         .as_array_mut()
@@ -206,32 +224,37 @@ fn observation(
     {
         let id = text(&thread["id"]).to_owned();
         pages(
+            send,
             &mut responses,
             &id,
             "threadComments",
             &mut thread["comments"],
             policy,
-        )?;
+        )
+        .await?;
     }
-    let data = query(
+    let data = query(send,
         &mut responses,
         format!(
             "query($owner:String!,$name:String!,$head:GitObjectID!) {{ repository(owner:$owner,name:$name) {{ object(oid:$head) {{ ... on Commit {{ oid statusCheckRollup {{ id state {} }} }} }} }} }}",
             selection("contexts", false)?
         ),
         json!({"owner":owner,"name":name,"head":node["headRefOid"]}),
-    )?;
+    ).await?;
     let mut rollup = data["repository"]["object"]["statusCheckRollup"].clone();
     if !rollup.is_null() {
         let id = text(&rollup["id"]).to_owned();
         pages(
+            send,
             &mut responses,
             &id,
             "contexts",
             &mut rollup["contexts"],
             policy,
-        )?;
+        )
+        .await?;
     }
+    query(send, &mut responses, "query($id:ID!) { node(id:$id) { ... on PullRequest { id state baseRefName baseRefOid headRefName headRefOid isDraft body lastEditedAt mergeable reviewDecision } } }".into(), json!({"id":id})).await?;
     Ok(responses)
 }
 
@@ -251,6 +274,26 @@ fn assemble(responses: &[Response], policy: &ConvergencePolicy) -> Result<Value,
         if let Some(page_node) = data.get("node") {
             let id = text(&page_node["id"]);
             if id == text(&node["id"]) {
+                if page_node.get("headRefOid").is_some()
+                    && [
+                        "state",
+                        "baseRefName",
+                        "baseRefOid",
+                        "headRefName",
+                        "headRefOid",
+                        "isDraft",
+                        "body",
+                        "lastEditedAt",
+                        "mergeable",
+                        "reviewDecision",
+                    ]
+                    .iter()
+                    .any(|key| page_node[*key] != node[*key])
+                {
+                    return Err(Error::Evidence(
+                        "pull request changed after its convergence snapshot".into(),
+                    ));
+                }
                 for kind in ["reviewThreads", "comments", "reviews", "reactions", "files"] {
                     if let Some(page) = page_node.get(kind) {
                         append_page(&mut node[kind], page)?;
@@ -307,37 +350,35 @@ impl Recording {
             comparisons: self.comparisons.clone(),
             blobs: self.blobs.clone(),
             previous: self.previous.clone(),
+            observed_at: self.observed_at.clone(),
         })
     }
 }
 
 /// Records raw responses and the ancestry comparisons used by the predicate.
-pub fn record(
+pub async fn record_with(
+    send: &mut SendRequest<'_>,
+    previous: Value,
     repository: &str,
     number: u64,
     policy: &ConvergencePolicy,
 ) -> Result<Recording, Error> {
-    let first = observation(repository, number, policy)?;
+    let first = observation(send, repository, number, policy).await?;
     let node = assemble(&first, policy)?;
     let head = text(&node["headRefOid"]);
     let base = text(&node["baseRefOid"]);
     let mut comparisons = BTreeMap::new();
     let mut candidates = vec![base.to_owned()];
+    for key in ["head_oid", "authenticated_review_head"] {
+        if let Some(head) = previous[key].as_str() {
+            candidates.push(head.to_owned());
+        }
+    }
     for review in array(&node["reviews"]["nodes"]) {
         let Some(oid) = review["commit"]["oid"].as_str() else {
             continue;
         };
-        let submitted = text(&review["submittedAt"]);
-        let post_green = crate::predicate::checks(&node)
-            .iter()
-            .filter(|check| !policy.is_non_gating(crate::predicate::check_name(check)))
-            .all(|check| {
-                crate::predicate::check_green(check)
-                    && std::cmp::max(text(&check["completedAt"]), text(&check["createdAt"]))
-                        <= submitted
-            });
-        if post_green
-            && text(&review["body"]).trim().is_empty()
+        if text(&review["body"]).trim().is_empty()
             && !matches!(text(&review["state"]), "DISMISSED" | "CHANGES_REQUESTED")
         {
             candidates.push(oid.to_owned());
@@ -354,7 +395,10 @@ pub fn record(
     candidates.dedup();
     for candidate in candidates {
         let key = format!("{candidate}...{head}");
-        let response = gh(&["api", &format!("repos/{repository}/compare/{key}")], None)?;
+        let response = send(GitHubRequest::Rest {
+            path: format!("repos/{repository}/compare/{key}"),
+        })
+        .await?;
         comparisons.insert(key, response);
     }
     let merged_heads: Vec<_> = comparisons
@@ -374,7 +418,10 @@ pub fn record(
         .collect();
     for reviewed in merged_heads {
         let key = format!("{reviewed}...{base}");
-        let value = gh(&["api", &format!("repos/{repository}/compare/{key}")], None)?;
+        let value = send(GitHubRequest::Rest {
+            path: format!("repos/{repository}/compare/{key}"),
+        })
+        .await?;
         let merge_base = value["merge_base_commit"]["sha"]
             .as_str()
             .map(str::to_owned);
@@ -384,7 +431,10 @@ pub fn record(
             if !comparisons.contains_key(&key) {
                 comparisons.insert(
                     key.clone(),
-                    gh(&["api", &format!("repos/{repository}/compare/{key}")], None)?,
+                    send(GitHubRequest::Rest {
+                        path: format!("repos/{repository}/compare/{key}"),
+                    })
+                    .await?,
                 );
             }
         }
@@ -405,7 +455,7 @@ pub fn record(
             .and_then(|f| f["previous_filename"].as_str())
             .unwrap_or(path);
         let mut responses = Vec::new();
-        let data = query(&mut responses,"query($owner:String!,$name:String!,$head:String!,$base:String!) { repository(owner:$owner,name:$name) { head:object(expression:$head) { ... on Blob { text } } base:object(expression:$base) { ... on Blob { text } } } }".into(),json!({"owner":owner,"name":name,"head":format!("{head}:{path}"),"base":format!("{base}:{previous}")}))?;
+        let data = query(send, &mut responses,"query($owner:String!,$name:String!,$head:String!,$base:String!) { repository(owner:$owner,name:$name) { head:object(expression:$head) { ... on Blob { text } } base:object(expression:$base) { ... on Blob { text } } } }".into(),json!({"owner":owner,"name":name,"head":format!("{head}:{path}"),"base":format!("{base}:{previous}")})).await?;
         blobs.insert(path.into(), serde_json::to_value(responses)?);
         if !crate::evidence::planning_blob(&data["repository"]["head"])
             || (file["changeType"] != "ADDED"
@@ -414,13 +464,38 @@ pub fn record(
             break;
         }
     }
-    let last = observation(repository, number, policy)?;
+    let last = observation(send, repository, number, policy).await?;
     Ok(Recording {
         repository: repository.into(),
         number,
         observations: vec![first, last],
         comparisons,
         blobs,
-        previous: json!({}),
+        previous,
+        observed_at: Some(
+            chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        ),
     })
+}
+
+/// Records with the authenticated gh CLI.
+pub fn record(
+    repository: &str,
+    number: u64,
+    policy: &ConvergencePolicy,
+    previous: Value,
+) -> Result<Recording, Error> {
+    let mut send = |request| -> RequestFuture<'static> {
+        Box::pin(async move {
+            match request {
+                GitHubRequest::GraphQl { query, variables } => gh(
+                    &["api", "graphql", "--input", "-"],
+                    Some(&json!({"query":query,"variables":variables})),
+                ),
+                GitHubRequest::Rest { path } => gh(&["api", &path], None),
+            }
+        })
+    };
+    futures_executor::block_on(record_with(&mut send, previous, repository, number, policy))
 }

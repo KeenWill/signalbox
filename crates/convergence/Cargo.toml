@@ -8,6 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+futures-executor = "0.3.31"
 flate2 = "1.1.9"
 chrono = { version = "0.4.41", default-features = false, features = ["std"] }
 regex = "1.11.1"

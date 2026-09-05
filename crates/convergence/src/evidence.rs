@@ -762,6 +762,22 @@ pub fn evaluate(snapshot: &Snapshot, policy: &ConvergencePolicy) -> Result<Evalu
     state["known_codex_review_ids"] = json!(known_ids);
     state["review_wave_ids"] = json!(wave_ids);
     state["review_wave_base_oid"] = json!(wave_base);
+    if let Some(observed_at) = &snapshot.observed_at {
+        let resolved = normalize_threads(current, policy)?
+            .into_iter()
+            .filter(|thread| thread.is_resolved)
+            .filter_map(|thread| thread.id)
+            .collect::<Vec<_>>();
+        let mut times = previous["resolved_thread_observed_at"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        times.retain(|id, _| resolved.contains(id));
+        for id in resolved {
+            times.entry(id).or_insert_with(|| json!(observed_at));
+        }
+        state["resolved_thread_observed_at"] = Value::Object(times);
+    }
     if stable && facts.quiet_review_head_oids.iter().any(|oid| oid == head) {
         state["authenticated_review_head"] = json!(head);
         state["authenticated_review_body"] = node["body"].clone();
@@ -806,7 +822,13 @@ pub fn evaluate(snapshot: &Snapshot, policy: &ConvergencePolicy) -> Result<Evalu
             .iter()
             .filter(|t| t.is_escalated)
             .count(),
-        checks_green: currently_green,
+        checks_green: facts.check_rollup_state.is_some()
+            && !gating_checks.is_empty()
+            && facts
+                .checks
+                .iter()
+                .filter(|check| !policy.is_non_gating(check_name(check)))
+                .all(check_green),
         gating_checks,
         non_gating_checks,
         facts,

@@ -1,5 +1,17 @@
 use signalbox_convergence::{ConvergencePolicy, Error, Recording, evaluate, fetch};
-use std::{collections::BTreeMap, path::Path, process::ExitCode};
+use std::{collections::BTreeMap, io::Write, path::Path, process::ExitCode};
+
+fn save_state(path: &Path, state: &serde_json::Value) -> Result<(), Error> {
+    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    serde_json::to_writer(&mut file, state)?;
+    file.flush()?;
+    std::fs::rename(temporary, path)?;
+    Ok(())
+}
 
 fn run() -> Result<u8, Error> {
     let mut arguments = std::env::args().skip(1);
@@ -16,15 +28,31 @@ fn run() -> Result<u8, Error> {
         .map(String::as_str)
         .unwrap_or("crates/convergence/examples/repository.toml");
     let policy = ConvergencePolicy::read(Path::new(policy_path))?;
-    let recording: Recording = if let Some(path) = options.get("--fixture") {
+    let previous = match options.get("--state") {
+        Some(path) => match std::fs::read(path) {
+            Ok(bytes) => Some(serde_json::from_slice(&bytes)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        },
+        None => None,
+    };
+    let mut recording: Recording = if let Some(path) = options.get("--fixture") {
         Recording::read(Path::new(path))?
     } else {
         let number = options
             .get("--pr")
             .and_then(|number| number.parse().ok())
             .ok_or_else(|| Error::Evidence("--pr requires a pull request number".into()))?;
-        fetch::record(&policy.repository, number, &policy)?
+        fetch::record(
+            &policy.repository,
+            number,
+            &policy,
+            previous.clone().unwrap_or_else(|| serde_json::json!({})),
+        )?
     };
+    if let Some(previous) = previous {
+        recording.previous = previous;
+    }
     match command.as_str() {
         "record" => {
             let path = options
@@ -35,6 +63,9 @@ fn run() -> Result<u8, Error> {
         }
         "evaluate" => {
             let result = evaluate(&recording.snapshot(&policy)?, &policy)?;
+            if let Some(path) = options.get("--state") {
+                save_state(Path::new(path), &result.state)?;
+            }
             serde_json::to_writer(std::io::stdout().lock(), &result)?;
             Ok(if result.converged { 0 } else { 1 })
         }

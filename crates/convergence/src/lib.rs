@@ -125,6 +125,8 @@ pub struct Recording {
     pub blobs: BTreeMap<String, Value>,
     #[serde(default)]
     pub previous: Value,
+    #[serde(default)]
+    pub observed_at: Option<String>,
 }
 
 impl Recording {
@@ -177,6 +179,7 @@ pub struct Snapshot {
     pub comparisons: BTreeMap<String, Value>,
     pub blobs: BTreeMap<String, Value>,
     pub previous: Value,
+    pub observed_at: Option<String>,
 }
 
 pub(crate) fn text(value: &Value) -> &str {
