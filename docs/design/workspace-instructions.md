@@ -15,12 +15,16 @@ user's request.
 
 ## Design
 
-Eligibility is an allow-list of registered bundle identities bound to a session
-template and copied into the session at creation. A session-specific replacement
-is its own durable command. An absent allow-list makes no bundle eligible. Each
-entry pairs a bundle identity with the authorizing root the session reaches it
-through, because one bundle may be registered under several roots and the root
-fixes the paths and scope the model sees.
+Eligibility is an allow-list of registered bundle identities. A session template
+supplies instruction selectors that the session carries until its first
+activation, where one session-scheduler transaction resolves them against the
+turn's discovery and installs the allow-list
+([configuration-and-credentials.md](../spec/configuration-and-credentials.md)).
+A session-specific replacement is its own durable command. An absent allow-list
+makes no bundle eligible. Each entry pairs a bundle identity with the
+authorizing root the session reaches it through, because one bundle may be
+registered under several roots and the root fixes the paths and scope the model
+sees.
 
 The activation transaction copies the exact ordered eligibility list under the
 session scheduler lock and records its versioned SHA-256 hash in the turn-start
@@ -42,10 +46,11 @@ Nothing is admitted because it is eligible, relevant, near a touched file, or
 named in a template. The only admission route is a model request through
 `instructions_read`. That tool declares the AlwaysConfirm permission default
 with an explicit Delegated approval posture, so the approval judge decides each
-admission against the session's brief and a person decides only when the judge
-escalates ([tool-loop.md](../spec/tool-loop.md)). A request naming an ineligible
-bundle or carrying arguments that do not decode resolves before approval and
-creates no attempt.
+admission against the session's brief. A person decides when the judge escalates
+and when the judge call itself ends in a terminal failure
+([tool-loop.md](../spec/tool-loop.md)). A request naming an ineligible bundle or
+carrying arguments that do not decode resolves before approval and creates no
+attempt.
 
 Every repository-controlled string a list or preview result carries, such as a
 display name, a source or scope path, a description, heading text, or skill

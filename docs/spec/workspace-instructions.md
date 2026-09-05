@@ -9,17 +9,15 @@ of them a model call could use.
 A workspace instruction is an agent document or an agent skill that a repository
 or an operator supplies to guide a model. An agent document is a file named
 `AGENTS.md`; an agent skill is a directory holding a `SKILL.md`. The daemon, not
-a model-runtime adapter, finds them, records them, decides which a session may
-use, places their text in model input, and proves per turn what a model could
-see. Model-runtime adapters run with their native document, rules, and skill
-loaders disabled ([runtime-substrate.md](runtime-substrate.md)).
+a model-runtime adapter, finds them, records them, and proves per turn what a
+model could see. Model-runtime adapters run with their native document, rules,
+and skill loaders disabled ([runtime-substrate.md](runtime-substrate.md)).
 
 There are four stages. Discovery finds candidates. Registration validates a
-candidate and gives it a typed identity and a source hash. Eligibility decides
-which registered bundles one session may use. Admission places a bundle's
-rendered text in one turn's model input. Discovery and registration are built.
-Eligibility and admission exist only as the empty per-turn record described
-below.
+candidate and gives it a typed identity and a source hash. Both are built.
+Planned eligibility decides which registered bundles one session may use, and
+planned admission places a bundle's rendered text in one turn's model input;
+both exist only as the empty per-turn record described below.
 
 A bundle is one independently addressable instruction source. Discovery
 (`discover_workspace_instructions` in
@@ -146,10 +144,11 @@ corruption ([persistence-protocol.md](persistence-protocol.md)).
   bytes and findings from the runner's workspace, and no adapter is asked to
   load ambient files in its place
   ([design](../design/workspace-instructions.md)).
-- Eligibility control: an allow-list bound to a session template, copied into
-  the session at creation, and replaceable later by its own durable command; the
-  present implementation exposes no replacement command, template field, or
-  visibility variant ([design](../design/workspace-instructions.md)).
+- Eligibility control: a session template supplies instruction selectors that
+  resolve at the session's first activation into an allow-list, replaceable
+  later by its own durable command; the present implementation exposes no
+  replacement command, template field, or visibility variant
+  ([design](../design/workspace-instructions.md)).
 - Allow-list default: an absent allow-list means no bundle is eligible, never
   every discovered bundle ([design](../design/workspace-instructions.md)).
 - Frozen eligibility snapshot: activation copies the exact ordered eligibility
