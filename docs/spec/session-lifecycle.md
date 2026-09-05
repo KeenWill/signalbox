@@ -20,20 +20,23 @@ writes the session state in the same transaction as the turn or goal transition
 that changes the projection, so the two machines never disagree.
 
 Waiting carries a typed kind, a deadline, and the party expected to end the
-wait. An owned session has three configured deadlines: admission, which covers
-created and dispatched; active stall; and waiting. A parked session waits on a
-human and carries a machine-readable cause and the responder who must act. The
-operator queue is exactly the set of parked sessions.
+wait. An owned session has one armed deadline, of a kind set by its state:
+admission, which covers created and dispatched; active stall, which covers
+active and recovering; and waiting. The admission and waiting bounds come from
+configuration. A parked session waits on a human and carries a machine-readable
+cause and the responder who must act. The operator queue is exactly the set of
+parked sessions.
 
 Terminal carries one outcome from a closed vocabulary. Achievement is verified
-when a declared finish check passed and declared when the session had no finish
-condition. A failure is retryable when a retry could clear it, structural when
-the same input will fail again (a compaction wall, a broken toolchain, a
-moderation block that a resume re-trips), and unknown when no cause was
-classified. A session is stopped by a human or a rule, and superseded when a
-newer session owns the work or the work is gone. It is abandoned when an
-operator writes off a parked session and releases its worktrees, containers, and
-slots, and retired when it never did the work and never will.
+when a finish check passed and declared when no check did. A failure is
+retryable when a retry could clear it, structural when the same input will fail
+again (a compaction wall, a broken toolchain, a moderation block that a resume
+re-trips), and unknown when no cause was classified. A session is stopped by a
+human or a rule, and the stop records whether it is sticky. It is superseded
+when a newer session owns the work; the outcome also admits a successor-free
+form, for work that is gone, that no command produces. It is abandoned when an
+operator writes off a parked session, and retired when it never did the work and
+never will.
 
 Every session carries an owned-or-unmonitored bit, set at creation and flipped
 by a journaled adopt or release. Owned means the daemon holds a liveness
@@ -109,18 +112,14 @@ The attention classifier that
 [sessions and the transcript](sessions-and-transcript.md) owns is a projection
 of lifecycle state and turn phase, never an independent machine.
 
-A missing deadline is unbounded, not a violation.
+An absent configured bound leaves a deadline unbounded. An owned session that is
+not terminal and has no deadline row is a violation.
 
 Parking overrides the turn projection: it suspends a live turn in place, the
 turn keeps its phase, and no model call, tool execution, or delivery proceeds
 while the session is parked.
 
-Verified achievement is recorded only when the declared finish check passes; for
-[repo-watch](repo-watch.md) work the check re-tests the external gate on the
-exact head.
-
-A sticky stop suppresses re-dispatch of the stopped work until the dispatch
-source is updated.
+Verified achievement is recorded only when the declared finish check passes.
 
 Lifecycle members default from the creation cause: module dispatch creates an
 owned session whose finish condition is the external gate, and an interactive
@@ -128,9 +127,10 @@ session is unmonitored with no finish condition. Attaching a goal to an
 unmonitored session records it as owned, with the adoption journaled to the
 attaching actor, in the same transaction.
 
-An unmonitored session has no deadlines, no watchdog, no automatic resumption,
-and no held slot; no external sweep acts on it, and it is excluded from
-occupancy accounting.
+An unmonitored session has no deadlines, no automatic resumption, and no held
+slot; no external sweep acts on it, and it is excluded from occupancy
+accounting. Turn-liveness recovery covers its turns, because a dead turn left
+active would block its next input.
 
 Release never interrupts a live operation: a running turn completes to its
 boundary under the resources already held, and the slot releases at that
@@ -156,9 +156,8 @@ an open goal generation closes as session_closed; a user-stopped generation
 admits only the stopped outcome, and an achieved generation admits only an
 achievement outcome.
 
-The compaction funnel is fully queryable from durable state: requested,
-prepared, applied, and failed are each stamped, and the failure path records
-input size and fit result.
+The compaction funnel is queryable from durable state: requested, prepared,
+applied, and failed are each stamped.
 
 The five lifecycle metrics are defined on durable columns, never on proxies.
 
@@ -179,4 +178,16 @@ The five lifecycle metrics are defined on durable columns, never on proxies.
 - Dispatch payload measurement: every dispatched session records the token and
   byte size of its initial payload at creation, and an interactive session
   records them at its first accepted input; see
+  [session lifecycle design](../design/session-lifecycle.md).
+- Active-stall expiry: the configured active-stall bound and the deadline pass
+  that parks an active or recovering session on it; see
+  [session lifecycle design](../design/session-lifecycle.md).
+- [Repo-watch](repo-watch.md) finish verification: a finish check that re-tests
+  the external gate on the exact head, so a declared achievement can settle as
+  verified; see [session lifecycle design](../design/session-lifecycle.md).
+- Sticky-stop suppression: re-dispatch of stopped work stays suppressed until
+  the dispatch source is updated; see
+  [session lifecycle design](../design/session-lifecycle.md).
+- Worktree and container cleanup on closure: a closed session's worktree and
+  container are removed; see
   [session lifecycle design](../design/session-lifecycle.md).

@@ -10,7 +10,10 @@ Every owned session reaches a terminal outcome or a human, and no module writes
 lifecycle machinery of its own. A failure parks the session instead of ending it
 or stalling silently, a redispatch closes the session it replaces, modules
 receive deadline expiries as events, every dispatched session records what it
-was handed, and a program run acts under its own actor.
+was handed, and a program run acts under its own actor. An active stall parks
+the session, a repo-watch achievement is verified against its gate, a sticky
+stop holds off redispatch, and a closure removes the worktree and container the
+session held.
 
 ## Shape
 
@@ -40,11 +43,15 @@ pursuit the predecessor still owns. The unattended
 dispatch fails the predecessor's turn instead of superseding the session. The
 superseded outcome and the supersede command exist; no dispatch path issues it.
 
-Every deadline expiry is a published transition: the state-change or terminal
-event the deadline runtime already emits, with the expired deadline named in its
-cause. Modules and the program substrate subscribe to those events and run no
-timer over a session of their own. A module that needs a deadline core does not
-arm asks for a new deadline kind in core.
+Every deadline expiry is a published transition with the expired deadline named
+in its cause. Admission expiry reaches the terminal event the satellite's
+trigger appends; the state-change event for a waiting or active-stall expiry is
+to be built, because the deadline pass parks the row and appends no event. The
+daemon reads the active-stall bound from configuration, and the pass parks an
+active or recovering session whose stall exceeds it with the active-stall cause.
+Modules and the program substrate subscribe to those events and run no timer
+over a session of their own. A module that needs a deadline core does not arm
+asks for a new deadline kind in core.
 
 The lifecycle actor vocabulary gains a run-scoped program-run actor for commands
 issued by a registered program's run, as
@@ -63,6 +70,12 @@ precedes its recorded payload and no dispatch path skips the measurement. An
 interactive session has no payload at creation; it records the same two
 measurements when its first input is accepted, because that input is what the
 session was handed.
+
+A repo-watch session's finish check re-tests the external gate on the exact head
+the achievement names, and only a pass settles the achievement as verified. A
+redispatch reads the sticky flag on a stopped predecessor and dispatches nothing
+for that source until the source is updated. A closure whose outcome releases
+resources removes the session's worktree and container.
 
 ## Constraints on present code
 
@@ -104,3 +117,16 @@ its run reference, and replaying the command classifies it identically.
 Every dispatched session's lifecycle row carries both payload measurements from
 creation, and an interactive session's row carries them from its first accepted
 input.
+
+An active or recovering session whose stall exceeds the configured bound is
+parked by the deadline pass, and a waiting or active-stall expiry appends a
+state-change event naming the deadline.
+
+A repo-watch declaration settles verified only after the external gate passes on
+the exact head.
+
+After a sticky stop, new activity on the same dispatch source dispatches nothing
+until the source is updated.
+
+A closure that releases resources leaves no worktree or container for the
+session.
