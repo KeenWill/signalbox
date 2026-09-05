@@ -211,14 +211,15 @@ content, never transcript access.
 
 An owned session that waits for an operator is parked, or blocked on a goal that
 no automatic resumption will lift; a pending tool-approval decision is the
-separate waiting state. An ambiguous model call or external-effect tool attempt
-whose automatic reconciliation budget is exhausted is a further operator wait
-until the operator reconciles the turn. A turn awaiting runner recovery is an
-operator wait too, and only replacement or abandonment leaves the lost state. A
-module that parks something wrapping a session drives the session itself to
-parked. Attention states shown to operators are derived from durable facts by
-one classifier, and a read that encounters a state it does not recognize returns
-an error rather than a guess.
+separate waiting state. An ambiguous model call whose automatic reconciliation
+budget is exhausted is a further operator wait until the operator reconciles the
+turn; an ambiguous external-effect tool attempt whose budget is exhausted parks
+until the deferred tool-recovery surface exists. A turn awaiting runner recovery
+is an operator wait too, and only replacement or abandonment leaves the lost
+state. A module that parks something wrapping a session drives the session
+itself to parked. Attention states shown to operators are derived from durable
+facts by one classifier, and a read that encounters a state it does not
+recognize returns an error rather than a guess.
 
 The only way to derive a new transcript snapshot is to append to the old one, so
 every earlier entry stays in order. Two frontiers are equal only if they are the
@@ -266,29 +267,32 @@ fixed pathless placement as version one. Every table in this set is append-only
 except the current-defaults and current-placement pointers and the lifecycle
 satellite, which lifecycle transitions update in place.
 
-The daemon resolves the addressed imported aggregate to its canonical sealed
-frontier before constructing the command; the frontier names its own imported
-conversation and inclusive boundary, and the command accepts no second
-conversation identity. Import never chooses the relationship or a frontier, and
-a client may create a session against any boundary of any imported conversation,
-at any later time and more than once. Resume and fork both create independent
-session identities, use the same imported prefix, and leave the imported
-conversation unchanged.
+The daemon inspects the durable-command registry before any source resolution.
+For an unclaimed identity it resolves the addressed imported aggregate to its
+canonical sealed frontier before constructing the command; the frontier names
+its own imported conversation and inclusive boundary, and the command accepts no
+second conversation identity. Import never chooses the relationship or a
+frontier, and a client may create a session against any boundary of any imported
+conversation, at any later time and more than once. Resume and fork both create
+independent session identities, use the same imported prefix, and leave the
+imported conversation unchanged.
 
-A missing imported conversation or frontier is returned without claiming the
-command identity. A changed frontier, relationship, or defaults under an already
-claimed identity is conflicting reuse; selecting another conversation
-necessarily changes the frontier. Unique conflicts for the generated session,
-semantic-entry, and seed-frontier candidates are typed identity collisions by
-kind, and the failed transaction rolls back its registry claim.
+A missing imported conversation or frontier under an unclaimed identity is
+returned without claiming the command identity. A changed frontier,
+relationship, or defaults under an already claimed identity is conflicting
+reuse; selecting another conversation necessarily changes the frontier. Unique
+conflicts for the generated session, semantic-entry, and seed-frontier
+candidates are typed identity collisions by kind, and the failed transaction
+rolls back its registry claim.
 
 Every imported-seeded session owns exactly one immutable `ImportedSessionSeed`
 pairing its session identity with the generated seed frontier identity;
 reminting an equal-content frontier never satisfies that link. Creation replay
 and every read that resolves imported semantic context require the imported
 ancestry and its seed together and validate that the linked frontier belongs to
-the same session. First-turn scheduling and transcript projection use that
-checked loader and the stored identity; neither mints another frontier.
+the same session and that its membership is the selected imported prefix in
+exact order. First-turn scheduling and transcript projection use that checked
+loader and the stored identity; neither mints another frontier.
 
 The seeding transaction inserts one imported-provenance entry for every
 normalized imported entry in the exact prefix, including non-text content. Each
@@ -549,7 +553,8 @@ next model-call safe point in recipient-wide order; an idle recipient gets one
 delegation-origin queued turn, and further items coalesce into its starting
 frontier. Message admission preserves the final relationship ordinal for a
 future terminal child outcome and rejects a nonterminal message on exhaustion
-with typed transition evidence.
+with typed transition evidence, and an exhausted recipient delivery sequence
+rejects the operation with typed recipient-sequence exhaustion.
 
 Returned content derives only from the proof-bearing completed call;
 independently supplied text cannot authorize a result. Reconciliation-required

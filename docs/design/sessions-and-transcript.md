@@ -150,8 +150,9 @@ unpinned at the successor revision. Delegation result sealing reads one sealed
 projection and has no raw-identity path. A spawned child sits in its parent's
 directory, is pathless when its parent is, and copies no other placement axis. A
 turn that fails at eligibility carries its origin entries, one for an accepted
-input and every coalesced delivery in sequence for a delegation wake, and one
-failed marker committed together with a turn-failed event and no attempt row. A
-turn released from a wait with an exhausted pool and an already-issued
-predecessor call carries one failed marker committed with a fresh call-free
-ended attempt, a turn-failed event, and no terminal model call.
+input, every coalesced delivery in sequence for a delegation wake, and the
+checked delegated-task entry for a delegated child's first turn, and one failed
+marker committed together with a turn-failed event and no attempt row. A turn
+released from a wait with an exhausted pool and an already-issued predecessor
+call carries one failed marker committed with a fresh call-free ended attempt, a
+turn-failed event, and no terminal model call.
