@@ -293,9 +293,8 @@ per-turn provenance. The following extensions remain undecided:
   grammar, per-membership ranking, and closed action vocabulary by
   [credential pools and selection](spec/configuration-and-credentials.md#overview).
   What remains open is the client projection: snapshots expose each call's usage
-  and the final turn state, while the predecessor, cause, and successor relation
-  is committed future storage that no present migration or repository operation
-  supplies. Blocks fallback UI, not fallback. (S22)
+  and the final turn state but not the durable predecessor, cause, and successor
+  relation. Blocks fallback UI, not fallback. (S22)
 - **Whether an automatic successor may cross adapter kinds.** Decided for the
   first slice: no. A pool's members share one adapter, so cross-kind
   substitution is inexpressible rather than merely disabled, and moving a
@@ -349,13 +348,10 @@ per-turn provenance. The following extensions remain undecided:
   concrete served identity and a substitution as evidence rather than as
   operator diagnostics and a fail-closed error. Blocks the provider provenance
   schema. (S20–S23)
-- **Future same-profile retry.** Repeating a known provider failure or ambiguous
-  outcome against the target and credential profile that produced it remains
-  outside every accepted policy; the successor-call decision above authorizes
-  same-target failover through another eligible profile, never a repeat of the
-  same profile. Any later same-profile retry command or policy, including
-  backoff and resource limits, is a separate decision the accepted no-retry
-  policy leaves open. Blocks retry features. (S02, S04, S22)
+- **Ambiguity-replacement credential authority.** Decide whether a replacement
+  call authorized by `DuplicateRiskAccepted` may reuse the ambiguous call's
+  credential profile or must select another eligible profile. Blocks ambiguity
+  replacement calls. (S04)
 
 ## Scheduling and runners
 
