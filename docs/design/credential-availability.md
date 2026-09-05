@@ -182,6 +182,10 @@ spec page states.
 - The pre-call producer's commit shape, a `TurnFailed` appended after the ended
   attempt's starting frontier in the terminalizing transaction, is reused
   unchanged by wait-transition fail (no call).
+- Wait-transition fail (after call) keeps the predecessor's provider cause as
+  its terminal evidence. The built preparation path classifies every call-free
+  exhaustion as a pre-call one carrying no provider cause, so this ending needs
+  a closure that preserves it.
 - One commit never both terminalizes a turn and authorizes a successor, and a
   wait commit appends no `TurnFailed`; a parked turn is never indistinguishable
   from a terminal one.

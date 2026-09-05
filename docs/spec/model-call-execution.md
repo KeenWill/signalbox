@@ -686,7 +686,9 @@ serialized by that same lock: when its applied-interrupt proof already exists,
 the known failure follows the ordinary stop-requested terminal path and no
 successor is created; when the observation wins first, the later stop targets
 the newly active successor. One commit can therefore never both terminalize the
-turn and authorize a successor.
+turn and authorize a successor. A later preparation that finds the pool
+exhausted ends that call-free successor attempt as a pre-call exhaustion: its
+terminal cause is pool exhaustion and it records no provider cause.
 
 Three causes qualify and no others. Refusal never qualifies: it is provider
 judgment about the request, so another account would refuse the same content and
