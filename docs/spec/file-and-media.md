@@ -37,12 +37,13 @@ daemon for byte ranges, which the daemon checks against the declared envelope
 before serving them from a `VerifiedBlobSource`. A worker's response is
 untrusted until the registry has reparsed and cross-checked it.
 
-The model has two effect-free tools. `file_inspect` takes a canonical digest and
-an optional selector for a repeated visible use. `file_read` adds an exact
-provider-owned view and exactly one input: object options for a first read, or
-the cursor a truncated result returned. `signalbox-file-media-provider-runtime`
-supplies the registry-backed service behind both and authorizes each request
-through an injected `FileUseResolver`.
+Two effect-free tool declarations are compiled, and no daemon catalog registers
+either one. `file_inspect` takes a canonical digest and an optional selector for
+a repeated visible use. `file_read` adds an exact provider-owned view and
+exactly one input: object options for a first read, or the cursor a truncated
+result returned. `signalbox-file-media-provider-runtime` supplies the
+registry-backed service behind both and authorizes each request through an
+injected `FileUseResolver`.
 
 ## Design decisions
 
@@ -128,9 +129,9 @@ recovery is registered as part of the reader's validation.
 ## Planned
 
 - Daemon composition of `file_inspect` and `file_read` behind a
-  `FileUseResolver` that reuses the rendered-frontier visibility proof; no
-  daemon catalog registers either tool, and the daemon registry recognizes no
-  format. See the [design](../design/file-and-media.md).
+  `FileUseResolver` that reuses the rendered-frontier visibility proof; the
+  daemon registry recognizes no format. See the
+  [design](../design/file-and-media.md).
 - Image, audio, and general-file views and the rich blob-reference result arm,
   with publication and registration before result commit and no dangling result
   on failure. See the [design](../design/file-and-media.md).
