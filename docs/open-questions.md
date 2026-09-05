@@ -371,12 +371,13 @@ bytes, runner-to-daemon failure frames, workspace-release acknowledgement,
 forced Git transport configuration, and the independent
 [session-composition axes](spec/runner-protocol.md) in
 [runner protocol and placement](spec/runner-protocol.md); the runner-recovery
-phase, the placement transcript payload, creation-record placement, and the
-runner event family in
-[persistence-protocol](spec/persistence-protocol.md#relational-representation);
-the closed runner execution object, creation-request placement, and template
-creation carrying placement in [process-protocol](spec/process-protocol.md); the
-relocation transcript boundary in
+phase, creation-record placement, and the runner event family in
+[persistence-protocol](spec/persistence-protocol.md), and the placement
+transcript entry in the
+[persistence-protocol design](design/persistence-protocol.md); the closed runner
+execution object, creation-request placement, and template creation carrying
+placement in [process-protocol](spec/process-protocol.md); the relocation
+transcript boundary in
 [sessions-and-transcript](spec/sessions-and-transcript.md); capability-derived
 tool advertisement in
 [model-call-execution](spec/model-call-execution.md#frontier-rendering). Why: a

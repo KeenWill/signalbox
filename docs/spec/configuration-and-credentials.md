@@ -1761,7 +1761,7 @@ what a pool needs, and a profile in no pool has no co-member to contradict. Two
 provisionings of one account must not both commit, so this consultation is
 serialized against any concurrent provisioning commit of a consulted profile;
 the lock protocol that achieves it is owned by
-[persistence protocol](persistence-protocol.md#lock-protocol).
+[persistence protocol](persistence-protocol.md).
 
 Provisioning is not the only moment co-membership arises, and checking only at
 provisioning would leave the property unenforced by the other one. Two profiles
@@ -2110,17 +2110,17 @@ still leave one excluded member at selection.
 Preparation is the other side of that race and joins the same protocol. Before
 it reads any member's exclusion state, it locks the action head of every member
 of the policy it may select, at the ordering position and in the modes
-[persistence protocol](persistence-protocol.md#lock-protocol) fixes, and holds
-those locks through the `Prepared` insert. The modes are not restated here,
-because they are not uniform across members: a preparation writes the exclusion
-state of any member whose pending displacement it consumes, and reads the rest.
-The share and exclusive modes conflict, so one of the two transactions waits: a
-call is either prepared before the exclusion commits or prepared against a
-member it has already observed as excluded. Without this rule selection takes no
-lock the exclusion writer takes — an unbounded `first_listed` member acquires
-neither a capacity row nor a cursor row — and a preparation that read a member
-as admissible could then dispatch a provider request on a credential quarantined
-in the interval.
+[persistence protocol](persistence-protocol.md) fixes, and holds those locks
+through the `Prepared` insert. The modes are not restated here, because they are
+not uniform across members: a preparation writes the exclusion state of any
+member whose pending displacement it consumes, and reads the rest. The share and
+exclusive modes conflict, so one of the two transactions waits: a call is either
+prepared before the exclusion commits or prepared against a member it has
+already observed as excluded. Without this rule selection takes no lock the
+exclusion writer takes — an unbounded `first_listed` member acquires neither a
+capacity row nor a cursor row — and a preparation that read a member as
+admissible could then dispatch a provider request on a credential quarantined in
+the interval.
 
 `switch_now` is admitted only for `on_quota_exhausted`, `on_rate_limited`, and
 `on_overloaded`, because only those causes carry proof that the request was not

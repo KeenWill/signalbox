@@ -216,16 +216,16 @@ for a physical attempt, realized today as the dispatch gate. See
 
 The append-only event rows written inside the transactions that commit
 client-observable state, the sole path from a commit to an update event. See
-[transactional outbox](spec/persistence-protocol.md#transactional-outbox).
+[transactional outbox](spec/persistence-protocol.md).
 
 ## Update event
 
 One durable-transition fact delivered to subscribers, produced only from the
 outbox rows its committing transaction appended. See
-[transactional outbox](spec/persistence-protocol.md#transactional-outbox).
+[transactional outbox](spec/persistence-protocol.md).
 
 ## Subscription cursor
 
 The opaque resumption token each durable update event advances, derived from the
 outbox's monotonic commit-ordered sequence. See
-[transactional outbox](spec/persistence-protocol.md#transactional-outbox).
+[transactional outbox](spec/persistence-protocol.md).

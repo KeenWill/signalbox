@@ -577,10 +577,9 @@ is a recorded result, not grounds to roll back the attempt. Replay of an already
 committed request returns the recorded receipt and admission link without
 appending either again; a conflicting receipt or link is corruption. That head
 lock's position in the repository-wide order and its mode belong to the
-[persistence lock protocol](persistence-protocol.md#lock-protocol), which
-carries it in the same inventory as this transaction's scheduler lock; this page
-states that the lock is taken, never where or how. No present tool supplies this
-effect.
+[persistence lock protocol](persistence-protocol.md), which carries it in the
+same inventory as this transaction's scheduler lock; this page states that the
+lock is taken, never where or how. No present tool supplies this effect.
 
 The runner durably spools a terminal evidence envelope until `result_recorded`.
 A process exit, timeout, supervisor loss, or channel loss after claim is not a
@@ -1417,15 +1416,14 @@ database round trips while holding the scheduler lock.
 `DecideToolRequest` joins the user-global durable-command registry as its own
 typed record family, and `OverrideDeniedToolRequest` likewise; the recorded
 override row, its recording and consumption triggers, and the UNIQUE consumption
-column are owned by
-[persistence protocol](persistence-protocol.md#relational-representation).
+column are owned by [persistence protocol](persistence-protocol.md).
 Defaults-bearing command records at kind-scoped storage version 1 reconstitute
 with `DangerousToolAutoApproval::Disabled`. The current kind-scoped versions and
 their compatibility gates are owned by
 [identity and commands](identity-and-commands.md) and
-[persistence protocol](persistence-protocol.md#relational-representation).
-Registry inspection validates the supported version set for the selected kind
-rather than applying one global version constant.
+[persistence protocol](persistence-protocol.md). Registry inspection validates
+the supported version set for the selected kind rather than applying one global
+version constant.
 
 ## Open edges
 
