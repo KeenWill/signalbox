@@ -1,6 +1,7 @@
-//! PostgreSQL proof for the §7 lifecycle command family: claim and replay,
-//! recorded rejections, the finish-condition validations, closures over live
-//! and parked turns, and the recorded issuer principal.
+//! PostgreSQL proof for the lifecycle command family
+//! (docs/spec/session-lifecycle.md): claim and replay, recorded rejections,
+//! the finish-condition validations, closures over live and parked turns, and
+//! the recorded issuer principal.
 
 use std::error::Error;
 
@@ -495,7 +496,7 @@ async fn park_by_statement(pool: &PgPool, session: SessionId) -> Result<(), sqlx
     Ok(())
 }
 
-/// §7: a claimed stop closes the session, records its typed row and receipt
+/// A claimed stop closes the session, records its typed row and receipt
 /// under the operator principal, replays for an equal retry, and refuses the
 /// same identity under a different payload.
 #[tokio::test(flavor = "multi_thread")]
@@ -570,7 +571,7 @@ async fn a_stop_claims_records_its_receipt_and_replays() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// §7: an applied resume records the state its projection returned, so an
+/// An applied resume records the state its projection returned, so an
 /// equal retry returns that receipt after the session moves again.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -1057,7 +1058,7 @@ async fn a_lifecycle_command_effect_must_match_its_operation() -> Result<(), Box
     Ok(())
 }
 
-/// §7: a refused command still claims its identity and records the closed
+/// A refused command still claims its identity and records the closed
 /// rejection with its receipt; a retry replays the rejection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -1116,7 +1117,7 @@ async fn a_refused_command_records_its_rejection() -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-/// §7: an owned creation without a finish condition, or a held gate on an
+/// An owned creation without a finish condition, or a held gate on an
 /// unmonitored one, is a recorded rejection that creates no session row and
 /// replays; an owned creation declaring its condition carries it.
 #[tokio::test(flavor = "multi_thread")]
@@ -1199,7 +1200,7 @@ async fn creation_admits_every_lifecycle_shape() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// §7: a held start gate keeps an owned creation `created` through its first
+/// A held start gate keeps an owned creation `created` through its first
 /// input and arms the start-gate deadline.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -1312,7 +1313,7 @@ async fn releasing_ownership_also_settles_a_held_start_gate() -> Result<(), Box<
     Ok(())
 }
 
-/// §7: adopt declares the finish condition an owned session owes when it
+/// Adopt declares the finish condition an owned session owes when it
 /// carries none, and refuses to redeclare one it already carries.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -1397,7 +1398,7 @@ async fn adopt_takes_an_unmonitored_session_with_or_without_a_condition()
     Ok(())
 }
 
-/// §1/§2: a closure over a live turn commits its outcome to the handoff and
+/// A closure over a live turn commits its outcome to the handoff and
 /// reports the turn to settle; the transaction that terminalizes that turn
 /// retires the queued successor and records terminal.
 #[tokio::test(flavor = "multi_thread")]
@@ -1503,7 +1504,7 @@ async fn a_closure_over_a_live_turn_settles_when_the_turn_does() -> Result<(), B
     Ok(())
 }
 
-/// §2/§12: a park closure settles the suspended turn through the committed
+/// A park closure settles the suspended turn through the committed
 /// interrupt machinery; a possibly-executed call terminalizes
 /// `reconciliation_required`, never `cancelled`, and deferred settlement
 /// preserves the same parked failure evidence as immediate closure.
@@ -1836,7 +1837,7 @@ async fn ownership_commands_on_a_closed_session_are_recorded_rejections()
     Ok(())
 }
 
-/// §6: attaching a goal confers ownership. An unmonitored conversation becomes
+/// Attaching a goal confers ownership. An unmonitored conversation becomes
 /// owned by the attaching actor in the attach transaction, with its journal
 /// entry; an explicit adopt afterwards finds nothing to change.
 #[tokio::test(flavor = "multi_thread")]

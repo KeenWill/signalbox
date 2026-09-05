@@ -631,7 +631,7 @@ impl GoalRepository {
         load_goal_from_connection(&mut connection, session).await
     }
 
-    /// Whether the daemon holds the session's liveness obligation (§6): an
+    /// Whether the daemon holds the session's liveness obligation: an
     /// automatic resume is owed to an owned session only.
     pub async fn session_owned(&self, session: SessionId) -> Result<bool, GoalRepositoryError> {
         let mut connection = self.pool.acquire().await?;
@@ -2122,7 +2122,7 @@ fn decode_session_closure_outcome(value: String) -> Result<SessionClosureOutcome
     })
 }
 
-/// Rebuilds the §6 classification, and the exact agency behind a core closure.
+/// Rebuilds the actor classification, and the exact agency behind a core closure.
 ///
 /// The classification and the agency are one value, so a stored row that
 /// carries a turn identity under an operator classification is corrupt rather

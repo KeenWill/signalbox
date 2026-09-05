@@ -311,11 +311,12 @@ impl DerivedModelCallCost {
     }
 }
 
-/// Validated deployment paths used to construct the Codex CLI adapter.
+/// Validated deployment settings used to construct the Codex CLI adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CodexCliConfiguration {
     executable: PathBuf,
     working_directory: PathBuf,
+    model_context_window_overrides: HashMap<String, u32>,
 }
 
 impl CodexCliConfiguration {
@@ -1023,9 +1024,18 @@ impl HubModelConfiguration {
                 let table = item
                     .as_table()
                     .ok_or(HubModelConfigurationError::InvalidCodexCliConfiguration)?;
-                reject_unknown_fields(table, &["executable", "working_directory"])?;
+                reject_unknown_fields(
+                    table,
+                    &[
+                        "executable",
+                        "working_directory",
+                        "model_context_window_overrides",
+                    ],
+                )?;
                 let executable = PathBuf::from(required_string(table, "executable")?);
                 let working_directory = PathBuf::from(required_string(table, "working_directory")?);
+                let model_context_window_overrides =
+                    parse_positive_u32_inline_map(table.get("model_context_window_overrides"))?;
                 if !executable.is_absolute()
                     || !executable.is_file()
                     || !working_directory.is_absolute()
@@ -1036,6 +1046,7 @@ impl HubModelConfiguration {
                 Ok(CodexCliConfiguration {
                     executable,
                     working_directory,
+                    model_context_window_overrides,
                 })
             })
             .transpose()?;
@@ -1047,7 +1058,7 @@ impl HubModelConfiguration {
             return Err(HubModelConfigurationError::MissingCodexCliConfiguration);
         }
         if let Some(configuration) = codex_cli.as_ref() {
-            CodexCliRuntime::new(CodexCliConfig::new(
+            let mut runtime_configuration = CodexCliConfig::new(
                 configuration.executable.clone(),
                 configuration.working_directory.clone(),
                 CredentialReference::new(
@@ -1056,8 +1067,11 @@ impl HubModelConfiguration {
                         .unwrap_or(CODEX_CLI_CREDENTIAL_REFERENCE),
                 ),
                 None,
-            ))
-            .map_err(|_| HubModelConfigurationError::InvalidCodexCliConfiguration)?;
+            );
+            runtime_configuration.model_context_window_overrides =
+                configuration.model_context_window_overrides.clone();
+            CodexCliRuntime::new(runtime_configuration)
+                .map_err(|_| HubModelConfigurationError::InvalidCodexCliConfiguration)?;
         }
 
         let claude_cli = document
@@ -1354,6 +1368,17 @@ impl HubModelConfiguration {
                     .map_err(|_| HubModelConfigurationError::InvalidField)?,
                 );
             }
+        }
+
+        if codex_cli.as_ref().is_some_and(|configuration| {
+            configuration
+                .model_context_window_overrides
+                .keys()
+                .any(|provider_model| {
+                    provider_model_adapters.get(provider_model) != Some(&ModelAdapter::CodexCli)
+                })
+        }) {
+            return Err(HubModelConfigurationError::InvalidCodexCliConfiguration);
         }
 
         if approval_judge_selection.is_some_and(|selection| !direct_selections.contains(&selection))
@@ -1816,6 +1841,8 @@ impl HubModelConfiguration {
                     }),
                 );
                 runtime_configuration.model_capabilities = self.runtime_model_capability_catalog();
+                runtime_configuration.model_context_window_overrides =
+                    configuration.model_context_window_overrides.clone();
                 CodexCliRuntime::new(runtime_configuration)
             })
             .transpose()
@@ -2466,6 +2493,30 @@ fn required_positive_u32(table: &Table, key: &str) -> Result<u32, HubModelConfig
     }
 }
 
+fn parse_positive_u32_inline_map(
+    item: Option<&Item>,
+) -> Result<HashMap<String, u32>, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(HashMap::new());
+    };
+    let table = item
+        .as_inline_table()
+        .ok_or(HubModelConfigurationError::InvalidCodexCliConfiguration)?;
+    table
+        .iter()
+        .map(|(target, value)| {
+            validated_name(target)
+                .map_err(|_| HubModelConfigurationError::InvalidCodexCliConfiguration)?;
+            let value = value
+                .as_integer()
+                .and_then(|value| u32::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .ok_or(HubModelConfigurationError::InvalidCodexCliConfiguration)?;
+            Ok((target.to_string(), value))
+        })
+        .collect()
+}
+
 fn parse_model_settings_profiles(
     item: Option<&Item>,
 ) -> Result<HashMap<Arc<str>, ModelSettingsOverlay>, HubModelConfigurationError> {
@@ -3111,7 +3162,7 @@ impl fmt::Display for HubModelConfigurationError {
         }
         // Startup telemetry formats this value, so the failing member and the
         // closed admission cause must both survive. The path never appears, as
-        // `configuration-and-credentials.md#the-codex_home-delivery` requires.
+        // `configuration-and-credentials.md` requires.
         if let Self::InvalidCredentialHome {
             credential_profile,
             failure,
@@ -6388,6 +6439,78 @@ context_window_tokens = 200000
     fn configuration_rejects_a_codex_executable_that_is_not_a_file() {
         let temporary = tempfile::tempdir().expect("fixture directory is available");
         let configuration = configuration_with_codex_paths(temporary.path(), temporary.path());
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidCodexCliConfiguration)
+        );
+    }
+
+    #[test]
+    fn codex_model_context_window_overrides_are_positive_exact_target_values() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let configuration = format!(
+            "{}model_context_window_overrides = {{ \"gpt-5.6-sol\" = 1000000 }}\n\n\
+             [[models]]\n\
+             selection_id = \"10000000-0000-4000-8000-00000000000f\"\n\
+             target_id = \"20000000-0000-4000-8000-00000000000f\"\n\
+             model_family = \"codex\"\n\
+             provider_model = \"gpt-5.6-sol\"\n\
+             max_output_tokens = 8192\n\
+             context_window_tokens = 828400\n",
+            configuration_with_codex_paths(&executable, temporary.path())
+        );
+
+        let parsed = HubModelConfiguration::parse(&configuration)
+            .expect("a positive exact-target override is valid");
+
+        assert_eq!(
+            parsed
+                .codex_cli()
+                .and_then(|codex| codex.model_context_window_overrides.get("gpt-5.6-sol")),
+            Some(&1_000_000)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_zero_codex_model_context_window_override() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let configuration = format!(
+            "{}model_context_window_overrides = {{ \"gpt-5.6-sol\" = 0 }}\n",
+            configuration_with_codex_paths(&executable, temporary.path())
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidCodexCliConfiguration)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_unknown_codex_model_context_window_override() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let configuration = format!(
+            "{}model_context_window_overrides = {{ \"gpt-5.6-sol\" = 1000000 }}\n",
+            configuration_with_codex_paths(&executable, temporary.path())
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidCodexCliConfiguration)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_codex_override_for_another_adapter() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let configuration = format!(
+            "{}model_context_window_overrides = {{ \"claude-example\" = 1000000 }}\n",
+            configuration_with_codex_paths(&executable, temporary.path())
+        );
 
         assert_eq!(
             HubModelConfiguration::parse(&configuration).err(),

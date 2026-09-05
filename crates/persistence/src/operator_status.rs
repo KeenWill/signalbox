@@ -534,7 +534,7 @@ fn lifecycle_read_failure(
 async fn declare_status_cursors(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<(), sqlx::Error> {
-    // The two §12 sections read the same views the telemetry pass reads, in
+    // The two lifecycle-metric sections read the same views the telemetry pass reads, in
     // the same snapshot as the sections above.
     sqlx::query(DECLARE_WEEKLY_METRICS_CURSOR)
         .bind(MAX_REPORTED_WEEKS)

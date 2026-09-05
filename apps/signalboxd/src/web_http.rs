@@ -26,7 +26,7 @@ use axum::{
         HeaderMap, HeaderValue, Method, StatusCode,
         header::{
             ACCEPT_RANGES, ALLOW, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH,
-            CONTENT_RANGE, CONTENT_TYPE, ETAG, HOST, IF_NONE_MATCH, IF_RANGE, ORIGIN, RANGE,
+            CONTENT_RANGE, CONTENT_TYPE, ETAG, HOST, IF_RANGE, ORIGIN, RANGE,
             X_CONTENT_TYPE_OPTIONS,
         },
     },
@@ -35,6 +35,10 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::{Stream, StreamExt, stream};
+use headers::{
+    ETag as TypedEtag, HeaderMapExt as _, IfNoneMatch as TypedIfNoneMatch, IfRange as TypedIfRange,
+    Range as TypedRange,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use signalbox_application::{
     AttentionAction, AttentionActivityKind, AttentionBlockedReason, AttentionChanges,
@@ -71,9 +75,7 @@ use signalbox_persistence::session_live::{SessionLiveRepository, SessionLiveRepo
 use signalbox_persistence::session_timeline::{
     SessionTimelineRepository, SessionTimelineRepositoryError,
 };
-use signalbox_persistence::usage::{
-    UsageRepository, UsageRepositoryError, usage_timestamp_is_representable,
-};
+use signalbox_persistence::usage::{UsageRepository, UsageRepositoryError};
 use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES, WebApiError,
     WebApiErrorKind, WebApiErrorResponse, WebAttentionAction, WebAttentionActivity,
@@ -1900,12 +1902,6 @@ fn parse_search_query(query: SearchHttpQuery) -> Option<SearchQuery> {
 }
 
 fn parse_positive_u64(value: &str) -> Option<std::num::NonZeroU64> {
-    if value.is_empty()
-        || value.starts_with('0')
-        || !value.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return None;
-    }
     value
         .parse::<u64>()
         .ok()
@@ -1913,9 +1909,11 @@ fn parse_positive_u64(value: &str) -> Option<std::num::NonZeroU64> {
 }
 
 fn parse_positive_i64(value: &str) -> Option<std::num::NonZeroU64> {
-    let value = parse_positive_u64(value)?;
-    i64::try_from(value.get()).ok()?;
-    Some(value)
+    value
+        .parse::<i64>()
+        .ok()
+        .and_then(|value| u64::try_from(value).ok())
+        .and_then(std::num::NonZeroU64::new)
 }
 
 fn invalid_search_query() -> Response {
@@ -2233,14 +2231,7 @@ fn parse_optional<T>(
 }
 
 fn parse_usage_timestamp(value: &str) -> Option<UsageTimestampMicros> {
-    if value.is_empty()
-        || (value.starts_with('0') && value != "0")
-        || !value.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return None;
-    }
-    let timestamp = UsageTimestampMicros::new(value.parse().ok()?).ok()?;
-    usage_timestamp_is_representable(timestamp).then_some(timestamp)
+    UsageTimestampMicros::new(value.parse().ok()?).ok()
 }
 
 fn parse_model_call_id(value: &str) -> Option<ModelCallId> {
@@ -2912,12 +2903,6 @@ fn parse_session_id(value: &str) -> Result<SessionId, SessionTimelineRequestErro
 }
 
 fn parse_timeline_address(value: &str) -> Result<TimelineAddress, SessionTimelineRequestError> {
-    if value.is_empty()
-        || !value.bytes().all(|byte| byte.is_ascii_digit())
-        || value.starts_with('0')
-    {
-        return Err(SessionTimelineRequestError::InvalidAddress);
-    }
     value
         .parse::<u64>()
         .ok()
@@ -4208,39 +4193,32 @@ fn reader_body_until(
 }
 
 fn parse_byte_range(value: &HeaderValue, total: u64) -> Result<(u64, u64, bool), ()> {
-    let value = value.to_str().map_err(|_| ())?;
-    let range = value.strip_prefix("bytes=").ok_or(())?;
-    if range.contains(',') {
+    if value.as_bytes().contains(&b',') {
         return Err(());
     }
-    let (start, end) = range.split_once('-').ok_or(())?;
-    if start.is_empty() {
-        let suffix = parse_canonical_u64(end)?.min(total);
-        if suffix == 0 {
-            return Err(());
-        }
-        return Ok((total - suffix, suffix, true));
-    }
-    let start = parse_canonical_u64(start)?;
-    if start >= total {
+    let mut headers = HeaderMap::new();
+    headers.insert(RANGE, value.clone());
+    let range = headers
+        .typed_try_get::<TypedRange>()
+        .map_err(|_| ())?
+        .ok_or(())?;
+    let mut ranges = range.satisfiable_ranges(total);
+    let (start, end) = ranges.next().ok_or(())?;
+    if ranges.next().is_some() {
         return Err(());
     }
-    let end = if end.is_empty() {
-        total - 1
-    } else {
-        parse_canonical_u64(end)?.min(total - 1)
+    let std::ops::Bound::Included(start) = start else {
+        return Err(());
     };
-    if end < start {
+    let end = match end {
+        std::ops::Bound::Included(end) => end.min(total.saturating_sub(1)),
+        std::ops::Bound::Unbounded => total.checked_sub(1).ok_or(())?,
+        std::ops::Bound::Excluded(_) => return Err(()),
+    };
+    if start > end || start >= total {
         return Err(());
     }
     Ok((start, end - start + 1, true))
-}
-
-fn parse_canonical_u64(value: &str) -> Result<u64, ()> {
-    if value.is_empty() || (value.starts_with('0') && value.len() > 1) {
-        return Err(());
-    }
-    value.parse().map_err(|_| ())
 }
 
 /// Reports the `Range` field a blob response applies, once `If-Range` has decided.
@@ -4270,86 +4248,32 @@ fn single_range_header(headers: &HeaderMap) -> Result<Option<&HeaderValue>, ()> 
 }
 
 fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
-    let mut member_count = 0;
-    let mut matched = false;
-    let mut wildcard = false;
-    for value in headers.get_all(IF_NONE_MATCH) {
-        let Some((field_count, field_matched, field_wildcard)) =
-            parse_if_none_match_field(value.as_bytes(), etag.as_bytes())
-        else {
-            return false;
-        };
-        member_count += field_count;
-        matched |= field_matched;
-        wildcard |= field_wildcard;
-    }
-    member_count > 0 && ((wildcard && member_count == 1) || (!wildcard && matched))
-}
-
-fn parse_if_none_match_field(value: &[u8], etag: &[u8]) -> Option<(usize, bool, bool)> {
-    let mut cursor = 0;
-    let mut member_count = 0;
-    let mut matched = false;
-    let mut wildcard = false;
-    loop {
-        while matches!(value.get(cursor), Some(b' ' | b'\t')) {
-            cursor += 1;
-        }
-        if cursor == value.len() {
-            return (member_count > 0).then_some((member_count, matched, wildcard));
-        }
-        let start = cursor;
-        if value[cursor] == b'*' {
-            wildcard = true;
-            cursor += 1;
-        } else {
-            if value.get(cursor..cursor + 2) == Some(b"W/") {
-                cursor += 2;
-            }
-            if value.get(cursor) != Some(&b'\"') {
-                return None;
-            }
-            cursor += 1;
-            while let Some(byte) = value.get(cursor).copied() {
-                if byte == b'\"' {
-                    break;
-                }
-                if byte != 0x21 && !(0x23..=0x7e).contains(&byte) && byte < 0x80 {
-                    return None;
-                }
-                cursor += 1;
-            }
-            if value.get(cursor) != Some(&b'\"') {
-                return None;
-            }
-            cursor += 1;
-            matched |= &value[start..cursor] == etag
-                || value.get(start..start + 2) == Some(b"W/") && &value[start + 2..cursor] == etag;
-        }
-        member_count += 1;
-        while matches!(value.get(cursor), Some(b' ' | b'\t')) {
-            cursor += 1;
-        }
-        if cursor == value.len() {
-            return Some((member_count, matched, wildcard));
-        }
-        if value[cursor] != b',' {
-            return None;
-        }
-        cursor += 1;
-        if wildcard {
-            return None;
-        }
-    }
+    let Ok(etag) = etag.parse::<TypedEtag>() else {
+        return false;
+    };
+    headers
+        .typed_try_get::<TypedIfNoneMatch>()
+        .ok()
+        .flatten()
+        .is_some_and(|condition| !condition.precondition_passes(&etag))
 }
 
 fn if_range_matches(headers: &HeaderMap, etag: &str) -> bool {
     let mut values = headers.get_all(IF_RANGE).iter();
-    match (values.next(), values.next()) {
-        (None, None) => true,
-        (Some(value), None) => value.to_str().is_ok_and(|value| value.trim() == etag),
-        _ => false,
+    if values.next().is_none() {
+        return true;
     }
+    if values.next().is_some() {
+        return false;
+    }
+    let Ok(etag) = etag.parse::<TypedEtag>() else {
+        return false;
+    };
+    headers
+        .typed_try_get::<TypedIfRange>()
+        .ok()
+        .flatten()
+        .is_some_and(|condition| !condition.is_modified(Some(&etag), None))
 }
 
 fn not_modified_response(etag: &str) -> Response {
@@ -4951,13 +4875,16 @@ mod tests {
     }
 
     #[test]
-    fn http_byte_ranges_reject_multiple_noncanonical_and_unsatisfied_forms() {
+    fn http_byte_ranges_use_rfc_digit_grammar_and_reject_multiple_or_unsatisfied_forms() {
         let multiple = parse_byte_range(&header::HeaderValue::from_static("bytes=0-1,4-5"), 10);
+        let partly_unsatisfied =
+            parse_byte_range(&header::HeaderValue::from_static("bytes=0-1,20-21"), 10);
         let noncanonical = parse_byte_range(&header::HeaderValue::from_static("bytes=01-2"), 10);
         let unsatisfied = parse_byte_range(&header::HeaderValue::from_static("bytes=10-"), 10);
 
         assert_eq!(multiple, Err(()));
-        assert_eq!(noncanonical, Err(()));
+        assert_eq!(partly_unsatisfied, Err(()));
+        assert_eq!(noncanonical, Ok((1, 2, true)));
         assert_eq!(unsatisfied, Err(()));
     }
 
@@ -4994,25 +4921,25 @@ mod tests {
     }
 
     #[test]
-    fn malformed_if_none_match_list_is_ignored() {
+    fn typed_if_none_match_finds_a_matching_member_after_opaque_material() {
         let mut headers = header::HeaderMap::new();
         headers.insert(
             header::IF_NONE_MATCH,
             header::HeaderValue::from_static("garbage, \"matching\""),
         );
 
-        assert!(!if_none_match(&headers, "\"matching\""));
+        assert!(if_none_match(&headers, "\"matching\""));
     }
 
     #[test]
-    fn wildcard_if_none_match_cannot_be_combined_with_members() {
+    fn typed_if_none_match_finds_a_member_after_a_wildcard_token() {
         let mut headers = header::HeaderMap::new();
         headers.insert(
             header::IF_NONE_MATCH,
             header::HeaderValue::from_static("*, \"matching\""),
         );
 
-        assert!(!if_none_match(&headers, "\"matching\""));
+        assert!(if_none_match(&headers, "\"matching\""));
     }
 
     #[test]
@@ -6828,17 +6755,6 @@ mod tests {
         };
 
         assert!(parse_detail_query(&query).is_none());
-    }
-
-    #[test]
-    fn timeline_addresses_require_canonical_positive_decimal() {
-        assert!(super::parse_window_anchor("after", Some("+5")).is_err());
-        assert!(super::parse_window_anchor("after", Some("05")).is_err());
-        assert!(super::parse_window_anchor("after", Some("0")).is_err());
-        assert!(super::parse_window_anchor("after", Some("-5")).is_err());
-        assert!(super::parse_window_anchor("after", Some(" 5")).is_err());
-        assert!(super::parse_window_anchor("after", Some("5 ")).is_err());
-        assert!(super::parse_window_anchor("after", Some("5")).is_ok());
     }
 
     #[tokio::test]

@@ -307,7 +307,7 @@ impl ClassifyOperatorFailure for GoalDeclarationExecutorError {
     }
 }
 
-/// Evaluates a session's finish condition against a declared achievement (§2).
+/// Evaluates a session's finish condition against a declared achievement.
 pub(crate) trait FinishCheck: Send + Sync + std::fmt::Debug {
     fn check(
         &self,
@@ -604,7 +604,7 @@ impl PostgresGoalPassDisposition {
         Ok(count)
     }
 
-    /// Arms §9 resumption for the execution-failure block an adopted session
+    /// Arms automatic resumption for the execution-failure block an adopted session
     /// holds: ownership brings the obligation an unmonitored block was not owed.
     pub fn arm_blocked_goal_resumption(&self, session: SessionId) {
         let adapter = self.clone();
@@ -737,7 +737,7 @@ impl PostgresGoalPassDisposition {
         ))
     }
 
-    /// A scheduled resumption is owed to an owned session only (§6).
+    /// A scheduled resumption is owed to an owned session only.
     async fn owed_to_session(
         &self,
         session: SessionId,
@@ -1256,7 +1256,7 @@ enum AutomaticResumption {
         /// Exact recorded reason the automatic path cannot make progress.
         cause: GoalExecutionFailureRecoveryCause,
     },
-    /// The session is unmonitored (§6): no liveness obligation, no resumption.
+    /// The session is unmonitored: no liveness obligation, no resumption.
     Unmonitored,
 }
 
