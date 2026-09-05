@@ -2960,8 +2960,8 @@ compatibility base composition and the complete four-mapping composition
 construct them through the injected `SessionPlanPort`; production injects
 `SessionPlanRepository`. They require no credential profile, egress policy, or
 workspace root, and model arguments cannot select another session or storage
-adapter. Their automatic permission defaults and effect classes are owned by
-[tool-loop](tool-loop.md).
+adapter. Their automatic permission defaults and effect classes are declared in
+`crates/tools-plan`.
 
 ## Redaction and logs
 

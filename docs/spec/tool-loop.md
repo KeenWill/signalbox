@@ -45,8 +45,9 @@ proposal of the same command.
 
 The daemon composes one process-lifetime immutable registry from the implemented
 tool families in `apps/signalboxd/src/daemon_tools.rs`: basic, blob-read, web,
-code-host, workspace, conversation, plan, session-delegation, local Git, and
-execution tools. Each family's crate documents its tools.
+code-host, workspace, conversation, plan, session-delegation, goal-declaration,
+local Git, and execution tools. Each family's crate or daemon module documents
+its tools.
 
 Each approved request runs as one physical attempt through staged transactions.
 A prepare transaction mints the attempt and commits a `Prepared` row that fixes
@@ -61,13 +62,15 @@ result commit, crash classification, and the continuation checkpoint.
 
 A result entry in the transcript references a durable row rather than carrying
 content: an execution result names the terminal attempt, a denial names the
-request, and `ToolClosed` names a request whose turn ended before it completed
-ordinary execution, whether it was still undecided, approved but not yet
-attempted, or ambiguous when an interrupt or automatic reconciliation
-terminalized the turn. Once every request in the batch has a resolution, one
-continuation transaction projects the results and prepares the next model call.
-An approval wait is a stored active-turn phase that names the earliest undecided
-request and survives restart.
+request, a delegation result names the foreground `await_session` request and
+the child whose durable result completed its wait, and `ToolClosed` names a
+request whose turn ended before it completed ordinary execution, whether it was
+still undecided, approved but not yet attempted, or ambiguous when an interrupt
+or automatic reconciliation terminalized the turn. Once every request in the
+batch is resolved other than by turn end, one continuation transaction projects
+the results and prepares the next model call. An approval wait is a stored
+active-turn phase that names the earliest undecided request and survives
+restart.
 
 ## Design decisions
 
@@ -159,10 +162,10 @@ the automatic-reconciliation ledger's claim on that exact ambiguity; resolving
 evidence and accepted-risk continuation are undecided in
 [open questions](../open-questions.md).
 
-After restart, a batch with no persisted in-flight attempt continues through the
+After restart, a batch with no current tool attempt continues through the
 ordinary next-attempt or continuation transaction, never a recovery path that
-fails the turn or waits for process-local wake state; a persisted in-flight
-attempt takes the effect-class crash-loss path.
+fails the turn or waits for process-local wake state; a persisted prepared or
+in-flight attempt takes the effect-class crash-loss path.
 
 Foreground waiting on a child through `await_session` is a logical tool
 transition that ends any physical attempt before committing the wait, so restart
@@ -324,12 +327,14 @@ evidence and therefore projects an execution result, not `ToolClosed`. Attempt
 evidence commits as soon as execution ends, independently of semantic
 projection.
 
-Once every request in the batch is resolved, one continuation transaction
-appends exactly one result entry per request in proposal order, consumes every
-pending steering input in ascending acceptance position and appends its entry
-after the results, derives the exact prefix-preserving frontier extension, and
-creates the next round's `Prepared` model call against that frontier. These
-effects commit or roll back together. When at least one request entered
+Once every request in the batch is resolved other than by turn end, one
+continuation transaction appends exactly one result entry per request in
+proposal order, consumes every pending steering input in ascending acceptance
+position and appends its entry after the results, derives the exact
+prefix-preserving frontier extension, and creates the next round's `Prepared`
+model call against that frontier. These effects commit or roll back together. An
+interrupt or crash loss that ends the turn appends the result suffix with its
+terminal marker and prepares no call. When at least one request entered
 execution, the continuation turn attempt already entered `Running` during
 authorization and owns the new call without moving backward. An optional
 configured ceiling bounds the tool rounds one turn may complete, and a policy of
