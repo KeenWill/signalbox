@@ -516,7 +516,7 @@ query($id: ID!, $after: String!) {
             quiet_oids: list[str] = []
             observed_codex_reviews: dict[str, str] = {}
             live_codex_review_oids: dict[str, str] = {}
-            live_codex_reviews: list[dict[str, Any]] = []
+            live_codex_reviews: dict[str, dict[str, Any]] = {}
             authenticated_review_ids: dict[str, str] = {}
             for review in reviews:
                 commit = review.get("commit")
@@ -554,7 +554,7 @@ query($id: ID!, $after: String!) {
                     and isinstance(review_id, str)
                 )
                 if is_live_codex_review:
-                    live_codex_reviews.append(review)
+                    live_codex_reviews[review_id] = review
                 if is_live_codex_review and request_times:
                     observed_codex_reviews[review_id] = reviewed_oid
                 review_threads = [
@@ -644,7 +644,13 @@ query($id: ID!, $after: String!) {
             pull_request["authenticated_review_ids"] = authenticated_review_ids
             pull_request["observed_codex_reviews"] = observed_codex_reviews
             pull_request["live_codex_review_oids"] = live_codex_review_oids
-            pull_request["_codex_reviews"] = live_codex_reviews
+            pull_request["_live_codex_reviews"] = live_codex_reviews
+            pull_request["_codex_reviews"] = [
+                review
+                for review in reviews
+                if isinstance(review.get("id"), str)
+                and review["id"] in observed_codex_reviews
+            ]
             pull_request["quiet_review_head_oids"] = [
                 oid for oid in quiet_oids if oid == pull_request["head_oid"]
             ]
@@ -658,6 +664,7 @@ query($id: ID!, $after: String!) {
             persisted_head = record.get("authenticated_review_head")
             persisted_review_id = record.get("authenticated_review_id")
             live_codex_review_oids = pull_request.pop("live_codex_review_oids", {})
+            live_codex_reviews = pull_request.pop("_live_codex_reviews", {})
             gating_checks = [
                 check
                 for check in pull_request.get("checks", [])
@@ -705,6 +712,13 @@ query($id: ID!, $after: String!) {
                 pull_request["authenticated_review_ids"][persisted_head] = (
                     persisted_review_id
                 )
+            persisted_review = live_codex_reviews.get(persisted_review_id)
+            if review_still_valid and isinstance(persisted_review, dict):
+                reviews = pull_request.setdefault("_codex_reviews", [])
+                if not any(
+                    review.get("id") == persisted_review_id for review in reviews
+                ):
+                    reviews.append(persisted_review)
             if (
                 review_still_valid
                 and persisted_head == pull_request["head_oid"]

@@ -1147,11 +1147,20 @@ class GitHubGraphQLTests(unittest.TestCase):
         )
         self.assertEqual(pull_request["quiet_review_head_oids"], [])
 
-    def test_check_rerun_keeps_live_review_in_wave_census(self) -> None:
+    def test_check_rerun_restores_authenticated_review_to_wave_census(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
         head = "a" * 40
+        inventory = ["CheckRun:required build"]
         pull_request = {
+            "_persisted_record": {
+                "authenticated_review_head": head,
+                "authenticated_review_id": "review-a",
+                "authenticated_review_body": "description",
+                "authenticated_review_check_inventory": inventory,
+                "check_inventory": inventory,
+            },
             "head_oid": head,
+            "body": "description",
             "body_last_edited_at": None,
             "check_rollup_state": "SUCCESS",
             "checks": [
@@ -1187,11 +1196,15 @@ class GitHubGraphQLTests(unittest.TestCase):
 
         client._finalize_review_evidence([pull_request])
 
+        self.assertEqual(pull_request["_codex_reviews"], [])
+        self.assertEqual(pull_request["observed_codex_reviews"], {})
+
+        client._restore_persisted_review_evidence([pull_request])
+
         self.assertEqual(
             [review["id"] for review in pull_request["_codex_reviews"]],
             ["review-a"],
         )
-        self.assertEqual(pull_request["observed_codex_reviews"], {})
 
     def test_persisted_review_not_restored_when_no_longer_live(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
