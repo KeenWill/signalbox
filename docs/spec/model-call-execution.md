@@ -275,7 +275,10 @@ neither observes nor records them and adds no retries of its own. A migration
 constraint enforces one call per attempt. A `switch_now` failure with proven
 non-acceptance writes a durable chain exclusion for the failed member, and
 successor selection and preparation skip excluded members; that selection, not a
-constraint, enforces no-reuse. The no-retry rule is unenforced.
+constraint, enforces no-reuse. The one-shot send capability, the per-attempt
+dispatch gate, the authorize-send commit, and startup parking of an issued call
+enforce at-most-once sending. Only the rule that no code retries a call without
+recording the retry is unenforced.
 
 The terminal transition stores the input, output, cache-creation, and cache-read
 token axes independently; a null axis means the provider did not supply it, and
@@ -419,8 +422,8 @@ the sealed issued call carries is.
   ([design](../design/model-call-execution.md)).
 - A structured-output contract on the session path
   ([design](../design/model-call-execution.md)).
-- Durable provider-target evidence
-  ([design](../design/model-call-execution.md)).
+- Durable provider-target evidence, pending the per-call provenance schema
+  decision ([design](../design/model-call-execution.md)).
 - Unstopped ambiguity recovery ([design](../design/model-call-execution.md)).
 - The workspace-instruction region of the prepared model operation
   ([design](../design/model-call-execution.md)).

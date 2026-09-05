@@ -5,11 +5,12 @@ This document describes committed work that is not built; it extends
 
 ## Goal
 
-The daemon renders admitted attachments as provider-native multipart content. It
-renders runner-placement changes to the model and advertises only the tools
-executable in the session. It reuses a successful attachment verification within
-a turn. It emits a process-level event carrying the complete exclusion evidence
-of a pre-call pool exhaustion. It checks at reconstitution that the pinned pool
+The daemon renders admitted attachments as typed provider-neutral content parts,
+and provider-native delivery follows the open rendering decision. It renders
+runner-placement changes to the model and advertises only the tools executable
+in the session. It reuses a successful attachment verification within a turn. It
+emits a process-level event carrying the complete exclusion evidence of a
+pre-call pool exhaustion. It checks at reconstitution that the pinned pool
 policy contains the pinned profile with the expected adapter and delivery kind.
 It carries a program-declared structured-output contract through preparation
 into runtime enforcement. It records durable provider-target evidence. It lets a
@@ -155,8 +156,8 @@ A relocated session's next call carries exactly one placement-change message
 with the profile-specific text, and a session composed without a workspace
 advertises exactly the tools that can execute in it.
 
-A second attachment range in one turn reuses the first range's verification and
-performs no store read.
+A second attachment range in one turn reads only that range, conditional on the
+pinned generation, and does not verify the full replica again.
 
 A pre-call pool exhaustion produces one process event whose member list equals
 the frozen policy's members in order, and the domain cause is unchanged.
