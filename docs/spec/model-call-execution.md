@@ -86,7 +86,9 @@ separately classifies its input as replaced or retained for later headroom
 accounting: non-null replaces the pre-compaction input and null is a replayable
 no-op. This classification does not rewrite billing evidence. Anthropic
 iteration usage remains the sum of every reported iteration on the call's four
-usage axes.
+usage axes, and an iteration missing required input or output usage is invalid
+response material. The tool-continuation guard likewise excludes replaced
+pre-compaction input from its retained-context baseline.
 
 `ModelCallExecutionService::execute` in
 `crates/application/src/model_execution.rs` runs one linear invocation over five
