@@ -4163,8 +4163,10 @@ dependencies = [
 name = "signalbox-domain"
 version = "0.0.0"
 dependencies = [
+ "bstr",
  "divan",
  "expect-test",
+ "gix-validate",
  "gungraun",
  "regex",
  "rpds",
@@ -4173,6 +4175,7 @@ dependencies = [
  "serde_stacker",
  "sha2 0.11.0",
  "signalbox-expect-table",
+ "url",
  "uuid",
 ]
 
