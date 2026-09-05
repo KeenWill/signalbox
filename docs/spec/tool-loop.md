@@ -306,16 +306,16 @@ inconclusive reread retains that authority state for another identical reread,
 so neither a retry nor a crash classification is inferred from a lost commit
 response.
 
-Before inserting the next attempt, acting on a loaded prepared attempt, or
-preparing continuation, tool execution acquires the dispatch gate and
-revalidates the loaded batch. It holds the gate through a preflight closure, or
-from before authorization until the returned evidence commits, and interrupt
-handling acquires the same gate before its command transaction. A pass that sees
-an in-flight attempt also acquires the gate and reloads the attempt before
-classifying prior-process crash loss. An interrupt that waits behind executor
+Tool execution acquires the dispatch gate and revalidates the loaded batch
+before inserting the next attempt, acting on a loaded prepared attempt, or
+preparing continuation, and holds the gate through a preflight closure, or from
+before authorization until the returned evidence commits. A pass that sees an
+in-flight attempt acquires the gate and reloads the attempt before classifying
+prior-process crash loss. Interrupt handling acquires the same gate before its
+command transaction, and the durable attempt cannot remain in flight after the
+gate becomes available to an interrupt. An interrupt that waits behind executor
 work reloads the committed result before closing the batch, so it cannot strand
-an issued request or roll back its command. The durable attempt cannot remain in
-flight after the gate becomes available to an interrupt.
+an issued request or roll back its command.
 
 If the executor returns an operator failure without trustworthy evidence after
 authorization, the service retains the gate and applies the attempt's

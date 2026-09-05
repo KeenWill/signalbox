@@ -17,9 +17,8 @@ snapshot to the call. A fresh admission reselects the member the session's most
 recent call on that pool used while no durable exclusion removes it, otherwise
 the first member in policy order that none removes. The commit that closes a
 failed call applies the action the pinned policy fixes for the failure's cause,
-and either prepares a successor attempt or terminalizes the turn. The
-successor's member is admitted and its call created at that attempt's
-preparation.
+and either terminalizes the turn or prepares a successor attempt, whose member
+is admitted and call created at that attempt's preparation.
 
 An availability chain begins at a fresh admission inside one turn and holds the
 call that admission prepares, if any, and every successor that follows a
@@ -73,10 +72,10 @@ availability chain, not to the turn;
 [model-call execution](model-call-execution.md) owns what bounds a chain.
 
 Selected: a member was admitted. The selecting preparation inserts the call's
-prepared record and adds no turn phase. The same preparation consumes the
-pending `switch_next_turn` displacement of the member it excluded, never of the
-member it selected, because the displacement is the excluded member's record and
-consuming any other leaves it pending forever.
+prepared record, adds no turn phase, and consumes the pending `switch_next_turn`
+displacement of the member it excluded, never of the member it selected, because
+the displacement is the excluded member's record and consuming any other leaves
+it pending forever.
 
 Pre-call fail: the attempt that finds every member excluded is call-free, either
 a fresh chain's admission or the later preparation of a deferred successor. The
@@ -113,11 +112,10 @@ preparation, that successor exhausts instead of selecting another member.
 
 A successor prepared after a rate-limit, overload or provider-internal failure
 waits the greater of the provider's reported delay and a local exponentially
-increasing jittered delay, capped at five minutes (`MAX_AVAILABILITY_BACKOFF` in
-`crates/persistence/src/model_execution.rs`); a reported delay longer than the
-cap is truncated to it. A successor after a quota failure is immediate. Quota
-and authentication failures bypass same-credential retry and apply their pinned
-actions immediately.
+increasing jittered delay, each capped at five minutes
+(`MAX_AVAILABILITY_BACKOFF` in `crates/persistence/src/model_execution.rs`). A
+successor after a quota failure is immediate. Quota and authentication failures
+bypass same-credential retry and apply their pinned actions immediately.
 
 The required finite positive
 `numeric_bounds.max_same_credential_attempts_per_turn` bounds recorded calls on

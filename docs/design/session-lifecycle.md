@@ -25,17 +25,16 @@ structural and retry-budget parks, the standing failure cause attached; it never
 terminalizes the session directly. A retryable failure moves the session through
 recovering or blocked while budgeted retries run, and the retryable outcome is
 recorded only when the session closes with the retryable cause standing. A
-structural failure is never resumed automatically: the session parks with the
-structural cause, and the expected closure is a fresh session that supersedes
-it. When [goal mode](../spec/goal-mode.md) reaches either its attempt budget or
-its lifetime attempt ceiling, the goal's session moves from blocked to parked
-with cause retry budget exhausted, where the owner sees it; exhaustion is never
-a silent stop. The domain already defines the park causes, the rule that a
-park's cause must admit its standing failure cause, and the closures that carry
-the standing cause forward. The missing part is the driver: the turn liveness
-pass, the goal disposition pass, and model-call failure classification call the
-park path with the classified cause inside the transaction that records the
-failure.
+structural failure is never resumed automatically; its expected closure is a
+fresh session that supersedes it. When [goal mode](../spec/goal-mode.md) reaches
+either its attempt budget or its lifetime attempt ceiling, the goal's session
+moves from blocked to parked with cause retry budget exhausted, where the owner
+sees it; exhaustion is never a silent stop. The domain already defines the park
+causes, the rule that a park's cause must admit its standing failure cause, and
+the closures that carry the standing cause forward. The missing part is the
+driver: the turn liveness pass, the goal disposition pass, and model-call
+failure classification call the park path with the classified cause inside the
+transaction that records the failure.
 
 When a module's redispatch owns the retry of parked work, the redispatch issues
 supersede against the parked predecessor, naming the successor, in the same
@@ -57,14 +56,13 @@ events and run no timer over a session of their own, the repo-watch start lease
 excepted. A module that needs a deadline core does not arm asks for a new
 deadline kind in core.
 
-The lifecycle actor vocabulary gains a run-scoped program-run actor for commands
-issued by a registered program's run, as
-[program substrate](../spec/program-substrate.md) and
-[identity and commands](../spec/identity-and-commands.md) commit it. It is a
-reference to the program run, not a module name. Storage admits the new
-discriminator with a run reference beside it, and classification treats a
-program-run principal as it treats a module principal: it wins over the domain
-actor.
+The lifecycle actor vocabulary gains a run-scoped program-run actor, a reference
+to the program run rather than a module name, for commands issued by a
+registered program's run, as [program substrate](../spec/program-substrate.md)
+and [identity and commands](../spec/identity-and-commands.md) commit it. Storage
+admits the new discriminator with a run reference beside it, and classification
+treats a program-run principal as it treats a module principal: it wins over the
+domain actor.
 
 Every dispatched session records the size of its initial payload at creation, as
 the token count estimated for the target model and the byte count, on the
