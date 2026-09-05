@@ -28,24 +28,27 @@ The domain lives in `crates/domain/src/runner.rs` and the wire vocabulary in
 `crates/runner-wire`. A `RunnerEnrollment` binds the daemon-issued runner,
 enrollment, and authentication-reference identities to the capability classes
 the daemon allows. A `ValidatedRunnerRegistration` is one revision of a runner's
-advertisement checked against that enrollment and the daemon's `RunnerCatalog`.
-A registration carries availability only: capability classes, tool names,
+advertisement checked against that enrollment and the daemon's `RunnerCatalog`,
+paired with the daemon's policy for every tool and profile it admits. The
+advertisement carries availability only: capability classes, tool names,
 credential-profile names with their repository entries, and workspace and
-sandbox-profile capabilities. Policy stays with the daemon. Each tool a runner
-may advertise has one daemon-authoritative `RunnerToolDeclaration` giving its
-model-facing definition, its effect class, and its admissible loci. Every
-declaration has exactly one effect class, pure, idempotent, or side-effecting,
-with no default; the class decides what a lost or repeated execution may do. A
-tool's admissible loci are daemon only, runner only, or either, and a runner
-locus names one runner identity or one capability class.
+sandbox-profile capabilities. Each tool a runner may advertise has one
+daemon-authoritative `RunnerToolDeclaration` giving its model-facing definition,
+its effect class, and its admissible loci. Every declaration has exactly one
+effect class, pure, idempotent, or side-effecting, with no default; the class
+decides what a lost or repeated execution may do. A tool's admissible loci are
+daemon only, runner only, or either, and a runner locus names one runner
+identity or one capability class.
 
-A session's runner request is one `SessionRunnerPlacement`. Its four axes are
-workspace, repository, credentials, and sandbox, and it starts unpinned. The
-first dispatch pins it to one runner, snapshots the registration it was
-validated against, and creates a `CredentialProfileGrant` when a profile was
-selected. A `RunnerLease` is the domain record of one tool attempt offered to
-that runner; its offer, claim, loss, and retry transitions are domain code, and
-the wire dispatch that would drive them is listed under Planned. A placement
+A `SessionRunnerPlacement` is the session's placement aggregate: one
+`SessionRunnerPlacementRequest`, the placement revision, and the lifecycle
+state. The request states the runner selector and the session's choices on the
+four axes, workspace, repository, credentials, and sandbox. The aggregate starts
+unpinned; the first dispatch pins it to one runner, snapshots the registration
+it was validated against, and creates a `CredentialProfileGrant` when a profile
+was selected. A `RunnerLease` is the domain record of one tool attempt offered
+to that runner; its offer, claim, loss, and retry transitions are domain code,
+and the wire dispatch that would drive them is listed under Planned. A placement
 changes only by explicit transition: replacing a lost runner and replacing the
 pinned credential profile each advance its revision. When a pinned runner is
 lost, the placement enters a lost state that only two user commands leave:
@@ -122,13 +125,15 @@ runner, and authentication-reference correlations. A lease already offered is
 already dispatched: it completes or crash-classifies normally, and revocation
 neither rewrites nor cancels it.
 
-A registration carries no permission default, effect class, placement
+An advertisement carries no permission default, effect class, placement
 declaration, approval posture, credential path, or credential value, and
-advertising a name confers no execution authority. Registration validates every
-class, tool, workspace capability, and sandbox profile against the enrollment
-and the daemon catalog; one disallowed claim, one malformed name, one
-daemon-only tool, or one runner tool whose identity-or-class selector the
-advertisement does not satisfy rejects the complete registration.
+advertising a name confers no execution authority. A validated registration
+pairs that availability with daemon-owned policy: the complete declaration of
+each admitted tool and the approval policy of each admitted credential profile.
+Registration validates every class, tool, workspace capability, and sandbox
+profile against the enrollment and the daemon catalog; one disallowed claim, one
+malformed name, one daemon-only tool, or one runner tool whose identity-or-class
+selector the advertisement does not satisfy rejects the complete registration.
 Capability-class, credential-profile, and repository-key names share one checked
 syntax, but classes are catalog keys while the other two are availability keys
 from runner configuration. Credential-profile names are duplicate-free; the user
