@@ -11,7 +11,7 @@ list, drives sessions and other effects host-side, recovers from a crash without
 a false exactly-once claim, and is cancelled by user authority. The journal
 stays thin coordination state.
 
-## Shape
+## Design
 
 A registration is an immutable row keyed by program name and revision. It
 records the content digests of the program: one over the exact source bytes and
@@ -72,7 +72,7 @@ executions happen host-side under the credential machinery in
 [configuration and credentials](../spec/configuration-and-credentials.md); the
 isolate receives only journaled answers.
 
-## Constraints on present code
+## Compatibility constraints
 
 - The isolate bootstrap stays closed: nothing new reaches a program except
   through the frame protocol, and no executor moves into the isolate.
@@ -92,7 +92,7 @@ isolate receives only journaled answers.
 - The approval judge stays the only gate inside a turn; no program-facing hook
   is added inside a turn.
 
-## Acceptance
+## Acceptance criteria
 
 - Registering identical bytes under two names or two grant lists yields two
   programs, and a run's grants are read from its registration row and from

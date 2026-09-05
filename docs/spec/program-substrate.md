@@ -3,7 +3,7 @@
 The program substrate runs a JavaScript program in a closed isolate and journals
 every nondeterministic act, so a run can be re-executed to the same point.
 
-## Map
+## Overview
 
 Two parts are built: an isolate host in the program-runtime crate and a frame
 journal in the persistence crate. The host, `ProgramHost`, runs one stripped
@@ -45,7 +45,7 @@ code. A journaled `run_cancel` delivery is terminal: the host returns the
 cancelled outcome and creates no isolate. No present surface initiates a
 cancellation.
 
-## Decisions
+## Design decisions
 
 The engine is pinned by exact crate version and upgraded deliberately. Why: the
 standalone `deno_core` repository is archived and the deno monorepo is its
@@ -65,7 +65,7 @@ No checkpointing or journal truncation exists, because a journal that can be
 rewritten is not a journal; the migration's triggers reject deletion, update,
 and truncation of journal rows.
 
-## Contracts
+## Boundary contracts
 
 The canonical SDK specifier is `@signalbox/program-sdk/v<version>`, where the
 version is a positive decimal integer with no leading zero. Frame-contract
@@ -89,7 +89,7 @@ are this substrate's event source. They stay readable to a matcher outside it.
 A malformed journal row is typed corruption under the fail-closed reconstitution
 contract in [persistence protocol](persistence-protocol.md).
 
-## Not built
+## Planned
 
 - Program registration under an identity of name, revision, and content digests;
   no present surface registers a program
