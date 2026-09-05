@@ -39,10 +39,11 @@ follows the external-effect ambiguity contract in
 loss as if it had not happened.
 
 A frame payload below a fixed inline threshold stays inline in the journal row.
-A larger payload becomes an immutable SHA-256-addressed blob, and the row
-references it by digest only. The blob is routed under the daemon-derived
-`program_journal` storage class that [blob storage](../spec/blob-storage.md)
-reserves, never under an operation-selected class.
+A larger payload, up to the configured blob maximum, becomes an immutable
+SHA-256-addressed blob, and the row references it by digest only. The blob is
+routed under the daemon-derived `program_journal` storage class that
+[blob storage](../spec/blob-storage.md) reserves, never under an
+operation-selected class.
 
 A session capability composes the existing session services host-side. A program
 drives a session one turn at a time: it submits input, awaits that turn's
@@ -101,9 +102,9 @@ isolate receives only journaled answers.
 - After a crash between an external effect's request and its answer, recovery
   yields exactly one of an adopted outcome, a re-issue of a declared-idempotent
   operation, or a journaled ambiguous answer, and never a silent re-issue.
-- A payload above the inline threshold is stored once as a blob under the
-  `program_journal` class and journaled by digest, and replay reads it by that
-  digest.
+- A payload above the inline threshold and within the configured blob maximum is
+  stored once as a blob under the `program_journal` class and journaled by
+  digest, and replay reads it by that digest.
 - A journaled session outcome contains identities and a digest and no transcript
   bytes.
 - An applied cancel appears as one `run_cancel` delivery carrying the command

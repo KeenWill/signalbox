@@ -27,12 +27,14 @@ four primitive answerable requests are emitted today. No executor applies
 effects, scope cancellation, terminal admission, capability rejection, or run
 terminalization, and only the nondeterminism fault is produced.
 
-Resume discards nothing and restores nothing. A woken run re-executes its module
-from the start; `ReplayCursor` answers each request from the journal in delivery
-order, and execution goes live where the journal ends. Live requests are
-answered through the `LiveDeliverySource` seam, which receives only the
-outstanding durable request frames; that seam is the boundary later capability
-executors implement.
+Resume discards nothing and restores nothing. A journal that already holds a
+terminal delivery, one that ended the run instead of answering a request, names
+the run's outcome; the host returns that outcome and creates no isolate. Any
+other woken run re-executes its module from the start; `ReplayCursor` answers
+each request from the journal in delivery order, and execution goes live where
+the journal ends. Live requests are answered through the `LiveDeliverySource`
+seam, which receives only the outstanding durable request frames; that seam is
+the boundary later capability executors implement.
 
 The journal's stream row pins only frame-contract version one. It is not a run
 aggregate: no row records a program's registration, grants, or budgets. The
@@ -51,9 +53,11 @@ The typed journal and the database carry every frame discriminator, including
 those nothing produces yet; producing a frame stays with the registration,
 executor, or capability slice that can enforce its transition.
 
-Concurrent outstanding requests are permitted. Why: recorded delivery order
-alone makes promise interleaving identical in live execution and replay without
-restricting the language.
+Concurrent outstanding requests are permitted, and the host drains the isolate's
+microtasks after each delivery before it selects the next. Why: a delivery can
+unblock a further request, so recorded delivery order with that drain makes
+promise interleaving identical in live execution and replay without restricting
+the language.
 
 No checkpointing or journal truncation exists, because a journal that can be
 rewritten is not a journal; the migration's triggers reject deletion, update,
