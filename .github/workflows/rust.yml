@@ -158,6 +158,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Test domain API digest
+        run: python3 scripts/test_domain_spine_digest.py
       - name: Test domain-spine checker
         run: python3 scripts/test_check_domain_spine.py
       - name: Test migration version checker
