@@ -17,8 +17,8 @@ uses it.
 
 The environment supplies a fixed set of deployment values: the database URL, the
 catalog paths, the socket paths, the paths of the two integration credential
-files, the optional browser bind address and static-asset root, and the
-telemetry settings. `DATABASE_URL` is the whole database channel, and a
+files, the optional browser bind address and static-asset root, the log filter,
+and the telemetry settings. `DATABASE_URL` is the whole database channel, and a
 deployment carries every connection parameter in the URL. Model-provider
 credential paths come from `file` profiles in the catalog;
 `ANTHROPIC_API_KEY_FILE` and `OPENAI_API_KEY_FILE` are not read. An absent
@@ -29,15 +29,18 @@ production web build, the static files under that root; an empty root fails
 configuration and an absent one answers every other path 404. The DTOs and
 schemas under `crates/web-contract` are the authority for that surface, and the
 checked-in JavaScript decoders and TypeScript declarations are generated from
-them.
+them. `RUST_LOG` admits one log level and nothing else; any other value warns
+and falls back to the INFO default.
 
 `SIGNALBOX_OTLP_ENDPOINT` enables span export; its absence disables OTLP and
-makes every other OTLP setting inert. `SIGNALBOX_OTLP_PROTOCOL` selects `grpc`
-or `http/protobuf`, `SIGNALBOX_OTLP_HEADERS_FILE` names a collector-header file
-read once at startup, `SIGNALBOX_OTLP_SAMPLING_RATIO` sets the parent-based
-trace-id sampling ratio from 0 through 1, and `SIGNALBOX_OTLP_SERVICE_NAME` sets
-the service name. `SIGNALBOX_PROMETHEUS_BIND`, an exact IP socket address,
-enables a separate Prometheus listener.
+makes every other OTLP setting inert. With the endpoint set, any standard
+`OTEL_EXPORTER_OTLP_*` variable in the environment fails startup.
+`SIGNALBOX_OTLP_PROTOCOL` selects `grpc` or `http/protobuf`,
+`SIGNALBOX_OTLP_HEADERS_FILE` names a collector-header file read once at
+startup, `SIGNALBOX_OTLP_SAMPLING_RATIO` sets the parent-based trace-id sampling
+ratio from 0 through 1, and `SIGNALBOX_OTLP_SERVICE_NAME` sets the service name.
+`SIGNALBOX_PROMETHEUS_BIND`, an exact IP socket address, enables a separate
+Prometheus listener.
 
 `signalbox-runner` takes its configuration path from exactly one source,
 `SIGNALBOX_RUNNER_CONFIG_FILE` or `--config PATH`, and rejects both or neither
