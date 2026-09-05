@@ -177,9 +177,9 @@ messages:
   inventing text. The same profile-specific text renders every relocation,
   including a working-directory move on the same runner and a later
   user-directed move of a healthy session
-  ([runner protocol and placement](runner-protocol.md#committed-functionality-beyond-version-one)).
-  What is unavailable is authority to execute through the retired placement; the
-  old path is no longer the active working directory or writable root. Physical
+  ([runner protocol and placement](runner-protocol.md#planned)). What is
+  unavailable is authority to execute through the retired placement; the old
+  path is no longer the active working directory or writable root. Physical
   files are not reported lost: a restricted successor exposes only its own
   namespace, while an ambient successor may still expose an old path,
   particularly after a same-runner move. Why: reporting deletion or
@@ -259,25 +259,25 @@ matching optional profile satisfies preparation. No absent/present pair matches,
 and absence never selects a credential. A session composed without a workspace
 therefore advertises exactly the tools that can execute in it and no placement
 combination is rejected merely for being workspace-free
-([runner protocol and placement](runner-protocol.md#session-composition) owns
-the composition axes, and [tool-loop](tool-loop.md) owns which declarations
-carry a workspace requirement). Why: advertising a tool that cannot be admitted
-at lease claim spends a model round to learn what preparation had already
-determined, and accurate advertisement is cheaper than a late refusal. An
-exact-identity selector binds that runner and registration revision for a
-possible first dispatch, so its loss produces `RunnerLostBeforePin`. A
-capability-class selector freezes the class and required availability, not a
-runner identity; the eventual first dispatch may select only a then-current
-satisfying registration. If none remains, the proposal closes known-failed as
-`ToolUnavailableBeforePin` without creating an attempt or placement, because no
-runner execution was authorized. `RunnerAbandoned` exposes daemon-executable
-tools only. `RunnerLost` and `RunnerLostBeforePin` cannot prepare a new model
-operation while the turn awaits user recovery. An operation prepared before loss
-retains its frozen snapshot and physical-call disposition, but a runner-only
-proposal from it cannot authorize against the lost locus. A combined-locus
-definition remains executable through its daemon locus when runner availability
-disappears; an already frozen runner selection never silently falls back after
-the provider returns.
+([runner protocol and placement](runner-protocol.md) owns the composition axes,
+and [tool-loop](tool-loop.md) owns which declarations carry a workspace
+requirement). Why: advertising a tool that cannot be admitted at lease claim
+spends a model round to learn what preparation had already determined, and
+accurate advertisement is cheaper than a late refusal. An exact-identity
+selector binds that runner and registration revision for a possible first
+dispatch, so its loss produces `RunnerLostBeforePin`. A capability-class
+selector freezes the class and required availability, not a runner identity; the
+eventual first dispatch may select only a then-current satisfying registration.
+If none remains, the proposal closes known-failed as `ToolUnavailableBeforePin`
+without creating an attempt or placement, because no runner execution was
+authorized. `RunnerAbandoned` exposes daemon-executable tools only. `RunnerLost`
+and `RunnerLostBeforePin` cannot prepare a new model operation while the turn
+awaits user recovery. An operation prepared before loss retains its frozen
+snapshot and physical-call disposition, but a runner-only proposal from it
+cannot authorize against the lost locus. A combined-locus definition remains
+executable through its daemon locus when runner availability disappears; an
+already frozen runner selection never silently falls back after the provider
+returns.
 
 Each snapshot entry binds the exact model definition, permission/effect policy,
 and selected executable locus used to validate and authorize a returned

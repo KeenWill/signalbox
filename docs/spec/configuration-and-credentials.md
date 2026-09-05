@@ -546,12 +546,12 @@ entry, not a runner code branch. The runner advertises the exact configured
 credential names, and each configured repository key paired with the optional
 profile name its own entry carries, as availability. The registration-only
 daemon admission follows the
-[advertised catalog and daemon authority](runner-protocol.md#advertised-catalogs-and-daemon-authority);
-another otherwise-valid configured profile is rejected until that authority
-admits it. Reserved model-provider profile and environment names are rejected.
-Because arbitrary secret bytes have no self-describing type, file contents
-cannot be classified as a provider key; the runner has no model-provider config
-field or daemon path that supplies one.
+[advertised catalog and daemon authority](runner-protocol.md); another
+otherwise-valid configured profile is rejected until that authority admits it.
+Reserved model-provider profile and environment names are rejected. Because
+arbitrary secret bytes have no self-describing type, file contents cannot be
+classified as a provider key; the runner has no model-provider config field or
+daemon path that supplies one.
 
 Startup opens or creates `runner_root` as an effective-user-owned real `0700`
 directory without following its final component, retains its identity, takes the
@@ -943,8 +943,7 @@ minted Git push destination is keyed by it, so two spellings of one directory
 cannot become two scopes. The root is canonicalized once, when the record is
 minted, and stored in canonical form; no later comparison normalizes anything.
 The tiers that mint these records, and the one grant that currently uses them,
-are stated under
-[remote destination authority](git-authority-threat-model.md#remote-destination-authority).
+are stated under [remote destination authority](git-authority-threat-model.md).
 
 Provisioning that directory is deployment work: creating a direct main worktree
 there is what makes a session use it. Only a reported absence at the derived
@@ -1277,9 +1276,9 @@ supplies them:
   applies, so the profile does not contain a deliberately hostile program.
 
 This is not the runner's `WorkspaceRestricted` profile described by
-[sandbox profiles and approval](runner-protocol.md#sandbox-profiles-and-approval),
-which additionally drops capabilities and brokers egress through a hostname
-allowlist, and which no present runner surface provides.
+[sandbox profiles and approval](runner-protocol.md#planned), which additionally
+drops capabilities and brokers egress through a hostname allowlist, and which no
+present runner surface provides.
 
 The conversation adapter uses the existing application listing service and the
 established persistence projections for native semantic transcripts and
@@ -2898,7 +2897,7 @@ uses anonymous HTTPS, while an entry that names a profile fails with the typed
 never selected. Conversely, a named profile is granted to a session with no
 repository and no workspace, because the credential is scoped to that session's
 dispatches rather than to a clone
-([runner protocol and placement](runner-protocol.md#session-composition)).
+([runner protocol and placement](runner-protocol.md)).
 
 At lease admission the runner requires the exact granted name in its startup
 configuration; absence rejects the claim before any executable capability is
@@ -2932,12 +2931,11 @@ push; preserving the path is the authorization boundary, not a convenience.
 Binding the helper to the provisioned workspace would also leave the operation
 that introduces a session's first repository unauthorizable, because a clone
 runs in a writable root whose manifest names no repository key at all
-([runner protocol and placement](runner-protocol.md#workspace-provisioning-and-recovery)).
-The runner scrubs the exact value and its JSON-string-escaped form from admitted
-stdout, stderr, and result text before forwarding. This reduces accidental echo;
-it cannot prevent model-controlled code from transforming or using the value
-within its granted repository scope, which is an accepted restricted-profile
-cost.
+([runner protocol and placement](runner-protocol.md#planned)). The runner scrubs
+the exact value and its JSON-string-escaped form from admitted stdout, stderr,
+and result text before forwarding. This reduces accidental echo; it cannot
+prevent model-controlled code from transforming or using the value within its
+granted repository scope, which is an accepted restricted-profile cost.
 
 Unknown profiles fail before lease claim. A credential failure after a claimed
 dispatch is a fixed `ExecutionFailed` observation naming only the profile and
