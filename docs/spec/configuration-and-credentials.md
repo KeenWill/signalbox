@@ -154,6 +154,12 @@ Trigger actions and the exclusions they create are durable. How an attempt ends
 when a pool admits no member is owned by
 [credential availability](credential-availability.md).
 
+For rate-limit and overload failures, the credential-availability machine
+creates an authorized same-member retry before applying the pinned trigger
+action while that member remains below the configured attempt bound.
+Provider-internal failures use the same retry rule but have no trigger key; they
+terminalize at the bound.
+
 The session-template catalog is read after the model catalog. Each template
 binds a name and version to a model or alias, a system prompt, and a
 dangerous-tool blanket. A prompt is inline or a file reference, either relative
