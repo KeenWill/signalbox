@@ -6,8 +6,8 @@ every outbound web request under operator policy and approval.
 ## Map
 
 The daemon composes two web tools, `web_search` and `web_fetch`, in
-`crates/tools-web`. Each sends one request and returns the response as evidence
-for the model.
+`crates/tools-web`. Each invocation sends at most one request and returns the
+outcome as evidence for the model.
 
 The output boundary is structural: a provider response is parsed into typed
 components and the evidence is built from those components. Every bound on a
@@ -19,10 +19,10 @@ The transport floor in `crates/egress-transport` fixes how a `web_fetch`
 connection is made. Origin admission, stated in
 [configuration-and-credentials.md](configuration-and-credentials.md), fixes
 which origins `web_fetch` may reach; `web_search` reaches one fixed provider.
-The approval flow, with both tools' declarations and shipped posture, is stated
-in [tool-loop.md](tool-loop.md). Transport and admission constrain where bytes
-go, approval constrains whether they go, and structure constrains what comes
-back.
+The approval flow, both tools' declarations, and their shipped human posture are
+stated in [tool-loop.md](tool-loop.md). Transport and admission constrain where
+bytes go, approval constrains whether they go, and structure constrains what
+comes back.
 
 ## Decisions
 
