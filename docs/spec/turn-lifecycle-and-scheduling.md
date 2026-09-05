@@ -207,14 +207,15 @@ activates a queued turn; failure of either lookup is an ordinary failed pass,
 and only a failure after active-turn execution begins trips fatal recovery
 supervision. A pass releases its slot during attachment or blob-store I/O and
 reacquires one before send authorization, and its guarded transaction
-revalidates authority; a pass that cannot immediately get an
-attachment-preparation permit ends and leaves only the durable prepared row for
-a later sweep. When a pass exceeds its occupancy bound, the handoff invokes the
-startup-recovery transaction only for a turn whose attempt and turn-progress
-frontier did not change between two observations, and a resumability read that
-does not settle counts as a resumption; a pass that expires inside
-pre-activation compaction instead hands off only the exact compaction call that
-window made durable.
+revalidates authority. A model-originated blob read authorizes no later send, so
+it reacquires its slot before the correlated tool result commits. A pass that
+cannot immediately get an attachment-preparation permit ends and leaves only the
+durable prepared row for a later sweep. When a pass exceeds its occupancy bound,
+the handoff invokes the startup-recovery transaction only for a turn whose
+attempt and turn-progress frontier did not change between two observations, and
+a resumability read that does not settle counts as a resumption; a pass that
+expires inside pre-activation compaction instead hands off only the exact
+compaction call that window made durable.
 
 A quiescent candidate is an active turn with an accepted-input origin in the
 running phase, with no tool round, approval, or recovery attempt, and no live
@@ -246,12 +247,12 @@ configured attempt budget is spent, the recovery row becomes exhausted, the wait
 remains unchanged, and the process transcript sets operator action required.
 
 Startup acquires the single-daemon guard, fences the prior pool incarnation,
-runs migrations, completes the generic scan, marks prior-process runner
-connections lost, binds the runner socket, binds the process socket, and then
-starts enrollment, admission, dispatch, and scheduling concurrently. No request,
-dispatch cursor advance, scheduler pass, or runner admission occurs before
-recovery completes. Any phase failure is a failed startup with a classified,
-key-bearing log line and a failure exit code.
+runs migrations, completes the generic scan, initializes every configured blob
+store, marks prior-process runner connections lost, binds the runner socket,
+binds the process socket, and then starts enrollment, admission, dispatch, and
+scheduling concurrently. No request, dispatch cursor advance, scheduler pass, or
+runner admission occurs before recovery completes. Any phase failure is a failed
+startup with a classified, key-bearing log line and a failure exit code.
 
 Each scan transaction classifies the lost tenure by its durable evidence and
 never fabricates a live end. A turn with no model call ends its attempt lost and

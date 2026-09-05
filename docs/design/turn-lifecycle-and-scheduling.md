@@ -106,7 +106,8 @@ availability chain.
 
 A replacement command issued while a call is in flight is accepted, and its
 placement boundary commits after that call's observation boundary; a commit in
-any other order is rejected by the prefix-preserving frontier triggers.
+any other order is rejected by the prefix-preserving frontier triggers. A call
+whose response introduces unfinished tool work is outside this criterion.
 
 An abandonment command against a session with an active turn is rejected with
 the existing-control result and creates no cancellation.
@@ -116,5 +117,5 @@ A queued turn whose placement is lost is not activated by any pass or sweep.
 A restart with retained runner work resolves every runner-owned attempt before
 the generic scan runs, and the generic scan ends no attempt a runner still owns.
 
-Every started or terminal turn owns exactly one turn-start instruction manifest,
-written in its activation transaction and never after it.
+Every activated turn owns exactly one turn-start instruction manifest, written
+in its activation transaction and never after it.
