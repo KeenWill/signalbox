@@ -382,10 +382,10 @@ powers outside the grant channel.
 
 ## Boundary contracts
 
-The optional `[codex_cli].model_context_window_overrides` map may be written as
-an inline TOML table or as a `[codex_cli.model_context_window_overrides]`
-subtable. Every key exactly matches the `provider_model` of a configured model
-routed through the `codex_cli` adapter, every value is a positive raw Codex
+The optional `[codex_cli].model_context_window_overrides` map is an inline TOML
+table; a nested `[codex_cli.model_context_window_overrides]` table is invalid.
+Every key exactly matches the `provider_model` of a configured model routed
+through the `codex_cli` adapter, every value is a positive raw Codex
 `model_context_window` token count, and any unmatched or differently routed key
 fails startup. Codex applies its own reservation to that raw count;
 `context_window_tokens` remains the independently configured usable
