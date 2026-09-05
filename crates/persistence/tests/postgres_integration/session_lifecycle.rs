@@ -1,6 +1,7 @@
-//! PostgreSQL proof for the session lifecycle satellite: the §1 mapping, the
-//! armed deadline, the parked override, §2's closures, and §6's
-//! provenance and ownership journal.
+//! PostgreSQL proof for the session lifecycle satellite
+//! (docs/spec/session-lifecycle.md): the state mapping, the armed deadline,
+//! the parked override, the closures, and the provenance and ownership
+//! journal.
 
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
@@ -25,7 +26,7 @@ use sqlx::types::time::OffsetDateTime;
 
 const LIFECYCLE_SEED: u128 = 0x11fe_0000;
 
-/// Builds one interactive creation, which §6 records as unmonitored.
+/// Builds one interactive creation, recorded as unmonitored.
 fn interactive_creation(seed: u128) -> PreparedCreateSession {
     prepared(
         LIFECYCLE_SEED + seed,
@@ -34,7 +35,7 @@ fn interactive_creation(seed: u128) -> PreparedCreateSession {
     )
 }
 
-/// Builds one repository-watch dispatch, which §6 records as owned work.
+/// Builds one repository-watch dispatch, recorded as owned work.
 fn dispatched_creation(seed: u128) -> PreparedCreateSession {
     CreateSession::new(
         DurableCommandId::from_uuid(Uuid::from_u128(LIFECYCLE_SEED + seed)),
@@ -263,9 +264,9 @@ fn lifecycle_rejection(error: SessionLifecycleRepositoryError) -> SessionLifecyc
     }
 }
 
-/// §6: an interactive creation is a conversation. It records the unmonitored
+/// An interactive creation is a conversation. It records the unmonitored
 /// bit, opens its ownership journal, and carries no armed deadline, because a
-/// deadline on a person's chat window is exactly what §6 forbids.
+/// deadline on a person's chat window is exactly what the unmonitored bit forbids.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn an_interactive_creation_is_unmonitored_and_arms_no_deadline() -> Result<(), Box<dyn Error>>
@@ -339,8 +340,8 @@ async fn a_command_naming_another_dispatch_than_its_session_is_rejected()
     Ok(())
 }
 
-/// §6: a module-dispatched creation records the module and its exact dispatch,
-/// is owned, and arms the admission deadline §10 gives an owned creation.
+/// A module-dispatched creation records the module and its exact dispatch,
+/// is owned, and arms the admission deadline an owned creation is given.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_dispatched_creation_is_owned_and_holds_its_admission_deadline()
@@ -390,7 +391,7 @@ async fn a_dispatched_creation_is_owned_and_holds_its_admission_deadline()
     Ok(())
 }
 
-/// §1: the first accepted input moves the session to `dispatched`, not
+/// The first accepted input moves the session to `dispatched`, not
 /// `active` — the turn is queued, and only activation makes it active. Each
 /// state arms the deadline that state defines.
 #[tokio::test(flavor = "multi_thread")]
@@ -457,7 +458,7 @@ async fn the_mapping_follows_the_turn_from_dispatch_to_activation() -> Result<()
     Ok(())
 }
 
-/// §1: a parked session's rows are not eligibility-sweep candidates. Parking
+/// A parked session's rows are not eligibility-sweep candidates. Parking
 /// suspends the session's work in place, so a sweep that still hinted it would
 /// hand the scheduler a session no pass may run.
 #[tokio::test(flavor = "multi_thread")]
@@ -477,7 +478,7 @@ async fn a_parked_session_leaves_the_eligibility_sweep() -> Result<(), Box<dyn E
     assert!(before_park.contains(&session));
 
     // The dispatched session is parked by statement rather than through the
-    // store: §1 admits a park only from the states the turn mapping derives,
+    // store: the lifecycle admits a park only from the states the turn mapping derives,
     // and the module-park unification that drives a dispatched session to core
     // `parked` lands with the expiry engine. The sweep's exclusion is what this
     // test is about, and it reads the state column either way.
@@ -494,10 +495,10 @@ async fn a_parked_session_leaves_the_eligibility_sweep() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// §1: a parked session's turn is not a liveness-watchdog candidate either.
+/// A parked session's turn is not a liveness-watchdog candidate either.
 /// Parking keeps the turn's phase, so a watchdog that still saw it would read
 /// a deliberately held turn as a stalled one and reap the work an operator is
-/// holding — the §13 safety-backfire class this conjunct exists to prevent.
+/// holding — the safety-backfire class this conjunct exists to prevent.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_parked_session_leaves_the_liveness_scans() -> Result<(), Box<dyn Error>> {
@@ -559,7 +560,7 @@ async fn a_parked_session_leaves_the_liveness_scans() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// §1: leaving `parked` re-enters the state the mapping gives the suspended
+/// Leaving `parked` re-enters the state the mapping gives the suspended
 /// turn's phase. The turn kept its phase through the park, so the phase is
 /// what decides where the session belongs — not a remembered previous state.
 #[tokio::test(flavor = "multi_thread")]
@@ -645,7 +646,7 @@ async fn retired_unactivated_turn_does_not_make_a_park_resume_active() -> Result
     Ok(())
 }
 
-/// §1/§2: no terminal session leaves a non-terminal turn behind. A closure
+/// No terminal session leaves a non-terminal turn behind. A closure
 /// issued over a live turn is refused rather than committing a terminal
 /// session whose turn is still running.
 #[tokio::test(flavor = "multi_thread")]
@@ -685,10 +686,10 @@ async fn a_closure_over_a_live_turn_is_refused() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// §2 and codex finding F1: session terminalization settles the live goal
-/// generation in the same closure. Goal state is the sole
-/// continuation-stopping condition in the goal contract, so a pursuing goal
-/// beneath a terminal session would keep scheduling work no one owns.
+/// Session terminalization settles the live goal generation in the same
+/// closure. Goal state is the sole continuation-stopping condition in the
+/// goal contract, so a pursuing goal beneath a terminal session would keep
+/// scheduling work no one owns.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_closure_settles_the_live_goal_generation() -> Result<(), Box<dyn Error>> {
@@ -770,7 +771,7 @@ async fn a_closure_settles_the_live_goal_generation() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// §2: a verified achievement and a stop are the goal contract's own events,
+/// A verified achievement and a stop are the goal contract's own events,
 /// so a session closure naming one over a generation still open is refused
 /// rather than recording the same closure twice.
 #[tokio::test(flavor = "multi_thread")]
@@ -818,7 +819,7 @@ async fn an_achievement_closure_over_an_open_generation_is_refused() -> Result<(
     Ok(())
 }
 
-/// §6: adopting takes the liveness obligation and arms the deadline the state
+/// Adopting takes the liveness obligation and arms the deadline the state
 /// defines; releasing drops the forward obligations immediately, disarming the
 /// deadline with the bit. Both transitions are journaled with their actor.
 #[tokio::test(flavor = "multi_thread")]
@@ -863,7 +864,7 @@ async fn ownership_flips_arm_and_disarm_the_deadline_and_journal_themselves()
     Ok(())
 }
 
-/// §6: `release` on a `parked` session is rejected. `parked` is an owned-only
+/// `release` on a `parked` session is rejected. `parked` is an owned-only
 /// state, so the park is closed or resumed first; releasing it would strand a
 /// session waiting on a human with nothing left watching it.
 #[tokio::test(flavor = "multi_thread")]
@@ -905,7 +906,7 @@ async fn releasing_a_parked_session_is_rejected() -> Result<(), Box<dyn Error>> 
 }
 
 /// Terminal is final. Without this a later transition could reopen a closed
-/// session and move every §12 cohort built on `ended_at` underneath the week
+/// session and move every metric cohort built on `ended_at` underneath the week
 /// that already reported it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -947,7 +948,7 @@ async fn a_terminal_session_admits_no_further_transition() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// §2: a closure may commit to its outcome while the live turn still settles.
+/// A closure may commit to its outcome while the live turn still settles.
 /// The handoff is what lets a command say what it decided without recording a
 /// terminal session over a running turn.
 #[tokio::test(flavor = "multi_thread")]
@@ -981,7 +982,7 @@ async fn a_pending_terminal_settles_once_the_turn_does() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// §2: a committed closure disposes steering still pending on its live turn.
+/// A committed closure disposes steering still pending on its live turn.
 /// The turn then settles without creating a successor that would hold the
 /// session open beneath its terminal handoff.
 #[tokio::test(flavor = "multi_thread")]
@@ -1094,7 +1095,7 @@ async fn the_state_vocabulary_matches_its_database_constraint() -> Result<(), Bo
     Ok(())
 }
 
-/// §2's closed terminal-outcome vocabulary, likewise read from the constraint.
+/// The closed terminal-outcome vocabulary, likewise read from the constraint.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn the_terminal_outcome_vocabulary_matches_its_database_constraint()
@@ -1175,7 +1176,7 @@ async fn the_satellite_lock_position_survives_interleaving() -> Result<(), Box<d
     Ok(())
 }
 
-/// §6: the eligibility sweep reports each candidate's ownership, so an
+/// The eligibility sweep reports each candidate's ownership, so an
 /// unmonitored conversation's pass never counts toward the occupancy the
 /// daemon reports as driven work.
 #[tokio::test(flavor = "multi_thread")]
@@ -1205,7 +1206,7 @@ async fn the_sweep_reports_which_candidates_are_unmonitored() -> Result<(), Box<
     Ok(())
 }
 
-/// §1/§6: `parked` is an owned-only state, so an unmonitored conversation
+/// `parked` is an owned-only state, so an unmonitored conversation
 /// cannot be parked. The park would delete rather than arm the re-notification
 /// deadline — an unmonitored session holds none — while the sweep and both
 /// watchdogs stopped seeing it, leaving the conversation with nothing at all
@@ -1242,7 +1243,7 @@ async fn parking_an_unmonitored_session_is_rejected() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// §2: the first committed closure decision is the one that settles. A second
+/// The first committed closure decision is the one that settles. A second
 /// closure naming a different outcome is refused rather than silently
 /// replacing the decision that already started tearing the turn down; an
 /// identical replay is the caller's idempotent retry and settles the same way.
@@ -1292,7 +1293,7 @@ async fn a_second_pending_terminal_cannot_replace_the_first() -> Result<(), Box<
     Ok(())
 }
 
-/// §2: a session outcome and its goal's terminal state are two records of one
+/// A session outcome and its goal's terminal state are two records of one
 /// ending. A goal the user stopped and a session claiming a verified
 /// achievement disagree, and nothing downstream could say which is true, so
 /// the closure is refused instead of committing both.
@@ -1338,7 +1339,7 @@ async fn a_closure_contradicting_its_settled_goal_is_rejected() -> Result<(), Bo
     Ok(())
 }
 
-/// §2: a park closes "as failed with the cause standing". A closure naming a
+/// A park closes "as failed with the cause standing". A closure naming a
 /// different cause would record a fabricated one in both the terminal outcome
 /// and the goal event, and the same write clears the park that would have
 /// contradicted it.
@@ -1385,7 +1386,7 @@ async fn a_failed_closure_must_carry_the_parks_standing_cause() -> Result<(), Bo
     Ok(())
 }
 
-/// §2: an unknown-failure park cannot close under a classification the park
+/// An unknown-failure park cannot close under a classification the park
 /// explicitly did not establish.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -1428,7 +1429,7 @@ async fn an_unknown_failure_park_refuses_a_classified_closure() -> Result<(), Bo
     Ok(())
 }
 
-/// §6: a `core` classification keeps the exact model or tool identity behind
+/// A `core` classification keeps the exact model or tool identity behind
 /// it. The ownership journal is the audit that would otherwise lose it, making
 /// a tool-driven release indistinguishable from ordinary daemon action.
 #[tokio::test(flavor = "multi_thread")]
@@ -1470,7 +1471,7 @@ async fn the_ownership_journal_keeps_the_agency_behind_a_core_flip() -> Result<(
     Ok(())
 }
 
-/// §1: the sweep's parked exclusion is a hint filter, not an authority. A hint
+/// The sweep's parked exclusion is a hint filter, not an authority. A hint
 /// queued before the park still reaches the activation transaction, so the
 /// authoritative path reads the state under its own lock and refuses rather
 /// than activating a turn in a session an operator is holding.
@@ -1509,7 +1510,7 @@ async fn a_parked_session_does_not_activate_its_queued_turn() -> Result<(), Box<
     Ok(())
 }
 
-/// §7: a parked goal session resumes through the goal command, and the unpark
+/// A parked goal session resumes through the goal command, and the unpark
 /// rides that same transaction. Without it the accepted continuation stays
 /// excluded from every sweep and watchdog while its authoritative state still
 /// reads parked.
@@ -1553,7 +1554,7 @@ async fn resuming_a_parked_goal_lifts_the_park() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// §7: a blocked goal resumes through its own command. Lifting the park
+/// A blocked goal resumes through its own command. Lifting the park
 /// directly would expose the blocked generation to automatic resumption
 /// without recording the goal's resume event or guidance.
 #[tokio::test(flavor = "multi_thread")]
@@ -1631,7 +1632,7 @@ async fn a_terminal_session_admits_no_later_queued_turn() -> Result<(), Box<dyn 
 }
 
 /// The ownership journal is append-only against truncation too: row triggers
-/// do not fire for TRUNCATE, and §12's cohort membership follows this journal.
+/// do not fire for TRUNCATE, and metric cohort membership follows this journal.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn the_ownership_journal_cannot_be_truncated() -> Result<(), Box<dyn Error>> {
@@ -1658,7 +1659,7 @@ async fn the_ownership_journal_cannot_be_truncated() -> Result<(), Box<dyn Error
     Ok(())
 }
 
-/// Each wait kind designates exactly one waker (§1). A wait recorded against
+/// Each wait kind designates exactly one waker. A wait recorded against
 /// machinery that will never end it reads as a real wait to everything
 /// downstream, so the pair is constrained rather than merely both present.
 #[tokio::test(flavor = "multi_thread")]
@@ -2155,7 +2156,7 @@ async fn a_closure_cannot_override_a_committed_handoff() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// §8: a committed closure closes the steering still pending on its live turn
+/// A committed closure closes the steering still pending on its live turn
 /// `not_delivered`, with a receipt per injection; the turn then settles with
 /// no successor to reclassify into, and the session records terminal.
 #[tokio::test(flavor = "multi_thread")]
@@ -2260,7 +2261,7 @@ async fn terminalization_closes_pending_steering_not_delivered() -> Result<(), B
     Ok(())
 }
 
-/// §8: the third disposition exists only for a terminal or closing session;
+/// The third disposition exists only for a terminal or closing session;
 /// closing steering under a live one is refused at commit.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -2398,7 +2399,7 @@ async fn a_closure_records_its_acting_identity_in_its_own_columns() -> Result<()
     Ok(())
 }
 
-/// §2 makes `abandoned` the operator's write-off of a parked session, so
+/// `abandoned` is the operator's write-off of a parked session, so
 /// neither another classification nor an unparked session records one.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -2452,7 +2453,7 @@ async fn only_an_operator_writes_off_a_parked_session() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// §2/§6: the handoff carries the actor that decided, and the settlement
+/// The handoff carries the actor that decided, and the settlement
 /// records that actor rather than whichever caller observed the turn reach its
 /// boundary. The settlement takes no actor at all, which is what makes the
 /// attribution unforgeable across a worker change or a restart — and the
@@ -2520,7 +2521,7 @@ async fn a_settlement_records_the_actor_that_decided() -> Result<(), Box<dyn Err
     Ok(())
 }
 
-/// §1/§2: a turn the delegation cascade already terminated logically is not
+/// A turn the delegation cascade already terminated logically is not
 /// live work. The parent's stop released its runtime slot and wrote the
 /// terminal proof while the child turn's `state_kind` stayed put by design, so
 /// reading `state_kind` alone would leave the child session unclosable.
@@ -2574,7 +2575,7 @@ async fn a_logically_terminated_child_turn_does_not_hold_its_session_open()
     Ok(())
 }
 
-/// §2: a handoff has to be settleable. An achievement or a stop is the goal
+/// A handoff has to be settleable. An achievement or a stop is the goal
 /// contract's own event to write, so a closure naming one over an open
 /// generation is refused — and a handoff committed anyway could never settle
 /// and could never be replaced, which is a session stuck by construction.
@@ -2616,7 +2617,7 @@ async fn an_unsettleable_handoff_is_never_committed() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// §6: a goal event the user authored is the operator's, and the lifecycle
+/// A goal event the user authored is the operator's, and the lifecycle
 /// transition it projects records that. Only a lift said so before, so an
 /// operator's stop or supersede read as daemon core in the durable history.
 #[tokio::test(flavor = "multi_thread")]
@@ -2663,7 +2664,7 @@ async fn a_user_authored_goal_event_projects_operator_provenance() -> Result<(),
     Ok(())
 }
 
-/// §1/§2: the standing evidence a park carries is the evidence its cause
+/// The standing evidence a park carries is the evidence its cause
 /// names. A closure reads that evidence to classify the outcome, so a pair
 /// that contradicts itself would close under a classification the park never
 /// supported.
@@ -2744,7 +2745,7 @@ async fn a_park_carries_the_standing_evidence_its_cause_names() -> Result<(), Bo
     Ok(())
 }
 
-/// §1/§2: a cause-bearing park cannot omit the standing evidence its cause
+/// A cause-bearing park cannot omit the standing evidence its cause
 /// names, including when a writer bypasses the repository.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -2800,7 +2801,7 @@ async fn a_cause_bearing_park_requires_standing_evidence() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// §10: the active-stall deadline measures a stall, not a session's whole
+/// The active-stall deadline measures a stall, not a session's whole
 /// working life. A turn terminalizing with a queued successor projects
 /// `active` again, and re-arming there is what keeps a continuously
 /// progressing session from tripping the deadline armed at its first turn.
@@ -2834,7 +2835,7 @@ async fn turn_progress_re_arms_the_active_stall_deadline() -> Result<(), Box<dyn
     );
 
     // Stands in for the turn-boundary write: a turn terminalizing or a
-    // successor activating fires this projection, and §1 keeps the session
+    // successor activating fires this projection, and the mapping keeps the session
     // `active` across both, so the projected shape does not move with it.
     sqlx::query("SELECT project_session_lifecycle($1, false, NULL, NULL, true)")
         .bind(session.into_uuid())
@@ -2857,7 +2858,7 @@ async fn turn_progress_re_arms_the_active_stall_deadline() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// §1/§2: a committed closure freezes the session. Activating a successor
+/// A committed closure freezes the session. Activating a successor
 /// beneath a handoff is what makes its settlement impossible — the terminal
 /// write would find a live turn, and the next queued turn would do it again.
 #[tokio::test(flavor = "multi_thread")]
@@ -2907,7 +2908,7 @@ async fn a_committed_handoff_takes_no_new_turn() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// §2: input cannot create a live turn beneath a committed closure, because
+/// Input cannot create a live turn beneath a committed closure, because
 /// that turn would prevent the closure from settling.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -2963,7 +2964,7 @@ async fn submit_input_refuses_a_committed_terminal_handoff() -> Result<(), Box<d
     Ok(())
 }
 
-/// §1/§2: a resume cannot lift a park under a committed closure. The
+/// A resume cannot lift a park under a committed closure. The
 /// settlement wants the park it decided on and the activation gate wants the
 /// handoff gone, so lifting it strands the session between them.
 #[tokio::test(flavor = "multi_thread")]
@@ -3006,7 +3007,7 @@ async fn a_resume_cannot_lift_a_park_under_a_committed_closure() -> Result<(), B
     Ok(())
 }
 
-/// §2: a goal command cannot contradict a committed closure. Its own terminal
+/// A goal command cannot contradict a committed closure. Its own terminal
 /// event would make the settlement refuse, and with the handoff standing and
 /// activation frozen behind it the session could not move at all, so a client
 /// command takes the durable `session_closing` rejection.

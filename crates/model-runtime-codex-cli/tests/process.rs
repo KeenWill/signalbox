@@ -455,7 +455,41 @@ async fn buffered_completion_is_terminal_only_after_turn_completed() {
     assert!(result.argv.contains("--config\nweb_search=\"disabled\""));
     assert!(result.argv.contains("--config\nproject_doc_max_bytes=0"));
     assert!(result.argv.contains(RESOLVED_TARGET));
+    assert!(!result.argv.contains("model_context_window="));
     assert!(result.prompt.contains(scenario));
+}
+
+#[tokio::test]
+async fn exact_model_context_window_override_reaches_the_codex_process() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let mut config = CodexCliConfig::new(
+        fake_cli(),
+        temporary.path(),
+        CredentialReference::new(CREDENTIAL_REFERENCE),
+        None,
+    );
+    config
+        .model_context_window_overrides
+        .insert(RESOLVED_TARGET.to_string(), 1_000_000);
+    let runtime = CodexCliRuntime::new(config).expect("offline runtime configuration is valid");
+    let prepared = prepare(
+        &runtime,
+        operation(
+            "buffered_completed",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+    )
+    .await;
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+    let argv = read_optional(temporary.path().join("fake-codex-argv"));
+
+    assert!(matches!(report.evidence, TerminalEvidence::Completed(_)));
+    assert!(argv.contains("--config\nmodel_context_window=1000000"));
 }
 
 #[tokio::test]

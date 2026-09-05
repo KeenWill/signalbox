@@ -884,7 +884,7 @@ where
 /// which is what keeps every terminal trigger firing for both; the cause is
 /// what makes the two distinguishable in the rows rather than only in a log.
 /// Proposes one fresh successor turn per steering input pending on the
-/// active turn, so a lost failure reclassifies rather than refuses (§8).
+/// active turn, so a lost failure reclassifies rather than refuses.
 pub(crate) fn lost_failure_identities<Generator>(
     identities: AcceptedInputTurnFailureIdentities,
     scheduling: &signalbox_domain::AcceptedInputSchedulingProjection,

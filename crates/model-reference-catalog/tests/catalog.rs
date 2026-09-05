@@ -674,6 +674,21 @@ fn malformed_catalog_field_is_rejected() {
 }
 
 #[test]
+fn catalog_dates_require_strict_calendar_dates() {
+    for date in ["2025-02-29", "2024-2-29", "2024-02-30"] {
+        let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+        raw["verified_through"]["openai"] = Value::String(String::from(date));
+
+        let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
+
+        assert!(
+            error.to_string().contains("YYYY-MM-DD calendar date"),
+            "{date}: {error}"
+        );
+    }
+}
+
+#[test]
 fn rate_window_cannot_extend_past_model_availability() {
     let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
     assert_eq!(raw["rate_sets"][4]["id"], "oai-gpt4-launch");

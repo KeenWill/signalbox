@@ -199,17 +199,17 @@ per-turn provenance. The following extensions remain undecided:
 
 - **Creation-attributed default visibility.** The implemented visibility and
   attribution limits are owned by
-  [sessions-and-transcript](spec/sessions-and-transcript.md#session-metadata-and-list-projection).
-  Decide derivation, override shape and authority, and monitor inclusion
-  together with the attributed-creation implementation.
+  [sessions-and-transcript](spec/sessions-and-transcript.md). Decide derivation,
+  override shape and authority, and monitor inclusion together with the
+  attributed-creation implementation.
 - **Expressive metadata filters.** The implemented filter grammar is owned by
-  [sessions-and-transcript](spec/sessions-and-transcript.md#session-metadata-and-list-projection).
-  Whether to add OR, negation, attribute predicates, case folding, or a general
-  query language remains open.
+  [sessions-and-transcript](spec/sessions-and-transcript.md). Whether to add OR,
+  negation, attribute predicates, case folding, or a general query language
+  remains open.
 - **Imported-conversation archive semantics.** Ordinary session archive and
   immutable imported-source behavior are owned by
-  [sessions-and-transcript](spec/sessions-and-transcript.md#session-metadata-and-list-projection)
-  and [conversation-import](spec/conversation-import.md). Whether imported
+  [sessions-and-transcript](spec/sessions-and-transcript.md) and
+  [conversation-import](spec/conversation-import.md). Whether imported
   conversation records have a distinct non-destructive archive state, and how
   that state affects discovery, remains undecided.
 - **Destructive retention or purge beyond ordinary archive.** Kept separate from
@@ -289,8 +289,8 @@ per-turn provenance. The following extensions remain undecided:
   end as, and every projection of each ending, by
   [the credential-availability machine](spec/credential-availability.md); the
   qualifying causes and the successor-call shape by
-  [availability successor calls](spec/model-call-execution.md#availability-successor-calls);
-  the pool grammar, per-membership ranking, and closed action vocabulary by
+  [availability successor calls](spec/model-call-execution.md); the pool
+  grammar, per-membership ranking, and closed action vocabulary by
   [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
   What remains open is the client projection: snapshots expose each call's usage
   and the final turn state, while the predecessor, cause, and successor relation
@@ -339,14 +339,14 @@ per-turn provenance. The following extensions remain undecided:
   family revocation is account loss. (S22)
 - **Detailed provider provenance representation.** Model identifier
   normalization is decided: the
-  [provider-target identity rule](spec/model-call-execution.md#provider-target-identity)
-  accepts an alias resolved to its own dated snapshot as the same target and
-  keeps a different lineage as a distinct substitution outcome. The mismatch
-  disposition itself is likewise accepted
-  ([model-call-execution](spec/model-call-execution.md)). What remains open is
-  the durable per-call provenance schema that would record the concrete served
-  identity and a substitution as evidence rather than as operator diagnostics
-  and a fail-closed error. Blocks the provider provenance schema. (S20–S23)
+  [provider-target identity rule](spec/model-call-execution.md) accepts an alias
+  resolved to its own dated snapshot as the same target and keeps a different
+  lineage as a distinct substitution outcome. The mismatch disposition itself is
+  likewise accepted ([model-call-execution](spec/model-call-execution.md)). What
+  remains open is the durable per-call provenance schema that would record the
+  concrete served identity and a substitution as evidence rather than as
+  operator diagnostics and a fail-closed error. Blocks the provider provenance
+  schema. (S20–S23)
 - **Future same-profile retry.** Repeating a known provider failure or ambiguous
   outcome against the target and credential profile that produced it remains
   outside every accepted policy; the successor-call decision above authorizes
@@ -364,26 +364,26 @@ local runner orchestration are specified in
 cleanup, contract-gap, and session-composition questions this section previously
 carried are decided, and each decision is stated by the contract page that owns
 it: staged replacement ordering and the runner-recovery turn phase in
-[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md#runner-loss-session-recovery);
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md);
 same-runner recovery after a registration-triggered loss, deployment-scoped
 successor promotion, non-transferable workspace cleanup, pinned canonical digest
 bytes, runner-to-daemon failure frames, workspace-release acknowledgement,
 forced Git transport configuration, and the independent
 [session-composition axes](spec/runner-protocol.md) in
 [runner protocol and placement](spec/runner-protocol.md); the runner-recovery
-phase, the placement transcript payload, creation-record placement, and the
-runner event family in
-[persistence-protocol](spec/persistence-protocol.md#relational-representation);
-the closed runner execution object, creation-request placement, and template
-creation carrying placement in [process-protocol](spec/process-protocol.md); the
-relocation transcript boundary in
-[sessions-and-transcript](spec/sessions-and-transcript.md#semantic-transcript-entries);
-capability-derived tool advertisement in
-[model-call-execution](spec/model-call-execution.md#frontier-rendering). Why: a
-decided question is a contract, and a contract binds only where the implementer
-of that contract reads it; a decision restated on this page would be a second
-authority over prose that already owns it, free to drift from the page it
-paraphrases. Multiple simultaneously enrolled runners and user-directed
+phase, creation-record placement, and the runner event family in
+[persistence-protocol](spec/persistence-protocol.md), and the placement
+transcript entry in the
+[persistence-protocol design](design/persistence-protocol.md); the closed runner
+execution object, creation-request placement, and template creation carrying
+placement in [process-protocol](spec/process-protocol.md); the relocation
+transcript boundary in
+[sessions-and-transcript](spec/sessions-and-transcript.md); capability-derived
+tool advertisement in [model-call-execution](spec/model-call-execution.md). Why:
+a decided question is a contract, and a contract binds only where the
+implementer of that contract reads it; a decision restated on this page would be
+a second authority over prose that already owns it, free to drift from the page
+it paraphrases. Multiple simultaneously enrolled runners and user-directed
 relocation of a healthy session are committed functionality that version one
 defers rather than open questions
 ([runner protocol and placement](spec/runner-protocol.md#planned)). The
@@ -503,9 +503,9 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
 - **Ambiguous tool-wait resolution.** Who may record resolving evidence, how an
   exact accepted-risk continuation is represented, and which effects permit it
   beyond the
-  [proof-bearing terminal paths](spec/turn-lifecycle-and-scheduling.md#runner-loss-session-recovery)
-  remain undecided. Blocks reconciliation and continuation from
-  `AwaitingToolRecovery`. (S06)
+  [proof-bearing terminal paths](spec/turn-lifecycle-and-scheduling.md) remain
+  undecided. Blocks reconciliation and continuation from `AwaitingToolRecovery`.
+  (S06)
 - **Durable tool-definition revisioning.** The implemented compiled catalog is
   immutable for one process lifetime. A dynamic catalog or a deployment that
   changes a definition while requests are outstanding must first decide how the

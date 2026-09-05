@@ -2555,7 +2555,7 @@ async fn interrupt_completion_and_restart_races_retain_stop_history() -> Result<
     Ok(())
 }
 
-/// §8: steering into a stopping turn is accepted, not rejected for state; the
+/// Steering into a stopping turn is accepted, not rejected for state; the
 /// cancellation boundary reclassifies it into a queued successor and settles
 /// it `delivered`, as it settles the interrupt's own origin.
 #[tokio::test(flavor = "multi_thread")]

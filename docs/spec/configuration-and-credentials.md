@@ -123,14 +123,12 @@ rejects an unknown field, wrong shape, different family, or different version
 rather than interpreting it as the local process protocol. No process-protocol
 frame is a browser DTO. The descriptor, historical-window, and lexical-search
 route shapes and semantics are owned by
-[Sessions and the transcript](sessions-and-transcript.md#bounded-browser-session-timeline)
-and its
-[lexical-search section](sessions-and-transcript.md#bounded-browser-lexical-search).
-The open-workspace live snapshot, follow route, and resynchronization semantics
-are owned by
-[its live-session section](sessions-and-transcript.md#bounded-browser-live-session-projection).
-The descriptor, content, and download routes beneath `/api/blobs/{digest}` are
-the same-origin surface owned by [blob storage](blob-storage.md).
+[Sessions and the transcript](sessions-and-transcript.md) and its
+[sessions and transcript](sessions-and-transcript.md). The open-workspace live
+snapshot, follow route, and resynchronization semantics are owned by
+[sessions and transcript](sessions-and-transcript.md). The descriptor, content,
+and download routes beneath `/api/blobs/{digest}` are the same-origin surface
+owned by [blob storage](blob-storage.md).
 
 `GET /api/attention` returns at most 32 session summaries from one read-only
 repeatable-read snapshot, ordered by session identity. A continuation names the
@@ -195,9 +193,11 @@ use ordinary HTTP bodies rather than JSON wrapping.
 
 ### Bounded browser usage and cost reads
 
-The bounded `/api/usage/summary` and newest-first `/api/usage/calls` routes,
-their filters, pagination, compatibility grouping, and read-time configured-cost
-semantics are owned by [Usage evidence](usage-evidence.md).
+The bounded `/api/usage/summary` and newest-first `/api/usage/calls` routes read
+the usage projection [model-call-execution](model-call-execution.md) owns; their
+response shapes, bounds, and cost labels are the web contract under
+`crates/web-contract`, and the daemon's web HTTP layer parses their filters and
+cursors.
 
 `deterministic_test_router` supplies a database-free page plus bounded read,
 mutation, and two-item stream routes. It composes the same bootstrap, mutation
@@ -1763,7 +1763,7 @@ what a pool needs, and a profile in no pool has no co-member to contradict. Two
 provisionings of one account must not both commit, so this consultation is
 serialized against any concurrent provisioning commit of a consulted profile;
 the lock protocol that achieves it is owned by
-[persistence protocol](persistence-protocol.md#lock-protocol).
+[persistence protocol](persistence-protocol.md).
 
 Provisioning is not the only moment co-membership arises, and checking only at
 provisioning would leave the property unenforced by the other one. Two profiles
@@ -2037,7 +2037,7 @@ The five admitted actions are:
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `stay`               | The member keeps the session. A failure terminalizes as it would with no pool.                                                                                                                                                                                                                                        |
 | `switch_next_turn`   | A failure terminalizes as it would with no pool; low headroom does not fail or replace the current turn. The next turn's preparation excludes this member.                                                                                                                                                            |
-| `switch_now`         | The turn creates a successor attempt against the next admitted member ([model-call-execution](model-call-execution.md#availability-successor-calls)).                                                                                                                                                                 |
+| `switch_now`         | The turn creates a successor attempt against the next admitted member ([model-call-execution](model-call-execution.md)).                                                                                                                                                                                              |
 | `avoid_new_sessions` | Sessions with a prior completed call through the member keep it; preparation for a session without one on this pool excludes it.                                                                                                                                                                                      |
 | `quarantine`         | The member is excluded from every selection, in every pool and across restarts, until an explicit operator command clears it — or, where an adapter offers one, until a zero-cost probe that calls no model reports availability. Never by a timer and never by a restart; the clearing rule is stated in full below. |
 
@@ -2112,17 +2112,17 @@ still leave one excluded member at selection.
 Preparation is the other side of that race and joins the same protocol. Before
 it reads any member's exclusion state, it locks the action head of every member
 of the policy it may select, at the ordering position and in the modes
-[persistence protocol](persistence-protocol.md#lock-protocol) fixes, and holds
-those locks through the `Prepared` insert. The modes are not restated here,
-because they are not uniform across members: a preparation writes the exclusion
-state of any member whose pending displacement it consumes, and reads the rest.
-The share and exclusive modes conflict, so one of the two transactions waits: a
-call is either prepared before the exclusion commits or prepared against a
-member it has already observed as excluded. Without this rule selection takes no
-lock the exclusion writer takes — an unbounded `first_listed` member acquires
-neither a capacity row nor a cursor row — and a preparation that read a member
-as admissible could then dispatch a provider request on a credential quarantined
-in the interval.
+[persistence protocol](persistence-protocol.md) fixes, and holds those locks
+through the `Prepared` insert. The modes are not restated here, because they are
+not uniform across members: a preparation writes the exclusion state of any
+member whose pending displacement it consumes, and reads the rest. The share and
+exclusive modes conflict, so one of the two transactions waits: a call is either
+prepared before the exclusion commits or prepared against a member it has
+already observed as excluded. Without this rule selection takes no lock the
+exclusion writer takes — an unbounded `first_listed` member acquires neither a
+capacity row nor a cursor row — and a preparation that read a member as
+admissible could then dispatch a provider request on a credential quarantined in
+the interval.
 
 `switch_now` is admitted only for `on_quota_exhausted`, `on_rate_limited`, and
 `on_overloaded`, because only those causes carry proof that the request was not
@@ -2594,21 +2594,20 @@ credential presence is never consulted (INV-008):
   an origin minted by any of them would otherwise freeze an incapable target and
   fail before provider spawn — precisely the restart-after-retargeting case this
   check exists to prevent. That is also what
-  [sessions-and-transcript](sessions-and-transcript.md#session-defaults-and-replacement)
-  promises for every later origin. The subject of that check is the effective
-  serving record the frozen settings select, not the named direct model: when
-  the frozen overlay enables fast mode on a model whose `fast_mode` is
-  `alternate_target`, the check is applied to the `fast_target_id` serving
-  record that execution will pin, and to its adapter mapping. Each serving
-  target declares transport and capacity independently, so validating only the
-  direct target would admit an input that fails later, before provider spawn.
-  Where the frozen settings leave the effective record undetermined at
-  acceptance, every record the frozen selection may still pin must satisfy the
-  check. This check runs even when no defaults replacement occurred, so restart
-  or configuration retargeting cannot strand an admitted session. A direct
-  selection receives the same check against the serving record its own frozen
-  settings select. The typed rejection accepts no input, creates no turn, and
-  changes neither defaults nor admissions.
+  [sessions-and-transcript](sessions-and-transcript.md) promises for every later
+  origin. The subject of that check is the effective serving record the frozen
+  settings select, not the named direct model: when the frozen overlay enables
+  fast mode on a model whose `fast_mode` is `alternate_target`, the check is
+  applied to the `fast_target_id` serving record that execution will pin, and to
+  its adapter mapping. Each serving target declares transport and capacity
+  independently, so validating only the direct target would admit an input that
+  fails later, before provider spawn. Where the frozen settings leave the
+  effective record undetermined at acceptance, every record the frozen selection
+  may still pin must satisfy the check. This check runs even when no defaults
+  replacement occurred, so restart or configuration retargeting cannot strand an
+  admitted session. A direct selection receives the same check against the
+  serving record its own frozen settings select. The typed rejection accepts no
+  input, creates no turn, and changes neither defaults nor admissions.
 - **At execution.** When the attempt pins its target, the frozen selection is
   resolved against the `ModelTargetCatalog`. An unresolvable selection fails the
   turn as a known failure before any model call exists; a credential or send
@@ -2756,11 +2755,10 @@ deployment-side rules that code cannot enforce are stated in
   (INV-002 boundary type). An ambient CLI operation validates its pinned
   external-login reference and prepares the process capability without reading a
   credential value. The shared cancellation contract for preparation and
-  execution is owned by
-  [model-call-execution](model-call-execution.md#staged-execution). A code-host
-  tool resolves its fixed `github-primary` reference only after the durable tool
-  attempt is authorized `InFlight` and immediately before its typed transport
-  call; no model argument, client, or runner can select or receive the
+  execution is owned by [model-call-execution](model-call-execution.md). A
+  code-host tool resolves its fixed `github-primary` reference only after the
+  durable tool attempt is authorized `InFlight` and immediately before its typed
+  transport call; no model argument, client, or runner can select or receive the
   credential. The pull-request suite follows the same timing with its fixed
   GitHub API egress policy.
 

@@ -60,7 +60,7 @@ use crate::{
 use crate::runner_protocol::RunnerConnectionEpoch;
 
 const STORAGE_VERSION: i16 = 1;
-/// `session_created` advanced when its record gained §6 provenance.
+/// `session_created` advanced when its record gained lifecycle provenance.
 const SESSION_CREATED_STORAGE_VERSION: i16 = 2;
 
 const fn storage_version_for(discriminator: OutboxEventDiscriminator) -> i16 {
@@ -265,7 +265,7 @@ pub enum DispatchedOutboxEventKind {
     DelegationWake(DispatchedDelegationWake),
 }
 
-/// The §6 provenance a creation recorded.
+/// The lifecycle provenance a creation recorded.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DispatchedSessionCreation {
     /// Why the session was created.

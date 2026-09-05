@@ -87,8 +87,7 @@ INV-tagged test names and attached doc comments.
   retried, and an ambiguous outcome never creates a successor. When pool policy
   selects `switch_now`, a proven availability failure may create the S22
   successor on a new attempt against the same target and a different credential
-  profile, under
-  [availability successor calls](spec/model-call-execution.md#availability-successor-calls),
+  profile, under [availability successor calls](spec/model-call-execution.md),
   [the credential-availability machine](spec/credential-availability.md), and
   [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
   No partial draft becomes final content. A later authorized call must retain
@@ -591,7 +590,7 @@ INV-tagged test names and attached doc comments.
   delivery without retaining that slot; result commit creates a durable parent
   wake. The returned value or typed failure becomes delivered parent content,
   never child transcript content, under the
-  [delegated-wait contract](spec/turn-lifecycle-and-scheduling.md#delegated-waits-messages-and-wake-turns).
+  [delegated-wait contract](spec/turn-lifecycle-and-scheduling.md#boundary-contracts).
 - **Transient updates:** Best-effort nudges reduce result/message wake latency;
   the durable eligibility sweep is the restart and lost-wake backstop.
 - **Owning component:** Daemon owns relationships and scheduling; each session
@@ -599,8 +598,7 @@ INV-tagged test names and attached doc comments.
 - **Failure behavior:** Restart restores the relationship, exact wait, messages,
   and undelivered result. Child failure, stop, or cancellation is delivered as a
   typed outcome. A detached result remains durable after parent termination, as
-  owned by
-  [session delegation](spec/sessions-and-transcript.md#session-delegation).
+  owned by [session delegation](spec/sessions-and-transcript.md).
 - **Required invariants:** INV-003, INV-010, INV-034.
 - **Remaining questions:** Multi-source or merged transcript ancestry remains
   separate and unchanged.
@@ -612,7 +610,7 @@ INV-tagged test names and attached doc comments.
 - **Durable commands:** Parent stop/cancel carries `ParentAlone` or
   `ParentAndDescendants`. The latter atomically records a disposition for each
   evaluated relationship from the durable descendant walk defined by
-  [session delegation](spec/sessions-and-transcript.md#session-delegation).
+  [session delegation](spec/sessions-and-transcript.md).
 - **State transitions:** Background children continue. Bound children apply
   their separately recorded stop/cancel action; `KeepRunning` is itself a typed
   disposition. A child is never deleted and may finish after the parent.
@@ -623,7 +621,7 @@ INV-tagged test names and attached doc comments.
 - **Failure behavior:** Every evaluated child has an explicit reason and exact
   spawn, parent-event, and command provenance. Already-issued effects are not
   undone and ambiguous effects remain reconcilable under the
-  [delegated-wait contract](spec/turn-lifecycle-and-scheduling.md#delegated-waits-messages-and-wake-turns).
+  [delegated-wait contract](spec/turn-lifecycle-and-scheduling.md#boundary-contracts).
 - **Required invariants:** INV-010, INV-025, INV-026, INV-029, INV-034.
 - **Remaining questions:** Ordinary archive remains independently non-cascading;
   destructive retention remains separate later scope.
@@ -718,7 +716,7 @@ INV-tagged test names and attached doc comments.
   the session-pinned pool policy; create a distinct successor attempt and model
   call that pin the same target, a different eligible profile from that pool,
   the predecessor call, and the qualifying cause, as owned by
-  [availability successor calls](spec/model-call-execution.md#availability-successor-calls),
+  [availability successor calls](spec/model-call-execution.md),
   [the credential-availability machine](spec/credential-availability.md), and
   [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
 - **State transitions:** Predecessor call → known availability failure and
@@ -726,8 +724,7 @@ INV-tagged test names and attached doc comments.
   attempt/call → terminal. Each availability-successor chain is bounded to at
   most one call per pool member; a successful call ends that chain before later
   continuation, while releasing a parked wait resumes the chain the wait belongs
-  to
-  ([availability successor calls](spec/model-call-execution.md#availability-successor-calls)).
+  to ([availability successor calls](spec/model-call-execution.md)).
 - **Transient updates:** No current client update announces that a successor is
   being considered or selected. The predecessor, cause, and successor are
   committed future durable evidence that no present migration or repository
