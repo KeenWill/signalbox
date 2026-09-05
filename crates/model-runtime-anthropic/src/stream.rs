@@ -426,6 +426,9 @@ impl StreamDecoder {
         if usage.input_tokens.is_none() {
             return self.violation("message_start usage is missing input_tokens");
         }
+        if !iteration_usage_is_complete(usage) {
+            return self.violation("message_start carries incomplete required iteration usage");
+        }
         self.started = true;
         self.input_usage_reported = true;
         self.message_id = Some(ProviderMessageId::new(id));
@@ -1015,6 +1018,17 @@ mod tests {
           data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\
           \"role\":\"assistant\",\"id\":\"msg_1\",\
           \"model\":\"model-exact-1\",\"content\":[],\"usage\":{\"input_tokens\":25}}}\n\n"
+    }
+
+    #[test]
+    fn message_start_rejects_incomplete_required_iteration_usage() {
+        let (terminal, _) = drive(&[b"event: message_start\n\
+          data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\
+          \"role\":\"assistant\",\"id\":\"msg_1\",\
+          \"model\":\"model-exact-1\",\"content\":[],\"usage\":{\"input_tokens\":25,\
+          \"iterations\":[{\"input_tokens\":25}]}}}\n\n"]);
+
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
     }
 
     fn tool_input_delta(partial_json: &str) -> Vec<u8> {
