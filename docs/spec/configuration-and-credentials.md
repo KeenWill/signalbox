@@ -320,8 +320,9 @@ than retained and inert: `round_robin`, `least_used`, any headroom reserve, a
 non-`stay` `on_headroom_low`, and a `switch_now` whose adapter cannot prove
 non-acceptance for that trigger's cause. A Codex pool rejects non-`stay` actions
 on availability and credential-rejection triggers because its opaque failures
-cannot fire them. Why: a configured protection that silently never fires reads
-as one the deployment has.
+cannot fire them. A Claude pool rejects non-`stay` quota actions because HTTP
+status classification supplies no quota-exhaustion cause. Why: a configured
+protection that silently never fires reads as one the deployment has.
 
 The pool name and member bounds keep the duplicated exhaustion evidence and the
 authoritative policy read below the process protocol's frame limit under

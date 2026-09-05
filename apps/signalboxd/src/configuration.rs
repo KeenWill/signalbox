@@ -7786,6 +7786,40 @@ members = [{ profile = "anthropic-primary", priority = 1, headroom_reserve_perce
         assert_codex_trigger_rejects_actions("on_credential_rejected");
     }
 
+    #[track_caller]
+    fn assert_claude_quota_action_rejected(action: &str) {
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let (configuration, _workspace) = configuration_varying_the_claude_bridge(&executable);
+        let configured = configuration.replace(
+            "name = \"claude-code-main\"",
+            &format!("name = \"claude-code-main\"\non_quota_exhausted = {action:?}"),
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(
+                HubModelConfigurationError::InadmissibleCredentialPoolAction {
+                    trigger: Arc::from("on_quota_exhausted"),
+                }
+            ),
+            "{action}",
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_unreachable_claude_quota_actions() {
+        assert_claude_quota_action_rejected("switch_now");
+        assert_claude_quota_action_rejected("switch_next_turn");
+        assert_claude_quota_action_rejected("avoid_new_sessions");
+        assert_claude_quota_action_rejected("quarantine");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let (configuration, _workspace) = configuration_varying_the_claude_bridge(&executable);
+        let configured = configuration.replace(
+            "name = \"claude-code-main\"",
+            "name = \"claude-code-main\"\non_quota_exhausted = \"stay\"",
+        );
+        HubModelConfiguration::parse(&configured).expect("stay needs no quota classification");
+    }
+
     #[test]
     fn configuration_admits_switch_now_where_the_adapter_proves_non_acceptance() {
         let substituting = configuration_with_anthropic_pool(&format!(

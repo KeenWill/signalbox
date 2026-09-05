@@ -742,13 +742,8 @@ impl<C: Clone> EventDecoder<C> {
             message,
         }) = self.terminal
         {
-            // A generic structured error (`error_during_execution`) determines no
-            // kind on its own, while the process exit carries definitive stderr
-            // (`authentication failed`). Fall back to the exit classification in
-            // exactly that case so the shared provider-error vocabulary reflects
-            // all the evidence available, rather than reporting `Unrecognized`
-            // beside a stderr that names the cause. A structured error that does
-            // determine a kind still wins: it is the provider's own statement.
+            // Machine-readable HTTP status determines the kind; stderr remains
+            // opaque and supplies no exit classification for a generic error.
             let kind = match classify_status(status) {
                 ProviderErrorKind::Unrecognized => fallback_kind,
                 determined => determined,
