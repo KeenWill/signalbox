@@ -11,8 +11,9 @@ use signalbox_domain::{
 use signalbox_model_runtime::{
     CancellationSignal, CompletionFinish, ConversationMessage, CredentialReference, DeliveryMode,
     ModelOperation, ModelRuntime, ModelSettings, NoDomainConstraints, Observation,
-    PreparationOutcome, ProviderReportedModel, RequestedTarget, ResolvedTarget,
-    StructuredOutputContract, TerminalEvidence, TokenUsage, UnsentCause, decode_structured,
+    PreparationOutcome, ProviderCompactionMode, ProviderReportedModel, RequestedTarget,
+    ResolvedTarget, StructuredOutputContract, TerminalEvidence, TokenUsage, UnsentCause,
+    decode_structured,
 };
 
 use crate::{ProviderTargetRelation, RuntimeModelCatalog, relate_provider_target};
@@ -240,6 +241,7 @@ where
             operation.system = Some(request.system_prompt);
             operation.output_contract = Some(contract.clone());
             operation.delivery = DeliveryMode::Buffered;
+            operation.provider_compaction = ProviderCompactionMode::Suppressed;
             let preparation = self
                 .runtime
                 .prepare(operation, CancellationSignal::never())
@@ -298,6 +300,9 @@ where
     }
     let reported_model = match &report.evidence {
         TerminalEvidence::Completed(evidence) => evidence.reported_model.as_ref(),
+        TerminalEvidence::CompletedWithProviderCompaction { completion, .. } => {
+            completion.reported_model.as_ref()
+        }
         TerminalEvidence::Refused(evidence) => evidence.reported_model.as_ref(),
         TerminalEvidence::ProviderError(evidence) => evidence.reported_model.as_ref(),
         TerminalEvidence::CancellationConfirmed(evidence) => evidence.reported_model.as_ref(),
@@ -310,6 +315,9 @@ where
     }
     let completed = match report.evidence {
         TerminalEvidence::Completed(completed) => completed,
+        TerminalEvidence::CompletedWithProviderCompaction { completion, .. } => {
+            return Err(ApprovalJudgeModelError::InvalidDecision(completion.usage));
+        }
         TerminalEvidence::Refused(evidence) => {
             return Err(ApprovalJudgeModelError::Refused(evidence.usage));
         }
@@ -427,6 +435,7 @@ fn require_same_target(
 fn terminal_usage(evidence: &TerminalEvidence) -> TokenUsage {
     match evidence {
         TerminalEvidence::Completed(value) => value.usage,
+        TerminalEvidence::CompletedWithProviderCompaction { completion, .. } => completion.usage,
         TerminalEvidence::Refused(value) => value.usage,
         TerminalEvidence::ProviderError(value) => value.usage,
         TerminalEvidence::BoundaryLoss(value) => value.usage,
@@ -598,8 +607,8 @@ mod tests {
     };
     use signalbox_model_runtime::{
         AssistantPart, CompletionEvidence, CompletionFinish, ExchangeFacts, Observation,
-        ObservationFact, ProviderReportedModel, Script, ScriptedModel, TerminalEvidence,
-        TokenUsage, ToolCallId, ToolCallProposal, ToolName,
+        ObservationFact, ProviderCompactionMode, ProviderReportedModel, Script, ScriptedModel,
+        TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
     };
     use uuid::Uuid;
 
@@ -770,6 +779,22 @@ mod tests {
         assert_eq!(
             result.usage.cache_read_input_tokens,
             Some(CACHE_READ_INPUT_TOKENS)
+        );
+    }
+
+    #[tokio::test]
+    async fn dedicated_approval_judge_suppresses_provider_compaction() {
+        let runtime = ScriptedModel::<ModelCallId>::single(approval_completion());
+        let receipt = runtime.clone();
+        let model = RuntimeApprovalJudgeModel::new(runtime, catalog());
+
+        execute(&model)
+            .await
+            .expect("the typed decision is admitted");
+
+        assert_eq!(
+            receipt.received_operations()[0].provider_compaction,
+            ProviderCompactionMode::Suppressed
         );
     }
 

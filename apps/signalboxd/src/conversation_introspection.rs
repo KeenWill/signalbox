@@ -320,6 +320,11 @@ fn visible_process_entry(
             content,
             ..
         } => (entry_index, TranscriptEntryKind::Assistant, content),
+        ProcessTranscriptEntry::ProviderCompaction { entry_index, .. } => (
+            entry_index,
+            TranscriptEntryKind::System,
+            String::from("provider compaction"),
+        ),
         ProcessTranscriptEntry::AssistantToolUse {
             entry_index,
             name,

@@ -24,7 +24,9 @@ use signalbox_model_runtime::{
     ToolCallsAtLoss, ToolName, validate_provider_json_nesting,
 };
 
-use crate::response::{convert_usage, map_finish};
+use crate::response::{
+    convert_usage, iteration_usage_is_complete, map_finish, retained_input_tokens,
+};
 use crate::status::classify_error_token;
 use crate::wire::{
     ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent, ErrorEnvelope,
@@ -62,6 +64,9 @@ enum BlockBuilder {
     RedactedThinking {
         data: String,
     },
+    Compaction {
+        delta: Option<(crate::wire::WireCompactionContent, Option<String>)>,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -84,6 +89,7 @@ pub(crate) struct StreamDecoder {
     message_id: Option<ProviderMessageId>,
     reported_model: Option<ProviderReportedModel>,
     usage: TokenUsage,
+    retained_input_tokens: Option<u64>,
     input_usage_reported: bool,
     final_output_usage_reported: bool,
     finish: Option<FinishReason>,
@@ -91,6 +97,7 @@ pub(crate) struct StreamDecoder {
     tool_call_ids: BTreeSet<String>,
     discarded_unexamined_bytes: bool,
     later_records: LaterRecords,
+    provider_compaction_enabled: bool,
     open_blocks: BTreeMap<u32, BlockBuilder>,
     closed: BTreeMap<u32, AssistantPart>,
 }
@@ -99,6 +106,7 @@ impl StreamDecoder {
     pub(crate) fn with_stop_sequences(
         exchange: ExchangeFacts,
         declared_stop_sequences: Vec<String>,
+        provider_compaction_enabled: bool,
     ) -> Self {
         Self {
             exchange,
@@ -106,6 +114,7 @@ impl StreamDecoder {
             message_id: None,
             reported_model: None,
             usage: TokenUsage::unreported(),
+            retained_input_tokens: None,
             input_usage_reported: false,
             final_output_usage_reported: false,
             finish: None,
@@ -113,6 +122,7 @@ impl StreamDecoder {
             tool_call_ids: BTreeSet::new(),
             discarded_unexamined_bytes: false,
             later_records: LaterRecords::AllApplied,
+            provider_compaction_enabled,
             open_blocks: BTreeMap::new(),
             closed: BTreeMap::new(),
         }
@@ -423,9 +433,13 @@ impl StreamDecoder {
         if usage.input_tokens.is_none() {
             return self.violation("message_start usage is missing input_tokens");
         }
+        if !iteration_usage_is_complete(usage) {
+            return self.violation("message_start carries incomplete required iteration usage");
+        }
         self.started = true;
         self.input_usage_reported = true;
         self.message_id = Some(ProviderMessageId::new(id));
+        self.retained_input_tokens = retained_input_tokens(usage);
         let usage = convert_usage(usage);
         self.usage.absorb(usage);
         Self::emit(correlation, sink, ObservationFact::UsageReported(usage));
@@ -507,6 +521,32 @@ impl StreamDecoder {
                 signature: signature.filter(|value| !value.is_empty()),
             },
             WireResponseBlock::RedactedThinking { data } => BlockBuilder::RedactedThinking { data },
+            WireResponseBlock::Compaction { raw } => {
+                if !self.provider_compaction_enabled {
+                    return self.violation(format!(
+                        "compaction block opened at index {}, but this operation did not enable \
+                         provider compaction",
+                        event.index
+                    ));
+                }
+                let Ok(start) = serde_json::from_str::<serde_json::Value>(raw.get()) else {
+                    return self.violation(format!(
+                        "compaction block {} could not be reinspected",
+                        event.index
+                    ));
+                };
+                if start.get("content") != Some(&serde_json::Value::Null)
+                    || start
+                        .get("encrypted_content")
+                        .is_some_and(|value| !value.is_null())
+                {
+                    return self.violation(format!(
+                        "compaction block {} opened with non-placeholder content",
+                        event.index
+                    ));
+                }
+                BlockBuilder::Compaction { delta: None }
+            }
             WireResponseBlock::Fallback { to_model } => {
                 // This adapter never enables server-side fallback, so a
                 // fallback marker mid-stream means the stream is no longer
@@ -616,6 +656,20 @@ impl StreamDecoder {
                 accumulated.push_str(&partial_json);
                 StreamStep::Continue
             }
+            (
+                BlockBuilder::Compaction { delta },
+                WireDelta::Compaction {
+                    content,
+                    encrypted_content,
+                },
+            ) => {
+                if delta.is_some() {
+                    return self
+                        .violation("compaction block carries more than one compaction delta");
+                }
+                *delta = Some((content, encrypted_content));
+                StreamStep::Continue
+            }
             // Additive delta evolution is tolerated on any block type.
             (_, WireDelta::Unrecognized) => StreamStep::Continue,
             _ => self.violation(format!(
@@ -667,6 +721,46 @@ impl StreamDecoder {
                 }
             }
             BlockBuilder::RedactedThinking { data } => AssistantPart::RedactedThinking { data },
+            BlockBuilder::Compaction { delta } => {
+                let Some((content, encrypted_content)) = delta else {
+                    return self.violation(format!(
+                        "compaction block {} closed without its compaction delta",
+                        event.index
+                    ));
+                };
+                let content = match content {
+                    crate::wire::WireCompactionContent::Missing => {
+                        return self.violation(format!(
+                            "compaction block {} closed without delta content",
+                            event.index
+                        ));
+                    }
+                    crate::wire::WireCompactionContent::Null => None,
+                    crate::wire::WireCompactionContent::Text(content) if content.is_empty() => {
+                        return self.violation(format!(
+                            "compaction block {} closed with empty content",
+                            event.index
+                        ));
+                    }
+                    crate::wire::WireCompactionContent::Text(content) => Some(content),
+                };
+                let Ok(content_json) = serde_json::to_string(&content) else {
+                    return self.violation(format!(
+                        "compaction block {} content cannot be encoded",
+                        event.index
+                    ));
+                };
+                let Ok(encrypted_content_json) = serde_json::to_string(&encrypted_content) else {
+                    return self.violation(format!(
+                        "compaction block {} encrypted content cannot be encoded",
+                        event.index
+                    ));
+                };
+                let block_json = format!(
+                    r#"{{"content":{content_json},"encrypted_content":{encrypted_content_json},"type":"compaction"}}"#
+                );
+                AssistantPart::ProviderCompaction { block_json }
+            }
             BlockBuilder::ToolUse {
                 id,
                 name,
@@ -750,8 +844,29 @@ impl StreamDecoder {
                         .violation("message_delta carries a stop_sequence without a stop_reason");
                 }
                 if let Some(usage) = event.usage.as_ref() {
+                    if !iteration_usage_is_complete(usage) {
+                        return self.violation(
+                            "message_delta carries incomplete required iteration usage",
+                        );
+                    }
+                    if usage
+                        .iterations
+                        .as_ref()
+                        .is_some_and(|items| !items.is_empty())
+                    {
+                        self.retained_input_tokens = retained_input_tokens(usage);
+                    }
                     let usage = convert_usage(usage);
-                    self.usage.absorb(usage);
+                    if event
+                        .usage
+                        .as_ref()
+                        .and_then(|wire| wire.iterations.as_ref())
+                        .is_some_and(|iterations| !iterations.is_empty())
+                    {
+                        self.usage = usage;
+                    } else {
+                        self.usage.absorb(usage);
+                    }
                     Self::emit(correlation, sink, ObservationFact::UsageReported(usage));
                 }
                 return StreamStep::Continue;
@@ -792,8 +907,29 @@ impl StreamDecoder {
             Self::emit(correlation, sink, ObservationFact::FinishReported(finish));
         }
         if let Some(usage) = event.usage.as_ref() {
+            if !iteration_usage_is_complete(usage) {
+                return self.violation("message_delta carries incomplete required iteration usage");
+            }
+            if usage
+                .iterations
+                .as_ref()
+                .is_some_and(|items| !items.is_empty())
+            {
+                self.retained_input_tokens = retained_input_tokens(usage);
+            }
             let usage = convert_usage(usage);
-            self.usage.absorb(usage);
+            if event
+                .usage
+                .as_ref()
+                .and_then(|wire| wire.iterations.as_ref())
+                .is_some_and(|iterations| !iterations.is_empty())
+            {
+                // Iteration usage is the complete physical-request total, not
+                // a delta from the message_start input report.
+                self.usage = usage;
+            } else {
+                self.usage.absorb(usage);
+            }
             Self::emit(correlation, sink, ObservationFact::UsageReported(usage));
         }
         StreamStep::Continue
@@ -827,6 +963,15 @@ impl StreamDecoder {
         if matches!(finish, FinishReason::ToolUse) && !has_tool_calls {
             return self.violation("stream content contradicts its stop_reason");
         }
+        let has_provider_compaction = self
+            .closed
+            .values()
+            .any(|part| matches!(part, AssistantPart::ProviderCompaction { .. }));
+        if has_provider_compaction && self.retained_input_tokens.is_none() {
+            return self.violation(
+                "provider compaction response omits final-iteration retained input usage",
+            );
+        }
         let evidence = match finish.completion_finish() {
             None => TerminalEvidence::Refused(RefusalEvidence {
                 exchange: self.exchange.clone(),
@@ -835,14 +980,25 @@ impl StreamDecoder {
                 content: std::mem::take(&mut self.closed).into_values().collect(),
                 usage: self.usage,
             }),
-            Some(finish) => TerminalEvidence::Completed(CompletionEvidence {
-                exchange: self.exchange.clone(),
-                message_id: self.message_id.clone(),
-                reported_model: self.reported_model.clone(),
-                finish,
-                content: std::mem::take(&mut self.closed).into_values().collect(),
-                usage: self.usage,
-            }),
+            Some(finish) => {
+                let completion = CompletionEvidence {
+                    exchange: self.exchange.clone(),
+                    message_id: self.message_id.clone(),
+                    reported_model: self.reported_model.clone(),
+                    finish,
+                    content: std::mem::take(&mut self.closed).into_values().collect(),
+                    usage: self.usage,
+                };
+                match self.retained_input_tokens {
+                    Some(retained_input_tokens) if has_provider_compaction => {
+                        TerminalEvidence::CompletedWithProviderCompaction {
+                            completion,
+                            retained_input_tokens,
+                        }
+                    }
+                    _ => TerminalEvidence::Completed(completion),
+                }
+            }
         };
         StreamStep::Terminal(Box::new(evidence))
     }
@@ -882,8 +1038,19 @@ mod tests {
     /// rejected by the panic below, keeping fixtures honest) and the
     /// observation log.
     fn drive(chunks: &[&[u8]]) -> (Option<TerminalEvidence>, Vec<Observation<String>>) {
+        drive_with_provider_compaction(chunks, true)
+    }
+
+    fn drive_with_provider_compaction(
+        chunks: &[&[u8]],
+        provider_compaction_enabled: bool,
+    ) -> (Option<TerminalEvidence>, Vec<Observation<String>>) {
         let mut framing = SseFraming::new(1024 * 1024);
-        let mut decoder = StreamDecoder::with_stop_sequences(exchange(), vec!["END".to_string()]);
+        let mut decoder = StreamDecoder::with_stop_sequences(
+            exchange(),
+            vec!["END".to_string()],
+            provider_compaction_enabled,
+        );
         let mut observations: Vec<Observation<String>> = Vec::new();
         let correlation = "call-1".to_string();
         let mut terminal = None;
@@ -907,7 +1074,8 @@ mod tests {
     /// loss evidence for the resulting decoder state.
     fn drive_to_eof(chunks: &[&[u8]]) -> (TerminalEvidence, Vec<Observation<String>>) {
         let mut framing = SseFraming::new(1024 * 1024);
-        let mut decoder = StreamDecoder::with_stop_sequences(exchange(), vec!["END".to_string()]);
+        let mut decoder =
+            StreamDecoder::with_stop_sequences(exchange(), vec!["END".to_string()], true);
         let mut observations: Vec<Observation<String>> = Vec::new();
         let correlation = "call-1".to_string();
         for chunk in chunks {
@@ -929,6 +1097,32 @@ mod tests {
           data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\
           \"role\":\"assistant\",\"id\":\"msg_1\",\
           \"model\":\"model-exact-1\",\"content\":[],\"usage\":{\"input_tokens\":25}}}\n\n"
+    }
+
+    #[test]
+    fn message_start_rejects_incomplete_required_iteration_usage() {
+        let (terminal, _) = drive(&[b"event: message_start\n\
+          data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\
+          \"role\":\"assistant\",\"id\":\"msg_1\",\
+          \"model\":\"model-exact-1\",\"content\":[],\"usage\":{\"input_tokens\":25,\
+          \"iterations\":[{\"input_tokens\":25}]}}}\n\n"]);
+
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+    }
+
+    #[test]
+    fn message_start_rejects_overflowing_iteration_usage() {
+        let event = format!(
+            "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\
+             \"type\":\"message\",\"role\":\"assistant\",\"id\":\"msg_1\",\
+             \"model\":\"model-exact-1\",\"content\":[],\"usage\":{{\"input_tokens\":1,\
+             \"iterations\":[{{\"input_tokens\":{},\"output_tokens\":1}},\
+             {{\"input_tokens\":1,\"output_tokens\":1}}]}}}}}}\n\n",
+            u64::MAX
+        );
+        let (terminal, _) = drive(&[event.as_bytes()]);
+
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
     }
 
     fn tool_input_delta(partial_json: &str) -> Vec<u8> {
@@ -1064,7 +1258,7 @@ mod tests {
               data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
             b"event: message_delta\n\
               data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\
-              \"usage\":{\"output_tokens\":7}}\n\n",
+              \"usage\":{\"output_tokens\":7,\"iterations\":[{\"input_tokens\":25,\"output_tokens\":7}]}}\n\n",
             b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
         ]);
 
@@ -1092,6 +1286,118 @@ mod tests {
                 fragment: r#"{"city":"Oslo"}"#.to_string(),
             },
         }));
+    }
+
+    #[test]
+    fn streamed_compaction_delta_becomes_replayable_block() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"compaction\",\"content\":null,\"encrypted_content\":null}}\n\n",
+            b"event: content_block_delta\n\
+              data: {\"type\":\"content_block_delta\",\"index\":0,\
+              \"delta\":{\"type\":\"compaction_delta\",\"content\":\"summary\",\"encrypted_content\":\"opaque==\"}}\n\n",
+            b"event: content_block_stop\n\
+              data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
+              \"usage\":{\"output_tokens\":7,\"iterations\":[{\"input_tokens\":25,\"output_tokens\":7}]}}\n\n",
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ]);
+        let Some(TerminalEvidence::CompletedWithProviderCompaction {
+            completion,
+            retained_input_tokens,
+        }) = terminal
+        else {
+            panic!("compaction stream gated on message_stop must complete");
+        };
+        assert_eq!(retained_input_tokens, 25);
+        let [AssistantPart::ProviderCompaction { block_json }] = completion.content.as_slice()
+        else {
+            panic!("compaction stream must retain exactly one opaque block");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(block_json)
+                .expect("assembled compaction block is valid JSON"),
+            serde_json::json!({
+                "type": "compaction",
+                "content": "summary",
+                "encrypted_content": "opaque==",
+            })
+        );
+    }
+
+    #[test]
+    fn streamed_compaction_is_rejected_when_the_request_disabled_it() {
+        let (terminal, _) = drive_with_provider_compaction(
+            &[
+                message_start(),
+                b"event: content_block_start\n\
+                  data: {\"type\":\"content_block_start\",\"index\":0,\
+                  \"content_block\":{\"type\":\"compaction\",\"content\":null,\"encrypted_content\":null}}\n\n",
+            ],
+            false,
+        );
+
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+    }
+
+    #[test]
+    fn streamed_compaction_start_rejects_non_placeholder_material() {
+        for start in [
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"compaction\",\"content\":\"summary\",\"encrypted_content\":null}}\n\n"
+                .as_slice(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"compaction\",\"content\":null,\"encrypted_content\":\"opaque==\"}}\n\n"
+                .as_slice(),
+        ] {
+            let (terminal, _) = drive(&[message_start(), start]);
+            assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+        }
+    }
+
+    #[test]
+    fn streamed_compaction_rejects_empty_content() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"compaction\",\"content\":null,\"encrypted_content\":null}}\n\n",
+            b"event: content_block_delta\n\
+              data: {\"type\":\"content_block_delta\",\"index\":0,\
+              \"delta\":{\"type\":\"compaction_delta\",\"content\":\"\",\"encrypted_content\":null}}\n\n",
+            b"event: content_block_stop\n\
+              data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("empty compaction content must be protocol loss");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
+    }
+
+    #[test]
+    fn streamed_compaction_requires_the_delta_content_field() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"compaction\",\"content\":null,\"encrypted_content\":null}}\n\n",
+            b"event: content_block_delta\n\
+              data: {\"type\":\"content_block_delta\",\"index\":0,\
+              \"delta\":{\"type\":\"compaction_delta\",\"encrypted_content\":null}}\n\n",
+            b"event: content_block_stop\n\
+              data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        ]);
+
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
     }
 
     #[test]
@@ -1493,6 +1799,27 @@ mod tests {
                 cache_read_input_tokens: None,
             }),
         }));
+    }
+
+    #[test]
+    fn usage_only_iteration_totals_replace_all_earlier_axes() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":3,\"output_tokens\":4,\
+              \"iterations\":[{\"input_tokens\":3,\"output_tokens\":4}]}}\n\n",
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
+              \"usage\":{\"output_tokens\":4}}\n\n",
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ]);
+        let Some(TerminalEvidence::Completed(completion)) = terminal else {
+            panic!("complete iteration usage must remain completion evidence");
+        };
+        assert_eq!(completion.usage.input_tokens, Some(3));
+        assert_eq!(completion.usage.output_tokens, Some(4));
+        assert_eq!(completion.usage.cache_creation_input_tokens, None);
+        assert_eq!(completion.usage.cache_read_input_tokens, None);
     }
 
     #[test]

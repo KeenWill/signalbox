@@ -982,8 +982,8 @@ async fn transient_retry_exhausts_if_its_credential_is_quarantined_before_prepar
 /// persistence chain checkpoints Prepared with its credential and input-token
 /// semantics pins, reloads them instead of changed deployment values,
 /// separately authorizes send, and atomically commits exact assistant content,
-/// completion, terminal frontier, lifecycle, call, attempt, and typed outbox
-/// records.
+/// provider compaction, completion, terminal frontier, lifecycle, call,
+/// attempt, and typed outbox records.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complete_first_reply()
@@ -1282,15 +1282,27 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
         PrepareInitialModelCallOutcome::NoWork
     );
 
-    let assistant_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde2));
-    let completion_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde3));
+    let provider_compaction_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde2));
+    let assistant_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde3));
+    let completion_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde4));
     let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xee2));
+    let provider_compaction = ProviderCompactionBlock::try_new(String::from(
+        r#"{"type":"compaction", "content":"exact summary", "encrypted_content":"opaque=="}"#,
+    ))
+    .expect("fixture provider compaction block is admitted");
     let assistant_text = AssistantText::try_new("exact assistant reply".to_owned())
         .expect("fixture assistant content is admitted");
-    let observation = observation_correlation.bind_terminal_observation(
-        ModelCallTerminalObservation::Completed {
-            assistant_text: vec![assistant_text.clone()],
+    let observation = observation_correlation.bind_terminal_observation_with_usage(
+        ModelCallTerminalObservation::CompletedWithProviderCompaction {
+            response: vec![
+                AssistantResponsePart::ProviderCompaction(provider_compaction.clone()),
+                AssistantResponsePart::Text(assistant_text.clone()),
+            ],
+            retained_input_tokens: 17,
         },
+        ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(123))
+            .with_output_tokens(Some(17)),
     );
     assert_eq!(
         repository
@@ -1298,12 +1310,18 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
             .await?,
         RetainedModelCallObservationStatus::Pending
     );
+    let projected_text_bytes_before: Decimal = sqlx::query_scalar(
+        "SELECT projected_text_bytes FROM session_timeline_fact WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
     let outcome = repository
         .apply_terminal_observation(
             session,
             observation.clone(),
             ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
-                vec![assistant_entry],
+                vec![provider_compaction_entry, assistant_entry],
                 completion_entry,
                 terminal_frontier,
             )),
@@ -1320,14 +1338,34 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
         panic!("the definitive response must complete the turn");
     };
     assert_eq!(completed.turn(), turn);
-    assert_eq!(completed.assistant_entries().len(), 1);
+    assert_eq!(completed.assistant_entries().len(), 2);
     assert_eq!(
         completed.assistant_entries()[0].payload(),
+        &signalbox_domain::SemanticTranscriptEntryPayload::ProviderCompaction {
+            producing_call: call,
+            block: provider_compaction.clone(),
+        }
+    );
+    assert_eq!(
+        completed.assistant_entries()[1].payload(),
         &signalbox_domain::SemanticTranscriptEntryPayload::AssistantText {
             producing_call: call,
             value: assistant_text.clone(),
         }
     );
+
+    let reported = repository
+        .latest_reported_usage(session, resolved_target, terminal_frontier)
+        .await?
+        .expect("completed provider compaction reports retained-context semantics");
+    assert!(reported.input_is_retained());
+    assert_eq!(reported.retained_input_tokens(), Some(17));
+    let retained_input_tokens: Decimal =
+        sqlx::query_scalar("SELECT retained_input_tokens FROM model_call WHERE model_call_id = $1")
+            .bind(call.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(retained_input_tokens, Decimal::from(17_u64));
 
     let durable_shape: (i64, i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
@@ -1382,6 +1420,31 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
     .fetch_one(&pool)
     .await?;
     assert_eq!(durable_shape, (1, 1, 1, 1, 1, 3, 1, 1, 1));
+    let durable_provider_compaction: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM semantic_transcript_entry
+          WHERE semantic_entry_id = $1
+            AND payload_kind = 'provider_compaction'
+            AND assistant_text_value = $2
+            AND producing_model_call_id = $3",
+    )
+    .bind(provider_compaction_entry.into_uuid())
+    .bind(provider_compaction.as_json())
+    .bind(call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(durable_provider_compaction, 1);
+    let projected_text_bytes_after: Decimal = sqlx::query_scalar(
+        "SELECT projected_text_bytes FROM session_timeline_fact WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        projected_text_bytes_after - projected_text_bytes_before,
+        Decimal::from(u64::try_from(assistant_text.as_str().len())?),
+        "opaque provider compaction bytes are excluded from transcript text accounting"
+    );
 
     let completion_sequence: Decimal = sqlx::query_scalar(
         "SELECT event_sequence

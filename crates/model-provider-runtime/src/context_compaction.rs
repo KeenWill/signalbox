@@ -6,8 +6,8 @@ use signalbox_domain::{DirectModelSelection, ModelCallId, ResolvedProviderTarget
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, CredentialReference,
     DeliveryMode, ModelOperation, ModelRuntime, ModelSettings, Observation, PreparationOutcome,
-    ProviderReportedModel, RequestedTarget, ResolvedTarget, TerminalEvidence, TokenUsage,
-    UnsentCause,
+    ProviderCompactionMode, ProviderReportedModel, RequestedTarget, ResolvedTarget,
+    TerminalEvidence, TokenUsage, UnsentCause,
 };
 
 use crate::{ProviderTargetRelation, RuntimeModelCatalog, relate_provider_target};
@@ -118,6 +118,7 @@ where
             );
             operation.system = Some(request.system_prompt);
             operation.delivery = DeliveryMode::Buffered;
+            operation.provider_compaction = ProviderCompactionMode::Suppressed;
             let prepared = match self
                 .runtime
                 .prepare(operation, CancellationSignal::never())
@@ -154,6 +155,9 @@ where
             }
             let reported_model = match &report.evidence {
                 TerminalEvidence::Completed(evidence) => evidence.reported_model.as_ref(),
+                TerminalEvidence::CompletedWithProviderCompaction { completion, .. } => {
+                    completion.reported_model.as_ref()
+                }
                 TerminalEvidence::Refused(evidence) => evidence.reported_model.as_ref(),
                 TerminalEvidence::ProviderError(evidence) => evidence.reported_model.as_ref(),
                 TerminalEvidence::CancellationConfirmed(evidence) => {
@@ -167,6 +171,9 @@ where
             }
             let completed = match report.evidence {
                 TerminalEvidence::Completed(completed) => completed,
+                TerminalEvidence::CompletedWithProviderCompaction { .. } => {
+                    return Err(ContextCompactionModelError::NonTextSummary);
+                }
                 TerminalEvidence::Refused(_) => {
                     return Err(ContextCompactionModelError::Refused);
                 }
@@ -213,6 +220,7 @@ where
                     AssistantPart::Thinking { text, .. } if text.is_empty() => {}
                     AssistantPart::Thinking { .. }
                     | AssistantPart::RedactedThinking { .. }
+                    | AssistantPart::ProviderCompaction { .. }
                     | AssistantPart::ToolCall(_)
                     | AssistantPart::SuppressedToolCall(_) => {
                         return Err(ContextCompactionModelError::NonTextSummary);

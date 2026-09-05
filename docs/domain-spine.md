@@ -4570,14 +4570,21 @@ impl ContextHeadroomExhaustedModelCallTurn {
 
 pub enum ModelCallTerminalObservation {
     Completed { assistant_text: Vec<AssistantText> },
-    CompletedWithTools { response: ToolUsingAssistantResponse },
+    CompletedWithProviderCompaction {
+        response: Vec<AssistantResponsePart>,
+        retained_input_tokens: u64,
+    },
+    CompletedWithTools {
+        response: ToolUsingAssistantResponse,
+        retained_input_tokens: Option<u64>,
+    },
     KnownFailed,
     Refused,
     Cancelled,
     Ambiguous,
 }
 impl ModelCallTerminalObservation {
-    // accessor: disposition()
+    // accessors: retained_input_tokens(), disposition()
 }
 pub struct PendingSteeringReclassificationIdentity { /* private */ }
 impl PendingSteeringReclassificationIdentity {
@@ -4600,6 +4607,9 @@ pub enum ToolResponsePartIdentity {
     Text {
         entry: SemanticTranscriptEntryId,
     },
+    ProviderCompaction {
+        entry: SemanticTranscriptEntryId,
+    },
     ToolCall {
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
@@ -4608,6 +4618,7 @@ pub enum ToolResponsePartIdentity {
 }
 impl ToolResponsePartIdentity {
     pub const fn text(entry: SemanticTranscriptEntryId) -> Self;
+    pub const fn provider_compaction(entry: SemanticTranscriptEntryId) -> Self;
     pub const fn tool_call(
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
@@ -4627,6 +4638,9 @@ pub enum StoppedToolResponsePartIdentity {
     Text {
         entry: SemanticTranscriptEntryId,
     },
+    ProviderCompaction {
+        entry: SemanticTranscriptEntryId,
+    },
     ToolCall {
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
@@ -4636,6 +4650,7 @@ pub enum StoppedToolResponsePartIdentity {
 }
 impl StoppedToolResponsePartIdentity {
     pub const fn text(entry: SemanticTranscriptEntryId) -> Self;
+    pub const fn provider_compaction(entry: SemanticTranscriptEntryId) -> Self;
     pub const fn tool_call(
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
@@ -4975,6 +4990,14 @@ impl AssistantText {
     pub fn into_string(self) -> String;
 }
 
+pub struct ProviderCompactionBlock(/* private */);
+impl ProviderCompactionBlock {
+    pub fn try_new(value: String) -> Result<Self, ProviderCompactionBlockError>;
+    pub fn as_json(&self) -> &str;
+    pub fn into_json(self) -> String;
+}
+pub struct ProviderCompactionBlockError;
+
 pub enum SemanticTranscriptEntryPayload {
     Imported {
         imported_entry: ImportedTranscriptEntryId,
@@ -5020,6 +5043,7 @@ pub enum SemanticTranscriptEntryPayload {
     },
     TurnFailed { turn: TurnId },
     AssistantText { producing_call: ModelCallId, value: AssistantText },
+    ProviderCompaction { producing_call: ModelCallId, block: ProviderCompactionBlock },
     AssistantToolUse { producing_call: ModelCallId, request: ToolRequestId },
     ToolExecutionResult { attempt: ToolAttemptId },
     ToolDenied { request: ToolRequestId },
@@ -5102,6 +5126,7 @@ impl ToolCallProposal {
 }
 pub enum AssistantResponsePart {
     Text(AssistantText),
+    ProviderCompaction(ProviderCompactionBlock),
     ToolCall(ToolCallProposal),
 }
 pub struct ToolUsingAssistantResponse { /* private */ }
@@ -13646,7 +13671,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: context_compaction                         | 12                               |
 | domain: model_execution                            | 54                               |
 | domain: context_frontier                           | 6                                |
-| domain: semantic_entry                             | 4                                |
+| domain: semantic_entry                             | 6                                |
 | domain: tool                                       | 53                               |
 | domain: tool_attempt                               | 27                               |
 | domain: tool_execution                             | 20                               |
@@ -13661,7 +13686,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
 | domain: workspace_instruction                      | 18                               |
-| **signalbox-domain total**                         | **893 (+12 free fn)**            |
+| **signalbox-domain total**                         | **895 (+12 free fn)**            |
 | application: repo_watch_operations                 | 33 (+2 free fn) (incl. 1 trait)  |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: attention                             | 17 (+6 free fn) (incl. 1 trait)  |

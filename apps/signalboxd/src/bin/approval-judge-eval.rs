@@ -499,6 +499,8 @@ async fn run(options: RunOptions) -> Result<(), String> {
                     }),
             );
             let mut adapter_configuration = AnthropicConfig::new(native_message_limit);
+            adapter_configuration.provider_compaction_targets =
+                configuration.anthropic_provider_compaction_targets();
             adapter_configuration.exchange_timeout = model_exchange_timeout;
             adapter_configuration.model_capabilities =
                 configuration.runtime_model_capability_catalog();

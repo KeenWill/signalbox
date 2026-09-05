@@ -740,6 +740,7 @@ impl ModelCallExecution {
                 | SemanticTranscriptEntryPayload::ContextSummary { .. }
                 | SemanticTranscriptEntryPayload::Imported { .. }
                 | SemanticTranscriptEntryPayload::AssistantText { .. }
+                | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
                 | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
                 | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
                 | SemanticTranscriptEntryPayload::ToolDenied { .. }
@@ -2060,13 +2061,37 @@ fn apply_terminal_observation(
                 ended_call,
                 ended_attempt,
                 frontier_entries.into_vec(),
-                assistant_text,
+                assistant_text
+                    .into_iter()
+                    .map(AssistantResponsePart::Text)
+                    .collect(),
                 identities,
                 reclassified_pending_steering,
             )?;
             Ok(ModelCallTerminalOutcome::Completed(completed))
         }
-        ModelCallTerminalObservation::CompletedWithTools { response } => {
+        ModelCallTerminalObservation::CompletedWithProviderCompaction { response, .. } => {
+            let ModelCallTerminalIdentities::Completed(identities) = identities else {
+                return Err(ModelCallClosureError::IdentityShapeMismatch);
+            };
+            let ended_attempt = match cancellation_proof {
+                Some(proof) => attempt
+                    .end_after_cancellation(proof, CancellationStopDisposition::TurnCompleted),
+                None => attempt.end_without_stop(UnstoppedAttemptDisposition::TurnCompleted),
+            }
+            .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
+            let completed = complete_turn(
+                scope,
+                ended_call,
+                ended_attempt,
+                frontier_entries.into_vec(),
+                response,
+                identities,
+                reclassified_pending_steering,
+            )?;
+            Ok(ModelCallTerminalOutcome::Completed(completed))
+        }
+        ModelCallTerminalObservation::CompletedWithTools { response, .. } => {
             if let Some(proof) = cancellation_proof {
                 let ModelCallTerminalIdentities::StoppedToolRound(identities) = identities else {
                     return Err(ModelCallClosureError::IdentityShapeMismatch);
@@ -2301,10 +2326,22 @@ pub enum ModelCallTerminalObservation {
         /// Exact assistant text parts in final semantic order.
         assistant_text: Vec<AssistantText>,
     },
+    /// Definitive success containing provider compaction blocks and no tools.
+    CompletedWithProviderCompaction {
+        /// Exact text and provider compaction parts in provider order.
+        response: Vec<AssistantResponsePart>,
+        /// Provider-reported input retained after its final compaction
+        /// iteration, including cache axes and excluding earlier billed
+        /// iterations.
+        retained_input_tokens: u64,
+    },
     /// Definitive success whose ordered response contains tool proposals.
     CompletedWithTools {
         /// Ordered text and normalized proposals, proven to contain a tool.
         response: ToolUsingAssistantResponse,
+        /// Provider-reported input retained after an in-response compaction,
+        /// when the tool response contains a provider compaction block.
+        retained_input_tokens: Option<u64>,
     },
     /// Evidence establishes a known failure.
     KnownFailed,
@@ -2317,12 +2354,28 @@ pub enum ModelCallTerminalObservation {
 }
 
 impl ModelCallTerminalObservation {
+    /// Returns provider-reported retained input for a completed in-response
+    /// compaction, separate from billed physical-iteration usage.
+    pub const fn retained_input_tokens(&self) -> Option<u64> {
+        match self {
+            Self::CompletedWithProviderCompaction {
+                retained_input_tokens,
+                ..
+            } => Some(*retained_input_tokens),
+            Self::CompletedWithTools {
+                retained_input_tokens,
+                ..
+            } => *retained_input_tokens,
+            _ => None,
+        }
+    }
+
     /// Returns the exact physical disposition declared by this observation.
     pub const fn disposition(&self) -> ModelCallDisposition {
         match self {
-            Self::Completed { .. } | Self::CompletedWithTools { .. } => {
-                ModelCallDisposition::Completed
-            }
+            Self::Completed { .. }
+            | Self::CompletedWithProviderCompaction { .. }
+            | Self::CompletedWithTools { .. } => ModelCallDisposition::Completed,
             Self::KnownFailed => ModelCallDisposition::KnownFailed,
             Self::Refused => ModelCallDisposition::Refused,
             Self::Cancelled => ModelCallDisposition::Cancelled,
@@ -2405,6 +2458,11 @@ pub enum ToolResponsePartIdentity {
         /// Fresh semantic-entry identity.
         entry: SemanticTranscriptEntryId,
     },
+    /// One semantic provider-compaction entry.
+    ProviderCompaction {
+        /// Fresh semantic-entry identity.
+        entry: SemanticTranscriptEntryId,
+    },
     /// One logical request plus its reference-only semantic entry.
     ToolCall {
         /// Fresh semantic-entry identity.
@@ -2420,6 +2478,11 @@ impl ToolResponsePartIdentity {
     /// Constructs a text-part identity.
     pub const fn text(entry: SemanticTranscriptEntryId) -> Self {
         Self::Text { entry }
+    }
+
+    /// Constructs a provider-compaction-part identity.
+    pub const fn provider_compaction(entry: SemanticTranscriptEntryId) -> Self {
+        Self::ProviderCompaction { entry }
     }
 
     /// Constructs a tool-part identity and explicit initial policy outcome.
@@ -2484,6 +2547,11 @@ pub enum StoppedToolResponsePartIdentity {
         /// Fresh semantic-entry identity.
         entry: SemanticTranscriptEntryId,
     },
+    /// One semantic provider-compaction entry.
+    ProviderCompaction {
+        /// Fresh semantic-entry identity.
+        entry: SemanticTranscriptEntryId,
+    },
     /// One request, tool-use entry, and turn-closed result entry.
     ToolCall {
         /// Fresh assistant tool-use entry identity.
@@ -2501,6 +2569,11 @@ impl StoppedToolResponsePartIdentity {
     /// Constructs one text identity.
     pub const fn text(entry: SemanticTranscriptEntryId) -> Self {
         Self::Text { entry }
+    }
+
+    /// Constructs one provider-compaction identity.
+    pub const fn provider_compaction(entry: SemanticTranscriptEntryId) -> Self {
+        Self::ProviderCompaction { entry }
     }
 
     /// Constructs one closed tool-proposal identity group.
@@ -3627,6 +3700,7 @@ fn reconstitute(
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
             | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
+            | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | SemanticTranscriptEntryPayload::ToolDenied { .. }
@@ -4032,6 +4106,7 @@ fn frontier_closes_latest_tool_round(
         .filter_map(|entry| match entry.payload() {
             SemanticTranscriptEntryPayload::AssistantToolUse { request, .. } => Some(*request),
             SemanticTranscriptEntryPayload::AssistantText { .. }
+            | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
             | SemanticTranscriptEntryPayload::DelegatedTask { .. }
             | SemanticTranscriptEntryPayload::DelegationMessage { .. }
             | SemanticTranscriptEntryPayload::DelegationResult { .. }
@@ -4089,6 +4164,7 @@ fn frontier_closes_latest_tool_round(
             | SemanticTranscriptEntryPayload::TurnFailed { .. }
             | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
+            | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. } => false,
@@ -4108,6 +4184,7 @@ fn frontier_closes_latest_tool_round(
 fn assistant_entry_call(entry: &SemanticTranscriptEntry) -> Option<ModelCallId> {
     match entry.payload() {
         SemanticTranscriptEntryPayload::AssistantText { producing_call, .. }
+        | SemanticTranscriptEntryPayload::ProviderCompaction { producing_call, .. }
         | SemanticTranscriptEntryPayload::AssistantToolUse { producing_call, .. } => {
             Some(*producing_call)
         }
@@ -4249,6 +4326,22 @@ fn assemble_tool_round(
                     SemanticTranscriptEntryPayload::AssistantText {
                         producing_call: call.id(),
                         value: value.clone(),
+                    },
+                )
+            }
+            (
+                AssistantResponsePart::ProviderCompaction(block),
+                ToolResponsePartIdentity::ProviderCompaction { entry },
+            ) => {
+                if !used_entries.insert(entry) {
+                    return Err(ModelCallClosureError::FrontierDerivationFailed);
+                }
+                SemanticTranscriptEntry::from_validated_parts(
+                    entry,
+                    session,
+                    SemanticTranscriptEntryPayload::ProviderCompaction {
+                        producing_call: call.id(),
+                        block: block.clone(),
                     },
                 )
             }
@@ -4418,6 +4511,22 @@ fn assemble_stopped_tool_round(
                     SemanticTranscriptEntryPayload::AssistantText {
                         producing_call: call.id(),
                         value: value.clone(),
+                    },
+                )
+            }
+            (
+                AssistantResponsePart::ProviderCompaction(block),
+                StoppedToolResponsePartIdentity::ProviderCompaction { entry },
+            ) => {
+                if !used_entries.insert(entry) {
+                    return Err(ModelCallClosureError::FrontierDerivationFailed);
+                }
+                SemanticTranscriptEntry::from_validated_parts(
+                    entry,
+                    session,
+                    SemanticTranscriptEntryPayload::ProviderCompaction {
+                        producing_call: call.id(),
+                        block: block.clone(),
                     },
                 )
             }
@@ -5092,12 +5201,16 @@ fn complete_turn(
     call: EndedModelCall,
     attempt: EndedTurnAttempt,
     frontier_entries: Vec<SemanticTranscriptEntry>,
-    assistant_text: Vec<AssistantText>,
+    response: Vec<AssistantResponsePart>,
     identities: CompletedModelCallIdentities,
     reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
 ) -> Result<CompletedModelCallTurn, ModelCallClosureError> {
     let ModelCallTurnScope { session, turn } = scope;
-    if assistant_text.len() != identities.assistant_entries.len() {
+    if response.len() != identities.assistant_entries.len()
+        || response
+            .iter()
+            .any(|part| matches!(part, AssistantResponsePart::ToolCall(_)))
+    {
         return Err(ModelCallClosureError::AssistantIdentityCountMismatch);
     }
     let mut used = frontier_entries
@@ -5115,18 +5228,30 @@ fn complete_turn(
     let assistant_entries = identities
         .assistant_entries
         .into_iter()
-        .zip(assistant_text)
-        .map(|(identity, value)| {
-            SemanticTranscriptEntry::from_validated_parts(
-                identity,
-                session,
-                SemanticTranscriptEntryPayload::AssistantText {
-                    producing_call: call.id(),
-                    value,
-                },
-            )
+        .zip(response)
+        .map(|(identity, part)| {
+            let payload = match part {
+                AssistantResponsePart::Text(value) => {
+                    SemanticTranscriptEntryPayload::AssistantText {
+                        producing_call: call.id(),
+                        value,
+                    }
+                }
+                AssistantResponsePart::ProviderCompaction(block) => {
+                    SemanticTranscriptEntryPayload::ProviderCompaction {
+                        producing_call: call.id(),
+                        block,
+                    }
+                }
+                AssistantResponsePart::ToolCall(_) => {
+                    return Err(ModelCallClosureError::AssistantIdentityCountMismatch);
+                }
+            };
+            Ok(SemanticTranscriptEntry::from_validated_parts(
+                identity, session, payload,
+            ))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
     let completion_entry = SemanticTranscriptEntry::from_validated_parts(
         identities.completion_entry,
         session,
@@ -5303,7 +5428,10 @@ fn close_cancelled_turn(
 }
 
 #[cfg(test)]
-pub(crate) use tests::{cancelled_turn_fixture, completed_turn_fixture, failed_turn_fixture};
+pub(crate) use tests::{
+    cancelled_turn_fixture, completed_turn_fixture,
+    completed_turn_with_provider_compaction_fixture, failed_turn_fixture,
+};
 
 #[cfg(test)]
 mod tests {
@@ -5907,7 +6035,8 @@ mod tests {
                 assistant_text: values
                     .iter()
                     .map(|value| {
-                        AssistantText::try_new((*value).to_owned()).expect("nonempty fixture text")
+                        crate::AssistantText::try_new((*value).to_owned())
+                            .expect("nonempty fixture text")
                     })
                     .collect(),
             },
@@ -5929,6 +6058,47 @@ mod tests {
             .expect("definitive fixture completion is admissible");
         let ModelCallTerminalOutcome::Completed(completed) = outcome else {
             panic!("completed fixture evidence selects completed outcome");
+        };
+        completed
+    }
+
+    pub(crate) fn completed_turn_with_provider_compaction_fixture(
+        value: &str,
+    ) -> CompletedModelCallTurn {
+        let execution = in_flight_execution();
+        let observation = correlated_observation(
+            &execution,
+            ModelCallTerminalObservation::CompletedWithProviderCompaction {
+                response: vec![
+                    AssistantResponsePart::ProviderCompaction(
+                        crate::ProviderCompactionBlock::try_new(
+                            r#"{"type":"compaction","content":"summary"}"#.to_string(),
+                        )
+                        .expect("fixture compaction block is complete"),
+                    ),
+                    AssistantResponsePart::Text(
+                        crate::AssistantText::try_new(value.to_owned())
+                            .expect("nonempty fixture text"),
+                    ),
+                ],
+                retained_input_tokens: 23,
+            },
+        );
+        let outcome = execution
+            .apply_terminal_observation(
+                observation,
+                ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                    vec![
+                        semantic_transcript_entry_id(10),
+                        semantic_transcript_entry_id(11),
+                    ],
+                    semantic_transcript_entry_id(12),
+                    context_frontier_id(13),
+                )),
+            )
+            .expect("provider compaction fixture completion is admissible");
+        let ModelCallTerminalOutcome::Completed(completed) = outcome else {
+            panic!("provider compaction evidence selects completed outcome");
         };
         completed
     }
@@ -7699,7 +7869,7 @@ mod tests {
             &execution,
             ModelCallTerminalObservation::Completed {
                 assistant_text: vec![
-                    AssistantText::try_new("race winner".to_owned()).expect("nonempty text"),
+                    crate::AssistantText::try_new("race winner".to_owned()).expect("nonempty text"),
                 ],
             },
         );
@@ -7741,6 +7911,7 @@ mod tests {
                     AssistantResponsePart::ToolCall(tool_proposal("risky_tool", "{}")),
                 ])
                 .expect("the response contains one tool proposal"),
+                retained_input_tokens: None,
             },
         );
         let outcome = execution
@@ -7904,8 +8075,8 @@ mod tests {
             &execution,
             ModelCallTerminalObservation::Completed {
                 assistant_text: vec![
-                    AssistantText::try_new("first".to_string()).expect("nonempty text"),
-                    AssistantText::try_new(" second ".to_string()).expect("nonempty text"),
+                    crate::AssistantText::try_new("first".to_string()).expect("nonempty text"),
+                    crate::AssistantText::try_new(" second ".to_string()).expect("nonempty text"),
                 ],
             },
         );
@@ -7975,7 +8146,7 @@ mod tests {
             ModelCallTerminalObservation::CompletedWithTools {
                 response: ToolUsingAssistantResponse::try_from_parts(vec![
                     AssistantResponsePart::Text(
-                        AssistantText::try_new(String::from("checking"))
+                        crate::AssistantText::try_new(String::from("checking"))
                             .expect("assistant text is nonempty"),
                     ),
                     AssistantResponsePart::ToolCall(tool_proposal(
@@ -7985,6 +8156,7 @@ mod tests {
                     AssistantResponsePart::ToolCall(tool_proposal("current_time", "{}")),
                 ])
                 .expect("the response contains tool proposals"),
+                retained_input_tokens: None,
             },
         );
         let outcome = execution
@@ -8148,6 +8320,7 @@ mod tests {
                     AssistantResponsePart::ToolCall(tool_proposal("current_time", "{}")),
                 ])
                 .expect("the response contains one tool proposal"),
+                retained_input_tokens: None,
             },
         );
         let outcome = execution
@@ -8187,7 +8360,7 @@ mod tests {
             &execution,
             ModelCallTerminalObservation::Completed {
                 assistant_text: vec![
-                    AssistantText::try_new("reply".to_owned()).expect("nonempty text"),
+                    crate::AssistantText::try_new("reply".to_owned()).expect("nonempty text"),
                 ],
             },
         );

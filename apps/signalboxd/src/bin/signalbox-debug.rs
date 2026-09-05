@@ -471,6 +471,8 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
                 .transpose()
                 .map_err(|_| DebugDriverError::Configuration)?;
             let mut adapter_configuration = AnthropicConfig::new(native_message_limit);
+            adapter_configuration.provider_compaction_targets =
+                configuration.anthropic_provider_compaction_targets();
             adapter_configuration.exchange_timeout = configuration
                 .numeric_bounds()
                 .duration("model_exchange_timeout")

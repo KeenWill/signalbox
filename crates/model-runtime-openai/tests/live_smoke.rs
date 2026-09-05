@@ -320,6 +320,7 @@ fn require_decoded_response(
         // `TerminalEvidence` variant fails to compile here instead of
         // silently inheriting this panic path.
         rejected @ (TerminalEvidence::Completed(_)
+        | TerminalEvidence::CompletedWithProviderCompaction { .. }
         | TerminalEvidence::Refused(_)
         | TerminalEvidence::ProviderError(_)
         | TerminalEvidence::CancellationConfirmed(_)

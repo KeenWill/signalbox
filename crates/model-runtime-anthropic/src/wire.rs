@@ -7,7 +7,7 @@
 //! unknown content-block and event *types* are handled explicitly where they
 //! are interpreted.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 pub(crate) fn raw_json_is_object(raw: &serde_json::value::RawValue) -> bool {
     raw.get().bytes().find(|byte| !byte.is_ascii_whitespace()) == Some(b'{')
@@ -39,7 +39,29 @@ pub(crate) struct MessagesRequest {
     pub tools: Option<Vec<WireTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<WireToolChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_management: Option<ContextManagement>,
     pub stream: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ContextManagement {
+    pub edits: [ContextManagementEdit; 1],
+}
+
+impl ContextManagement {
+    pub(crate) const fn compact() -> Self {
+        Self {
+            edits: [ContextManagementEdit::Compact],
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+pub(crate) enum ContextManagementEdit {
+    #[serde(rename = "compact_20260112")]
+    Compact,
 }
 
 #[derive(Debug, Serialize)]
@@ -54,8 +76,15 @@ pub(crate) struct WireMessage {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(tag = "type")]
+#[serde(untagged)]
 pub(crate) enum WireRequestBlock {
+    Known(WireKnownRequestBlock),
+    ProviderCompaction(Box<serde_json::value::RawValue>),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+pub(crate) enum WireKnownRequestBlock {
     #[serde(rename = "text")]
     Text { text: String },
     #[serde(rename = "tool_use")]
@@ -113,6 +142,8 @@ pub(crate) struct CountTokensRequest {
     pub tools: Option<Vec<WireTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<WireToolChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_management: Option<ContextManagement>,
 }
 
 impl From<MessagesRequest> for CountTokensRequest {
@@ -125,6 +156,7 @@ impl From<MessagesRequest> for CountTokensRequest {
             speed: request.speed,
             tools: request.tools,
             tool_choice: request.tool_choice,
+            context_management: request.context_management,
         }
     }
 }
@@ -174,6 +206,10 @@ pub(crate) enum WireResponseBlock {
     RedactedThinking {
         data: String,
     },
+    Compaction {
+        /// The provider's complete content block, retained verbatim.
+        raw: Box<serde_json::value::RawValue>,
+    },
     /// The provider's server-side fallback marker: the point in this
     /// response where one model declined and another continued.
     ///
@@ -222,6 +258,11 @@ pub(crate) fn parse_response_block(
         data: String,
     }
     #[derive(Deserialize)]
+    struct CompactionBlock {
+        content: serde_json::Value,
+        encrypted_content: Option<serde_json::Value>,
+    }
+    #[derive(Deserialize)]
     struct FallbackBlock {
         to: Option<FallbackModel>,
     }
@@ -254,6 +295,28 @@ pub(crate) fn parse_response_block(
             let block: RedactedThinkingBlock = serde_json::from_str(raw.get())?;
             WireResponseBlock::RedactedThinking { data: block.data }
         }
+        "compaction" => {
+            let block: CompactionBlock = serde_json::from_str(raw.get())?;
+            let content_valid = matches!(block.content, serde_json::Value::Null)
+                || block
+                    .content
+                    .as_str()
+                    .is_some_and(|content| !content.is_empty());
+            let encrypted_content_valid = block.encrypted_content.is_none_or(|content| {
+                matches!(
+                    content,
+                    serde_json::Value::Null | serde_json::Value::String(_)
+                )
+            });
+            if !content_valid || !encrypted_content_valid {
+                return Err(<serde_json::Error as serde::de::Error>::custom(
+                    "invalid compaction block",
+                ));
+            }
+            WireResponseBlock::Compaction {
+                raw: serde_json::value::RawValue::from_string(raw.get().to_owned())?,
+            }
+        }
         "fallback" => {
             let block: FallbackBlock = serde_json::from_str(raw.get())?;
             WireResponseBlock::Fallback {
@@ -266,6 +329,15 @@ pub(crate) fn parse_response_block(
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct WireUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_creation_input_tokens: Option<u64>,
+    pub cache_read_input_tokens: Option<u64>,
+    pub iterations: Option<Vec<WireIterationUsage>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct WireIterationUsage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cache_creation_input_tokens: Option<u64>,
@@ -334,10 +406,66 @@ pub(crate) enum WireDelta {
     Thinking { thinking: String },
     #[serde(rename = "signature_delta")]
     Signature { signature: String },
+    #[serde(rename = "compaction_delta")]
+    Compaction {
+        #[serde(default)]
+        content: WireCompactionContent,
+        encrypted_content: Option<String>,
+    },
     /// A delta type this adapter does not recognize (the provider documents
     /// that new delta types may be added); tolerated and ignored.
     #[serde(other)]
     Unrecognized,
+}
+
+/// The required compaction-delta content field, preserving the distinction
+/// between an explicit JSON null and a missing field.
+#[derive(Debug, Default)]
+pub(crate) enum WireCompactionContent {
+    #[default]
+    Missing,
+    Null,
+    Text(String),
+}
+
+impl<'de> Deserialize<'de> for WireCompactionContent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = WireCompactionContent;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string or null compaction content value")
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(WireCompactionContent::Null)
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(WireCompactionContent::Null)
+            }
+
+            fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                String::deserialize(deserializer).map(WireCompactionContent::Text)
+            }
+        }
+
+        deserializer.deserialize_option(Visitor)
+    }
 }
 
 #[derive(Debug, Deserialize)]

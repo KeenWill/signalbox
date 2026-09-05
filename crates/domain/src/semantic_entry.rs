@@ -6,6 +6,8 @@
 
 use std::num::NonZeroU64;
 
+use serde::Deserialize;
+
 use crate::{
     AcceptedInputId, ContextCompactionRange, DelegationContent, DelegationMessageId,
     DelegationOutcome, DelegationWaitMode, DirectModelSelection, ImportedSourceAttestation,
@@ -39,6 +41,56 @@ impl AssistantText {
         self.0.into_string()
     }
 }
+
+/// One complete provider-produced compaction content block.
+///
+/// The JSON bytes remain opaque after the `compaction` discriminator is
+/// checked so provider metadata can be replayed unchanged.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ProviderCompactionBlock(String);
+
+impl ProviderCompactionBlock {
+    /// Checks the provider block discriminator while retaining the exact JSON.
+    pub fn try_new(value: String) -> Result<Self, ProviderCompactionBlockError> {
+        let mut deserializer = serde_json::Deserializer::from_str(&value);
+        deserializer.disable_recursion_limit();
+        let parsed =
+            serde_json::Value::deserialize(serde_stacker::Deserializer::new(&mut deserializer))
+                .map_err(|_| ProviderCompactionBlockError)?;
+        deserializer
+            .end()
+            .map_err(|_| ProviderCompactionBlockError)?;
+        if parsed.get("type").and_then(serde_json::Value::as_str) != Some("compaction") {
+            return Err(ProviderCompactionBlockError);
+        }
+        match parsed.get("content") {
+            Some(serde_json::Value::String(content)) if !content.is_empty() => {}
+            Some(serde_json::Value::Null) => {}
+            _ => return Err(ProviderCompactionBlockError),
+        }
+        if !matches!(
+            parsed.get("encrypted_content"),
+            None | Some(serde_json::Value::String(_)) | Some(serde_json::Value::Null)
+        ) {
+            return Err(ProviderCompactionBlockError);
+        }
+        Ok(Self(value))
+    }
+
+    /// Borrows the exact provider JSON.
+    pub fn as_json(&self) -> &str {
+        &self.0
+    }
+
+    /// Returns the exact provider JSON.
+    pub fn into_json(self) -> String {
+        self.0
+    }
+}
+
+/// A stored provider compaction block is not a complete `compaction` object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProviderCompactionBlockError;
 
 /// The complete semantic transcript-entry payload set.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -118,6 +170,13 @@ pub enum SemanticTranscriptEntryPayload {
         producing_call: ModelCallId,
         /// The exact assistant-owned text.
         value: AssistantText,
+    },
+    /// One opaque provider-produced compaction block with call provenance.
+    ProviderCompaction {
+        /// The outcome-authoritative call that supplied this block.
+        producing_call: ModelCallId,
+        /// The complete block retained for exact replay.
+        block: ProviderCompactionBlock,
     },
     /// One logical tool request named by a definitive assistant response.
     AssistantToolUse {
@@ -269,6 +328,31 @@ impl SemanticTranscriptEntryReconstitutionInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_compaction_distinguishes_summary_from_failed_noop() {
+        let summary = ProviderCompactionBlock::try_new(String::from(
+            r#"{"type":"compaction","content":"summary","encrypted_content":"opaque"}"#,
+        ))
+        .expect("complete summary block is valid");
+        let failed = ProviderCompactionBlock::try_new(String::from(
+            r#"{"type":"compaction","content":null,"encrypted_content":null}"#,
+        ))
+        .expect("failed compaction block is replayable");
+
+        assert_eq!(
+            summary.as_json(),
+            r#"{"type":"compaction","content":"summary","encrypted_content":"opaque"}"#
+        );
+        assert_eq!(
+            failed.as_json(),
+            r#"{"type":"compaction","content":null,"encrypted_content":null}"#
+        );
+        assert!(
+            ProviderCompactionBlock::try_new(String::from(r#"{"type":"compaction","content":""}"#))
+                .is_err()
+        );
+    }
     use crate::test_support::{
         accepted_input_id, model_call_id, semantic_transcript_entry_id, session_id,
         tool_request_id, turn_id,

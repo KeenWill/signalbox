@@ -1021,6 +1021,7 @@ pub struct HubModelConfiguration {
     credential_pools: HashMap<Arc<str>, CredentialPool>,
     model_capabilities: ModelCapabilityCatalog,
     runtime_model_capabilities: RuntimeModelCapabilityCatalog,
+    anthropic_provider_compaction_targets: BTreeSet<String>,
     model_settings_lower_layers: HashMap<DirectModelSelection, ModelSettingsLowerLayers>,
     billing_rates: HashMap<ResolvedProviderTarget, ModelBillingRates>,
     target_adapters: HashMap<ResolvedProviderTarget, ModelAdapter>,
@@ -1400,6 +1401,7 @@ impl HubModelConfiguration {
         let mut target_provider_models = HashMap::with_capacity(models.len());
         let mut selectable_targets = HashSet::with_capacity(models.len());
         let mut provider_model_adapters = HashMap::with_capacity(models.len());
+        let mut provider_compaction_by_provider_model = HashMap::with_capacity(models.len());
         let mut runtime_capability_projections = Vec::with_capacity(models.len());
         for model in models {
             reject_unknown_fields(
@@ -1421,6 +1423,7 @@ impl HubModelConfiguration {
                     "fast_target_id",
                     "service_tiers",
                     "settings_profile",
+                    "provider_compaction",
                 ],
             )?;
             let selection = DirectModelSelection::from_uuid(required_uuid(model, "selection_id")?);
@@ -1437,6 +1440,7 @@ impl HubModelConfiguration {
             }
             let max_output_tokens = required_positive_u32(model, "max_output_tokens")?;
             let context_window_tokens = required_positive_u32(model, "context_window_tokens")?;
+            let provider_compaction = parse_provider_compaction_capability(model, mapping.adapter)?;
             let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
                 required_uuid(model, "target_id")?,
             ));
@@ -1498,6 +1502,12 @@ impl HubModelConfiguration {
                 FastModeSupport::Unsupported | FastModeSupport::RequestControl => None,
             };
             let provider_model = provider_model.to_owned();
+            if let Some(previous) = provider_compaction_by_provider_model
+                .insert(provider_model.clone(), provider_compaction)
+                && previous != provider_compaction
+            {
+                return Err(HubModelConfigurationError::InvalidModelCapabilities);
+            }
             let rates = parse_model_billing_rates(model)?;
             if let Some(previous) = target_billing_rates.insert(target, rates.clone())
                 && previous != rates
@@ -1584,6 +1594,7 @@ impl HubModelConfiguration {
                         "provider_model",
                         "max_output_tokens",
                         "context_window_tokens",
+                        "provider_compaction",
                     ],
                 )?;
                 let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
@@ -1602,6 +1613,14 @@ impl HubModelConfiguration {
                     return Err(HubModelConfigurationError::InvalidProviderModel);
                 }
                 let provider_model = provider_model.to_owned();
+                let provider_compaction =
+                    parse_provider_compaction_capability(serving_target, mapping.adapter)?;
+                if let Some(previous) = provider_compaction_by_provider_model
+                    .insert(provider_model.clone(), provider_compaction)
+                    && previous != provider_compaction
+                {
+                    return Err(HubModelConfigurationError::InvalidModelCapabilities);
+                }
                 let max_output_tokens = required_positive_u32(serving_target, "max_output_tokens")?;
                 let context_window_tokens =
                     required_positive_u32(serving_target, "context_window_tokens")?;
@@ -1683,6 +1702,10 @@ impl HubModelConfiguration {
         )?;
         let runtime_models = RuntimeModelCatalog::try_from_definitions(runtime_definitions)
             .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
+        let anthropic_provider_compaction_targets = provider_compaction_by_provider_model
+            .into_iter()
+            .filter_map(|(provider_model, supported)| supported.then_some(provider_model))
+            .collect();
         let mut tool_continuation_usage_limits = Vec::with_capacity(routes.len().saturating_mul(2));
         for route in routes.values() {
             let definition = runtime_models
@@ -1726,6 +1749,7 @@ impl HubModelConfiguration {
             credential_pools,
             model_capabilities,
             runtime_model_capabilities,
+            anthropic_provider_compaction_targets,
             model_settings_lower_layers,
             billing_rates,
             target_adapters,
@@ -1781,6 +1805,11 @@ impl HubModelConfiguration {
     /// Returns the exact provider-target capability catalog used at preparation.
     pub fn runtime_model_capability_catalog(&self) -> RuntimeModelCapabilityCatalog {
         self.runtime_model_capabilities.clone()
+    }
+
+    /// Returns the exact resolved Anthropic targets configured for server compaction.
+    pub fn anthropic_provider_compaction_targets(&self) -> BTreeSet<String> {
+        self.anthropic_provider_compaction_targets.clone()
     }
 
     /// Returns the copied profile and global layers for a direct selection.
@@ -3663,6 +3692,24 @@ struct RuntimeCapabilityProjection {
     adapter: ModelAdapter,
     provider_model: String,
     capabilities: ModelCapabilities,
+}
+
+fn parse_provider_compaction_capability(
+    table: &Table,
+    adapter: ModelAdapter,
+) -> Result<bool, HubModelConfigurationError> {
+    let supported = table
+        .get("provider_compaction")
+        .map(|item| {
+            item.as_bool()
+                .ok_or(HubModelConfigurationError::InvalidModelCapabilities)
+        })
+        .transpose()?
+        .unwrap_or(false);
+    if supported && adapter != ModelAdapter::Anthropic {
+        return Err(HubModelConfigurationError::InvalidModelCapabilities);
+    }
+    Ok(supported)
 }
 
 fn project_runtime_model_capabilities(
@@ -9315,6 +9362,48 @@ extra = true"#,
         assert_eq!(
             HubModelConfiguration::parse(&impossible_reservation).err(),
             Some(HubModelConfigurationError::InvalidField)
+        );
+    }
+
+    #[test]
+    fn provider_compaction_is_an_explicit_per_target_capability() {
+        let disabled = HubModelConfiguration::parse(CONFIGURATION)
+            .expect("omitted provider compaction defaults closed");
+        assert!(disabled.anthropic_provider_compaction_targets().is_empty());
+
+        let enabled = HubModelConfiguration::parse(&CONFIGURATION.replace(
+            "provider_model = \"claude-example\"",
+            "provider_model = \"claude-example\"\nprovider_compaction = true",
+        ))
+        .expect("the Anthropic target declares provider compaction");
+        let targets = enabled.anthropic_provider_compaction_targets();
+        assert_eq!(targets.len(), 1);
+        assert!(targets.contains("claude-example"));
+
+        let malformed = CONFIGURATION.replace(
+            "provider_model = \"claude-example\"",
+            "provider_model = \"claude-example\"\nprovider_compaction = \"true\"",
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&malformed).err(),
+            Some(HubModelConfigurationError::InvalidModelCapabilities)
+        );
+
+        let wrong_adapter = format!(
+            "{}\n[codex_cli]\nexecutable = \"/bin/true\"\nworking_directory = \"/tmp\"\n",
+            CONFIGURATION
+                .replace(
+                    "adapter = \"anthropic\"\ncredential_pool = \"anthropic-main\"",
+                    "adapter = \"codex_cli\"\ncredential_pool = \"codex-main\"",
+                )
+                .replace(
+                    "provider_model = \"claude-example\"",
+                    "provider_model = \"claude-example\"\nprovider_compaction = true",
+                )
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&wrong_adapter).err(),
+            Some(HubModelConfigurationError::InvalidModelCapabilities)
         );
     }
 

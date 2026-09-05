@@ -855,7 +855,8 @@ impl<C: Clone> EventDecoder<C> {
                         }
                         AssistantPart::Text(_)
                         | AssistantPart::Thinking { .. }
-                        | AssistantPart::RedactedThinking { .. } => false,
+                        | AssistantPart::RedactedThinking { .. }
+                        | AssistantPart::ProviderCompaction { .. } => false,
                     }) =>
             {
                 Err(format!("Claude tool choice permits only `{name}`"))
@@ -895,6 +896,9 @@ impl<C: Clone> EventDecoder<C> {
                 AssistantPart::RedactedThinking { data } => Some(AssistantPart::RedactedThinking {
                     data: redact_text(&data),
                 }),
+                AssistantPart::ProviderCompaction { block_json } => {
+                    Some(AssistantPart::ProviderCompaction { block_json })
+                }
                 AssistantPart::ToolCall(mut call) => {
                     call.arguments_json = redact_json(&call.arguments_json);
                     Some(AssistantPart::ToolCall(call))

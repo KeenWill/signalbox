@@ -2698,7 +2698,10 @@ async fn recorded_override_pre_approves_a_call_prepared_after_it() -> Result<(),
         .expect("the proposal forms a tool-using response");
     let observation = authorized
         .observation_correlation()
-        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+        });
     let consuming_request = ToolRequestId::from_uuid(Uuid::from_u128(seed + 0x48));
     let outcome = model_repository
         .apply_terminal_observation(
@@ -2807,7 +2810,10 @@ async fn judge_completion_replay_rejects_a_mismatch_behind_a_user_override_appro
     .expect("the two proposals form a tool-using response");
     let observation = authorized
         .observation_correlation()
-        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+        });
     let judged_request = ToolRequestId::from_uuid(Uuid::from_u128(seed + 0x120));
     let overridden_request = ToolRequestId::from_uuid(Uuid::from_u128(seed + 0x121));
     let outcome = model_repository
@@ -3137,7 +3143,10 @@ async fn judged_reproposal_after_a_recorded_override(
         .expect("the re-proposal forms a tool-using response");
     let observation = authorized
         .observation_correlation()
-        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+        });
     let reproposal = ToolRequestId::from_uuid(Uuid::from_u128(seed + 0x120));
     let outcome = model_repository
         .apply_terminal_observation(

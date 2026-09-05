@@ -33,8 +33,9 @@ use signalbox_domain::{
     AuthorizedModelCall, CodexCliServiceTier as DomainCodexCliServiceTier, ContextFrontierId,
     DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason, FastMode as DomainFastMode,
     FrozenModelSelection, ModelCallId, ModelCallTerminalObservation, NormalizedToolArguments,
-    OpenAiServiceTier as DomainOpenAiServiceTier, ProviderModelCallFailureCause,
-    ProviderReportedTokenUsage, ReasoningLevel as DomainReasoningLevel, ResolvedProviderTarget,
+    OpenAiServiceTier as DomainOpenAiServiceTier, ProviderCompactionBlock,
+    ProviderModelCallFailureCause, ProviderReportedTokenUsage,
+    ReasoningLevel as DomainReasoningLevel, ResolvedProviderTarget,
     ServiceTier as DomainServiceTier, SessionId, ToolArgumentsKind,
     ToolCallProposal as DomainToolCallProposal, ToolExecutionErrorKind, ToolName as DomainToolName,
     ToolResultContent, ToolUsingAssistantResponse, TurnAttemptId, TurnId, ValidatedModelSettings,
@@ -1480,6 +1481,7 @@ fn report_classified_outcome(telemetry: ModelCallTelemetry, classified: &Termina
     }
     match classified.observation {
         ModelCallTerminalObservation::Completed { .. }
+        | ModelCallTerminalObservation::CompletedWithProviderCompaction { .. }
         | ModelCallTerminalObservation::CompletedWithTools { .. } => {
             tracing::debug!(
                 cause_code = classified.cause.as_str(),
@@ -1591,6 +1593,27 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
                     }
                 } else {
                     rendered.push(ConversationMessage::assistant_text(content.as_str()));
+                    assistant_call = Some(*producing_call);
+                }
+                collecting_tool_results = false;
+            }
+            ModelConversationMessage::ProviderCompaction {
+                producing_call,
+                block,
+                ..
+            } => {
+                let part = MessagePart::ProviderCompaction {
+                    block_json: block.as_json().to_owned(),
+                };
+                if assistant_call == Some(*producing_call) {
+                    if let Some(message) = rendered.last_mut() {
+                        message.parts.push(part);
+                    }
+                } else {
+                    rendered.push(ConversationMessage {
+                        role: ConversationRole::Assistant,
+                        parts: vec![part],
+                    });
                     assistant_call = Some(*producing_call);
                 }
                 collecting_tool_results = false;
@@ -1961,11 +1984,21 @@ fn classify_terminal(
         })
     };
 
+    let (evidence, retained_input_tokens) = match evidence {
+        TerminalEvidence::CompletedWithProviderCompaction {
+            completion,
+            retained_input_tokens,
+        } => (
+            TerminalEvidence::Completed(completion),
+            Some(retained_input_tokens),
+        ),
+        evidence => (evidence, None),
+    };
     match evidence {
         TerminalEvidence::Completed(completion) => {
             let finish = completion.finish;
             let mut response_parts = Vec::new();
-            let mut text_parts = Vec::new();
+            let mut has_provider_compaction = false;
             let mut tool_count = 0usize;
             for part in completion.content {
                 match part {
@@ -1976,8 +2009,16 @@ fn classify_terminal(
                                 RuntimeModelCallProviderError::InvalidAssistantText,
                             )
                         })?;
-                        text_parts.push(text.clone());
                         response_parts.push(AssistantResponsePart::Text(text));
+                    }
+                    AssistantPart::ProviderCompaction { block_json } => {
+                        let block = ProviderCompactionBlock::try_new(block_json).map_err(|_| {
+                            ClassificationFailure::bare(
+                                RuntimeModelCallProviderError::UnsupportedCompletionMaterial,
+                            )
+                        })?;
+                        has_provider_compaction = true;
+                        response_parts.push(AssistantResponsePart::ProviderCompaction(block));
                     }
                     AssistantPart::ToolCall(proposal) => {
                         tool_count += 1;
@@ -2041,12 +2082,33 @@ fn classify_terminal(
                         ModelCallCauseCode::FinishContradictsContent,
                     );
                 }
-                classify(
-                    ModelCallTerminalObservation::Completed {
-                        assistant_text: text_parts,
-                    },
-                    ModelCallCauseCode::Completed,
-                )
+                if has_provider_compaction {
+                    let Some(retained_input_tokens) = retained_input_tokens else {
+                        return Err(ClassificationFailure::bare(
+                            RuntimeModelCallProviderError::UnsupportedCompletionMaterial,
+                        ));
+                    };
+                    classify(
+                        ModelCallTerminalObservation::CompletedWithProviderCompaction {
+                            response: response_parts,
+                            retained_input_tokens,
+                        },
+                        ModelCallCauseCode::Completed,
+                    )
+                } else {
+                    let assistant_text = response_parts
+                        .into_iter()
+                        .filter_map(|part| match part {
+                            AssistantResponsePart::Text(text) => Some(text),
+                            AssistantResponsePart::ProviderCompaction(_)
+                            | AssistantResponsePart::ToolCall(_) => None,
+                        })
+                        .collect();
+                    classify(
+                        ModelCallTerminalObservation::Completed { assistant_text },
+                        ModelCallCauseCode::Completed,
+                    )
+                }
             } else {
                 if !matches!(finish, CompletionFinish::ToolUse) {
                     return classify(
@@ -2062,7 +2124,10 @@ fn classify_terminal(
                     );
                 };
                 classify(
-                    ModelCallTerminalObservation::CompletedWithTools { response },
+                    ModelCallTerminalObservation::CompletedWithTools {
+                        response,
+                        retained_input_tokens,
+                    },
                     ModelCallCauseCode::Completed,
                 )
             }
@@ -2099,6 +2164,11 @@ fn classify_terminal(
             ModelCallTerminalObservation::Ambiguous,
             ModelCallCauseCode::BoundaryLoss(BoundaryLossCode::of(&loss.cause)),
         ),
+        TerminalEvidence::CompletedWithProviderCompaction { .. } => {
+            Err(ClassificationFailure::bare(
+                RuntimeModelCallProviderError::UnsupportedCompletionMaterial,
+            ))
+        }
     }
 }
 
@@ -2124,6 +2194,9 @@ fn reported_identities<'evidence>(
 fn reported_model(evidence: &TerminalEvidence) -> Option<&ProviderReportedModel> {
     match evidence {
         TerminalEvidence::Completed(value) => value.reported_model.as_ref(),
+        TerminalEvidence::CompletedWithProviderCompaction { completion, .. } => {
+            completion.reported_model.as_ref()
+        }
         TerminalEvidence::Refused(value) => value.reported_model.as_ref(),
         TerminalEvidence::ProviderError(value) => value.reported_model.as_ref(),
         TerminalEvidence::CancellationConfirmed(value) => value.reported_model.as_ref(),
@@ -2135,6 +2208,7 @@ fn reported_model(evidence: &TerminalEvidence) -> Option<&ProviderReportedModel>
 fn provider_reported_token_usage(evidence: &TerminalEvidence) -> ProviderReportedTokenUsage {
     let usage = match evidence {
         TerminalEvidence::Completed(value) => value.usage,
+        TerminalEvidence::CompletedWithProviderCompaction { completion, .. } => completion.usage,
         TerminalEvidence::Refused(value) => value.usage,
         TerminalEvidence::ProviderError(value) => value.usage,
         TerminalEvidence::BoundaryLoss(value) => value.usage,
@@ -2903,6 +2977,86 @@ mod tests {
         );
     }
 
+    #[test]
+    fn provider_compaction_completion_preserves_retained_input_measure() {
+        let completion = CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("model-exact")),
+            finish: CompletionFinish::EndTurn,
+            content: vec![AssistantPart::ProviderCompaction {
+                block_json: String::from(
+                    r#"{"type":"compaction","content":"summary","encrypted_content":"opaque"}"#,
+                ),
+            }],
+            usage: TokenUsage {
+                input_tokens: Some(140),
+                output_tokens: Some(8),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+            },
+        };
+
+        let classified = classify_terminal(
+            TerminalEvidence::CompletedWithProviderCompaction {
+                completion,
+                retained_input_tokens: 37,
+            },
+            &[],
+            &configured("model-exact"),
+        )
+        .expect("provider compaction completion is representable");
+
+        assert!(matches!(
+            classified.observation,
+            ModelCallTerminalObservation::CompletedWithProviderCompaction {
+                retained_input_tokens: 37,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn provider_compaction_tool_completion_preserves_retained_input_measure() {
+        let completion = CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("model-exact")),
+            finish: CompletionFinish::ToolUse,
+            content: vec![
+                AssistantPart::ProviderCompaction {
+                    block_json: String::from(
+                        r#"{"type":"compaction","content":"summary","encrypted_content":"opaque"}"#,
+                    ),
+                },
+                AssistantPart::ToolCall(ToolCallProposal {
+                    id: ToolCallId::new("provider-call-opaque"),
+                    name: ToolName::new("current_time"),
+                    arguments_json: String::from("{}"),
+                }),
+            ],
+            usage: TokenUsage::default(),
+        };
+
+        let classified = classify_terminal(
+            TerminalEvidence::CompletedWithProviderCompaction {
+                completion,
+                retained_input_tokens: 37,
+            },
+            &[],
+            &configured("model-exact"),
+        )
+        .expect("provider compaction tool completion is representable");
+
+        assert!(matches!(
+            classified.observation,
+            ModelCallTerminalObservation::CompletedWithTools {
+                retained_input_tokens: Some(37),
+                ..
+            }
+        ));
+    }
+
     /// S10 / INV-002 / INV-005: runtime-native tool calls become ordered,
     /// normalized domain proposals without retaining provider identifiers.
     #[test]
@@ -2913,7 +3067,8 @@ mod tests {
             &configured("model-exact"),
         )
         .expect("tool-use completion is supported");
-        let ModelCallTerminalObservation::CompletedWithTools { response } = classified.observation
+        let ModelCallTerminalObservation::CompletedWithTools { response, .. } =
+            classified.observation
         else {
             panic!("tool-use finish produces a same-turn tool round");
         };
@@ -2957,7 +3112,8 @@ mod tests {
             &configured("model-exact"),
         )
         .expect("an empty thinking part must not fail a tool completion closed");
-        let ModelCallTerminalObservation::CompletedWithTools { response } = classified.observation
+        let ModelCallTerminalObservation::CompletedWithTools { response, .. } =
+            classified.observation
         else {
             panic!("the tool completion still yields its same-turn tool round");
         };
@@ -3051,7 +3207,8 @@ mod tests {
         )
         .expect("suppressed tool material has a bounded terminal classification");
 
-        let ModelCallTerminalObservation::CompletedWithTools { response } = classified.observation
+        let ModelCallTerminalObservation::CompletedWithTools { response, .. } =
+            classified.observation
         else {
             panic!("suppressed tool material yields a same-turn denial round");
         };

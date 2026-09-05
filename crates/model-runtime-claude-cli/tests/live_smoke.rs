@@ -287,7 +287,8 @@ fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
         // silently inheriting this panic path — a new terminal classification
         // must be reviewed for whether it counts as decoded compatibility
         // evidence, not absorbed as an ordinary rejection.
-        rejected @ (TerminalEvidence::ProviderError(_)
+        rejected @ (TerminalEvidence::CompletedWithProviderCompaction { .. }
+        | TerminalEvidence::ProviderError(_)
         | TerminalEvidence::CancellationConfirmed(_)
         | TerminalEvidence::ProvenUnsent(_)
         | TerminalEvidence::BoundaryLoss(_)) => {

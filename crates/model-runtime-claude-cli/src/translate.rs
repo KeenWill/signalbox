@@ -267,6 +267,12 @@ fn render_part(part: &MessagePart) -> Result<PromptPart<'_>, TranslationError> {
         }),
         MessagePart::Thinking { text, signature } => Ok(PromptPart::Thinking { text, signature }),
         MessagePart::RedactedThinking { data } => Ok(PromptPart::RedactedThinking { data }),
+        MessagePart::ProviderCompaction { .. } => Err(TranslationError::Failure(
+            PreparationFailure::UnsupportedOperation {
+                detail: "provider compaction blocks can only be replayed by their provider adapter"
+                    .to_string(),
+            },
+        )),
     }
 }
 

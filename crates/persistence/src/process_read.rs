@@ -1044,6 +1044,19 @@ pub enum ProcessTranscriptEntry {
         /// Exact committed assistant text.
         content: String,
     },
+    /// Opaque provider compaction retained without exposing replay bytes.
+    ProviderCompaction {
+        /// Zero-based position in the projected frontier.
+        entry_index: u64,
+        /// Session that owns the immutable semantic entry.
+        source_session: SessionId,
+        /// Semantic entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Owning turn.
+        turn: TurnId,
+        /// Producing model call.
+        model_call: ModelCallId,
+    },
     /// Assistant tool proposal.
     AssistantToolUse {
         /// Zero-based position in the projected frontier.
@@ -5308,6 +5321,28 @@ fn decode_transcript_entry(
             model_call: ModelCallId::from_uuid(call),
             content,
         },
+        (
+            "provider_compaction",
+            None,
+            None,
+            None,
+            Some(block_json),
+            Some(call),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(turn),
+        ) if signalbox_domain::ProviderCompactionBlock::try_new(block_json.clone()).is_ok() => {
+            ProcessTranscriptEntry::ProviderCompaction {
+                entry_index,
+                source_session,
+                entry,
+                turn: TurnId::from_uuid(turn),
+                model_call: ModelCallId::from_uuid(call),
+            }
+        }
         ("turn_failed", None, None, Some(turn), None, None, None, None, None, None, None, None) => {
             ProcessTranscriptEntry::TurnFailed {
                 entry_index,
@@ -5358,6 +5393,7 @@ fn decode_transcript_entry(
             "origin_accepted_input"
             | "steering_accepted_input"
             | "assistant_text"
+            | "provider_compaction"
             | "assistant_tool_use"
             | "tool_execution_result"
             | "tool_denied"

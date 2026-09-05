@@ -500,6 +500,13 @@ fn wire_messages(
                         .to_string(),
                 });
             }
+            MessagePart::ProviderCompaction { .. } => {
+                return Err(PreparationFailure::UnsupportedOperation {
+                    detail:
+                        "provider compaction blocks can only be replayed by their provider adapter"
+                            .to_string(),
+                });
+            }
         }
     }
     flush(role, &mut pending_text, &mut pending_tool_calls, out);

@@ -6059,6 +6059,13 @@ pub enum TranscriptEntry {
         /// Exact direct model identity frozen for the turn.
         selected_model_id: CanonicalUuid,
     },
+    /// Provider-side compaction occurred; opaque replay bytes stay internal.
+    ProviderCompaction {
+        /// Owning turn.
+        turn_id: CanonicalUuid,
+        /// Producing model call.
+        model_call_id: CanonicalUuid,
+    },
     /// Assistant proposed one durable tool request.
     AssistantToolUse {
         /// Owning turn.
@@ -12226,6 +12233,27 @@ mod tests {
         assert_eq!(frame.version(), ProtocolVersion::One);
         assert!(String::from_utf8(encoded.clone())?.starts_with("{\"version\":1,"));
         assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_provider_compaction_projects_only_a_non_text_marker()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message = ServerMessage::TranscriptEntry {
+            entry_index: CanonicalU64::new(0),
+            source_session_id: uuid(1),
+            entry_id: uuid(2),
+            entry: TranscriptEntry::ProviderCompaction {
+                turn_id: uuid(3),
+                model_call_id: uuid(4),
+            },
+        };
+
+        assert_server_message_round_trip(
+            request(8)?,
+            message,
+            r#"{"type":"transcript_entry","entry_index":"0","source_session_id":"00000000-0000-0000-0000-000000000001","entry_id":"00000000-0000-0000-0000-000000000002","entry":{"type":"provider_compaction","turn_id":"00000000-0000-0000-0000-000000000003","model_call_id":"00000000-0000-0000-0000-000000000004"}}"#,
+        )?;
         Ok(())
     }
 

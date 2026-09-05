@@ -874,7 +874,8 @@ fn operation_tool_results(
             MessagePart::Text(_)
             | MessagePart::ToolCall(_)
             | MessagePart::Thinking { .. }
-            | MessagePart::RedactedThinking { .. } => None,
+            | MessagePart::RedactedThinking { .. }
+            | MessagePart::ProviderCompaction { .. } => None,
         })
         .collect::<Result<Vec<_>, _>>()?)
 }

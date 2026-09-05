@@ -972,7 +972,10 @@ async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
         })?;
     let observation = authorized
         .observation_correlation()
-        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+        });
     let model_outcome = model_repository
         .apply_terminal_observation(
             flow.session,

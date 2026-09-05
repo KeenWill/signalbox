@@ -532,6 +532,15 @@ fn delegation_content_from_live_completed(
                 producing_call,
                 value,
             } => (producing_call, value),
+            crate::SemanticTranscriptEntryPayload::ProviderCompaction {
+                producing_call, ..
+            } => {
+                if entry.source_session() != value.session() || *producing_call != value.call().id()
+                {
+                    return None;
+                }
+                continue;
+            }
             crate::SemanticTranscriptEntryPayload::Imported { .. }
             | crate::SemanticTranscriptEntryPayload::DelegatedTask { .. }
             | crate::SemanticTranscriptEntryPayload::DelegationMessage { .. }
@@ -2805,6 +2814,19 @@ mod tests {
         assert_eq!(outcome.kind(), DelegationOutcomeKind::ResultReturned);
         assert_eq!(outcome.content(), Some(&expected));
         assert_eq!(directly_derived, outcome);
+    }
+
+    #[test]
+    fn provider_compaction_metadata_does_not_hide_a_delegated_child_result() {
+        let expected = content("completed child result");
+        let completed = crate::model_execution::completed_turn_with_provider_compaction_fixture(
+            expected.as_str(),
+        );
+
+        let outcome = DelegationOutcome::from_completed_child(&completed);
+
+        assert_eq!(outcome.kind(), DelegationOutcomeKind::ResultReturned);
+        assert_eq!(outcome.content(), Some(&expected));
     }
 
     /// S18 / INV-010: empty live completion is a typed unavailable result.

@@ -2577,6 +2577,7 @@ impl AcceptedInputSchedulingProjection {
                 | SemanticTranscriptEntryPayload::ContextSummary { .. }
                 | SemanticTranscriptEntryPayload::TurnCancelled { .. }
                 | SemanticTranscriptEntryPayload::AssistantText { .. }
+                | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
                 | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
                 | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
                 | SemanticTranscriptEntryPayload::ToolDenied { .. }
@@ -4642,6 +4643,9 @@ fn reconstitute_inner(
                 }
             }
             InitialSemanticTranscriptEntryPayload::AssistantText { producing_call, .. }
+            | InitialSemanticTranscriptEntryPayload::ProviderCompaction {
+                producing_call, ..
+            }
             | InitialSemanticTranscriptEntryPayload::AssistantToolUse { producing_call, .. } => {
                 assistant_by_call
                     .entry(*producing_call)
@@ -6105,6 +6109,10 @@ fn reconstitute_inner(
                                         };
                                         match entry.payload() {
                                         SemanticTranscriptEntryPayload::AssistantText {
+                                            producing_call,
+                                            ..
+                                        } => *producing_call == tool_batch.producing_call,
+                                        SemanticTranscriptEntryPayload::ProviderCompaction {
                                             producing_call,
                                             ..
                                         } => *producing_call == tool_batch.producing_call,

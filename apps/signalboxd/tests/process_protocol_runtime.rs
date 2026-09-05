@@ -6374,7 +6374,10 @@ async fn park_turn_on_tool_approval(
     .expect("the fixture proposals form a tool-using response");
     let observation = authorized
         .observation_correlation()
-        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+        });
     let identities = request_ids
         .iter()
         .map(|request_id| {
