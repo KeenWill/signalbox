@@ -23,17 +23,17 @@ those facts are stored, locked, published, and read back.
 
 The schema is defined by forward-only versioned SQL files in
 `crates/persistence/migrations/`, embedded as the static `MIGRATOR` and applied
-by one `migrate` call. Fifteen files form the per-domain baseline: one schema
-split by domain, applied only as a whole in filename order, with
+by one `migrate` call. Fifteen files form the baseline: one schema split by
+domain, applied only as a whole in filename order, with
 `HUB_FENCE_MIGRATION_VERSION` naming the last of them. Every later file is a
 forward migration on top of that baseline. SQLx records each applied file and
 its checksum in `_sqlx_migrations`.
 
 The schema is normalized and purpose-specific: mutable current-state rows
 guarded by constraints and triggers, and append-only facts that triggers protect
-from update, delete, and truncate. Three singletons in the core file anchor the
-daemon: the hub-fence generation that fences the connection pool, the outbox
-sequence allocator, and the outbox delivery cursor.
+from update, delete, and truncate. The core file holds three singletons: the
+hub-fence generation that fences the connection pool, the outbox sequence
+allocator, and the outbox delivery cursor.
 
 One append-only, user-global `durable_command` registry claims every command
 identifier across all kinds and sessions, and each command kind has one typed
@@ -62,8 +62,7 @@ The transactional outbox is the only path from a committed transition to a
 client-visible event. Two header tables, one for core kinds and one for
 delegation kinds, feed one delivery sequence, and each event kind has a typed
 record table. `OutboxDispatcher` is the single consumer; it hands one event at a
-time to a synchronous consumer and advances the cursor only when the consumer
-accepts.
+time to a synchronous consumer.
 
 ## Decisions
 
@@ -96,7 +95,7 @@ While there is exactly one deployment and no release, the collapse repeats
 whenever forward migrations accumulate on the baseline.
 
 Dogfood session and conversation data survive every collapse. Repository-watch
-data is disposable, and that matters only for a repository-watch campaign that
+data is disposable, which matters only for a repository-watch campaign that
 drops those tables by forward migration; a collapse authorizes no drop.
 
 Every function reachable from a table constraint or index expression pins its
@@ -194,9 +193,8 @@ A stopped delegated child keeps its physical execution evidence; eligibility
 excludes it through its logical terminal proof, and a late provider response is
 discarded rather than stored.
 
-The event is written in the committing transaction, and a guarded transition
-that changes no durable state appends none, so state without its event, or an
-event without its state, is unrepresentable.
+A guarded transition that changes no durable state appends no event, so state
+without its event, or an event without its state, is unrepresentable.
 
 The command-settled record authenticates its header without the session column,
 because that column is null for a receipt with no session and a null key member
