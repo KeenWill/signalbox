@@ -630,9 +630,10 @@ fact about the pull request it stalled on: an event carrying a head other than
 the stalled one, or review activity against it.
 
 A completed approval-judge escalation judged under dispatch authority is an
-execution-failure terminal transition rather than an attended approval wait,
-except while operator-commissioned authority still stands, when the turn keeps
-awaiting approval.
+execution-failure terminal transition rather than an attended approval wait. The
+turn keeps awaiting approval while a steer names it, while operator-commissioned
+authority still stands, and while authority still stands for a sweep-dispatched
+session that already recorded an escalation.
 
 While a pull request's lifecycle remains terminal, repository watch applies the
 parent-only stop to each generation-one goal it commissioned for that pull
