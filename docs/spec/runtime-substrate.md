@@ -349,22 +349,26 @@ that could add a model-visible tool, an instruction source, an external
 interaction or delegated execution, or that could replace the pinned executable;
 prompt text is never a capability boundary. Before spawn the adapter clears the
 parent environment and copies only its allowlist of home, executable and
-temporary paths, XDG, locale, certificate and proxy variables. An allowlisted
-proxy value that embeds URL userinfo or is not UTF-8 refuses the exchange as
-proven unsent before spawn, because the child would receive that credential
-verbatim. Under the Claude Code CLI the invocation excludes ambient settings,
-sessions, slash commands, browser integration, plugins and built-in tools and
-allows only the declared MCP tool names; the initial event must report no slash
-commands, skills or plugins and must identify the pinned version, and any
-mismatch is stream-protocol boundary loss, not a relaxed invocation. The one
-native hook the adapter installs is a session-start command that runs the
-private MCP bridge and holds the CLI until that bridge has served its tool list.
-A Claude Code tool proposal must name the private MCP namespace, match a
-declared schema name, carry a unique nonempty id and object arguments, and
-receive exactly one matching acknowledgement result. When an operation carries
-an explicit catalog-governed control, a CLI adapter validates the exact target
-capability record before checking its ambient-login reference and never
-delegates validation to the CLI.
+temporary paths, XDG, locale, terminal, certificate and proxy variables. An
+allowlisted proxy value that embeds URL userinfo or is not UTF-8 refuses the
+exchange as proven unsent before spawn, because the child would receive that
+credential verbatim. A copied credential home is absolutized against the
+parent's working directory first, and one that is empty or resolves to no
+absolute path refuses the exchange the same way, because the child would
+otherwise select an ambient login store under its own working directory. Under
+the Claude Code CLI the invocation excludes ambient settings, sessions, slash
+commands, browser integration, plugins and built-in tools and allows only the
+declared MCP tool names; the initial event must report no slash commands, skills
+or plugins and must identify the pinned version, and any mismatch is
+stream-protocol boundary loss, not a relaxed invocation. The one native hook the
+adapter installs is a session-start command that runs the private MCP bridge and
+holds the CLI until that bridge has served its tool list. A Claude Code tool
+proposal must name the private MCP namespace, match a declared schema name,
+carry a unique nonempty id and object arguments, and receive exactly one
+matching acknowledgement result. When an operation carries an explicit
+catalog-governed control, a CLI adapter validates the exact target capability
+record before checking its ambient-login reference and never delegates
+validation to the CLI.
 
 `expose_bytes` is the sole read path on a credential value, and the HTTP
 adapters call it for exactly two purposes: building request authentication and
@@ -387,18 +391,19 @@ adapter replaces only the already allowlisted configuration-directory variable
 with a private request-scoped directory, never adds the API-key variable to the
 child environment, and removes the directory when the capability drops.
 
-Provider-controlled text is credential-sanitized before it leaves the adapter:
-evidence text is redacted before any truncation, tool-argument JSON is redacted
-JSON-aware, and streamed deltas are redacted with a held-back trailing prefix.
-When ordering forces a held prefix out it is replaced with a redaction marker,
-so a possible secret prefix is destroyed rather than delivered. Because no
-credential value crosses a CLI adapter's boundary under ambient delivery,
-CLI-controlled text and JSON are recursively scrubbed by credential-bearing
-member names and token shapes before they leave the crate. For any delta
-fragmentation of one text stream, the concatenated streamed output is never less
-redacted than a stateless scan of the concatenated provider text. Fail-closed
-suppression is absorbing for a sink's lifetime: usage reports, other fact
-boundaries and terminal flushes never re-enable provider-controlled bytes.
+Provider-controlled text is credential-sanitized before it leaves the adapter.
+An adapter that reads the credential value redacts that exact value from the
+text it emits: evidence text before any truncation, tool-argument JSON
+JSON-aware, and streamed deltas with a held-back trailing prefix. When ordering
+forces a held prefix out it is replaced with a redaction marker, so a possible
+secret prefix is destroyed rather than delivered. Under an ambient CLI login no
+credential value crosses the adapter's boundary, so CLI-controlled text and JSON
+receive only recursive scrubbing by credential-bearing member names and token
+shapes before they leave the crate. For any delta fragmentation of one text
+stream, the concatenated streamed output is never less redacted than a stateless
+scan of the concatenated provider text. Fail-closed suppression is absorbing for
+a sink's lifetime: usage reports, other fact boundaries and terminal flushes
+never re-enable provider-controlled bytes.
 
 Each CLI adapter's build derives its supported-version constant from the exact
 version in its pin manifest, so the manifest is the sole source. The daemon
@@ -410,13 +415,16 @@ reported version equals the supported version and compares the CLI's complete
 feature list, including stage and default, with an exact classified inventory.
 In every smoke workflow, forks are excluded by GitHub secret withholding and by
 three explicit repository-name comparisons, no credential is echoed or passed in
-argv, and the test binary comes from a credential-free build, so no build script
-or procedural macro runs while the key is readable. The direct-HTTP smokes
-reference their secret only in the step that spends the exchange. Each CLI smoke
-references it in a setup step before that: the Claude smoke writes it to a file
+argv, and the test binary is compiled before any step carries the credential.
+The direct-HTTP smokes reference their secret only in the step that spends the
+exchange, and that step runs the compiled binary directly, so no build script or
+procedural macro runs while the key is readable. Each CLI smoke references its
+secret in a setup step before the exchange: the Claude smoke writes it to a file
 and gives the exchange step only that path, and the Codex smoke pipes it on
 stdin into the CLI's own login, which writes the credential store the CLI then
-reads. Each CLI smoke removes what it materialized when the job ends.
+reads. The exchange step then invokes the compiled test through Cargo, so its
+freshness check runs after credential setup. Each CLI smoke removes what it
+materialized when the job ends.
 
 `OperatorFailureClass` states only a failure's severity and carries no user
 content, so shared telemetry may emit it while the underlying error keeps its
