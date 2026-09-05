@@ -1,27 +1,28 @@
 # Identity, commands, and telemetry correlation
 
-This subsystem gives every durable fact an opaque identity, records every caller
-command once so replay is deterministic, and records who issued a command
-without granting that record any authority.
+This subsystem gives each identity-bearing durable fact an opaque identity,
+records every caller command once so replay is deterministic, and records who
+issued a command without granting that record any authority.
 
 ## Map
 
-Signalbox names each durable thing with a UUID-backed identity type and each
-caller command with one durable command identifier. This page owns the identity
-types, the command registry, the actor field that records who issued a command,
-and the rule for what operational telemetry may carry. Transaction mechanics,
-locking, and reconstitution belong to
+Signalbox names each identity-bearing durable fact with a UUID-backed identity
+type and each caller command with one durable command identifier. Rows keyed by
+a parent identity and an ordinal carry no identity of their own. This page owns
+the identity types, the command registry, the actor field that records who
+issued a command, and the rule for what operational telemetry may carry.
+Transaction mechanics, locking, and reconstitution belong to
 [persistence-protocol](persistence-protocol.md); what each command does belongs
 to the page for its subsystem.
 
 Identities come from three sources. The caller supplies exactly one, the
 `DurableCommandId` that every application request constructor accepts as its
-idempotency key. The daemon mints the identity of every durable fact it records.
-Configuration reference keys are the third source: a direct model selection or a
-model alias arrives inside a command payload and names an operator-configured
-selection. `ProviderModelIdentity` is a normalized provider-and-model value the
-operator configures. It is stored on turn and model-call rows and is neither
-minted nor a command key.
+idempotency key. The daemon mints the identity of every identity-bearing fact it
+records. Configuration reference keys are the third source: a direct model
+selection or a model alias arrives inside a command payload and names an
+operator-configured selection. `ProviderModelIdentity` is a normalized
+provider-and-model value the operator configures. It is stored on turn and
+model-call rows and is neither minted nor a command key.
 
 The identity types are built by the `define_identity!` macro in `crates/domain`.
 Generation is an application-layer effect: `crates/domain` depends on `uuid`
@@ -120,8 +121,11 @@ candidate is discarded.
 
 All claimed command identifiers live in one user-global registry; no command
 kind, session, or client has a separate namespace. The registry and every typed
-record table are append-only, enforced by `reject_immutable_record_change`
-triggers, so a claimed identifier's recorded meaning is never rewritten.
+record table other than the compaction command's are append-only, enforced by
+`reject_immutable_record_change` triggers. A compaction command record moves
+once from pending to applied or failed under its own guard, which keeps its
+request fields immutable. A claimed identifier's recorded meaning is therefore
+never rewritten.
 
 The boundary that admitted a command stamps the issuer principal on its registry
 row: the principal's kind and, for a module, the module name.

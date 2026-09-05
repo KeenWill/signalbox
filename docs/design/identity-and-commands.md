@@ -6,11 +6,12 @@ This design is not built; it extends
 ## Goal
 
 Build the items the identity and command subsystem has committed to but lacks:
-registry kinds for the runner recovery commands, production generators for three
-identity types that have storage but no writer, and the two reserved storage
-versions that carry runner placement. Actor attribution extends to every command
-family that records a caller's intent, including a program arm, so a
-program-driven turn is never recorded as user-issued.
+registry kinds for the runner recovery commands, production generators for the
+four identity types that lack one, and the optional runner placement that the
+two reserved storage versions introduce. `Actor` gains a program arm that
+submit-input records, replace-session-defaults gains an actor field, and
+create-session adoption stays an explicit maintainer choice, so a program-driven
+turn is never recorded as user-issued.
 
 ## Shape
 
@@ -45,13 +46,16 @@ verbs; their registry kinds and tables already exist. Each generator mints
 immediately before the domain transition that creates the fact, as the spec page
 requires of every generator.
 
-Imported-creation storage version 4 and create-session storage version 5 carry
-an optional runner placement in the command payload. The placement is a
-caller-supplied semantic field, so it participates in replay equality in both
-creation modes, including template-derived creation. A replay carrying a
-different placement, or a placement where the first handling had none, is
-conflicting reuse. Each version's decoder accepts the payload and the supported
-version set for its kind becomes contiguous.
+Imported-creation storage version 4 and create-session storage version 5
+introduce an optional runner placement in the command payload, and every later
+version of each kind carries it. Current writers keep their version and store
+the placement, so no field added after the reserved numbers is lost. A row at a
+later version written before the field existed reconstitutes with no placement.
+The placement is a caller-supplied semantic field, so it participates in replay
+equality in both creation modes, including template-derived creation. A replay
+carrying a different placement, or a placement where the first handling had
+none, is conflicting reuse. Each version's decoder accepts the payload and the
+supported version set for its kind becomes contiguous.
 
 `Actor` gains a program arm: a verified reference to the issuing program run,
 constructible only by the program substrate's host-side session capability, with
@@ -86,11 +90,14 @@ earlier version reconstitutes.
   test that names it.
 - An equal replay of a runner replacement during provisioning returns the
   pending disposition; after the result row commits it returns that result.
-- The three identity types have production generators and no Postgres column
+- `ProviderTargetEvidenceId`, `WorkspaceId`, `GitRemoteMintId`, and
+  `GitRemoteWithdrawalId` have production generators, and no Postgres column
   gained an identity-generating default.
-- Version 4 imported-creation and version 5 create-session records decode,
-  compare placement in replay equality, and the supported version sets are
-  contiguous.
+- Version 4 imported-creation and version 5 create-session records decode, and
+  the supported version sets are contiguous.
+- Every later version carries the placement, current writers store it, rows
+  written before the field reconstitute it absent, and replay equality compares
+  it.
 - A program-issued submit-input records the program actor, and replaying its
   identifier under the user actor is conflicting reuse.
 - A replace-session-defaults record at the new version carries its actor, and
