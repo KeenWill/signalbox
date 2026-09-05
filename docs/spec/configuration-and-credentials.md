@@ -154,6 +154,12 @@ Trigger actions and the exclusions they create are durable. How an attempt ends
 when a pool admits no member is owned by
 [credential availability](credential-availability.md).
 
+For rate-limit and overload failures, the credential-availability machine
+creates an authorized same-member retry before applying the pinned trigger
+action while that member remains below the configured attempt bound.
+Provider-internal failures use the same retry rule but have no trigger key; they
+terminalize at the bound.
+
 The session-template catalog is read after the model catalog. Each template
 binds a name and version to a model or alias, a system prompt, and a
 dangerous-tool blanket. A prompt is inline or a file reference, either relative
@@ -381,6 +387,16 @@ a runner. An explicit `ambient` login nevertheless retains same-user filesystem
 powers outside the grant channel.
 
 ## Boundary contracts
+
+The optional `[codex_cli].model_context_window_overrides` map is an inline TOML
+table; a nested `[codex_cli.model_context_window_overrides]` table is invalid.
+Every key exactly matches the `provider_model` of a configured model routed
+through the `codex_cli` adapter, every value is a positive raw Codex
+`model_context_window` token count, and any unmatched or differently routed key
+fails startup. Codex applies its own reservation to that raw count;
+`context_window_tokens` remains the independently configured usable
+post-reservation ceiling enforced by the daemon, and the loader does not derive
+either value from the other.
 
 The daemon refers to a credential by its non-secret name everywhere except at
 the point of use. No credential value, credential file path, or database URL
