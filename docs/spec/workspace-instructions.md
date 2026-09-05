@@ -332,11 +332,11 @@ after recovery.
 Failing closed waits for reconciliation; it does not pre-empt it. A retained
 turn can hold an unstopped in-flight model call or external-effect tool attempt,
 and the owning
-[startup recovery contract](turn-lifecycle-and-scheduling.md#startup-scan-and-recovery)
-requires such an operation to be parked as ambiguous rather than terminalized —
-it may already have acted. Revocation therefore never writes a terminal failure
-over that wait or releases the slot ahead of it. The turn is marked at recovery,
-root access is blocked from that moment on the same access-time terms as the
+[startup recovery contract](turn-lifecycle-and-scheduling.md#contracts) requires
+such an operation to be parked as ambiguous rather than terminalized — it may
+already have acted. Revocation therefore never writes a terminal failure over
+that wait or releases the slot ahead of it. The turn is marked at recovery, root
+access is blocked from that moment on the same access-time terms as the
 unadmitted case, and the close is taken by the recovery path once the
 outstanding operation reconciles, carrying the typed finding that names the
 bundle and the absent root. Nothing new can be rendered from the removed root
@@ -385,11 +385,11 @@ it never degrades to a path glob or newest-content match. Runner-workspace
 selectors remain unresolved until the runner discovery protocol exists.
 
 The effective eligibility snapshot is immutable for one turn. The owning
-[activation transaction](turn-lifecycle-and-scheduling.md#the-activation-transaction)
-copies the exact ordered eligibility list effective under its session lock and
-records its versioned SHA-256 hash. Replacement serializes on the same lock and
-affects only later activations. A registered bundle absent from that snapshot
-cannot be enumerated, previewed, or admitted.
+[activation transaction](turn-lifecycle-and-scheduling.md) copies the exact
+ordered eligibility list effective under its session lock and records its
+versioned SHA-256 hash. Replacement serializes on the same lock and affects only
+later activations. A registered bundle absent from that snapshot cannot be
+enumerated, previewed, or admitted.
 
 An eligibility entry is authority-qualified, not a bare identity. Each names one
 `InstructionBundleId` together with the authorizing root the session reaches it

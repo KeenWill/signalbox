@@ -366,7 +366,7 @@ local runner orchestration are specified in
 cleanup, contract-gap, and session-composition questions this section previously
 carried are decided, and each decision is stated by the contract page that owns
 it: staged replacement ordering and the runner-recovery turn phase in
-[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md#runner-loss-session-recovery);
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md);
 same-runner recovery after a registration-triggered loss, deployment-scoped
 successor promotion, non-transferable workspace cleanup, pinned canonical digest
 bytes, runner-to-daemon failure frames, workspace-release acknowledgement,
@@ -506,9 +506,9 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
 - **Ambiguous tool-wait resolution.** Who may record resolving evidence, how an
   exact accepted-risk continuation is represented, and which effects permit it
   beyond the
-  [proof-bearing terminal paths](spec/turn-lifecycle-and-scheduling.md#runner-loss-session-recovery)
-  remain undecided. Blocks reconciliation and continuation from
-  `AwaitingToolRecovery`. (S06)
+  [proof-bearing terminal paths](spec/turn-lifecycle-and-scheduling.md) remain
+  undecided. Blocks reconciliation and continuation from `AwaitingToolRecovery`.
+  (S06)
 - **Durable tool-definition revisioning.** The implemented compiled catalog is
   immutable for one process lifetime. A dynamic catalog or a deployment that
   changes a definition while requests are outstanding must first decide how the

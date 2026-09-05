@@ -786,8 +786,8 @@ handling already released the wait it would now be refused for; and an absent
 session is left to the transaction's recorded `session_not_found`. Every other
 request reaches the authoritative transaction, which applies the accepted
 `Interrupt` delivery in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md#occupied-slot-input-handling)
-and revalidates the expected active turn under the scheduler lock. A caller that
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) and
+revalidates the expected active turn under the scheduler lock. A caller that
 loses a race there receives `active_turn_mismatch` when another turn took the
 slot, or `no_active_turn` when the winning decision left the slot empty. The
 verb therefore supplies the interrupt authority a reconciliation-required
@@ -805,10 +805,9 @@ Resume and fork are explicit and have the semantics owned by
 [sessions-and-transcript](sessions-and-transcript.md#create-from-an-imported-frontier).
 
 `stop_turn` is the explicit stop verb, and it is the accepted `Interrupt`
-delivery in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md#occupied-slot-input-handling)
-on the wire — no standalone active-turn cancellation command exists (INV-029).
-The request names the exact turn the caller observed active and carries the
+delivery in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) on
+the wire — no standalone active-turn cancellation command exists (INV-029). The
+request names the exact turn the caller observed active and carries the
 successor content the interrupt algebra requires: an applied interrupt is the
 only cancellation authority, and it binds an immediate-successor origin in the
 same transaction. Terminalization flows through the lifecycle — a running turn
@@ -2210,7 +2209,7 @@ Together these guards enforce one active daemon process—and therefore one
 dispatcher and its process-local fan-outs—for a database, while preventing a
 successor's migration or recovery from overlapping an old daemon's authoritative
 work. Guard-session monitoring and fatal-loss behavior are owned by
-[Daemon runtime: startup order and shutdown](turn-lifecycle-and-scheduling.md#daemon-runtime-startup-order-and-shutdown).
+[Daemon runtime: startup order and shutdown](turn-lifecycle-and-scheduling.md).
 For each attempt, the dispatcher:
 
 1. starts a PostgreSQL transaction and locks the singleton

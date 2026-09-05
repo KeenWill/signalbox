@@ -1143,9 +1143,9 @@ call is authorized and in flight as the replacement runs, the replacement is
 staged rather than refused: the transition appends its semantic boundary only
 after that call reaches its observation boundary, so the call's own output
 appends first and the prefix-only frontier law holds
-([turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md#runner-loss-session-recovery)).
-Safe retry authority exists only for a pinned lost runner and can be consumed
-only as part of its user replacement; it never causes automatic dispatch.
+([turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md)). Safe retry
+authority exists only for a pinned lost runner and can be consumed only as part
+of its user replacement; it never causes automatic dispatch.
 
 Reconstitution accepts a complete public raw-facts input and rejects ordinary
 `Unpinned` above revision one unless append-only history proves an exact

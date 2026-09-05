@@ -7,10 +7,9 @@ trigger vocabulary, and admission rules are owned by
 the successor call's own mechanics by
 [availability successor calls](model-call-execution.md#availability-successor-calls);
 the phase algebra by
-[turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot);
-the storage protocol by
-[persistence protocol](persistence-protocol.md#lock-protocol); the entry
-vocabulary by
+[turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md); the storage
+protocol by [persistence protocol](persistence-protocol.md#lock-protocol); the
+entry vocabulary by
 [sessions and the transcript](sessions-and-transcript.md#when-entries-come-to-exist);
 the wire shapes by
 [process protocol](process-protocol.md#credential-pool-preparation-failure); and
@@ -153,17 +152,16 @@ parked wait is not a selection outcome at all: the owning lifecycle contract
 consumes the wait, creates a fresh immediate-successor attempt, records the
 applied-interrupt proof, ends that attempt `AfterCancellation(Cancelled)`,
 appends `TurnCancelled` after the wait's latest frontier, and terminalizes the
-turn `Cancelled`
-([turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot)).
-None of that is the `terminal` row, whose projections are `Failed`,
-`TurnFailed`, and a provider `TerminalEvidence` — routing a cancellation through
-it would persist the wrong disposition and the wrong transcript entry, and would
-report an operator's own stop as a provider failure. What cancellation does
-share with `terminal` is only that it authorizes no successor. And a
-delivery-layer credential failure — a rejected daemon-owned OAuth refresh, or a
-credential-home identity that failed its walk — never enters this machine at
-all: it occurs before any provider request, is typed as its own refresh or
-credential-home failure, and quarantines the profile directly under
+turn `Cancelled` ([turn lifecycle](turn-lifecycle-and-scheduling.md)). None of
+that is the `terminal` row, whose projections are `Failed`, `TurnFailed`, and a
+provider `TerminalEvidence` — routing a cancellation through it would persist
+the wrong disposition and the wrong transcript entry, and would report an
+operator's own stop as a provider failure. What cancellation does share with
+`terminal` is only that it authorizes no successor. And a delivery-layer
+credential failure — a rejected daemon-owned OAuth refresh, or a credential-home
+identity that failed its walk — never enters this machine at all: it occurs
+before any provider request, is typed as its own refresh or credential-home
+failure, and quarantines the profile directly under
 [credential deliveries](configuration-and-credentials.md#credential-deliveries).
 The pool's trigger policy does not see it, and no row above describes it.
 
@@ -177,7 +175,7 @@ derived view and a row disagree, the row governs.
 Each projection below is a column above, and names the page that owns it:
 
 - Turn phase, attempt disposition, and wake conditions —
-  [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot).
+  [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md).
 - Continuation origins, durable record shapes, and lock order —
   [persistence protocol](persistence-protocol.md#lock-protocol).
 - Transcript producers and semantic entries —

@@ -836,8 +836,7 @@ Locks per transaction, in acquisition order:
   temporary boundaries are sound only while eligibility is the one immutable
   empty value. The committed nonempty eligibility surface moves every manifest
   into activation under this same scheduler lock, as
-  [the activation transaction](turn-lifecycle-and-scheduling.md#the-activation-transaction)
-  requires.
+  [the activation transaction](turn-lifecycle-and-scheduling.md) requires.
 
 - **StartEligibleTurn** and nonterminal **model-call execution transactions**
   (prepare and authorize): first model-call insertion first takes the
@@ -858,8 +857,7 @@ Locks per transaction, in acquisition order:
   the admitted-set locks stated here, in the tool-loop bullet below, and in the
   `ReplaceSessionDefaults` bullet below are the protocol that functionality must
   follow. This inventory fixes their order and mode. The instruction eligibility
-  freeze that
-  [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md#the-activation-transaction)
+  freeze that [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md)
   adds to `StartEligibleTurn`, and the session-eligibility replacement command,
   take the session's admitted-set head immediately after the `session_scheduler`
   row, before the `session_current_defaults` pointer row, and before any
@@ -2179,10 +2177,9 @@ below the current bound. Any one such member suffices, since one admissible
 member is all preparation needs. A bound raised, lowered, or removed across a
 restart is therefore evaluated the same way for every member of every wait,
 without waiting for an unrelated release. These are the shapes required by
-[turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot).
-Reconstitution and wake must fail closed on partial, stale, or mismatched
-evidence. This paragraph constrains that future schema; no present storage
-surface provides it.
+[turn lifecycle](turn-lifecycle-and-scheduling.md). Reconstitution and wake must
+fail closed on partial, stale, or mismatched evidence. This paragraph constrains
+that future schema; no present storage surface provides it.
 
 ## Open edges
 

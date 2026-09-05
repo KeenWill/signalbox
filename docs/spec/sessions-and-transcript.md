@@ -1021,10 +1021,10 @@ missing-record, non-prefix, cross-session, or second placement boundary fails
 closed. When the installing command runs while an authorized model call is still
 in flight, the boundary is appended only after that call's observation commits,
 so the call's own entries precede it and the prefix-only law holds
-([turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md#runner-loss-session-recovery)).
-The entry copies no runner advertisement, workspace path, credential fact, or
-tool output; the placement record remains its content authority. The provider
-projection resolves that record to the exact injected placement event owned by
+([turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md)). The entry
+copies no runner advertisement, workspace path, credential fact, or tool output;
+the placement record remains its content authority. The provider projection
+resolves that record to the exact injected placement event owned by
 [model-call execution](model-call-execution.md#frontier-rendering) (INV-015,
 INV-044).
 
