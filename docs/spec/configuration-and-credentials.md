@@ -290,8 +290,8 @@ delivery, where a matrix needs two.
 
 `ambient` has no account identity at admission and never acquires one, because
 the daemon never reads the ambient login store; so a document holds at most one
-`ambient` profile per CLI adapter and never combines one with a `codex_home`
-profile.
+`ambient` profile per CLI adapter and never combines a Codex `ambient` profile
+with a `codex_home` profile.
 
 Member independence is stated as one property with a per-delivery disposition
 rather than a list of rejected alias spellings, because a rejection list covers
