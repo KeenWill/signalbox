@@ -38,9 +38,10 @@ change adds a capability derived from a model name or a provider probe.
 
 ## Acceptance
 
-Every value the screen offers for a direct model appears in that model's
-daemon-provided capability record. No Swift source carries a reasoning-level,
-fast-mode, or service-tier table of its own beyond the protocol types. A
-submitted overlay marks untouched members as inherit and chosen members as set
-or clear, and a defaults read returns the same provenance. Automatic adjustments
-shown to the user are the ones the daemon recorded.
+Every set(value) choice the screen offers for a direct model appears in that
+model's daemon-provided capability record; inherit and clear are overlay states,
+not capability values. No Swift source carries a reasoning-level, fast-mode, or
+service-tier table of its own beyond the protocol types. A submitted overlay
+marks untouched members as inherit and chosen members as set or clear, and a
+defaults read returns the same provenance. Automatic adjustments shown to the
+user are the ones the daemon recorded.

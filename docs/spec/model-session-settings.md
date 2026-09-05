@@ -16,18 +16,21 @@ value, and `ModelCapabilities` decides whether the selected model supports it.
 Settings resolve highest to lowest: per-call override, session override, the
 selected model's named settings profile, then the deployment global default.
 Each nullable override is inherit, clear, or set(value): inherit consults the
-next layer, clear selects the provider default, and set requests the value. The
-profile catalog and the global default are daemon configuration, described on
+next layer, clear selects the provider default, and set requests the value. A
+fast-mode override admits only inherit or set(value). The profile catalog and
+the global default are daemon configuration, described on
 [configuration-and-credentials.md](configuration-and-credentials.md). The three
 lower layers resolve when a session defaults epoch is installed; the per-call
 layer resolves at input acceptance, under the turn-binding rule on
 [sessions-and-transcript.md](sessions-and-transcript.md).
 
-Every configured model carries one capability record: the reasoning levels and
-service tiers it supports, and how it supports fast mode. Fast mode is either a
-request control on the selected target or a declared alternate serving target. A
-model change carries the inherited settings to the new model, adjusts those the
-new model does not support, and records each adjustment.
+A model's capability record lists the reasoning levels and service tiers it
+supports, and how it supports fast mode. An operation needs the exact record for
+its target only when it sets an explicit reasoning level, enables fast mode, or
+sets a service tier; a provider-default-only operation needs none. Fast mode is
+either a request control on the selected target or a declared alternate serving
+target. A model change carries the inherited settings to the new model, adjusts
+those the new model does not support, and records each adjustment.
 
 Two durable events record settings outcomes: `SessionModelSettingsChanged` when
 a defaults replacement changes a setting or model, and
@@ -68,8 +71,9 @@ not run a provider CLI during request preparation.
 ## Contracts
 
 A reasoning level of none is an explicit provider value, distinct from an absent
-reasoning setting, which selects the provider default. Every adapter maps none
-to a value and absence to an omitted field.
+reasoning setting, which selects the provider default. Every adapter maps
+absence to an omitted field and maps none to a provider value or refuses it as
+unsupported; the Anthropic and Claude Code adapters refuse it.
 
 Fast mode is not a model name and is independent of service tier, even where an
 adapter translates both controls onto one provider field.
