@@ -19,12 +19,13 @@ per-member evidence rows.
 The machine's endings partition on questions asked in order: did selection admit
 a member; if not, was any otherwise-admissible member skipped only for its
 concurrency bound; does the exhaustion select a wait; is the admission a fresh
-one or the release of a parked wait; has this availability chain already issued
-a call. The four endings below join the five the spec page states, making nine,
-and nothing else divides them. The release question divides only the endings
-that select no wait: a release that selects a member reaches selected, and one
-that re-parks re-enters the wait ending, because neither ending's projections
-change with the path that reached it.
+one or the release of a parked wait; and was a call issued, by the failing
+attempt at an admission or by this chain at a release. The four endings below
+join the five the spec page states, making nine, and nothing else divides them.
+The release question divides only the endings that select no wait: a release
+that selects a member reaches selected, and one that re-parks re-enters the wait
+ending, because neither ending's projections change with the path that reached
+it.
 
 Contended-wait: nothing is admissible and at least one otherwise-admissible
 member was skipped only for its bound. The turn enters the
@@ -61,9 +62,11 @@ deadline-free wait.
 Wait-transition fail (no call): a released wait finds the pool exhausted, no
 wait is selected again, and this chain has issued no call. The wait's own
 attempt is immutable, so one transaction consumes the wait, opens a fresh
-call-free attempt, ends it KnownFailure, and terminalizes the turn Failed. The
-fresh attempt's continuation origin is the wait-release origin naming the
-consumed wait; the unique continuation chain is total over attempts, so an
+call-free attempt, ends it KnownFailure, reclassifies any steering still pending
+on the source turn as a queued successor, and terminalizes the turn Failed. Both
+terminalizing releases owe that reclassification, as the parked-stop transaction
+does. The fresh attempt's continuation origin is the wait-release origin naming
+the consumed wait; the unique continuation chain is total over attempts, so an
 attempt without an origin could not be reconstituted. The producer, records,
 wire shape and evidence are pre-call fail's, plus the consumed wait.
 
@@ -89,10 +92,11 @@ member holding one never qualifies, whatever else it holds. A pending
 `switch_next_turn` displacement is clearable, because an operator clear removes
 it and publishes the member-availability update that wakes the wait. Where no
 member qualifies, no wait is selected and the exhaustion ends in a failure
-ending exactly as a `fail` pool would. Whether this chain has issued a call
-chooses which: pre-call fail or post-failure fail at a fresh admission,
-wait-transition fail (no call) or wait-transition fail (after call) at a
-release.
+ending exactly as a `fail` pool would. At an admission the failing attempt
+chooses which: pre-call fail when that attempt is call-free, post-failure fail
+when the observation closing a provider failure finds the exhaustion. At a
+release, whether this chain has issued a call chooses wait-transition fail (no
+call) or wait-transition fail (after call).
 
 A contended wait that becomes exhausted re-runs the exhaustion policy rather
 than staying parked. When a woken contended waiter finds every formerly bounded
@@ -212,7 +216,8 @@ spec page states.
   change that rerun admits that member and reaches selected.
 - A `park` pool in which every member holds a chain exclusion of this turn,
   alone or beside an expiring exclusion, fails rather than parking: post-failure
-  fail at a fresh admission, wait-transition fail (after call) at a release.
+  fail at the observation that closes the failure, wait-transition fail (after
+  call) at a release.
 - A contended wait whose bounded candidates all become durably excluded re-runs
   the exhaustion policy: a `fail` pool terminalizes, and a `park` pool converts
   to exhausted-wait in place only where some member's every active exclusion is

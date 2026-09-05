@@ -38,10 +38,9 @@ the operator surface that clears them is on
 
 A selection attempt reaches one of five endings: selected, pre-call fail,
 post-failure fail, successor and terminal. They split on whether selection
-admitted a member, whether this chain had already issued a call when exhaustion
-was found, and whether a failed call's cause, pinned action and proof authorize
-a successor. Every exhaustion fails, whatever exhaustion value the pool
-configures.
+admitted a member, whether the attempt that met exhaustion was call-free, and
+whether a failed call's cause, pinned action and proof authorize a successor.
+Every exhaustion fails, whatever exhaustion value the pool configures.
 
 ## Design decisions
 
@@ -80,15 +79,14 @@ pending `switch_next_turn` displacement of the member it excluded, never of the
 member it selected, because the displacement is the excluded member's record and
 consuming any other leaves it pending forever.
 
-Pre-call fail: a fresh admission finds every member excluded and this chain has
-issued no call, or the later preparation of a call-free successor attempt finds
-every member excluded. The turn terminalizes Failed and the call-free attempt
-ends KnownFailure. The pre-call exhaustion producer appends the `TurnFailed`
-transcript entry after the ended attempt's starting frontier in the transaction
-that terminalizes the turn. The ending carries no terminal evidence, because
-this chain issued no provider request and an earlier round's successful call is
-not this chain's evidence; its terminal cause is pool exhaustion, never a
-provider failure.
+Pre-call fail: the attempt that finds every member excluded is call-free, either
+a fresh chain's admission or the later preparation of a deferred successor. The
+turn terminalizes Failed and that attempt ends KnownFailure. The pre-call
+exhaustion producer appends the `TurnFailed` transcript entry after the ended
+attempt's starting frontier in the transaction that terminalizes the turn. The
+ending carries no terminal evidence, because the attempt that ends issued no
+provider request and no other attempt's call is its evidence; its terminal cause
+is pool exhaustion, never a provider failure.
 
 Post-failure fail: the observation that closes a qualifying provider failure
 finds every member excluded. The turn terminalizes Failed and adds no further
