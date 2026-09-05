@@ -35,15 +35,15 @@ are the two paths into parked. The operator queue is every parked session; the
 recorded responder does not filter it.
 
 Terminal carries one outcome from a closed vocabulary. Achievement is verified
-when a finish check passed and declared when no check did. A failure is
-retryable when a retry could clear it, structural when the same input will fail
-again (a compaction wall, a broken toolchain, a moderation block that a resume
-re-trips), and unknown when no cause was classified. A session is stopped by a
-human or a rule, and the stop records whether it is sticky. It is superseded
-when the caller names an existing session other than the one closed; the outcome
-also admits a successor-free form, for work that is gone. It is abandoned when
-an operator writes off a parked session, and retired when it never did the work
-and never will.
+when a finish check passed and declared when no check ran; a failed check blocks
+the goal instead of achieving it. A failure is retryable when a retry could
+clear it, structural when the same input will fail again (a compaction wall, a
+broken toolchain, a moderation block that a resume re-trips), and unknown when
+no cause was classified. A session is stopped by a human or a rule, and the stop
+records whether it is sticky. It is superseded when the caller names an existing
+session other than the one closed; the outcome also admits a successor-free
+form, for work that is gone. It is abandoned when an operator writes off a
+parked session, and retired when it never did the work and never will.
 
 Every session carries an owned-or-unmonitored bit, set at creation and flipped
 by a journaled adopt or release. Owned means the daemon holds a liveness
@@ -119,7 +119,7 @@ attempt whose budget is exhausted stays an exhausted recovery wait, flagged for
 the operator, with no releasing command until the deferred tool-recovery surface
 exists. A turn awaiting runner recovery is an operator wait too; the replacement
 and abandonment commands that leave the lost state are planned. A module that
-parks something wrapping a session drives the session itself to parked.
+parks something wrapping an owned session drives the session itself to parked.
 Attention states shown to operators are derived from durable facts by one
 classifier, and a read that encounters a state it does not recognize returns an
 error rather than a guess.
@@ -160,7 +160,8 @@ transaction.
 
 An unmonitored session has no deadlines and no automatic resumption; no external
 sweep other than the repo-watch start lease acts on it, and it is excluded from
-occupancy accounting. Turn-liveness recovery covers its turns, because a dead
+occupancy accounting only on the passes the reconciliation sweep admits under
+its ownership marker. Turn-liveness recovery covers its turns, because a dead
 turn left active would block its next input.
 
 Release never interrupts a live operation: a running turn completes to its
@@ -183,8 +184,8 @@ every non-terminal state regardless of ownership, except while a terminal
 outcome is pending: a session in that window rejects injection. An injection is
 never silently lost: every accepted injection settles with a durable
 injection_settled receipt, and pending injections never block terminalization. A
-turn awaiting a tool approval refuses interrupt delivery, and the other delivery
-modes stay legal.
+turn awaiting a tool approval refuses interrupt delivery; next-safe-point and
+after-current-turn delivery stay legal.
 
 On session closure, remaining queued turns retire with cause session_closed and
 an open goal generation closes as session_closed; a user-stopped generation
