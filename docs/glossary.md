@@ -59,8 +59,9 @@ provider against one exact resolved target and context frontier. See
 ## Outcome-authoritative provider call
 
 The sole model call eligible to determine one provider interaction's completion,
-refusal, failure, or cancellation; authority transfer is deferred design. See
-[model-call open edges](spec/model-call-execution.md#planned).
+refusal, failure, or cancellation. Transfer of that authority from an ambiguous
+call to its replacement is committed design, not built; see
+[model-call-execution design](design/model-call-execution.md).
 
 ## Provider-target mismatch invalidation
 

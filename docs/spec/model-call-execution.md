@@ -270,9 +270,12 @@ the provider, the daemon may prepare an unsent call again. After a known failure
 the daemon may start a new attempt with a different credential. It never sends
 again with the credential that failed in that chain. A call whose outcome is
 unknown is never retried automatically; the turn parks for recovery. A CLI
-harness may retry inside itself. The daemon records those retries as events of
-the one attempt and adds no retries of its own. A migration constraint enforces
-one call per attempt; the no-retry and no-reuse rules are unenforced.
+harness may retry inside itself. Those retries are provider-internal; the daemon
+neither observes nor records them and adds no retries of its own. A migration
+constraint enforces one call per attempt. A `switch_now` failure with proven
+non-acceptance writes a durable chain exclusion for the failed member, and
+successor selection and preparation skip excluded members; that selection, not a
+constraint, enforces no-reuse. The no-retry rule is unenforced.
 
 The terminal transition stores the input, output, cache-creation, and cache-read
 token axes independently; a null axis means the provider did not supply it, and
