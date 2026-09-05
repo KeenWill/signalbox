@@ -1,209 +1,142 @@
-//! Server-sent-events record framing.
-//!
-//! A provider-agnostic incremental parser from transport byte chunks to SSE
-//! records. Interpreting record contents belongs to each provider adapter;
-//! this layer only frames, and it reports framing trouble as typed errors so
-//! an adapter can surface stream-integrity evidence instead of guessing.
-//!
-//! Framing follows the WHATWG event-stream grammar for the constructs
-//! providers use: `event` and `data` fields, multi-line data joined with
-//! newlines, comment lines, a UTF-8 BOM at stream start, and `\n`, `\r\n`,
-//! or `\r` line terminators. The `id` and `retry` fields are parsed and
-//! ignored — no adapter resumes streams, and resuming would be a second
-//! request this layer must never make (docs/spec/runtime-substrate.md).
+//! Bounded server-sent-event framing backed by `eventsource-stream`.
+
+use std::{convert::Infallible, fmt, pin::Pin, task::Context};
+
+use eventsource_stream::{EventStream, EventStreamError, Eventsource};
+use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use futures_util::{Stream, task::noop_waker_ref};
 
 /// One framed SSE record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SseRecord {
-    /// The record's `event` field, when one was set.
+    /// The nonempty `event` field, including `message`; absent or reset is `None`.
     pub event: Option<String>,
-    /// The record's data: every `data` line joined with `\n`.
+    /// The record's data lines joined with newlines.
     pub data: String,
 }
 
-/// A framing failure. Terminal for the stream: once a failure is reported,
-/// the framer's state no longer corresponds to a record boundary, later
-/// pushes frame nothing, and the same failure is reported again.
+/// A terminal SSE framing failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SseFramingError {
-    /// One line, or one record's retained content (its joined data plus its
-    /// retained event value), exceeded the configured size limit.
+    /// One raw line or one decoded record exceeded the configured size limit.
     RecordTooLarge {
         /// The configured limit, in bytes.
         limit: usize,
     },
-    /// A line is not valid UTF-8.
+    /// The input was not a valid UTF-8 event stream.
     InvalidUtf8 {
-        /// Rendered description of the invalid sequence.
+        /// Rendered parser detail.
         detail: String,
     },
 }
 
-impl std::fmt::Display for SseFramingError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for SseFramingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::RecordTooLarge { limit } => {
-                write!(f, "SSE record exceeds the {limit}-byte limit")
+                write!(formatter, "SSE record exceeds the {limit}-byte limit")
             }
-            Self::InvalidUtf8 { detail } => write!(f, "SSE line is not valid UTF-8: {detail}"),
+            Self::InvalidUtf8 { detail } => {
+                write!(formatter, "SSE stream is not valid UTF-8: {detail}")
+            }
         }
     }
 }
 
 impl std::error::Error for SseFramingError {}
 
-/// What one push framed: every record completed before any failure, then
-/// the failure if one occurred.
-///
-/// Records and failure are reported together, never traded off: a record
-/// completed earlier in a chunk is delivered even when a later record in
-/// the same chunk fails, so evidence observed before the failure (a
-/// provider-model report, for example) does not depend on how the transport
-/// happened to batch bytes into chunks.
+/// Records completed by one push followed by an optional terminal error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SsePushOutcome {
-    /// Records completed by this push, in stream order.
+    /// Records completed in stream order.
     pub records: Vec<SseRecord>,
-    /// The framing failure this push ran into, when one occurred; terminal
-    /// for the stream.
+    /// The terminal framing failure, when one occurred.
     pub error: Option<SseFramingError>,
 }
 
-/// How the stream stood when the transport ended.
+/// How the stream stood when transport ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SseTermination {
     /// The stream ended at a record boundary.
     Clean,
-    /// The stream ended inside an undispatched record; its partial content
-    /// was discarded, which the adapter surfaces as integrity evidence.
+    /// The stream ended with undispatched material.
     TruncatedRecord,
 }
 
-/// Incremental SSE framer: push transport chunks in, take framed records
-/// out.
-#[derive(Debug)]
+type ByteStream = UnboundedReceiver<Result<Vec<u8>, Infallible>>;
+
+/// Incremental bounded wrapper around the maintained SSE decoder.
 pub struct SseFraming {
     record_limit: usize,
-    at_stream_start: bool,
-    pending_lf_swallow: bool,
+    sender: Option<UnboundedSender<Result<Vec<u8>, Infallible>>>,
+    stream: Pin<Box<EventStream<ByteStream>>>,
     failed: Option<SseFramingError>,
     line_buffer: Vec<u8>,
-    current_event: Option<String>,
-    data_lines: Vec<String>,
-    joined_data_len: usize,
+    at_stream_start: bool,
+    event_len: Option<usize>,
+    joined_data_len: Option<usize>,
+    pending_lf_swallow: bool,
+    utf8_tail: Vec<u8>,
+}
+
+impl fmt::Debug for SseFraming {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SseFraming")
+            .field("record_limit", &self.record_limit)
+            .field("failed", &self.failed)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SseFraming {
-    /// A framer enforcing two independent `record_limit` bounds: no line may
-    /// exceed it (checked as bytes are copied, so an unterminated line never
-    /// buffers past the limit), and no record's retained content — its
-    /// joined data including separators, plus its retained event value — may
-    /// exceed it. The bounds depend only on complete lines and retained
-    /// content, so transport fragmentation never changes framing results.
-    ///
-    /// Comment and ignored-field lines are bounded per line but never
-    /// accumulate, so keep-alive comments on a long-lived stream cannot
-    /// exhaust the bound; a replaced `event:` value stops counting when it
-    /// is overwritten.
+    /// Creates a decoder with a hard raw-line and decoded-record byte limit.
     pub fn new(record_limit: usize) -> Self {
+        let (sender, receiver) = unbounded();
         Self {
             record_limit,
-            at_stream_start: true,
-            pending_lf_swallow: false,
+            sender: Some(sender),
+            stream: Box::pin(receiver.eventsource()),
             failed: None,
             line_buffer: Vec::new(),
-            current_event: None,
-            data_lines: Vec::new(),
-            joined_data_len: 0,
+            at_stream_start: true,
+            event_len: None,
+            joined_data_len: None,
+            pending_lf_swallow: false,
+            utf8_tail: Vec::new(),
         }
     }
 
-    /// Consumes one transport chunk, returning every record it completes
-    /// and the framing failure it ran into, if any.
+    /// Supplies one transport chunk and returns every completed event.
     pub fn push(&mut self, chunk: &[u8]) -> SsePushOutcome {
-        let mut records = Vec::new();
         if let Some(error) = &self.failed {
             return SsePushOutcome {
-                records,
+                records: Vec::new(),
                 error: Some(error.clone()),
             };
         }
-        let mut bytes = chunk;
-        if self.pending_lf_swallow {
-            // The previous chunk ended in a CR terminator; a LF opening the
-            // next non-empty chunk belongs to the same terminator. An empty
-            // chunk consumes nothing and leaves the wait in place.
-            let Some(first) = bytes.first() else {
-                return SsePushOutcome {
-                    records,
-                    error: None,
-                };
-            };
-            if *first == b'\n' {
-                bytes = &bytes[1..];
-            }
-            self.pending_lf_swallow = false;
-        }
-        let mut index = 0;
-        while index < bytes.len() {
-            let step = match bytes[index] {
-                b'\n' => {
-                    index += 1;
-                    self.finish_line(&mut records)
-                }
-                b'\r' => {
-                    match bytes.get(index + 1) {
-                        Some(b'\n') => index += 2,
-                        Some(_) => index += 1,
-                        None => {
-                            self.pending_lf_swallow = true;
-                            index += 1;
-                        }
-                    }
-                    self.finish_line(&mut records)
-                }
-                byte => {
-                    // The line bound is enforced while copying, so an
-                    // unterminated line never buffers past the limit no
-                    // matter how the transport chunks it.
-                    self.line_buffer.push(byte);
-                    index += 1;
-                    if self.line_buffer.len() > self.record_limit {
-                        Err(SseFramingError::RecordTooLarge {
-                            limit: self.record_limit,
-                        })
-                    } else {
-                        Ok(())
-                    }
-                }
-            };
-            if let Err(error) = step {
-                self.failed = Some(error.clone());
-                return SsePushOutcome {
-                    records,
-                    error: Some(error),
-                };
-            }
+        let mut records = Vec::new();
+        if let Err(error) = self.accept_utf8(chunk, &mut records) {
+            self.failed = Some(error);
         }
         SsePushOutcome {
             records,
-            error: None,
+            error: self.failed.clone(),
         }
     }
 
-    /// Whether bytes have been accepted that no record has yet carried out.
-    ///
-    /// A loss raised while this holds — a transport failure, a cancellation, a
-    /// framing error, or an adapter byte limit — discards material the decoder
-    /// never saw, so the adapter reports its partial facts about that material
-    /// as unobserved rather than as stated negatives.
+    /// Reports whether accepted bytes have not produced a record boundary.
     pub fn holds_unframed_bytes(&self) -> bool {
-        !self.line_buffer.is_empty() || !self.data_lines.is_empty() || self.current_event.is_some()
+        !self.line_buffer.is_empty()
+            || self.event_len.is_some()
+            || self.joined_data_len.is_some()
+            || !self.utf8_tail.is_empty()
     }
 
-    /// Reports how the stream stood at end of transport. Meaningful only on
-    /// a stream that reported no framing failure.
-    pub fn finish(self) -> SseTermination {
+    /// Closes the maintained decoder and reports whether material was partial.
+    pub fn finish(mut self) -> SseTermination {
+        self.sender.take();
+        let _ = self.poll_records();
         if self.holds_unframed_bytes() {
             SseTermination::TruncatedRecord
         } else {
@@ -211,68 +144,164 @@ impl SseFraming {
         }
     }
 
-    fn finish_line(&mut self, records: &mut Vec<SseRecord>) -> Result<(), SseFramingError> {
-        let mut line = std::mem::take(&mut self.line_buffer);
-        if self.at_stream_start {
-            if line.starts_with(&[0xEF, 0xBB, 0xBF]) {
-                line.drain(..3);
+    fn accept_lines(
+        &mut self,
+        chunk: &[u8],
+        records: &mut Vec<SseRecord>,
+    ) -> Result<(), SseFramingError> {
+        for byte in chunk.iter().copied() {
+            if self.pending_lf_swallow {
+                self.pending_lf_swallow = false;
+                if byte == b'\n' {
+                    continue;
+                }
             }
-            self.at_stream_start = false;
-        }
-        let line = String::from_utf8(line).map_err(|error| SseFramingError::InvalidUtf8 {
-            detail: error.to_string(),
-        })?;
-        if line.is_empty() {
-            if !self.data_lines.is_empty() {
-                records.push(SseRecord {
-                    event: self.current_event.take(),
-                    data: std::mem::take(&mut self.data_lines).join("\n"),
-                });
-            } else {
-                self.current_event = None;
+            match byte {
+                b'\n' => self.finish_raw_line(records)?,
+                b'\r' => {
+                    self.finish_raw_line(records)?;
+                    self.pending_lf_swallow = true;
+                }
+                _ => {
+                    self.line_buffer.push(byte);
+                    if self.line_buffer.len() > self.record_limit {
+                        return Err(SseFramingError::RecordTooLarge {
+                            limit: self.record_limit,
+                        });
+                    }
+                }
             }
-            self.joined_data_len = 0;
-            return Ok(());
-        }
-        if line.starts_with(':') {
-            return Ok(());
-        }
-        let (field, value) = match line.split_once(':') {
-            Some((field, value)) => (field, value.strip_prefix(' ').unwrap_or(value)),
-            None => (line.as_str(), ""),
-        };
-        match field {
-            "event" => {
-                // Replacement semantics: only the retained (last) value
-                // counts toward the record bound. An empty event value resets
-                // the event type to the default, represented here as `None`.
-                self.current_event = (!value.is_empty()).then(|| value.to_string());
-            }
-            "data" => {
-                // Exact joined length: each line beyond the first also
-                // contributes the newline separator `join` inserts, so
-                // arbitrarily many empty data lines cannot grow the record
-                // unaccounted.
-                let separator = usize::from(!self.data_lines.is_empty());
-                self.joined_data_len += value.len() + separator;
-                self.data_lines.push(value.to_string());
-            }
-            // `id` and `retry` support stream resumption, which would be a
-            // second request; parsed and deliberately dropped. Unknown
-            // fields are ignored per the event-stream grammar.
-            _ => {}
-        }
-        self.check_record_bound()
-    }
-
-    fn check_record_bound(&self) -> Result<(), SseFramingError> {
-        let event_len = self.current_event.as_ref().map_or(0, String::len);
-        if self.joined_data_len + event_len > self.record_limit {
-            return Err(SseFramingError::RecordTooLarge {
-                limit: self.record_limit,
-            });
         }
         Ok(())
+    }
+
+    fn accept_utf8(
+        &mut self,
+        mut chunk: &[u8],
+        records: &mut Vec<SseRecord>,
+    ) -> Result<(), SseFramingError> {
+        // Only a split scalar is copied before line admission. Complete input
+        // stays borrowed so a large transport chunk cannot bypass the bounds.
+        while !self.utf8_tail.is_empty() {
+            let Some((byte, remaining)) = chunk.split_first() else {
+                return Ok(());
+            };
+            chunk = remaining;
+            self.utf8_tail.push(*byte);
+            match std::str::from_utf8(&self.utf8_tail) {
+                Ok(_) => {
+                    let completed = std::mem::take(&mut self.utf8_tail);
+                    self.accept_lines(&completed, records)?;
+                }
+                Err(error) if error.error_len().is_some() => {
+                    return Err(SseFramingError::InvalidUtf8 {
+                        detail: error.to_string(),
+                    });
+                }
+                Err(_) => {}
+            }
+        }
+        match std::str::from_utf8(chunk) {
+            Ok(_) => self.accept_lines(chunk, records),
+            Err(error) => {
+                let valid_up_to = error.valid_up_to();
+                self.accept_lines(&chunk[..valid_up_to], records)?;
+                if error.error_len().is_none() {
+                    self.utf8_tail.extend_from_slice(&chunk[valid_up_to..]);
+                    Ok(())
+                } else {
+                    Err(SseFramingError::InvalidUtf8 {
+                        detail: error.to_string(),
+                    })
+                }
+            }
+        }
+    }
+
+    fn finish_raw_line(&mut self, records: &mut Vec<SseRecord>) -> Result<(), SseFramingError> {
+        let mut raw_line = std::mem::take(&mut self.line_buffer);
+        if self.at_stream_start {
+            self.at_stream_start = false;
+            if raw_line.starts_with(b"\xef\xbb\xbf") {
+                raw_line.drain(..3);
+            }
+        }
+        let line = &raw_line;
+        let boundary = line.is_empty();
+        if !boundary {
+            let mut parts = line.splitn(2, |byte| *byte == b':');
+            let field = parts.next().unwrap_or_default();
+            let value = parts.next().unwrap_or_default();
+            let value = value.strip_prefix(b" ").unwrap_or(value);
+            match field {
+                b"event" => self.event_len = (!value.is_empty()).then_some(value.len()),
+                b"data" => {
+                    self.joined_data_len = Some(self.joined_data_len.map_or(value.len(), |len| {
+                        len.saturating_add(1).saturating_add(value.len())
+                    }));
+                }
+                _ => {}
+            }
+            if self
+                .joined_data_len
+                .unwrap_or_default()
+                .saturating_add(self.event_len.unwrap_or_default())
+                > self.record_limit
+            {
+                return Err(SseFramingError::RecordTooLarge {
+                    limit: self.record_limit,
+                });
+            }
+        }
+        // Forward only admitted complete lines, so the decoder cannot accumulate
+        // data past the retained-record bound or defer a terminal CR until EOF.
+        raw_line.push(b'\n');
+        let sent = self
+            .sender
+            .as_mut()
+            .map(|sender| sender.unbounded_send(Ok(raw_line)));
+        if !matches!(sent, Some(Ok(()))) {
+            return Err(SseFramingError::InvalidUtf8 {
+                detail: String::from("decoder input channel closed"),
+            });
+        }
+        records.extend(self.poll_records());
+        if let Some(error) = &self.failed {
+            return Err(error.clone());
+        }
+        if boundary {
+            self.event_len = None;
+            self.joined_data_len = None;
+        }
+        Ok(())
+    }
+
+    fn poll_records(&mut self) -> Vec<SseRecord> {
+        let mut records = Vec::new();
+        let mut context = Context::from_waker(noop_waker_ref());
+        loop {
+            match self.stream.as_mut().poll_next(&mut context) {
+                std::task::Poll::Ready(Some(Ok(event))) => {
+                    let event_name = self.event_len.map(|_| event.event);
+                    records.push(SseRecord {
+                        event: event_name,
+                        data: event.data,
+                    });
+                }
+                std::task::Poll::Ready(Some(Err(error))) => {
+                    self.failed = Some(map_parser_error(error));
+                    break;
+                }
+                std::task::Poll::Ready(None) | std::task::Poll::Pending => break,
+            }
+        }
+        records
+    }
+}
+
+fn map_parser_error(error: EventStreamError<Infallible>) -> SseFramingError {
+    SseFramingError::InvalidUtf8 {
+        detail: error.to_string(),
     }
 }
 
@@ -280,225 +309,36 @@ impl SseFraming {
 mod tests {
     use super::{SseFraming, SseFramingError, SseRecord, SseTermination};
 
-    fn framer() -> SseFraming {
-        SseFraming::new(1024)
-    }
-
-    fn record(event: Option<&str>, data: &str) -> SseRecord {
-        SseRecord {
-            event: event.map(str::to_string),
-            data: data.to_string(),
-        }
-    }
-
-    /// Pushes one chunk that must frame without a failure and returns its
-    /// completed records.
-    #[track_caller]
-    fn push_ok(framing: &mut SseFraming, chunk: &[u8]) -> Vec<SseRecord> {
-        let outcome = framing.push(chunk);
-        assert_eq!(outcome.error, None, "chunk was expected to frame cleanly");
-        outcome.records
-    }
-
     #[test]
-    fn one_chunk_frames_event_and_data() {
-        let mut framing = framer();
-
-        let records = push_ok(&mut framing, b"event: message_start\ndata: {\"a\":1}\n\n");
-
-        assert_eq!(records, vec![record(Some("message_start"), "{\"a\":1}")]);
+    fn fragmented_event_is_decoded_by_eventsource_stream() {
+        let mut framing = SseFraming::new(1024);
+        assert!(framing.push(b"event: ping\ndata: {\"pi").records.is_empty());
+        assert_eq!(
+            framing.push(b"ng\":true}\n\n").records,
+            vec![SseRecord {
+                event: Some(String::from("ping")),
+                data: String::from("{\"ping\":true}"),
+            }]
+        );
         assert_eq!(framing.finish(), SseTermination::Clean);
     }
 
     #[test]
-    fn a_record_split_across_chunks_frames_once_complete() {
-        let mut framing = framer();
-
-        let first = push_ok(&mut framing, b"event: ping\ndata: {\"pi");
-        let second = push_ok(&mut framing, b"ng\":true}\n\n");
-
-        assert_eq!(first, vec![]);
-        assert_eq!(second, vec![record(Some("ping"), "{\"ping\":true}")]);
-    }
-
-    #[test]
-    fn multi_line_data_joins_with_newline() {
-        let mut framing = framer();
-
-        let records = push_ok(&mut framing, b"data: first\ndata: second\n\n");
-
-        assert_eq!(records, vec![record(None, "first\nsecond")]);
-    }
-
-    #[test]
-    fn crlf_terminators_frame_like_lf() {
-        let mut framing = framer();
-
-        let records = push_ok(&mut framing, b"event: delta\r\ndata: x\r\n\r\n");
-
-        assert_eq!(records, vec![record(Some("delta"), "x")]);
-    }
-
-    #[test]
-    fn cr_terminator_split_before_its_lf_frames_once() {
-        let mut framing = framer();
-
-        let first = push_ok(&mut framing, b"data: x\r");
-        let second = push_ok(&mut framing, b"\n\r\n");
-
-        assert_eq!(first, vec![]);
-        assert_eq!(second, vec![record(None, "x")]);
-    }
-
-    #[test]
-    fn cr_terminator_split_before_a_data_line_does_not_split_the_record() {
-        let mut framing = framer();
-
-        let first = push_ok(&mut framing, b"data: a\r");
-        let second = push_ok(&mut framing, b"\ndata: b\n\n");
-
-        assert_eq!(first, vec![]);
-        assert_eq!(second, vec![record(None, "a\nb")]);
-    }
-
-    #[test]
-    fn an_empty_chunk_between_cr_and_lf_does_not_split_the_record() {
-        let mut framing = framer();
-
-        let first = push_ok(&mut framing, b"data: a\r");
-        let empty = push_ok(&mut framing, b"");
-        let second = push_ok(&mut framing, b"\ndata: b\n\n");
-
-        assert_eq!(first, vec![]);
-        assert_eq!(empty, vec![]);
-        assert_eq!(second, vec![record(None, "a\nb")]);
-    }
-
-    #[test]
-    fn comment_lines_and_unknown_fields_are_ignored() {
-        let mut framing = framer();
-
-        let records = push_ok(
-            &mut framing,
-            b": keep-alive\nid: 7\nretry: 100\ndata: kept\n\n",
-        );
-
-        assert_eq!(records, vec![record(None, "kept")]);
-    }
-
-    #[test]
-    fn leading_bom_is_stripped_from_the_first_line_only() {
-        let mut framing = framer();
-
-        let records = push_ok(&mut framing, b"\xEF\xBB\xBFdata: first\n\n");
-
-        assert_eq!(records, vec![record(None, "first")]);
-    }
-
-    #[test]
-    fn event_without_data_dispatches_nothing_and_resets() {
-        let mut framing = framer();
-
-        let records = push_ok(&mut framing, b"event: orphan\n\ndata: later\n\n");
-
-        assert_eq!(records, vec![record(None, "later")]);
-        assert_eq!(framing.finish(), SseTermination::Clean);
-    }
-
-    #[test]
-    fn empty_event_value_uses_the_default_event_type() {
-        let mut framing = framer();
-
-        let records = push_ok(&mut framing, b"event:\ndata: value\n\n");
-
-        assert_eq!(records, vec![record(None, "value")]);
-    }
-
-    #[test]
-    fn eof_inside_a_record_reports_truncation() {
-        let mut framing = framer();
-
-        let records = push_ok(&mut framing, b"event: message_delta\ndata: {\"partial\":");
-
-        assert_eq!(records, vec![]);
-        assert_eq!(framing.finish(), SseTermination::TruncatedRecord);
-    }
-
-    #[test]
-    fn eof_after_undispatched_complete_lines_reports_truncation() {
-        let mut framing = framer();
-
-        let records = push_ok(&mut framing, b"data: complete line, no blank separator\n");
-
-        assert_eq!(records, vec![]);
-        assert_eq!(framing.finish(), SseTermination::TruncatedRecord);
-    }
-
-    /// The mid-stream accessor answers the same question `finish` answers at
-    /// end of transport, so an adapter losing a stream early can tell whether
-    /// bytes are being discarded unexamined.
-    #[test]
-    fn unframed_bytes_are_visible_before_the_stream_ends() {
-        let mut framing = framer();
-
-        assert!(!framing.holds_unframed_bytes());
-
-        let records = push_ok(&mut framing, b"data: partial");
-        assert_eq!(records, vec![]);
-        assert!(framing.holds_unframed_bytes());
-
-        let records = push_ok(&mut framing, b" line\n\n");
-        assert_eq!(records.len(), 1);
-        assert!(
-            !framing.holds_unframed_bytes(),
-            "a dispatched record leaves nothing held"
-        );
-    }
-
-    #[test]
-    fn oversized_record_is_rejected_with_the_limit() {
-        let mut framing = SseFraming::new(8);
-
-        let outcome = framing.push(b"data: 123456789\n");
-
-        assert_eq!(outcome.records, vec![]);
+    fn data_only_event_uses_the_default_event_type() {
+        let mut framing = SseFraming::new(1024);
         assert_eq!(
-            outcome.error,
-            Some(SseFramingError::RecordTooLarge { limit: 8 })
+            framing.push(b"data: hello\n\n").records,
+            vec![SseRecord {
+                event: None,
+                data: String::from("hello"),
+            }]
         );
     }
 
     #[test]
-    fn oversized_event_value_is_rejected_with_the_limit() {
-        let mut framing = SseFraming::new(8);
-
-        let outcome = framing.push(b"event: 123456789\n");
-
-        assert_eq!(outcome.records, vec![]);
-        assert_eq!(
-            outcome.error,
-            Some(SseFramingError::RecordTooLarge { limit: 8 })
-        );
-    }
-
-    #[test]
-    fn keep_alive_comments_never_accumulate_toward_the_limit() {
-        let mut framing = SseFraming::new(16);
-
-        let first = push_ok(&mut framing, b": ping-1234567\n: ping-1234567\n");
-        let second = push_ok(&mut framing, b": ping-1234567\ndata: kept\n\n");
-
-        assert_eq!(first, vec![]);
-        assert_eq!(second, vec![record(None, "kept")]);
-    }
-
-    #[test]
-    fn empty_data_lines_count_their_separators_toward_the_limit() {
+    fn raw_line_limit_fails_before_unbounded_buffering() {
         let mut framing = SseFraming::new(4);
-
-        let outcome = framing.push(b"data:\ndata:\ndata:\ndata:\ndata:\ndata:\n");
-
-        assert_eq!(outcome.records, vec![]);
+        let outcome = framing.push(b"data:");
         assert_eq!(
             outcome.error,
             Some(SseFramingError::RecordTooLarge { limit: 4 })
@@ -506,89 +346,197 @@ mod tests {
     }
 
     #[test]
-    fn transport_fragmentation_never_changes_framing_results() {
-        let bytes: &[u8] = b"data: 1234567890\ndata: x\n\n";
-        let mut whole = SseFraming::new(16);
-        let mut split = SseFraming::new(16);
-
-        let from_whole = push_ok(&mut whole, bytes);
-        let first = push_ok(&mut split, &bytes[..20]);
-        let second = push_ok(&mut split, &bytes[20..]);
-
-        assert_eq!(first, vec![]);
-        assert_eq!(from_whole, second);
-        assert_eq!(from_whole, vec![record(None, "1234567890\nx")]);
+    fn incomplete_record_is_reported_at_transport_end() {
+        let mut framing = SseFraming::new(1024);
+        assert!(framing.push(b"data: partial\n").records.is_empty());
+        assert_eq!(framing.finish(), SseTermination::TruncatedRecord);
     }
 
     #[test]
-    fn a_replaced_event_value_stops_counting_toward_the_limit() {
-        // Each event line is within the limit, and the retained record
-        // (event 10 + data 1) is too; only accounting that kept counting
-        // the overwritten first value (10 + 10 + 1 = 21) would reject.
+    fn ignored_complete_lines_leave_no_unframed_material() {
+        let mut framing = SseFraming::new(32);
+        assert_eq!(
+            framing
+                .push(b": comment\nid: 7\nretry: 100\nunknown: value\nevent:\n")
+                .error,
+            None
+        );
+        assert!(!framing.holds_unframed_bytes());
+        assert_eq!(framing.finish(), SseTermination::Clean);
+    }
+
+    #[test]
+    fn ignored_lines_do_not_clear_retained_data() {
+        let mut framing = SseFraming::new(32);
+        assert_eq!(framing.push(b"data:\n: comment\n").error, None);
+        assert!(framing.holds_unframed_bytes());
+        assert_eq!(framing.finish(), SseTermination::TruncatedRecord);
+    }
+
+    #[test]
+    fn explicit_message_is_distinct_from_missing_or_reset_event() {
+        let mut framing = SseFraming::new(32);
+        assert_eq!(
+            framing
+                .push(b"event: message\ndata: a\n\ndata: b\n\nevent: message\nevent:\ndata: c\n\n")
+                .records,
+            vec![
+                SseRecord {
+                    event: Some(String::from("message")),
+                    data: String::from("a")
+                },
+                SseRecord {
+                    event: None,
+                    data: String::from("b")
+                },
+                SseRecord {
+                    event: None,
+                    data: String::from("c")
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn event_without_data_resets_at_a_blank_line() {
+        let mut framing = SseFraming::new(32);
+        assert_eq!(
+            framing.push(b"event: message\n\ndata: a\n\n").records,
+            vec![SseRecord {
+                event: None,
+                data: String::from("a")
+            }],
+        );
+        assert!(!framing.holds_unframed_bytes());
+    }
+
+    #[test]
+    fn cumulative_data_limit_fails_before_the_blank_separator() {
+        let mut framing = SseFraming::new(16);
+        assert_eq!(framing.push(b"data: 1234567890\n").error, None);
+        let outcome = framing.push(b"data: 123456\n");
+        assert_eq!(
+            outcome.error,
+            Some(SseFramingError::RecordTooLarge { limit: 16 })
+        );
+        assert!(outcome.records.is_empty());
+    }
+
+    #[test]
+    fn records_before_a_cumulative_failure_are_delivered() {
+        let mut framing = SseFraming::new(16);
+        let outcome = framing.push(b"data: kept\n\ndata: 1234567890\ndata: 123456\n");
+        assert_eq!(
+            outcome.records,
+            vec![SseRecord {
+                event: None,
+                data: String::from("kept")
+            }]
+        );
+        assert_eq!(
+            outcome.error,
+            Some(SseFramingError::RecordTooLarge { limit: 16 })
+        );
+    }
+
+    #[test]
+    fn empty_data_separators_count_toward_the_record_limit() {
+        let mut framing = SseFraming::new(5);
+        assert_eq!(
+            framing.push(b"data\ndata\ndata\ndata\ndata\ndata\n").error,
+            None
+        );
+        assert_eq!(
+            framing.push(b"data\n").error,
+            Some(SseFramingError::RecordTooLarge { limit: 5 })
+        );
+    }
+
+    #[test]
+    fn replaced_event_values_release_their_record_budget() {
         let mut framing = SseFraming::new(18);
-
-        let records = push_ok(
-            &mut framing,
-            b"event: aaaaaaaaaa\nevent: bbbbbbbbbb\ndata: x\n\n",
+        assert_eq!(
+            framing
+                .push(b"event: aaaaaaaaaa\nevent: bbbbbbbbbb\ndata: 12345678\n\n")
+                .records,
+            vec![SseRecord {
+                event: Some(String::from("bbbbbbbbbb")),
+                data: String::from("12345678")
+            }],
         );
-
-        assert_eq!(records, vec![record(Some("bbbbbbbbbb"), "x")]);
+        assert_eq!(
+            framing.push(b"event: message\ndata: 123456789012\n").error,
+            Some(SseFramingError::RecordTooLarge { limit: 18 })
+        );
     }
 
     #[test]
-    fn an_unterminated_line_is_rejected_at_the_limit_across_chunks() {
-        let mut framing = SseFraming::new(8);
+    fn split_bom_and_crlf_preserve_explicit_event_metadata() {
+        let mut framing = SseFraming::new(32);
+        assert_eq!(framing.push(b"\xef").error, None);
+        assert_eq!(framing.push(b"\xbb\xbfevent: message\r").error, None);
+        assert_eq!(framing.push(b"").error, None);
+        assert_eq!(
+            framing.push(b"\ndata: a\r\r").records,
+            vec![SseRecord {
+                event: Some(String::from("message")),
+                data: String::from("a")
+            }],
+        );
+        assert_eq!(framing.finish(), SseTermination::Clean);
+    }
 
-        let first = framing.push(b"data: 12");
-        let second = framing.push(b"3456789");
+    #[test]
+    fn a_four_byte_scalar_can_span_four_chunks() {
+        let mut framing = SseFraming::new(32);
+        assert_eq!(framing.push(b"data: \xf0").error, None);
+        assert_eq!(framing.push(b"\x9f").error, None);
+        assert_eq!(framing.push(b"\x98").error, None);
+        assert_eq!(
+            framing.push(b"\x80\n\n").records,
+            vec![SseRecord {
+                event: None,
+                data: String::from("😀")
+            }],
+        );
+        assert_eq!(framing.finish(), SseTermination::Clean);
+    }
 
+    #[test]
+    fn invalid_split_utf8_preserves_preceding_records() {
+        let mut framing = SseFraming::new(32);
+        let first = framing.push(b"data: kept\n\ndata: \xe2");
+        assert_eq!(
+            first.records,
+            vec![SseRecord {
+                event: None,
+                data: String::from("kept")
+            }]
+        );
         assert_eq!(first.error, None);
-        assert_eq!(
-            second.error,
-            Some(SseFramingError::RecordTooLarge { limit: 8 })
-        );
-    }
-
-    #[test]
-    fn invalid_utf8_line_is_rejected_as_utf8_error() {
-        let mut framing = framer();
-
-        let outcome = framing.push(b"data: \xFF\xFE\n\n");
-
         assert!(matches!(
-            outcome.error,
+            framing.push(b"x").error,
             Some(SseFramingError::InvalidUtf8 { .. })
         ));
     }
 
     #[test]
-    fn records_completed_before_a_failure_in_the_same_chunk_are_delivered() {
-        let mut framing = framer();
-
-        let outcome = framing.push(b"event: kept\ndata: first\n\ndata: \xFF\xFE\n\n");
-
-        assert_eq!(outcome.records, vec![record(Some("kept"), "first")]);
-        assert!(matches!(
-            outcome.error,
-            Some(SseFramingError::InvalidUtf8 { .. })
-        ));
-    }
-
-    #[test]
-    fn a_failed_framer_frames_nothing_and_repeats_its_failure() {
+    fn a_large_chunk_hits_the_line_limit_before_later_invalid_utf8() {
         let mut framing = SseFraming::new(8);
-        let first = framing.push(b"data: 123456789\n");
-
-        let second = framing.push(b"data: ok\n\n");
-
+        let mut chunk = vec![b'x'; 1024 * 1024];
+        chunk.push(0xff);
         assert_eq!(
-            first.error,
-            Some(SseFramingError::RecordTooLarge { limit: 8 })
+            framing.push(&chunk).error,
+            Some(SseFramingError::RecordTooLarge { limit: 8 }),
         );
-        assert_eq!(second.records, vec![]);
-        assert_eq!(
-            second.error,
-            Some(SseFramingError::RecordTooLarge { limit: 8 })
-        );
+    }
+
+    #[test]
+    fn invalid_utf8_is_terminal() {
+        let mut framing = SseFraming::new(1024);
+        assert!(matches!(
+            framing.push(&[0xff]).error,
+            Some(SseFramingError::InvalidUtf8 { .. })
+        ));
     }
 }
