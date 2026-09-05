@@ -1,66 +1,65 @@
 # Web egress threat model
 
-This page specifies the implemented security boundary for web-tool output. It
-covers provider response parsing and evidence construction in
-`crates/tools-web`, together with the defense-in-depth approval boundary for web
-egress.
+The web egress boundary keeps provider bytes from becoming anything but bounded
+evidence and keeps every outbound web request under operator policy and
+approval.
 
-## Structural output boundary
+## Map
 
-Provider response bytes are never themselves rendered. Every success or failure
-output is constructed from parsed, typed components, and every rendered
-component is admitted only within its named byte or item limit.
+The daemon composes two web tools, `web_search` and `web_fetch`, in
+`crates/tools-web`. Each sends one request out and returns the response as
+evidence for the model.
 
-For search results, URL parsing discards user information before rendering,
-retains only query parameters named by the explicit result-query allowlist, and
-reconstructs the URL from the retained parsed components. Provider titles and
-snippets are entity-escaped before they become evidence. Result count, title,
-URL, snippet, provider-response, and failure-detail bounds are named constants
-beside the types that enforce them.
+The output boundary is structural: a provider response is parsed into typed
+components and the evidence is built from those components. Every bound on a
+search-result component is a named constant beside the type that enforces it.
+After construction, a `CredentialScrubber` redacts the search credential's exact
+value and encoded variants from `web_search` output.
 
-Why: structural construction makes provider bytes data for a bounded parser, not
-an alternative rendering channel.
+The transport floor in `crates/egress-transport` fixes how a `web_fetch`
+connection is made. Origin admission, stated in
+[configuration-and-credentials.md](configuration-and-credentials.md), fixes
+which origins `web_fetch` may reach; `web_search` reaches one fixed provider.
+The approval flow, with both tools' declarations and shipped posture, is stated
+in [tool-loop.md](tool-loop.md). Transport and admission constrain where bytes
+go, approval constrains whether they go, and structure constrains what comes
+back.
 
-## Credential scrubbing
+## Decisions
 
-`CredentialScrubber` is defense in depth after structural construction, not the
-primary security control. Exact-value redaction cannot guarantee detection of a
-credential that provider-controlled content transforms, encodes, or splits.
-Those forms are accepted residual risk; structural construction remains the
-control that prevents raw provider bytes from becoming output.
+Structural construction is the primary control on web-tool output, and the
+credential scrubber is defense in depth after it. Why: parsing makes provider
+bytes data for a bounded parser rather than a second rendering channel, while
+exact-value redaction does not guarantee it catches a credential that provider
+content transforms, encodes, or splits; those forms are accepted residual risk.
 
-The semantic trustworthiness, relevance, and safety of provider-supplied content
-are also outside this threat model. The boundary constrains how content is
-represented and bounded; it does not endorse what that content says.
+The trustworthiness, relevance, and safety of provider content are outside this
+model, which constrains how content is represented, not what it means.
 
-## Approval defense in depth
+Origin admission constrains the recipient only; it establishes no user intent to
+send data and lets no external system direct another, so approval stays
+necessary even when a transport has an exact destination policy. Why: a model
+can combine workspace content into a fetch URL, or take a code-host read as
+authority for a later search, and neither source authorizes that disclosure or
+delegation.
 
-`web_search` and `web_fetch` are daemon-composed egress tools with
-`ExternalEffect` declarations. Both declarations default to `Confirm`, and the
-shipped configuration resolves both exact tool names to the `Human` approval
-posture. The resulting precedence over the session blanket and the durable
-approval flow are owned by
-[Approval policy and decision sources](tool-loop.md#approval-policy-and-decision-sources).
-An operator must therefore make an explicit policy choice before either tool can
-execute automatically.
+Both tools' declarations are conservative, so deliberate operator policy and the
+ordinary approval flow are the only ways to widen egress authority.
 
-The approval boundary remains necessary even when an egress transport has an
-exact destination policy. A model can combine content read from a workspace with
-a `web_fetch` URL, or use a code-host read as authority for a subsequent search,
-without either source authorizing disclosure or delegation. Origin admission
-constrains the recipient; it does not establish the user's intent to send data
-or let one external system direct another. Why: conservative declarations keep
-deliberate operator policy and the ordinary approval flow as the only ways to
-widen egress authority.
-
-## Review rule
-
-A finding that demonstrates a violation of the structural output boundary or a
-named bound is an implementation defect. A finding solely about a transformed,
-encoded, or split secret that exact redaction cannot recognize, or about
-provider-content semantics, is an accepted residual and does not require a code
+A finding that demonstrates a violation of the structural output boundary or of
+a named bound is an implementation defect. A finding only about a residual named
+above, or about provider-content semantics, is accepted and needs no code
 change.
 
-## Open edges
+## Contracts
+
+A `web_fetch` destination resolves to between one and 32 public addresses, and
+the transport pins those addresses into the client so connection setup cannot
+substitute a later DNS answer. One dispatch performs at most one credential-free
+request; proxies, redirects, retries, and idle connection reuse are disabled,
+TLS runs on rustls with a 1.2 floor, and one 15-second timeout bounds resolution
+and the exchange. `crates/egress-transport` builds this client.
+
+## Not built
 
 None.
