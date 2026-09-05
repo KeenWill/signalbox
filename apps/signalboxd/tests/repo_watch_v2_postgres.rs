@@ -105,14 +105,11 @@ async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dy
 }
 
 async fn module_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
-    let options = local_test_connection_options(database_url)?;
+    let options = local_test_connection_options(database_url)?.username("mod_repo_watch");
     PgPoolOptions::new()
         .max_connections(2)
         .after_connect(|connection, _metadata| {
             Box::pin(async move {
-                sqlx::query("SET ROLE mod_repo_watch")
-                    .execute(&mut *connection)
-                    .await?;
                 sqlx::query("SET search_path = mod_repo_watch, pg_catalog")
                     .execute(&mut *connection)
                     .await?;
@@ -128,6 +125,9 @@ async fn module_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
 async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn Error>> {
     let (container, core_pool, database_url) = postgres().await?;
     migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
     let module_pool = module_pool(&database_url).await?;
     let store = RepoWatchStore::new(module_pool.clone());
 
