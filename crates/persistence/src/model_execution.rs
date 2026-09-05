@@ -602,6 +602,11 @@ pub(crate) struct ModelCallOutboxOrderGuard {
     _private: (),
 }
 
+pub(crate) enum CountedActivationCheckpointOutcome {
+    Prepared,
+    PoolExhausted(CredentialPoolRuntimePolicy),
+}
+
 const MODEL_CALL_OUTBOX_ORDER_GUARD: &str = "model_call_outbox_order_guard:v1";
 
 impl PostgresModelCallRepository {
@@ -1300,7 +1305,7 @@ impl PostgresModelCallRepository {
         activated: &signalbox_domain::ActivatedTurn,
         prospective: &ProspectiveModelCall,
         _outbox_order_guard: ModelCallOutboxOrderGuard,
-    ) -> Result<(), ModelCallRepositoryError> {
+    ) -> Result<CountedActivationCheckpointOutcome, ModelCallRepositoryError> {
         let prepared = prospective.prepared();
         let signalbox_domain::ActiveTurnPhase::Running { current_attempt } = activated.phase()
         else {
@@ -1350,9 +1355,15 @@ impl PostgresModelCallRepository {
         .await?;
         outbox::lock_sequence_allocator(connection).await?;
         let Some(credential_reference) = selected.reference.as_ref() else {
-            // The activated turn remains call-free; the ordinary preparation
-            // pass owns the typed pool-exhaustion closure and its identities.
-            return Ok(());
+            // The activated turn remains call-free. The ordinary counted path
+            // hands it to preparation; a definitive attachment path already
+            // has identities and closes the typed exhaustion in this transaction.
+            let policy = selected
+                .policy
+                .ok_or(ModelCallRepositoryError::InvalidTransition(
+                    "credential-pool exhaustion is missing its frozen policy",
+                ))?;
+            return Ok(CountedActivationCheckpointOutcome::PoolExhausted(policy));
         };
         insert_prepared_call(
             connection,
@@ -1368,7 +1379,8 @@ impl PostgresModelCallRepository {
             prepared.turn(),
             &selected.pending_consumed_actions,
         )
-        .await
+        .await?;
+        Ok(CountedActivationCheckpointOutcome::Prepared)
     }
 
     /// Checkpoints and closes the exact prospective call after attachment
@@ -1382,13 +1394,27 @@ impl PostgresModelCallRepository {
         identities: FailedModelCallTurnIdentities,
         outbox_order_guard: ModelCallOutboxOrderGuard,
     ) -> Result<FailedModelCallTurn, ModelCallRepositoryError> {
-        self.checkpoint_counted_activation_in_transaction(
-            connection,
-            activated,
-            prospective,
-            outbox_order_guard,
-        )
-        .await?;
+        let checkpoint = self
+            .checkpoint_counted_activation_in_transaction(
+                connection,
+                activated,
+                prospective,
+                outbox_order_guard,
+            )
+            .await?;
+        if let CountedActivationCheckpointOutcome::PoolExhausted(policy) = checkpoint {
+            let execution =
+                require_live_execution(connection, activated.session(), &self.targets).await?;
+            let exhausted = execution
+                .fail_credential_pool_exhausted(policy.name().to_owned(), identities)
+                .map_err(|_| {
+                    ModelCallRepositoryError::InvalidTransition(
+                        "credential-pool exhaustion could not close counted activation",
+                    )
+                })?;
+            persist_credential_pool_exhaustion(connection, &exhausted).await?;
+            return Ok(exhausted.into_failed());
+        }
         let call = prospective.prepared().call().id();
         let execution = require_exact_call(
             require_live_execution(connection, activated.session(), &self.targets).await?,
