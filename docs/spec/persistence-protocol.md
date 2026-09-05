@@ -137,9 +137,10 @@ The session system prompt joins its selection key through a generated SHA-256
 digest, because megabyte text cannot be a btree key, and an absent prompt is
 stored as the empty digest rather than null so the foreign key still checks.
 
-Every typed record kind carries a kind-scoped storage version, and a change an
-older reader could misread advances it, so an older reader rejects the record
-instead of projecting it wrongly.
+Durable command and outbox records carry a kind-scoped storage version, and a
+change an older reader could misread advances it, so an older reader rejects the
+record instead of projecting it wrongly. Typed event families such as goal,
+plan, and delegation events carry a closed kind discriminator and no version.
 
 Some rules are enforced twice, as typed domain transitions and as database
 constraints, because a row set that passes SQL checks can still fail domain
@@ -405,8 +406,8 @@ then its scheduler, then the relationship. A peer message locks both endpoint
 session rows FOR NO KEY UPDATE in ascending session-identity order, then both
 scheduler rows, and only then the relationship row. A descendant-scoped stop or
 interrupt locks the complete reachable session frontier in ascending
-session-identity order before the ordinary root or scheduler locks, then the
-relationships in spawning-request order.
+session-identity order before the ordinary root or scheduler locks and before it
+allocates any outbox event, then the relationships in spawning-request order.
 
 A durable user-command claim precedes the runner lock subsequence.
 
@@ -516,17 +517,20 @@ the round, and a recovery attempt belongs to a request the named call produced.
 
 An applied submit-input that creates a turn origin appends an input-accepted
 event; pending steering appends nothing until terminal reclassification mints
-its successor turn and appends the correlated event. Turn activation appends the
-turn's activation event in the activating transaction. Binding an
+its successor turn and appends the correlated event. Every turn origin appends
+its resolved-settings event before its input-accepted event. Turn activation
+appends the turn's activation event in the activating transaction. Binding an
 already-accepted turn to a goal generation appends nothing. Every durable goal
 event appends a goal-changed event in the transaction that stores it. A stop or
 supersede that makes a queued goal turn ineligible appends a retired
 turn-terminal event in the same transaction, and supersede appends that
-retirement before the replacement's input-accepted event.
+retirement before the replacement's input-accepted event. Adopting or releasing
+a session appends an ownership-changed event in the transaction that journals
+it.
 
 The transaction that terminalizes a session's last live turn settles the
-session's pending closure at commit through a deferred constraint trigger, so
-the causal turn's own event precedes the settlement.
+session's pending closure at commit through a deferred constraint trigger, which
+appends the session-terminal event, so the causal turn's own event precedes it.
 
 Lifecycle-disposition updates admit only cascade evaluations caused by a parent
 turn command or parent goal command; a child-origin terminal event is delivered
