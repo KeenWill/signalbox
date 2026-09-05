@@ -7,14 +7,16 @@ behavior that no present surface provides.
 ## Goal
 
 Every owned session reaches a terminal outcome or a human, and no module writes
-lifecycle machinery of its own beyond the retained repo-watch start lease and
-the core-integrated convergence sweep's cool-off. A failure parks the session
-instead of ending it or stalling silently, a redispatch closes the session it
-replaces, modules receive deadline expiries as events, every dispatched session
-records what it was handed, and a program run acts under its own actor. An
-active stall parks the session, a repo-watch achievement is verified against its
-gate, a sticky stop holds off redispatch, and a closure removes the worktree and
-container the session held.
+lifecycle machinery of its own beyond the retained repo-watch start lease, the
+core-integrated convergence sweep's cool-off, and the repo-watch
+dispatch-attempt budget whose exhaustion parks the owned sessions the obligation
+wraps as the module. A failure parks the session instead of ending it or
+stalling silently, a redispatch closes the session it replaces, modules receive
+deadline expiries as events, every dispatched session records what it was
+handed, and a program run acts under its own actor. An active stall parks the
+session, a repo-watch achievement is verified against its gate, a sticky stop
+holds off redispatch, and a closure removes the worktree and container the
+session held.
 
 ## Design
 
