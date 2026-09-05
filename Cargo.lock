@@ -4496,7 +4496,6 @@ dependencies = [
  "base64 0.23.1",
  "serde",
  "serde_json",
- "signalbox-blob-store",
  "signalbox-domain",
  "uuid",
 ]
