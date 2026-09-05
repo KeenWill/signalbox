@@ -251,7 +251,8 @@ current-placement pointer, and the session-created outbox event together. A
 visible session never names a placement its creation command did not carry, and
 a carried placement is never dropped between the claim and the session. Every
 table in this set is append-only except the current-defaults and
-current-placement pointers.
+current-placement pointers and the lifecycle satellite, which lifecycle
+transitions update in place.
 
 The daemon resolves the addressed imported aggregate to its canonical sealed
 frontier before constructing the command; the frontier names its own imported
@@ -297,7 +298,8 @@ cross-wired history, or invalid command fact.
 
 A placed requester's readable scope is its parent directory's subtree, and a
 refusal is typed evidence carrying the requesting directory and a closed reason,
-never an empty successful result. A one-segment placement sits in the root
+never an empty successful result. A pathless requester has global conversation
+read: every target is allowed. A one-segment placement sits in the root
 directory and has global conversation read, including pathless sessions. The
 conversation-introspection adapter applies the decision in the same
 repeatable-read transaction that opens the transcript cursor.
@@ -372,13 +374,15 @@ candidate, the creation receipt, and the loaded `Session` are distinct types:
 loading never returns a receipt, and replay never returns a `Session`.
 
 A session load is one statement-consistent read joining the session row, its one
-current-defaults pointer, and exactly the version that pointer names; for
-imported ancestry it also joins the seed record and frontier header as a
-constant-size proof. The pointer is authoritative, and a load never infers
-current defaults from version one, the greatest stored version, a
-caller-supplied version, or a cache. The load returns none only when no session
-row exists in the read snapshot; a row that exists but does not decode follows
-the corruption rule in [persistence-protocol](persistence-protocol.md).
+current-defaults pointer and exactly the version that pointer names, and its one
+current-placement pointer and exactly the placement event that pointer names;
+for imported ancestry it also joins the seed record and frontier header as a
+constant-size proof. Both pointers are authoritative, and a load never infers
+current defaults or placement from version one, the greatest stored version, a
+caller-supplied version, or a cache. The loaded placement head is authenticated
+under the current-placement load rule. The load returns none only when no
+session row exists in the read snapshot; a row that exists but does not decode
+follows the corruption rule in [persistence-protocol](persistence-protocol.md).
 
 The attention journal is authoritative for activity kind and timestamp. The
 per-session last-activity timestamp maintained from it is only the indexed

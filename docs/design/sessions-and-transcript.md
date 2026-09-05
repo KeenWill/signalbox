@@ -85,10 +85,9 @@ yields one sealed projection of an ended call and its turn. Result sealing
 consumes that projection and never accepts parallel raw identities or semantic
 entries as proof of a terminal outcome.
 
-Parent-directory default. A spawned child without an explicit path placement is
-placed in its parent's directory. The default derives only the path; it does not
-copy the parent's complete placement. The session-placement surface implements
-it.
+Parent-directory default. A spawned child is placed in its parent's directory.
+The derived placement carries only the path and does not copy the parent's
+complete placement. The session-placement surface implements it.
 
 Static eligible failure. A turn that fails at eligibility, before any attempt
 exists, is terminalized by one transaction that commits its origin entry and its
