@@ -17,10 +17,14 @@ unless given an explicit path. Each frame is one UTF-8 JSON object followed by a
 newline, at most 8 MiB including the newline; an empty line is a malformed
 frame. Every frame carries the version as a JSON integer, a request identity,
 and exactly one request or message object tagged by its `type` string; a field
-the variant does not admit is rejected. Identifiers are canonical UUID strings;
-indices, counts, and cursors are canonical decimal strings that preserve the
-full unsigned 64-bit range. A request identity is a nonzero decimal string; zero
-is reserved for an error the daemon cannot correlate to a request.
+the variant does not admit is rejected. Signalbox's own durable identifiers are
+canonical UUID strings, while configured rule identities, provider review node
+identities, and provider-owned external objects keep their own bounded-string
+grammars. Indices, counts, and event cursors are canonical decimal strings that
+preserve the full unsigned 64-bit range, while a listing request resumes from
+the identity of the last row it returned. A request identity is a nonzero
+decimal string; zero is reserved for an error the daemon cannot correlate to a
+request.
 
 A client sends requests and receives receipts, reads, or errors. A mutation
 carries a client-supplied command identity under the claim protocol in
