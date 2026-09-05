@@ -363,7 +363,8 @@ Runner loss advances a durable loss epoch in one short transaction that locks
 only the current connection-loss head, never holding that global row while
 waiting for a session lock. Propagation then pages, under repeatable read,
 through the current placements whose baselines precede the authenticated loss,
-in session-identity order after a durable cursor.
+in session-identity order after a durable cursor. Each page is a fixed size the
+code pins.
 
 The triggers that check a runner-recovery wait against its loss evidence lock
 the session's scheduler row first, so a concurrent advance cannot validate the
@@ -383,15 +384,15 @@ Every automatic-reconciliation claim, application, and failure-record
 transaction installs a local `lock_timeout` before it reads or writes anything,
 floored under the caller's configured deadline.
 
-A delegated terminal observation locks both endpoint session rows, then both
-endpoint scheduler rows, in ascending session-identity order, and only then the
-delegation row. A delegated await locks the issuing session, then its scheduler,
-then the relationship. A peer message locks both endpoint session rows FOR NO
-KEY UPDATE in ascending session-identity order, then both scheduler rows, and
-only then the relationship row. A descendant-scoped stop or interrupt locks the
-complete reachable session frontier in ascending session-identity order before
-the ordinary root or scheduler locks, then the relationships in spawning-request
-order.
+A delegated terminal observation locks both endpoint session rows FOR NO KEY
+UPDATE, then both endpoint scheduler rows, in ascending session-identity order,
+and only then the delegation row. A delegated await locks the issuing session,
+then its scheduler, then the relationship. A peer message locks both endpoint
+session rows FOR NO KEY UPDATE in ascending session-identity order, then both
+scheduler rows, and only then the relationship row. A descendant-scoped stop or
+interrupt locks the complete reachable session frontier in ascending
+session-identity order before the ordinary root or scheduler locks, then the
+relationships in spawning-request order.
 
 A durable user-command claim precedes the runner lock subsequence.
 
@@ -475,7 +476,8 @@ Dispatch locks the delivery singleton FOR UPDATE, reads exactly the next
 sequence and its typed record, and advances the singleton only when the
 synchronous consumer accepts, in the same transaction. An absent header for a
 sequence the allocator has already allocated fails the dispatch instead of
-reporting an idle queue. A consumer retry or exit before the commit request
+reporting an idle queue, and a delivery cursor or any committed header beyond
+the allocator fails it too. A consumer retry or exit before the commit request
 leaves the prefix unchanged for redelivery, and a lost commit response is
 resolved by the next locked cursor read.
 
