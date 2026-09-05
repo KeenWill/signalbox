@@ -21,20 +21,19 @@ that changes the projection, so the two machines never disagree.
 
 Waiting carries a typed kind, a deadline, and the party expected to end the
 wait. An owned session has three configured deadlines: admission, which covers
-created and dispatched; active stall; and waiting. Parked is the one state in
-which a session waits on a human; it carries a machine-readable cause and the
-responder who must act. The operator queue is exactly the set of parked
-sessions.
+created and dispatched; active stall; and waiting. A parked session waits on a
+human and carries a machine-readable cause and the responder who must act. The
+operator queue is exactly the set of parked sessions.
 
 Terminal carries one outcome from a closed vocabulary. Achievement is verified
-when a declared finish check passed and declared when no finish condition was
-declared. A failure is retryable when a retry could clear it, structural when
+when a declared finish check passed and declared when the session had no finish
+condition. A failure is retryable when a retry could clear it, structural when
 the same input will fail again (a compaction wall, a broken toolchain, a
 moderation block that a resume re-trips), and unknown when no cause was
-classified. A session is stopped by a human or a rule, superseded when a newer
-session owns the work or the work is gone, abandoned when an operator writes off
-a parked session and releases its worktrees, containers, and slots, and retired
-when it never did the work and never will.
+classified. A session is stopped by a human or a rule, and superseded when a
+newer session owns the work or the work is gone. It is abandoned when an
+operator writes off a parked session and releases its worktrees, containers, and
+slots, and retired when it never did the work and never will.
 
 Every session carries an owned-or-unmonitored bit, set at creation and flipped
 by a journaled adopt or release. Owned means the daemon holds a liveness
@@ -45,14 +44,13 @@ or the watchdog) classified from the domain actor that
 [identity and commands](identity-and-commands.md) defines.
 
 The command surface creates a session, releases its start gate, submits input,
-attaches, resumes, or stops a goal, adopts, and releases; five further commands
+attaches, resumes, or stops a goal, adopts, and releases. Five further commands
 make every outcome and transition reachable: a session-level stop, supersede,
 abandon, close as failed, and resume. A parked session with a blocked goal
 resumes through the goal's resume-with-guidance command; one with a pursuing
 goal may use the session-level resume. The goal command that
 [goal mode](goal-mode.md) calls supersede starts a new goal generation in the
-same session; it is goal replacement, unrelated to the session outcome
-superseded.
+same session and is unrelated to the session outcome superseded.
 
 Modules observe the lifecycle through eight event kinds with typed payloads on
 the transactional outbox that [persistence protocol](persistence-protocol.md)
@@ -149,10 +147,9 @@ actor: a module principal classifies as that module; otherwise the domain actor
 classifies.
 
 Message injection (operator text, coordinator guidance, steering) is legal in
-every non-terminal state regardless of ownership. An injection is never rejected
-for lifecycle state and never silently lost: every accepted injection settles
-with a durable injection_settled receipt, and pending injections never block
-terminalization.
+every non-terminal state regardless of ownership. An injection is never silently
+lost: every accepted injection settles with a durable injection_settled receipt,
+and pending injections never block terminalization.
 
 On session closure, remaining queued turns retire with cause session_closed and
 an open goal generation closes as session_closed; a user-stopped generation

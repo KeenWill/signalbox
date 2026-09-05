@@ -6,11 +6,11 @@ behavior that no present surface provides.
 
 ## Goal
 
-Every owned session reaches a terminal outcome or a human without any module
-writing lifecycle machinery of its own: a failure parks the session instead of
-ending it or stalling silently, a redispatch closes the session it replaces,
-modules receive deadline expiries as events, every dispatched session records
-what it was handed, and a program run acts under its own actor.
+Every owned session reaches a terminal outcome or a human, and no module writes
+lifecycle machinery of its own. A failure parks the session instead of ending it
+or stalling silently, a redispatch closes the session it replaces, modules
+receive deadline expiries as events, every dispatched session records what it
+was handed, and a program run acts under its own actor.
 
 ## Shape
 
