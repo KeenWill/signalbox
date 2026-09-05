@@ -89,12 +89,12 @@ this chain issued no provider request and an earlier round's successful call is
 not this chain's evidence; its terminal cause is pool exhaustion, never a
 provider failure.
 
-Post-failure fail: a fresh admission finds every member excluded after this
-chain observed a qualifying provider failure. The turn terminalizes Failed and
-adds no further attempt; the predecessor attempt has already ended KnownFailure.
-The terminal evidence is the last observed provider cause as a provider error,
-never pool exhaustion, because reporting the pool's emptiness would discard the
-only evidence naming what failed. The rotation test in
+Post-failure fail: the observation that closes a qualifying provider failure
+finds every member excluded. The turn terminalizes Failed and adds no further
+attempt; the predecessor attempt has already ended KnownFailure. The terminal
+evidence is the last observed provider cause as a provider error, never pool
+exhaustion, because reporting the pool's emptiness would discard the only
+evidence naming what failed. The rotation test in
 `crates/persistence/tests/postgres_integration/model_call_execution_and_recovery.rs`
 pins this ending.
 
@@ -113,11 +113,11 @@ an automatic retry against the profile that just failed. The turn-scoped key on
 `credential_pool_chain_exclusion` in the model-calls migration enforces the
 scope; nothing enforces that no path deletes a row.
 
-A successor prepared after a rate-limit or overload failure waits a backoff
-computed from the provider's reported delay and capped at five minutes
-(`MAX_AVAILABILITY_BACKOFF` in `crates/persistence/src/model_execution.rs`); a
-reported delay longer than the cap is truncated to it. A successor after a quota
-failure is immediate.
+A successor prepared after a rate-limit or overload failure waits the greater of
+the provider's reported delay and a local exponentially increasing jittered
+delay, capped at five minutes (`MAX_AVAILABILITY_BACKOFF` in
+`crates/persistence/src/model_execution.rs`); a reported delay longer than the
+cap is truncated to it. A successor after a quota failure is immediate.
 
 Terminal: a known failure no successor is authorized to follow terminalizes the
 turn Failed exactly as it would with no pool. Four gates are checked in order,

@@ -122,7 +122,7 @@ of otherwise-admissible bounded members with their reservation identities. A
 capacity reservation is one per-member invocation reservation, taken by the
 selecting preparation for the selected member only and released when the
 invocation ends; no reservation is taken against a member no invocation will
-start. A contended wait has five committing transactions that are never
+start. A contended wait has six committing transactions that are never
 conflated: the admission that finds every candidate at its bound and inserts the
 wait; the rewrite from an exhausted wait whose cleared exclusion leaves the
 newly admissible member at its bound, which recomputes the complete contended
@@ -135,11 +135,14 @@ exclusion evidence and derived deadline from current state and stays parked; and
 the release, the call preparation that puts its Prepared call on a fresh
 successor attempt and consumes the wait in that same transaction, inserting a
 reservation only where the selected member is a `codex_home` one. An exhausted
-wait has four: the admission; the rewrite from a contended wait; the evidence
+wait has five: the admission; the rewrite from a contended wait; the evidence
 rewrite by which a woken transaction that reruns admission and still selects an
 exhausted wait replaces the wait's exclusion evidence and deadline from current
 state and stays parked, so a past deadline never wakes it again; and the
-release. Lock order is
+release. Either form also has a terminalizing release, where a rerun of
+admission that selects no wait consumes the wait, opens and ends the call-free
+failure attempt, and terminalizes the turn as wait-transition fail (no call) or
+(after call). Lock order is
 [persistence protocol](../spec/persistence-protocol.md)'s.
 
 Wire: a parked turn projects an active transcript turn state that retains the
