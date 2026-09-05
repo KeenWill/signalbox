@@ -2210,20 +2210,21 @@ work. Guard-session monitoring and fatal-loss behavior are owned by
 [Daemon runtime: startup order and shutdown](turn-lifecycle-and-scheduling.md#daemon-runtime-startup-order-and-shutdown).
 For each attempt, the dispatcher:
 
-1. starts a PostgreSQL transaction and locks the singleton
-   `outbox_delivery_state`;
+1. starts a PostgreSQL transaction and locks the `process_protocol` row in
+   `outbox_consumer_cursor`;
 2. loads exactly `delivered_through + 1` and its one typed record;
 3. maps the storage record to a distinct process-update value and offers it to
    the in-process fan-out;
-4. only after that offer is accepted, advances `delivered_through` to the same
-   sequence and commits.
+4. only after that offer is accepted, advances that consumer's
+   `delivered_through` to the same sequence and commits.
 
-An idle dispatcher polls again after 50 ms. It never skips a sequence and never
-dispatches two events concurrently. Delivery failure, task cancellation, or a
-crash before the cursor commit leaves the prefix unchanged, so the same event is
-offered again after recovery. A crash after the offer but before commit may
-therefore duplicate that cursor; delivery is at least once and globally ordered
-(INV-032). Consumers deduplicate by cursor.
+An idle dispatcher polls again after 50 ms. It never skips a sequence for the
+process-protocol consumer and never dispatches two events concurrently. Delivery
+failure, task cancellation, or a crash before the cursor commit leaves that
+consumer's prefix unchanged, so the same event is offered again after recovery.
+A crash after the offer but before commit may therefore duplicate that cursor;
+delivery is at least once and globally ordered (INV-032). Consumers deduplicate
+by cursor.
 
 The process-local durable-only fan-out and delta-admitting composite fan-out
 each retain 64 update events. The dispatcher offers every durable update to
