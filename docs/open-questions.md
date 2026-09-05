@@ -38,9 +38,9 @@ specification diff. Accepted cross-component and wire contracts live in the
 - **Further content variants and rendering.** Ordered multipart content with
   content-addressed attachment parts, its replay equality, persistence, terminal
   rendering, and model-visible stubs are decided and specified by
-  [blob storage](spec/blob-storage.md#multipart-user-content). Any non-text
-  content variant beyond attachment parts and provider-native media rendering
-  remain open. Blocks only those further extensions. (S01, S03, S08)
+  [blob storage](spec/blob-storage.md). Any non-text content variant beyond
+  attachment parts and provider-native media rendering remain open. Blocks only
+  those further extensions. (S01, S03, S08)
 
 ## Model-input projection
 
@@ -288,8 +288,8 @@ per-turn provenance. The following extensions remain undecided:
 
 - **Automatic fallback.** Decided and specified: what a selection attempt can
   end as, and every projection of each ending, by
-  [the credential-availability machine](spec/credential-availability.md#the-credential-availability-machine);
-  the qualifying causes and the successor-call shape by
+  [the credential-availability machine](spec/credential-availability.md); the
+  qualifying causes and the successor-call shape by
   [availability successor calls](spec/model-call-execution.md#availability-successor-calls);
   the pool grammar, per-membership ranking, and closed action vocabulary by
   [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
