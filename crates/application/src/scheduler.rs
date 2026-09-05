@@ -1941,7 +1941,7 @@ mod tests {
         SessionId, TurnAttemptId,
     };
     use tokio::{
-        sync::{Notify, mpsc, oneshot},
+        sync::{Notify, oneshot},
         time::timeout,
     };
     use uuid::Uuid;
