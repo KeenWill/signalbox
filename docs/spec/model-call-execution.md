@@ -185,16 +185,17 @@ provider acceptance is possible, which serializes execution passes for that
 attempt across the acceptance boundary without serializing interrupt
 application.
 
-The chain exclusion that removes the failed member commits in the observation
-transaction itself, because a crash between the observation and a later release
-could readmit the profile whose failure parked the turn. Identities knowable
-only under the lock are minted through application-owned generator closures that
-persistence invokes inside the transaction, so the locked pending count moves
-into the transaction without moving identity authority into persistence. A
-proven daemon-minted identity collision is the only failure retried within one
-invocation, with fresh candidates and no repeated credential or provider work,
-because a unique-violation rollback is the one failure that guarantees the
-transaction had no effect.
+A rotation's chain exclusion commits in the observation transaction itself, so a
+crash between the observation and a later release cannot readmit the failed
+profile. A same-credential transient successor instead records a durable retry
+deadline without a chain exclusion. Identities knowable only under the lock are
+minted through application-owned generator closures that persistence invokes
+inside the transaction, so the locked pending count moves into the transaction
+without moving identity authority into persistence. A proven daemon-minted
+identity collision is the only failure retried within one invocation, with fresh
+candidates and no repeated credential or provider work, because a
+unique-violation rollback is the one failure that guarantees the transaction had
+no effect.
 
 Ambiguity parks the turn instead of retrying or substituting, because a lost
 acknowledgement cannot prove the provider did not act, and an invented
@@ -267,18 +268,20 @@ A model call is one recorded attempt. The daemon sends each attempt to the
 provider at most once. A retry is a new recorded attempt; no code retries a call
 without recording the retry in the database. Before anything has been sent to
 the provider, the daemon may prepare an unsent call again. After a known failure
-the daemon may start a new attempt with a different credential. It never sends
-again with the credential that failed in that chain. A call whose outcome is
-unknown is never retried automatically; the turn parks for recovery. A CLI
-harness may retry inside itself. Those retries are provider-internal; the daemon
-neither observes nor records them and adds no retries of its own. A migration
-constraint enforces one call per attempt. A `switch_now` failure with proven
-non-acceptance writes a durable chain exclusion for the failed member, and
-successor selection and preparation skip excluded members; that selection, not a
-constraint, enforces no-reuse. The one-shot send capability, the per-attempt
-dispatch gate, the authorize-send commit, and startup parking of an issued call
-enforce at-most-once sending. Only the rule that no code retries a call without
-recording the retry is unenforced.
+with proven non-acceptance, a rate-limited, overloaded or provider-internal call
+may start a new recorded attempt on the same credential after its durable
+backoff while that credential remains below the finite per-turn attempt bound.
+At the bound, or for another qualifying failure, `switch_now` starts a new
+attempt on another admitted credential and writes the failed member's durable
+chain exclusion. A call whose outcome is unknown is never retried automatically;
+the turn parks for recovery. A CLI harness may retry inside itself. Those
+retries are provider-internal; the daemon neither observes nor records them and
+adds no retries of its own. A migration constraint enforces one call per
+attempt. Successor selection and preparation skip chain-excluded members; that
+selection, not a constraint, enforces rotation no-reuse. The one-shot send
+capability, the per-attempt dispatch gate, the authorize-send commit, and
+startup parking of an issued call enforce at-most-once sending. Only the rule
+that no code retries a call without recording the retry is unenforced.
 
 The terminal transition stores the input, output, cache-creation, and cache-read
 token axes independently; a null axis means the provider did not supply it, and
