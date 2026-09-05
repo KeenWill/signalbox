@@ -14,7 +14,7 @@ SNAPSHOTS = {
 }
 DECLARATION = re.compile(
     r'^pub (?:(?:async|const|unsafe)\s+|extern\s+"[^"]*"\s+)*'
-    r"(?P<kind>struct|enum|union|type|trait|fn|const)\s+"
+    r"(?P<kind>struct|enum|union|type|trait|fn|const|static)\s+"
 )
 MODULE = re.compile(r"^pub mod (?P<name>[A-Za-z_][A-Za-z0-9_#:]*)(?:\b|$)")
 AUTO_TRAIT = re.compile(
@@ -85,7 +85,11 @@ def parse(text: str) -> tuple[str, list[Item]]:
                 trait, subject = normalized.split(" for ", 1)
                 raw_subject = line.split(" for ", 1)[1].split(" where ", 1)[0]
                 owners = [module for module in modules if subject.startswith(module)]
-                source_owned = not line.startswith("impl<") or "<" in raw_subject
+                parameters = re.findall(r"(?:^|,\s*)(?:const\s+)?('?\w+)", line[5:line.find(">")])
+                source_owned = not line.startswith("impl<") or any(
+                    re.search(rf"(?<!\w){re.escape(name)}(?!\w)", raw_subject)
+                    for name in parameters
+                )
                 if owners and not AUTO_TRAIT.match(trait) and (
                     source_owned or any(trait.startswith(module) for module in modules)
                 ):
