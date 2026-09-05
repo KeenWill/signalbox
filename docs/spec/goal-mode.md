@@ -7,38 +7,35 @@ starting turns toward it until the goal's own state stops them.
 
 A goal is one statement of work attached to a session. The domain type `Goal` in
 `crates/domain/src/goal.rs` holds the session's goal lineage as an append-only
-stream of events, and every reader derives the current state by replaying that
-stream. Each statement is one generation. A generation is pursuing from its
-commission until it is blocked, achieved, stopped by the user, superseded by a
-replacement statement, or closed with its session. A blocked generation admits
-resume or supersede; the other endings are final for that generation, and a
-later attach may start a new one after an achieved or stopped generation. The
-event vocabulary is closed: a commission, each block and resumption, and the
-ending.
+stream of events, and the current state is derived by replaying that stream.
+Each statement is one generation. A generation is pursuing from its commission
+until it is blocked, achieved, stopped by the user, superseded by a replacement
+statement, or closed with its session. A blocked generation admits resume or
+supersede; the other endings are final for that generation, and a later attach
+may start a new one after an achieved or stopped generation. The event
+vocabulary is closed: a commission, each block and resumption, and the ending.
 
 Users act on a goal through four commands: attach, resume with optional
-guidance, stop, and supersede with a replacement statement. Supersede is the
-command for changing an active generation's scope; guidance that leaves the
-scope alone is a steer while the goal is pursuing or a resume while it is
-blocked. A model reaches the goal only through the session-scoped `goal_declare`
-tool, and may declare only blocked or achieved. Repository watch commissions
-goals for the sessions it dispatches by composing an attach with a synthesized
-statement, as [repository watch](repo-watch.md) describes.
+guidance, stop, and supersede with a replacement statement. Supersede changes an
+active generation's scope; guidance that leaves the scope alone is a steer while
+the goal is pursuing or a resume while it is blocked. A model reaches the goal
+only through the session-scoped `goal_declare` tool, and may declare only
+blocked or achieved. [Repository watch](repo-watch.md) commissions goals for the
+sessions it dispatches by attaching a synthesized statement.
 
 While a generation is pursuing, the end of each successful turn makes the
-scheduler create and start the next turn without user input, and this repeats
-until the state changes. A failed goal turn is not retried; the daemon appends a
-blocked event with the execution-failure reason, need text, and the failed
-turn's provenance. Every goal turn is either scheduled by this machinery or
-bound to a turn a command already accepted, and never neither.
+scheduler create and start the next turn without user input. A failed goal turn
+is not retried; the daemon appends a blocked event with the execution-failure
+reason, need text, and the failed turn's provenance. Every goal turn is either
+scheduled by this machinery or bound to a turn a command already accepted.
 
-An execution-failure block on an owned session is resumed automatically within
-bounds. The planner in `apps/signalboxd/src/goal_mode.rs` derives how many
-attempts the current run has spent from the event history, schedules one resume
+The planner in `apps/signalboxd/src/goal_mode.rs` resumes an execution-failure
+block on an owned session automatically and within bounds. It derives from the
+event history how many attempts the current run has spent, schedules one resume
 after a backoff, and writes into each block's need text either the scheduled
-resumption or the operator repair. At startup the daemon inventories
-execution-failure blocks whose need promises resumption and treats their lost
-timers as immediately due.
+resumption or the operator repair. At startup the daemon finds execution-failure
+blocks whose need promises resumption and treats their lost timers as
+immediately due.
 
 Command identity and replay are owned by
 [identity and commands](identity-and-commands.md), turn execution by
@@ -78,7 +75,7 @@ resumption: the block an unattended repository-watch approval escalation
 appends, described by [repository watch](repo-watch.md), and a failed turn
 carrying the durable cause that no context-compaction boundary fits the model
 window. Why: repository watch already owes the first a redispatch, and an
-unchanged successor to the second would meet the same proof.
+unchanged successor to the second would fail for the same cause.
 
 No goal-mode surface delegates work or creates child sessions, and the goal
 events and commands reserve no delegation variant.
