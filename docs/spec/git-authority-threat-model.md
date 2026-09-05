@@ -1,18 +1,18 @@
 # Git authority threat model
 
 The Git authority lets a session read and write one pinned repository through
-typed operations that can never choose which repository they touch or where a
-push goes.
+typed operations that cannot choose which repository they touch or where a push
+goes.
 
 ## Map
 
 The Git tool family is a suite of typed operations constructed over one
 workspace root; `LocalGitTools` in `crates/tools-git` is that suite. The
 deployment injects the root when it constructs a suite, and the daemon composes
-one suite per root it serves; how a session's root is derived is stated in
-[configuration-and-credentials.md](configuration-and-credentials.md). A suite
-reaches a session through the tool loop ([tool-loop.md](tool-loop.md)), which
-owns approval and dispatch.
+one suite per root it serves;
+[configuration-and-credentials.md](configuration-and-credentials.md) states how
+a session's root is derived. A suite reaches a session through the tool loop
+([tool-loop.md](tool-loop.md)), which owns approval and dispatch.
 
 Repository paths and repository data are untrusted input. The trusted computing
 base is the local process, the kernel, the filesystem, the cryptographic hash
@@ -24,8 +24,8 @@ configuration, references, lock state, and object data into private snapshots;
 the typed Git library, `git2`, works only on those snapshots.
 
 Pushing is a separate surface with its own authority. A push names a branch; its
-destination is a remote a person minted, scoped to a durable `WorkspaceRecord`
-whose identity, not its path, is what the grant is keyed by.
+destination is a remote a person minted, scoped to a durable workspace record.
+The grant is keyed by the record's identity, not its path.
 
 ## Decisions
 
@@ -54,15 +54,14 @@ separately.
 Workspace roots are globally unique by canonical spelling, and the key carries
 no runner or location dimension.
 
-Three Git behaviours bind any Git transport Signalbox runs. A repository-local
+Three Git behaviors bind any Git transport Signalbox runs. A repository-local
 `credential.helper` value beginning with `!` is a shell snippet Git executes, so
 a transport that leaves the helper list in place lets an auto-approved fetch run
 model-authored code. `pushurl` is multi-valued, Git pushes to every value, and
 `remote get-url --push` returns only the first, so checking one push URL proves
 nothing about the rest. A canonical URL repeated in that list makes Git invoke
-the destination twice, so the repetition is rejected: a second failure could
-report a known failure after the first invocation already changed external
-state.
+the destination twice, so the repetition is rejected: the second invocation
+could report a known failure after the first had already changed external state.
 
 Signalbox does not isolate a repository from every process that can write it:
 another same-authority or privileged process can mutate repository data after
@@ -101,7 +100,7 @@ The Git family operates only on a direct main worktree whose `.git` directory is
 immediately inside the root its suite was constructed with. The root is
 construction input and never a per-call argument, so a local operation cannot
 select another repository. Composing several suites does not weaken this: each
-suite is a separate construction, and no suite can reach another suite's root.
+suite is a separate construction, and no suite can reach another's root.
 
 Every admitted Git action is a fixed typed operation with a compiled argument
 schema and a typed result or failure. Text fields such as a commit message are
@@ -118,11 +117,11 @@ SHA-256 once.
 
 Mutable `HEAD` and reference values are pinned for the duration of an operation,
 not frozen for the suite's lifetime. A completed typed publication is the
-baseline the next operation observes, while an operation guard still rejects a
+baseline the next operation observes, and an operation guard still rejects a
 concurrent transition.
 
-At its validation points the suite detects observed concurrent replacement or
-in-place change, preserves entries it no longer owns, and fails closed.
+At its validation points the suite fails closed on observed concurrent
+replacement or in-place change and preserves entries it no longer owns.
 
 An external write names a branch and a minted remote, never a destination; the
 endpoint is durable authority recorded ahead of the call, and the push requires

@@ -24,10 +24,10 @@ Minting. Registration through the client resolves the root path once, following
 symbolic links and removing `.` and `..` components, and stores the canonical
 bytes. The store judges canonical form as bytes and cannot see the filesystem,
 so a canonical spelling whose components are symbolic links is admitted; the
-minting boundary is the only place that resolves them, and no later reader
-repeats the resolution. Two spellings of one directory are one key, so at most
-one live destination exists per workspace and name. The daemon inserts a
-daemon-derived row for each per-session root its derivation materializes
+minting boundary is the only place that resolves them. Two spellings of one
+directory are one key, so at most one live destination exists per workspace and
+name. The daemon inserts a daemon-derived row for each per-session root its
+derivation materializes
 ([configuration-and-credentials.md](../spec/configuration-and-credentials.md));
 those rows are bookkeeping, and no path reads them to decide a binding.
 
@@ -41,8 +41,8 @@ fails with a typed error when none stands. A destination stays `https` only, and
 the transport compiles no SSH support, so the store and the transport refuse the
 same set. No caller supplies a URL.
 
-Relocation. Relocation is a durable fact that binds an existing workspace
-identity to a new canonical root while the identity and its grants stand.
+Relocation. A relocation is a durable fact that binds an existing workspace
+identity to a new canonical root; the identity and its grants stand.
 Re-registering a moved directory no longer mints a new identity.
 
 ## Constraints on present code
