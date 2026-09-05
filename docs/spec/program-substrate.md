@@ -6,19 +6,19 @@ every nondeterministic act, so a run can be re-executed to the same point.
 ## Map
 
 Two parts are built: an isolate host in the program-runtime crate and a frame
-journal in the persistence crate. The host, `ProgramHost`, runs one
-already-stripped JavaScript module per execution attempt in a fresh embedded
-`deno_core` isolate. The module's only admitted import is the canonical SDK
-specifier, which the loader resolves to a host-supplied synthetic module. The
-isolate exposes no filesystem, network, environment, module source, wall clock,
-or unvirtualized randomness. Its only asynchronous operation is the closed
-request op behind that SDK module. The SDK exports four primitives: the virtual
-clock, a randomness draw, a sleep, and an event wait. Each takes exact bytes and
-produces one typed request at the Rust boundary.
+journal in the persistence crate. The host, `ProgramHost`, runs one stripped
+JavaScript module per execution attempt in a fresh embedded `deno_core` isolate.
+The module's only admitted import is the canonical SDK specifier, which the
+loader resolves to a host-supplied synthetic module. The isolate exposes no
+filesystem, network, environment, module source, wall clock, or unvirtualized
+randomness. Its only asynchronous operation is the closed request op behind that
+SDK module. The SDK exports four primitives: the virtual clock, a randomness
+draw, a sleep, and an event wait. Each takes exact bytes and produces one typed
+request at the Rust boundary.
 
 The journal is one append-only sequence of frames per program-run identity, held
 by `ProgramJournalRepository`. A frame is a request (what the program asked) or
-a delivery (what the host answered). Requests are journaled in program order and
+a delivery (what the host answered). Requests are journaled in program order,
 deliveries in delivery order, and every row carries one contiguous global
 position, so their interleaving is retained. The request, delivery, and fault
 vocabularies are closed; the domain crate's `RequestKind`, `DeliveryKind`, and
@@ -29,10 +29,10 @@ terminalization, and only the nondeterminism fault is produced.
 
 Resume discards nothing and restores nothing. A woken run re-executes its module
 from the start; `ReplayCursor` answers each request from the journal in delivery
-order, and execution goes live exactly where the journal ends. Live requests are
+order, and execution goes live where the journal ends. Live requests are
 answered through the `LiveDeliverySource` seam, which receives only the
-currently outstanding durable request frames; that seam is the boundary later
-capability executors implement.
+outstanding durable request frames; that seam is the boundary later capability
+executors implement.
 
 The journal's stream row pins only frame-contract version one. It is not a run
 aggregate: no row records a program's registration, grants, or budgets. The
@@ -77,9 +77,8 @@ that resolves a request names that ordinal. Delivery order fixes the
 interleaving and the named ordinal fixes which promise resolves, identically in
 live execution and replay. `DeliveryKind::resolves` carries that ordinal.
 
-Repository watch's durable cursor and event rows are this substrate's event
-source. They stay readable to a matcher outside
-[repository watch](repo-watch.md), which owns them.
+[Repository watch](repo-watch.md) owns the durable cursor and event rows that
+are this substrate's event source. They stay readable to a matcher outside it.
 
 A malformed journal row is typed corruption under the fail-closed reconstitution
 contract in [persistence protocol](persistence-protocol.md).

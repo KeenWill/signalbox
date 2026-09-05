@@ -24,7 +24,7 @@ grant lists, are two programs.
 Every registration carries an explicit grant list drawn from the closed
 capability vocabulary, `ProgramCapability`. A capability outside the run's grant
 list does not exist for that run: the host journals a refusal of the request and
-exercises no authority. The `register` grant attenuates. A program holding it
+exercises no authority. The `register` grant attenuates: a program holding it
 may request for a child only a subset of its own grants, so no chain of
 program-initiated registrations obtains a capability its root lacked; widening a
 grant list goes through a user-authorized registration.
@@ -39,11 +39,10 @@ follows the external-effect ambiguity contract in
 loss as if it had not happened.
 
 A frame payload below a fixed inline threshold stays inline in the journal row.
-A larger payload becomes an immutable SHA-256-addressed blob and the row carries
-its digest. The blob is routed under the daemon-derived `program_journal`
-storage class that [blob storage](../spec/blob-storage.md) reserves, never under
-an operation-selected class, and the journal references the bytes by digest
-only.
+A larger payload becomes an immutable SHA-256-addressed blob, and the row
+references it by digest only. The blob is routed under the daemon-derived
+`program_journal` storage class that [blob storage](../spec/blob-storage.md)
+reserves, never under an operation-selected class.
 
 A session capability composes the existing session services host-side. A program
 drives a session one turn at a time: it submits input, awaits that turn's
@@ -51,12 +50,12 @@ outcome, and branches. Program-issued input and program-created sessions carry
 the attribution and creation cause that
 [identity and commands](../spec/identity-and-commands.md) and
 [sessions and the transcript](../spec/sessions-and-transcript.md) define. The
-delivered outcome journals the session identity, the exact turn and
-accepted-input identity that produced it, and an outcome digest. Transcript
-content never enters the journal; the session is already durable, and the
-recorded turn identity lets replay authenticate which turn supplied the answer.
-Structure inside one turn is out of contract: the turn is the model's autonomy
-zone, governed by the same approval judge as every session
+delivered outcome journals the session identity, the turn and accepted-input
+identity that produced it, and an outcome digest. Transcript content never
+enters the journal; the session is already durable, and the recorded turn
+identity lets replay authenticate which turn supplied the answer. Structure
+inside one turn is out of contract: the turn is the model's autonomy zone,
+governed by the same approval judge as every session
 ([tool loop](../spec/tool-loop.md)).
 
 Cancel authority is user authority. Cancel is a command with ordinary durable
