@@ -3,7 +3,7 @@
 This subsystem turns accepted inputs into turns, activates at most one turn per
 session at a time, drives it, and recovers it after a crash.
 
-## Map
+## Overview
 
 A turn is one durable logical request for one conversational outcome, made from
 one accepted-input origin under one frozen effective configuration. A turn is
@@ -80,7 +80,7 @@ The daemon runtime acquires the single-daemon guard owned by
 then binds its sockets and starts admission, dispatch, scheduling, and the
 watchdog together.
 
-## Decisions
+## Design decisions
 
 Eligibility is a derived predicate, never a durable state, because acceptance
 positions, priority relations, and the active-slot owner are already durable and
@@ -158,7 +158,7 @@ derives the values and nothing commits them.
 A queued turn never fails without activating; activation is the only eligibility
 outcome.
 
-## Contracts
+## Boundary contracts
 
 Order comes from commit-ordered sequences, never from comparing wall-clock
 times. A liveness check that cannot query some kind of evidence skips the turn
@@ -417,7 +417,7 @@ a fixed cleanup margin. After its in-flight operation reaches a durable
 boundary, a pass checkpoints the active turn and returns without issuing
 another, and a successor resumes from that boundary.
 
-## Not built
+## Planned
 
 - Runner-loss recovery: replacement and abandonment of a lost runner, and the
   runner-loss projection's effect on queued activation and runner execution;

@@ -332,11 +332,11 @@ after recovery.
 Failing closed waits for reconciliation; it does not pre-empt it. A retained
 turn can hold an unstopped in-flight model call or external-effect tool attempt,
 and the owning
-[startup recovery contract](turn-lifecycle-and-scheduling.md#contracts) requires
-such an operation to be parked as ambiguous rather than terminalized — it may
-already have acted. Revocation therefore never writes a terminal failure over
-that wait or releases the slot ahead of it. The turn is marked at recovery, root
-access is blocked from that moment on the same access-time terms as the
+[startup recovery contract](turn-lifecycle-and-scheduling.md#boundary-contracts)
+requires such an operation to be parked as ambiguous rather than terminalized —
+it may already have acted. Revocation therefore never writes a terminal failure
+over that wait or releases the slot ahead of it. The turn is marked at recovery,
+root access is blocked from that moment on the same access-time terms as the
 unadmitted case, and the close is taken by the recovery path once the
 outstanding operation reconciles, carrying the typed finding that names the
 bundle and the absent root. Nothing new can be rendered from the removed root

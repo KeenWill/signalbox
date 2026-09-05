@@ -11,7 +11,7 @@ recovered on a replacement runner or abandoned, and a restart reconciles
 retained runner work before the generic scan can end it. Activation freezes the
 session's instruction eligibility for the turn.
 
-## Shape
+## Design
 
 The pool-availability wait is a distinct active phase with a closed cause,
 exhausted or contended. It retains the session slot and binds the frozen
@@ -71,7 +71,7 @@ activation and enters the snapshot or follows it and affects only a later turn.
 The manifest and eligibility shapes are owned by
 [workspace-instructions](../spec/workspace-instructions.md).
 
-## Constraints on present code
+## Compatibility constraints
 
 No present active phase, storage discriminator, startup-scan branch, scheduler
 path, or process state supplies the pool-availability wait. The active-phase
@@ -93,7 +93,7 @@ The activation transaction remains the one atomic boundary for everything a turn
 start owns. Later eligibility work changes only the copied values and rendered
 rows, never that boundary.
 
-## Acceptance
+## Acceptance criteria
 
 A turn whose model call finds no available credential parks in the new phase
 only when the credential machine selects a wait; an exhaustion that selects no
