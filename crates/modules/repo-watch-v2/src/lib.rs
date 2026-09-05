@@ -11,8 +11,8 @@ use serde_json::{Value, json};
 use signalbox_ownership_seam::{
     BranchName, CheckConclusion, ChecksOutcome, CommitSha, MergeableState, OffsetDateTime,
     PullRequestBody, PullRequestNumber, PullRequestTitle, ReactionChange, ReactionSubject,
-    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventContentIdentityV1,
-    RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventKindNameV1, RepoWatchEventKindV1,
+    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventIdentityFrontierV1,
+    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventOccurrenceV1,
     RepoWatchEventTarget, RepoWatchRule, RepositorySlug, ReviewState,
 };
 use sqlx::{PgPool, Postgres, Transaction};
@@ -135,19 +135,6 @@ pub enum EventAdmission {
     Replayed,
 }
 
-/// One normalized fact in a frontier commit.
-#[derive(Clone, Copy, Debug)]
-pub struct EventCandidate<'a> {
-    /// Complete checked fact.
-    pub event: &'a RepoWatchEvent,
-    /// Identity of the normalized fact content.
-    pub content_identity: RepoWatchEventContentIdentityV1,
-    /// Local admission time.
-    pub recorded_at: OffsetDateTime,
-    /// Caller-selected retention boundary.
-    pub retain_until: OffsetDateTime,
-}
-
 /// Result of atomically committing a complete frontier candidate and event batch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FrontierEventAdmission {
@@ -155,6 +142,8 @@ pub enum FrontierEventAdmission {
     Committed(Box<[EventAdmission]>),
     /// A durable event identity was already bound to a different fact.
     ConflictingReuse,
+    /// A newer frontier entry already committed for this repository.
+    Stale,
 }
 
 /// Result of activating one configured rule revision.
@@ -435,16 +424,41 @@ impl RepoWatchStore {
     pub async fn commit_frontier_candidate(
         &self,
         repository: &RepositorySlug,
-        frontier: &[RepoWatchEventIdentityFrontierEntryV1],
-        events: &[EventCandidate<'_>],
+        frontier: &RepoWatchEventIdentityFrontierV1,
+        events: &[RepoWatchEventOccurrenceV1],
+        recorded_at: OffsetDateTime,
+        retain_until: OffsetDateTime,
     ) -> Result<FrontierEventAdmission, StoreError> {
+        if retain_until <= recorded_at {
+            return Err(StoreError::InvalidEventRetention);
+        }
         let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('frontier:' || $1, 0))")
+            .bind(repository.as_str())
+            .execute(&mut *transaction)
+            .await?;
+        let frontier = frontier.entries().collect::<Vec<_>>();
+        for entry in &frontier {
+            let stale: Option<bool> = sqlx::query_scalar(
+                "SELECT sequence > $3 FROM frontier
+                  WHERE repository = $1 AND stream_identity = $2",
+            )
+            .bind(repository.as_str())
+            .bind(entry.stream_identity().as_slice())
+            .bind(Decimal::from(entry.sequence().get()))
+            .fetch_optional(&mut *transaction)
+            .await?;
+            if stale.unwrap_or(false) {
+                transaction.rollback().await?;
+                return Ok(FrontierEventAdmission::Stale);
+            }
+        }
         let mut admissions = Vec::with_capacity(events.len());
-        for candidate in events {
-            if candidate.event.repository() != repository {
+        for occurrence in events {
+            if occurrence.event().repository() != repository {
                 return Err(StoreError::EventRepositoryMismatch);
             }
-            match append_event(&mut transaction, candidate).await? {
+            match append_event(&mut transaction, occurrence, recorded_at, retain_until).await? {
                 Some(admission) => admissions.push(admission),
                 None => {
                     transaction.rollback().await?;
@@ -663,12 +677,11 @@ impl RepoWatchStore {
 
 async fn append_event(
     transaction: &mut Transaction<'_, Postgres>,
-    candidate: &EventCandidate<'_>,
+    occurrence: &RepoWatchEventOccurrenceV1,
+    recorded_at: OffsetDateTime,
+    retain_until: OffsetDateTime,
 ) -> Result<Option<EventAdmission>, StoreError> {
-    if candidate.retain_until <= candidate.recorded_at {
-        return Err(StoreError::InvalidEventRetention);
-    }
-    let event = candidate.event;
+    let event = occurrence.event();
     let (target_kind, pull_request_number) = match event.target() {
         RepoWatchEventTarget::PullRequest(context) => {
             ("pull_request", Some(Decimal::from(context.number().get())))
@@ -684,14 +697,14 @@ async fn append_event(
          ON CONFLICT DO NOTHING",
     )
     .bind(event.id().into_uuid())
-    .bind(candidate.content_identity.as_bytes().as_slice())
+    .bind(occurrence.content_identity().as_bytes().as_slice())
     .bind(event.repository().as_str())
     .bind(event_kind_storage(event.kind().name()))
     .bind(target_kind)
     .bind(pull_request_number)
     .bind(payload.as_slice())
-    .bind(candidate.recorded_at)
-    .bind(candidate.retain_until)
+    .bind(recorded_at)
+    .bind(retain_until)
     .execute(&mut **transaction)
     .await?
     .rows_affected()
@@ -700,26 +713,14 @@ async fn append_event(
         return Ok(Some(EventAdmission::Inserted));
     }
     let exact: bool = sqlx::query_scalar(
-        "SELECT COALESCE(
-            count(*) = 1 AND bool_and(
-                event_id = $1
-                AND content_identity = $2
-                AND repository = $3
-                AND event_kind = $4
-                AND target_kind = $5
-                AND pull_request_number IS NOT DISTINCT FROM $6
-                AND normalized_payload = $7
-            ), false)
-           FROM gh_event
-          WHERE event_id = $1 OR content_identity = $2",
+        "SELECT EXISTS (
+            SELECT 1 FROM gh_event WHERE content_identity = $2)
+            AND NOT EXISTS (
+                SELECT 1 FROM gh_event
+                 WHERE event_id = $1 AND content_identity <> $2)",
     )
     .bind(event.id().into_uuid())
-    .bind(candidate.content_identity.as_bytes().as_slice())
-    .bind(event.repository().as_str())
-    .bind(event_kind_storage(event.kind().name()))
-    .bind(target_kind)
-    .bind(pull_request_number)
-    .bind(payload.as_slice())
+    .bind(occurrence.content_identity().as_bytes().as_slice())
     .fetch_one(&mut **transaction)
     .await?;
     Ok(exact.then_some(EventAdmission::Replayed))

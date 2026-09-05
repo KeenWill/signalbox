@@ -8,14 +8,15 @@ use std::{error::Error, num::NonZeroU64, time::Duration};
 
 use rust_decimal::Decimal;
 use signalbox_module_repo_watch_v2::{
-    EventAdmission, EventCandidate, FrontierEventAdmission, PullRequestLifecycle, PullRequestState,
-    RepoWatchStore, RepositoryState, RuleAdmission, WebhookAdmission, WebhookDelivery,
-    WebhookDisposition, matching_rules,
+    EventAdmission, FrontierEventAdmission, PullRequestLifecycle, PullRequestState, RepoWatchStore,
+    RepositoryState, RuleAdmission, WebhookAdmission, WebhookDelivery, WebhookDisposition,
+    matching_rules,
 };
 use signalbox_ownership_seam::{
     BranchName, CommitSha, OffsetDateTime, PullRequestBody, PullRequestNumber, PullRequestTitle,
     RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventContentIdentityV1, RepoWatchEventId,
-    RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventKindNameV1, RepoWatchLabelMatcher,
+    RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventIdentityFrontierV1,
+    RepoWatchEventKindNameV1, RepoWatchEventOccurrenceV1, RepoWatchLabelMatcher,
     RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchRule, RepoWatchRuleActionV1,
     RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope, RepositorySlug,
     SessionTemplateName, WorkflowName,
@@ -137,11 +138,12 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         .await?;
 
     let stream = [13; 32];
-    let frontier = RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+    let frontier_entry = RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
         stream,
         NonZeroU64::new(2).expect("two is positive"),
         PullRequestNumber::new(NonZeroU64::new(7).expect("seven is positive")),
     );
+    let frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![frontier_entry])?;
     let rule = RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(String::from("branch-ci"))?,
         RepoWatchRuleVersion::V1,
@@ -213,33 +215,36 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     );
     assert_eq!(matching_rules(std::slice::from_ref(&rule), &event), [&rule]);
     let identity = RepoWatchEventContentIdentityV1::from_bytes([15; 32]);
+    let occurrence = RepoWatchEventOccurrenceV1::from_parts(event.clone(), identity);
     let retain_until = observed_at + Duration::from_secs(120);
     assert_eq!(
         store
             .commit_frontier_candidate(
                 &repository,
-                &[frontier],
-                &[EventCandidate {
-                    event: &event,
-                    content_identity: identity,
-                    recorded_at: observed_at,
-                    retain_until,
-                }],
+                &frontier,
+                std::slice::from_ref(&occurrence),
+                observed_at,
+                retain_until,
             )
             .await?,
         FrontierEventAdmission::Committed(Box::new([EventAdmission::Inserted]))
     );
+    let replayed_event = RepoWatchEvent::branch_workflow(
+        RepoWatchEventId::from_uuid(Uuid::from_u128(16)),
+        repository.clone(),
+        default_branch.clone(),
+        WorkflowName::try_new(String::from("ci"))?,
+        signalbox_ownership_seam::CheckConclusion::Success,
+    );
+    let replayed_occurrence = RepoWatchEventOccurrenceV1::from_parts(replayed_event, identity);
     assert_eq!(
         store
             .commit_frontier_candidate(
                 &repository,
-                &[frontier],
-                &[EventCandidate {
-                    event: &event,
-                    content_identity: identity,
-                    recorded_at: observed_at + Duration::from_secs(1),
-                    retain_until: retain_until + Duration::from_secs(1),
-                }],
+                &frontier,
+                std::slice::from_ref(&replayed_occurrence),
+                observed_at + Duration::from_secs(1),
+                retain_until + Duration::from_secs(1),
             )
             .await?,
         FrontierEventAdmission::Committed(Box::new([EventAdmission::Replayed]))
@@ -254,11 +259,13 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert!(payload.contains("branch_workflow_run_completed"));
     assert!(payload.contains("\"workflow\":\"ci\""));
 
-    let next_frontier = RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
-        stream,
-        NonZeroU64::new(3).expect("three is positive"),
-        PullRequestNumber::new(NonZeroU64::new(7).expect("seven is positive")),
-    );
+    let next_frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![
+        RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+            stream,
+            NonZeroU64::new(3).expect("three is positive"),
+            PullRequestNumber::new(NonZeroU64::new(7).expect("seven is positive")),
+        ),
+    ])?;
     let preceding_event = RepoWatchEvent::branch_workflow(
         RepoWatchEventId::from_uuid(Uuid::from_u128(15)),
         repository.clone(),
@@ -266,25 +273,22 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         WorkflowName::try_new(String::from("build"))?,
         signalbox_ownership_seam::CheckConclusion::Success,
     );
+    let preceding_occurrence = RepoWatchEventOccurrenceV1::from_parts(
+        preceding_event.clone(),
+        RepoWatchEventContentIdentityV1::from_bytes([17; 32]),
+    );
+    let conflicting_occurrence = RepoWatchEventOccurrenceV1::from_parts(
+        event.clone(),
+        RepoWatchEventContentIdentityV1::from_bytes([16; 32]),
+    );
     assert_eq!(
         store
             .commit_frontier_candidate(
                 &repository,
-                &[next_frontier],
-                &[
-                    EventCandidate {
-                        event: &preceding_event,
-                        content_identity: RepoWatchEventContentIdentityV1::from_bytes([17; 32]),
-                        recorded_at: observed_at,
-                        retain_until,
-                    },
-                    EventCandidate {
-                        event: &event,
-                        content_identity: RepoWatchEventContentIdentityV1::from_bytes([16; 32]),
-                        recorded_at: observed_at,
-                        retain_until,
-                    },
-                ],
+                &next_frontier,
+                &[preceding_occurrence, conflicting_occurrence],
+                observed_at,
+                retain_until,
             )
             .await?,
         FrontierEventAdmission::ConflictingReuse
@@ -304,6 +308,25 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .fetch_one(&core_pool)
     .await?;
     assert_eq!(frontier_sequence, Decimal::from(2_u64));
+    let stale_frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![
+        RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+            stream,
+            NonZeroU64::MIN,
+            PullRequestNumber::new(NonZeroU64::new(7).expect("seven is positive")),
+        ),
+    ])?;
+    assert_eq!(
+        store
+            .commit_frontier_candidate(
+                &repository,
+                &stale_frontier,
+                &[],
+                observed_at,
+                retain_until,
+            )
+            .await?,
+        FrontierEventAdmission::Stale
+    );
     assert!(store.release_frontier(&repository, &stream).await?);
     assert!(!store.release_frontier(&repository, &stream).await?);
 
