@@ -4475,6 +4475,7 @@ name = "signalbox-module-repo-watch-v2"
 version = "0.0.0"
 dependencies = [
  "rust_decimal",
+ "serde_json",
  "signalbox-ownership-seam",
  "sqlx",
  "uuid",

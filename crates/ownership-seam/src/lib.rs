@@ -4,18 +4,29 @@
 //! only the checked command families admitted by [`SessionCommand`]. Database
 //! handles and the wider core outbox vocabulary do not cross this boundary.
 
+pub use signalbox_application::{
+    RepoWatchEventContentIdentityV1, RepoWatchEventIdentityFrontierEntryV1,
+    RepoWatchEventIdentityFrontierError, RepoWatchEventIdentityFrontierV1,
+    RepoWatchEventOccurrenceV1, derive_repo_watch_events,
+};
 pub use signalbox_domain::{
-    BranchName, CommitSha, ContextFrontierId, CreateSession, DeliveryRequest,
-    DescendantTerminationScope, DirectModelSelection, DurableCommandId, FinishCondition,
-    FinishConditionStatement, GoalGuidance, GoalStatement, GoalUserAction, GoalUserCommand,
-    LifecycleActor, ModelCallId, ModelSelectionOverride, ModelSelectionRequest, ModuleDispatch,
+    BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, ContextFrontierId,
+    CreateSession, DeliveryRequest, DescendantTerminationScope, DirectModelSelection,
+    DurableCommandId, FinishCondition, FinishConditionStatement, GitHubObjectId, GoalGuidance,
+    GoalStatement, GoalUserAction, GoalUserCommand, LabelName, LifecycleActor, MergeableState,
+    ModelCallId, ModelSelectionOverride, ModelSelectionRequest, ModuleDispatch,
     PerInputConfigurationChoices, PullRequestBody, PullRequestNumber, PullRequestTitle,
-    RepoWatchAuthorLogin, RepoWatchDispatchId, RepositorySlug, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionFailureCause, SessionId, SessionLifecycleCommand,
-    SessionLifecycleOperation, SessionLifecycleState, SessionOwnership, SessionOwnershipTransition,
-    SessionTerminalOutcome, StartGate, StopStickiness, SubmitInput, ToolAttemptId, TurnId,
-    UserContent, UserContentPart,
+    ReactionChange, ReactionContent, ReactionSubject, RepoWatchAuthorLogin, RepoWatchDispatchId,
+    RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindNameV1, RepoWatchEventKindV1,
+    RepoWatchEventTarget, RepoWatchLabelMatcher, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
+    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleContentDigest, RepoWatchRuleId,
+    RepoWatchRuleIdentityField, RepoWatchRuleIdentityFieldDigest, RepoWatchRuleVersion,
+    RepoWatchSingletonScope, RepositorySlug, ReviewState, ReviewThreadId,
+    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+    SessionCreationCause, SessionCreationProvenance, SessionFailureCause, SessionId,
+    SessionLifecycleCommand, SessionLifecycleOperation, SessionLifecycleState, SessionOwnership,
+    SessionOwnershipTransition, SessionTemplateName, SessionTerminalOutcome, StartGate,
+    StopStickiness, SubmitInput, ToolAttemptId, TurnId, UserContent, UserContentPart, WorkflowName,
 };
 pub use signalbox_persistence::outbox::OutboxDispatchError;
 use signalbox_persistence::outbox::{
