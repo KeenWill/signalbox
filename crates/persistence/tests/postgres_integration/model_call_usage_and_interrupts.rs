@@ -1410,23 +1410,23 @@ async fn model_call_noncompleted_rereads_validate_each_durable_closure()
         .execute(&pool)
         .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         DISABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         DISABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(&pool)
     .await?;
     sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = $1 - 1,
                 last_delivery_xid = pg_current_xact_id()
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .bind(refused_sequence)
     .execute(&pool)
     .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         ENABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         ENABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(&pool)
     .await?;

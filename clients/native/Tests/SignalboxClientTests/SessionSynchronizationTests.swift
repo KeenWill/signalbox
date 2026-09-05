@@ -113,7 +113,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  ///  / : an authoritative snapshot publishes the runner fact
+  /// an authoritative snapshot publishes the runner fact
   /// from its cursor boundary together with the transcript records.
   func testAuthoritativeSnapshotPublishesRunnerProjection() throws {
     var transport = try SynchronizationFixture.transport()
@@ -881,7 +881,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  ///  / : a side snapshot carries its cursor-bound runner fact
+  /// a side snapshot carries its cursor-bound runner fact
   /// into the merge offered to the native projection layer.
   func testSideSnapshotMergeCarriesRunnerProjection() throws {
     var transport = try SynchronizationFixture.synchronizedTransport(

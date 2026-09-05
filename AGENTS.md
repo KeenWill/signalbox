@@ -109,14 +109,24 @@ owner's private repositories may be named as provenance, not cited as rules.
 - The description claims only what the code enforces; a contract binding future
   implementers is described as a contract. Keep it under 350 words.
 - Reply to every review comment in its thread: name the fixing commit, or state
-  why the finding is declined. Fix P1 findings; defer P3 findings; use judgment
-  on P2s. Reviewers reward building less.
+  why the finding is declined. Accept a review finding only when it names a
+  false statement (a claim the code or the page's own text contradicts), a
+  broken link or cross-reference, a contradiction within the pull request's own
+  files, undecided material presented as committed, a failing gating check, a
+  defect in the pull request's own behavior, or a mechanism the task does not
+  need. Decline everything else in one line and resolve the thread: restorations
+  of inventories the code already owns (producer lists, lock orders, dispatch
+  correlations, admission-rule lists), constants, grammars, conventions, hedges,
+  tone, and new content. Reviewers reward building less.
 - Stacks: each pull request targets the branch below it and is reviewed against
   that base. Check that a base branch still exists before stacking on it; when a
-  base merges, retarget or rebase the rest. Open pull requests early. Do not
-  force-push or rewrite a shared branch unless it is necessary and safe, and
-  preserve owner-authored and externally added commits. Tell the owner before
-  replacing an open stack with a rewrite.
+  base merges, retarget or rebase the rest. Open pull requests early. Each push
+  triggers a full re-review, so batch fixes into at most one push per pull
+  request per hour after the first, and merge the base forward only when the
+  pull request is conflicting or about to merge. Do not force-push or rewrite a
+  shared branch unless it is necessary and safe, and preserve owner-authored and
+  externally added commits. Tell the owner before replacing an open stack with a
+  rewrite.
 
 ## Validation
 

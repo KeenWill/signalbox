@@ -96,9 +96,9 @@ async fn s24_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Error>> {
         .await?;
     assert_eq!(invisible_events, 0);
     let uncommitted_delivery = sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = $1
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .bind(first_sequence)
     .execute(&pool)
@@ -124,9 +124,9 @@ async fn s24_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Error>> {
     assert_eq!(visible_sequences, vec![first_sequence]);
 
     sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = $1
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .bind(first_sequence)
     .execute(&pool)
@@ -139,8 +139,8 @@ async fn s24_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Error>> {
     let undelivered_suffix: Vec<Decimal> = sqlx::query_scalar(
         "SELECT event.event_sequence
            FROM outbox_event AS event
-           CROSS JOIN outbox_delivery_state AS delivery
-          WHERE delivery.singleton
+           CROSS JOIN outbox_consumer_cursor AS delivery
+          WHERE delivery.consumer_name = 'process_protocol'
             AND event.event_sequence > delivery.delivered_through
           ORDER BY event.event_sequence",
     )
@@ -521,7 +521,7 @@ async fn s24_dispatcher_redelivers_after_cursor_commit_failure_in_order()
     .await?;
     sqlx::query(
         "CREATE CONSTRAINT TRIGGER zz_test_fail_outbox_delivery_commit
-         AFTER UPDATE ON outbox_delivery_state
+         AFTER UPDATE ON outbox_consumer_cursor
          DEFERRABLE INITIALLY DEFERRED
          FOR EACH ROW
          EXECUTE FUNCTION fail_test_outbox_delivery_commit()",
@@ -560,8 +560,8 @@ async fn s24_dispatcher_redelivers_after_cursor_commit_failure_in_order()
     assert_eq!(
         sqlx::query_scalar::<_, Decimal>(
             "SELECT delivered_through
-               FROM outbox_delivery_state
-              WHERE singleton",
+               FROM outbox_consumer_cursor
+              WHERE consumer_name = 'process_protocol'",
         )
         .fetch_one(&pool)
         .await?,
@@ -570,7 +570,7 @@ async fn s24_dispatcher_redelivers_after_cursor_commit_failure_in_order()
 
     sqlx::query(
         "DROP TRIGGER zz_test_fail_outbox_delivery_commit
-            ON outbox_delivery_state",
+            ON outbox_consumer_cursor",
     )
     .execute(&pool)
     .await?;
@@ -622,12 +622,90 @@ async fn s24_dispatcher_redelivers_after_cursor_commit_failure_in_order()
     assert_eq!(
         sqlx::query_scalar::<_, Decimal>(
             "SELECT delivered_through
-               FROM outbox_delivery_state
-              WHERE singleton",
+               FROM outbox_consumer_cursor
+              WHERE consumer_name = 'process_protocol'",
         )
         .fetch_one(&pool)
         .await?,
         Decimal::from(2)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24 / INV-032: each compiled-in outbox consumer advances an independent
+/// prefix while decoding the same commit-ordered typed events.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_outbox_consumers_advance_independent_typed_prefixes()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let first_session = insert_outbox_session_fixture(&pool, 0xe19).await?;
+    let second_session = insert_outbox_session_fixture(&pool, 0xe1a).await?;
+    let mut first_transaction = pool.begin().await?;
+    append_session_created_test_event(&mut first_transaction, first_session).await?;
+    first_transaction.commit().await?;
+    let mut second_transaction = pool.begin().await?;
+    append_session_created_test_event(&mut second_transaction, second_session).await?;
+    second_transaction.commit().await?;
+
+    let process = OutboxDispatcher::new(pool.clone());
+    let repo_watch = OutboxConsumerReader::new(pool.clone(), OutboxConsumer::RepoWatch);
+
+    assert_eq!(
+        process
+            .dispatch_next(|event| {
+                assert_eq!(event.session(), Some(SessionId::from_uuid(first_session)));
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 1 }
+    );
+    let first = repo_watch
+        .read_next()
+        .await?
+        .expect("repo-watch has its first typed event");
+    assert_eq!(first.sequence(), 1);
+    assert_eq!(first.session(), Some(SessionId::from_uuid(first_session)));
+    assert!(first.recorded_at().unix_timestamp() > 0);
+    assert_eq!(repo_watch.read_next().await?, Some(first.clone()));
+    repo_watch.acknowledge(first.sequence()).await?;
+
+    let second = repo_watch
+        .read_next()
+        .await?
+        .expect("repo-watch has its second typed event");
+    assert_eq!(second.sequence(), 2);
+    assert_eq!(second.session(), Some(SessionId::from_uuid(second_session)));
+    repo_watch.acknowledge(second.sequence()).await?;
+    repo_watch.acknowledge(first.sequence()).await?;
+    assert_eq!(repo_watch.read_next().await?, None);
+
+    let cursors: Vec<(String, Decimal)> = sqlx::query_as(
+        "SELECT consumer_name, delivered_through
+           FROM outbox_consumer_cursor
+          ORDER BY consumer_name",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        cursors,
+        vec![
+            ("process_protocol".to_owned(), Decimal::ONE),
+            ("repo_watch".to_owned(), Decimal::from(2)),
+        ]
+    );
+
+    assert_eq!(
+        process
+            .dispatch_next(|event| {
+                assert_eq!(event.session(), Some(SessionId::from_uuid(second_session)));
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 2 }
     );
 
     pool.close().await;
@@ -706,8 +784,8 @@ async fn s24_dispatcher_reports_a_missing_committed_header() -> Result<(), Box<d
     assert_eq!(
         sqlx::query_scalar::<_, Decimal>(
             "SELECT delivered_through
-               FROM outbox_delivery_state
-              WHERE singleton",
+               FROM outbox_consumer_cursor
+              WHERE consumer_name = 'process_protocol'",
         )
         .fetch_one(&pool)
         .await?,
@@ -843,22 +921,22 @@ async fn s24_dispatcher_rejects_a_noncontiguous_header_beyond_the_allocator()
 async fn s24_dispatcher_validates_the_allocator_at_exhaustion() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         DISABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         DISABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(&pool)
     .await?;
     sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = 18446744073709551615,
                 last_delivery_xid = pg_current_xact_id()
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .execute(&pool)
     .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         ENABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         ENABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(&pool)
     .await?;
@@ -1015,23 +1093,23 @@ async fn s24_dispatcher_rejects_crosswired_terminal_correlations() -> Result<(),
     .execute(&pool)
     .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         DISABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         DISABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(&pool)
     .await?;
     sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = $1 - 1,
                 last_delivery_xid = pg_current_xact_id()
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .bind(first.0)
     .execute(&pool)
     .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         ENABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         ENABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(&pool)
     .await?;
@@ -1097,9 +1175,9 @@ async fn s24_outbox_delivery_rejects_event_producing_transaction() -> Result<(),
     let sequence =
         append_session_created_test_event(&mut event_transaction, Uuid::from_u128(0xe15)).await?;
     let same_transaction_delivery = sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = $1
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .bind(sequence)
     .execute(&mut *event_transaction)
@@ -1117,8 +1195,8 @@ async fn s24_outbox_delivery_rejects_event_producing_transaction() -> Result<(),
     let rolled_back: (Decimal, i64) = sqlx::query_as(
         "SELECT
             (SELECT delivered_through
-               FROM outbox_delivery_state
-              WHERE singleton),
+               FROM outbox_consumer_cursor
+              WHERE consumer_name = 'process_protocol'),
             (SELECT count(*)
                FROM outbox_event)",
     )
@@ -1133,9 +1211,9 @@ async fn s24_outbox_delivery_rejects_event_producing_transaction() -> Result<(),
 
     let mut delivery_then_event = pool.begin().await?;
     sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = $1
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .bind(sequence)
     .execute(&mut *delivery_then_event)
@@ -1156,8 +1234,8 @@ async fn s24_outbox_delivery_rejects_event_producing_transaction() -> Result<(),
     let after_delivery_first_rollback: (Decimal, i64) = sqlx::query_as(
         "SELECT
             (SELECT delivered_through
-               FROM outbox_delivery_state
-              WHERE singleton),
+               FROM outbox_consumer_cursor
+              WHERE consumer_name = 'process_protocol'),
             (SELECT count(*)
                FROM outbox_event)",
     )
@@ -1166,17 +1244,17 @@ async fn s24_outbox_delivery_rejects_event_producing_transaction() -> Result<(),
     assert_eq!(after_delivery_first_rollback, (Decimal::ZERO, 1));
 
     sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = $1
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .bind(sequence)
     .execute(&pool)
     .await?;
     let delivered_through: Decimal = sqlx::query_scalar(
         "SELECT delivered_through
-           FROM outbox_delivery_state
-          WHERE singleton",
+           FROM outbox_consumer_cursor
+          WHERE consumer_name = 'process_protocol'",
     )
     .fetch_one(&pool)
     .await?;
@@ -1196,7 +1274,7 @@ async fn outbox_storage_rejects_truncate() -> Result<(), Box<dyn Error>> {
 
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE hub_fence_state CASCADE").await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_sequence_state CASCADE").await?;
-    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_delivery_state CASCADE").await?;
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_consumer_cursor CASCADE").await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_event CASCADE").await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE session_created_outbox_event CASCADE")
         .await?;
@@ -1546,8 +1624,8 @@ async fn s01_scheduling_transitions_dispatch_in_commit_order() -> Result<(), Box
               WHERE accepted_input_id = $1),
             (SELECT count(*) FROM turn_activated_outbox_event
               WHERE current_attempt_id = $2),
-            (SELECT delivered_through FROM outbox_delivery_state
-              WHERE singleton)",
+            (SELECT delivered_through FROM outbox_consumer_cursor
+              WHERE consumer_name = 'process_protocol')",
     )
     .bind(accepted_input.into_uuid())
     .bind(attempt.into_uuid())
@@ -1673,22 +1751,22 @@ async fn s01_turn_activation_dispatch_requires_authoritative_attempt() -> Result
         .execute(&pool)
         .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         DISABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         DISABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(&pool)
     .await?;
     sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = 4,
                 last_delivery_xid = pg_current_xact_id()
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .execute(&pool)
     .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         ENABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         ENABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(&pool)
     .await?;

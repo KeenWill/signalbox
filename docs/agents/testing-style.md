@@ -6,10 +6,10 @@ to keep. The [testing section of CONTRIBUTING.md](../../CONTRIBUTING.md#testing)
 covers test categories and coverage; test naming is in
 [AGENTS.md](../../AGENTS.md).
 
-The numbered rules apply to new and modified tests; cite them by number in
-review. Apply them to existing tests only when already changing those tests for
-another reason. Each bad→good rewrite below is condensed from a real diff in
-this repository, with identifiers shortened.
+The numbered rules apply to new and modified tests. Apply them to existing tests
+only when already changing those tests for another reason. Each bad→good rewrite
+below is condensed from a real diff in this repository, with identifiers
+shortened.
 
 ## Fixtures and assertions
 
@@ -20,8 +20,9 @@ this repository, with identifiers shortened.
    ([Software Engineering at Google, ch. 12](https://abseil.io/resources/swe-book/html/ch12.html))
 
 2. **Tests are verified by inspection, not by tests of tests.** Test bodies are
-   straight-line code: no loops, no conditionals, and no expectation
-   recalculated by logic mirroring the code under test. An expected value is a
+   straight-line code: no conditionals, and no expectation recalculated by logic
+   mirroring the code under test; a loop over a table of cases is acceptable
+   when each case is identifiable in the failure output. An expected value is a
    hardcoded literal or a value the fixture already states (rule 6). Logic that
    must exist moves into a helper, and a nontrivial helper gets its own tests.
    ([Don't put logic in tests](https://testing.googleblog.com/2014/07/testing-on-toilet-dont-put-logic-in.html))
@@ -64,23 +65,6 @@ this repository, with identifiers shortened.
    ([Test suites as classifiers](https://blog.nelhage.com/post/test-suites-as-classifiers/))
 
 ### Rewrites from the test sweeps
-
-Rule 2 — a loop over same-behavior cases unrolls into named straight-line calls
-(domain sweep, `turn_attempt.rs`):
-
-```rust
-// Bad: three cases share one anonymous failure site inside a loop.
-for current in [running(), cancellation_stopped(), fatal_stopped()] {
-    let error = current.clone().begin_running().unwrap_err();
-    assert_eq!(error.into_parts(), (current, AttemptedTransition::BeginRunning));
-}
-
-// Good: unrolled onto a #[track_caller] check helper (rule 16); a
-// failure names the state that caused it.
-assert_begin_running_rejects_unchanged(running());
-assert_begin_running_rejects_unchanged(cancellation_stopped());
-assert_begin_running_rejects_unchanged(fatal_stopped());
-```
 
 Rules 4 and 5 — a facts struct with a canonical `matching` baseline turns eight
 positional arguments into one named perturbation (domain sweep, `session.rs`):
@@ -268,7 +252,7 @@ assert_recorded_result_passes_through(SubmitInputResult::Rejected(
 
 ## Split versus unroll
 
-17. **A loop is removed from a test body in one of two ways.** Few cases
+17. **A loop that leaves a test body does so in one of two ways.** Few cases
     exercising one behavior unroll in place into straight-line calls (rule 2);
     cases exercising distinct behaviors split into separately named tests — one
     behavior per test (rule 7). The exception is a requirement that is itself

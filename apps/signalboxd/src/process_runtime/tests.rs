@@ -652,7 +652,7 @@ mod tests {
         Ok(())
     }
 
-    /// : every stop refusal the interrupt treatment records reaches the
+    /// every stop refusal the interrupt treatment records reaches the
     /// wire as its recorded typed rejection, not as an encode invariant that
     /// closes the connection; the racing-target projections are covered by the
     /// reconciliation test below.
@@ -703,7 +703,7 @@ mod tests {
         Ok(())
     }
 
-    /// : the receipt projection is exact — the wire
+    /// the receipt projection is exact — the wire
     /// surface records only reason-bearing denials, so a reason-free denial
     /// fails closed instead of fabricating an empty reason.
     #[test]
@@ -752,7 +752,7 @@ mod tests {
         );
     }
 
-    /// : the metadata last-writer projection is total over the domain
+    /// the metadata last-writer projection is total over the domain
     /// agencies durable metadata records, and each carried reference lands in
     /// its own member. A projection gap here is not a degraded field: both
     /// callers propagate it as an encode invariant, which is fatal to the
@@ -783,7 +783,7 @@ mod tests {
         SessionId::from_uuid(Uuid::from_u128(1))
     }
 
-    /// S03 / : an explicit compaction whose commit outcome cannot be
+    /// S03: an explicit compaction whose commit outcome cannot be
     /// decided raises the same fatal recovery signal its automatic sibling
     /// raises through the scheduler pass, and still answers the client with the
     /// stable ambiguous code.
@@ -824,7 +824,7 @@ mod tests {
         Ok(())
     }
 
-    /// S03 / : a failure proven to precede the commit boundary is
+    /// S03: a failure proven to precede the commit boundary is
     /// ordinary unavailability and raises no recovery signal, so the reaction
     /// stays scoped to the one declared class that needs it.
     #[tokio::test]
@@ -906,7 +906,7 @@ mod tests {
         );
     }
 
-    /// : direct blob-read admission exposes one fixed non-waiting
+    /// direct blob-read admission exposes one fixed non-waiting
     /// process-wide capacity.
     #[test]
     fn blob_read_admission_has_fixed_nonwaiting_capacity() -> Result<(), Box<dyn Error>> {
@@ -937,7 +937,7 @@ mod tests {
         Ok(())
     }
 
-    /// : a reconciliation decision that lost its race to another
+    /// a reconciliation decision that lost its race to another
     /// decision reaches the wire as its recorded typed rejection, not as an
     /// encode invariant that closes the connection.
     #[test]
@@ -1419,7 +1419,7 @@ mod tests {
         Ok(())
     }
 
-    /// : an expired active bulk-ingest deadline releases a frame held
+    /// an expired active bulk-ingest deadline releases a frame held
     /// while a review mutation waits for its separate admission budget.
     #[tokio::test(start_paused = true)]
     async fn expired_bulk_ingest_deadline_cancels_review_admission()
@@ -1739,7 +1739,7 @@ mod tests {
         ));
     }
 
-    /// : each chunked bulk-ingest kind rejects every lifecycle request
+    /// each chunked bulk-ingest kind rejects every lifecycle request
     /// belonging to the other kind while preserving its own lifecycle.
     #[test]
     fn cross_kind_bulk_ingest_requests_are_classified_before_admission() {
@@ -1768,7 +1768,7 @@ mod tests {
         ));
     }
 
-    /// : inactivity resets after accepted lifecycle output while the
+    /// inactivity resets after accepted lifecycle output while the
     /// whole-session deadline stays anchored to permit acquisition.
     #[tokio::test(start_paused = true)]
     async fn bulk_ingest_deadlines_have_independent_monotonic_anchors()
@@ -1805,7 +1805,7 @@ mod tests {
         Ok(())
     }
 
-    /// : an active upload classifies every second begin as the sole
+    /// an active upload classifies every second begin as the sole
     /// nonterminal duplicate-begin refusal before inspecting its new length.
     #[test]
     fn active_blob_upload_precedes_duplicate_begin_length_validation()
@@ -3008,7 +3008,7 @@ mod tests {
         );
     }
 
-    /// : a recorded session settings change reaches the wire as its
+    /// a recorded session settings change reaches the wire as its
     /// typed projection without losing either settings snapshot.
     #[test]
     fn session_model_settings_change_projects_to_the_closed_wire_shape() {
@@ -3135,7 +3135,7 @@ mod tests {
         );
     }
 
-    /// : a recorded per-turn settings resolution reaches the wire with
+    /// a recorded per-turn settings resolution reaches the wire with
     /// its requested alias and exact resolved-settings evidence.
     #[test]
     fn turn_model_settings_resolution_projects_to_the_closed_wire_shape() {
@@ -3274,7 +3274,7 @@ mod tests {
         );
     }
 
-    /// S17 / : committing an internal delivery wake makes the exact
+    /// S17: committing an internal delivery wake makes the exact
     /// recipient eligible without projecting the wake onto follow streams.
     #[test]
     fn s17_internal_delegation_wake_nudges_exact_recipient() {
@@ -3746,7 +3746,7 @@ mod tests {
         );
     }
 
-    ///  / : the daemon preserves every bounded runner-placement
+    /// the daemon preserves every bounded runner-placement
     /// fact while projecting one dispatched outbox transition to the wire.
     #[test]
     fn runner_state_transition_projects_to_the_closed_wire_shape() {

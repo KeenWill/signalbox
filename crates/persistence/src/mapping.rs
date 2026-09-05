@@ -2,7 +2,7 @@
 
 use std::{error::Error, fmt};
 
-use crate::repo_watch_webhook::RepoWatchWebhookDisposition;
+use crate::{outbox::OutboxConsumer, repo_watch_webhook::RepoWatchWebhookDisposition};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
@@ -33,6 +33,14 @@ use signalbox_domain::{
     TurnTerminalCause, UpdateSessionPlacementRejectionKind, ValidatedModelSettings,
     WorkspaceOrigin,
 };
+
+/// Encodes one compiled-in outbox consumer for storage.
+pub(crate) const fn outbox_consumer_to_str(value: OutboxConsumer) -> &'static str {
+    match value {
+        OutboxConsumer::ProcessProtocol => "process_protocol",
+        OutboxConsumer::RepoWatch => "repo_watch",
+    }
+}
 
 pub(crate) const SESSION_CREATED: &str = "session_created";
 pub(crate) const SESSION_STATE_CHANGED: &str = "session_state_changed";
@@ -4028,7 +4036,7 @@ mod tests {
     ///
     /// The outbox dispatcher decodes the header's disposition for every
     /// committed `turn_terminal`, and a spelling it cannot read stalls the
-    /// singleton cursor for every session.
+    /// selected consumer cursor for every session.
     #[test]
     fn turn_disposition_mapping_is_closed() {
         assert_eq!(

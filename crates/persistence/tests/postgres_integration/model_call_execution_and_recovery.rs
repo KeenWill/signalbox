@@ -219,7 +219,7 @@ async fn deferred_final_state_validation_claims_are_typed_and_transaction_local(
     Ok(())
 }
 
-/// : model-call writers acquire one ordering guard,
+/// model-call writers acquire one ordering guard,
 /// finish credential action locking, and only then wait for the shared outbox
 /// allocator. Counted activation carries proof that it acquired the same guard
 /// before its earlier activation event.
@@ -1298,23 +1298,23 @@ async fn s01_s20_s21_model_call_transactions_complete_first_reply() -> Result<()
         .execute(&pool)
         .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         DISABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         DISABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(&pool)
     .await?;
     sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = $1 - 1,
                 last_delivery_xid = pg_current_xact_id()
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .bind(completion_sequence)
     .execute(&pool)
     .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         ENABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         ENABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(&pool)
     .await?;
@@ -1368,7 +1368,7 @@ async fn s01_s20_s21_model_call_transactions_complete_first_reply() -> Result<()
     Ok(())
 }
 
-/// : a durable Prepared model call is a reconciliation-sweep hint, so
+/// a durable Prepared model call is a reconciliation-sweep hint, so
 /// temporary attachment unavailability can retry without process restart.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
