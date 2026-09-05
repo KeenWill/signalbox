@@ -13,6 +13,90 @@ import domain_spine_digest as digest
 
 
 class DomainSpineDigestTests(unittest.TestCase):
+    def test_local_trait_for_foreign_type_uses_trait_ownership(self) -> None:
+        baseline = "pub mod sample\npub trait sample::Visible\n"
+        current = baseline + """\
+impl sample::Visible for alloc::string::String
+pub type sample::Visible::Output
+"""
+        expected = """\
+sample
+  (root): types=0 traits=1 functions=0
+    added: associated type Visible::Output, implementation alloc::string::String as sample::Visible
+    removed: none
+"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            snapshot = Path(temporary_directory) / "sample.txt"
+            snapshot.write_text(current)
+            output = StringIO()
+            with (
+                patch.object(digest, "previous_text", return_value=baseline),
+                redirect_stdout(output),
+            ):
+                digest.render("sample", snapshot)
+
+        self.assertEqual(output.getvalue(), expected)
+
+    def test_wrapped_local_subjects_use_subject_ownership(self) -> None:
+        baseline = "pub mod sample\npub struct sample::Packet\n"
+        current = baseline + """\
+impl<'a> core::fmt::Display for &'a sample::Packet
+impl core::fmt::Display for alloc::boxed::Box<sample::Packet>
+"""
+        expected = """\
+sample
+  (root): types=1 traits=0 functions=0
+    added: implementation &'a sample::Packet as core::fmt::Display, implementation alloc::boxed::Box<sample::Packet> as core::fmt::Display
+    removed: none
+"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            snapshot = Path(temporary_directory) / "sample.txt"
+            snapshot.write_text(current)
+            output = StringIO()
+            with (
+                patch.object(digest, "previous_text", return_value=baseline),
+                redirect_stdout(output),
+            ):
+                digest.render("sample", snapshot)
+
+        self.assertEqual(output.getvalue(), expected)
+
+    def test_implementation_identity_keeps_trait_and_subject_arguments(self) -> None:
+        shared = """\
+pub mod sample
+pub struct sample::ArgumentA
+pub struct sample::ArgumentB
+pub struct sample::Target<T>
+"""
+        baseline = shared + (
+            "impl core::convert::From<sample::ArgumentA> for "
+            "sample::Target<sample::ArgumentA>\n"
+        )
+        current = shared + (
+            "impl core::convert::From<sample::ArgumentB> for "
+            "sample::Target<sample::ArgumentB>\n"
+        )
+        expected = """\
+sample
+  (root): types=3 traits=0 functions=0
+    added: implementation Target<sample::ArgumentB> as core::convert::From<sample::ArgumentB>
+    removed: implementation Target<sample::ArgumentA> as core::convert::From<sample::ArgumentA>
+"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            snapshot = Path(temporary_directory) / "sample.txt"
+            snapshot.write_text(current)
+            output = StringIO()
+            with (
+                patch.object(digest, "previous_text", return_value=baseline),
+                redirect_stdout(output),
+            ):
+                digest.render("sample", snapshot)
+
+        self.assertEqual(output.getvalue(), expected)
+
     def test_generic_external_trait_implementation_is_delta_identity(self) -> None:
         baseline = "pub mod sample\npub struct sample::Bag\n"
         current = baseline + (
@@ -21,7 +105,7 @@ class DomainSpineDigestTests(unittest.TestCase):
         expected = """\
 sample
   (root): types=1 traits=0 functions=0
-    added: implementation Bag as core::iter::traits::collect::FromIterator
+    added: implementation Bag as core::iter::traits::collect::FromIterator<T>
     removed: none
 """
 
@@ -207,8 +291,8 @@ sample
         expected = """\
 sample
   (root): types=1 traits=0 functions=0
-    added: implementation Service (inherent)
-    removed: implementation Service (inherent)
+    added: implementation Service<Handler> (inherent)
+    removed: implementation Service<Handler> (inherent)
 """
 
         with tempfile.TemporaryDirectory() as temporary_directory:

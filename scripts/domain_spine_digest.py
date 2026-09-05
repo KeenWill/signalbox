@@ -63,6 +63,26 @@ def item_name(line: str, start: int) -> str:
     return re.split(r"[\s(={]", without_generics(line[start:]), 1)[0].rstrip(":")
 
 
+def implementation_parts(line: str) -> tuple[str, str]:
+    body = line[4:].lstrip()
+    parameters = ""
+    if body.startswith("<"):
+        depth = 0
+        for index, char in enumerate(body):
+            depth += char == "<"
+            depth -= char == ">"
+            if depth == 0:
+                parameters = body[1:index]
+                body = body[index + 1:].lstrip()
+                break
+    return parameters, body.split(" where ", 1)[0]
+
+
+def owning_modules(text: str, modules: set[str]) -> list[str]:
+    return [module for module in modules if re.search(
+        rf"(?<![\w:]){re.escape(module)}(?=::|\b)", text)]
+
+
 def parse(text: str) -> tuple[str, list[Item]]:
     lines = text.splitlines()
     module_lines = [(match.group("name"), line) for line in lines
@@ -79,18 +99,21 @@ def parse(text: str) -> tuple[str, list[Item]]:
             target = impl_line.split(" where ", 1)[0]
             include_nested_functions = " for " not in target and any(
                 f"{module}::" in target for module in modules)
-            normalized = without_generics(impl_line[4:]).split(" where ", 1)[0].strip()
+            parameter_text, signature = implementation_parts(impl_line)
+            normalized = without_generics(signature)
             if " for " not in normalized:
-                owners = [module for module in modules if normalized.startswith(module)]
+                owners = owning_modules(signature, modules)
                 if owners:
                     module = max(owners, key=len)
-                    items.append(Item(module, "implementation", f"{normalized} (inherent)", line))
+                    items.append(Item(module, "implementation", f"{signature} (inherent)", line))
             else:
                 trait, subject = normalized.split(" for ", 1)
-                raw_subject = impl_line.split(" for ", 1)[1].split(" where ", 1)[0]
-                owners = [module for module in modules if subject.startswith(module)]
+                raw_trait, raw_subject = signature.split(" for ", 1)
+                subject_owners = owning_modules(raw_subject, modules)
+                trait_owners = owning_modules(raw_trait, modules)
+                owners = subject_owners or trait_owners
                 parameters = re.findall(r"(?:^|,\s*)(?:const\s+)?('?\w+)",
-                                        impl_line[5:impl_line.find(">")])
+                                        parameter_text)
                 uses_subject_parameter = any(
                     re.search(rf"(?<!\w){re.escape(name)}(?!\w)", raw_subject)
                     for name in parameters
@@ -100,10 +123,10 @@ def parse(text: str) -> tuple[str, list[Item]]:
                     and BLANKET_TRAIT.match(without_generics(trait))
                 )
                 if owners and not AUTO_TRAIT.match(trait) and (
-                    not blanket or any(trait.startswith(module) for module in modules)
+                    not blanket or trait_owners
                 ):
                     module = max(owners, key=len)
-                    name = f"{subject} as {trait}"
+                    name = f"{raw_subject} as {raw_trait}"
                     items.append(Item(module, "implementation", name, line))
                     include_associated_types = True
         match = DECLARATION.match(line)
