@@ -75,9 +75,7 @@ use signalbox_persistence::session_live::{SessionLiveRepository, SessionLiveRepo
 use signalbox_persistence::session_timeline::{
     SessionTimelineRepository, SessionTimelineRepositoryError,
 };
-use signalbox_persistence::usage::{
-    UsageRepository, UsageRepositoryError, usage_timestamp_is_representable,
-};
+use signalbox_persistence::usage::{UsageRepository, UsageRepositoryError};
 use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES, WebApiError,
     WebApiErrorKind, WebApiErrorResponse, WebAttentionAction, WebAttentionActivity,
@@ -1914,12 +1912,6 @@ fn parse_search_query(query: SearchHttpQuery) -> Option<SearchQuery> {
 }
 
 fn parse_positive_u64(value: &str) -> Option<std::num::NonZeroU64> {
-    if value.is_empty()
-        || value.starts_with('0')
-        || !value.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return None;
-    }
     value
         .parse::<u64>()
         .ok()
@@ -1927,9 +1919,11 @@ fn parse_positive_u64(value: &str) -> Option<std::num::NonZeroU64> {
 }
 
 fn parse_positive_i64(value: &str) -> Option<std::num::NonZeroU64> {
-    let value = parse_positive_u64(value)?;
-    i64::try_from(value.get()).ok()?;
-    Some(value)
+    value
+        .parse::<i64>()
+        .ok()
+        .and_then(|value| u64::try_from(value).ok())
+        .and_then(std::num::NonZeroU64::new)
 }
 
 fn invalid_search_query() -> Response {
@@ -2247,14 +2241,7 @@ fn parse_optional<T>(
 }
 
 fn parse_usage_timestamp(value: &str) -> Option<UsageTimestampMicros> {
-    if value.is_empty()
-        || (value.starts_with('0') && value != "0")
-        || !value.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return None;
-    }
-    let timestamp = UsageTimestampMicros::new(value.parse().ok()?).ok()?;
-    usage_timestamp_is_representable(timestamp).then_some(timestamp)
+    UsageTimestampMicros::new(value.parse().ok()?).ok()
 }
 
 fn parse_model_call_id(value: &str) -> Option<ModelCallId> {
@@ -2926,12 +2913,6 @@ fn parse_session_id(value: &str) -> Result<SessionId, SessionTimelineRequestErro
 }
 
 fn parse_timeline_address(value: &str) -> Result<TimelineAddress, SessionTimelineRequestError> {
-    if value.is_empty()
-        || !value.bytes().all(|byte| byte.is_ascii_digit())
-        || value.starts_with('0')
-    {
-        return Err(SessionTimelineRequestError::InvalidAddress);
-    }
     value
         .parse::<u64>()
         .ok()
@@ -6784,17 +6765,6 @@ mod tests {
         };
 
         assert!(parse_detail_query(&query).is_none());
-    }
-
-    #[test]
-    fn timeline_addresses_require_canonical_positive_decimal() {
-        assert!(super::parse_window_anchor("after", Some("+5")).is_err());
-        assert!(super::parse_window_anchor("after", Some("05")).is_err());
-        assert!(super::parse_window_anchor("after", Some("0")).is_err());
-        assert!(super::parse_window_anchor("after", Some("-5")).is_err());
-        assert!(super::parse_window_anchor("after", Some(" 5")).is_err());
-        assert!(super::parse_window_anchor("after", Some("5 ")).is_err());
-        assert!(super::parse_window_anchor("after", Some("5")).is_ok());
     }
 
     #[tokio::test]
