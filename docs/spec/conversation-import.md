@@ -736,8 +736,8 @@ structured values (INV-002).
 
 The raw-source schema is blob-reference-only. The runtime repository accepts
 only that shape, and imports write only blob references. The owning
-[blob-storage configuration contract](blob-storage.md#stores-routing-and-configuration)
-defines when omitted configuration is valid.
+[blob-storage configuration contract](blob-storage.md) defines when omitted
+configuration is valid.
 
 ## Derived display titles
 

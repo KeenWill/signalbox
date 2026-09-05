@@ -326,9 +326,8 @@ nonempty array of at most 256 closed part objects. A text part is exactly
 where `D` is a canonical blob digest, `K` is `image`, `document`, or `file`, and
 `F` is a string or JSON null. Adjacent text parts are malformed. The aggregate
 text bytes and attachment member bounds are owned by
-[blob storage](blob-storage.md#multipart-user-content); the wire applies them
-before application construction. A one-part text array is the sole spelling of
-text-only content.
+[blob storage](blob-storage.md); the wire applies them before application
+construction. A one-part text array is the sole spelling of text-only content.
 
 The `content` member on transcript `queued` states and `input_accepted` session
 events is that same closed ordered parts array. Together with
@@ -2979,11 +2978,11 @@ subsequent typed durable updates until interrupted. Each delta is flushed as one
 line:
 `provider_text_delta session=<session> turn=<turn> call=<call> part=<index> content=<text>`.
 Accepted `transcript_user_entry` members use the terminal line shape owned by
-[blob storage](blob-storage.md#multipart-user-content), preserving their ordered
-part JSON without rendering attachment bytes. That JSON's default terminal
-serialization additionally renders DEL and C1 characters inside string values as
-lowercase four-hex-digit JSON escapes; `--raw-output` is the explicit opt-in to
-ordinary compact JSON that may carry those characters literally. By default the
+[blob storage](blob-storage.md), preserving their ordered part JSON without
+rendering attachment bytes. That JSON's default terminal serialization
+additionally renders DEL and C1 characters inside string values as lowercase
+four-hex-digit JSON escapes; `--raw-output` is the explicit opt-in to ordinary
+compact JSON that may carry those characters literally. By default the
 provider-delta trailing text field escapes line feed and every other C0 code
 point, DEL, and C1 code point, so provider output cannot forge another event
 line or execute terminal controls; `--raw-output` remains the explicit opt-in to

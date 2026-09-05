@@ -131,8 +131,7 @@ The open-workspace live snapshot, follow route, and resynchronization semantics
 are owned by
 [its live-session section](sessions-and-transcript.md#bounded-browser-live-session-projection).
 The descriptor, content, and download routes beneath `/api/blobs/{digest}` are
-the same-origin surface owned by
-[blob storage](blob-storage.md#browser-delivery-views-and-derivations).
+the same-origin surface owned by [blob storage](blob-storage.md).
 
 `GET /api/attention` returns at most 32 session summaries from one read-only
 repeatable-read snapshot, ordered by session identity. A continuation names the
@@ -268,8 +267,7 @@ read during startup. Provider and integration credential files remain lazy. A
 currently routed S3 blob store is the sole static-file exception: after database
 connection and the configuration-independent recovery scan, startup reads that
 explicit credential to perform the marker and lifecycle checks owned by
-[blob storage](blob-storage.md#stores-routing-and-configuration), before socket
-admission or scheduling.
+[blob storage](blob-storage.md), before socket admission or scheduling.
 
 The deployed daemon supplies no Anthropic or OpenAI endpoint or timeout setting;
 it constructs each adapter with its defaults. The
@@ -846,11 +844,10 @@ it, and commit rechecks the value against the actual appended byte count.
 The optional `[blob_storage]` table, its one-through-32 store catalog, distinct
 store-name and namespace-UUID bindings, exact filesystem and S3 fields, static
 credential grammar, routes, bounds, and absent-state compatibility are owned by
-the
-[blob-storage configuration contract](blob-storage.md#stores-routing-and-configuration).
-This configuration loader rejects every disagreement before runtime composition
-and applies the ordinary protected-file checks to the explicit S3 credential
-file; no ambient credential source enters the resulting adapter configuration.
+the [blob-storage configuration contract](blob-storage.md). This configuration
+loader rejects every disagreement before runtime composition and applies the
+ordinary protected-file checks to the explicit S3 credential file; no ambient
+credential source enters the resulting adapter configuration.
 
 The optional `[web_fetch]` table has exactly one `allowed_origins` array. It
 contains at most 64 distinct bare HTTP(S) origins: scheme, host, and optional

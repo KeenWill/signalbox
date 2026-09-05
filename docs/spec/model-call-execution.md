@@ -153,8 +153,7 @@ messages:
 
 - `OriginAcceptedInput` renders as a user-role message with its checked accepted
   input parts in order; text remains exact text and each attachment becomes the
-  exact bounded textual stub owned by
-  [blob storage](blob-storage.md#attachment-visibility-and-model-reads);
+  exact bounded textual stub owned by [blob storage](blob-storage.md);
 - `SteeringAcceptedInput` renders the referenced accepted input through that
   same ordered part projection;
 - `ModelIdentityChanged` renders as the structured provider-neutral identity
@@ -537,8 +536,7 @@ provenance for the parent command.
    cancellation closure. Reusing a successful check through the bounded
    turn-scoped verification inventory is committed unimplemented functionality
    until a blob-store adapter supplies the immutable-generation token required
-   by [blob storage](blob-storage.md#wire-vocabulary); current later ranges
-   therefore reverify.
+   by [blob storage](blob-storage.md); current later ranges therefore reverify.
 4. **Authorize-send transaction.** After acquiring the process-shared
    per-attempt dispatch gate, a distinct transaction reloads authority and
    commits `Prepared -> InFlight`. A `Prepared` owning attempt moves

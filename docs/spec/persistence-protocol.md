@@ -206,7 +206,7 @@ Implemented table families (across the forward-only migrations):
 - `accepted_input`, `queued_input_origin`, `turn_lifecycle`, `turn_attempt`;
 - `blob_derivation` and its ordered input and output satellites, whose complete
   immutable provenance and deterministic-key convergence are owned by
-  [blob storage](blob-storage.md#browser-delivery-views-and-derivations);
+  [blob storage](blob-storage.md);
 - `instruction_discovery`, including its limit version, consumed counts, and
   completeness bit, plus its ordered roots, candidates, and findings;
   `registered_instruction_bundle`; and `turn_instruction_manifest`, whose
@@ -609,8 +609,8 @@ Representation rules, all enforced in the schema:
 - Accepted user content is stored only in the mirrored ordered command and
   `accepted_input` part satellites. Their parent completeness, ordinal,
   structural, text-byte, attachment-metadata, and blob-correlation constraints
-  are owned by [blob storage](blob-storage.md#multipart-user-content); neither
-  parent retains a `content_text` column.
+  are owned by [blob storage](blob-storage.md); neither parent retains a
+  `content_text` column.
 - Current and receipt metadata tag and attribute-key columns are bounded to
   1,024 UTF-8 bytes with the same explicit octet-length checks as their domain
   admission boundary.
