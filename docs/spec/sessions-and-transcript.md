@@ -221,13 +221,14 @@ automatic resumption will lift, or held in an exhausted recovery wait; a pending
 tool-approval decision is the separate waiting state. An ambiguous model call
 whose automatic reconciliation budget is exhausted is a further operator wait
 until the operator reconciles the turn; an ambiguous external-effect tool
-attempt whose budget is exhausted stays an exhausted recovery wait with operator
-action required until the deferred tool-recovery surface exists. A turn awaiting
-runner recovery is an operator wait too; the replacement and abandonment
-commands that leave the lost state are planned. A module that parks something
-wrapping a session drives the session itself to parked. Attention states shown
-to operators are derived from durable facts by one classifier, and a read that
-encounters a state it does not recognize returns an error rather than a guess.
+attempt whose budget is exhausted stays an exhausted recovery wait, flagged for
+the operator, with no releasing command until the deferred tool-recovery surface
+exists. A turn awaiting runner recovery is an operator wait too; the replacement
+and abandonment commands that leave the lost state are planned. A module that
+parks something wrapping a session drives the session itself to parked.
+Attention states shown to operators are derived from durable facts by one
+classifier, and a read that encounters a state it does not recognize returns an
+error rather than a guess.
 
 The only way to derive a new transcript snapshot is to append to the old one, so
 every earlier entry stays in order. Two frontiers are equal only if they are the
@@ -371,11 +372,12 @@ rejection.
 
 No metadata string is trimmed, normalized, or case-folded. The daemon applies
 deployment-owned tag and attribute count policies before command handling;
-domain reconstitution has no count policy. Absence of metadata rows is the
-canonical initial projection: no title, tags, or attributes, not archived, and
-no last-writer stamp. A missing session returns the typed absent outcome behind
-the process boundary's not-found response; only an existing session without a
-metadata root returns the initial projection.
+domain reconstitution has no count policy. A successful point read returns the
+root, tags, and attributes from one repeatable-read snapshot. Absence of
+metadata rows is the canonical initial projection: no title, tags, or
+attributes, not archived, and no last-writer stamp. A missing session returns
+the typed absent outcome behind the process boundary's not-found response; only
+an existing session without a metadata root returns the initial projection.
 
 `SubmitInput` and `ReplaceSessionMetadata` are the conversational command
 payloads that carry an actor. `SubmitInput` and the process-facing metadata
@@ -422,29 +424,36 @@ than hiding a session. Session metadata changes publish a session fact through
 the same journal and invalidate a hot follow snapshot. Catalog order is total,
 by descending last activity with ascending session identity as tie-breaker, or
 by ascending session identity; catalog search is an exact case-sensitive
-substring of the title or the canonical session UUID.
+substring of the title or the canonical session UUID. The catalog keeps only
+sessions carrying every required tag and excludes archived sessions unless they
+are requested.
 
 The follow stream subscribes to the daemon's browser monitor fanout before
 reading the session state and its observed cursor from one repeatable-read
-snapshot, then emits that snapshot as its first item. Provider-text deltas
-queued when the snapshot completes are discarded, and a durable update for the
-followed session queued with a cursor above the snapshot's is emitted after the
-snapshot. An update for another session advances the observed cursor and is not
-emitted. Lag confined to records the snapshot cursor covers is absorbed
-silently. Falling behind past covered records, or saturating the monitor while
-retained fragment text is draining, emits one positive-cursor resync item and
-ends the response; the client then replaces all transient presentation with a
-fresh live snapshot and resumes durable history above its cursor without
-reloading the historical transcript.
+snapshot, then emits that snapshot as its first item. The live snapshot carries
+the active turn's state, the queued turn count with a bounded preview of the
+earliest queued identities, any pending reconciliation operation, and the runner
+placement and connection health. Provider-text deltas queued when the snapshot
+completes are discarded, and a durable update for the followed session queued
+with a cursor above the snapshot's is emitted after the snapshot. An update for
+another session advances the observed cursor and is not emitted. Lag confined to
+records the snapshot cursor covers is absorbed silently. Falling behind past
+covered records, or saturating the monitor while retained fragment text is
+draining, emits one positive-cursor resync item and ends the response; the
+client then replaces all transient presentation with a fresh live snapshot and
+resumes durable history above its cursor without reloading the historical
+transcript.
 
-The timeline sequence is allocated once across ordinary and delegation outbox
-events; it is append-only, totally ordered, independent of table offsets and
-query plans, and never renumbered. Another session's events may create gaps, so
-a navigator carries session and sequence and opens an unloaded region with an
-around read, which bounds the indexed prefix and suffix candidates before
-sorting their union by distance from the address; arithmetic adjacency is never
-required. Continuation repeats only the boundary address, never an item in the
-next keyset window.
+The session timeline descriptor reports the first and latest addresses, the item
+and projected-size facts, the active and queued turn counts, and the observation
+cursor, all from one snapshot. The timeline sequence is allocated once across
+ordinary and delegation outbox events; it is append-only, totally ordered,
+independent of table offsets and query plans, and never renumbered. Another
+session's events may create gaps, so a navigator carries session and sequence
+and opens an unloaded region with an around read, which bounds the indexed
+prefix and suffix candidates before sorting their union by distance from the
+address; arithmetic adjacency is never required. Continuation repeats only the
+boundary address, never an item in the next keyset window.
 
 Browser DTOs are generated from the Rust web-contract schema, and application
 values, persistence rows, browser DTOs, and presentation items remain distinct.
