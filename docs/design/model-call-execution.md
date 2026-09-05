@@ -96,10 +96,12 @@ a marker naming the configured target carries the substitution on its own.
 
 From the awaiting-recovery phase, a user decision resolves an unstopped
 ambiguity. Accepting the duplicate risk records `DuplicateRiskAccepted` as the
-turn treatment and authorizes a replacement call on a new attempt. Outcome
-authority transfers from the ambiguous call to the replacement, so at most one
-call determines the turn's outcome. The ambiguous call stays terminal and
-unchanged.
+turn treatment and authorizes a replacement call on a new attempt. Whether that
+replacement may reuse the ambiguous call's credential profile is undecided in
+[open-questions](../open-questions.md), so its credential authority is pending
+that decision. Outcome authority transfers from the ambiguous call to the
+replacement, so at most one call determines the turn's outcome. The ambiguous
+call stays terminal and unchanged.
 
 The prepared model operation carries a separate optional typed
 workspace-instruction region unchanged into the model operation's
