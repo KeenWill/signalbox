@@ -248,14 +248,15 @@ with its native facts retained rather than guessed at.
 The non-acceptance proof on a provider error is an adapter-owned typed fact,
 never inferred from the error kind, status retryability or provider prose. An
 adapter admits it only when it decoded its own documented error envelope, the
-native token names one of that adapter's mapped availability causes, and the
-envelope arrived as an error response decoded before any stream began. A
-status-derived fallback, an absent or undecodable body, or an unmapped token
-carries no proof and keeps its status-classified kind. An SSE error record never
-carries the proof, so an availability failure that arrives mid-stream carries
-none. The Codex CLI adapter, which has no error envelope, admits the proof only
-when its event stream closes with a `turn.failed` event; a stream-level error
-that no matching `turn.failed` event closes carries none.
+native token names one of that adapter's mapped availability causes, the HTTP
+status agrees with that token, and the envelope arrived as an error response
+decoded before any stream began. A status-derived fallback, an absent or
+undecodable body, or an unmapped token carries no proof and keeps its
+status-classified kind. An SSE error record never carries the proof, so an
+availability failure that arrives mid-stream carries none. The Codex CLI
+adapter, which has no error envelope, admits the proof only when its event
+stream closes with a `turn.failed` event; a stream-level error that no matching
+`turn.failed` event closes carries none.
 
 A success-status response whose body is not valid completion material is
 boundary loss, never completion, and an unrecognized finish token is boundary
@@ -387,10 +388,14 @@ anything, the Codex smoke asserts that the reported version equals the supported
 version and compares the CLI's complete feature list, including stage and
 default, with an exact classified inventory. In every smoke workflow, forks are
 excluded by GitHub secret withholding and by three explicit repository-name
-comparisons; each credential is referenced only in the step that spends the
-exchange, never echoed or passed in argv; and the test binary comes from a
-credential-free build, so no build script or procedural macro runs while the key
-is readable.
+comparisons, no credential is echoed or passed in argv, and the test binary
+comes from a credential-free build, so no build script or procedural macro runs
+while the key is readable. The direct-HTTP smokes reference their secret only in
+the step that spends the exchange. Each CLI smoke references it in a setup step
+before that: the Claude smoke writes it to a file and gives the exchange step
+only that path, and the Codex smoke pipes it on stdin into the CLI's own login,
+which writes the credential store the CLI then reads. Each CLI smoke removes
+what it materialized when the job ends.
 
 `OperatorFailureClass` states only a failure's severity and carries no user
 content, so shared telemetry may emit it while the underlying error keeps its
