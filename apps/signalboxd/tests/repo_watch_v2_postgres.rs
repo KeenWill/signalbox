@@ -6,14 +6,16 @@
 
 use std::{error::Error, num::NonZeroU64, time::Duration};
 
+use rust_decimal::Decimal;
 use signalbox_domain::{
     DirectModelSelection, ModelSelectionRequest, ModuleDispatch, SessionConfigurationDefaults,
     SessionCreationProvenance,
 };
 use signalbox_module_repo_watch_v2::{
     CreateSessionCommandFactory, DispatchAdmission, DispatchReferenceGenerator, EventAdmission,
-    PullRequestLifecycle, PullRequestState, RepoWatchStore, RepositoryState, RuleAdmission,
-    WebhookAdmission, WebhookDelivery, WebhookDisposition, matching_rules, plan_repository_event,
+    EventCandidate, FrontierEventAdmission, PullRequestLifecycle, PullRequestState, RepoWatchStore,
+    RepositoryState, RuleAdmission, WebhookAdmission, WebhookDelivery, WebhookDisposition,
+    matching_rules, plan_repository_event,
 };
 use signalbox_ownership_seam::{
     BranchName, CommitSha, CreateSession, DurableCommandId, OffsetDateTime, PullRequestBody,
@@ -39,15 +41,21 @@ const DATABASE_NAME: &str = "signalbox_repo_watch_v2";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 
-struct FixedDispatchIds;
+struct FixedDispatchIds {
+    value: u128,
+    calls: usize,
+}
 
 impl DispatchReferenceGenerator for FixedDispatchIds {
     fn next_dispatch(&mut self) -> RepoWatchDispatchId {
-        RepoWatchDispatchId::from_uuid(Uuid::from_u128(16))
+        self.calls += 1;
+        RepoWatchDispatchId::from_uuid(Uuid::from_u128(self.value))
     }
 }
 
-struct FixtureSessionFactory;
+struct FixtureSessionFactory {
+    next_command: u128,
+}
 
 impl CreateSessionCommandFactory for FixtureSessionFactory {
     type Error = std::convert::Infallible;
@@ -58,8 +66,10 @@ impl CreateSessionCommandFactory for FixtureSessionFactory {
         _template: &SessionTemplateName,
         _event: &RepoWatchEvent,
     ) -> Result<CreateSession, Self::Error> {
+        let command = DurableCommandId::from_uuid(Uuid::from_u128(self.next_command));
+        self.next_command += 1;
         Ok(CreateSession::new(
-            DurableCommandId::from_uuid(Uuid::from_u128(17)),
+            command,
             SessionCreationProvenance::module_dispatched(ModuleDispatch::RepositoryWatch {
                 dispatch,
             }),
@@ -124,6 +134,23 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     let default_head =
         CommitSha::try_new(String::from("1111111111111111111111111111111111111111"))?;
     let observed_at = OffsetDateTime::UNIX_EPOCH + Duration::from_secs(1_000);
+    let body = br#"{"action":"opened"}"#;
+    let delivery = || WebhookDelivery {
+        repository: &repository,
+        hook_id: 9,
+        delivery_id: Uuid::from_u128(10),
+        event: "pull_request",
+        action: Some("opened"),
+        body_digest: [11; 32],
+        body,
+        received_at: observed_at,
+        expires_at: observed_at + Duration::from_secs(60),
+    };
+    assert_eq!(
+        store.admit_webhook(delivery()).await?,
+        WebhookAdmission::Inserted
+    );
+
     store
         .upsert_repository(RepositoryState {
             repository: &repository,
@@ -159,10 +186,6 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         NonZeroU64::new(2).expect("two is positive"),
         PullRequestNumber::new(NonZeroU64::new(7).expect("seven is positive")),
     );
-    store.upsert_frontier(&repository, frontier).await?;
-    assert!(store.release_frontier(&repository, &stream).await?);
-    assert!(!store.release_frontier(&repository, &stream).await?);
-
     let rule = RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(String::from("branch-ci"))?,
         RepoWatchRuleVersion::V1,
@@ -172,20 +195,63 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             labels: RepoWatchLabelMatcher::default(),
             ..RepoWatchMatcherV1Input::default()
         }),
-        vec![RepoWatchRuleActionV1::DispatchSession {
-            template: SessionTemplateName::try_new(String::from("repo-watch"))?,
-        }],
+        vec![
+            RepoWatchRuleActionV1::DispatchSession {
+                template: SessionTemplateName::try_new(String::from("repo-watch"))?,
+            },
+            RepoWatchRuleActionV1::DispatchSession {
+                template: SessionTemplateName::try_new(String::from("repo-watch-followup"))?,
+            },
+        ],
         RepoWatchSingletonScope::Repository,
         Duration::ZERO,
     )?;
-    assert_eq!(
-        store.record_rule(&rule, observed_at).await?,
-        RuleAdmission::Inserted
+    let (first, concurrent) = tokio::join!(
+        store.record_rule(&repository, &rule, observed_at),
+        store.record_rule(&repository, &rule, observed_at)
     );
+    assert!(matches!(
+        (first?, concurrent?),
+        (RuleAdmission::Inserted, RuleAdmission::Replayed)
+            | (RuleAdmission::Replayed, RuleAdmission::Inserted)
+    ));
     assert_eq!(
-        store.record_rule(&rule, observed_at).await?,
+        store.record_rule(&repository, &rule, observed_at).await?,
         RuleAdmission::Replayed
     );
+    let fingerprint_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM rule_field_fingerprint
+          WHERE repository = $1 AND rule_id = $2",
+    )
+    .bind(repository.as_str())
+    .bind(rule.id().as_str())
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(
+        usize::try_from(fingerprint_count)?,
+        rule.identity_field_digests().len()
+    );
+    let other_repository = RepositorySlug::try_new(String::from("other/repository"))?;
+    assert_eq!(
+        store
+            .record_rule(&other_repository, &rule, observed_at)
+            .await?,
+        RuleAdmission::Inserted
+    );
+    assert!(
+        store
+            .deactivate_rule(&other_repository, rule.id().as_str(), observed_at)
+            .await?
+    );
+    let retained_revisions: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM rule_revision
+          WHERE repository = $1 AND rule_id = $2",
+    )
+    .bind(other_repository.as_str())
+    .bind(rule.id().as_str())
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(retained_revisions, 1);
 
     let event = RepoWatchEvent::branch_workflow(
         RepoWatchEventId::from_uuid(Uuid::from_u128(14)),
@@ -199,20 +265,45 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     let retain_until = observed_at + Duration::from_secs(120);
     assert_eq!(
         store
-            .append_event(&event, identity, observed_at, retain_until)
+            .commit_frontier_candidate(
+                &repository,
+                &[frontier],
+                &[EventCandidate {
+                    event: &event,
+                    content_identity: identity,
+                    recorded_at: observed_at,
+                    retain_until,
+                }],
+            )
             .await?,
-        EventAdmission::Inserted
+        FrontierEventAdmission::Committed(Box::new([EventAdmission::Inserted]))
     );
     assert_eq!(
         store
-            .append_event(&event, identity, observed_at, retain_until)
+            .commit_frontier_candidate(
+                &repository,
+                &[frontier],
+                &[EventCandidate {
+                    event: &event,
+                    content_identity: identity,
+                    recorded_at: observed_at + Duration::from_secs(1),
+                    retain_until: retain_until + Duration::from_secs(1),
+                }],
+            )
             .await?,
-        EventAdmission::Replayed
+        FrontierEventAdmission::Committed(Box::new([EventAdmission::Replayed]))
     );
-    let mut ids = FixedDispatchIds;
-    let mut factory = FixtureSessionFactory;
+    let mut ids = FixedDispatchIds {
+        value: 16,
+        calls: 0,
+    };
+    let mut factory = FixtureSessionFactory { next_command: 17 };
     let plans = plan_repository_event(std::slice::from_ref(&rule), &event, &mut ids, &mut factory)?;
-    assert_eq!(plans.len(), 1);
+    assert_eq!(plans.len(), 2);
+    assert_eq!(ids.calls, 1);
+    assert_eq!(plans[0].dispatch(), plans[1].dispatch());
+    assert_eq!(plans[0].action_ordinal(), 1);
+    assert_eq!(plans[1].action_ordinal(), 2);
     let signalbox_ownership_seam::SessionCommandPayload::CreateSession(created) =
         plans[0].command().clone().into_payload()
     else {
@@ -220,32 +311,110 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     };
     assert_eq!(created.start_gate(), StartGate::Held);
     assert_eq!(
-        store.record_command(&plans[0], observed_at).await?,
+        store.record_commands(&plans, observed_at).await?,
         DispatchAdmission::Inserted
     );
+    let mut replay_ids = FixedDispatchIds {
+        value: 30,
+        calls: 0,
+    };
+    let mut replay_factory = FixtureSessionFactory { next_command: 31 };
+    let replay_plans = plan_repository_event(
+        std::slice::from_ref(&rule),
+        &event,
+        &mut replay_ids,
+        &mut replay_factory,
+    )?;
     assert_eq!(
-        store.record_command(&plans[0], observed_at).await?,
+        store.record_commands(&replay_plans, observed_at).await?,
         DispatchAdmission::Replayed
     );
-
-    let body = br#"{"action":"opened"}"#;
-    let delivery = || WebhookDelivery {
-        repository: &repository,
-        hook_id: 9,
-        delivery_id: Uuid::from_u128(10),
-        event: "pull_request",
-        action: Some("opened"),
-        body_digest: [11; 32],
-        body,
-        received_at: observed_at,
-        expires_at: observed_at + Duration::from_secs(60),
-    };
-    assert_eq!(
-        store.admit_webhook(delivery()).await?,
-        WebhookAdmission::Inserted
+    let retained_commands: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM dispatch_ledger
+          WHERE repository = $1 AND rule_id = $2 AND event_id = $3",
+    )
+    .bind(repository.as_str())
+    .bind(rule.id().as_str())
+    .bind(event.id().into_uuid())
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(retained_commands, 2);
+    assert!(
+        store
+            .deactivate_rule(&repository, rule.id().as_str(), observed_at)
+            .await?
     );
     assert_eq!(
-        store.admit_webhook(delivery()).await?,
+        store.record_commands(&replay_plans, observed_at).await?,
+        DispatchAdmission::InactiveRule
+    );
+    let payload: Vec<u8> =
+        sqlx::query_scalar("SELECT normalized_payload FROM gh_event WHERE event_id = $1")
+            .bind(event.id().into_uuid())
+            .fetch_one(&module_pool)
+            .await?;
+    let payload = String::from_utf8(payload)?;
+    assert!(payload.contains("branch_workflow_run_completed"));
+    assert!(payload.contains("\"workflow\":\"ci\""));
+
+    let next_frontier = RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+        stream,
+        NonZeroU64::new(3).expect("three is positive"),
+        PullRequestNumber::new(NonZeroU64::new(7).expect("seven is positive")),
+    );
+    let preceding_event = RepoWatchEvent::branch_workflow(
+        RepoWatchEventId::from_uuid(Uuid::from_u128(15)),
+        repository.clone(),
+        default_branch.clone(),
+        WorkflowName::try_new(String::from("build"))?,
+        signalbox_ownership_seam::CheckConclusion::Success,
+    );
+    assert_eq!(
+        store
+            .commit_frontier_candidate(
+                &repository,
+                &[next_frontier],
+                &[
+                    EventCandidate {
+                        event: &preceding_event,
+                        content_identity: RepoWatchEventContentIdentityV1::from_bytes([17; 32]),
+                        recorded_at: observed_at,
+                        retain_until,
+                    },
+                    EventCandidate {
+                        event: &event,
+                        content_identity: RepoWatchEventContentIdentityV1::from_bytes([16; 32]),
+                        recorded_at: observed_at,
+                        retain_until,
+                    },
+                ],
+            )
+            .await?,
+        FrontierEventAdmission::ConflictingReuse
+    );
+    let preceding_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM gh_event WHERE event_id = $1")
+            .bind(preceding_event.id().into_uuid())
+            .fetch_one(&module_pool)
+            .await?;
+    assert_eq!(preceding_count, 0);
+    let frontier_sequence: Decimal = sqlx::query_scalar(
+        "SELECT sequence FROM frontier
+          WHERE repository = $1 AND stream_identity = $2",
+    )
+    .bind(repository.as_str())
+    .bind(stream.as_slice())
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(frontier_sequence, Decimal::from(2_u64));
+    assert!(store.release_frontier(&repository, &stream).await?);
+    assert!(!store.release_frontier(&repository, &stream).await?);
+
+    let mut replay = delivery();
+    replay.received_at += Duration::from_secs(1);
+    replay.expires_at += Duration::from_secs(1);
+    assert_eq!(
+        store.admit_webhook(replay).await?,
         WebhookAdmission::Replayed
     );
 
@@ -265,6 +434,9 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             )
             .await?
     );
+    assert!(store.advance_core_event(0, 4).await?);
+    assert!(store.advance_core_event(4, 9).await?);
+    assert!(!store.advance_core_event(4, 10).await?);
     assert!(
         !store
             .settle_webhook(

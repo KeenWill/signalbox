@@ -26,6 +26,11 @@ def dependency_tables(manifest: dict[str, object]) -> list[dict[str, object]]:
         table = manifest.get(name)
         if isinstance(table, dict):
             tables.append(table)
+    target = manifest.get("target")
+    if isinstance(target, dict):
+        for target_table in target.values():
+            if isinstance(target_table, dict):
+                tables.extend(dependency_tables(target_table))
     return tables
 
 
@@ -68,8 +73,9 @@ def main() -> int:
     if MODULE_ROOT.is_dir():
         for manifest in sorted(MODULE_ROOT.glob("*/Cargo.toml")):
             failures.extend(check_manifest(manifest))
-        for source in sorted(MODULE_ROOT.glob("*/src/**/*.rs")):
-            failures.extend(check_module_source(source))
+        for source in sorted(MODULE_ROOT.glob("*/src/**/*")):
+            if source.suffix in {".rs", ".sql"}:
+                failures.extend(check_module_source(source))
 
     for root in (ROOT / "crates", ROOT / "apps"):
         if not root.is_dir():

@@ -7,16 +7,19 @@
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
+use serde_json::{Value, json};
 use signalbox_ownership_seam::{
-    BranchName, CommandSettlement, CommitSha, CreateSession, FinishCondition, LifecycleEvent,
-    LifecycleEventKind, OffsetDateTime, PullRequestBody, PullRequestNumber, PullRequestTitle,
-    RepoWatchAuthorLogin, RepoWatchDispatchId, RepoWatchEvent, RepoWatchEventContentIdentityV1,
-    RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventKindNameV1, RepoWatchEventTarget,
-    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion, RepositorySlug,
+    BranchName, CheckConclusion, ChecksOutcome, CommandOutsideSeam, CommandSettlement, CommitSha,
+    CreateSession, FinishCondition, LifecycleEvent, LifecycleEventKind, MergeableState,
+    OffsetDateTime, PullRequestBody, PullRequestNumber, PullRequestTitle, ReactionChange,
+    ReactionSubject, RepoWatchAuthorLogin, RepoWatchDispatchId, RepoWatchEvent,
+    RepoWatchEventContentIdentityV1, RepoWatchEventIdentityFrontierEntryV1,
+    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchRule,
+    RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion, RepositorySlug, ReviewState,
     SessionCommand, SessionCommandKind, SessionLifecycleCommand, SessionLifecycleOperation,
     SessionOwnership, StartGate, StopStickiness,
 };
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 mod github;
@@ -138,7 +141,27 @@ pub enum EventAdmission {
     Inserted,
     /// The exact fact was already retained.
     Replayed,
-    /// Either durable identity was already bound to different fact metadata.
+}
+
+/// One normalized fact in a frontier commit.
+#[derive(Clone, Copy, Debug)]
+pub struct EventCandidate<'a> {
+    /// Complete checked fact.
+    pub event: &'a RepoWatchEvent,
+    /// Identity of the normalized fact content.
+    pub content_identity: RepoWatchEventContentIdentityV1,
+    /// Local admission time.
+    pub recorded_at: OffsetDateTime,
+    /// Caller-selected retention boundary.
+    pub retain_until: OffsetDateTime,
+}
+
+/// Result of atomically committing a complete frontier candidate and event batch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FrontierEventAdmission {
+    /// The frontier and ordered facts committed together.
+    Committed(Box<[EventAdmission]>),
+    /// A durable event identity was already bound to a different fact.
     ConflictingReuse,
 }
 
@@ -160,36 +183,46 @@ pub enum RuleAdmission {
 /// Result of idempotently recording one emitted command.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DispatchAdmission {
-    /// The command was new.
+    /// The complete action batch was new.
     Inserted,
-    /// The exact command was already retained.
+    /// This rule revision and event already have a retained action batch.
     Replayed,
-    /// Either durable identity was already bound to different command metadata.
+    /// A durable dispatch or command identity was already bound elsewhere.
     ConflictingReuse,
+    /// The named rule revision is not currently active in this repository.
+    InactiveRule,
 }
 
 /// Module provenance retained beside one checked seam command.
 #[derive(Clone, Debug)]
 pub struct PlannedCommand {
     dispatch: RepoWatchDispatchId,
+    action_ordinal: u64,
+    repository: RepositorySlug,
     rule_id: RepoWatchRuleId,
     rule_revision: RepoWatchRuleVersion,
     event_id: signalbox_ownership_seam::RepoWatchEventId,
+    trigger_sequence: Option<u64>,
     command: SessionCommand,
 }
 
 impl PlannedCommand {
     fn new(
         dispatch: RepoWatchDispatchId,
+        action_ordinal: u64,
         rule: &RepoWatchRule,
         event: &RepoWatchEvent,
+        trigger_sequence: Option<u64>,
         command: SessionCommand,
     ) -> Self {
         Self {
             dispatch,
+            action_ordinal,
+            repository: event.repository().clone(),
             rule_id: rule.id().clone(),
             rule_revision: rule.version(),
             event_id: event.id(),
+            trigger_sequence,
             command,
         }
     }
@@ -197,6 +230,16 @@ impl PlannedCommand {
     /// Returns the module-local dispatch reference.
     pub const fn dispatch(&self) -> RepoWatchDispatchId {
         self.dispatch
+    }
+
+    /// Returns the one-based position in the rule's ordered action batch.
+    pub const fn action_ordinal(&self) -> u64 {
+        self.action_ordinal
+    }
+
+    /// Returns the repository whose fact matched the rule.
+    pub const fn repository(&self) -> &RepositorySlug {
+        &self.repository
     }
 
     /// Returns the checked rule identity.
@@ -212,6 +255,11 @@ impl PlannedCommand {
     /// Returns the triggering normalized GitHub fact.
     pub const fn event_id(&self) -> signalbox_ownership_seam::RepoWatchEventId {
         self.event_id
+    }
+
+    /// Returns the lifecycle trigger, absent for a direct rule/event match.
+    pub const fn trigger_sequence(&self) -> Option<u64> {
+        self.trigger_sequence
     }
 
     /// Borrows the checked command sent through the seam.
@@ -269,6 +317,38 @@ impl fmt::Display for LifecycleReactionError {
 
 impl Error for LifecycleReactionError {}
 
+/// Why a matching event could not become a checked command batch.
+#[derive(Debug)]
+pub enum PlanRepositoryEventError<E> {
+    /// The core-owned command factory failed.
+    Factory(E),
+    /// The factory returned creation provenance outside the ownership seam.
+    CommandOutsideSeam,
+}
+
+impl<E: fmt::Display> fmt::Display for PlanRepositoryEventError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Factory(error) => write!(formatter, "create-session factory failed: {error}"),
+            Self::CommandOutsideSeam => {
+                formatter.write_str("create-session command is outside the ownership seam")
+            }
+        }
+    }
+}
+
+impl<E> Error for PlanRepositoryEventError<E>
+where
+    E: Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Factory(error) => Some(error),
+            Self::CommandOutsideSeam => None,
+        }
+    }
+}
+
 impl WebhookDisposition {
     const fn storage(self) -> &'static str {
         match self {
@@ -290,6 +370,12 @@ pub enum StoreError {
     InvalidWebhookExpiry,
     /// The event retention boundary does not follow its recording time.
     InvalidEventRetention,
+    /// A fact in a frontier commit belongs to another repository.
+    EventRepositoryMismatch,
+    /// The checked rule exposed too many identity fields for the durable inventory.
+    InvalidRuleFieldInventory,
+    /// Planned commands do not form one complete ordered rule/event batch.
+    InvalidDispatchBatch,
 }
 
 impl fmt::Display for StoreError {
@@ -301,6 +387,15 @@ impl fmt::Display for StoreError {
             Self::InvalidEventRetention => {
                 "repository-watch event retention is not after recording"
             }
+            Self::EventRepositoryMismatch => {
+                "repository-watch event does not belong to the frontier repository"
+            }
+            Self::InvalidRuleFieldInventory => {
+                "repository-watch rule identity-field inventory is too large"
+            }
+            Self::InvalidDispatchBatch => {
+                "repository-watch commands do not form one ordered dispatch batch"
+            }
         })
     }
 }
@@ -311,7 +406,10 @@ impl Error for StoreError {
             Self::Database(error) => Some(error),
             Self::InvalidProviderIdentity
             | Self::InvalidWebhookExpiry
-            | Self::InvalidEventRetention => None,
+            | Self::InvalidEventRetention
+            | Self::EventRepositoryMismatch
+            | Self::InvalidRuleFieldInventory
+            | Self::InvalidDispatchBatch => None,
         }
     }
 }
@@ -449,8 +547,6 @@ impl RepoWatchStore {
                     AND delivery.action IS NOT DISTINCT FROM $5
                     AND delivery.body_digest = $6
                     AND body.body = $7
-                    AND delivery.received_at = $8
-                    AND delivery.expires_at = $9
                FROM webhook_delivery AS delivery
                JOIN webhook_body AS body USING (hook_id, delivery_id)
               WHERE delivery.hook_id = $1 AND delivery.delivery_id = $2",
@@ -462,8 +558,6 @@ impl RepoWatchStore {
         .bind(delivery.action)
         .bind(delivery.body_digest.as_slice())
         .bind(delivery.body)
-        .bind(delivery.received_at)
-        .bind(delivery.expires_at)
         .fetch_one(&mut *transaction)
         .await?;
         transaction.rollback().await?;
@@ -500,45 +594,72 @@ impl RepoWatchStore {
         Ok(updated.rows_affected() == 1)
     }
 
-    /// Advances module-local application through the exact next core event.
-    pub async fn advance_core_event(&self, sequence: u64) -> Result<bool, StoreError> {
+    /// Advances module-local application from the prior visible core event.
+    pub async fn advance_core_event(
+        &self,
+        prior_visible_sequence: u64,
+        sequence: u64,
+    ) -> Result<bool, StoreError> {
         let updated = sqlx::query(
             "UPDATE core_event_cursor
                 SET applied_through = $1, updated_at = statement_timestamp()
-              WHERE singleton AND applied_through = $1 - 1",
+              WHERE singleton
+                AND applied_through = $2
+                AND $1 > $2",
         )
         .bind(Decimal::from(sequence))
+        .bind(Decimal::from(prior_visible_sequence))
         .execute(&self.pool)
         .await?;
         Ok(updated.rows_affected() == 1)
     }
 
-    /// Upserts the durable occurrence counter for one normalized event stream.
-    pub async fn upsert_frontier(
+    /// Atomically commits a complete frontier candidate and its ordered facts.
+    pub async fn commit_frontier_candidate(
         &self,
         repository: &RepositorySlug,
-        entry: RepoWatchEventIdentityFrontierEntryV1,
-    ) -> Result<(), StoreError> {
-        sqlx::query(
-            "INSERT INTO frontier
-                (repository, stream_identity, sequence, pull_request_number, updated_at)
-             VALUES ($1, $2, $3, $4, statement_timestamp())
-             ON CONFLICT (repository, stream_identity) DO UPDATE
-             SET sequence = EXCLUDED.sequence,
-                 pull_request_number = EXCLUDED.pull_request_number,
-                 updated_at = statement_timestamp()",
-        )
-        .bind(repository.as_str())
-        .bind(entry.stream_identity().as_slice())
-        .bind(Decimal::from(entry.sequence().get()))
-        .bind(
-            entry
-                .pull_request_number()
-                .map(|number| Decimal::from(number.get())),
-        )
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        frontier: &[RepoWatchEventIdentityFrontierEntryV1],
+        events: &[EventCandidate<'_>],
+    ) -> Result<FrontierEventAdmission, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let mut admissions = Vec::with_capacity(events.len());
+        for candidate in events {
+            if candidate.event.repository() != repository {
+                return Err(StoreError::EventRepositoryMismatch);
+            }
+            match append_event(&mut transaction, candidate).await? {
+                Some(admission) => admissions.push(admission),
+                None => {
+                    transaction.rollback().await?;
+                    return Ok(FrontierEventAdmission::ConflictingReuse);
+                }
+            }
+        }
+        for entry in frontier {
+            sqlx::query(
+                "INSERT INTO frontier
+                    (repository, stream_identity, sequence, pull_request_number, updated_at)
+                 VALUES ($1, $2, $3, $4, statement_timestamp())
+                 ON CONFLICT (repository, stream_identity) DO UPDATE
+                 SET sequence = EXCLUDED.sequence,
+                     pull_request_number = EXCLUDED.pull_request_number,
+                     updated_at = statement_timestamp()",
+            )
+            .bind(repository.as_str())
+            .bind(entry.stream_identity().as_slice())
+            .bind(Decimal::from(entry.sequence().get()))
+            .bind(
+                entry
+                    .pull_request_number()
+                    .map(|number| Decimal::from(number.get())),
+            )
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(FrontierEventAdmission::Committed(
+            admissions.into_boxed_slice(),
+        ))
     }
 
     /// Releases one recurring stream after its rebuild subject has retired.
@@ -558,244 +679,525 @@ impl RepoWatchStore {
         Ok(deleted.rows_affected() == 1)
     }
 
-    /// Appends one normalized fact with its caller-selected retention boundary.
-    pub async fn append_event(
-        &self,
-        event: &RepoWatchEvent,
-        content_identity: RepoWatchEventContentIdentityV1,
-        recorded_at: OffsetDateTime,
-        retain_until: OffsetDateTime,
-    ) -> Result<EventAdmission, StoreError> {
-        if retain_until <= recorded_at {
-            return Err(StoreError::InvalidEventRetention);
-        }
-        let (target_kind, pull_request_number) = match event.target() {
-            RepoWatchEventTarget::PullRequest(context) => {
-                ("pull_request", Some(Decimal::from(context.number().get())))
-            }
-            RepoWatchEventTarget::Branch => ("branch", None),
-        };
-        let inserted = sqlx::query(
-            "INSERT INTO gh_event
-                (event_id, content_identity, repository, event_kind, target_kind,
-                 pull_request_number, recorded_at, retain_until)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(event.id().into_uuid())
-        .bind(content_identity.as_bytes().as_slice())
-        .bind(event.repository().as_str())
-        .bind(event_kind_storage(event.kind().name()))
-        .bind(target_kind)
-        .bind(pull_request_number)
-        .bind(recorded_at)
-        .bind(retain_until)
-        .execute(&self.pool)
-        .await?
-        .rows_affected()
-            == 1;
-        if inserted {
-            return Ok(EventAdmission::Inserted);
-        }
-        let exact: bool = sqlx::query_scalar(
-            "SELECT COALESCE(
-                count(*) = 1 AND bool_and(
-                    event_id = $1
-                    AND content_identity = $2
-                    AND repository = $3
-                    AND event_kind = $4
-                    AND target_kind = $5
-                    AND pull_request_number IS NOT DISTINCT FROM $6
-                    AND recorded_at = $7
-                    AND retain_until = $8
-                ), false)
-               FROM gh_event
-              WHERE event_id = $1 OR content_identity = $2",
-        )
-        .bind(event.id().into_uuid())
-        .bind(content_identity.as_bytes().as_slice())
-        .bind(event.repository().as_str())
-        .bind(event_kind_storage(event.kind().name()))
-        .bind(target_kind)
-        .bind(pull_request_number)
-        .bind(recorded_at)
-        .bind(retain_until)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(if exact {
-            EventAdmission::Replayed
-        } else {
-            EventAdmission::ConflictingReuse
-        })
-    }
-
     /// Activates one checked rule revision without retaining configuration text.
     pub async fn record_rule(
         &self,
+        repository: &RepositorySlug,
         rule: &RepoWatchRule,
         activated_at: OffsetDateTime,
     ) -> Result<RuleAdmission, StoreError> {
         let revision = Decimal::from(rule.version().get());
         let digest = rule.content_digest();
         let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(
+                hashtextextended(length($1)::text || ':' || $1 || $2, 0))",
+        )
+        .bind(repository.as_str())
+        .bind(rule.id().as_str())
+        .execute(&mut *transaction)
+        .await?;
         let active: Option<(Decimal, Vec<u8>)> = sqlx::query_as(
             "SELECT active_revision, content_digest
                FROM rule
-              WHERE rule_id = $1
+              WHERE repository = $1 AND rule_id = $2
               FOR UPDATE",
         )
+        .bind(repository.as_str())
         .bind(rule.id().as_str())
         .fetch_optional(&mut *transaction)
         .await?;
-        let Some((active_revision, active_digest)) = active else {
-            sqlx::query(
-                "INSERT INTO rule
-                    (rule_id, active_revision, content_digest, updated_at)
-                 VALUES ($1, $2, $3, statement_timestamp())",
-            )
-            .bind(rule.id().as_str())
-            .bind(revision)
-            .bind(digest.as_bytes().as_slice())
-            .execute(&mut *transaction)
-            .await?;
-            sqlx::query(
-                "INSERT INTO rule_revision
-                    (rule_id, revision, content_digest, activated_at)
-                 VALUES ($1, $2, $3, $4)",
-            )
-            .bind(rule.id().as_str())
-            .bind(revision)
-            .bind(digest.as_bytes().as_slice())
-            .bind(activated_at)
-            .execute(&mut *transaction)
-            .await?;
-            transaction.commit().await?;
-            return Ok(RuleAdmission::Inserted);
-        };
-        if revision < active_revision {
+        let latest_revision: Option<Decimal> = sqlx::query_scalar(
+            "SELECT max(revision) FROM rule_revision
+              WHERE repository = $1 AND rule_id = $2",
+        )
+        .bind(repository.as_str())
+        .bind(rule.id().as_str())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let historical_digest: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT content_digest
+               FROM rule_revision
+              WHERE repository = $1 AND rule_id = $2 AND revision = $3",
+        )
+        .bind(repository.as_str())
+        .bind(rule.id().as_str())
+        .bind(revision)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(historical_digest) = historical_digest {
+            transaction.rollback().await?;
+            return Ok(if historical_digest != digest.as_bytes() {
+                RuleAdmission::ConflictingReuse
+            } else if active
+                .as_ref()
+                .is_some_and(|(active_revision, _)| *active_revision == revision)
+            {
+                RuleAdmission::Replayed
+            } else {
+                RuleAdmission::Stale
+            });
+        }
+        if active
+            .as_ref()
+            .is_some_and(|(active_revision, _)| revision < *active_revision)
+            || latest_revision.is_some_and(|latest_revision| revision < latest_revision)
+        {
             transaction.rollback().await?;
             return Ok(RuleAdmission::Stale);
         }
-        if revision == active_revision {
-            transaction.rollback().await?;
-            return Ok(if active_digest == digest.as_bytes() {
-                RuleAdmission::Replayed
-            } else {
-                RuleAdmission::ConflictingReuse
-            });
-        }
-        sqlx::query(
-            "UPDATE rule_revision
-                SET retired_at = GREATEST(activated_at, $3)
-              WHERE rule_id = $1 AND revision = $2",
-        )
-        .bind(rule.id().as_str())
-        .bind(active_revision)
-        .bind(activated_at)
-        .execute(&mut *transaction)
-        .await?;
-        let inserted = sqlx::query(
-            "INSERT INTO rule_revision
-                (rule_id, revision, content_digest, activated_at)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(rule.id().as_str())
-        .bind(revision)
-        .bind(digest.as_bytes().as_slice())
-        .bind(activated_at)
-        .execute(&mut *transaction)
-        .await?
-        .rows_affected()
-            == 1;
-        if !inserted {
-            let exact: bool = sqlx::query_scalar(
-                "SELECT content_digest = $3 AND activated_at = $4
-                   FROM rule_revision
-                  WHERE rule_id = $1 AND revision = $2",
+        insert_rule_revision(&mut transaction, repository, rule, activated_at).await?;
+        let admission = if let Some((active_revision, _)) = active {
+            sqlx::query(
+                "UPDATE rule_revision
+                    SET retired_at = GREATEST(activated_at, $4)
+                  WHERE repository = $1 AND rule_id = $2 AND revision = $3",
             )
+            .bind(repository.as_str())
+            .bind(rule.id().as_str())
+            .bind(active_revision)
+            .bind(activated_at)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE rule
+                    SET active_revision = $3,
+                        content_digest = $4,
+                        updated_at = statement_timestamp()
+                  WHERE repository = $1 AND rule_id = $2",
+            )
+            .bind(repository.as_str())
             .bind(rule.id().as_str())
             .bind(revision)
             .bind(digest.as_bytes().as_slice())
-            .bind(activated_at)
-            .fetch_one(&mut *transaction)
+            .execute(&mut *transaction)
             .await?;
-            if !exact {
-                transaction.rollback().await?;
-                return Ok(RuleAdmission::ConflictingReuse);
+            RuleAdmission::Updated
+        } else {
+            sqlx::query(
+                "INSERT INTO rule
+                    (repository, rule_id, active_revision, content_digest, updated_at)
+                 VALUES ($1, $2, $3, $4, statement_timestamp())",
+            )
+            .bind(repository.as_str())
+            .bind(rule.id().as_str())
+            .bind(revision)
+            .bind(digest.as_bytes().as_slice())
+            .execute(&mut *transaction)
+            .await?;
+            if latest_revision.is_some() {
+                RuleAdmission::Updated
+            } else {
+                RuleAdmission::Inserted
             }
-        }
-        sqlx::query(
-            "UPDATE rule
-                SET active_revision = $2,
-                    content_digest = $3,
-                    updated_at = statement_timestamp()
-              WHERE rule_id = $1",
-        )
-        .bind(rule.id().as_str())
-        .bind(revision)
-        .bind(digest.as_bytes().as_slice())
-        .execute(&mut *transaction)
-        .await?;
+        };
         transaction.commit().await?;
-        Ok(RuleAdmission::Updated)
+        Ok(admission)
     }
 
-    /// Records one emitted command before it is submitted through the seam.
-    pub async fn record_command(
+    /// Deactivates one repository-scoped rule while retaining revision lineage.
+    pub async fn deactivate_rule(
         &self,
-        planned: &PlannedCommand,
+        repository: &RepositorySlug,
+        rule_id: &str,
+        retired_at: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(
+                hashtextextended(length($1)::text || ':' || $1 || $2, 0))",
+        )
+        .bind(repository.as_str())
+        .bind(rule_id)
+        .execute(&mut *transaction)
+        .await?;
+        let active_revision: Option<Decimal> = sqlx::query_scalar(
+            "SELECT active_revision FROM rule
+              WHERE repository = $1 AND rule_id = $2 FOR UPDATE",
+        )
+        .bind(repository.as_str())
+        .bind(rule_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(active_revision) = active_revision else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        sqlx::query(
+            "UPDATE rule_revision
+                SET retired_at = GREATEST(activated_at, $4)
+              WHERE repository = $1 AND rule_id = $2 AND revision = $3",
+        )
+        .bind(repository.as_str())
+        .bind(rule_id)
+        .bind(active_revision)
+        .bind(retired_at)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query("DELETE FROM rule WHERE repository = $1 AND rule_id = $2")
+            .bind(repository.as_str())
+            .bind(rule_id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(true)
+    }
+}
+
+async fn append_event(
+    transaction: &mut Transaction<'_, Postgres>,
+    candidate: &EventCandidate<'_>,
+) -> Result<Option<EventAdmission>, StoreError> {
+    if candidate.retain_until <= candidate.recorded_at {
+        return Err(StoreError::InvalidEventRetention);
+    }
+    let event = candidate.event;
+    let (target_kind, pull_request_number) = match event.target() {
+        RepoWatchEventTarget::PullRequest(context) => {
+            ("pull_request", Some(Decimal::from(context.number().get())))
+        }
+        RepoWatchEventTarget::Branch => ("branch", None),
+    };
+    let payload = normalized_event_payload(event).to_string().into_bytes();
+    let inserted = sqlx::query(
+        "INSERT INTO gh_event
+            (event_id, content_identity, repository, event_kind, target_kind,
+             pull_request_number, normalized_payload, recorded_at, retain_until)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(event.id().into_uuid())
+    .bind(candidate.content_identity.as_bytes().as_slice())
+    .bind(event.repository().as_str())
+    .bind(event_kind_storage(event.kind().name()))
+    .bind(target_kind)
+    .bind(pull_request_number)
+    .bind(payload.as_slice())
+    .bind(candidate.recorded_at)
+    .bind(candidate.retain_until)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected()
+        == 1;
+    if inserted {
+        return Ok(Some(EventAdmission::Inserted));
+    }
+    let exact: bool = sqlx::query_scalar(
+        "SELECT COALESCE(
+            count(*) = 1 AND bool_and(
+                event_id = $1
+                AND content_identity = $2
+                AND repository = $3
+                AND event_kind = $4
+                AND target_kind = $5
+                AND pull_request_number IS NOT DISTINCT FROM $6
+                AND normalized_payload = $7
+            ), false)
+           FROM gh_event
+          WHERE event_id = $1 OR content_identity = $2",
+    )
+    .bind(event.id().into_uuid())
+    .bind(candidate.content_identity.as_bytes().as_slice())
+    .bind(event.repository().as_str())
+    .bind(event_kind_storage(event.kind().name()))
+    .bind(target_kind)
+    .bind(pull_request_number)
+    .bind(payload.as_slice())
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(exact.then_some(EventAdmission::Replayed))
+}
+
+async fn insert_rule_revision(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository: &RepositorySlug,
+    rule: &RepoWatchRule,
+    activated_at: OffsetDateTime,
+) -> Result<(), StoreError> {
+    let revision = Decimal::from(rule.version().get());
+    let digest = rule.content_digest();
+    sqlx::query(
+        "INSERT INTO rule_revision
+            (repository, rule_id, revision, content_digest, activated_at)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(repository.as_str())
+    .bind(rule.id().as_str())
+    .bind(revision)
+    .bind(digest.as_bytes().as_slice())
+    .bind(activated_at)
+    .execute(&mut **transaction)
+    .await?;
+    for (index, (field, field_digest)) in rule.identity_field_digests().into_iter().enumerate() {
+        let ordinal = i16::try_from(index).map_err(|_| StoreError::InvalidRuleFieldInventory)?;
+        sqlx::query(
+            "INSERT INTO rule_field_fingerprint
+                (repository, rule_id, revision, field_ordinal, field_name, field_digest)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(repository.as_str())
+        .bind(rule.id().as_str())
+        .bind(revision)
+        .bind(ordinal)
+        .bind(field.configuration_path())
+        .bind(field_digest.as_bytes().as_slice())
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
+}
+
+fn normalized_event_payload(event: &RepoWatchEvent) -> Value {
+    let target = match event.target() {
+        RepoWatchEventTarget::PullRequest(context) => json!({
+            "kind": "pull_request",
+            "number": context.number().get(),
+            "head_sha": context.head_sha().as_str(),
+            "head_repository": context.head_repository().as_str(),
+            "base_branch": context.base_branch().as_str(),
+            "head_branch": context.head_branch().as_str(),
+            "title": context.title().as_str(),
+            "body": context.body().as_str(),
+            "labels": context.labels().iter().map(|label| label.as_str()).collect::<Vec<_>>(),
+            "draft": context.draft(),
+            "author": context.author().map(RepoWatchAuthorLogin::as_str),
+        }),
+        RepoWatchEventTarget::Branch => json!({ "kind": "branch" }),
+    };
+    let kind = match event.kind() {
+        RepoWatchEventKindV1::PullRequestOpened => json!({ "name": "pull_request_opened" }),
+        RepoWatchEventKindV1::PullRequestClosed => json!({ "name": "pull_request_closed" }),
+        RepoWatchEventKindV1::PullRequestMerged => json!({ "name": "pull_request_merged" }),
+        RepoWatchEventKindV1::HeadChanged { previous, current } => json!({
+            "name": "head_changed",
+            "previous": previous.as_str(),
+            "current": current.as_str(),
+        }),
+        RepoWatchEventKindV1::MergeableStateChanged { current } => json!({
+            "name": "mergeable_state_changed",
+            "current": mergeable_state_storage(*current),
+        }),
+        RepoWatchEventKindV1::ChecksCompleted { outcome } => json!({
+            "name": "checks_completed",
+            "outcome": checks_outcome_storage(*outcome),
+        }),
+        RepoWatchEventKindV1::CheckRunCompleted { name, conclusion } => json!({
+            "name": "check_run_completed",
+            "check_run": name.as_str(),
+            "conclusion": check_conclusion_storage(*conclusion),
+        }),
+        RepoWatchEventKindV1::BranchWorkflowRunCompleted {
+            branch,
+            workflow,
+            conclusion,
+        } => json!({
+            "name": "branch_workflow_run_completed",
+            "branch": branch.as_str(),
+            "workflow": workflow.as_str(),
+            "conclusion": check_conclusion_storage(*conclusion),
+        }),
+        RepoWatchEventKindV1::ReviewSubmitted {
+            reviewer,
+            state,
+            commit,
+        } => json!({
+            "name": "review_submitted",
+            "reviewer": reviewer.as_str(),
+            "state": review_state_storage(*state),
+            "commit": commit.as_str(),
+        }),
+        RepoWatchEventKindV1::ThreadOpened { thread } => json!({
+            "name": "thread_opened",
+            "thread": thread.as_str(),
+        }),
+        RepoWatchEventKindV1::ThreadResolved { thread } => json!({
+            "name": "thread_resolved",
+            "thread": thread.as_str(),
+        }),
+        RepoWatchEventKindV1::Labeled { label } => json!({
+            "name": "labeled",
+            "label": label.as_str(),
+        }),
+        RepoWatchEventKindV1::Unlabeled { label } => json!({
+            "name": "unlabeled",
+            "label": label.as_str(),
+        }),
+        RepoWatchEventKindV1::BaseAdvanced { branch } => json!({
+            "name": "base_advanced",
+            "branch": branch.as_str(),
+        }),
+        RepoWatchEventKindV1::ReactionChanged {
+            subject,
+            reactor,
+            content,
+            change,
+        } => json!({
+            "name": "reaction_changed",
+            "subject": reaction_subject_payload(*subject),
+            "reactor": reactor.as_str(),
+            "content": content.as_str(),
+            "change": reaction_change_storage(*change),
+        }),
+    };
+    json!({
+        "repository": event.repository().as_str(),
+        "target": target,
+        "kind": kind,
+    })
+}
+
+const fn mergeable_state_storage(value: MergeableState) -> &'static str {
+    match value {
+        MergeableState::Mergeable => "mergeable",
+        MergeableState::Conflicting => "conflicting",
+        MergeableState::Unknown => "unknown",
+    }
+}
+
+const fn checks_outcome_storage(value: ChecksOutcome) -> &'static str {
+    match value {
+        ChecksOutcome::Success => "success",
+        ChecksOutcome::Failure => "failure",
+    }
+}
+
+const fn check_conclusion_storage(value: CheckConclusion) -> &'static str {
+    match value {
+        CheckConclusion::Success => "success",
+        CheckConclusion::Failure => "failure",
+        CheckConclusion::Neutral => "neutral",
+        CheckConclusion::Cancelled => "cancelled",
+        CheckConclusion::Skipped => "skipped",
+        CheckConclusion::TimedOut => "timed_out",
+        CheckConclusion::ActionRequired => "action_required",
+        CheckConclusion::Stale => "stale",
+        CheckConclusion::StartupFailure => "startup_failure",
+    }
+}
+
+const fn review_state_storage(value: ReviewState) -> &'static str {
+    match value {
+        ReviewState::Approved => "approved",
+        ReviewState::ChangesRequested => "changes_requested",
+        ReviewState::Commented => "commented",
+    }
+}
+
+fn reaction_subject_payload(value: ReactionSubject) -> Value {
+    match value {
+        ReactionSubject::PullRequestBody => json!({ "kind": "pull_request_body" }),
+        ReactionSubject::IssueComment { id } => {
+            json!({ "kind": "issue_comment", "id": id.get() })
+        }
+        ReactionSubject::ReviewComment { id } => {
+            json!({ "kind": "review_comment", "id": id.get() })
+        }
+    }
+}
+
+const fn reaction_change_storage(value: ReactionChange) -> &'static str {
+    match value {
+        ReactionChange::Added => "added",
+        ReactionChange::Removed => "removed",
+    }
+}
+
+impl RepoWatchStore {
+    /// Atomically records one complete emitted action batch before submission.
+    pub async fn record_commands(
+        &self,
+        planned: &[PlannedCommand],
         issued_at: OffsetDateTime,
     ) -> Result<DispatchAdmission, StoreError> {
-        let inserted = sqlx::query(
-            "INSERT INTO dispatch_ledger
-                (dispatch_ref, command_id, rule_id, rule_revision, event_id,
-                 command_kind, status, issued_at)
-             VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
-             ON CONFLICT DO NOTHING",
+        let Some(first) = planned.first() else {
+            return Err(StoreError::InvalidDispatchBatch);
+        };
+        if planned.iter().enumerate().any(|(index, command)| {
+            command.dispatch() != first.dispatch()
+                || command.repository() != first.repository()
+                || command.rule_id() != first.rule_id()
+                || command.rule_revision() != first.rule_revision()
+                || command.event_id() != first.event_id()
+                || command.trigger_sequence() != first.trigger_sequence()
+                || command.action_ordinal()
+                    != u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1)
+        }) {
+            return Err(StoreError::InvalidDispatchBatch);
+        }
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(
+                hashtextextended(length($1)::text || ':' || $1 || $2, 0))",
         )
-        .bind(planned.dispatch().into_uuid())
-        .bind(planned.command().command_id().into_uuid())
-        .bind(planned.rule_id().as_str())
-        .bind(Decimal::from(planned.rule_revision().get()))
-        .bind(planned.event_id().into_uuid())
-        .bind(command_kind_storage(planned.command().kind()))
-        .bind(issued_at)
-        .execute(&self.pool)
-        .await?
-        .rows_affected()
-            == 1;
-        if inserted {
+        .bind(first.repository().as_str())
+        .bind(first.rule_id().as_str())
+        .execute(&mut *transaction)
+        .await?;
+        let active_revision: Option<Decimal> = sqlx::query_scalar(
+            "SELECT active_revision FROM rule
+              WHERE repository = $1 AND rule_id = $2 FOR UPDATE",
+        )
+        .bind(first.repository().as_str())
+        .bind(first.rule_id().as_str())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if active_revision != Some(Decimal::from(first.rule_revision().get())) {
+            transaction.rollback().await?;
+            return Ok(DispatchAdmission::InactiveRule);
+        }
+        let mut inserted_count = 0_usize;
+        for command in planned {
+            inserted_count += usize::from(
+                sqlx::query(
+                    "INSERT INTO dispatch_ledger
+                        (dispatch_ref, action_ordinal, command_id, repository, rule_id,
+                         rule_revision, event_id, trigger_sequence, command_kind, status, issued_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10)
+                     ON CONFLICT DO NOTHING",
+                )
+                .bind(command.dispatch().into_uuid())
+                .bind(Decimal::from(command.action_ordinal()))
+                .bind(command.command().command_id().into_uuid())
+                .bind(command.repository().as_str())
+                .bind(command.rule_id().as_str())
+                .bind(Decimal::from(command.rule_revision().get()))
+                .bind(command.event_id().into_uuid())
+                .bind(command.trigger_sequence().map(Decimal::from))
+                .bind(command_kind_storage(command.command().kind()))
+                .bind(issued_at)
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected()
+                    == 1,
+            );
+        }
+        if inserted_count == planned.len() {
+            transaction.commit().await?;
             return Ok(DispatchAdmission::Inserted);
         }
-        let exact: bool = sqlx::query_scalar(
-            "SELECT COALESCE(
-                count(*) = 1 AND bool_and(
-                    dispatch_ref = $1
-                    AND command_id = $2
-                    AND rule_id = $3
-                    AND rule_revision = $4
-                    AND event_id = $5
-                    AND command_kind = $6
-                    AND issued_at = $7
-                ), false)
-               FROM dispatch_ledger
-              WHERE dispatch_ref = $1 OR command_id = $2",
+        transaction.rollback().await?;
+        if inserted_count != 0 {
+            return Ok(DispatchAdmission::ConflictingReuse);
+        }
+        let retained_actions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM dispatch_ledger
+              WHERE repository = $1 AND rule_id = $2 AND rule_revision = $3
+                AND event_id = $4 AND trigger_sequence IS NOT DISTINCT FROM $5",
         )
-        .bind(planned.dispatch().into_uuid())
-        .bind(planned.command().command_id().into_uuid())
-        .bind(planned.rule_id().as_str())
-        .bind(Decimal::from(planned.rule_revision().get()))
-        .bind(planned.event_id().into_uuid())
-        .bind(command_kind_storage(planned.command().kind()))
-        .bind(issued_at)
+        .bind(first.repository().as_str())
+        .bind(first.rule_id().as_str())
+        .bind(Decimal::from(first.rule_revision().get()))
+        .bind(first.event_id().into_uuid())
+        .bind(first.trigger_sequence().map(Decimal::from))
         .fetch_one(&self.pool)
         .await?;
-        Ok(if exact {
-            DispatchAdmission::Replayed
-        } else {
-            DispatchAdmission::ConflictingReuse
-        })
+        Ok(
+            if usize::try_from(retained_actions).ok() == Some(planned.len()) {
+                DispatchAdmission::Replayed
+            } else {
+                DispatchAdmission::ConflictingReuse
+            },
+        )
     }
 
     /// Applies a command-settlement lifecycle event to the module ledger.
@@ -828,18 +1230,19 @@ pub fn plan_repository_event<Ids, Factory>(
     event: &RepoWatchEvent,
     ids: &mut Ids,
     factory: &mut Factory,
-) -> Result<Vec<PlannedCommand>, Factory::Error>
+) -> Result<Vec<PlannedCommand>, PlanRepositoryEventError<Factory::Error>>
 where
     Ids: DispatchReferenceGenerator,
     Factory: CreateSessionCommandFactory,
 {
     let mut commands = Vec::new();
     for rule in matching_rules(rules, event) {
-        for action in rule.actions() {
+        let dispatch = ids.next_dispatch();
+        for (index, action) in rule.actions().iter().enumerate() {
             let RepoWatchRuleActionV1::DispatchSession { template } = action;
-            let dispatch = ids.next_dispatch();
             let command = factory
-                .create_session(dispatch, template, event)?
+                .create_session(dispatch, template, event)
+                .map_err(PlanRepositoryEventError::Factory)?
                 .with_lifecycle(
                     StartGate::Held,
                     SessionOwnership::Owned,
@@ -847,9 +1250,13 @@ where
                 );
             commands.push(PlannedCommand::new(
                 dispatch,
+                u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1),
                 rule,
                 event,
-                SessionCommand::create_session(command),
+                None,
+                SessionCommand::create_session(command).map_err(|_: CommandOutsideSeam| {
+                    PlanRepositoryEventError::CommandOutsideSeam
+                })?,
             ));
         }
     }
@@ -883,7 +1290,14 @@ pub fn plan_lifecycle_reaction(
     }
     let command = SessionCommand::lifecycle(command)
         .map_err(|_| LifecycleReactionError::UnsupportedCommand)?;
-    Ok(PlannedCommand::new(dispatch, rule, event, command))
+    Ok(PlannedCommand::new(
+        dispatch,
+        1,
+        rule,
+        event,
+        Some(trigger.sequence()),
+        command,
+    ))
 }
 
 /// Returns configured rules whose checked matcher accepts one normalized fact.

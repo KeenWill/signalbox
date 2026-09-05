@@ -59,7 +59,6 @@ CREATE TABLE webhook_delivery (
     received_at timestamptz NOT NULL,
     expires_at timestamptz NOT NULL,
     PRIMARY KEY (hook_id, delivery_id),
-    FOREIGN KEY (repository) REFERENCES repository_state(repository) ON DELETE CASCADE,
     CHECK (hook_id BETWEEN 1 AND 18446744073709551615),
     CHECK (octet_length(event_kind) BETWEEN 1 AND 128),
     CHECK (action IS NULL OR octet_length(action) BETWEEN 1 AND 128),

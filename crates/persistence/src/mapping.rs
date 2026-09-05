@@ -39,15 +39,6 @@ pub(crate) const fn outbox_consumer_to_str(value: OutboxConsumer) -> &'static st
     }
 }
 
-/// Decodes one compiled-in outbox consumer from storage.
-pub fn outbox_consumer_from_str(value: &str) -> Option<OutboxConsumer> {
-    match value {
-        "process_protocol" => Some(OutboxConsumer::ProcessProtocol),
-        "repo_watch" => Some(OutboxConsumer::RepoWatch),
-        _ => None,
-    }
-}
-
 pub(crate) const SESSION_CREATED: &str = "session_created";
 pub(crate) const SESSION_STATE_CHANGED: &str = "session_state_changed";
 pub(crate) const SESSION_TERMINAL: &str = "session_terminal";
@@ -2846,7 +2837,7 @@ mod tests {
     };
     use sqlx::types::Uuid;
 
-    use crate::outbox::{DispatchedRunnerState, OutboxConsumer};
+    use crate::outbox::DispatchedRunnerState;
 
     use super::{
         ActiveTurnPhaseStorageKind, ApprovalJudgeStateStorageKind,
@@ -2883,8 +2874,7 @@ mod tests {
         instruction_root_kind_from_str, instruction_root_kind_to_str,
         model_change_adjustments_from_json, model_change_adjustments_to_json,
         model_settings_from_json, model_settings_overlay_from_json, model_settings_to_json,
-        outbox_consumer_from_str, outbox_consumer_to_str, plan_event_kind_from_str,
-        plan_event_kind_to_str, runner_loss_propagation_state_from_str,
+        plan_event_kind_from_str, plan_event_kind_to_str, runner_loss_propagation_state_from_str,
         runner_loss_propagation_state_to_str, runner_placement_loss_source_from_str,
         runner_placement_loss_source_to_str, runner_sandbox_from_str, runner_sandbox_to_str,
         session_creation_cause_from_str, session_creation_cause_to_str, session_id_from_uuid,
@@ -2898,19 +2888,6 @@ mod tests {
         turn_disposition_kind_from_str, turn_disposition_kind_to_str, turn_id_from_uuid,
         turn_id_to_uuid, workspace_instruction_authority_from_placement_state,
     };
-
-    #[test]
-    fn outbox_consumer_mapping_is_closed() {
-        assert_eq!(
-            outbox_consumer_from_str(outbox_consumer_to_str(OutboxConsumer::ProcessProtocol)),
-            Some(OutboxConsumer::ProcessProtocol)
-        );
-        assert_eq!(
-            outbox_consumer_from_str(outbox_consumer_to_str(OutboxConsumer::RepoWatch)),
-            Some(OutboxConsumer::RepoWatch)
-        );
-        assert_eq!(outbox_consumer_from_str("unknown"), None);
-    }
 
     #[test]
     fn blob_read_rejection_mapping_is_closed() {
