@@ -20,13 +20,14 @@ writes the session state in the same transaction as the turn or goal transition
 that changes the projection, so the two machines never disagree.
 
 Waiting carries a typed kind and the party expected to end the wait. Only an
-owned session carries a deadline, and it carries exactly one, of a kind set by
-its state: admission, which covers created and dispatched; active stall, which
-covers active and recovering; and waiting. The admission and waiting bounds come
-from configuration. A parked session carries a machine-readable cause and the
-responder who must act, the operator queue or one module. An expired waiting
-deadline and a module park are the two paths into parked. The operator queue is
-exactly the set of parked sessions.
+owned session carries a deadline, and its state sets the kind: admission covers
+created and dispatched, active stall covers active and recovering, and waiting
+covers waiting. Each of those states carries exactly one deadline; blocked and
+parked carry none. The admission and waiting bounds come from configuration. A
+parked session carries a machine-readable cause and the responder who must act,
+the operator queue or one module. An expired waiting deadline and a module park
+are the two paths into parked. The operator queue is exactly the set of parked
+sessions.
 
 Terminal carries one outcome from a closed vocabulary. Achievement is verified
 when a finish check passed and declared when no check did. A failure is
@@ -79,9 +80,8 @@ The turn watchdog's terminalization of a provably dead turn, which blocks the
 goal and arms goal recovery, is turn disposition, not session disposition; this
 page governs session disposition only.
 
-A structurally failed session is closed by a fresh session that supersedes it
-rather than resumed, and automatic resumption into the same compaction wall is
-refused, because the same input fails again.
+Automatic resumption of a structurally failed session is refused, because the
+same input fails again.
 
 A module keeps a park state of its own only for an obligation that is not a
 session. Why: a session held waiting on a human outside core parked is missing
@@ -114,8 +114,8 @@ The attention classifier that
 [sessions and the transcript](sessions-and-transcript.md) owns is a projection
 of lifecycle state and turn phase, never an independent machine.
 
-An absent configured bound leaves a deadline unbounded. An owned session that is
-not terminal and has no deadline row is a violation.
+An absent configured bound leaves a deadline unbounded. An owned session in a
+deadline-bearing state with no deadline row is a violation.
 
 Parking overrides the turn projection: it suspends a live turn in place, the
 turn keeps its phase, and no model call, tool execution, or delivery proceeds
@@ -169,8 +169,8 @@ The five lifecycle metrics are defined on durable columns, never on proxies.
   cause instead of terminalizing it or stopping silently; see
   [session lifecycle design](../design/session-lifecycle.md).
 - Supersession by redispatch: a module redispatch that owns the retry closes the
-  parked predecessor as superseded by the successor; see
-  [session lifecycle design](../design/session-lifecycle.md).
+  parked predecessor, a structurally failed one included, as superseded by the
+  successor; see [session lifecycle design](../design/session-lifecycle.md).
 - Deadline events for modules: modules and the program substrate subscribe to
   deadline expiries instead of running their own watchdogs; see
   [session lifecycle design](../design/session-lifecycle.md).
