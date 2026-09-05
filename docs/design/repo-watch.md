@@ -13,7 +13,7 @@ program. The poll cache survives a daemon restart, so the first complete poll
 after a restart sends conditional requests instead of one complete unconditional
 fetch.
 
-## Shape
+## Design
 
 Provenance: session creation and input submission accept a repository-watch
 creation cause and actor identity. A durable provenance record is linked to
@@ -36,7 +36,7 @@ reconstruct that resource's normalized contribution and the identities nested
 fetches need. The store is transport state beside the cursor, not part of the
 event or rule surface.
 
-## Constraints on present code
+## Compatibility constraints
 
 The dispatch transaction keeps recording dispatch, session, context, and input
 identities; provenance must reference those identities, never recreate or
@@ -55,7 +55,7 @@ durable events cannot inspect it. The present cursor persists no validator and
 no accepted transport snapshot; the warm-restart schedule keeps the full
 re-fetch on the configured cadence until this store exists.
 
-## Acceptance
+## Acceptance criteria
 
 A dispatched session's creation cause and actor identify repository watch, and
 its provenance record resolves the same dispatch, session, context, and input

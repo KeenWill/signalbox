@@ -352,9 +352,9 @@ subscription matching. The present structured-rule dispatch surface is committed
 to converge onto this mechanism — the dispatch action becomes a built-in
 program. Shadowing is only a validation step and never owns delivery. The
 rule-to-program cutover and frontier-ownership contract is owned by
-[repository watch](repo-watch.md#not-built); this page only consumes the
-resulting subscription and transferred dispatch state. For each handled event,
-the built-in program's `continue` transaction records the consumed event as the
+[repository watch](repo-watch.md#planned); this page only consumes the resulting
+subscription and transferred dispatch state. For each handled event, the
+built-in program's `continue` transaction records the consumed event as the
 successor's inherited exclusive event frontier. When that successor issues
 `await_event`, activation uses this inherited frontier rather than the
 then-current event tail and immediately matches the first eligible durable event

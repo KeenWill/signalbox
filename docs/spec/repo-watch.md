@@ -4,7 +4,7 @@ Repository watch turns GitHub activity on configured repositories into durable
 events, matches them against configured rules, and dispatches sessions to act on
 them.
 
-## Map
+## Overview
 
 Repository watch is a credentialed external-ingress boundary. Each configured
 repository has its own credential-file reference, read only for that
@@ -117,7 +117,7 @@ template and the timing policy, and each repository lists its
 review thread is unresolved, the status rollup belongs to the current head,
 every gating check is green, and mergeability is `mergeable`.
 
-## Decisions
+## Design decisions
 
 Dispatched sessions keep the approval posture of their named session templates
 and inherit no authority from the watcher. Startup validates the credential
@@ -537,7 +537,7 @@ the operator need `inspect_inactive_session`. The sweep is a shallow daemon loop
 that creates no reusable program primitive, and it does no prioritization or
 scheduling beyond the configured list.
 
-## Contracts
+## Boundary contracts
 
 The daemon refers to a credential by its non-secret name everywhere except at
 the point of use. No credential value, credential file path, or database URL
@@ -663,7 +663,7 @@ its repository-watch exception in [goal mode](goal-mode.md); approval and
 dispatch from the frozen proposal snapshot in [tool loop](tool-loop.md); request
 framing in [process protocol](process-protocol.md).
 
-## Not built
+## Planned
 
 - A purpose-specific creation cause and actor for repository-watch dispatch;
   dispatch uses the user-initiated creation and input interfaces:
