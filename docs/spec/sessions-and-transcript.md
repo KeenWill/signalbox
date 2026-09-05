@@ -64,14 +64,17 @@ message, and a delivered result. A completed, cancelled, or failed turn ends
 with exactly one terminal marker; refused, reconciliation-required, and retired
 turns have none.
 
-A `ContextCompaction` has five correlated immutable facts: its identity and
+A `ContextCompaction` has six correlated immutable facts: its identity and
 optional predecessor, the source frontier, a dedicated model call, the
-summarized inclusive range, and the result frontier. The compaction-call record
-separately retains the session's current direct selection, the resolved provider
-target, the source frontier, and the call's lifecycle, disposition, credential
-reference, and optional usage fields. Explicit compaction chooses an optional
-through position, defaulting to the latest safe boundary; automatic compaction
-is triggered as [model-call-execution](model-call-execution.md) describes.
+summarized inclusive range, the exact context-summary entry that call produced,
+and the result frontier. The result frontier is the source frontier with that
+entry appended, and reconstitution rejects any other result. The compaction-call
+record separately retains the session's current direct selection, the resolved
+provider target, the source frontier, and the call's lifecycle, disposition,
+credential reference, and optional usage fields. Explicit compaction chooses an
+optional through position, defaulting to the latest safe boundary; automatic
+compaction is triggered as [model-call-execution](model-call-execution.md)
+describes.
 
 Accepted-input content is `UserContent`, one ordered nonempty sequence of closed
 text or attachment parts. The multipart bounds belong to
@@ -170,9 +173,10 @@ semantics and a future strategy cannot turn the request into a database query
 language. A lexical query examines a bounded candidate set, and a term absent
 from the index returns empty at once. Attachment filenames, attachment media
 metadata, and derived text artifacts are content classes the schema admits and a
-read returns, and no producer publishes them; the projection performs no
-implicit attachment reading, OCR, text extraction, or model pass. No browser
-read materializes or scans a session transcript.
+read returns; a compaction commit publishes its summary as a derived text
+artifact, and no producer publishes the two attachment classes. The search
+projection performs no implicit attachment reading, OCR, text extraction, or
+model pass. No browser read materializes or scans a session transcript.
 
 There is no generic text, role, metadata, or other payload; every entry kind is
 a closed semantic fact. Entries reference accepted input and never copy its
@@ -447,8 +451,9 @@ when the matching region is not loaded, and each returned source is correlated
 with its canonical record and with the exact durable event that supplies its
 reveal address. An unknown stored source or content class, malformed identity,
 invalid address, mismatched reveal event, or contradictory source shape fails
-closed, including for the unreturned lookahead item. Results are in strict
-newest-address-first keyset order.
+closed, including for the unreturned lookahead item. Results and their keyset
+continuation are ordered by descending timeline address, then by descending
+projection identity.
 
 Entry construction is sealed inside the domain crate. Origin and steering
 entries name the accepted input's identity, and a steering entry also names the

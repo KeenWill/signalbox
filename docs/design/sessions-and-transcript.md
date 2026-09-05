@@ -94,7 +94,9 @@ Static eligible failure. A turn that fails at eligibility, before any attempt
 exists, is terminalized by one transaction that commits its origin entry and its
 failed marker together and emits the turn-failed update event atomically, under
 the same marker-uniqueness and turn-state agreement rules as the four present
-producers.
+producers. A delegated child's first turn keeps the `DelegatedTask` entry the
+spawn transaction already committed, so its failure transaction appends only the
+marker.
 
 Wait-transition failure. A turn whose frozen credential pool is exhausted when
 its durable wait releases, and whose predecessor model call already issued, is
