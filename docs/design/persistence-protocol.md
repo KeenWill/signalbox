@@ -41,11 +41,11 @@ and before the current-defaults pointer row and any credential-pool row.
 
 Credential-pool state, capacity reservations, and availability waits are durable
 rows with locks recorded in the same inventory. A transaction takes the
-action-head row of every member of the policy it may select immediately after
-the session's scheduler row, in profile-reference byte order, FOR SHARE for a
-member it only reads and FOR UPDATE for a member whose exclusion state it
-writes, and takes a capacity or cursor row only after every action head. The
-machine they serve is owned by
+action-head row of every member of the policy it may select after the session's
+scheduler row and the admitted-set head, in profile-reference byte order, FOR
+SHARE for a member it only reads and FOR UPDATE for a member whose exclusion
+state it writes, and takes a capacity or cursor row only after every action
+head. The machine they serve is owned by
 [credential-availability](../spec/credential-availability.md), and its design
 fixes their transitions.
 
