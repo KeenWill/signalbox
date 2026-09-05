@@ -179,7 +179,7 @@ fn attachment_count_failure(failure: AttachmentPreparationFailure) -> ModelCallI
         }
         AttachmentPreparationFailure::TooLarge { .. }
         | AttachmentPreparationFailure::Missing
-        | AttachmentPreparationFailure::Corrupt => ModelCallInputTokenCount::Unavailable,
+        | AttachmentPreparationFailure::Corrupt => ModelCallInputTokenCount::AttachmentFailure,
     }
 }
 
@@ -329,14 +329,14 @@ mod tests {
     use super::{StreamVerificationFailure, attachment_count_failure, verify_stream};
 
     #[test]
-    fn transient_attachment_failure_defers_count_before_activation() {
+    fn attachment_count_failures_preserve_transient_and_definitive_classes() {
         assert_eq!(
             attachment_count_failure(AttachmentPreparationFailure::Unavailable),
             ModelCallInputTokenCount::AttachmentUnavailable
         );
         assert_eq!(
             attachment_count_failure(AttachmentPreparationFailure::Missing),
-            ModelCallInputTokenCount::Unavailable
+            ModelCallInputTokenCount::AttachmentFailure
         );
     }
 

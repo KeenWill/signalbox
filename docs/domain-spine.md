@@ -8780,6 +8780,7 @@ pub enum ModelCallInputTokenCount {
     Counted(u64),
     Cancelled,
     AttachmentUnavailable,
+    AttachmentFailure,
     Unavailable,
 }
 
