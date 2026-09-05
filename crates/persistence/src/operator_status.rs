@@ -206,9 +206,9 @@ impl ProcessOperatorStatusQueuedObligation {
 pub enum ProcessOperatorStatusItem {
     HeldSlot(ProcessOperatorStatusHeldSlot),
     QueuedObligation(ProcessOperatorStatusQueuedObligation),
-    /// One calendar week's §12 metrics.
+    /// One calendar week's lifecycle metrics.
     LifecycleWeek(LifecycleWeeklyMetrics),
-    /// One owned non-terminal session past its §1 deadline obligation.
+    /// One owned non-terminal session past its deadline obligation.
     LifecycleDeadlineViolation(LifecycleDeadlineViolation),
 }
 
@@ -454,7 +454,7 @@ async fn declare_status_cursors(
     )
     .execute(&mut **transaction)
     .await?;
-    // The two §12 sections read the same views the telemetry pass reads, in
+    // The two lifecycle-metric sections read the same views the telemetry pass reads, in
     // the same snapshot as the sections above.
     sqlx::query(DECLARE_WEEKLY_METRICS_CURSOR)
         .bind(MAX_REPORTED_WEEKS)
