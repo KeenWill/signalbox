@@ -7,8 +7,8 @@ owner-approved plans. Do not add speculative product behavior.
 
 - Cross-crate and wire contracts: `docs/spec/`. `docs/spec/README.md` states the
   page conventions.
-- Public API of the domain and application crates: `docs/domain-spine.md`,
-  checked by CI against source.
+- Public API of the domain and application crates: generated Markdown under
+  `docs/api/`, checked by CI against rustdoc JSON.
 - Invariants: INV-tagged tests. `docs/invariants.md` is their generated index.
 - Committed but unbuilt design: `docs/design/`; undecided items:
   `docs/open-questions.md`.
@@ -82,8 +82,9 @@ owner's private repositories may be named as provenance, not cited as rules.
   conflict in practice, report the conflict instead of resolving it silently.
 - Fix every defect you introduce. A pre-existing defect outside the assigned
   change is recorded, not fixed.
-- A change to a public item in the domain or application crates updates
-  `docs/domain-spine.md` in the same pull request.
+- A change to a public item in the domain or application crates regenerates
+  `docs/api/` with `devenv shell -- python3 scripts/render_domain_spine.py` in
+  the same pull request.
 - A change to behavior a `docs/spec/` page describes updates that page in the
   same pull request. In a stack, the bottom spec diff covers the behavior its
   children implement; a child adds a spec edit only for behavior the bottom diff
@@ -133,8 +134,10 @@ Documentation bar:
 
 ```bash
 python3 scripts/generate_invariants.py --check
-python3 scripts/check_domain_spine.py
-python3 scripts/test_check_domain_spine.py
+python3 scripts/render_domain_spine.py
+git diff --exit-code -- docs/api
+python3 scripts/test_render_domain_spine.py
+python3 scripts/test_domain_spine_digest.py
 python3 scripts/check_docs_consistency.py
 python3 scripts/test_check_docs_consistency.py
 python3 scripts/check_migration_versions.py

@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-"""Summarize committed cargo-public-api snapshots and their working-tree diff."""
+"""Summarize cargo-public-api declarations against the event base."""
 
+import json
 import os
+import tarfile
+import tempfile
 import re
 import subprocess
 from collections import Counter, defaultdict, namedtuple
 from pathlib import Path
 
-SNAPSHOTS = {
-    "signalbox-domain": Path("docs/api/signalbox-domain.txt"),
-    "signalbox-application": Path("docs/api/signalbox-application.txt"),
-}
 DECLARATION = re.compile(
     r'^pub (?:(?:async|const|unsafe)\s+|extern\s+"[^"]*"\s+)*'
     r"(?P<kind>struct|enum|union|type|trait|fn|const|static|macro)\s+"
@@ -31,20 +30,8 @@ BLANKET_TRAIT = re.compile(
 Item = namedtuple("Item", "module category name declaration")
 
 
-def git_text(revision: str, path: Path) -> str:
-    result = subprocess.run(
-        ["git", "show", f"{revision}:{path.as_posix()}"], check=False,
-        capture_output=True, text=True)
-    return result.stdout if result.returncode == 0 else ""
-
-
-def previous_text(path: Path, current: str) -> str:
-    if base := os.environ.get("DOMAIN_SPINE_BASE"):
-        return git_text(base, path) or current
-    dirty = subprocess.run(
-        ["git", "diff", "--quiet", "HEAD", "--", path.as_posix()], check=False)
-    revision = "HEAD" if dirty.returncode == 1 else "HEAD^"
-    return git_text(revision, path) or current
+def baseline_revision():
+    return os.environ.get("DOMAIN_SPINE_BASE") or "HEAD^"
 
 
 def without_generics(text: str) -> str:
@@ -61,7 +48,7 @@ def without_generics(text: str) -> str:
 
 
 def item_name(line: str, start: int) -> str:
-    return re.split(r"[\s(={]", without_generics(line[start:]), 1)[0].rstrip(":")
+    return re.split(r"[\s(={]", without_generics(line[start:]), maxsplit=1)[0].rstrip(":")
 
 
 def implementation_parts(line: str) -> tuple[str, str]:
@@ -177,10 +164,9 @@ def parse(text: str) -> tuple[str, list[Item]]:
     return root, items
 
 
-def render(crate: str, path: Path) -> None:
-    current_text = path.read_text()
+def render(crate: str, current_text: str, previous_text: str, links=None) -> None:
     root, current = parse(current_text)
-    _, previous = parse(previous_text(path, current_text))
+    _, previous = parse(previous_text)
     current = list(dict.fromkeys(current))
     previous = list(dict.fromkeys(previous))
     added = Counter(current) - Counter(previous)
@@ -190,23 +176,85 @@ def render(crate: str, path: Path) -> None:
         by_module[item.module].append(item)
     changed_modules = {item.module for item in added + removed}
 
-    print(crate)
+    print(f"### {crate}\n" if links is not None else crate)
     for module in sorted(set(by_module) | changed_modules):
         counts = Counter(item.category for item in by_module[module])
         label = module.removeprefix(root).removeprefix("::") or "(root)"
         print(
-            f"  {label}: types={counts['type']} traits={counts['trait']} "
+            ("- " if links is not None else "  ")
+            + f"{label}: types={counts['type']} traits={counts['trait']} "
             f"functions={counts['function']}"
         )
         for heading, changes in (("added", added), ("removed", removed)):
             names = sorted(
                 {
-                    f"{item.category} {item.name.removeprefix(f'{item.module}::')}"
+                    linked_name(item, links)
                     for item, count in changes.items()
                     if item.module == module and count
                 }
             )
-            print(f"    {heading}: {', '.join(names) if names else 'none'}")
+            prefix = "  - " if links is not None else "    "
+            print(f"{prefix}{heading}: {', '.join(names) if names else 'none'}")
+    if links is not None:
+        print()
+def linked_name(item, links):
+    label = f"{item.category} {item.name.removeprefix(f'{item.module}::')}"
+    if links is None:
+        return label
+    owners = [name for name in links if re.search(
+        rf"(?<![\w:]){re.escape(name)}(?=::|<|\b)", item.name)]
+    path = links[max(owners, key=len)] if owners else links['']
+    # Code formatting keeps generic arguments visible in Markdown reports.
+    return f"[`{label}`]({path})"
+
+
+def declaration_links(crate, document):
+    from render_domain_spine import Renderer
+
+    renderer = Renderer(document)
+    links = {'': f'docs/api/{crate}/README.md'}
+    for path, content in renderer.files(crate).items():
+        for name in re.findall(r'^## (.+)$', content, re.MULTILINE):
+            links[f'{renderer.crate}::{name}'] = f'docs/api/{crate}/{path}'
+    return links
+
+
+def public_api(path):
+    return subprocess.run([
+        'cargo-public-api', 'public-api', '--rustdoc-json', str(path),
+        '--color', 'never',
+    ], check=True, capture_output=True, text=True).stdout
+
+
+def main():
+    from render_domain_spine import ROOT, build_json, configuration
+
+    revision = baseline_revision()
+    with tempfile.TemporaryDirectory(prefix='domain-spine-base-') as temporary:
+        directory = Path(temporary)
+        archive = directory / 'base.tar'
+        subprocess.run(['git', 'archive', '--output', str(archive), revision], check=True)
+        workspace = directory / 'source'
+        workspace.mkdir()
+        with tarfile.open(archive) as source:
+            source.extractall(workspace, filter='data')
+        for crate in configuration()['crates']:
+            current_json = build_json(crate)
+            current = public_api(current_json)
+            current_links = declaration_links(crate, json.loads(current_json.read_text()))
+            base_json = build_json(crate, workspace=workspace, target=ROOT / 'target/domain-spine-base')
+            previous = public_api(base_json)
+            base_links = declaration_links(crate, json.loads(base_json.read_text()))
+            # A removed item links to its surviving module page when possible.
+            current_pages = set(current_links.values())
+            links = {name: path if path in current_pages else current_links['']
+                     for name, path in base_links.items()}
+            links.update(current_links)
+            if os.environ.get('GITHUB_REPOSITORY'):
+                prefix = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/blob/{os.environ['GITHUB_SHA']}/"
+                links = {name: prefix + path for name, path in links.items()}
+            render(crate, current, previous, links)
+
+
 if __name__ == "__main__":
-    for crate, path in SNAPSHOTS.items():
-        render(crate, path)
+    main()

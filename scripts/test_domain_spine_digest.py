@@ -2,7 +2,6 @@
 """Exercise the domain API digest's parser and revision selection."""
 
 import os
-import tempfile
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -23,15 +22,9 @@ sample
     removed: none
 """
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            snapshot = Path(temporary_directory) / "sample.txt"
-            snapshot.write_text(current)
-            output = StringIO()
-            with (
-                patch.object(digest, "previous_text", return_value=baseline),
-                redirect_stdout(output),
-            ):
-                digest.render("sample", snapshot)
+        output = StringIO()
+        with redirect_stdout(output):
+            digest.render("sample", current, baseline)
 
         self.assertEqual(output.getvalue(), expected)
 
@@ -49,15 +42,9 @@ sample
     removed: none
 """
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            snapshot = Path(temporary_directory) / "sample.txt"
-            snapshot.write_text(current)
-            output = StringIO()
-            with (
-                patch.object(digest, "previous_text", return_value=baseline),
-                redirect_stdout(output),
-            ):
-                digest.render("sample", snapshot)
+        output = StringIO()
+        with redirect_stdout(output):
+            digest.render("sample", current, baseline)
 
         self.assertEqual(output.getvalue(), expected)
 
@@ -78,15 +65,9 @@ sample
     removed: none
 """
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            snapshot = Path(temporary_directory) / "sample.txt"
-            snapshot.write_text(current)
-            output = StringIO()
-            with (
-                patch.object(digest, "previous_text", return_value=baseline),
-                redirect_stdout(output),
-            ):
-                digest.render("sample", snapshot)
+        output = StringIO()
+        with redirect_stdout(output):
+            digest.render("sample", current, baseline)
 
         self.assertEqual(output.getvalue(), expected)
 
@@ -103,15 +84,9 @@ sample
     removed: none
 """
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            snapshot = Path(temporary_directory) / "sample.txt"
-            snapshot.write_text(current)
-            output = StringIO()
-            with (
-                patch.object(digest, "previous_text", return_value=baseline),
-                redirect_stdout(output),
-            ):
-                digest.render("sample", snapshot)
+        output = StringIO()
+        with redirect_stdout(output):
+            digest.render("sample", current, baseline)
 
         self.assertEqual(output.getvalue(), expected)
 
@@ -128,15 +103,9 @@ sample
     removed: none
 """
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            snapshot = Path(temporary_directory) / "sample.txt"
-            snapshot.write_text(current)
-            output = StringIO()
-            with (
-                patch.object(digest, "previous_text", return_value=baseline),
-                redirect_stdout(output),
-            ):
-                digest.render("sample", snapshot)
+        output = StringIO()
+        with redirect_stdout(output):
+            digest.render("sample", current, baseline)
 
         self.assertEqual(output.getvalue(), expected)
 
@@ -162,15 +131,9 @@ sample
     removed: implementation Target<sample::ArgumentA> as core::convert::From<sample::ArgumentA>
 """
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            snapshot = Path(temporary_directory) / "sample.txt"
-            snapshot.write_text(current)
-            output = StringIO()
-            with (
-                patch.object(digest, "previous_text", return_value=baseline),
-                redirect_stdout(output),
-            ):
-                digest.render("sample", snapshot)
+        output = StringIO()
+        with redirect_stdout(output):
+            digest.render("sample", current, baseline)
 
         self.assertEqual(output.getvalue(), expected)
 
@@ -186,15 +149,9 @@ sample
     removed: none
 """
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            snapshot = Path(temporary_directory) / "sample.txt"
-            snapshot.write_text(current)
-            output = StringIO()
-            with (
-                patch.object(digest, "previous_text", return_value=baseline),
-                redirect_stdout(output),
-            ):
-                digest.render("sample", snapshot)
+        output = StringIO()
+        with redirect_stdout(output):
+            digest.render("sample", current, baseline)
 
         self.assertEqual(output.getvalue(), expected)
 
@@ -208,15 +165,9 @@ sample
     removed: none
 """
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            snapshot = Path(temporary_directory) / "sample.txt"
-            snapshot.write_text(current)
-            output = StringIO()
-            with (
-                patch.object(digest, "previous_text", return_value=baseline),
-                redirect_stdout(output),
-            ):
-                digest.render("sample", snapshot)
+        output = StringIO()
+        with redirect_stdout(output):
+            digest.render("sample", current, baseline)
 
         self.assertEqual(output.getvalue(), expected)
 
@@ -230,15 +181,9 @@ sample
     removed: none
 """
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            snapshot = Path(temporary_directory) / "sample.txt"
-            snapshot.write_text(current)
-            output = StringIO()
-            with (
-                patch.object(digest, "previous_text", return_value=baseline),
-                redirect_stdout(output),
-            ):
-                digest.render("sample", snapshot)
+        output = StringIO()
+        with redirect_stdout(output):
+            digest.render("sample", current, baseline)
 
         self.assertEqual(output.getvalue(), expected)
 
@@ -252,15 +197,9 @@ sample
     removed: none
 """
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            snapshot = Path(temporary_directory) / "sample.txt"
-            snapshot.write_text(current)
-            output = StringIO()
-            with (
-                patch.object(digest, "previous_text", return_value=baseline),
-                redirect_stdout(output),
-            ):
-                digest.render("sample", snapshot)
+        output = StringIO()
+        with redirect_stdout(output):
+            digest.render("sample", current, baseline)
 
         self.assertEqual(output.getvalue(), expected)
 
@@ -274,15 +213,9 @@ sample
     removed: none
 """
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            snapshot = Path(temporary_directory) / "sample.txt"
-            snapshot.write_text(current)
-            output = StringIO()
-            with (
-                patch.object(digest, "previous_text", return_value=baseline),
-                redirect_stdout(output),
-            ):
-                digest.render("sample", snapshot)
+        output = StringIO()
+        with redirect_stdout(output):
+            digest.render("sample", current, baseline)
 
         self.assertEqual(output.getvalue(), expected)
 
@@ -302,15 +235,9 @@ sample
     removed: none
 """
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            snapshot = Path(temporary_directory) / "sample.txt"
-            snapshot.write_text(current)
-            output = StringIO()
-            with (
-                patch.object(digest, "previous_text", return_value=baseline),
-                redirect_stdout(output),
-            ):
-                digest.render("sample", snapshot)
+        output = StringIO()
+        with redirect_stdout(output):
+            digest.render("sample", current, baseline)
 
         self.assertEqual(output.getvalue(), expected)
 
@@ -326,15 +253,9 @@ sample
     removed: none
 """
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            snapshot = Path(temporary_directory) / "sample.txt"
-            snapshot.write_text(current)
-            output = StringIO()
-            with (
-                patch.object(digest, "previous_text", return_value=baseline),
-                redirect_stdout(output),
-            ):
-                digest.render("sample", snapshot)
+        output = StringIO()
+        with redirect_stdout(output):
+            digest.render("sample", current, baseline)
 
         self.assertEqual(output.getvalue(), expected)
 
@@ -343,7 +264,7 @@ sample
             Path(__file__).resolve().parents[1] / ".github/workflows/rust.yml"
         ).read_text()
 
-        self.assertIn("docs/api/* | docs/domain-spine.md", workflow)
+        self.assertIn("| docs/api/* | docs/invariants.md", workflow)
 
     def test_public_static_is_delta_item(self) -> None:
         baseline = "pub mod sample\n"
@@ -355,15 +276,9 @@ sample
     removed: none
 """
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            snapshot = Path(temporary_directory) / "sample.txt"
-            snapshot.write_text(current)
-            output = StringIO()
-            with (
-                patch.object(digest, "previous_text", return_value=baseline),
-                redirect_stdout(output),
-            ):
-                digest.render("sample", snapshot)
+        output = StringIO()
+        with redirect_stdout(output):
+            digest.render("sample", current, baseline)
 
         self.assertEqual(output.getvalue(), expected)
 
@@ -377,15 +292,9 @@ sample
     removed: none
 """
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            snapshot = Path(temporary_directory) / "sample.txt"
-            snapshot.write_text(current)
-            output = StringIO()
-            with (
-                patch.object(digest, "previous_text", return_value=baseline),
-                redirect_stdout(output),
-            ):
-                digest.render("sample", snapshot)
+        output = StringIO()
+        with redirect_stdout(output):
+            digest.render("sample", current, baseline)
 
         self.assertEqual(output.getvalue(), expected)
 
@@ -404,15 +313,9 @@ sample
     removed: implementation Service<Handler> (inherent)
 """
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            snapshot = Path(temporary_directory) / "sample.txt"
-            snapshot.write_text(current)
-            output = StringIO()
-            with (
-                patch.object(digest, "previous_text", return_value=baseline),
-                redirect_stdout(output),
-            ):
-                digest.render("sample", snapshot)
+        output = StringIO()
+        with redirect_stdout(output):
+            digest.render("sample", current, baseline)
 
         self.assertEqual(output.getvalue(), expected)
 
@@ -432,15 +335,9 @@ sample
     removed: none
 """
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            snapshot = Path(temporary_directory) / "sample.txt"
-            snapshot.write_text(current)
-            output = StringIO()
-            with (
-                patch.object(digest, "previous_text", return_value=baseline),
-                redirect_stdout(output),
-            ):
-                digest.render("sample", snapshot)
+        output = StringIO()
+        with redirect_stdout(output):
+            digest.render("sample", current, baseline)
 
         self.assertEqual(output.getvalue(), expected)
 
@@ -454,15 +351,9 @@ sample
     removed: none
 """
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            snapshot = Path(temporary_directory) / "sample.txt"
-            snapshot.write_text(current)
-            output = StringIO()
-            with (
-                patch.object(digest, "previous_text", return_value=baseline),
-                redirect_stdout(output),
-            ):
-                digest.render("sample", snapshot)
+        output = StringIO()
+        with redirect_stdout(output):
+            digest.render("sample", current, baseline)
 
         self.assertEqual(output.getvalue(), expected)
 
@@ -494,19 +385,23 @@ pub fn sample::ToolArgumentValidator::validate(&self)
         functions = [item.name for item in items if item.category == "function"]
         self.assertEqual(functions, ["sample::PublicTrait::call"])
 
-    def test_event_base_selects_previous_snapshot(self) -> None:
-        snapshot = Path("docs/api/sample.txt")
-        committed_at_base = "pub mod sample\n"
+    def test_event_base_selects_previous_revision(self) -> None:
+        with patch.dict(os.environ, {"DOMAIN_SPINE_BASE": "event-base"}, clear=True):
+            self.assertEqual(digest.baseline_revision(), "event-base")
+
+    def test_delta_names_link_to_module_files(self) -> None:
+        baseline = "pub mod sample\npub struct sample::Removed\n"
         current = "pub mod sample\npub struct sample::Added\n"
-
-        with (
-            patch.dict(os.environ, {"DOMAIN_SPINE_BASE": "event-base"}, clear=True),
-            patch.object(digest, "git_text", return_value=committed_at_base) as git_text,
-        ):
-            previous = digest.previous_text(snapshot, current)
-
-        self.assertEqual(previous, committed_at_base)
-        git_text.assert_called_once_with("event-base", snapshot)
+        links = {
+            '': 'docs/api/sample/README.md',
+            'sample::Added': 'docs/api/sample/example.md',
+            'sample::Removed': 'docs/api/sample/example.md',
+        }
+        output = StringIO()
+        with redirect_stdout(output):
+            digest.render("sample", current, baseline, links)
+        self.assertIn("added: [`type Added`](docs/api/sample/example.md)", output.getvalue())
+        self.assertIn("removed: [`type Removed`](docs/api/sample/example.md)", output.getvalue())
 
 
 if __name__ == "__main__":

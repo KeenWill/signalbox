@@ -9,16 +9,16 @@ selection aims at a destination instead of drifting.
 This document is **directional destination only, never authority**. Implemented
 behavior is owned by the [living specification](spec/README.md) under
 `docs/spec/`, together with INV-tagged tests indexed in
-[invariants.md](invariants.md) and the [domain spine](domain-spine.md); where
-this document and those pages disagree about what the system does, they win and
-this document describes only where the system is headed. The
-[glossary](glossary.md) is a terminology index, not part of that normative
-surface. Concepts described here that the spec does not yet describe are
-**targets awaiting decisions, not decisions**: naming a concept here authorizes
-neither its implementation nor a silent closure of an open question. The
-[one-place rule](../AGENTS.md) applies throughout — implemented semantics are
-linked, never restated, and only target-only concepts are owned by this
-document.
+[invariants.md](invariants.md) and the
+[generated API](api/signalbox-domain/README.md); where this document and those
+pages disagree about what the system does, they win and this document describes
+only where the system is headed. The [glossary](glossary.md) is a terminology
+index, not part of that normative surface. Concepts described here that the spec
+does not yet describe are **targets awaiting decisions, not decisions**: naming
+a concept here authorizes neither its implementation nor a silent closure of an
+open question. The [one-place rule](../AGENTS.md) applies throughout —
+implemented semantics are linked, never restated, and only target-only concepts
+are owned by this document.
 
 Milestone selection rules for autonomous runs live in
 [goal-mode.md](agents/goal-mode.md); this document owns only the

@@ -256,9 +256,9 @@ This is execution ordering only; the rulings in section 6 come first.
 2. Add the bottom-of-stack specification diff that describes the behavior the
    stack implements. Set the protocol and storage transition scope from the
    recorded rulings; do not prestate an unimplemented transition on `main`.
-3. Rename the domain public vocabulary and update `docs/domain-spine.md` in the
-   same change. Let compiler failures enumerate application, persistence, hub,
-   and test call sites.
+3. Rename the domain public vocabulary and regenerate `docs/api/` in the same
+   change. Let compiler failures enumerate application, persistence, hub, and
+   test call sites.
 4. Rename application and composition mappings, then repair co-located unit
    tests, fixture accessors, error prose, and snapshots without touching
    technical ownership.

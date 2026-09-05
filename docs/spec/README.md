@@ -17,10 +17,10 @@ design, written for the agent that will build it; landed material is removed as
 it lands, and the document is deleted when no planned capability remains.
 [open-questions.md](../open-questions.md) holds undecided items. Nothing on a
 spec page describes behavior the code lacks except the lines under Planned. Two
-normative surfaces sit outside those homes:
-[domain-spine.md](../domain-spine.md) mirrors the public API shapes of the
-domain and application crates, and [invariants.md](../invariants.md) indexes the
-INV-tagged tests.
+normative surfaces sit outside those homes: the generated
+[domain API](../api/signalbox-domain/README.md) and
+[application API](../api/signalbox-application/README.md) declare public API
+shapes, and [invariants.md](../invariants.md) indexes the INV-tagged tests.
 
 A design document is titled `<Subsystem> design`, opens with a preamble saying
 it is not built and naming the spec page it extends, and has the sections Goal,
