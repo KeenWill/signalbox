@@ -23,6 +23,10 @@ port over any `ModelRuntime` and its input-token counting port over an adapter
 that counts a prospective operation's rendered input without a generation
 request.
 
+Every Anthropic Messages generation and input-count request enables
+`clear_tool_uses_20250919` context editing with the
+`context-management-2025-06-27` beta; the provider's edit defaults apply.
+
 Caller identity crosses the boundary as an opaque correlation parameter carried
 by `ModelOperation`, every `Observation` and the final `TerminalReport`; the
 runtime imports no domain identifier. An operation names its target as two
