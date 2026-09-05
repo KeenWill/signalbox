@@ -45,23 +45,24 @@ shapes and placement transitions are owned by
 [runner-protocol](../spec/runner-protocol.md). This subsystem owns their effect
 on the turn. Replacement is never refused because a model call is in flight; it
 is staged behind that call. The command claims its identity and provisioning
-authorization immediately, and the terminal transaction that installs the
-successor placement and extends the next context frontier commits only after any
+authorization immediately, and its terminal transaction commits only after any
 authorized in-flight daemon-local call for the session reaches its observation
-boundary, so the call's entries append before the placement boundary. That
-transaction also moves the active turn out of the runner-recovery wait: to
-running with a fresh attempt when the loss interrupted no tool attempt, and
-otherwise to the phase the retained tool attempt justifies. A call that ends
-known-failed, refused, cancelled, or ambiguous reaches an observation boundary
-too, so staging never waits indefinitely. A response that would introduce
-unfinished tool work stays outside replacement recovery until its recovery
-transition is defined. Abandonment requires no active turn; with a turn active
-it records that the turn needs existing control, and the user empties the slot
-through the stop, approval, or reconciliation flow first. A queued turn remains
-queued and cannot activate while its placement is lost. Both commands are
-administrative recovery: they neither widen the interrupt delivery nor create a
-standalone cancellation path, and no case turns ambiguous effect evidence into
-known failure.
+boundary. A pinned loss installs the successor placement and extends the next
+context frontier in that transaction, so the call's entries append before the
+placement boundary; a pre-pin replacement returns the placement to unpinned at
+the successor revision and appends no boundary. The terminal transaction also
+moves the active turn out of the runner-recovery wait: to running with a fresh
+attempt when the loss interrupted no tool attempt, and otherwise to the phase
+the retained tool attempt justifies. A call that ends known-failed, refused,
+cancelled, or ambiguous reaches an observation boundary too, so staging never
+waits indefinitely. A response that would introduce unfinished tool work stays
+outside replacement recovery until its recovery transition is defined.
+Abandonment requires no active turn; with a turn active it records that the turn
+needs existing control, and the user empties the slot through the stop,
+approval, or reconciliation flow first. A queued turn remains queued and cannot
+activate while its placement is lost. Both commands are administrative recovery:
+they neither widen the interrupt delivery nor create a standalone cancellation
+path, and no case turns ambiguous effect evidence into known failure.
 
 Recovery-only startup binds the runner socket in recovery-only mode after
 migrations, reconciles retained runner inventory, evidence, and nonterminal
@@ -70,6 +71,13 @@ socket, and only then enables ordinary runner enrollment and scheduling. The
 generic scan skips runner-owned attempts until that phase has resolved them,
 then classifies only the remaining daemon-owned tenure. With no retained runner
 work the phase completes immediately.
+[Configuration and credentials](../spec/configuration-and-credentials.md)
+commits retained OAuth-marker resolution, scratch-home scavenging, prior-process
+capacity-reservation recovery, and the legacy family-to-policy backfill. Those
+gates sit after the generic scan and before the daemon binds the process socket
+or enables ordinary enrollment and scheduling, so a credential failure cannot
+block recovery of acknowledged work and no admitted work runs against stale
+credential state.
 
 The instruction-eligibility freeze extends the activation transaction. Under the
 same scheduler lock, activation copies the session's ordered eligibility entries
@@ -118,10 +126,11 @@ freed member resumes; each other rewrites its reservation evidence in place and
 stays parked. A stop-turn request against a parked turn terminalizes it
 cancelled through a fresh cancelled successor attempt and leaves no wait stored.
 
-A replacement command issued while a call is in flight is accepted, and its
-placement boundary commits after that call's observation boundary; a commit in
-any other order is rejected by the prefix-preserving frontier triggers. A call
-whose response introduces unfinished tool work is outside this criterion.
+A pinned-loss replacement command issued while a call is in flight is accepted,
+and its placement boundary commits after that call's observation boundary; a
+commit in any other order is rejected by the prefix-preserving frontier
+triggers. A call whose response introduces unfinished tool work is outside this
+criterion.
 
 An abandonment command against a session with an active turn is rejected with
 the existing-control result and creates no cancellation.
