@@ -3,6 +3,8 @@
 //! Values are never parsed or normalized. Each input becomes one `value` cell
 //! containing its exact `Debug` rendering, with raw control characters escaped
 //! so a logical row cannot create additional physical table rows.
+//! Callers must supply deterministic `Debug` projections, including nested
+//! values: convert `HashMap`/`HashSet` to ordered collections or sorted rows.
 //!
 //! [`expect-test`]: https://github.com/rust-analyzer/expect-test
 
@@ -11,11 +13,13 @@ mod render;
 use std::fmt::{self, Debug, Display};
 
 /// Renders one opaque `value` column, one row per item.
+/// Rows must have deterministic [`Debug`] output; project unordered collections first.
 pub fn table<T: Debug>(rows: impl IntoIterator<Item = T>) -> String {
     Table::new(rows).to_string()
 }
 
 /// Renders one opaque `input | output` row per input, applying `f` to each.
+/// Both inputs and outputs must have deterministic [`Debug`] output.
 pub fn cases<I: Debug, O: Debug>(
     inputs: impl IntoIterator<Item = I>,
     mut f: impl FnMut(&I) -> O,
@@ -29,14 +33,6 @@ pub fn cases<I: Debug, O: Debug>(
         })
         .collect();
     render::render(&["input", "output"], &rows)
-}
-
-/// Renders one opaque value as a `field | value` table.
-pub fn transposed<T: Debug>(value: &T) -> String {
-    render::render(
-        &["field", "value"],
-        &[vec![String::new(), opaque_cell(value)]],
-    )
 }
 
 fn opaque_cell<T: Debug>(value: &T) -> String {
@@ -60,6 +56,7 @@ pub struct Table {
 
 impl Table {
     /// Captures each row's exact [`Debug`] rendering.
+    /// Rows must have deterministic [`Debug`] output; project unordered collections first.
     pub fn new<T: Debug>(rows: impl IntoIterator<Item = T>) -> Self {
         Self {
             rows: rows.into_iter().map(|row| opaque_cell(&row)).collect(),

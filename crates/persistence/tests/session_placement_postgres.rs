@@ -657,12 +657,12 @@ async fn s36_placement_update_appends_created_and_updated_history() -> Result<()
     .await?;
 
     expect![[r#"
-        ┌─────────┬────────────┐
-        │ version │ event_kind │
-        ├─────────┼────────────┤
-        │       1 │ created    │
-        │       2 │ updated    │
-        └─────────┴────────────┘
+        ┌───────────────────────────────────────────────────────────┐
+        │ value                                                     │
+        ├───────────────────────────────────────────────────────────┤
+        │ PlacementHistoryRow { version: 1, event_kind: "created" } │
+        │ PlacementHistoryRow { version: 2, event_kind: "updated" } │
+        └───────────────────────────────────────────────────────────┘
     "#]]
     .assert_eq(&table(history));
 

@@ -171,11 +171,12 @@ Snapshot assertions use
     asserts nothing; it is a
     [change-detector test](https://testing.googleblog.com/2015/01/testing-on-toilet-change-detector-tests.html).
     Table-shaped output uses the workspace's `signalbox-expect-table`
-    dev-dependency (`crates/expect-table`), which renders any `Debug` rows as
-    one box-drawn table with deterministic, right-trimmed lines that stay
-    byte-stable under re-blessing; test crates import it rather than writing
-    their own. Prior art for tables in expect tests:
-    [expectable](https://github.com/janestreet/expectable).
+    dev-dependency (`crates/expect-table`), which renders each `Debug` row as
+    one opaque `value` cell with right-trimmed lines. Callers must project
+    unordered collections, including nested `HashMap` and `HashSet` values, into
+    ordered collections or sorted rows before rendering. Test crates import the
+    renderer rather than writing their own. Prior art for tables in expect
+    tests: [expectable](https://github.com/janestreet/expectable).
 
 Rules 2, 9, and 10 — a matrix whose expectation mirrors the code becomes
 per-edge targeted asserts in a row helper plus an expect table as their
@@ -193,21 +194,22 @@ for d in all_cancellation_dispositions() {
 // "rejected":
 //     Err(error) => { assert_eq!(error.current().id(), source_id); "rejected" }
 // so the table supplements the per-edge asserts (rule 10); it does not
-// replace them. The helper emits one `#[derive(Debug)]` row struct per
-// edge; the struct's field names are the rendered column headers.
+// replace them. Project each helper row into an opaque tuple for display.
 assert!(prepared().end_after_cancellation(proof(1), Cancelled).is_ok());
-let rows = after_cancellation_rows(&prepared, proof(1));
+let rows = after_cancellation_rows(&prepared, proof(1))
+    .into_iter()
+    .map(|row| (row.attempted_end, row.outcome));
 expect![[r#"
-    ┌───────────────┬──────────┐
-    │ attempted_end │ outcome  │
-    ├───────────────┼──────────┤
-    │ TurnCompleted │ rejected │
-    │ TurnRefused   │ rejected │
-    │ KnownFailure  │ rejected │
-    │ Lost          │ rejected │
-    │ Cancelled     │ ends     │
-    │ Ambiguous     │ rejected │
-    └───────────────┴──────────┘
+    ┌─────────────────────────────┐
+    │ value                       │
+    ├─────────────────────────────┤
+    │ (TurnCompleted, "rejected") │
+    │ (TurnRefused, "rejected")   │
+    │ (KnownFailure, "rejected")  │
+    │ (Lost, "rejected")          │
+    │ (Cancelled, "ends")         │
+    │ (Ambiguous, "rejected")     │
+    └─────────────────────────────┘
 "#]]
 .assert_eq(&table(rows));
 ```
@@ -329,12 +331,13 @@ assert!(matches!(end, AttemptEnd::WithoutStop { disposition: actual }
 // #[derive(Debug)] row struct per end — field names are the column
 // headers — rendered through the shared crate (rule 12).
 expect![[r#"
-    ┌────────────────────┬─────────────┬─────────────────────┐
-    │ family             │ disposition │ retained_cause      │
-    ├────────────────────┼─────────────┼─────────────────────┤
-    │ without stop       │ Lost        │ -                   │
-    │ after cancellation │ Cancelled   │ interrupt command 1 │
-    └────────────────────┴─────────────┴─────────────────────┘
+    ┌───────────────────────────────────────────────┐
+    │ value                                         │
+    ├───────────────────────────────────────────────┤
+    │ (1, 1, "ordinary")                            │
+    │ (2, 3, "interrupt immediately after input 1") │
+    │ (3, 2, "ordinary")                            │
+    └───────────────────────────────────────────────┘
 "#]]
 .assert_eq(&table(attempt_end_family_rows(&ends)));
 ```
@@ -429,6 +432,6 @@ expect![[r#"
 .assert_eq(&derived_order_table(&[first, second, interrupt]));
 ```
 
-The rendering helper draws only the fields the derivation depends on, in derived
-order, through the shared `signalbox-expect-table` renderer; read the snapshot
-diff when it changes (rule 11).
+The rendering helper projects each row into `(derived, accepted, priority)` in
+derived order through the shared `signalbox-expect-table` renderer; read the
+snapshot diff when it changes (rule 11).
