@@ -3454,7 +3454,7 @@ async fn injection_receipt(
     .await
 }
 
-/// §8: an approval decision is a durable injection. It settles `delivered`
+/// An approval decision is a durable injection. It settles `delivered`
 /// to the request's turn, and a restart scan leaves the decided round intact
 /// for the ordinary scheduler to resume.
 #[tokio::test(flavor = "multi_thread")]
@@ -3513,7 +3513,7 @@ async fn approval_decision_survives_restart_and_settles_delivered() -> Result<()
     Ok(())
 }
 
-/// §8: a drain that cuts a decision mid-transaction leaves no partial claim,
+/// A drain that cuts a decision mid-transaction leaves no partial claim,
 /// so the same command applies after restart; decisions committed before the
 /// drain are all still there. Zero approvals are lost either way.
 #[tokio::test(flavor = "multi_thread")]
@@ -3626,7 +3626,7 @@ async fn assert_approved_and_delivered(
     Ok(())
 }
 
-/// §8: a decision arriving after its request was decided settles
+/// A decision arriving after its request was decided settles
 /// `not_delivered` and is never applied to a different request.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -3682,7 +3682,7 @@ async fn late_decision_settles_not_delivered() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// §8: the correlation contract stands. A decision naming a later request
+/// The correlation contract stands. A decision naming a later request
 /// settles `rejected`, and one naming no request records its typed rejection
 /// with no session to carry a receipt.
 #[tokio::test(flavor = "multi_thread")]
