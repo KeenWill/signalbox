@@ -362,7 +362,9 @@ The placement snapshot writer refuses loss, replacement, and abandonment,
 because those transitions require authority outside the placement aggregate.
 Each placement records the connection-loss epoch observed when it selected its
 enrollment, derived under scheduler, enrollment, and connection authority; a
-caller cannot supply it.
+caller cannot supply it. Placement and enrollment insertion, loss propagation,
+and loss completion take one transaction-scoped runner-identity advisory lock,
+placement taking it between the scheduler and enrollment locks.
 
 Runner loss advances a durable loss epoch in one short transaction that locks
 only the current connection-loss head, never holding that global row while
@@ -483,7 +485,9 @@ that predates the advance rejects the record as unsupported.
 
 Dispatch locks the delivery singleton FOR UPDATE, reads exactly the next
 sequence and its typed record, and advances the singleton only when the
-synchronous consumer accepts, in the same transaction. An absent header for a
+synchronous consumer accepts, in the same transaction. A transaction that
+appends an event never advances the delivery cursor and one that advances the
+cursor never appends; the schema rejects both orders. An absent header for a
 sequence the allocator has already allocated fails the dispatch instead of
 reporting an idle queue, and a delivery cursor or any committed header beyond
 the allocator fails it too. A consumer retry or exit before the commit request
